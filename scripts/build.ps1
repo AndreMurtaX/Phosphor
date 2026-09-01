@@ -59,7 +59,12 @@ $engineDir = Join-Path $root 'engine'
 $violations = @()
 foreach ($src in Get-ChildItem -Path $engineDir -Filter *.pas -Recurse) {
     $text = Get-Content -Raw -LiteralPath $src.FullName
-    # Only look at the uses clauses, lowercased, comments stripped crudely.
+    # Strip Pascal comments first: a unit name mentioned in prose (e.g. an engine
+    # comment naming the LCL host it must NOT reach) is documentation, not a
+    # dependency. Only then scan the real uses clauses, lowercased.
+    $text = [regex]::Replace($text, '(?m)//.*?$', ' ')
+    $text = [regex]::Replace($text, '(?s)\{.*?\}', ' ')
+    $text = [regex]::Replace($text, '(?s)\(\*.*?\*\)', ' ')
     foreach ($m in [regex]::Matches($text, '(?is)\buses\b(.*?);')) {
         $clause = $m.Groups[1].Value.ToLowerInvariant()
         foreach ($unit in $forbidden) {

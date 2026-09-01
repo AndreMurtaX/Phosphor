@@ -37,8 +37,15 @@ type
     FFrames: array of TCallFrame;   // user-function activation frames
     FFrameSP: Integer;
     FDataPtr: Integer;              // READ position in the DATA pool
+    FProg: TProgram;                // the running program (reachable during a call)
     procedure Push(const V: TValue);
     function Pop: TValue;
+    { The fetch-decode-execute loop. Runs from AStartPC until the program halts
+      (or its instructions run out) OR a user-function return brings the frame
+      stack back down to AStopFrameSP -- the bound that lets CallUserFunc invoke
+      one BASIC routine re-entrantly and hand control back. The top-level Run uses
+      AStopFrameSP = -1, a level the frame stack never reaches, so it runs to end. }
+    function ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
   public
     OnOutput: TPhosphorOutputProc;
     Registry: TPhosphorRegistry;
@@ -46,6 +53,13 @@ type
     ErrorLine: Integer;
     constructor Create;
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)
+    { Call a BASIC user function by name, re-entrantly, over the SAME globals and
+      handles as the running program. This is the host callback seam: an event
+      dispatcher (or the callfunc primitive) runs a BASIC routine and gets its
+      return value back. Err is set (and the result is a default value) if the
+      function is unknown or the routine fails. }
+    function CallUserFunc(const AName: String; const Args: array of TValue;
+                          out Err: TPhosphorError): TValue;
   end;
 
 implementation
@@ -89,13 +103,30 @@ end;
 
 function TPhosphorVM.Run(AProg: TProgram): Boolean;
 var
-  pc, i, argc, ufi: Integer;
+  i: Integer;
+begin
+  FProg := AProg;
+  FSP := 0;
+  FCSP := 0;
+  FFrameSP := 0;
+  FDataPtr := 0;
+  LastError := NoError;
+  ErrorLine := 0;
+  SetLength(FVars, AProg.VarCount);
+  for i := 0 to AProg.VarCount - 1 do
+    FVars[i] := DefaultValue(AProg.VarTypes[i]);
+  Result := ExecFrom(0, -1);
+end;
+
+function TPhosphorVM.ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
+var
+  pc, i, argc, ufi, savedRet: Integer;
   ins: TInstr;
   a, b, r, v: TValue;
   e: TPhosphorError;
   args: array of TValue;
   kinds: array of TValueKind;
-  fn: TPhosphorFunc;
+  res: TResolvedFunc;
   lt: TVarType;
 
   function Bin(AErr: TPhosphorError; const AResult: TValue): Boolean;
@@ -113,22 +144,13 @@ var
 begin
   args := nil;
   kinds := nil;
-  FSP := 0;
-  FCSP := 0;
-  FFrameSP := 0;
-  FDataPtr := 0;
-  LastError := NoError;
-  ErrorLine := 0;
-  SetLength(FVars, AProg.VarCount);
-  for i := 0 to AProg.VarCount - 1 do
-    FVars[i] := DefaultValue(AProg.VarTypes[i]);
-  pc := 0;
-  while pc < AProg.Count do
+  pc := AStartPC;
+  while pc < FProg.Count do
   begin
-    ins := AProg.Instr(pc);
+    ins := FProg.Instr(pc);
     case ins.Op of
       opNop: ;
-      opPushConst: Push(AProg.Consts.Get(ins.A));
+      opPushConst: Push(FProg.Consts.Get(ins.A));
       opPop: Pop;
       opPrint:
         begin
@@ -166,12 +188,12 @@ begin
       opStoreVar:
         begin
           v := Pop;
-          if CanStore(AProg.VarTypes[ins.A], v, r) then
+          if CanStore(FProg.VarTypes[ins.A], v, r) then
             FVars[ins.A] := r
           else
           begin
             LastError := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
-              ' into ' + VarTypeName(AProg.VarTypes[ins.A]) + ' variable');
+              ' into ' + VarTypeName(FProg.VarTypes[ins.A]) + ' variable');
             ErrorLine := ins.Line;
             Exit(False);
           end;
@@ -198,13 +220,13 @@ begin
         end;
       opReadData:
         begin
-          if FDataPtr >= AProg.DataCount then
+          if FDataPtr >= FProg.DataCount then
           begin
             LastError := MakeError(peRuntime, 'out of DATA');
             ErrorLine := ins.Line;
             Exit(False);
           end;
-          Push(AProg.DataPool[FDataPtr]);
+          Push(FProg.DataPool[FDataPtr]);
           Inc(FDataPtr);
         end;
       opRestore: FDataPtr := 0;
@@ -241,7 +263,7 @@ begin
       opStoreLocal:
         begin
           v := Pop;
-          lt := AProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].LocalTypes[ins.A];
+          lt := FProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].LocalTypes[ins.A];
           if CanStore(lt, v, r) then
             FFrames[FFrameSP - 1].Locals[ins.A] := r
           else
@@ -260,46 +282,54 @@ begin
             ErrorLine := ins.Line;
             Exit(False);
           end;
-          pc := FFrames[FFrameSP - 1].ReturnAddr;  // value stays on the stack
+          savedRet := FFrames[FFrameSP - 1].ReturnAddr;  // value stays on the stack
           Dec(FFrameSP);
+          // A re-entrant call (CallUserFunc) stops here, handing its return value
+          // back to the host through the stack, when the frame it pushed unwinds.
+          if FFrameSP = AStopFrameSP then Exit(True);
+          pc := savedRet;
           Continue;
         end;
       opCall:
         begin
           argc := ins.B;
           // A user function shadows the library registry for the same name+arity.
-          ufi := AProg.FindUserFunc(AProg.Consts.Get(ins.A).Str, argc);
+          ufi := FProg.FindUserFunc(FProg.Consts.Get(ins.A).Str, argc);
           if ufi >= 0 then
           begin
             if FFrameSP = Length(FFrames) then
               SetLength(FFrames, (FFrameSP + 1) * 2);
-            SetLength(FFrames[FFrameSP].Locals, Length(AProg.UserFuncs[ufi].LocalTypes));
+            SetLength(FFrames[FFrameSP].Locals, Length(FProg.UserFuncs[ufi].LocalTypes));
             for i := argc - 1 downto 0 do
               FFrames[FFrameSP].Locals[i] := Pop;
-            for i := argc to High(AProg.UserFuncs[ufi].LocalTypes) do
-              FFrames[FFrameSP].Locals[i] := DefaultValue(AProg.UserFuncs[ufi].LocalTypes[i]);
+            for i := argc to High(FProg.UserFuncs[ufi].LocalTypes) do
+              FFrames[FFrameSP].Locals[i] := DefaultValue(FProg.UserFuncs[ufi].LocalTypes[i]);
             FFrames[FFrameSP].FuncIndex := ufi;
             FFrames[FFrameSP].ReturnAddr := pc + 1;
             Inc(FFrameSP);
-            pc := AProg.UserFuncs[ufi].Entry;
+            pc := FProg.UserFuncs[ufi].Entry;
             Continue;
           end;
-          // library call
+          // library call (plain, or host-aware and given the VM to call back with)
           SetLength(args, argc);
           SetLength(kinds, argc);
           for i := argc - 1 downto 0 do
             args[i] := Pop;
           for i := 0 to argc - 1 do
             kinds[i] := args[i].Kind;
-          if not Registry.Resolve(AProg.Consts.Get(ins.A).Str, kinds, fn) then
+          res := Registry.Resolve(FProg.Consts.Get(ins.A).Str, kinds);
+          if not res.Found then
           begin
             LastError := MakeError(peUnknownFunction,
-              'no function ' + SignatureOf(AProg.Consts.Get(ins.A).Str, args));
+              'no function ' + SignatureOf(FProg.Consts.Get(ins.A).Str, args));
             ErrorLine := ins.Line;
             Exit(False);
           end;
           e := NoError;
-          r := fn(args, e);
+          if res.IsHost then
+            r := res.HostFunc(Self, args, e)
+          else
+            r := res.Func(args, e);
           if IsError(e) then
           begin
             LastError := e;
@@ -316,6 +346,49 @@ begin
     Inc(pc);
   end;
   Result := True;
+end;
+
+function TPhosphorVM.CallUserFunc(const AName: String; const Args: array of TValue;
+  out Err: TPhosphorError): TValue;
+var
+  ufi, i, saved: Integer;
+begin
+  Result := Default(TValue);
+  Err := NoError;
+  if FProg = nil then
+  begin
+    Err := MakeError(peRuntime, 'no program is running');
+    Exit;
+  end;
+  ufi := FProg.FindUserFunc(AName, Length(Args));
+  if ufi < 0 then
+  begin
+    Err := MakeError(peUnknownFunction,
+      'no BASIC function ' + AName + ' taking ' + IntToStr(Length(Args)) + ' argument(s)');
+    Exit;
+  end;
+  // Push an activation frame, mirroring opCall's user-function path, then run the
+  // body re-entrantly until it returns to this frame level. The stack, globals
+  // and handle registry are shared with the running program on purpose: a callback
+  // sees and mutates the same state, exactly like an in-line GOSUB would.
+  saved := FFrameSP;
+  if FFrameSP = Length(FFrames) then
+    SetLength(FFrames, (FFrameSP + 1) * 2);
+  SetLength(FFrames[FFrameSP].Locals, Length(FProg.UserFuncs[ufi].LocalTypes));
+  for i := 0 to Length(Args) - 1 do
+    FFrames[FFrameSP].Locals[i] := Args[i];
+  for i := Length(Args) to High(FProg.UserFuncs[ufi].LocalTypes) do
+    FFrames[FFrameSP].Locals[i] := DefaultValue(FProg.UserFuncs[ufi].LocalTypes[i]);
+  FFrames[FFrameSP].FuncIndex := ufi;
+  FFrames[FFrameSP].ReturnAddr := -1;   // unused: ExecFrom stops by frame level
+  Inc(FFrameSP);
+  if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
+    Result := Pop        // the routine's return value
+  else
+  begin
+    Err := LastError;
+    FFrameSP := saved;   // unwind on failure
+  end;
 end;
 
 end.

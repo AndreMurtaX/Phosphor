@@ -17,7 +17,10 @@ FPC="${FPC:-$(command -v fpc || true)}"
 forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
 violation=0
 for f in $(find "$root/engine" -name '*.pas'); do
-  flat="$(tr '\n' ' ' < "$f" | tr 'A-Z' 'a-z')"
+  # Strip Pascal comments (line //, brace { }, paren (* *)) BEFORE flattening, so a
+  # unit name named in prose (an engine comment naming the LCL host it must NOT
+  # reach) is documentation, not a dependency, and cannot trip the check.
+  flat="$(sed -E 's://.*$::' "$f" | tr '\n' ' ' | sed -E 's/\{[^}]*\}/ /g' | tr 'A-Z' 'a-z')"
   for u in $forbidden; do
     if printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]"; then
       echo "BOUNDARY VIOLATION: $(basename "$f") uses '$u'"

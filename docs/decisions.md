@@ -201,3 +201,50 @@ Consequences:
 - `tests/negative/01_too_many_globals.bas` is **NOT** imported: it guards a limit
   Phosphor deliberately does not have. If a cap is ever wanted (say for a future
   on-disk format), it would be a large, explicit, documented number — not 513.
+
+---
+
+## The host-callback seam — how a host runs a BASIC routine
+
+Phase 2's GUI host needs something the console host never did: when an LCL event
+fires, *the engine must run a BASIC routine and come back*. The engine still may
+not know a window exists, so the seam is defined in engine terms and proven with
+no GUI at all.
+
+Two additions, both host-agnostic:
+
+1. **Host-aware functions.** Alongside the plain `TPhosphorFunc`, the registry
+   accepts a `TPhosphorHostFunc` (via `AddHost`) that also receives the executing
+   VM (typed `TObject` to avoid a dependency cycle; the package casts it back).
+   Only functions that must call back into BASIC take this channel; the dozen
+   existing libraries are untouched. "Run a BASIC routine" needs no console, file
+   or window — only the VM already on the stack — so this stays inside the
+   boundary.
+2. **`TPhosphorVM.CallUserFunc`.** A public, re-entrant entry that pushes a call
+   frame for a named user function and runs the execution loop *bounded to that
+   frame*: it stops and hands the return value back the moment the routine
+   unwinds to the level it was called at. Globals, handles and the value stack
+   are shared with the running program on purpose — a callback sees and mutates
+   the same state, exactly as an in-line GOSUB would. The top-level `Run` is just
+   `CallUserFunc`'s unbounded case (stop-frame `-1`, a level the frame stack never
+   reaches).
+
+The language face of this is **`callfunc`** (`engine/libs/PhosphorCallLib`):
+
+    callfunc(name$)       call a BASIC user function by name, no arguments
+    callfunc(name$, x)    ... with one argument of any kind
+
+The name string is the routine's *exact* name, suffix and all (`"shout$"`,
+`"identity@"`); the suffix on the call spelling (`callfunc` / `callfunc$` /
+`callfunc@`) only reads as the return type expected. `callfunc` reaches user
+functions, not library functions — an unknown name is a runtime error, not a
+silent no-op (negative `12_callfunc_unknown`). `tests/suite/48_callback.bas`
+proves the whole seam headless: indirect numeric/string/handle calls, a routine
+mutating a shared global (the event-handler shape), and indirect recursion
+through the re-entrant path.
+
+A GUI event dispatcher is then just a host object that, on an LCL event, calls
+`CallUserFunc(handlerName, [senderHandle])`. It reuses this seam unchanged; the
+reference reached the engine by walking a control's parent chain up to the form,
+a fragile path it documents as the source of several dead-event bugs — Phosphor
+gives the dispatcher the VM directly at bind time instead.

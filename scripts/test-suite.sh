@@ -12,7 +12,10 @@ FPC="${FPC:-$(command -v fpc || true)}"
 # boundary check (same as build.sh)
 forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
 for f in $(find "$root/engine" -name '*.pas'); do
-  flat="$(tr '\n' ' ' < "$f" | tr 'A-Z' 'a-z')"
+  # Strip Pascal comments (line //, brace { }) before flattening, so a unit named
+  # in prose (an engine comment naming the LCL host it must NOT reach) cannot trip
+  # the check -- documentation is not a dependency.
+  flat="$(sed -E 's://.*$::' "$f" | tr '\n' ' ' | sed -E 's/\{[^}]*\}/ /g' | tr 'A-Z' 'a-z')"
   for u in $forbidden; do
     printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]" && { echo "boundary violation: $(basename "$f") uses '$u'"; exit 1; }
   done

@@ -34,6 +34,12 @@ $forbidden = @('crt','video','keyboard','lcl','lclintf','lcltype','forms','contr
                'dialogs','graphics','interfaces','windows','unix','baseunix')
 foreach ($src in Get-ChildItem (Join-Path $root 'engine') -Filter *.pas -Recurse) {
     $text = Get-Content -Raw -LiteralPath $src.FullName
+    # Strip Pascal comments first: a unit name mentioned in prose (e.g. an engine
+    # comment that names the LCL host it must NOT reach) is documentation, not a
+    # dependency, and must not trip the check.
+    $text = [regex]::Replace($text, '(?m)//.*?$', ' ')
+    $text = [regex]::Replace($text, '(?s)\{.*?\}', ' ')
+    $text = [regex]::Replace($text, '(?s)\(\*.*?\*\)', ' ')
     foreach ($m in [regex]::Matches($text, '(?is)\buses\b(.*?);')) {
         foreach ($u in $forbidden) {
             if ($m.Groups[1].Value.ToLowerInvariant() -match "(^|[\s,])$([regex]::Escape($u))([\s,]|$)") {

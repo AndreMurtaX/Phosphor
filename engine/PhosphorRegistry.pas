@@ -33,6 +33,24 @@ uses
 type
   TPhosphorFunc = function(const Args: array of TValue; out Err: TPhosphorError): TValue;
 
+  { A host-aware function. It receives the executing VM in addition to its
+    arguments, so it can call back INTO a BASIC routine -- the seam an event
+    handler or an indirect call (callfunc) needs. The VM is passed as TObject to
+    keep this unit free of a dependency on PhosphorVM (which itself uses the
+    registry); the package casts it to TPhosphorVM. Registered through AddHost;
+    everything else stays a plain TPhosphorFunc. }
+  TPhosphorHostFunc = function(AVM: TObject; const Args: array of TValue;
+                               out Err: TPhosphorError): TValue;
+
+  { What Resolve found: a plain function, or a host-aware one (never both). The VM
+    passes itself to the host-aware kind and only the arguments to the plain kind. }
+  TResolvedFunc = record
+    Found: Boolean;
+    IsHost: Boolean;
+    Func: TPhosphorFunc;
+    HostFunc: TPhosphorHostFunc;
+  end;
+
   { A small hand-rolled string->func map. The registry holds a few dozen entries
     and does not need Generics.Collections (whose enumerator instantiation emits
     library-internal warnings). Linear lookup is fine at this size; swap in a
@@ -41,14 +59,19 @@ type
   private
     FKeys: array of String;
     FFuncs: array of TPhosphorFunc;
+    FHostFuncs: array of TPhosphorHostFunc;
+    FIsHost: array of Boolean;
     FCount: Integer;
     function IndexOfKey(const AKey: String): Integer;
+    function EnsureSlot(const AKey: String): Integer;
   public
     { ASignature is 'name:codes', e.g. 'assert_eq:nn'. Name is case-insensitive. }
     procedure Add(const ASignature: String; AFunc: TPhosphorFunc);
+    { Same, for a host-aware function (one that calls back into BASIC). }
+    procedure AddHost(const ASignature: String; AFunc: TPhosphorHostFunc);
     { Resolve by name + the actual argument kinds, widening int% -> n as needed. }
-    function Resolve(const AName: String; const AKinds: array of TValueKind;
-                     out AFunc: TPhosphorFunc): Boolean;
+    function Resolve(const AName: String;
+                     const AKinds: array of TValueKind): TResolvedFunc;
     class function CodeOf(K: TValueKind): Char;
   end;
 
@@ -64,26 +87,42 @@ begin
   Result := -1;
 end;
 
-procedure TPhosphorRegistry.Add(const ASignature: String; AFunc: TPhosphorFunc);
-var
-  key: String;
-  idx: Integer;
+{ Return the index of AKey (a lowercase signature), creating an empty slot if it
+  is new. The three parallel arrays grow together. }
+function TPhosphorRegistry.EnsureSlot(const AKey: String): Integer;
 begin
-  key := LowerCase(ASignature);
-  idx := IndexOfKey(key);
-  if idx >= 0 then
-  begin
-    FFuncs[idx] := AFunc;
-    Exit;
-  end;
+  Result := IndexOfKey(AKey);
+  if Result >= 0 then Exit;
   if FCount = Length(FKeys) then
   begin
     SetLength(FKeys, (FCount + 1) * 2);
     SetLength(FFuncs, (FCount + 1) * 2);
+    SetLength(FHostFuncs, (FCount + 1) * 2);
+    SetLength(FIsHost, (FCount + 1) * 2);
   end;
-  FKeys[FCount] := key;
-  FFuncs[FCount] := AFunc;
+  FKeys[FCount] := AKey;
+  Result := FCount;
   Inc(FCount);
+end;
+
+procedure TPhosphorRegistry.Add(const ASignature: String; AFunc: TPhosphorFunc);
+var
+  idx: Integer;
+begin
+  idx := EnsureSlot(LowerCase(ASignature));
+  FFuncs[idx] := AFunc;
+  FHostFuncs[idx] := nil;
+  FIsHost[idx] := False;
+end;
+
+procedure TPhosphorRegistry.AddHost(const ASignature: String; AFunc: TPhosphorHostFunc);
+var
+  idx: Integer;
+begin
+  idx := EnsureSlot(LowerCase(ASignature));
+  FFuncs[idx] := nil;
+  FHostFuncs[idx] := AFunc;
+  FIsHost[idx] := True;
 end;
 
 class function TPhosphorRegistry.CodeOf(K: TValueKind): Char;
@@ -110,15 +149,15 @@ begin
 end;
 
 function TPhosphorRegistry.Resolve(const AName: String;
-  const AKinds: array of TValueKind; out AFunc: TPhosphorFunc): Boolean;
+  const AKinds: array of TValueKind): TResolvedFunc;
 var
-  n, k, i, j, mask, bestPop, pop, idx: Integer;
+  n, k, i, j, mask, bestPop, pop, idx, bestIdx: Integer;
   intPos: array of Integer;
   codes: array of Char;
   key, lname: String;
 begin
-  Result := False;
-  AFunc := nil;
+  Result := Default(TResolvedFunc);
+  bestIdx := -1;
   intPos := nil;
   codes := nil;
   lname := LowerCase(AName);
@@ -157,10 +196,16 @@ begin
       if pop < bestPop then
       begin
         bestPop := pop;
-        AFunc := FFuncs[idx];
-        Result := True;
+        bestIdx := idx;
       end;
     end;
+  end;
+  if bestIdx >= 0 then
+  begin
+    Result.Found := True;
+    Result.IsHost := FIsHost[bestIdx];
+    Result.Func := FFuncs[bestIdx];
+    Result.HostFunc := FHostFuncs[bestIdx];
   end;
 end;
 

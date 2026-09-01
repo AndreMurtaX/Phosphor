@@ -23,7 +23,8 @@ uses
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
-  PhosphorImageLib, PhosphorGridLib, PhosphorTreeListLib, PhosphorCanvasLib;
+  PhosphorImageLib, PhosphorGridLib, PhosphorTreeListLib, PhosphorCanvasLib,
+  PhosphorDialogLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -96,6 +97,7 @@ begin
     RegisterGridFuncs(eng.Registry);
     RegisterTreeListFuncs(eng.Registry);
     RegisterCanvasFuncs(eng.Registry);
+    RegisterDialogFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin

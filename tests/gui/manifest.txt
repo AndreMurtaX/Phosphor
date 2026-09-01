@@ -11,3 +11,4 @@
 07_image_grid
 08_tree_list
 09_canvas
+10_dialog

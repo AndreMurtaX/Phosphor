@@ -31,6 +31,20 @@ procedure RegisterFormFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
+type
+  { Terminates the message loop when a top-level form is closed, so closing the
+    window (the X button) ends the program the way a main form would. Hides rather
+    than frees, so the handle registry frees the form once, at the end. }
+  TFormCloser = class(TComponent)
+    procedure DoClose(Sender: TObject; var CloseAction: TCloseAction);
+  end;
+
+procedure TFormCloser.DoClose(Sender: TObject; var CloseAction: TCloseAction);
+begin
+  CloseAction := caHide;
+  Application.Terminate;
+end;
+
 function f_form(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   frm: TForm;
@@ -95,10 +109,18 @@ begin
 end;
 
 function f_form_show(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TComponent;
+var c: TComponent; closer: TFormCloser;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Show;
+  if GuiResolve(Args[0].Hnd, TForm, c) then
+  begin
+    if not Assigned(TForm(c).OnClose) then
+    begin
+      closer := TFormCloser.Create(c);   // owned by the form
+      TForm(c).OnClose := @closer.DoClose;
+    end;
+    TForm(c).Show;
+  end;
   Result := Args[0];
 end;
 

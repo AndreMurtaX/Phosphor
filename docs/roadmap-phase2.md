@@ -80,12 +80,31 @@ same standard as phase 1:
    display, no widgetset handle. This is exactly what `48_callback` already does
    through `callfunc`.
 
-The open question is which **widgetset** a headless test links. Options, to be
-settled at increment 2 with a spike, not guessed here: the `nogui` widgetset
-(LCL object model without a display — ideal if it constructs `TForm`/`TButton`);
-failing that, the real widgetset under a virtual display on the Linux VM
-(`xvfb-run`) and a normal desktop session on Windows. The interactive host is
-verified by hand on the Windows desktop regardless.
+Which **widgetset** a headless test links was the open question; a spike settled
+it (2026-09-01):
+
+- **`nogui` is out.** It raises `EAccessViolation` in `TForm.CreateNew` — the
+  widgetset is built for non-visual LCL (TProcess and the like) and does not carry
+  the window-server classes a form instantiates. Verified, not assumed.
+- **The real widgetset, headless, works.** Under `win32` on Windows, a program
+  that `Application.Initialize`s, then `TForm.CreateNew(nil)` + `TButton.Create`
+  + binds `OnClick` + calls `TControl.Click` twice, records `fired = 2` — no
+  `Show`, no message loop, no visible window. `Click` is a plain method call that
+  fires the handler synchronously; a window handle is never needed. This is the
+  phase-1 byte-exact methodology intact.
+
+So the headless GUI runner is a **console-subsystem app linking the platform
+widgetset** (win32 on Windows), writing its `passed:/failed:` summary through
+`FileWrite(StdOutputHandle, …)` exactly as `phosphortest` does (that path is
+byte-exact whatever the subsystem, since the golden capture redirects stdout to a
+file). The interactive host is verified by hand on the Windows desktop.
+
+Cross-platform note: Windows headless is proven. The Linux VM is reached over SSH
+with no display, so its byte-exact GUI run needs the platform widgetset (gtk2/qt5)
+under a virtual framebuffer (`xvfb-run`) — an increment-2 task on the VM (it needs
+xvfb + the gtk2 LCL units present). Until then, GUI suite files are byte-exact on
+Windows, the LCL library code is cross-platform by construction, and the phase-1
+engine/console suite stays green on both OSes.
 
 ## Sequence (each step: gate; deferral cost)
 

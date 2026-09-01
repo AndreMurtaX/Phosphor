@@ -42,6 +42,10 @@ type
     FVarTypes: array of TVarType;
     FVarCount: Integer;
     FHidden: Integer;
+    // compile-time named constants (const NAME = literal), case-insensitive
+    FConstNames: array of String;
+    FConstVals: array of TValue;
+    FConstCount: Integer;
     // current-function scope (params + locals live in a frame, not the globals)
     FInFunction: Boolean;
     FLocalNames: array of String;
@@ -66,6 +70,7 @@ type
     function VarIndex(const AName: String): Integer;
     function NewHiddenVar(AType: TVarType): Integer;
     function LocalIndex(const AName: String): Integer;
+    function ConstIndex(const AName: String): Integer;
     procedure AddLocal(const AName: String);
     procedure EmitLoadVar(const AName: String; ALine: Integer);
     procedure EmitStoreVar(const AName: String; ALine: Integer);
@@ -170,6 +175,14 @@ begin
   if not FInFunction then Exit;
   for i := 0 to FLocalCount - 1 do
     if FLocalNames[i] = AName then Exit(i);
+end;
+
+function TPhosphorCompiler.ConstIndex(const AName: String): Integer;
+var i: Integer;
+begin
+  Result := -1;
+  for i := 0 to FConstCount - 1 do
+    if FConstNames[i] = AName then Exit(i);
 end;
 
 procedure TPhosphorCompiler.AddLocal(const AName: String);
@@ -396,6 +409,11 @@ begin
         if t.StrVal = 'true' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(True)), 0, t.Line); FLex.Advance; end
         else if t.StrVal = 'false' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(False)), 0, t.Line); FLex.Advance; end
         else if FLex.Peek.Kind = tkLParen then begin FLex.Advance; ParseCall(t.StrVal, t.Line); end
+        else if ConstIndex(t.StrVal) >= 0 then
+        begin
+          FProg.Emit(opPushConst, FProg.Consts.Add(FConstVals[ConstIndex(t.StrVal)]), 0, t.Line);
+          FLex.Advance;
+        end
         else
         begin
           EmitLoadVar(t.StrVal, t.Line);
@@ -574,15 +592,18 @@ begin
     if CurIsTerm(ATerms) then Exit;
     ParseStatement;
     if FFailed then Exit;
-    if FLex.Cur.Kind = tkEOL then FLex.Advance
+    if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkColon) then FLex.Advance  // ':' separates statements
     else if (FLex.Cur.Kind <> tkEOF) and not CurIsTerm(ATerms) then
       Fail('expected end of line', FLex.Cur.Line);
   end;
 end;
 
 procedure TPhosphorCompiler.ParseIf;
-var ln, jFalse, jEnd: Integer;
+var
+  ln, jFalse, jEnd, i: Integer;
+  endJumps: array of Integer;
 begin
+  endJumps := nil;
   ln := FLex.Cur.Line;
   FLex.Advance; // 'if'
   ParseCondition;
@@ -591,30 +612,56 @@ begin
   FLex.Advance; // 'then'
   if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
   begin
-    // block IF
+    // block IF [ELSEIF ...] [ELSE] ENDIF
     jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
-    ParseBlockUntil(['else', 'endif']);
+    ParseBlockUntil(['else', 'elseif', 'endif']);
+    if FFailed then Exit;
+    while IsKeyword('elseif') do
+    begin
+      FLex.Advance;
+      SetLength(endJumps, Length(endJumps) + 1);          // taken branch -> jump to end
+      endJumps[High(endJumps)] := FProg.Emit(opJump, 0, 0, ln);
+      FProg.Patch(jFalse, FProg.Count);                    // prev cond false lands here
+      ParseCondition;
+      if FFailed then Exit;
+      if not IsKeyword('then') then begin Fail('expected ''then''', FLex.Cur.Line); Exit; end;
+      FLex.Advance;
+      jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+      ParseBlockUntil(['else', 'elseif', 'endif']);
+      if FFailed then Exit;
+    end;
+    if IsKeyword('else') then
+    begin
+      FLex.Advance;
+      SetLength(endJumps, Length(endJumps) + 1);
+      endJumps[High(endJumps)] := FProg.Emit(opJump, 0, 0, ln);
+      FProg.Patch(jFalse, FProg.Count);
+      ParseBlockUntil(['endif']);
+      if FFailed then Exit;
+    end
+    else
+      FProg.Patch(jFalse, FProg.Count);
+    if not IsKeyword('endif') then begin Fail('expected ''endif''', FLex.Cur.Line); Exit; end;
+    FLex.Advance;
+    for i := 0 to High(endJumps) do
+      FProg.Patch(endJumps[i], FProg.Count);
+  end
+  else
+  begin
+    // inline IF [ELSE]
+    jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+    ParseStatement;
     if FFailed then Exit;
     if IsKeyword('else') then
     begin
       FLex.Advance;
       jEnd := FProg.Emit(opJump, 0, 0, ln);
       FProg.Patch(jFalse, FProg.Count);
-      ParseBlockUntil(['endif']);
-      if FFailed then Exit;
-      FProg.Patch(jEnd, FProg.Count);
+      ParseStatement;
+      if not FFailed then FProg.Patch(jEnd, FProg.Count);
     end
     else
       FProg.Patch(jFalse, FProg.Count);
-    if not IsKeyword('endif') then begin Fail('expected ''endif''', FLex.Cur.Line); Exit; end;
-    FLex.Advance;
-  end
-  else
-  begin
-    // inline IF
-    jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
-    ParseStatement;
-    if not FFailed then FProg.Patch(jFalse, FProg.Count);
   end;
 end;
 
@@ -804,6 +851,9 @@ procedure TPhosphorCompiler.ParseStatement;
 var
   t: TToken;
   i: Integer;
+  cname: String;
+  cval: TValue;
+  neg: Boolean;
 begin
   t := FLex.Cur;
   if t.Kind = tkIdent then
@@ -952,16 +1002,60 @@ begin
       end;
       Exit;
     end;
+    // `const` is contextual: `const NAME = literal` declares a constant, but
+    // `const = ...` (or `const` alone) is an ordinary variable named "const".
+    if (t.StrVal = 'const') and (FLex.Peek.Kind = tkIdent) then
+    begin
+      FLex.Advance;
+      cname := FLex.Cur.StrVal;
+      FLex.Advance;
+      Expect(tkEQ, '''=''');
+      if FFailed then Exit;
+      neg := False;
+      if FLex.Cur.Kind = tkMinus then begin neg := True; FLex.Advance; end
+      else if FLex.Cur.Kind = tkPlus then FLex.Advance;
+      case FLex.Cur.Kind of
+        tkInt:    if neg then cval := ValInt(-FLex.Cur.IntVal) else cval := ValInt(FLex.Cur.IntVal);
+        tkDouble: if neg then cval := ValDouble(-FLex.Cur.DblVal) else cval := ValDouble(FLex.Cur.DblVal);
+        tkString: cval := ValStr(FLex.Cur.StrVal);
+      else
+        Fail('const value must be a number or a string literal', FLex.Cur.Line); Exit;
+      end;
+      FLex.Advance;
+      if FConstCount = Length(FConstNames) then
+      begin
+        SetLength(FConstNames, (FConstCount + 1) * 2);
+        SetLength(FConstVals, (FConstCount + 1) * 2);
+      end;
+      FConstNames[FConstCount] := cname;
+      FConstVals[FConstCount] := cval;
+      Inc(FConstCount);
+      Exit;
+    end;
     if t.StrVal = 'let' then
     begin
       FLex.Advance;
       if FLex.Cur.Kind <> tkIdent then begin Fail('expected a variable name after ''let''', FLex.Cur.Line); Exit; end;
       t := FLex.Cur;
       FLex.Advance;
-      Expect(tkEQ, '''=''');
-      if FFailed then Exit;
-      ParseExpr;
-      if not FFailed then EmitStoreVar(t.StrVal, t.Line);
+      if FLex.Cur.Kind = tkEQ then
+      begin
+        FLex.Advance;
+        ParseExpr;
+        if not FFailed then EmitStoreVar(t.StrVal, t.Line);
+      end
+      else
+      begin
+        // let <var>[, <var>...] -- declare only; the VM default-initializes them
+        VarIndex(t.StrVal);
+        while (not FFailed) and (FLex.Cur.Kind = tkComma) do
+        begin
+          FLex.Advance;
+          if FLex.Cur.Kind <> tkIdent then begin Fail('expected a variable name', FLex.Cur.Line); Exit; end;
+          VarIndex(FLex.Cur.StrVal);
+          FLex.Advance;
+        end;
+      end;
       Exit;
     end;
     if (t.StrVal <> 'true') and (t.StrVal <> 'false') and (FLex.Peek.Kind = tkEQ) then
@@ -985,6 +1079,7 @@ begin
   FVarCount := 0; FHidden := 0; FLoopDepth := 0;
   FLabelCount := 0; FGotoCount := 0; FBool := False;
   FInFunction := False; FLocalCount := 0; FRetType := vtNumber;
+  FConstCount := 0;
   FProg := TProgram.Create;
   FLex := TLexer.Create(ASource);
   try
@@ -1005,7 +1100,9 @@ begin
       end;
       ParseStatement;
       if FFailed then Break;
-      if (FLex.Cur.Kind <> tkEOL) and (FLex.Cur.Kind <> tkEOF) then
+      if FLex.Cur.Kind = tkColon then
+        FLex.Advance                                     // ':' separates statements on a line
+      else if (FLex.Cur.Kind <> tkEOL) and (FLex.Cur.Kind <> tkEOF) then
         Fail('expected end of line', FLex.Cur.Line)
       else if FLex.Cur.Kind = tkEOL then
         FLex.Advance;

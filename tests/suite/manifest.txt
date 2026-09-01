@@ -14,3 +14,5 @@
 07_numbers
 06_strings
 41_syntax_string_plus_number
+39_syntax_let_list
+40_syntax_inline_else

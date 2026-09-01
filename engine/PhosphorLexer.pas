@@ -24,7 +24,7 @@ type
   TTokenKind = (
     tkEOF, tkEOL,
     tkInt, tkDouble, tkString, tkIdent,
-    tkComma, tkSemicolon, tkLParen, tkRParen, tkLBracket, tkRBracket,
+    tkComma, tkSemicolon, tkColon, tkLParen, tkRParen, tkLBracket, tkRBracket,
     tkPlus, tkMinus, tkStar, tkSlash, tkBackslash, tkCaret, tkMod,
     tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE
   );
@@ -128,15 +128,17 @@ begin
   while i < FCount do
   begin
     merged := '';
-    if (FTokens[i].Kind = tkIdent) and (FTokens[i].StrVal = 'end') and
-       (i + 1 < FCount) and (FTokens[i + 1].Kind = tkIdent) then
+    if (FTokens[i].Kind = tkIdent) and (i + 1 < FCount) and (FTokens[i + 1].Kind = tkIdent) then
     begin
-      case FTokens[i + 1].StrVal of
-        'if':       merged := 'endif';
-        'while':    merged := 'endwhile';
-        'select':   merged := 'endselect';
-        'function': merged := 'endfunction';
-      end;
+      if FTokens[i].StrVal = 'end' then
+        case FTokens[i + 1].StrVal of
+          'if':       merged := 'endif';
+          'while':    merged := 'endwhile';
+          'select':   merged := 'endselect';
+          'function': merged := 'endfunction';
+        end
+      else if (FTokens[i].StrVal = 'else') and (FTokens[i + 1].StrVal = 'if') then
+        merged := 'elseif';   // `else if` is the same chain as `elseif`
     end;
     if merged <> '' then
     begin
@@ -305,6 +307,7 @@ begin
       ']': begin PushSimple(tkRBracket, startLine); Inc(FPos); end;
       ',': begin PushSimple(tkComma, startLine); Inc(FPos); end;
       ';': begin PushSimple(tkSemicolon, startLine); Inc(FPos); end;
+      ':': begin PushSimple(tkColon, startLine); Inc(FPos); end;
       '=': begin PushSimple(tkEQ, startLine); Inc(FPos); end;
       '<':
         begin

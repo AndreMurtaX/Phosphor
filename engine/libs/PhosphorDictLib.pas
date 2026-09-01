@@ -203,6 +203,35 @@ begin
   if GetDict(Args[0], d, Err) then Result := ValStr(d.TypeName);
 end;
 
+// key at a 1-based position (insertion order)
+function t_dict_key(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var d: TPhosphorDict; i: Integer;
+begin
+  Result := ValStr('');
+  if not GetDict(Args[0], d, Err) then Exit;
+  i := Round(AsDouble(Args[1])) - 1;
+  if (i < 0) or (i >= d.Count) then
+  begin
+    Err := MakeError(peRuntime, Format('dict index %d out of bounds 1..%d', [i + 1, d.Count]));
+    Exit;
+  end;
+  Result := ValStr(d.Keys[i]);
+end;
+
+// value-kind code: 0 numeric, 1 string, 2 pointer
+function t_dict_type(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var d: TPhosphorDict;
+begin
+  Result := ValInt(0);
+  if not GetDict(Args[0], d, Err) then Exit;
+  case d.Kind of
+    akString:  Result := ValInt(1);
+    akPointer: Result := ValInt(2);
+  else
+    Result := ValInt(0);
+  end;
+end;
+
 procedure RegisterDictFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('dict@:',  @t_dict_new);
@@ -220,11 +249,16 @@ begin
   Reg.Add('dict_getdef:@$n',   @t_dict_getdef);
   Reg.Add('sdict_getdef$:@$$', @t_dict_getdef);
 
+  Reg.Add('pdict_getdef@:@$@', @t_dict_getdef);
+
   Reg.Add('dict_count:@',      @t_dict_count);
   Reg.Add('dict_haskey:@$',    @t_dict_haskey);
+  Reg.Add('dict_exists:@$',    @t_dict_haskey);   // alias: asks without reading
   Reg.Add('dict_remove:@$',    @t_dict_remove);
   Reg.Add('dict_clear@:@',     @t_dict_clear);
   Reg.Add('dict_typename$:@',  @t_dict_typename);
+  Reg.Add('dict_key$:@n',      @t_dict_key);
+  Reg.Add('dict_type:@',       @t_dict_type);
 end;
 
 end.

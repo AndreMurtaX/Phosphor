@@ -89,6 +89,27 @@ end;
 function f_rnd(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Random); end;   // [0,1)
 
+function f_sinh(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(Sinh(N(Args))); end;
+function f_cosh(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(Cosh(N(Args))); end;
+function f_tanh(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(Tanh(N(Args))); end;
+function f_asinh(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(ArcSinh(N(Args))); end;
+function f_acosh(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(ArcCosh(N(Args))); end;
+function f_atanh(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(ArcTanh(N(Args))); end;
+function f_atan2(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValDouble(ArcTan2(AsDouble(Args[0]), AsDouble(Args[1]))); end;
+function f_cmpval(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a, b: Double;
+begin
+  Err := NoError; a := AsDouble(Args[0]); b := AsDouble(Args[1]);
+  if a < b then Result := ValInt(-1) else if a > b then Result := ValInt(1) else Result := ValInt(0);
+end;
+
 function f_isnan(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValInt(Ord(IsNan(N(Args)))); end;
 function f_isinfinite(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -118,6 +139,14 @@ begin
   Reg.Add('atan:n', @f_atan);
   Reg.Add('degtorad:n', @f_degtorad);
   Reg.Add('radtodeg:n', @f_radtodeg);
+  Reg.Add('sinh:n',  @f_sinh);
+  Reg.Add('cosh:n',  @f_cosh);
+  Reg.Add('tanh:n',  @f_tanh);
+  Reg.Add('asinh:n', @f_asinh);
+  Reg.Add('acosh:n', @f_acosh);
+  Reg.Add('atanh:n', @f_atanh);
+  Reg.Add('atan2:nn', @f_atan2);
+  Reg.Add('cmpval:nn', @f_cmpval);
   Reg.Add('randomize:', @f_randomize);
   Reg.Add('rnd:n',  @f_rnd_n);
   Reg.Add('rnd:',   @f_rnd);

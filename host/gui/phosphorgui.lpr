@@ -24,7 +24,7 @@ uses
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
   PhosphorImageLib, PhosphorGridLib, PhosphorTreeListLib, PhosphorCanvasLib,
-  PhosphorDialogLib;
+  PhosphorDialogLib, PhosphorMiscLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -98,6 +98,7 @@ begin
     RegisterTreeListFuncs(eng.Registry);
     RegisterCanvasFuncs(eng.Registry);
     RegisterDialogFuncs(eng.Registry);
+    RegisterMiscFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin

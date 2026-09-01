@@ -86,8 +86,28 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) th
 function f_sb_pos_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then Result := ValInt(TScrollBar(c).Position) else Result := ValInt(0); end;
 
+// --- up/down (a small pair of increment/decrement arrows) -------------------
+function f_updown(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TUpDown, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+function f_ud_min_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Min := Round(AsDouble(A[1])); Result := A[0]; end;
+function f_ud_min_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then Result := ValInt(TUpDown(c).Min) else Result := ValInt(0); end;
+function f_ud_max_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Max := Round(AsDouble(A[1])); Result := A[0]; end;
+function f_ud_max_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then Result := ValInt(TUpDown(c).Max) else Result := ValInt(0); end;
+function f_ud_pos_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Position := Round(AsDouble(A[1])); Result := A[0]; end;
+function f_ud_pos_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then Result := ValInt(TUpDown(c).Position) else Result := ValInt(0); end;
+
 procedure RegisterRangeFuncs(Reg: TPhosphorRegistry);
 begin
+  Reg.Add('updown@:@', @f_updown);
+  Reg.Add('updown_min@:@n', @f_ud_min_set); Reg.Add('updown_min:@', @f_ud_min_get);
+  Reg.Add('updown_max@:@n', @f_ud_max_set); Reg.Add('updown_max:@', @f_ud_max_get);
+  Reg.Add('updown_position@:@n', @f_ud_pos_set); Reg.Add('updown_position:@', @f_ud_pos_get);
   Reg.Add('trackbar@:@', @f_trackbar);
   Reg.Add('trackbar_min@:@n', @f_tb_min_set);  Reg.Add('trackbar_min:@', @f_tb_min_get);
   Reg.Add('trackbar_max@:@n', @f_tb_max_set);  Reg.Add('trackbar_max:@', @f_tb_max_get);

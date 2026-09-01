@@ -22,7 +22,7 @@ unit PhosphorMenuLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, Forms, Menus,
+  SysUtils, Classes, Controls, Forms, Menus, ComCtrls,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterMenuFuncs(Reg: TPhosphorRegistry);
@@ -69,8 +69,36 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMenuItem, c) the
 function f_mi_onclick(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TMenuItem, c) then TMenuItem(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', A[1].Str, A[0].Hnd); end;
 
+// --- tool bar (a container for tool buttons, top-aligned) -------------------
+function f_toolbar(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; tb: TToolBar;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  tb := TToolBar.Create(pc); tb.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(tb, False));
+end;
+
+// --- status bar (a simple text strip at the bottom) -------------------------
+function f_statusbar(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; sb: TStatusBar;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  sb := TStatusBar.Create(pc); sb.Parent := TWinControl(pc);
+  sb.SimplePanel := True;   // use the single SimpleText, not multiple panels
+  Result := ValHandle(GuiRegister(sb, False));
+end;
+function f_statusbar_text_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStatusBar, c) then TStatusBar(c).SimpleText := A[1].Str; Result := A[0]; end;
+function f_statusbar_text_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStatusBar, c) then Result := ValStr(TStatusBar(c).SimpleText) else Result := ValStr(''); end;
+
 procedure RegisterMenuFuncs(Reg: TPhosphorRegistry);
 begin
+  Reg.Add('toolbar@:@', @f_toolbar);
+  Reg.Add('statusbar@:@', @f_statusbar);
+  Reg.Add('statusbar_text@:@$', @f_statusbar_text_set); Reg.Add('statusbar_text$:@', @f_statusbar_text_get);
   Reg.Add('mainmenu@:@', @f_mainmenu);
   Reg.Add('menuitem@:@',  @f_menuitem);
   Reg.Add('menuitem@:@$', @f_menuitem);

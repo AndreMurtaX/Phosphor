@@ -83,8 +83,28 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTabSheet, c) the
 function f_tabsheet_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTabSheet, c) then Result := ValStr(TTabSheet(c).Caption) else Result := ValStr(''); end;
 
+// --- splitter (a draggable divider between aligned controls) ----------------
+function f_splitter(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TSplitter, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+
+// --- bevel (a decorative line or frame) -------------------------------------
+function f_bevel(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TBevel, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+function f_bevel_shape_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then begin n := Round(AsDouble(A[1])); if (n >= Ord(Low(TBevelShape))) and (n <= Ord(High(TBevelShape))) then TBevel(c).Shape := TBevelShape(n); end; Result := A[0]; end;
+function f_bevel_shape_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then Result := ValInt(Ord(TBevel(c).Shape)) else Result := ValInt(0); end;
+function f_bevel_style_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then begin n := Round(AsDouble(A[1])); if (n >= Ord(Low(TBevelStyle))) and (n <= Ord(High(TBevelStyle))) then TBevel(c).Style := TBevelStyle(n); end; Result := A[0]; end;
+function f_bevel_style_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then Result := ValInt(Ord(TBevel(c).Style)) else Result := ValInt(0); end;
+
 procedure RegisterContainerFuncs(Reg: TPhosphorRegistry);
 begin
+  Reg.Add('splitter@:@', @f_splitter);
+  Reg.Add('bevel@:@', @f_bevel);
+  Reg.Add('bevel_shape@:@n', @f_bevel_shape_set); Reg.Add('bevel_shape:@', @f_bevel_shape_get);
+  Reg.Add('bevel_style@:@n', @f_bevel_style_set); Reg.Add('bevel_style:@', @f_bevel_style_get);
   Reg.Add('panel@:@', @f_panel);
   Reg.Add('panel_caption@:@$', @f_panel_caption_set); Reg.Add('panel_caption$:@', @f_panel_caption_get);
   Reg.Add('groupbox@:@', @f_groupbox);

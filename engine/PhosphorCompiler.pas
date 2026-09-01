@@ -56,12 +56,15 @@ type
     FLoopBreaks: array of array of Integer;
     FLoopConts: array of array of Integer;
     FLoopDepth: Integer;
-    // line labels and the GOTO/GOSUB sites that reference them
-    FLabelLine: array of Int64;
+    // labels and the GOTO/GOSUB sites that reference them. Keyed by name:
+    // a numeric line label is stored as its digits (IntToStr), a named label
+    // as its (lowercased) identifier -- the two can never collide because an
+    // identifier cannot begin with a digit.
+    FLabelName: array of String;
     FLabelPos: array of Integer;
     FLabelCount: Integer;
     FGotoInstr: array of Integer;
-    FGotoLine: array of Int64;
+    FGotoName: array of String;
     FGotoCount: Integer;
     procedure Fail(const AMsg: String; ALine: Integer);
     procedure Expect(AKind: TTokenKind; const AWhat: String);
@@ -75,6 +78,7 @@ type
     procedure EmitLoadVar(const AName: String; ALine: Integer);
     procedure EmitStoreVar(const AName: String; ALine: Integer);
     function CompoundOp(K: TTokenKind): TOpcode;
+    function IsReservedWord(const S: String): Boolean;
     procedure ParseFunction;
     procedure PushLoop;
     procedure PopLoop;
@@ -82,8 +86,8 @@ type
     procedure AddCont(AInstr: Integer);
     procedure PatchBreaks(ATarget: Integer);
     procedure PatchConts(ATarget: Integer);
-    procedure RecordLabel(ALine: Int64; APos: Integer);
-    procedure AddGoto(AInstr: Integer; ALine: Int64);
+    procedure RecordLabel(const AName: String; APos: Integer);
+    procedure AddGoto(AInstr: Integer; const AName: String);
     procedure ResolveGotos;
     procedure ParseExpr;
     procedure ParseOr;
@@ -227,6 +231,29 @@ begin
   end;
 end;
 
+{ True for the words that begin (or are) a statement or block token. A `name:'
+  is a named label only when name is NOT one of these -- so a keyword statement
+  followed by a ':' separator (`return :', `break :') is never read as a label.
+  `const'/`elseif' stay here too: they work as variables via assignment, not as
+  label names. }
+function TPhosphorCompiler.IsReservedWord(const S: String): Boolean;
+begin
+  case S of
+    'if', 'then', 'else', 'elseif', 'endif',
+    'while', 'endwhile', 'wend', 'do', 'loop', 'repeat', 'until',
+    'for', 'to', 'step', 'next',
+    'select', 'case', 'endselect',
+    'function', 'endfunction', 'return', 'local',
+    'gosub', 'goto', 'break', 'continue', 'end',
+    'let', 'const', 'data', 'read', 'restore',
+    'print', 'println', 'dim',
+    'and', 'or', 'not', 'mod', 'true', 'false':
+      Result := True;
+  else
+    Result := False;
+  end;
+end;
+
 procedure TPhosphorCompiler.ParseFunction;
 var
   ln, entry, jOver, paramCount, i: Integer;
@@ -336,27 +363,34 @@ begin
     FProg.Patch(FLoopConts[FLoopDepth - 1][i], ATarget);
 end;
 
-procedure TPhosphorCompiler.RecordLabel(ALine: Int64; APos: Integer);
+procedure TPhosphorCompiler.RecordLabel(const AName: String; APos: Integer);
+var l: Integer;
 begin
-  if FLabelCount = Length(FLabelLine) then
+  for l := 0 to FLabelCount - 1 do
+    if FLabelName[l] = AName then
+    begin
+      Fail('duplicate label ' + AName, 0);
+      Exit;
+    end;
+  if FLabelCount = Length(FLabelName) then
   begin
-    SetLength(FLabelLine, (FLabelCount + 1) * 2);
+    SetLength(FLabelName, (FLabelCount + 1) * 2);
     SetLength(FLabelPos, (FLabelCount + 1) * 2);
   end;
-  FLabelLine[FLabelCount] := ALine;
+  FLabelName[FLabelCount] := AName;
   FLabelPos[FLabelCount] := APos;
   Inc(FLabelCount);
 end;
 
-procedure TPhosphorCompiler.AddGoto(AInstr: Integer; ALine: Int64);
+procedure TPhosphorCompiler.AddGoto(AInstr: Integer; const AName: String);
 begin
   if FGotoCount = Length(FGotoInstr) then
   begin
     SetLength(FGotoInstr, (FGotoCount + 1) * 2);
-    SetLength(FGotoLine, (FGotoCount + 1) * 2);
+    SetLength(FGotoName, (FGotoCount + 1) * 2);
   end;
   FGotoInstr[FGotoCount] := AInstr;
-  FGotoLine[FGotoCount] := ALine;
+  FGotoName[FGotoCount] := AName;
   Inc(FGotoCount);
 end;
 
@@ -367,10 +401,10 @@ begin
   begin
     pos := -1;
     for l := 0 to FLabelCount - 1 do
-      if FLabelLine[l] = FGotoLine[g] then begin pos := FLabelPos[l]; Break; end;
+      if FLabelName[l] = FGotoName[g] then begin pos := FLabelPos[l]; Break; end;
     if pos < 0 then
     begin
-      Fail('undefined line number ' + IntToStr(FGotoLine[g]), 0);
+      Fail('undefined label ' + FGotoName[g], 0);
       Exit;
     end;
     FProg.Patch(FGotoInstr[g], pos);
@@ -894,19 +928,21 @@ begin
     if t.StrVal = 'goto' then
     begin
       FLex.Advance;
-      if FLex.Cur.Kind <> tkInt then begin Fail('''goto'' needs a line number', FLex.Cur.Line); Exit; end;
-      i := FProg.Emit(opJump, 0, 0, t.Line);
-      AddGoto(i, FLex.Cur.IntVal);
-      FLex.Advance;
+      if FLex.Cur.Kind = tkInt then
+        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur.IntVal)); FLex.Advance; end
+      else if FLex.Cur.Kind = tkIdent then
+        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, FLex.Cur.StrVal); FLex.Advance; end
+      else Fail('''goto'' needs a line number or a label', FLex.Cur.Line);
       Exit;
     end;
     if t.StrVal = 'gosub' then
     begin
       FLex.Advance;
-      if FLex.Cur.Kind <> tkInt then begin Fail('''gosub'' needs a line number', FLex.Cur.Line); Exit; end;
-      i := FProg.Emit(opGosub, 0, 0, t.Line);
-      AddGoto(i, FLex.Cur.IntVal);
-      FLex.Advance;
+      if FLex.Cur.Kind = tkInt then
+        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur.IntVal)); FLex.Advance; end
+      else if FLex.Cur.Kind = tkIdent then
+        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, FLex.Cur.StrVal); FLex.Advance; end
+      else Fail('''gosub'' needs a line number or a label', FLex.Cur.Line);
       Exit;
     end;
     if t.StrVal = 'return' then
@@ -914,8 +950,9 @@ begin
       FLex.Advance;
       if FInFunction then
       begin
-        // a function return carries a value (default of the return type if bare)
-        if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
+        // a function return carries a value (default of the return type if bare:
+        // at end of line, before a ':' separator, or at end of input)
+        if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) or (FLex.Cur.Kind = tkColon) then
           FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(FRetType)), 0, t.Line)
         else
           ParseExpr;
@@ -1129,13 +1166,24 @@ begin
       // a leading line number is a label
       if FLex.Cur.Kind = tkInt then
       begin
-        RecordLabel(FLex.Cur.IntVal, FProg.Count);
+        RecordLabel(IntToStr(FLex.Cur.IntVal), FProg.Count);
         FLex.Advance;
         if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
         begin
           if FLex.Cur.Kind = tkEOL then FLex.Advance;
           Continue;
         end;
+      end;
+      // a leading `name:` is a named label. An identifier alone is never a
+      // statement, so `ident :' at the start of one can only be a label --
+      // except a keyword, which may be a statement with a ':' separator after.
+      if (FLex.Cur.Kind = tkIdent) and (FLex.Peek.Kind = tkColon) and
+         (not IsReservedWord(FLex.Cur.StrVal)) then
+      begin
+        RecordLabel(FLex.Cur.StrVal, FProg.Count);
+        FLex.Advance;   // name
+        FLex.Advance;   // ':'
+        Continue;
       end;
       ParseStatement;
       if FFailed then Break;

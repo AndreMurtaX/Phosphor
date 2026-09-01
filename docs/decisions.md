@@ -178,3 +178,26 @@ per-platform.
 executes an embedded payload is the classic shape of a dropper, and heuristic
 antivirus flags it eagerly — the number-one complaint of PyInstaller and AutoIt
 users. It will happen, and the documentation must say so plainly.
+
+---
+
+## No fixed global-variable cap
+
+Plan9Basic addresses globals through a fixed `HeapMem[0..515]` array with three
+slots reserved, so it caps a program at **513 globals** and rejects the 514th at
+compile time (its `13_global_limit` test pins the upper boundary and a negative
+test guards the other side).
+
+**Phosphor does not inherit that cap.** The VM holds globals in a dynamic array
+sized to the program's actual variable count (`SetLength(FVars, VarCount)`), and
+the bytecode addresses them with a 32-bit index, so there is no `HeapMem`
+artifact to bump into. Capping at 513 would be importing an implementation quirk
+as a language rule with no technical justification — exactly the kind of thing
+"not a port" means to avoid.
+
+Consequences:
+- `tests/suite/13_global_limit.bas` (513 globals must compile) is imported and
+  passes — Phosphor compiles it with room to spare.
+- `tests/negative/01_too_many_globals.bas` is **NOT** imported: it guards a limit
+  Phosphor deliberately does not have. If a cap is ever wanted (say for a future
+  on-disk format), it would be a large, explicit, documented number — not 513.

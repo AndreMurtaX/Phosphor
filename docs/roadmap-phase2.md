@@ -126,19 +126,25 @@ VM gtk2 build flags that worked (fpc direct, Lazarus 4.8 at `/usr/share/lazarus/
    headless. **Gate:** `48_callback` byte-exact; `12_callfunc_unknown` rejects;
    `-B` clean. **Deferral cost:** every event handler stands on it.
 
-2. **GUI host skeleton + widgetset spike.** A `host/gui/` program (LCL app) that
-   opens one window and runs the loop, and a decision on the headless widgetset
-   for the test runner. Mirrors `host/console/`. **Gate:** the window opens on the
-   Windows desktop; the headless runner links its chosen widgetset and constructs
-   a `TForm` without a display. **Deferral cost:** picks the whole verification
-   path; wrong choice reworks the test harness.
+2. **GUI host skeleton + widgetset spike.** *DONE.* Widgetset settled (above):
+   `win32` headless on Windows, `gtk2` on the Linux session's live display. Both
+   hosts built: `host/gui/phosphorgui.lpr` (interactive) and `host/gui/
+   phosphorguitest.lpr` (headless runner, `FileWrite(StdOutputHandle)` summary),
+   mirroring `host/console/`. `scripts/test-gui.{ps1,sh}` build against the
+   platform widgetset and run the GUI manifest byte-exact.
 
-3. **Form + first control + one event, end to end.** `form@`, `button@`,
-   `button_onclick@`, a simulated click running a BASIC handler that mutates a
-   global — the `07_engine_by_parent` / `11_form_events` shape, adapted. Controls
-   enter the handle registry; fabricated/wrong-class handles reject per
-   `02_handles`. **Gate:** a GUI suite file (adapted from the reference) byte-exact
-   green headless; the interactive host shows the form and the click works.
+3. **Form + first control + one event, end to end.** *DONE (2026-09-01).* The
+   first GUI packages, isolated under `host/gui/libs/` and registered through the
+   engine's registry: `PhosphorGuiCore` (the `TGuiHandle` owning/non-owning
+   wrapper so `ResetHandles` frees the LCL tree once; the `TGuiEventBridge` that
+   runs a handler via `CallUserFunc`; `gui_error`/`gui_clearerror`; `app_*`),
+   `PhosphorFormLib` (`form@`, caption/width/height, `form_show`), `PhosphorButtonLib`
+   (`button@`, `button_caption`, `button_click`, host-aware `button_onclick@`).
+   Controls live in the engine handle registry; a fabricated or wrong-class handle
+   is recorded in `gui_error()`, per `02_handles`. `tests/gui/00_smoke` (9) and
+   `01_events` (8) are byte-exact green headless on Windows; `01_events` fires a
+   real LCL `OnClick` that runs a BASIC handler mutating a global AND the button
+   through its sender handle. **Gate met** (Windows); Linux gtk2 cross-run next.
 
 4. **Property surface.** Named helpers for common properties + the `TypInfo`
    generic bridge; the `08_property_roundtrip` methodology (write back what was

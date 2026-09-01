@@ -1,0 +1,5 @@
+# Phase-2 GUI suite manifest (one file basename per line; '#' comments ignored).
+# Read by BOTH scripts/test-gui.ps1 and scripts/test-gui.sh. These run headless:
+# controls are built and events fired with no window shown and no message loop.
+00_smoke
+01_events

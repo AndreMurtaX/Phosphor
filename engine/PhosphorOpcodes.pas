@@ -65,7 +65,10 @@ type
     opRetFunc    = 32, // return from a user function (value already on the stack)
     opReadData   = 33, // push the next DATA item, advance the data pointer
     opRestore    = 34, // reset the data pointer to the first item
-    opDup2       = 35  // duplicate the top two stack values (for a@[i] op= x)
+    opDup2       = 35, // duplicate the top two stack values (for a@[i] op= x)
+    opStmt       = 36, // marks a statement boundary (records a clean resume point)
+    opSetErrHandler = 37, // A = handler pc, or -1 to disable (on error goto 0)
+    opResume     = 38  // A = 0 retry the failing statement, 1 continue at the next
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -225,7 +228,8 @@ begin
     (Ord(opOr) = 24) and (Ord(opNot) = 25) and (Ord(opJump) = 26) and
     (Ord(opHalt) = 27) and (Ord(opGosub) = 28) and (Ord(opReturn) = 29) and
     (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32) and
-    (Ord(opReadData) = 33) and (Ord(opRestore) = 34) and (Ord(opDup2) = 35);
+    (Ord(opReadData) = 33) and (Ord(opRestore) = 34) and (Ord(opDup2) = 35) and
+    (Ord(opStmt) = 36) and (Ord(opSetErrHandler) = 37) and (Ord(opResume) = 38);
 end;
 
 end.

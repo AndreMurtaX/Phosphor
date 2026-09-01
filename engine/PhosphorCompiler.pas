@@ -101,6 +101,7 @@ type
     procedure ParsePrimary;
     procedure ParseJsonLiteral;   // [ ... ] / { ... } assigned to a handle
     procedure ParseOnGoto;        // on <expr> goto/gosub label1, label2, ...
+    procedure ParseOnError;       // on error goto <label> | on error goto 0
     procedure ParseCall(const AName: String; ALine: Integer);
     procedure ParseCondition;
     procedure ParseBlockUntil(const ATerms: array of String);
@@ -641,6 +642,27 @@ begin
   for j := 0 to High(endJumps) do FProg.Patch(endJumps[j], FProg.Count);
 end;
 
+procedure TPhosphorCompiler.ParseOnError;
+var ln, j: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // 'on'
+  FLex.Advance;   // 'error'
+  if not IsKeyword('goto') then begin Fail('expected ''goto'' after ''on error''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;   // 'goto'
+  if (FLex.Cur.Kind = tkInt) and (FLex.Cur.IntVal = 0) then
+  begin
+    FProg.Emit(opSetErrHandler, -1, 0, ln);   // on error goto 0 -- disable the handler
+    FLex.Advance;
+  end
+  else if FLex.Cur.Kind = tkInt then
+    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, IntToStr(FLex.Cur.IntVal)); FLex.Advance; end
+  else if FLex.Cur.Kind = tkIdent then
+    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, FLex.Cur.StrVal); FLex.Advance; end
+  else
+    Fail('''on error goto'' needs a label or 0', FLex.Cur.Line);
+end;
+
 procedure TPhosphorCompiler.ParseUnary;
 var ln: Integer;
 begin
@@ -1034,6 +1056,8 @@ var
   neg: Boolean;
   k: TTokenKind;
 begin
+  // Mark the statement boundary so a caught error can resume from a clean point.
+  FProg.Emit(opStmt, 0, 0, FLex.Cur.Line);
   t := FLex.Cur;
   if t.Kind = tkIdent then
   begin
@@ -1058,12 +1082,31 @@ begin
       else AddCont(FProg.Emit(opJump, 0, 0, t.Line));
       Exit;
     end;
+    // `on error goto ...` installs a runtime-error handler (a distinct form of
+    // the contextual `on`; `error` here is the keyword, not a variable).
+    if (t.StrVal = 'on') and (FLex.Peek.Kind = tkIdent) and (FLex.Peek.StrVal = 'error') then
+    begin
+      ParseOnError;
+      Exit;
+    end;
     // `on <expr> goto/gosub ...` -- but `on` is contextual: `on = 5` is still a
     // variable, so only a non-assignment follower opens the computed jump.
     if (t.StrVal = 'on') and
        not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
     begin
       ParseOnGoto;
+      Exit;
+    end;
+    // `resume` / `resume next` -- continue from a caught error; contextual, so
+    // `resume = 5` stays a variable assignment.
+    if (t.StrVal = 'resume') and
+       not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
+    begin
+      FLex.Advance;
+      if (FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'next') then
+        begin FLex.Advance; FProg.Emit(opResume, 1, 0, t.Line); end
+      else
+        FProg.Emit(opResume, 0, 0, t.Line);
       Exit;
     end;
     if t.StrVal = 'goto' then

@@ -39,3 +39,4 @@
 13_global_limit
 47_on_goto_gosub
 48_callback
+49_on_error

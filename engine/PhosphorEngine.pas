@@ -26,7 +26,7 @@ uses
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
   PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorConfigLib,
-  PhosphorSysLib, PhosphorPlatformLib, PhosphorCallLib;
+  PhosphorSysLib, PhosphorPlatformLib, PhosphorCallLib, PhosphorErrLib;
 
 const
   PhosphorVersion = '0.0.1';
@@ -76,6 +76,7 @@ begin
   RegisterSysFuncs(FRegistry);
   RegisterPlatformFuncs(FRegistry);
   RegisterCallFuncs(FRegistry);
+  RegisterErrFuncs(FRegistry);
   FOnOutput := nil;
   FErrorLine := 0;
   FErrorMessage := '';

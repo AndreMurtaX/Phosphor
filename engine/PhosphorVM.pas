@@ -38,6 +38,18 @@ type
     FFrameSP: Integer;
     FDataPtr: Integer;              // READ position in the DATA pool
     FProg: TProgram;                // the running program (reachable during a call)
+    // ON ERROR state. FErrHandler is the handler pc, or -1 when none is installed.
+    // opStmt keeps FStmt* pointing at the current clean statement boundary; on a
+    // caught error those are copied to FErrStmt* (the resume point) before the
+    // handler runs and moves FStmt* on. FInHandler blocks re-entry until a resume.
+    FErrHandler: Integer;
+    FErrHandlerSP, FErrHandlerFrameSP: Integer;
+    FInHandler: Boolean;
+    FErrCode: Integer;              // last caught error: code / message / line
+    FErrMsg: String;
+    FErrLine: Integer;
+    FStmtPC, FStmtSP, FStmtFrameSP: Integer;          // current statement boundary
+    FErrStmtPC, FErrStmtSP, FErrStmtFrameSP: Integer; // the failing statement, for resume
     procedure Push(const V: TValue);
     function Pop: TValue;
     { The fetch-decode-execute loop. Runs from AStartPC until the program halts
@@ -60,6 +72,12 @@ type
       function is unknown or the routine fails. }
     function CallUserFunc(const AName: String; const Args: array of TValue;
                           out Err: TPhosphorError): TValue;
+    { The last error caught by an ON ERROR handler -- what err()/errmsg$()/erl()
+      read. Set on each fault; persists until the next fault. }
+    property ErrCode: Integer read FErrCode;
+    property ErrMessage: String read FErrMsg;
+    property ErrLine: Integer read FErrLine;
+    procedure ClearError;   // reset err()/errmsg$()/erl() to "no error"
   end;
 
 implementation
@@ -112,6 +130,11 @@ begin
   FDataPtr := 0;
   LastError := NoError;
   ErrorLine := 0;
+  FErrHandler := -1;
+  FInHandler := False;
+  FErrCode := 0; FErrMsg := ''; FErrLine := 0;
+  FStmtPC := 0; FStmtSP := 0; FStmtFrameSP := 0;
+  FErrStmtPC := 0; FErrStmtSP := 0; FErrStmtFrameSP := 0;
   SetLength(FVars, AProg.VarCount);
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
@@ -129,16 +152,44 @@ var
   res: TResolvedFunc;
   lt: TVarType;
 
-  function Bin(AErr: TPhosphorError; const AResult: TValue): Boolean;
+  { A runtime error. Returns True if an ON ERROR handler took it (pc now points at
+    the handler; the caller should Continue), False to abort (LastError set; the
+    caller should Exit(False)). The handler runs at the stack/frame level it was
+    installed at; the failing statement is remembered for resume. }
+  function Fault(const AErr: TPhosphorError): Boolean;
   begin
-    if IsError(AErr) then
+    FErrCode := Ord(AErr.Code);
+    FErrMsg := AErr.Message;
+    FErrLine := ins.Line;
+    if (FErrHandler >= 0) and (not FInHandler) then
+    begin
+      FErrStmtPC := FStmtPC; FErrStmtSP := FStmtSP; FErrStmtFrameSP := FStmtFrameSP;
+      FSP := FErrHandlerSP; FFrameSP := FErrHandlerFrameSP;
+      FInHandler := True;
+      pc := FErrHandler;
+      Result := True;
+    end
+    else
     begin
       LastError := AErr;
       ErrorLine := ins.Line;
-      Exit(False);
+      Result := False;
     end;
-    Push(AResult);
-    Result := True;
+  end;
+
+  { For arithmetic/comparison ops. 0 = ok (result pushed, fall through to Inc pc),
+    1 = a handler took the fault (Continue), 2 = abort (Exit False). }
+  function Bin(AErr: TPhosphorError; const AResult: TValue): Integer;
+  begin
+    if IsError(AErr) then
+    begin
+      if Fault(AErr) then Result := 1 else Result := 2;
+    end
+    else
+    begin
+      Push(AResult);
+      Result := 0;
+    end;
   end;
 
 begin
@@ -162,28 +213,23 @@ begin
           v := Pop;
           if Assigned(OnOutput) then OnOutput(ValToStr(v) + #10);
         end;
-      opNeg:
-        begin
-          a := Pop;
-          e := Negate(a, r);
-          if not Bin(e, r) then Exit(False);
-        end;
-      opAdd:     begin b := Pop; a := Pop; if not Bin(ValAdd(a, b, r), r) then Exit(False); end;
-      opSub:     begin b := Pop; a := Pop; if not Bin(ValSub(a, b, r), r) then Exit(False); end;
-      opMul:     begin b := Pop; a := Pop; if not Bin(ValMul(a, b, r), r) then Exit(False); end;
-      opDivReal: begin b := Pop; a := Pop; if not Bin(ValDivReal(a, b, r), r) then Exit(False); end;
-      opDivInt:  begin b := Pop; a := Pop; if not Bin(ValDivInt(a, b, r), r) then Exit(False); end;
-      opPow:     begin b := Pop; a := Pop; if not Bin(ValPow(a, b, r), r) then Exit(False); end;
-      opMod:     begin b := Pop; a := Pop; if not Bin(ValMod(a, b, r), r) then Exit(False); end;
-      opEQ:      begin b := Pop; a := Pop; if not Bin(ValCompare(coEQ, a, b, r), r) then Exit(False); end;
-      opNE:      begin b := Pop; a := Pop; if not Bin(ValCompare(coNE, a, b, r), r) then Exit(False); end;
-      opLT:      begin b := Pop; a := Pop; if not Bin(ValCompare(coLT, a, b, r), r) then Exit(False); end;
-      opLE:      begin b := Pop; a := Pop; if not Bin(ValCompare(coLE, a, b, r), r) then Exit(False); end;
-      opGT:      begin b := Pop; a := Pop; if not Bin(ValCompare(coGT, a, b, r), r) then Exit(False); end;
-      opGE:      begin b := Pop; a := Pop; if not Bin(ValCompare(coGE, a, b, r), r) then Exit(False); end;
-      opAnd:     begin b := Pop; a := Pop; if not Bin(ValAnd(a, b, r), r) then Exit(False); end;
-      opOr:      begin b := Pop; a := Pop; if not Bin(ValOr(a, b, r), r) then Exit(False); end;
-      opNot:     begin a := Pop; if not Bin(ValNot(a, r), r) then Exit(False); end;
+      opNeg:     begin a := Pop; case Bin(Negate(a, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opAdd:     begin b := Pop; a := Pop; case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opSub:     begin b := Pop; a := Pop; case Bin(ValSub(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opMul:     begin b := Pop; a := Pop; case Bin(ValMul(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opDivReal: begin b := Pop; a := Pop; case Bin(ValDivReal(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opDivInt:  begin b := Pop; a := Pop; case Bin(ValDivInt(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opPow:     begin b := Pop; a := Pop; case Bin(ValPow(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opMod:     begin b := Pop; a := Pop; case Bin(ValMod(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opEQ:      begin b := Pop; a := Pop; case Bin(ValCompare(coEQ, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opNE:      begin b := Pop; a := Pop; case Bin(ValCompare(coNE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opLT:      begin b := Pop; a := Pop; case Bin(ValCompare(coLT, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opLE:      begin b := Pop; a := Pop; case Bin(ValCompare(coLE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opGT:      begin b := Pop; a := Pop; case Bin(ValCompare(coGT, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opGE:      begin b := Pop; a := Pop; case Bin(ValCompare(coGE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opAnd:     begin b := Pop; a := Pop; case Bin(ValAnd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opOr:      begin b := Pop; a := Pop; case Bin(ValOr(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opNot:     begin a := Pop; case Bin(ValNot(a, r), r) of 1: Continue; 2: Exit(False); end; end;
       opLoadVar: Push(FVars[ins.A]);
       opStoreVar:
         begin
@@ -191,22 +237,14 @@ begin
           if CanStore(FProg.VarTypes[ins.A], v, r) then
             FVars[ins.A] := r
           else
-          begin
-            LastError := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
-              ' into ' + VarTypeName(FProg.VarTypes[ins.A]) + ' variable');
-            ErrorLine := ins.Line;
-            Exit(False);
-          end;
+            if Fault(MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
+              ' into ' + VarTypeName(FProg.VarTypes[ins.A]) + ' variable')) then Continue else Exit(False);
         end;
       opJumpIfFalse:
         begin
           v := Pop;
           if v.Kind <> vkBool then
-          begin
-            LastError := MakeError(peTypeMismatch, 'condition is not a boolean');
-            ErrorLine := ins.Line;
-            Exit(False);
-          end;
+            if Fault(MakeError(peTypeMismatch, 'condition is not a boolean')) then Continue else Exit(False);
           if not v.Bl then
           begin
             pc := ins.A;
@@ -222,9 +260,7 @@ begin
         begin
           if FDataPtr >= FProg.DataCount then
           begin
-            LastError := MakeError(peRuntime, 'out of DATA');
-            ErrorLine := ins.Line;
-            Exit(False);
+            if Fault(MakeError(peRuntime, 'out of DATA')) then Continue else Exit(False);
           end;
           Push(FProg.DataPool[FDataPtr]);
           Inc(FDataPtr);
@@ -236,6 +272,40 @@ begin
           b := FStack[FSP - 1];
           Push(a);
           Push(b);
+        end;
+      opStmt:
+        begin
+          // Mark this clean statement boundary; a fault resumes from here.
+          FStmtPC := pc; FStmtSP := FSP; FStmtFrameSP := FFrameSP;
+        end;
+      opSetErrHandler:
+        begin
+          FErrHandler := ins.A;   // -1 disables (on error goto 0)
+          if ins.A >= 0 then
+          begin
+            FErrHandlerSP := FSP; FErrHandlerFrameSP := FFrameSP;
+          end;
+          FInHandler := False;    // (re-)installing re-arms the handler
+        end;
+      opResume:
+        begin
+          if not FInHandler then
+          begin
+            LastError := MakeError(peRuntime, 'resume without an active error handler');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+          FInHandler := False;
+          FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;
+          if ins.A = 1 then
+          begin
+            // resume next: continue at the statement after the one that failed
+            pc := FErrStmtPC + 1;
+            while (pc < FProg.Count) and (FProg.Instr(pc).Op <> opStmt) do Inc(pc);
+          end
+          else
+            pc := FErrStmtPC;   // resume: retry the failing statement
+          Continue;
         end;
       opHalt: Exit(True);
       opGosub:
@@ -250,11 +320,7 @@ begin
       opReturn:
         begin
           if FCSP = 0 then
-          begin
-            LastError := MakeError(peRuntime, 'RETURN without GOSUB');
-            ErrorLine := ins.Line;
-            Exit(False);
-          end;
+            if Fault(MakeError(peRuntime, 'RETURN without GOSUB')) then Continue else Exit(False);
           Dec(FCSP);
           pc := FCallStack[FCSP];
           Continue;
@@ -267,21 +333,13 @@ begin
           if CanStore(lt, v, r) then
             FFrames[FFrameSP - 1].Locals[ins.A] := r
           else
-          begin
-            LastError := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
-              ' into ' + VarTypeName(lt) + ' local');
-            ErrorLine := ins.Line;
-            Exit(False);
-          end;
+            if Fault(MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
+              ' into ' + VarTypeName(lt) + ' local')) then Continue else Exit(False);
         end;
       opRetFunc:
         begin
           if FFrameSP = 0 then
-          begin
-            LastError := MakeError(peRuntime, 'return outside a function');
-            ErrorLine := ins.Line;
-            Exit(False);
-          end;
+            if Fault(MakeError(peRuntime, 'return outside a function')) then Continue else Exit(False);
           savedRet := FFrames[FFrameSP - 1].ReturnAddr;  // value stays on the stack
           Dec(FFrameSP);
           // A re-entrant call (CallUserFunc) stops here, handing its return value
@@ -320,10 +378,8 @@ begin
           res := Registry.Resolve(FProg.Consts.Get(ins.A).Str, kinds);
           if not res.Found then
           begin
-            LastError := MakeError(peUnknownFunction,
-              'no function ' + SignatureOf(FProg.Consts.Get(ins.A).Str, args));
-            ErrorLine := ins.Line;
-            Exit(False);
+            if Fault(MakeError(peUnknownFunction,
+              'no function ' + SignatureOf(FProg.Consts.Get(ins.A).Str, args))) then Continue else Exit(False);
           end;
           e := NoError;
           if res.IsHost then
@@ -332,20 +388,23 @@ begin
             r := res.Func(args, e);
           if IsError(e) then
           begin
-            LastError := e;
-            ErrorLine := ins.Line;
-            Exit(False);
+            if Fault(e) then Continue else Exit(False);
           end;
           Push(r);
         end;
     else
-      LastError := MakeError(peRuntime, 'bad opcode ' + IntToStr(Ord(ins.Op)));
-      ErrorLine := ins.Line;
-      Exit(False);
+      if Fault(MakeError(peRuntime, 'bad opcode ' + IntToStr(Ord(ins.Op)))) then Continue else Exit(False);
     end;
     Inc(pc);
   end;
   Result := True;
+end;
+
+procedure TPhosphorVM.ClearError;
+begin
+  FErrCode := 0;
+  FErrMsg := '';
+  FErrLine := 0;
 end;
 
 function TPhosphorVM.CallUserFunc(const AName: String; const Args: array of TValue;

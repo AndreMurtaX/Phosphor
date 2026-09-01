@@ -110,18 +110,22 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    **Deferral cost, paid down:** "embeddable" is now demonstrated by an outside
    embedder, not just the two built-in hosts.
 
-4. **The `.pbc` on-disk bytecode.** With the opcode set stable, implement the
-   frozen format (decisions.md, "On-disk bytecode"): serialize a compiled
-   `TProgram` — opcodes (explicit numbers), the constant pool, the var/func tables,
-   the data pool — to a little-endian `.pbc`, its **format-version byte checked and
-   refused out loud** on load. A `phosphorc` front-end compiles `.bas` → `.pbc`;
-   the engine loads a `.pbc` and runs it without recompiling.
-   **Gate:** a `.bas` compiled to `.pbc`, loaded and run, is **byte-identical** in
-   output to running the `.bas` directly; a corrupted or wrong-version `.pbc` is
-   refused with a clear error (seen failing before it is trusted); the same `.pbc`
-   runs on Windows and Linux (Double + endianness are fixed).
-   **Deferral cost:** no standalone distribution — but this is convenience over the
-   already-working in-memory path, hence sequenced after robustness.
+4. **The `.pbc` on-disk bytecode.** *DONE (2026-09-01).* `engine/PhosphorBytecode`
+   serializes a compiled `TProgram` — opcodes (explicit numbers), the constant
+   pool, the var/func tables, the data pool — to an **explicitly little-endian**
+   stream (NtoLE/LEToN, a fixed 8-byte Double), behind a header of the magic
+   `PBC`, a **format-version byte** and the highest opcode number; a bad magic, an
+   unsupported version, an opcode-set mismatch or corruption is **refused out
+   loud**, never run as the wrong opcodes. `phosphor compile a.bas a.pbc` writes
+   one (front-end in the console host); `phosphor a.pbc` detects the magic and runs
+   it via the new `TPhosphorEngine.RunBytecode(stream)`, no lexer/compiler
+   involved. **Gate met:** `tests/probe_bytecode` compiles a rich program
+   (data/read/func/for/strings) and a simple one to bytecode, runs the bytecode and
+   asserts its output is **byte-identical** to running the source, then corrupts the
+   version byte and the magic and asserts each is refused with a message (4 checks;
+   `--fail` flips one); auto-run in the suite; `phosphor compile`/run verified
+   end-to-end. Byte-exact green on Windows and Linux; the same `.pbc` runs on both
+   (Double + endianness fixed). `-B -vewn` clean.
 
 5. **Self-extracting deployment.** A per-platform stub that appends a `.pbc`
    payload to a runner binary, so `phosphorpack app.bas → app` yields a standalone

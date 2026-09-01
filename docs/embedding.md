@@ -48,6 +48,13 @@ numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
   Each `CallFunction` runs over the same live globals and handles the script set
   up. A second `Prepare` (or `Finish`) discards the previous one.
 
+- **Precompiled bytecode:** `eng.RunBytecode(stream)` runs a `.pbc` compiled
+  earlier (`phosphor compile a.bas a.pbc`), with no lexer or compiler involved.
+  Give it a `TFileStream` over the file, or a `TBytesStream` over an embedded
+  payload. A stream that is not a valid `.pbc` — wrong magic, unsupported version,
+  a mismatched opcode set, or corruption — is refused with a clear message (return
+  `1`), never executed as the wrong opcodes.
+
 ## Registering a host function
 
 A host function is a plain function matching one of two shapes, added to the

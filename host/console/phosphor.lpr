@@ -33,7 +33,7 @@ program phosphor;
 
 uses
   {$IFDEF WINDOWS}Windows,{$ENDIF}
-  SysUtils, Classes, PhosphorEngine;
+  SysUtils, Classes, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes, PhosphorBytecode;
 
 type
   { The whole host side of the boundary: give the engine somewhere to put its
@@ -194,10 +194,59 @@ begin
     Delete(Result, 1, 3);
 end;
 
+{ Compile a .bas source to a .pbc bytecode file. }
+function CompileFile(const AInPath, AOutPath: String): Integer;
+var
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  fs: TFileStream;
+begin
+  if not FileExists(AInPath) then
+  begin
+    Writeln(StdErr, 'phosphor: file not found: ', AInPath);
+    Exit(2);
+  end;
+  comp := TPhosphorCompiler.Create;
+  try
+    if not comp.Compile(ReadSource(AInPath), prog) then
+    begin
+      Writeln(StdErr, Format('phosphor: %s:%d: %s', [AInPath, comp.ErrorLine, comp.ErrorMessage]));
+      Exit(1);
+    end;
+  finally
+    comp.Free;
+  end;
+  try
+    fs := TFileStream.Create(AOutPath, fmCreate);
+    try WriteProgram(fs, prog); finally fs.Free; end;
+    Result := 0;
+  finally
+    prog.Free;
+  end;
+end;
+
+{ A file is bytecode if it starts with the .pbc magic. }
+function IsBytecode(const APath: String): Boolean;
+var fs: TFileStream; buf: array[0..2] of Char;
+begin
+  Result := False;
+  fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+  try
+    if fs.Size >= 3 then
+    begin
+      fs.ReadBuffer(buf[0], 3);
+      Result := (buf[0] = 'P') and (buf[1] = 'B') and (buf[2] = 'C');
+    end;
+  finally
+    fs.Free;
+  end;
+end;
+
 function RunFile(const APath, AOutPath: String): Integer;
 var
   host: TConsoleHost;
   eng: TPhosphorEngine;
+  fs: TFileStream;
   line: Integer;
 begin
   if not FileExists(APath) then
@@ -209,7 +258,14 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
-    line := eng.Run(ReadSource(APath));
+    if IsBytecode(APath) then
+    begin
+      // a precompiled .pbc: run it without the lexer/compiler
+      fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+      try line := eng.RunBytecode(fs); finally fs.Free; end;
+    end
+    else
+      line := eng.Run(ReadSource(APath));
     if line <> 0 then
     begin
       Writeln(StdErr, Format('phosphor: %s:%d: %s', [APath, line, eng.ErrorMessage]));
@@ -276,6 +332,17 @@ var
   i: Integer;
   arg, filePath, outPath: String;
 begin
+  // `phosphor compile <in.bas> <out.pbc>` -- compile to bytecode and stop.
+  if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
+  begin
+    if ParamCount < 3 then
+    begin
+      Writeln(StdErr, 'usage: phosphor compile <in.bas> <out.pbc>');
+      Halt(2);
+    end;
+    Halt(CompileFile(ParamStr(2), ParamStr(3)));
+  end;
+
   filePath := '';
   outPath := '';
   i := 1;
@@ -289,7 +356,8 @@ begin
     end
     else if (arg = '--help') or (arg = '-h') then
     begin
-      Writeln('usage: phosphor [run] <file.bas> [--out <path>]');
+      Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
+      Writeln('       phosphor compile <in.bas> <out.pbc>');
       Writeln('       phosphor            (REPL)');
       Writeln('       phosphor --diag     (console/UTF-8 self-check)');
       Writeln('       phosphor --version');

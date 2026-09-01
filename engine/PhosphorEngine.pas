@@ -20,9 +20,9 @@ unit PhosphorEngine;
 interface
 
 uses
-  SysUtils,
+  SysUtils, Classes,
   PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
-  PhosphorCompiler, PhosphorVM, PhosphorHandles,
+  PhosphorCompiler, PhosphorVM, PhosphorHandles, PhosphorBytecode,
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
   PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorConfigLib,
@@ -54,6 +54,11 @@ type
     { Compile and run ASource (UTF-8) to completion, one-shot. 0 on success;
       otherwise the 1-based line of the first error (ErrorMessage explains it). }
     function Run(const ASource: String): Integer;
+    { Run a compiled .pbc read from AStream (a TFileStream, a TBytesStream, ...) --
+      no lexer or compiler involved. 0 on success; 1 if the stream is not a valid
+      .pbc (ErrorMessage says why: bad magic, wrong version, opcode-set mismatch, or
+      corruption); otherwise the 1-based line of the first run-time error. }
+    function RunBytecode(AStream: TStream): Integer;
     { Embedding mode: compile ASource and run its top level ONCE, keeping the VM
       alive so a host can then call the routines it defined, over the same globals
       and handles, as many times as it likes. 0 on success, else the error line.
@@ -160,6 +165,44 @@ begin
   ResetHandles;   // no handles leak between programs
 
   if not CompileSource(ASource, prog) then Exit(FErrorLine);
+
+  vm := TPhosphorVM.Create;
+  try
+    ConfigureVM(vm);
+    if not vm.Run(prog) then
+    begin
+      FLastError := vm.LastError;
+      FErrorMessage := vm.LastError.Message;
+      FErrorLine := vm.ErrorLine;
+      if FErrorLine = 0 then FErrorLine := 1;
+      Exit(FErrorLine);
+    end;
+    Result := 0;
+  finally
+    vm.Free;
+    prog.Free;
+  end;
+end;
+
+function TPhosphorEngine.RunBytecode(AStream: TStream): Integer;
+var
+  vm: TPhosphorVM;
+  prog: TProgram;
+  err: String;
+begin
+  FErrorLine := 0;
+  FErrorMessage := '';
+  FLastError := NoError;
+  Finish;
+  ResetHandles;
+
+  if not ReadProgram(AStream, prog, err) then
+  begin
+    FErrorMessage := err;
+    FErrorLine := 1;
+    FLastError := MakeError(peSyntax, err);
+    Exit(1);
+  end;
 
   vm := TPhosphorVM.Create;
   try

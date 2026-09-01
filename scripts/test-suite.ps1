@@ -146,9 +146,10 @@ else {
     # prints ok:/fail: and exits non-zero on a failure.
     Write-Host ''
     $hostProbes = @(
-        @{ name='probe_value';   src='tests\probe_value.lpr' },
-        @{ name='probe_limits';  src='tests\probe_limits.lpr' },
-        @{ name='phosphorembed'; src='host\embed\phosphorembed.lpr' }
+        @{ name='probe_value';    src='tests\probe_value.lpr' },
+        @{ name='probe_limits';   src='tests\probe_limits.lpr' },
+        @{ name='probe_bytecode'; src='tests\probe_bytecode.lpr' },
+        @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' }
     )
     foreach ($hp in $hostProbes) {
         $psrc = Join-Path $root $hp.src

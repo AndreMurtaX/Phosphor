@@ -61,7 +61,7 @@ done
 # (the value kernel, the execution limits, the embedding API). Each prints ok:/
 # fail: and exits non-zero on a failure.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   [ -f "$root/$src" ] || continue
   pexe="$bin/$name"; rm -f "$pexe"

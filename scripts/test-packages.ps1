@@ -45,8 +45,16 @@ $manifest = Get-Content (Join-Path $pkg 'manifest.txt') |
     ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
 $tmp = [System.IO.Path]::GetTempPath()
 
+# A package needing an external runtime library is skipped where it is absent.
+$sqliteAvail = (Test-Path (Join-Path $binDir 'sqlite3.dll')) -or
+               (Test-Path (Join-Path $env:SystemRoot 'System32\sqlite3.dll'))
+
 $allOk = $true
 foreach ($name in $manifest) {
+    if (($name -like '*sqlite*') -and (-not $sqliteAvail)) {
+        Write-Host ("SKIP  {0}  (SQLite runtime library not found)" -f $name) -ForegroundColor Yellow
+        continue
+    }
     $bas = Join-Path $pkg "$name.bas"
     $exp = [System.IO.File]::ReadAllBytes((Join-Path $pkg "$name.expected"))
     $out = Join-Path $tmp 'phosphorpkgtest.out'

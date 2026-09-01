@@ -25,7 +25,14 @@ manifest="$(grep -vE '^[[:space:]]*#' "$pkg/manifest.txt" | tr '\n' ' ')"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
 
+# A package needing an external runtime library is skipped where it is absent.
+sqlite_avail=0
+ldconfig -p 2>/dev/null | grep -qi 'libsqlite3\.so' && sqlite_avail=1
+
 for name in $manifest; do
+  case "$name" in
+    *sqlite*) [ "$sqlite_avail" -eq 1 ] || { echo "SKIP  $name  (SQLite runtime library not found)"; continue; } ;;
+  esac
   "$exe" "$pkg/$name.bas" > "$out" 2> "$err"; code=$?
   if [ "$code" -eq 0 ] && cmp -s "$out" "$pkg/$name.expected"; then
     echo "PASS  $name  ($(wc -c <"$out") B, exit 0)"

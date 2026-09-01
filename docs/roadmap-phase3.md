@@ -156,13 +156,18 @@ opt-in host packages for whenever they are wanted; the engine stays dependency-f
 registers if it wants it, exactly like the GUI libs — the engine stays
 dependency-free and the boundary check keeps passing. **Landed:** `PhosphorBase64Lib`
 (base64/hex, from FPC's fcl-base) and `PhosphorZipLib` (zip archives, from FPC's
-paszlib) — both ship with the compiler, so no external runtime library, and both are
-byte-exact green on Windows and Linux via `host/packages/phosphorpkgtest` +
-`scripts/test-packages.{ps1,sh}` (`tests/packages/00_base64`, `01_zip`). **Ready to
-add when their runtime dependency is provisioned:** `sqlite` (needs `sqlite3.dll` /
-`libsqlite3.so` — the FPC `sqlite3*` units are present) and `http` (needs a server /
-OpenSSL to test) — kept out until they can be verified against reality, not stubbed.
-These are breadth, not a gate; they land any time.
+paszlib) — both ship with the compiler, so no external runtime library, byte-exact
+green on Windows and Linux. `PhosphorSqliteLib` (an in-memory/file SQLite database
+via FPC's SQLdb driver: `sqlite_open@`/`exec`/`scalar$`/`scalar`/`query$`/`close`)
+needs the SQLite runtime library, so it is **verified against reality where the
+library is present** (byte-exact on the Linux VM, which has `libsqlite3.so`) and the
+suite **skips it where it is absent** (Windows here has no `sqlite3.dll`) — the same
+skip pattern the headless GUI suite uses for a display. All run through
+`host/packages/phosphorpkgtest` + `scripts/test-packages.{ps1,sh}`
+(`tests/packages/00_base64`, `01_zip`, `02_sqlite`). **Still out:** `http` — its
+client ships with FPC (`fphttpclient`) but testing it needs a server / OpenSSL, so
+it stays out until it can be verified against reality, not stubbed. These are
+breadth, not a gate; they land any time.
 
 ## Rejected approaches (the traps the reasoning refuted)
 

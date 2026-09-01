@@ -62,25 +62,36 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    ErrHandler`; `opResume`) and one `Fault()` funnel in the VM through which every
    runtime-error site now routes; `err`/`errmsg$`/`erl`/`err_clear` are host-aware
    (they read the VM through the callfunc seam) in `engine/libs/PhosphorErrLib`.
-   **Gate met:** `tests/suite/49_on_error` (9 asserts — catch + resume next, resume
-   retry, `error()`, `err_clear`, an error caught from a called function) byte-exact
-   green on Windows and Linux; `negative/13_resume_no_handler` rejects `resume` with
-   no handler; the full engine + GUI suites still green; `-B -vewn` clean. **Scope
-   note:** `resume`/`resume next` target the failing statement in the handler's own
-   frame; an error caught from a deeper called function should recover with `goto`,
-   not resume — a later refinement can lift that.
+   A user-requested addition landed too: **`on error call func`** — on a fault, run
+   `function func(code%, msg$)` and continue by its return value (0 resumes next,
+   non-zero aborts), a callback form with no label/resume boilerplate (commit
+   8126d31). **Gate met:** `tests/suite/49_on_error` (13 asserts — catch + resume
+   next, resume retry, `error()`, `err_clear`, an error caught from a called
+   function, and the call form) byte-exact green on Windows and Linux;
+   `negative/13_resume_no_handler` rejects `resume` with no handler,
+   `negative/14_on_error_call_abort` rejects a call-handler that returns non-zero;
+   the full engine + GUI suites still green; `-B -vewn` clean. **Scope note:**
+   `resume`/`resume next` target the failing statement in the handler's own frame;
+   an error caught from a deeper called function should recover with `goto`, not
+   resume — a later refinement can lift that.
 
-2. **Execution limits — safe to embed untrusted scripts.** Opt-in ceilings the
-   host sets before `Run`: a **step budget** (halt with a catchable "step budget
-   exceeded" after N executed instructions — the answer to an infinite loop), a
-   **wall-clock timeout**, an **output-byte cap**, and a **handle ceiling** (the
-   deliberately-uncapped globals stay uncapped unless a limit is set). Enforced in
-   the VM dispatch loop; **zero cost when unset** (the default, as today).
-   **Gate:** a script with `while true` halts at the step budget with the specific
-   error and a non-zero line; a script within budget is byte-identical to an
-   unbounded run; a runaway `print` stops at the output cap.
-   **Deferral cost:** the core "embeddable" promise is *unsafe* — a host cannot run
-   user-supplied scripts without risking a hang or a flood.
+2. **Execution limits — safe to embed untrusted scripts.** *DONE (2026-09-01,
+   commit 98857df).* Three opt-in ceilings on `TPhosphorEngine`, `0` (the default)
+   meaning unlimited and costing nothing: **MaxSteps** (an instruction budget --
+   the answer to an infinite loop), **MaxOutputBytes** (total bytes through
+   OnOutput), **TimeoutMs** (a wall-clock ceiling, checked every 4096 steps).
+   Enforced in the VM dispatch loop and the output seam. A ceiling is **fatal by
+   design** (the new `peLimit` code): it aborts directly, *not* through the ON
+   ERROR path, so a script cannot catch and escape its own limit. The **handle
+   ceiling** is deferred (it needs registry cooperation). **Gate met:** because
+   limits are a host-facing API (set from Pascal, not a `.bas`), they are tested
+   with `tests/probe_limits.lpr` (5 checks: step/output/time bound their infinite
+   cases, a normal script within the ceilings runs clean, and ON ERROR cannot
+   escape a limit; `--fail` flips one). Both Pascal probes now auto-run in the
+   suite runner -- which surfaced and fixed a stale check in the pre-existing
+   `probe_value.lpr`. Byte-exact green on Windows and Linux. **Deferral cost, paid
+   down:** the "embeddable" promise is now *safe* -- a host can run user-supplied
+   scripts without risking a hang or a flood.
 
 3. **The embedding API + a third host.** Stabilize and document the public
    surface — `Create`, `Registry.Add`/`AddHost`, `OnOutput`, an `OnInput` seam,

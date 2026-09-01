@@ -1,0 +1,135 @@
+# Phosphor BASIC — architecture
+
+An embeddable BASIC interpreter in Free Pascal (FPC 3.2.2 / Lazarus). Desktop
+only: Windows and Linux. The spiritual successor to Plan9Basic, not a port —
+several language decisions change on purpose (see [decisions.md](decisions.md)).
+
+## The one rule
+
+**The engine is a library. The host is a consumer of it.** The engine knows
+nothing about consoles, files, windows, or the LCL. Everything it shows the
+outside world leaves through a callback; everything it reads comes back the same
+way. The console host is merely the *first* consumer; the GUI (phase 2) will be
+another, and the engine must never be able to tell which one it is talking to.
+
+This is enforced, not just intended. `scripts/build.ps1` scans every `engine/`
+unit's `uses` clauses and fails the build if one names a host- or GUI-facing
+unit (`crt`, `lcl`, `forms`, `windows`, `unix`, …). It is the Phosphor
+equivalent of Plan9Basic's FireMonkey-boundary check, and like that one it is
+meant to catch the mistake before it can be linked.
+
+## Layout
+
+```
+Phosphor/
+  engine/                 the library. Host-agnostic, GUI-free, no I/O of its own.
+    PhosphorEngine.pas      public facade (TPhosphorEngine, OnOutput callback).
+                            << WALKING SKELETON today: PRINT/PRINTLN only. >>
+  host/
+    console/              the first consumer: REPL + file runner.
+      phosphor.lpr          program; produces the `phosphor` binary.
+      phosphor.lpi          Lazarus project file (opens/builds in the IDE).
+  tests/
+    skeleton/            day-1 smoke test (hello.bas + golden hello.expected).
+                          The real oracle — Plan9Basic's 45+15 .bas suite —
+                          is imported later, once the interpreter exists.
+  scripts/
+    build.ps1            authoritative build (drives fpc directly).
+    test.ps1            build + run + byte-exact golden compare.
+  docs/
+    architecture.md     this file.
+    decisions.md        frozen language & on-disk-bytecode decisions.
+  bin/                    build output (git-ignored).
+```
+
+### Why the engine has no I/O of its own
+
+`TPhosphorEngine` exposes `OnOutput: procedure(const AText: String) of object`.
+`PRINTLN` puts the trailing LF into the text it emits; `PRINT` does not. The
+host writes those bytes wherever it likes and never has to reason about line
+endings. Input, when it lands, arrives by the same kind of callback — synchronous
+(see [decisions.md](decisions.md), "Input"). This is the seam that let
+Plan9Basic's engine run headless in `NoFmxProbe`, and it is the starting point
+here rather than a retrofit.
+
+## Build
+
+```powershell
+# Authoritative build (fpc), then the smoke test with a byte-exact golden compare:
+powershell -File scripts\build.ps1
+powershell -File scripts\test.ps1
+```
+
+Or open `host/console/phosphor.lpi` in Lazarus and build (Ctrl+F9). Both paths
+are kept working; `scripts/build.ps1` is the source of truth.
+
+Two habits the scripts encode, both inherited from how this project is run:
+
+- **Trust the artifact, not the exit code.** After compiling, `build.ps1`
+  checks the binary exists and actually runs (`--version`) before reporting
+  success — a step can "succeed" having produced nothing.
+- **A check is only trusted once seen to fail.** `test.ps1 -ProveFailure`
+  corrupts the expectation on purpose so you can watch the comparison report
+  FAIL, then a plain run shows PASS.
+
+## UTF-8
+
+UTF-8 everywhere, stated explicitly, resolved on day one rather than discovered
+later — FPC's string types (AnsiString / UTF8String / UnicodeString) are a
+minefield otherwise.
+
+- Sources are UTF-8. Units carry `{$codepage UTF8}` so Pascal string literals
+  are UTF-8 bytes.
+- The engine never transcodes source bytes: it slices literals out of the
+  source string and hands the raw bytes to the host. What you typed is what
+  comes out.
+- The console host writes output as raw bytes straight to the OS stdout handle,
+  so the golden comparison is byte-exact regardless of the console's codepage.
+  On Windows it also switches the console to UTF-8 (65001) so interactive text
+  renders. A source may be saved with a UTF-8 BOM; the host strips it.
+
+## Phases
+
+1. **Now.** Engine + non-graphical libraries + console host (REPL and file
+   execution). This skeleton proves the seam, UTF-8, and the build/test path;
+   the real lexer/parser/exec and the five-type value model replace the stub
+   next.
+2. **Later.** GUI over the LCL. The engine still never knows it exists. Controls
+   are reached through named helper functions for the common properties, plus a
+   generic `TypInfo` bridge for every published property, with events bound by
+   name. LCL events are synchronous method pointers on the main thread, so the
+   mobile-era marshalling is simply gone.
+
+## Linux
+
+Desktop means Windows **and** Linux, but this machine can build only Windows
+today. Concretely, what is installed:
+
+- FPC 3.2.2 with the `x86_64` code generator (`ppcx64.exe`) — the compiler can
+  *target* Linux, the CPU is the same.
+- RTL/packages compiled **only** for `x86_64-win64` (`units/x86_64-win64`).
+- Binutils **only** for `x86_64-win64`.
+
+What a Windows→Linux cross-build additionally needs, and what is missing:
+
+1. FPC RTL + packages built for `x86_64-linux` (`units/x86_64-linux`).
+2. Cross binutils targeting Linux (`x86_64-linux-gnu-ld`, `-as`).
+3. Target system libraries (libc and friends) to link against.
+
+`scripts/build.ps1 -TargetOS linux` stops with this explanation rather than
+emitting a broken command.
+
+Two supported ways to get a Linux binary, in order of preference:
+
+- **Build natively on Linux.** The phase-1 engine and console host are plain
+  console FPC with no external dependencies, so a native `fpc` on a Linux box,
+  in WSL2, or on a Linux CI runner compiles the same sources unchanged. This is
+  the honest, low-friction path and the one CI will use.
+- **Cross-compile from Windows.** Install the FPC cross bits above
+  (`fpcupdeluxe` is the usual way to add the `x86_64-linux` cross target and its
+  binutils on Windows). Workable, more moving parts; revisit if a Windows-only
+  release workflow ever needs it.
+
+The bytecode format (a later phase) is defined little-endian with a fixed
+`Double`, so the same `.pbc` runs under either OS; only the self-extracting stub
+is per-platform. See [decisions.md](decisions.md), "On-disk bytecode".

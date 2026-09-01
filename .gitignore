@@ -1,0 +1,22 @@
+# Build output
+/bin/
+
+# FPC / Lazarus compiled artifacts
+*.ppu
+*.o
+*.a
+*.or
+*.compiled
+lib/
+backup/
+
+# Lazarus IDE session state (per-user, not part of the project)
+*.lps
+*.lpo
+
+# Editor / OS noise
+*.bak
+*.~*
+*.orig
+Thumbs.db
+.DS_Store

@@ -1,0 +1,8 @@
+# Keep the whole tree LF in the working copy on every platform, so the byte-exact
+# golden test is deterministic regardless of a machine's core.autocrlf setting.
+* text=auto eol=lf
+
+# Golden test fixtures are compared byte-for-byte: never let git touch their
+# bytes. Treated as binary so no line-ending conversion is ever applied.
+tests/skeleton/hello.bas       -text
+tests/skeleton/hello.expected  -text

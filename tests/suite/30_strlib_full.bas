@@ -103,7 +103,7 @@ assert_eq(stuffstring$("hello", 1, 1, "J"), "Jello", "stuffstring$ replaces a ru
 
 test_case("strlib/lines")
 rem line$ picks one line out of a multi-line string, 1-based.
-text$ = "first" + chr$(10) + "second" + chr$(10) + "third"
+text$ = "first\nsecond\nthird"
 assert_eq(line$(text$, 1), "first", "line$ reads the first line")
 assert_eq(line$(text$, 3), "third", "and the last")
 assert_eq(line$(text$, 10), "", "a line past the end is empty rather than an error")

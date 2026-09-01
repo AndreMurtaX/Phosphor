@@ -111,7 +111,7 @@ assert_eq(json_len(a@), 3, "json_pop@ takes the last one off")
 test_case("json/paths")
 rem A path walks nested objects with dots, which is the whole reason it
 rem exists: json_get@ would need one call per level.
-deep@ = json_parse@("{""a"":{""b"":{""n"":7,""s"":""x"",""f"":true}}}")
+deep@ = json_parse@("{\"a\":{\"b\":{\"n\":7,\"s\":\"x\",\"f\":true}}}")
 assert_true(pnttonum(deep@), "json_parse@ answers a handle")
 assert_eq(json_pathn(deep@, "a.b.n"), 7, "json_pathn walks to a number")
 assert_eq(json_paths$(deep@, "a.b.s"), "x", "json_paths$ to a string")
@@ -143,7 +143,7 @@ r@ = json_object@()
 json_sets@(r@, "k", "v")
 flat$ = json_stringify$(r@)
 assert_true(len(flat$), "json_stringify$ renders")
-assert_eq(instr(flat$, chr$(10)), 0, "on one line")
+assert_eq(instr(flat$, "\n"), 0, "on one line")
 
 pretty$ = json_pretty$(r@)
 atleast = 0

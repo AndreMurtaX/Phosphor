@@ -31,3 +31,4 @@
 45_json_literals
 31_regex_dict_num
 12_fileio
+46_string_escapes

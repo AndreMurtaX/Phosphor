@@ -103,7 +103,7 @@ assert_eq(s$[[6]], "f", "last character")
 assert_eq(s$[[3]], "c", "middle character")
 
 test_case("str/line-index")
-multi$ = "first" + chr$(10) + "second" + chr$(10) + "third"
+multi$ = "first\nsecond\nthird"
 assert_eq(multi$[1], "first", "lines are 1-based")
 assert_eq(multi$[2], "second")
 assert_eq(multi$[3], "third")

@@ -250,6 +250,38 @@ begin
             Break;
           end;
         end
+        else if FSrc[FPos] = '\' then
+        begin
+          // C-style escape. Flush the run first (Copy preserves UTF-8 bytes),
+          // then append the escape's byte. Every escape below is ASCII (< 128),
+          // so a single-char append is codepage-safe. A quote can still be
+          // doubled as well ("" ), so both spellings reach a quote.
+          s := s + Copy(FSrc, runStart, FPos - runStart);
+          if FPos = len then
+          begin
+            FErr := 'unterminated string';
+            FErrLine := startLine;
+            Exit(False);
+          end;
+          case FSrc[FPos + 1] of
+            'n': s := s + #10;
+            't': s := s + #9;
+            'r': s := s + #13;
+            '0': s := s + #0;
+            'a': s := s + #7;
+            'b': s := s + #8;
+            'f': s := s + #12;
+            'v': s := s + #11;
+            '\': s := s + '\';
+            '"': s := s + '"';
+          else
+            FErr := 'unknown escape sequence ''\' + FSrc[FPos + 1] + '''';
+            FErrLine := startLine;
+            Exit(False);
+          end;
+          Inc(FPos, 2);
+          runStart := FPos;
+        end
         else if FSrc[FPos] = #10 then
         begin
           FErr := 'unterminated string';

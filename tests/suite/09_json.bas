@@ -28,8 +28,8 @@ assert_eq(ok, 1, "object is an object")
 assert_eq(json_typename$(o@), "object")
 
 test_case("json/parse")
-rem a quote inside a string literal is doubled (Phosphor's only escape)
-p@ = json_parse@("{""a"":1,""b"":""two"",""c"":[1,2,3]}")
+rem a quote inside a string is escaped \" (or doubled ""); backslash escapes are back
+p@ = json_parse@("{\"a\":1,\"b\":\"two\",\"c\":[1,2,3]}")
 assert_eq(json_getn(p@, "a"), 1)
 assert_eq(json_gets$(p@, "b"), "two")
 
@@ -54,19 +54,19 @@ assert_eq(json_itemn(a@, 2), 20)
 assert_eq(json_items$(a@, 3), "thirty")
 
 test_case("json/path")
-deep@ = json_parse@("{""user"":{""name"":""ana"",""age"":30}}")
+deep@ = json_parse@("{\"user\":{\"name\":\"ana\",\"age\":30}}")
 assert_eq(json_paths$(deep@, "user.name"), "ana")
 assert_eq(json_pathn(deep@, "user.age"), 30)
 
 test_case("json/roundtrip")
-src$ = "{""k"":7}"
+src$ = "{\"k\":7}"
 r@ = json_parse@(src$)
 out$ = json_stringify$(r@)
 back@ = json_parse@(out$)
 assert_eq(json_getn(back@, "k"), 7, "stringify then parse preserves the value")
 
 test_case("json/remove")
-d@ = json_parse@("{""x"":1,""y"":2}")
+d@ = json_parse@("{\"x\":1,\"y\":2}")
 assert_eq(json_count(d@), 2)
 json_remove@(d@, "x")
 assert_eq(json_count(d@), 1)

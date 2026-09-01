@@ -18,7 +18,8 @@ unit PhosphorStrLib;
 interface
 
 uses
-  SysUtils, StrUtils, Types, PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  SysUtils, StrUtils, Types, Character,
+  PhosphorValue, PhosphorErrors, PhosphorRegistry;
 
 procedure RegisterStrFuncs(Reg: TPhosphorRegistry);
 
@@ -26,6 +27,7 @@ implementation
 
 var
   InvFS: TFormatSettings;
+  GValCode: Integer;   // set by val(), read by valcode(): 0 clean, else stop position
 
 // --- UTF-8 codepoint helpers ------------------------------------------------
 // Byte index (1-based) of the start of each codepoint, plus a sentinel at
@@ -220,10 +222,13 @@ function f_oct(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValStr(ToRadix(Round(AsDouble(A[0])), 8)); end;
 
 function f_val(const A: array of TValue; out E: TPhosphorError): TValue;
-var d: Double;
+var d: Double; code: Integer; s: String;
 begin
   E := NoError;
-  if TryStrToFloat(Trim(s0(A)), d, InvFS) then Result := ValDouble(d) else Result := ValDouble(0);
+  s := Trim(s0(A));
+  Val(s, d, code);      // Pascal Val: code = 0 on success, else 1-based stop position
+  GValCode := code;
+  if TryStrToFloat(s, d, InvFS) then Result := ValDouble(d) else Result := ValDouble(0);
 end;
 function f_stri(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValStr(FloatToStr(AsDouble(A[0]), InvFS)); end;
@@ -336,6 +341,220 @@ begin
   if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
 end;
 
+// --- StrLib, the wider surface (30_strlib_full) -----------------------------
+// The reference counts these positions from 0; Phosphor is base-1 everywhere,
+// so insert$/delete$/line$ take 1-based positions here and stuffstring$ (already
+// 1-based in Delphi) is unchanged.
+
+function Utf8Chr(c: Integer): String;
+begin
+  if c < $80 then Result := Chr(c and $FF)
+  else if c < $800 then Result := Chr($C0 or (c shr 6)) + Chr($80 or (c and $3F))
+  else if c < $10000 then Result := Chr($E0 or (c shr 12)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F))
+  else Result := Chr($F0 or (c shr 18)) + Chr($80 or ((c shr 12) and $3F)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F));
+end;
+
+// Unicode (locale-following) case, over the whole codepoint range -- the 'a'
+// (Ansi) prefix, as opposed to ucase$/lcase$ which only know a-z. The result is
+// re-emitted through Utf8Chr rather than UTF8Encode ON PURPOSE: UTF8Encode tags
+// its result CP_UTF8, while every other string in the engine (literals, chr$)
+// carries DefaultSystemCodePage, and AnsiString '=' transcodes on a codepage
+// mismatch -- so two byte-identical strings would compare UNEQUAL. Building the
+// bytes with Chr() (as chr$ does) keeps the codepage tag consistent. See
+// [[phosphor-project]] on the codepage-tag hazard.
+function Utf8UpperU(const S: String): String;
+var u: UnicodeString; i: Integer;
+begin
+  u := UTF8Decode(S);
+  Result := '';
+  for i := 1 to Length(u) do Result := Result + Utf8Chr(Ord(TCharacter.ToUpper(u[i])));
+end;
+function Utf8LowerU(const S: String): String;
+var u: UnicodeString; i: Integer;
+begin
+  u := UTF8Decode(S);
+  Result := '';
+  for i := 1 to Length(u) do Result := Result + Utf8Chr(Ord(TCharacter.ToLower(u[i])));
+end;
+
+function SignI(c: Integer): Integer; inline;
+begin if c < 0 then Result := -1 else if c > 0 then Result := 1 else Result := 0; end;
+
+function f_proper(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, r: String; i: Integer; atStart: Boolean; c: Char;
+begin
+  E := NoError; s := s0(A); r := ''; atStart := True;
+  for i := 1 to Length(s) do
+  begin
+    c := s[i];
+    if (c = ' ') or (c = #9) or (c = #10) or (c = #13) then
+    begin r := r + c; atStart := True; end
+    else
+    begin
+      if atStart then
+      begin if (c >= 'a') and (c <= 'z') then c := Chr(Ord(c) - 32); end
+      else if (c >= 'A') and (c <= 'Z') then c := Chr(Ord(c) + 32);
+      r := r + c; atStart := False;
+    end;
+  end;
+  Result := ValStr(r);
+end;
+
+function f_swapcase(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, r: String; i: Integer; c: Char;
+begin
+  E := NoError; s := s0(A); r := '';
+  for i := 1 to Length(s) do
+  begin
+    c := s[i];
+    if (c >= 'a') and (c <= 'z') then c := Chr(Ord(c) - 32)
+    else if (c >= 'A') and (c <= 'Z') then c := Chr(Ord(c) + 32);
+    r := r + c;
+  end;
+  Result := ValStr(r);
+end;
+
+function f_alcase(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(Utf8LowerU(s0(A))); end;
+function f_aucase(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(Utf8UpperU(s0(A))); end;
+
+function f_ltab(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; w, n: Integer;
+begin
+  E := NoError; s := Trim(s0(A)); w := Round(AsDouble(A[1])); n := CpLen(s);
+  if n >= w then Result := ValStr(s) else Result := ValStr(StringOfChar(' ', w - n) + s);
+end;
+function f_rtab(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; w, n: Integer;
+begin
+  E := NoError; s := Trim(s0(A)); w := Round(AsDouble(A[1])); n := CpLen(s);
+  if n >= w then Result := ValStr(s) else Result := ValStr(s + StringOfChar(' ', w - n));
+end;
+function f_lfill(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, f: String; w, n: Integer;
+begin
+  E := NoError; s := s0(A); w := Round(AsDouble(A[1])); f := Utf8Chr(Round(AsDouble(A[2]))); n := CpLen(s);
+  if n >= w then Result := ValStr(s) else Result := ValStr(DupeString(f, w - n) + s);
+end;
+function f_rfill(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, f: String; w, n: Integer;
+begin
+  E := NoError; s := s0(A); w := Round(AsDouble(A[1])); f := Utf8Chr(Round(AsDouble(A[2]))); n := CpLen(s);
+  if n >= w then Result := ValStr(s) else Result := ValStr(s + DupeString(f, w - n));
+end;
+function f_center2(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; w, pad, l: Integer;
+begin
+  E := NoError; s := s0(A); w := Round(AsDouble(A[1])); pad := w - CpLen(s);
+  if pad <= 0 then Result := ValStr(s)
+  else begin l := pad div 2; Result := ValStr(StringOfChar(' ', l) + s + StringOfChar(' ', pad - l)); end;
+end;
+function f_center3(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, f: String; w, pad, l: Integer;
+begin
+  E := NoError; s := s0(A); w := Round(AsDouble(A[1])); f := Utf8Chr(Round(AsDouble(A[2]))); pad := w - CpLen(s);
+  if pad <= 0 then Result := ValStr(s)
+  else begin l := pad div 2; Result := ValStr(DupeString(f, l) + s + DupeString(f, pad - l)); end;
+end;
+
+function f_isdigits(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i: Integer; ok: Boolean;
+begin
+  E := NoError; s := s0(A); ok := s <> '';
+  for i := 1 to Length(s) do if not ((s[i] >= '0') and (s[i] <= '9')) then ok := False;
+  Result := ValInt(Ord(ok));
+end;
+function f_isalnum(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i: Integer; ok: Boolean; c: Char;
+begin
+  E := NoError; s := s0(A); ok := s <> '';
+  for i := 1 to Length(s) do
+  begin
+    c := s[i];
+    if not (((c >= '0') and (c <= '9')) or ((c >= 'A') and (c <= 'Z')) or ((c >= 'a') and (c <= 'z'))) then ok := False;
+  end;
+  Result := ValInt(Ord(ok));
+end;
+function f_isspace(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i: Integer; ok: Boolean;
+begin
+  E := NoError; s := s0(A); ok := s <> '';
+  for i := 1 to Length(s) do if not (s[i] in [' ', #9, #10, #11, #12, #13]) then ok := False;
+  Result := ValInt(Ord(ok));
+end;
+function f_islower(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i: Integer; hasLow, hasUp: Boolean; c: Char;
+begin
+  E := NoError; s := s0(A); hasLow := False; hasUp := False;
+  for i := 1 to Length(s) do
+  begin
+    c := s[i];
+    if (c >= 'a') and (c <= 'z') then hasLow := True
+    else if (c >= 'A') and (c <= 'Z') then hasUp := True;
+  end;
+  Result := ValInt(Ord(hasLow and not hasUp));
+end;
+function f_isupper(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i: Integer; hasLow, hasUp: Boolean; c: Char;
+begin
+  E := NoError; s := s0(A); hasLow := False; hasUp := False;
+  for i := 1 to Length(s) do
+  begin
+    c := s[i];
+    if (c >= 'a') and (c <= 'z') then hasLow := True
+    else if (c >= 'A') and (c <= 'Z') then hasUp := True;
+  end;
+  Result := ValInt(Ord(hasUp and not hasLow));
+end;
+
+function f_containstext(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(Ord(ContainsText(s0(A), A[1].Str))); end;
+
+function f_strcmp(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(SignI(CompareStr(s0(A), A[1].Str))); end;
+function f_strcmpi(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(SignI(CompareText(s0(A), A[1].Str))); end;
+
+function f_insert(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, ins: String; pos, n: Integer;
+begin
+  E := NoError; s := s0(A); ins := A[1].Str; pos := Round(AsDouble(A[2])); n := CpLen(s);
+  if pos < 1 then pos := 1;
+  if pos > n + 1 then pos := n + 1;
+  Result := ValStr(CpLeft(s, pos - 1) + ins + CpRight(s, n - (pos - 1)));
+end;
+function f_delete(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; pos, cnt, n, rem: Integer;
+begin
+  E := NoError; s := s0(A); pos := Round(AsDouble(A[1])); cnt := Round(AsDouble(A[2])); n := CpLen(s);
+  if pos < 1 then pos := 1;
+  if cnt < 0 then cnt := 0;
+  rem := n - (pos - 1) - cnt; if rem < 0 then rem := 0;
+  Result := ValStr(CpLeft(s, pos - 1) + CpRight(s, rem));
+end;
+function f_stuffstring(const A: array of TValue; out E: TPhosphorError): TValue;
+var s, repl: String; start, len, n, rem: Integer;
+begin
+  E := NoError; s := s0(A); start := Round(AsDouble(A[1])); len := Round(AsDouble(A[2])); repl := A[3].Str; n := CpLen(s);
+  if start < 1 then start := 1;
+  if len < 0 then len := 0;
+  rem := n - (start - 1) - len; if rem < 0 then rem := 0;
+  Result := ValStr(CpLeft(s, start - 1) + repl + CpRight(s, rem));
+end;
+
+function f_line(const A: array of TValue; out E: TPhosphorError): TValue;
+var lines: TStringArray; idx: Integer;
+begin
+  E := NoError; Result := ValStr('');
+  lines := SplitLines(s0(A));
+  idx := Round(AsDouble(A[1]));   // 1-based
+  if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
+end;
+
+function f_valcode(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(GValCode); end;
+
 procedure RegisterStrFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('ucase$:$', @f_ucase);
@@ -379,6 +598,30 @@ begin
   // index sugar helpers
   Reg.Add('strchar$:$n', @f_strchar);
   Reg.Add('strline$:$n', @f_strline);
+  // wider surface (30_strlib_full)
+  Reg.Add('proper$:$', @f_proper);
+  Reg.Add('swapcase$:$', @f_swapcase);
+  Reg.Add('alcase$:$', @f_alcase);
+  Reg.Add('aucase$:$', @f_aucase);
+  Reg.Add('ltab$:$n', @f_ltab);
+  Reg.Add('rtab$:$n', @f_rtab);
+  Reg.Add('lfill$:$nn', @f_lfill);
+  Reg.Add('rfill$:$nn', @f_rfill);
+  Reg.Add('center$:$n', @f_center2);
+  Reg.Add('center$:$nn', @f_center3);
+  Reg.Add('isdigits:$', @f_isdigits);
+  Reg.Add('isalnum:$', @f_isalnum);
+  Reg.Add('isspace:$', @f_isspace);
+  Reg.Add('islower:$', @f_islower);
+  Reg.Add('isupper:$', @f_isupper);
+  Reg.Add('containstext:$$', @f_containstext);
+  Reg.Add('strcmp:$$', @f_strcmp);
+  Reg.Add('strcmpi:$$', @f_strcmpi);
+  Reg.Add('insert$:$$n', @f_insert);
+  Reg.Add('delete$:$nn', @f_delete);
+  Reg.Add('stuffstring$:$nn$', @f_stuffstring);
+  Reg.Add('line$:$n', @f_line);
+  Reg.Add('valcode:', @f_valcode);
 end;
 
 initialization

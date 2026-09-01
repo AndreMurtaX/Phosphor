@@ -21,7 +21,8 @@ uses
   SysUtils, Classes,
   PhosphorEngine,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
-  PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib;
+  PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
+  PhosphorContainerLib, PhosphorRangeLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -86,6 +87,8 @@ begin
     RegisterLabelFuncs(eng.Registry);
     RegisterEditFuncs(eng.Registry);
     RegisterChoiceFuncs(eng.Registry);
+    RegisterContainerFuncs(eng.Registry);
+    RegisterRangeFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin

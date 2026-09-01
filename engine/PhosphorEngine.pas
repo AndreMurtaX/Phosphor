@@ -44,12 +44,27 @@ type
     FMaxSteps: Int64;
     FMaxOutputBytes: Int64;
     FTimeoutMs: Int64;
+    FVM: TPhosphorVM;       // the live VM in the prepared (embedding) mode
+    FProg: TProgram;        // its compiled program
+    function CompileSource(const ASource: String; out AProg: TProgram): Boolean;
+    procedure ConfigureVM(AVM: TPhosphorVM);
   public
     constructor Create;
     destructor Destroy; override;
-    { Compile and run ASource (UTF-8). 0 on success; otherwise the 1-based line
-      of the first error (ErrorMessage explains it). }
+    { Compile and run ASource (UTF-8) to completion, one-shot. 0 on success;
+      otherwise the 1-based line of the first error (ErrorMessage explains it). }
     function Run(const ASource: String): Integer;
+    { Embedding mode: compile ASource and run its top level ONCE, keeping the VM
+      alive so a host can then call the routines it defined, over the same globals
+      and handles, as many times as it likes. 0 on success, else the error line.
+      A second Prepare (or Finish) discards the previous one. }
+    function Prepare(const ASource: String): Integer;
+    { Call a BASIC function on the prepared VM and return its value. Sets LastError
+      / ErrorMessage (and returns a default value) if nothing is prepared, the
+      function is unknown, or it fails. }
+    function CallFunction(const AName: String; const Args: array of TValue): TValue;
+    { Discard the prepared VM and its handles. Called by Destroy. }
+    procedure Finish;
     property Registry: TPhosphorRegistry read FRegistry;
     property OnOutput: TPhosphorOutputProc read FOnOutput write FOnOutput;
     property ErrorLine: Integer read FErrorLine;
@@ -93,46 +108,62 @@ begin
   FMaxSteps := 0;
   FMaxOutputBytes := 0;
   FTimeoutMs := 0;
+  FVM := nil;
+  FProg := nil;
 end;
 
 destructor TPhosphorEngine.Destroy;
 begin
+  Finish;
   FRegistry.Free;
   inherited Destroy;
 end;
 
-function TPhosphorEngine.Run(const ASource: String): Integer;
+{ Compile ASource; on failure fill the engine error state and return False. }
+function TPhosphorEngine.CompileSource(const ASource: String; out AProg: TProgram): Boolean;
 var
   comp: TPhosphorCompiler;
+begin
+  comp := TPhosphorCompiler.Create;
+  try
+    Result := comp.Compile(ASource, AProg);
+    if not Result then
+    begin
+      FErrorMessage := comp.ErrorMessage;
+      FErrorLine := comp.ErrorLine;
+      if FErrorLine = 0 then FErrorLine := 1;
+      FLastError := MakeError(peSyntax, FErrorMessage);
+    end;
+  finally
+    comp.Free;
+  end;
+end;
+
+procedure TPhosphorEngine.ConfigureVM(AVM: TPhosphorVM);
+begin
+  AVM.Registry := FRegistry;
+  AVM.OnOutput := FOnOutput;
+  AVM.MaxSteps := FMaxSteps;
+  AVM.MaxOutputBytes := FMaxOutputBytes;
+  AVM.TimeoutMs := FTimeoutMs;
+end;
+
+function TPhosphorEngine.Run(const ASource: String): Integer;
+var
   vm: TPhosphorVM;
   prog: TProgram;
 begin
   FErrorLine := 0;
   FErrorMessage := '';
   FLastError := NoError;
+  Finish;         // a one-shot run discards any prepared state
   ResetHandles;   // no handles leak between programs
 
-  comp := TPhosphorCompiler.Create;
-  try
-    if not comp.Compile(ASource, prog) then
-    begin
-      FErrorMessage := comp.ErrorMessage;
-      FErrorLine := comp.ErrorLine;
-      if FErrorLine = 0 then FErrorLine := 1;
-      FLastError := MakeError(peSyntax, FErrorMessage);
-      Exit(FErrorLine);
-    end;
-  finally
-    comp.Free;
-  end;
+  if not CompileSource(ASource, prog) then Exit(FErrorLine);
 
   vm := TPhosphorVM.Create;
   try
-    vm.Registry := FRegistry;
-    vm.OnOutput := FOnOutput;
-    vm.MaxSteps := FMaxSteps;
-    vm.MaxOutputBytes := FMaxOutputBytes;
-    vm.TimeoutMs := FTimeoutMs;
+    ConfigureVM(vm);
     if not vm.Run(prog) then
     begin
       FLastError := vm.LastError;
@@ -145,6 +176,64 @@ begin
   finally
     vm.Free;
     prog.Free;
+  end;
+end;
+
+function TPhosphorEngine.Prepare(const ASource: String): Integer;
+begin
+  FErrorLine := 0;
+  FErrorMessage := '';
+  FLastError := NoError;
+  Finish;         // discard a previous preparation
+  ResetHandles;
+
+  if not CompileSource(ASource, FProg) then Exit(FErrorLine);
+
+  FVM := TPhosphorVM.Create;
+  ConfigureVM(FVM);
+  if not FVM.Run(FProg) then   // run the top level once; the VM stays alive after
+  begin
+    FLastError := FVM.LastError;
+    FErrorMessage := FVM.LastError.Message;
+    FErrorLine := FVM.ErrorLine;
+    if FErrorLine = 0 then FErrorLine := 1;
+    Finish;
+    Exit(FErrorLine);
+  end;
+  Result := 0;
+end;
+
+function TPhosphorEngine.CallFunction(const AName: String; const Args: array of TValue): TValue;
+begin
+  FErrorMessage := '';
+  FLastError := NoError;
+  FErrorLine := 0;
+  if FVM = nil then
+  begin
+    FLastError := MakeError(peRuntime, 'no script is prepared (call Prepare first)');
+    FErrorMessage := FLastError.Message;
+    Exit(Default(TValue));
+  end;
+  Result := FVM.CallUserFunc(AName, Args, FLastError);
+  if IsError(FLastError) then
+  begin
+    FErrorMessage := FLastError.Message;
+    FErrorLine := FVM.ErrorLine;
+  end;
+end;
+
+procedure TPhosphorEngine.Finish;
+begin
+  if FVM <> nil then
+  begin
+    FVM.Free;
+    FVM := nil;
+    ResetHandles;   // the prepared program's handles go with it
+  end;
+  if FProg <> nil then
+  begin
+    FProg.Free;
+    FProg := nil;
   end;
 end;
 

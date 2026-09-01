@@ -57,18 +57,21 @@ for f in "$neg"/*.bas; do
   fi
 done
 
-# Pascal probes: host-facing tests a .bas file cannot express (the value kernel,
-# the execution limits). Each prints ok:/fail: and exits non-zero on a failure.
+# Pascal probes + the embed host: host-facing programs a .bas file cannot express
+# (the value kernel, the execution limits, the embedding API). Each prints ok:/
+# fail: and exits non-zero on a failure.
 echo
-for probe in probe_value probe_limits; do
-  [ -f "$root/tests/$probe.lpr" ] || continue
-  pexe="$bin/$probe"; rm -f "$pexe"
+for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
+  name="${pair%%:*}"; src="${pair#*:}"
+  [ -f "$root/$src" ] || continue
+  pexe="$bin/$name"; rm -f "$pexe"
   "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
     -Fu"$root/engine" -Fu"$root/engine/libs" -FU"$units" -FE"$bin" -o"$pexe" \
-    "$root/tests/$probe.lpr" >/dev/null 2>&1
-  if [ ! -x "$pexe" ]; then echo "FAIL  probe: $probe  did not build"; allok=1; continue; fi
-  pout="$("$pexe" 2>/dev/null | tr '\n' ' ')"; pcode=$?
-  if [ "$pcode" -eq 0 ]; then echo "PASS  probe: $probe  ($pout)"; else echo "FAIL  probe: $probe  ($pout)"; allok=1; fi
+    "$root/$src" >/dev/null 2>&1
+  if [ ! -x "$pexe" ]; then echo "FAIL  probe: $name  did not build"; allok=1; continue; fi
+  "$pexe" >"$out" 2>"$err"; pcode=$?
+  psum="$(grep -E '^(ok|fail):' "$out" | tr '\n' ' ')"
+  if [ "$pcode" -eq 0 ]; then echo "PASS  probe: $name  ($psum)"; else echo "FAIL  probe: $name  ($psum)"; allok=1; fi
 done
 
 echo

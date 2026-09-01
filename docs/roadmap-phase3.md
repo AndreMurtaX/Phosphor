@@ -93,18 +93,22 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    down:** the "embeddable" promise is now *safe* -- a host can run user-supplied
    scripts without risking a hang or a flood.
 
-3. **The embedding API + a third host.** Stabilize and document the public
-   surface — `Create`, `Registry.Add`/`AddHost`, `OnOutput`, an `OnInput` seam,
-   `Run`/`CallUserFunc`, the error state, the limits — with host↔BASIC value
-   marshalling helpers. Build a **third example host** that is neither console nor
-   GUI: a minimal FPC program that embeds Phosphor as a *scripting layer* (a
-   config/formula/macro evaluator), registers a couple of host functions, runs a
-   user script and exchanges values back. Write `docs/embedding.md`.
-   **Gate:** the embedding example builds and runs on both OSes; the API is
-   exercised by a test; the doc walks a host author through registering a function
-   and running a script with limits.
-   **Deferral cost:** "embeddable" stays aspirational — demonstrated only by the
-   two built-in hosts, never by an outside embedder.
+3. **The embedding API + a third host.** *DONE (2026-09-01).* The engine gained the
+   embedding lifecycle a scripting host needs: **`Prepare(source)`** compiles and
+   runs a script's top level once and keeps the VM **alive** (globals and handles
+   intact), and **`CallFunction(name, args): TValue`** then calls the routines it
+   defined, as often as the host likes, over that live state; `Finish` (and the
+   destructor) discard it. `Run` stays the one-shot form; both share the compile /
+   configure helpers. The **third host**,
+   [`host/embed/phosphorembed.lpr`](../host/embed/phosphorembed.lpr), is neither
+   console nor GUI: it registers a host function, prepares a script, and calls its
+   routines from Pascal — exchanging values, reading back errors, under a step
+   limit. **Gate met:** the embed host builds and runs on both OSes and is
+   auto-run in the suite (`ok:/fail:`, 6 checks, `--fail` flips one), alongside the
+   two Pascal probes; [`docs/embedding.md`](embedding.md) walks a host author
+   through the whole surface with that file as the worked example. `-B -vewn` clean.
+   **Deferral cost, paid down:** "embeddable" is now demonstrated by an outside
+   embedder, not just the two built-in hosts.
 
 4. **The `.pbc` on-disk bytecode.** With the opcode set stable, implement the
    frozen format (decisions.md, "On-disk bytecode"): serialize a compiled

@@ -99,6 +99,7 @@ type
     procedure ParsePower;
     procedure ParseUnary;
     procedure ParsePrimary;
+    procedure ParseJsonLiteral;   // [ ... ] / { ... } assigned to a handle
     procedure ParseCall(const AName: String; ALine: Integer);
     procedure ParseCondition;
     procedure ParseBlockUntil(const ATerms: array of String);
@@ -441,6 +442,10 @@ begin
   FBool := False;
   t := FLex.Cur;
   case t.Kind of
+    // A leading '[' or '{' at a value position opens a JSON literal. (A '[' that
+    // follows an operand -- a@[i] -- is handled as a postfix in the tkIdent case,
+    // so it never reaches here.)
+    tkLBracket, tkLBrace: ParseJsonLiteral;
     tkInt:    begin FProg.Emit(opPushConst, FProg.Consts.Add(ValInt(t.IntVal)), 0, t.Line); FLex.Advance; end;
     tkDouble: begin FProg.Emit(opPushConst, FProg.Consts.Add(ValDouble(t.DblVal)), 0, t.Line); FLex.Advance; end;
     tkString: begin FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(t.StrVal)), 0, t.Line); FLex.Advance; end;
@@ -506,6 +511,84 @@ begin
   else
     Fail('unexpected token in expression', t.Line);
   end;
+end;
+
+{ A JSON literal builds its tree at run time through the JSON library, so element
+  values can be any expression (a variable, a call), not just constants. The
+  container handle stays on the stack: json_array@/json_object@ leave it there and
+  every json_pushval@/json_setval@ returns it, so the literal's value is the handle
+  once the closing bracket is reached. Newlines are ignored INSIDE a literal. }
+procedure TPhosphorCompiler.ParseJsonLiteral;
+
+  procedure SkipEols;
+  begin
+    while FLex.Cur.Kind = tkEOL do FLex.Advance;
+  end;
+
+var
+  ln: Integer;
+  key: String;
+begin
+  ln := FLex.Cur.Line;
+  if FLex.Cur.Kind = tkLBracket then
+  begin
+    FLex.Advance;   // '['
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_array@')), 0, ln);
+    SkipEols;
+    if FLex.Cur.Kind <> tkRBracket then
+      repeat
+        SkipEols;
+        if (FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'null') then
+        begin
+          FLex.Advance;
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_pushnull@')), 1, ln);
+        end
+        else
+        begin
+          ParseExpr;
+          if FFailed then Exit;
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_pushval@')), 2, ln);
+        end;
+        SkipEols;
+        if FLex.Cur.Kind = tkComma then begin FLex.Advance; SkipEols; end else Break;
+      until FFailed;
+    SkipEols;
+    Expect(tkRBracket, ''']''');
+  end
+  else
+  begin
+    FLex.Advance;   // '{'
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_object@')), 0, ln);
+    SkipEols;
+    if FLex.Cur.Kind <> tkRBrace then
+      repeat
+        SkipEols;
+        if FLex.Cur.Kind <> tkString then
+        begin Fail('a JSON object key must be a string', FLex.Cur.Line); Exit; end;
+        key := FLex.Cur.StrVal;
+        FLex.Advance;
+        Expect(tkColon, ''':''');
+        if FFailed then Exit;
+        SkipEols;
+        FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(key)), 0, ln);   // the key
+        if (FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'null') then
+        begin
+          FLex.Advance;
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_setnull@')), 2, ln);
+        end
+        else
+        begin
+          ParseExpr;
+          if FFailed then Exit;
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_setval@')), 3, ln);
+        end;
+        SkipEols;
+        if FLex.Cur.Kind = tkComma then begin FLex.Advance; SkipEols; end else Break;
+      until FFailed;
+    SkipEols;
+    Expect(tkRBrace, '''}''');
+  end;
+  FBool := False;
 end;
 
 procedure TPhosphorCompiler.ParseUnary;

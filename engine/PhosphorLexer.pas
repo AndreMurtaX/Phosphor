@@ -25,6 +25,7 @@ type
     tkEOF, tkEOL,
     tkInt, tkDouble, tkString, tkIdent,
     tkComma, tkSemicolon, tkColon, tkLParen, tkRParen, tkLBracket, tkRBracket,
+    tkLBrace, tkRBrace,
     tkPlus, tkMinus, tkStar, tkSlash, tkBackslash, tkCaret, tkMod,
     tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq,
     tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE
@@ -322,6 +323,8 @@ begin
       ')': begin PushSimple(tkRParen, startLine); Inc(FPos); end;
       '[': begin PushSimple(tkLBracket, startLine); Inc(FPos); end;
       ']': begin PushSimple(tkRBracket, startLine); Inc(FPos); end;
+      '{': begin PushSimple(tkLBrace, startLine); Inc(FPos); end;   // JSON object literal
+      '}': begin PushSimple(tkRBrace, startLine); Inc(FPos); end;
       ',': begin PushSimple(tkComma, startLine); Inc(FPos); end;
       ';': begin PushSimple(tkSemicolon, startLine); Inc(FPos); end;
       ':': begin PushSimple(tkColon, startLine); Inc(FPos); end;

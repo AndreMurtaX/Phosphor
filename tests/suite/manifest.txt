@@ -28,3 +28,4 @@
 20_datetime
 27_json
 29_datetime_full
+45_json_literals

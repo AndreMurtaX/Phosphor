@@ -571,6 +571,50 @@ begin
   if Args[0].Kind = vkHandle then Result := ValInt(Args[0].Hnd) else Result := ValInt(0);
 end;
 
+// --- generic value insertion (for the JSON-literal codegen) -----------------
+// The literal compiler evaluates each element to a plain value and calls these,
+// which pick the JSON node kind from the value's runtime kind. Both RETURN the
+// container handle, so it stays on the stack between insertions.
+function ValueToNode(const V: TValue; out Err: TPhosphorError): TJSONData;
+begin
+  Err := NoError;
+  case V.Kind of
+    vkInt, vkDouble: Result := NumNode(AsDouble(V));
+    vkString:        Result := TJSONString.Create(V.Str);
+    vkBool:          Result := TJSONBoolean.Create(V.Bl);
+    vkHandle:
+      if IsHandle(V.Hnd) and (HandleObj(V.Hnd) is TPhosphorJson) then
+        Result := TPhosphorJson(HandleObj(V.Hnd)).Node.Clone   // literal takes a copy
+      else
+      begin
+        Err := MakeError(peRuntime, 'not a valid json handle in a literal');
+        Result := nil;
+      end;
+  else
+    Result := TJSONNull.Create;
+  end;
+end;
+function t_json_pushval(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray; node: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  node := ValueToNode(Args[1], Err);
+  if node = nil then Exit;
+  a.Add(node);
+  Result := Args[0];
+end;
+function t_json_setval(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var o: TJSONObject; node: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetObj(Args[0], o, Err) then Exit;
+  node := ValueToNode(Args[2], Err);
+  if node = nil then Exit;
+  SetMember(o, Args[1].Str, node);
+  Result := Args[0];
+end;
+
 procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('json_object@:',     @t_json_object);
@@ -634,6 +678,15 @@ begin
   Reg.Add('json_clone@:@',     @t_json_clone);
   Reg.Add('json_merge@:@@',    @t_json_merge);
   Reg.Add('pnttonum:@',        @t_pnttonum);
+  // generic value insertion, one overload per value kind (JSON-literal codegen)
+  Reg.Add('json_pushval@:@n',  @t_json_pushval);
+  Reg.Add('json_pushval@:@$',  @t_json_pushval);
+  Reg.Add('json_pushval@:@?',  @t_json_pushval);
+  Reg.Add('json_pushval@:@@',  @t_json_pushval);
+  Reg.Add('json_setval@:@$n',  @t_json_setval);
+  Reg.Add('json_setval@:@$$',  @t_json_setval);
+  Reg.Add('json_setval@:@$?',  @t_json_setval);
+  Reg.Add('json_setval@:@$@',  @t_json_setval);
 end;
 
 end.

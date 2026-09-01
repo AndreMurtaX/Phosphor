@@ -34,3 +34,4 @@
 46_string_escapes
 22_config
 25_sys
+24_platform_std

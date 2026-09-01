@@ -144,6 +144,23 @@ begin E := NoError; Result := ValStr(TrimRight(s0(A))); end;
 function f_reverse(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValStr(CpReverse(s0(A))); end;
 
+// mid$(s, start[, len]) -- 1-based, by codepoint. Without len, to the end.
+function f_mid(const A: array of TValue; out E: TPhosphorError): TValue;
+var st: TInt64DynArray; startCp, cnt, lastEx, n: Integer;
+begin
+  E := NoError;
+  st := CpStarts(s0(A));
+  n := Length(st) - 1;
+  startCp := Round(AsDouble(A[1]));
+  if High(A) >= 2 then cnt := Round(AsDouble(A[2])) else cnt := n;
+  if startCp < 1 then startCp := 1;
+  if cnt < 0 then cnt := 0;
+  if startCp > n then Exit(ValStr(''));
+  lastEx := startCp + cnt;                 // one past the last codepoint
+  if lastEx > n + 1 then lastEx := n + 1;
+  Result := ValStr(Copy(s0(A), st[startCp - 1], st[lastEx - 1] - st[startCp - 1]));
+end;
+
 function f_asc(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String;
 begin
@@ -337,6 +354,9 @@ begin
   Reg.Add('oct$:n', @f_oct);
   Reg.Add('val:$', @f_val);
   Reg.Add('stri$:n', @f_stri);
+  Reg.Add('str$:n', @f_stri);       // alias: number -> string, locale-invariant
+  Reg.Add('mid$:$n', @f_mid);
+  Reg.Add('mid$:$nn', @f_mid);
   Reg.Add('space$:n', @f_space);
   Reg.Add('string$:nn', @f_string);
   Reg.Add('mulstring$:$n', @f_mulstring);

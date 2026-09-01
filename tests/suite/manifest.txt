@@ -13,3 +13,4 @@
 10_strlist
 07_numbers
 06_strings
+41_syntax_string_plus_number

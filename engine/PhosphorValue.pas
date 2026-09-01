@@ -269,10 +269,11 @@ var
   n: Int64;
 begin
   R := Default(TValue);
-  // '+' is the one operator that is also string concatenation.
-  if (A.Kind = vkString) and (B.Kind = vkString) then
+  // '+' is also concatenation: if EITHER side is a string, the other is coerced
+  // to its text (a number via its str$ form) and the two are joined.
+  if (A.Kind = vkString) or (B.Kind = vkString) then
   begin
-    R := ValStr(A.Str + B.Str);
+    R := ValStr(ValToStr(A) + ValToStr(B));
     Exit(NoError);
   end;
   Result := NumericPair(A, B, '+');
@@ -292,8 +293,19 @@ end;
 function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
+  k: Integer;
 begin
   R := Default(TValue);
+  // 'string - n' truncates the last n characters (the string keeps the rest).
+  if A.Kind = vkString then
+  begin
+    if not IsNumeric(B) then
+      Exit(MakeError(peTypeMismatch, 'cannot subtract ' + KindName(B.Kind) + ' from a string'));
+    k := Length(A.Str) - Round(AsDouble(B));
+    if k < 0 then k := 0;
+    R := ValStr(Copy(A.Str, 1, k));
+    Exit(NoError);
+  end;
   Result := NumericPair(A, B, '-');
   if IsError(Result) then Exit;
   if BothInt(A, B) then

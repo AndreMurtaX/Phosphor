@@ -396,7 +396,25 @@ begin
         if t.StrVal = 'true' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(True)), 0, t.Line); FLex.Advance; end
         else if t.StrVal = 'false' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(False)), 0, t.Line); FLex.Advance; end
         else if FLex.Peek.Kind = tkLParen then begin FLex.Advance; ParseCall(t.StrVal, t.Line); end
-        else begin EmitLoadVar(t.StrVal, t.Line); FLex.Advance; end;
+        else
+        begin
+          EmitLoadVar(t.StrVal, t.Line);
+          FLex.Advance;
+          // bracket sugar: a@[i] -> arr_get(a@, i) (handle variables only)
+          if FLex.Cur.Kind = tkLBracket then
+          begin
+            if VarTypeOf(t.StrVal) <> vtHandle then
+            begin
+              Fail('[] indexing is only for handle (@) variables for now', t.Line);
+              Exit;
+            end;
+            FLex.Advance;
+            ParseExpr;
+            Expect(tkRBracket, ''']''');
+            FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
+            FBool := False;
+          end;
+        end;
       end;
   else
     Fail('unexpected token in expression', t.Line);
@@ -867,6 +885,26 @@ begin
       Exit;
     end;
     if t.StrVal = 'restore' then begin FLex.Advance; FProg.Emit(opRestore, 0, 0, t.Line); Exit; end;
+    // indexed handle: a@[i] = <expr>  (set), or a@[i] alone (expression stmt)
+    if (VarTypeOf(t.StrVal) = vtHandle) and (FLex.Peek.Kind = tkLBracket) then
+    begin
+      EmitLoadVar(t.StrVal, t.Line);   // the handle
+      FLex.Advance;                    // the name
+      FLex.Advance;                    // '['
+      ParseExpr;                       // the index
+      Expect(tkRBracket, ''']''');
+      if FFailed then Exit;
+      if FLex.Cur.Kind = tkEQ then
+      begin
+        FLex.Advance;
+        ParseExpr;                     // the value
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 3, t.Line);
+      end
+      else
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
+      FProg.Emit(opPop, 0, 0, t.Line);  // statement: discard the call result
+      Exit;
+    end;
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
       FLex.Advance;

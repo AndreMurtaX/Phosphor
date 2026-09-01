@@ -129,13 +129,16 @@ and is unverifiable until the engine exists).
    pointer; `restore` rewinds. `tests/suite/05_data_read.bas` (7 asserts) green.
    Arrays are split into their own step (6b) because they need handles.
 
-6b. **Arrays (with handles).** `dim`, base-1 indexing, bracket sugar `a@[i]` /
-   `a@[i] = x`, `ndims`/`lbound`/`ubound`/`arraysize`/`arraytype`, numeric/string/
-   pointer arrays, and the char index `s$[[n]]` by codepoint. Needs the handle
-   type `@` + a handle registry (was step 7) + an array library, so arrays and
-   handles land together. `04_arrays.bas` (import with `#`→`@`) is the target;
-   this also unlocks `03_functions.bas`'s `func/pointer-return`.
-   **Gate:** `04_arrays` green; a deliberate base-0 leak fails.
+6b. **Arrays (with handles).** *(DONE 2026-09-01.)* Built the handle registry
+   (`PhosphorHandles`: 1-based Int64 ids, `IsHandle` validation, `ResetHandles`
+   per run) and `TPhosphorArray` (N-dim, 1-based, kind = numeric/string/pointer),
+   plus the array library (`PhosphorArrayLib`: dim@/sdim@/pdim@, ndims/lbound/
+   ubound/arraysize/arraytype/arraytypename$, narr/sarr/parr set+get, and the
+   generic `arr_get`/`arr_set` behind bracket sugar `a@[i]` / `a@[i] = x`; lexer
+   gained `[` `]`). The engine registers built-in libraries and resets handles
+   each Run. `tests/suite/04_arrays.bas` (import with `#`→`@`, 28 asserts) green.
+   The char index `s$[[n]]` (string, by codepoint) rides with the string lib
+   (step 8). The handle registry is also the prereq for step 7's dict/stringlist.
 
 7. **Handle registry + error-state contract, end-to-end** — the `@` handle type
    and the first handle-minting packages (dict@, stringlist@, array@); fabricated

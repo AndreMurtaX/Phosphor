@@ -22,7 +22,7 @@ interface
 uses
   SysUtils,
   PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
-  PhosphorCompiler, PhosphorVM;
+  PhosphorCompiler, PhosphorVM, PhosphorHandles, PhosphorArrayLib;
 
 const
   PhosphorVersion = '0.0.1';
@@ -59,6 +59,7 @@ begin
   if not VerifyOpcodeNumbering then
     raise EPhosphorInternal.Create('opcode numbering is corrupt (see PhosphorOpcodes)');
   FRegistry := TPhosphorRegistry.Create;
+  RegisterArrayFuncs(FRegistry);   // built-in library packages
   FOnOutput := nil;
   FErrorLine := 0;
   FErrorMessage := '';
@@ -80,6 +81,7 @@ begin
   FErrorLine := 0;
   FErrorMessage := '';
   FLastError := NoError;
+  ResetHandles;   // no handles leak between programs
 
   comp := TPhosphorCompiler.Create;
   try

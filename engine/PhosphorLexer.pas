@@ -24,7 +24,7 @@ type
   TTokenKind = (
     tkEOF, tkEOL,
     tkInt, tkDouble, tkString, tkIdent,
-    tkComma, tkLParen, tkRParen,
+    tkComma, tkLParen, tkRParen, tkLBracket, tkRBracket,
     tkPlus, tkMinus, tkStar, tkSlash, tkBackslash, tkCaret, tkMod,
     tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE
   );
@@ -301,6 +301,8 @@ begin
       '^': begin PushSimple(tkCaret, startLine); Inc(FPos); end;
       '(': begin PushSimple(tkLParen, startLine); Inc(FPos); end;
       ')': begin PushSimple(tkRParen, startLine); Inc(FPos); end;
+      '[': begin PushSimple(tkLBracket, startLine); Inc(FPos); end;
+      ']': begin PushSimple(tkRBracket, startLine); Inc(FPos); end;
       ',': begin PushSimple(tkComma, startLine); Inc(FPos); end;
       '=': begin PushSimple(tkEQ, startLine); Inc(FPos); end;
       '<':

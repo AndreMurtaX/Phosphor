@@ -24,7 +24,7 @@ uses
   Forms,
   SysUtils, Classes,
   PhosphorEngine, PhosphorTestLib,
-  PhosphorGuiCore, PhosphorFormLib, PhosphorButtonLib;
+  PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib;
 
 function ReadSource(const APath: String): String;
 var
@@ -77,6 +77,7 @@ begin
   try
     RegisterTestFuncs(eng.Registry);
     RegisterGuiCoreFuncs(eng.Registry);
+    RegisterControlFuncs(eng.Registry);
     RegisterFormFuncs(eng.Registry);
     RegisterButtonFuncs(eng.Registry);
     ResetTestState;

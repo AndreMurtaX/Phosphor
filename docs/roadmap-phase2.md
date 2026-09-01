@@ -146,10 +146,17 @@ VM gtk2 build flags that worked (fpc direct, Lazarus 4.8 at `/usr/share/lazarus/
    real LCL `OnClick` that runs a BASIC handler mutating a global AND the button
    through its sender handle. **Gate met** (Windows); Linux gtk2 cross-run next.
 
-4. **Property surface.** Named helpers for common properties + the `TypInfo`
-   generic bridge; the `08_property_roundtrip` methodology (write back what was
-   read; assert neither half errors). **Gate:** an adapted property-roundtrip file
-   green.
+4. **Property surface — the shared backbone.** *DONE (2026-09-01).*
+   `host/gui/libs/PhosphorControlLib` exposes the members every `TControl` shares
+   (geometry, state, colour, font, focus) once, for any control handle, plus the
+   generic `TypInfo` bridge: `control_set@(h, "PropName", value)` /
+   `control_get` / `control_get$` reach every published property by name, so each
+   later family unit writes only its specifics. `tests/gui/02_control` (24 asserts)
+   is byte-exact green headless (Windows + Linux) — named helpers, the bridge
+   (string/number/bool/enum by name), an unknown property recorded not crashed,
+   and free/double-free. (`control_setfocus@` guards on `HandleAllocated` so it
+   never realizes a window headless — a no-op until the interactive host shows the
+   form; without the guard it hung.)
 
 5. **Control breadth + geometry + containers**, one isolated library unit per
    family under `host/gui/libs/` (mirroring `engine/libs/`): label, edit,

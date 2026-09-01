@@ -20,7 +20,7 @@ uses
   Forms,
   SysUtils, Classes,
   PhosphorEngine,
-  PhosphorGuiCore, PhosphorFormLib, PhosphorButtonLib;
+  PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -79,6 +79,7 @@ begin
   try
     eng.OnOutput := @con.Output;
     RegisterGuiCoreFuncs(eng.Registry);
+    RegisterControlFuncs(eng.Registry);
     RegisterFormFuncs(eng.Registry);
     RegisterButtonFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));

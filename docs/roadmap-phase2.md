@@ -12,6 +12,44 @@ increment, prove it against reality before building on it**, and treat the
 reference (`C:\Dev\Plan9Basic`, its `tests/gui/` suite and `engine/Libs/GUI`) as
 an oracle for *shape*, not a thing to port.
 
+## Status — PHASE 2 COMPLETE (2026-09-01)
+
+The GUI control library is delivered and the engine never learned it exists. What
+shipped:
+
+- **The host-callback seam** (`Registry.AddHost` / `TPhosphorVM.CallUserFunc`) —
+  host-agnostic, proven headless by `callfunc` before any GUI existed.
+- **20 GUI packages** under `host/gui/libs/`, isolated per control family like
+  `engine/libs/` but free to use the LCL: `GuiCore`, `Control` (the shared
+  backbone + generic `TypInfo` property bridge), `Form`, `Button`, `Label`, `Edit`,
+  `Choice`, `Container`, `Range`, `Menu`, `Timer`, `Image`, `Grid`, `TreeList`,
+  `Canvas`, `Dialog`, `Misc` (and their siblings).
+- **Controls**: form, button/bitbtn/speedbutton, label/statictext, edit/memo/
+  spinedit/floatspinedit/maskedit, checkbox/radio/togglebox/combobox/listbox/
+  checklistbox, panel/groupbox/scrollbox/pagecontrol+tabsheet/splitter/bevel,
+  trackbar/progressbar/scrollbar/updown, mainmenu/menuitem/toolbar/statusbar,
+  timer, image, stringgrid, treeview/listview, canvas drawing (bitmap + `canvas_*`
+  + shape), the common dialogs, calendar, colorbutton.
+- **Two hosts** mirroring `host/console/`: `phosphorgui` (interactive) and
+  `phosphorguitest` (headless runner). `examples/gui_demo.bas` runs a real app.
+- **Verification**: 13 byte-exact GUI test files (`tests/gui/00`–`12`) green on
+  **Windows (win32)** and **Linux (gtk2, live display)** via `scripts/test-gui.
+  {ps1,sh}`; both hosts `fpc -B -vewn` clean; the engine/console suite stays green;
+  the boundary check still passes (the engine reaches no LCL unit).
+
+Verification method that made a windowed toolkit byte-exact: build controls and
+fire events **headless** (no `Show`, no message loop) — LCL fires OnChange/OnClick
+on a programmatic change, and drawing is proven by reading a pixel back. Anything
+inherently modal or window-realizing (setfocus, a dialog's Execute, msgbox) is
+guarded or kept out of the headless suite and exercised in the interactive host.
+
+**Out of scope, as decided:** data-aware controls (`TDB*`) need `Data.DB` — the
+external-dependency line phase 1 drew for sqlite/http. FMX-only scene features
+(effects, tween animations, retained vector path, media) have no LCL equivalent
+(see [gui-components.md](gui-components.md)). Remaining phase-2 nice-to-haves —
+richer key/mouse event marshalling and more example apps — are optional followups,
+not blockers. **Next: [phase 3](roadmap-phase3.md).**
+
 ## The one architectural question, and its answer
 
 A console program runs start to finish. A GUI program is event-driven: it builds

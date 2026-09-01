@@ -93,15 +93,23 @@ minefield otherwise.
 
 ## Phases
 
-1. **Now.** Engine + non-graphical libraries + console host (REPL and file
-   execution). This skeleton proves the seam, UTF-8, and the build/test path;
-   the real lexer/parser/exec and the five-type value model replace the stub
-   next.
-2. **Later.** GUI over the LCL. The engine still never knows it exists. Controls
-   are reached through named helper functions for the common properties, plus a
-   generic `TypInfo` bridge for every published property, with events bound by
-   name. LCL events are synchronous method pointers on the main thread, so the
-   mobile-era marshalling is simply gone.
+1. **Done.** Engine + non-graphical libraries + console host (REPL and file
+   execution). The five-kind value model, the `:`-separated registry, the
+   record-don't-raise error state and the stack VM replaced the day-1 stub; a
+   byte-exact oracle subset passes on Windows and Linux. See
+   [roadmap.md](roadmap.md).
+2. **Done.** GUI over the LCL — a *second consumer* of the same engine, which
+   still never knows it exists. Controls are reached through named helper
+   functions plus a generic `TypInfo` bridge for every published property, with
+   events bound by name; LCL events are synchronous method pointers on the main
+   thread, so the mobile-era marshalling is simply gone. 20 isolated packages
+   under `host/gui/libs/`, verified byte-exact headless on both OSes. See
+   [roadmap-phase2.md](roadmap-phase2.md) and [gui-components.md](gui-components.md).
+3. **Next.** Make it robust and deployable: a catchable language-level error model
+   (`ON ERROR`), execution limits so a host can run untrusted scripts safely, the
+   documented embedding API, and then the on-disk bytecode (`.pbc`) with its
+   self-extracting deployment stub (its format is already frozen in
+   [decisions.md](decisions.md)). See [roadmap-phase3.md](roadmap-phase3.md).
 
 ## Linux
 

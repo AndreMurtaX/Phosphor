@@ -58,50 +58,50 @@ begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
 
   // int + int -> int (checked)
-  e := OpAdd(ValInt(3), ValInt(4), r);
+  e := ValAdd(ValInt(3), ValInt(4), r);
   CheckErr(e, peNone, 'add int+int no error');
   if ProveFail then CheckInt(r, 8, 'add int+int stays int')   // deliberately wrong
   else CheckInt(r, 7, 'add int+int stays int');
 
   // int / int -> double (real division)
-  e := OpDivReal(ValInt(10), ValInt(4), r);
+  e := ValDivReal(ValInt(10), ValInt(4), r);
   CheckDouble(r, 2.5, 'div 10/4 = 2.5 double');
 
   // int \ int -> int (integer division)
-  e := OpDivInt(ValInt(7), ValInt(2), r);
+  e := ValDivInt(ValInt(7), ValInt(2), r);
   CheckInt(r, 3, 'idiv 7\2 = 3 int');
 
   // string + string -> concat
-  e := OpAdd(ValStr('ab'), ValStr('cd'), r);
+  e := ValAdd(ValStr('ab'), ValStr('cd'), r);
   CheckStr(r, 'abcd', 'concat ab+cd');
 
   // int + double -> double
-  e := OpAdd(ValInt(2), ValDouble(0.5), r);
+  e := ValAdd(ValInt(2), ValDouble(0.5), r);
   CheckDouble(r, 2.5, 'mixed 2+0.5 = 2.5 double');
 
   // overflow is a CATCHABLE ERROR, not a silent double
-  e := OpAdd(ValInt(High(Int64)), ValInt(1), r);
+  e := ValAdd(ValInt(High(Int64)), ValInt(1), r);
   CheckErr(e, peIntOverflow, 'add overflow -> error');
-  e := OpMul(ValInt(High(Int64)), ValInt(2), r);
+  e := ValMul(ValInt(High(Int64)), ValInt(2), r);
   CheckErr(e, peIntOverflow, 'mul overflow -> error');
   Report(not TryNegI64(Low(Int64), i), 'neg Low(Int64) overflows');
 
   // comparison produces a bool VALUE
-  e := OpCompare(coGT, ValInt(2), ValInt(1), r);
+  e := ValCompare(coGT, ValInt(2), ValInt(1), r);
   CheckBool(r, True, 'compare 2>1 = true');
-  e := OpCompare(coGT, ValInt(3), ValInt(5), r);
+  e := ValCompare(coGT, ValInt(3), ValInt(5), r);
   CheckBool(r, False, 'compare 3>5 = false');
-  e := OpCompare(coEQ, ValStr('x'), ValStr('x'), r);
+  e := ValCompare(coEQ, ValStr('x'), ValStr('x'), r);
   CheckBool(r, True, 'compare "x"="x" = true');
 
   // ^ is always double
-  e := OpPow(ValInt(2), ValInt(10), r);
+  e := ValPow(ValInt(2), ValInt(10), r);
   CheckDouble(r, 1024, 'pow 2^10 = 1024 double');
 
   // type errors and div-by-zero are recorded, not raised
-  e := OpAdd(ValStr('a'), ValInt(1), r);
+  e := ValAdd(ValStr('a'), ValInt(1), r);
   CheckErr(e, peTypeMismatch, 'string + int -> type mismatch');
-  e := OpDivReal(ValInt(1), ValInt(0), r);
+  e := ValDivReal(ValInt(1), ValInt(0), r);
   CheckErr(e, peDivByZero, 'div by zero -> error');
 
   Writeln('ok: ', Ok);

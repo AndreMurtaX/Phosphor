@@ -37,6 +37,11 @@ uses
   SysUtils, Math, PhosphorErrors;
 
 type
+  { The engine's one output seam. Declared here (a low-level unit) so the VM and
+    the engine facade share it without a circular dependency. PRINTLN puts the
+    trailing LF into the text; PRINT does not. }
+  TPhosphorOutputProc = procedure(const AText: String) of object;
+
   TValueKind = (vkDouble, vkString, vkInt, vkHandle, vkBool);
 
   TValue = record
@@ -65,14 +70,14 @@ function ValToStr(const V: TValue): String;                // locale-independent
 
 // Arithmetic kernel (each returns an error; on success Result = NoError) ------
 function Negate(const A: TValue; out R: TValue): TPhosphorError;
-function OpAdd(const A, B: TValue; out R: TValue): TPhosphorError;
-function OpSub(const A, B: TValue; out R: TValue): TPhosphorError;
-function OpMul(const A, B: TValue; out R: TValue): TPhosphorError;
-function OpDivReal(const A, B: TValue; out R: TValue): TPhosphorError;  // /
-function OpDivInt(const A, B: TValue; out R: TValue): TPhosphorError;   // \
-function OpMod(const A, B: TValue; out R: TValue): TPhosphorError;
-function OpPow(const A, B: TValue; out R: TValue): TPhosphorError;      // ^ -> double
-function OpCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError; // -> bool
+function ValAdd(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValMul(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValDivReal(const A, B: TValue; out R: TValue): TPhosphorError;  // /
+function ValDivInt(const A, B: TValue; out R: TValue): TPhosphorError;   // \
+function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValPow(const A, B: TValue; out R: TValue): TPhosphorError;      // ^ -> double
+function ValCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError; // -> bool
 
 // Checked Int64 primitives (exposed so libraries can test overflow-as-error) -
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
@@ -239,7 +244,7 @@ begin
   Result := NoError;
 end;
 
-function OpAdd(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValAdd(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
 begin
@@ -264,7 +269,7 @@ begin
     R := ValDouble(AsDouble(A) + AsDouble(B));
 end;
 
-function OpSub(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
 begin
@@ -283,7 +288,7 @@ begin
     R := ValDouble(AsDouble(A) - AsDouble(B));
 end;
 
-function OpMul(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValMul(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
 begin
@@ -302,7 +307,7 @@ begin
     R := ValDouble(AsDouble(A) * AsDouble(B));
 end;
 
-function OpDivReal(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValDivReal(const A, B: TValue; out R: TValue): TPhosphorError;
 begin
   R := Default(TValue);
   Result := NumericPair(A, B, '/');
@@ -313,7 +318,7 @@ begin
   R := ValDouble(AsDouble(A) / AsDouble(B));
 end;
 
-function OpDivInt(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValDivInt(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   ai, bi, q: Int64;
 begin
@@ -330,7 +335,7 @@ begin
   R := ValInt(q);
 end;
 
-function OpMod(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   ai, bi: Int64;
 begin
@@ -354,7 +359,7 @@ begin
   end;
 end;
 
-function OpPow(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValPow(const A, B: TValue; out R: TValue): TPhosphorError;
 begin
   R := Default(TValue);
   Result := NumericPair(A, B, '^');
@@ -363,7 +368,7 @@ begin
   R := ValDouble(Power(AsDouble(A), AsDouble(B)));
 end;
 
-function OpCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError;
+function ValCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError;
 var
   c: Integer;
   eq: Boolean;

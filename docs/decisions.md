@@ -109,6 +109,12 @@ Settled when the phase-1 [roadmap](roadmap.md) surfaced them as freeze-now forks
   assigning a `bool?` to a numeric variable (`x = true`) is a type-mismatch —
   negative test 07 stays a rejection, for this new documented reason rather than
   the removed "true is not a value".
+- **The registry type-code alphabet is `n % $ @ ?`** (`#` is never a code). `n`
+  is the numeric family (a Double, or an `int%` widened into it); `%` is an
+  exact `int%` slot that does not widen. Resolution prefers the fewest widenings,
+  so `assert_eq(2+3,5)` [int,int] → `assert_eq:nn` by widening, while
+  `assert_int(7\2,3)` → `assert_int:%%` exactly — and a successful dispatch to a
+  `%` slot is itself the proof the value stayed an `int%`.
 
 ## Extensibility
 

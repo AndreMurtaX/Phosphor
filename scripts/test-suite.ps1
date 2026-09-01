@@ -1,0 +1,118 @@
+<#
+.SYNOPSIS
+  Builds the headless suite runner (phosphortest) and runs it over the phase-1
+  oracle files, byte-comparing each summary to its golden and checking exit code.
+
+.DESCRIPTION
+  The engine's real acceptance test. For each .bas file the runner prints a
+  byte-exact summary (passed:/failed:) to stdout; this script captures it with
+  cmd redirection (so bytes are not re-encoded) and compares to <file>.expected.
+
+  Discipline: -ProveFailure corrupts one expected value in 00_harness and
+  confirms the runner reports a failure and exits non-zero -- the check is seen
+  failing before it is trusted.
+#>
+[CmdletBinding()]
+param(
+    [switch] $ProveFailure,
+    [string] $Fpc
+)
+
+$ErrorActionPreference = 'Stop'
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent $here
+
+function Resolve-Fpc {
+    if ($Fpc) { return $Fpc }
+    $c = 'C:\lazarus\fpc\3.2.2\bin\x86_64-win64\fpc.exe'
+    if (Test-Path $c) { return $c }
+    (Get-Command fpc -ErrorAction Stop).Source
+}
+
+# --- boundary check: the engine must not reach a host/GUI unit ---------------
+$forbidden = @('crt','video','keyboard','lcl','lclintf','lcltype','forms','controls',
+               'dialogs','graphics','interfaces','windows','unix','baseunix')
+foreach ($src in Get-ChildItem (Join-Path $root 'engine') -Filter *.pas -Recurse) {
+    $text = Get-Content -Raw -LiteralPath $src.FullName
+    foreach ($m in [regex]::Matches($text, '(?is)\buses\b(.*?);')) {
+        foreach ($u in $forbidden) {
+            if ($m.Groups[1].Value.ToLowerInvariant() -match "(^|[\s,])$([regex]::Escape($u))([\s,]|$)") {
+                throw "boundary violation: $($src.Name) uses '$u'"
+            }
+        }
+    }
+}
+Write-Host 'boundary check: engine stays host-agnostic' -ForegroundColor DarkGray
+
+# --- build the runner --------------------------------------------------------
+$fpcExe   = Resolve-Fpc
+$binDir   = Join-Path $root 'bin'
+$unitsDir = Join-Path $binDir 'units\x86_64-win64'
+$exe      = Join-Path $binDir 'phosphortest.exe'
+New-Item -ItemType Directory -Force $unitsDir | Out-Null
+if (Test-Path $exe) { Remove-Item $exe -Force }
+
+& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+    "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'tests')" `
+    "-FU$unitsDir" "-FE$binDir" "-o$exe" `
+    (Join-Path $root 'host\console\phosphortest.lpr') | Out-Null
+if (-not (Test-Path $exe)) { throw "phosphortest did not build (fpc exit $LASTEXITCODE)" }
+Write-Host "runner built: $exe" -ForegroundColor DarkGray
+Write-Host ''
+
+# --- run the manifest --------------------------------------------------------
+$suite = Join-Path $root 'tests\suite'
+$manifest = @('00_harness', '00b_kernel')
+$tmp = [System.IO.Path]::GetTempPath()
+
+function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {
+    $out = Join-Path $tmp 'phosphortest.out'
+    $err = Join-Path $tmp 'phosphortest.err'
+    # Redirect BOTH streams inside cmd: the runner writes failure detail to
+    # stderr, and PowerShell's Stop preference would treat that as terminating.
+    cmd /c "`"$exe`" `"$basPath`" > `"$out`" 2> `"$err`""
+    $code = $LASTEXITCODE
+    $act = [System.IO.File]::ReadAllBytes($out)
+    $same = ($act.Length -eq $expected.Length)
+    if ($same) { for ($i=0; $i -lt $act.Length; $i++) { if ($act[$i] -ne $expected[$i]) { $same=$false; break } } }
+    $okExit = ($code -eq $wantExit)
+    if ($same -and $okExit) {
+        Write-Host ("PASS  {0}  ({1} B, exit {2})" -f $label, $act.Length, $code) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ("FAIL  {0}" -f $label) -ForegroundColor Red
+    if (-not $same) {
+        Write-Host ("  expected: {0}" -f ([Text.Encoding]::ASCII.GetString($expected) -replace "`n","\n"))
+        Write-Host ("  actual:   {0}" -f ([Text.Encoding]::ASCII.GetString($act) -replace "`n","\n"))
+    }
+    if (-not $okExit) { Write-Host ("  exit {0}, wanted {1}" -f $code, $wantExit) }
+    return $false
+}
+
+$allOk = $true
+
+if ($ProveFailure) {
+    # Corrupt one expected value so an assertion fails; the summary must change
+    # (failed:1) and the exit code become 1.
+    $bad = Join-Path $tmp 'harness_broken.bas'
+    (Get-Content -Raw (Join-Path $suite '00_harness.bas')) -replace 'assert_eq\(2 \+ 3, 5\)', 'assert_eq(2 + 3, 6)' |
+        Set-Content -LiteralPath $bad -NoNewline -Encoding utf8
+    $goodGolden = [System.IO.File]::ReadAllBytes((Join-Path $suite '00_harness.expected'))
+    Write-Host 'ProveFailure: one expected value corrupted' -ForegroundColor Yellow
+    # Against the GOOD golden this must FAIL (bytes differ) and exit 1, so a PASS
+    # here would itself be the bug. We assert the run FAILs the comparison.
+    $detected = -not (Run-One $bad $goodGolden 0 '00_harness (corrupted, expect mismatch)')
+    if ($detected) { Write-Host 'ProveFailure: mismatch correctly detected' -ForegroundColor Green }
+    else { Write-Host 'ProveFailure: NOT detected -- the check is broken' -ForegroundColor Red; $allOk = $false }
+}
+else {
+    foreach ($name in $manifest) {
+        $bas = Join-Path $suite "$name.bas"
+        $exp = [System.IO.File]::ReadAllBytes((Join-Path $suite "$name.expected"))
+        if (-not (Run-One $bas $exp 0 $name)) { $allOk = $false }
+    }
+}
+
+Write-Host ''
+if ($allOk) { Write-Host 'SUITE OK' -ForegroundColor Green; exit 0 }
+else { Write-Host 'SUITE FAILED' -ForegroundColor Red; exit 1 }

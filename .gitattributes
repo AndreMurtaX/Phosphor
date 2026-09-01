@@ -6,3 +6,4 @@
 # bytes. Treated as binary so no line-ending conversion is ever applied.
 tests/skeleton/hello.bas       -text
 tests/skeleton/hello.expected  -text
+tests/suite/*.expected         -text

@@ -136,6 +136,17 @@ and is unverifiable until the engine exists).
 
 ## First increment — definition of done
 
+**Status (2026-08-31): DONE — both gates green.** The pipeline (lexer → compiler
+→ five-kind stack VM → registry with int%→n widening → ported assert package →
+runner) runs `tests/suite/00_harness.bas` (13 asserts) and the founding-
+divergence probe `tests/suite/00b_kernel.bas` (8 asserts) byte-exact via
+`scripts/test-suite.ps1`. The opcode-numbering assertion was seen firing on a
+corrupted literal, and `-ProveFailure` was seen catching a corrupted expectation.
+One scoped deviation from the sketch below: comparison-as-value is proven with
+`assert_true(2 > 1)` through a distinct `?` bool overload (kept variables and the
+statement `:` out of increment 1 — they are step 3); and the alphabet gained a
+`%` code so `assert_int` proves int-ness by dispatch.
+
 New engine units (all host-agnostic; the boundary scan must still pass):
 
 - `engine/PhosphorValue.pas` — five-kind `TValue` (`vkDouble/vkString/vkInt/

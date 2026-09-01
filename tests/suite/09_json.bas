@@ -28,7 +28,7 @@ assert_eq(ok, 1, "object is an object")
 assert_eq(json_typename$(o@), "object")
 
 test_case("json/parse")
-rem quotes inside a string literal are escaped with a backslash
+rem a quote inside a string literal is doubled (Phosphor's only escape)
 p@ = json_parse@("{""a"":1,""b"":""two"",""c"":[1,2,3]}")
 assert_eq(json_getn(p@, "a"), 1)
 assert_eq(json_gets$(p@, "b"), "two")

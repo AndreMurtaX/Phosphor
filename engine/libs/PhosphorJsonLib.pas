@@ -224,11 +224,13 @@ begin
   Result := ValInt(Ord(o.IndexOfName(Args[1].Str) >= 0));
 end;
 function t_json_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var o: TJSONObject;
+var n: TJSONData;
 begin
+  // object keys only -- an array (or a scalar) answers zero, not an error,
+  // which reads exactly like an empty object. json_len counts an array.
   Result := ValInt(0);
-  if not GetObj(Args[0], o, Err) then Exit;
-  Result := ValInt(o.Count);
+  if not GetNode(Args[0], n, Err) then Exit;
+  if n is TJSONObject then Result := ValInt(TJSONObject(n).Count);
 end;
 
 // --- array mutation and read ------------------------------------------------
@@ -255,32 +257,29 @@ begin
   if not GetArr(Args[0], a, Err) then Exit;
   Result := ValInt(a.Count);
 end;
-function ArrItem(const Args: array of TValue; out A: TJSONArray; out Z: Integer; out Err: TPhosphorError): Boolean;
-begin
-  Z := 0;
-  if not GetArr(Args[0], A, Err) then Exit(False);
-  Z := Round(AsDouble(Args[1])) - 1;   // 1-based -> 0-based
-  if (Z < 0) or (Z >= A.Count) then
-  begin
-    Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
-      [Z + 1, A.Count]));
-    Exit(False);
-  end;
-  Result := True;
-end;
+// Array reads are 1-based. The 3-argument form answers a default for an index
+// past the end; the 2-argument form treats that as an error.
 function t_json_itemn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var a: TJSONArray; z: Integer;
 begin
   Result := ValInt(0);
-  if not ArrItem(Args, a, z, Err) then Exit;
-  Result := NumVal(a.Items[z]);
+  if not GetArr(Args[0], a, Err) then Exit;
+  z := Round(AsDouble(Args[1])) - 1;
+  if (z >= 0) and (z < a.Count) then Result := NumVal(a.Items[z])
+  else if Length(Args) >= 3 then Result := Args[2]
+  else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
+    [z + 1, a.Count]));
 end;
 function t_json_items(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var a: TJSONArray; z: Integer;
 begin
   Result := ValStr('');
-  if not ArrItem(Args, a, z, Err) then Exit;
-  Result := ValStr(a.Items[z].AsString);
+  if not GetArr(Args[0], a, Err) then Exit;
+  z := Round(AsDouble(Args[1])) - 1;
+  if (z >= 0) and (z < a.Count) then Result := ValStr(a.Items[z].AsString)
+  else if Length(Args) >= 3 then Result := Args[2]
+  else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
+    [z + 1, a.Count]));
 end;
 
 // --- type introspection -----------------------------------------------------
@@ -340,14 +339,16 @@ var root, n: TJSONData;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], root, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := ValStr(n.AsString);
+  if NavPath(root, Args[1].Str, n) then Result := ValStr(n.AsString)
+  else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_pathn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var root, n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := NumVal(n);
+  if NavPath(root, Args[1].Str, n) then Result := NumVal(n)
+  else if Length(Args) >= 3 then Result := Args[2];
 end;
 
 // --- serialize --------------------------------------------------------------
@@ -357,6 +358,217 @@ begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
   Result := ValStr(n.AsJSON);
+end;
+
+// --- scalar constructors (each scalar is a handle too) ----------------------
+function t_json_null(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := RegJson(TJSONNull.Create, True); end;
+function t_json_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := RegJson(TJSONBoolean.Create(AsDouble(Args[0]) <> 0), True); end;
+function t_json_number(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := RegJson(NumNode(AsDouble(Args[0])), True); end;
+function t_json_string(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := RegJson(TJSONString.Create(Args[0].Str), True); end;
+
+// --- scalar readers ---------------------------------------------------------
+function t_json_value(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetNode(Args[0], n, Err) then Exit;
+  case n.JSONType of
+    jtBoolean: Result := ValInt(Ord(n.AsBoolean));
+    jtNumber:  Result := NumVal(n);
+    jtNull:    Result := ValInt(0);
+  else
+    Result := ValDouble(n.AsFloat);
+  end;
+end;
+function t_json_value_s(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: TJSONData;
+begin
+  Result := ValStr('');
+  if GetNode(Args[0], n, Err) then Result := ValStr(n.AsString);
+end;
+
+// --- type predicates and code -----------------------------------------------
+function IsType(const V: TValue; T: TJSONtype; out Err: TPhosphorError): TValue;
+var n: TJSONData;
+begin
+  Result := ValInt(0);
+  if GetNode(V, n, Err) then Result := ValInt(Ord(n.JSONType = T));
+end;
+function t_json_isnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := IsType(Args[0], jtNull, Err); end;
+function t_json_isbool(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := IsType(Args[0], jtBoolean, Err); end;
+function t_json_isnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := IsType(Args[0], jtNumber, Err); end;
+function t_json_isstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := IsType(Args[0], jtString, Err); end;
+function t_json_type(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: TJSONData;
+begin
+  Result := ValInt(0);
+  if GetNode(Args[0], n, Err) then Result := ValInt(Ord(n.JSONType));
+end;
+
+// --- object writes: null and a nested handle --------------------------------
+function t_json_setnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var o: TJSONObject;
+begin
+  Result := ValInt(0);
+  if not GetObj(Args[0], o, Err) then Exit;
+  SetMember(o, Args[1].Str, TJSONNull.Create);
+  Result := Args[0];
+end;
+function t_json_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var o: TJSONObject; v: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetObj(Args[0], o, Err) then Exit;
+  if not GetNode(Args[2], v, Err) then Exit;
+  SetMember(o, Args[1].Str, v.Clone);   // clone: the object owns its own copy
+  Result := Args[0];
+end;
+
+// --- array pushes: bool, null, a handle -------------------------------------
+function t_json_pushb(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  a.Add(TJSONBoolean.Create(AsDouble(Args[1]) <> 0));
+  Result := Args[0];
+end;
+function t_json_pushnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  a.Add(TJSONNull.Create);
+  Result := Args[0];
+end;
+function t_json_push(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray; v: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  if not GetNode(Args[1], v, Err) then Exit;
+  a.Add(v.Clone);
+  Result := Args[0];
+end;
+
+// --- array reads: boolean, a handle, defaults -------------------------------
+function t_json_itemb(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray; z: Integer;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  z := Round(AsDouble(Args[1])) - 1;
+  if (z >= 0) and (z < a.Count) and (a.Items[z].JSONType = jtBoolean) then
+    Result := ValInt(Ord(a.Items[z].AsBoolean));
+end;
+function t_json_item(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray; z: Integer;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  z := Round(AsDouble(Args[1])) - 1;
+  if (z < 0) or (z >= a.Count) then
+  begin
+    Err := MakeError(peRuntime, 'json array index out of bounds');
+    Exit;
+  end;
+  Result := RegJson(a.Items[z], False);   // borrowed child
+end;
+
+// --- object removal by key, array by position and pop -----------------------
+function t_json_removeat(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray; z: Integer;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  z := Round(AsDouble(Args[1])) - 1;
+  if (z >= 0) and (z < a.Count) then a.Delete(z);
+  Result := Args[0];
+end;
+function t_json_pop(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a: TJSONArray;
+begin
+  Result := ValInt(0);
+  if not GetArr(Args[0], a, Err) then Exit;
+  if a.Count > 0 then a.Delete(a.Count - 1);
+  Result := Args[0];
+end;
+
+// --- keys of an object as a fresh array -------------------------------------
+function t_json_keys(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var o: TJSONObject; arr: TJSONArray; i: Integer;
+begin
+  Result := ValInt(0);
+  if not GetObj(Args[0], o, Err) then Exit;
+  arr := TJSONArray.Create;
+  for i := 0 to o.Count - 1 do arr.Add(o.Names[i]);
+  Result := RegJson(arr, True);   // a new owned array
+end;
+
+// --- paths: boolean, a handle -----------------------------------------------
+function t_json_pathb(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var root, n: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetNode(Args[0], root, Err) then Exit;
+  if NavPath(root, Args[1].Str, n) and (n.JSONType = jtBoolean) then
+    Result := ValInt(Ord(n.AsBoolean));
+end;
+function t_json_path(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var root, n: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetNode(Args[0], root, Err) then Exit;
+  if not NavPath(root, Args[1].Str, n) then
+  begin
+    Err := MakeError(peRuntime, 'no such json path');
+    Exit;
+  end;
+  Result := RegJson(n, False);   // borrowed
+end;
+
+// --- clone (deep) and merge -------------------------------------------------
+function t_json_clone(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: TJSONData;
+begin
+  Result := ValInt(0);
+  if not GetNode(Args[0], n, Err) then Exit;
+  Result := RegJson(n.Clone, True);
+end;
+function t_json_merge(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var t, s: TJSONObject; i: Integer;
+begin
+  Result := ValInt(0);
+  if not GetObj(Args[0], t, Err) then Exit;
+  if not GetObj(Args[1], s, Err) then Exit;
+  for i := 0 to s.Count - 1 do
+    SetMember(t, s.Names[i], s.Items[i].Clone);
+  Result := Args[0];
+end;
+
+// --- pretty rendering; a handle's id as a number ----------------------------
+function t_json_pretty(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: TJSONData;
+begin
+  Result := ValStr('');
+  if not GetNode(Args[0], n, Err) then Exit;
+  if Length(Args) >= 2 then
+    Result := ValStr(n.FormatJSON(DefaultFormat, Round(AsDouble(Args[1]))))
+  else
+    Result := ValStr(n.FormatJSON());
+end;
+function t_pnttonum(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  if Args[0].Kind = vkHandle then Result := ValInt(Args[0].Hnd) else Result := ValInt(0);
 end;
 
 procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
@@ -380,13 +592,48 @@ begin
   Reg.Add('json_pushs@:@$',    @t_json_pushs);
   Reg.Add('json_len:@',        @t_json_len);
   Reg.Add('json_itemn:@n',     @t_json_itemn);
+  Reg.Add('json_itemn:@nn',    @t_json_itemn);   // 3-arg: default past the end
   Reg.Add('json_items$:@n',    @t_json_items);
+  Reg.Add('json_items$:@n$',   @t_json_items);
+  Reg.Add('json_itemb:@n',     @t_json_itemb);
+  Reg.Add('json_item@:@n',     @t_json_item);
+  Reg.Add('json_removeat@:@n', @t_json_removeat);
+  Reg.Add('json_pop@:@',       @t_json_pop);
   Reg.Add('json_isobj:@',      @t_json_isobj);
   Reg.Add('json_isarr:@',      @t_json_isarr);
+  Reg.Add('json_isnull:@',     @t_json_isnull);
+  Reg.Add('json_isbool:@',     @t_json_isbool);
+  Reg.Add('json_isnum:@',      @t_json_isnum);
+  Reg.Add('json_isstr:@',      @t_json_isstr);
+  Reg.Add('json_type:@',       @t_json_type);
   Reg.Add('json_typename$:@',  @t_json_typename);
   Reg.Add('json_paths$:@$',    @t_json_paths);
+  Reg.Add('json_paths$:@$$',   @t_json_paths);   // 3-arg: default when absent
   Reg.Add('json_pathn:@$',     @t_json_pathn);
+  Reg.Add('json_pathn:@$n',    @t_json_pathn);
+  Reg.Add('json_pathb:@$',     @t_json_pathb);
+  Reg.Add('json_path@:@$',     @t_json_path);
   Reg.Add('json_stringify$:@', @t_json_stringify);
+  Reg.Add('json_pretty$:@',    @t_json_pretty);
+  Reg.Add('json_pretty$:@n',   @t_json_pretty);  // 2-arg: explicit indent
+  // scalar constructors and readers
+  Reg.Add('json_null@:',       @t_json_null);
+  Reg.Add('json_bool@:n',      @t_json_bool);
+  Reg.Add('json_number@:n',    @t_json_number);
+  Reg.Add('json_string@:$',    @t_json_string);
+  Reg.Add('json_value:@',      @t_json_value);
+  Reg.Add('json_value$:@',     @t_json_value_s);
+  // nested handles: set into an object, push into an array
+  Reg.Add('json_setnull@:@$',  @t_json_setnull);
+  Reg.Add('json_set@:@$@',     @t_json_set);
+  Reg.Add('json_pushb@:@n',    @t_json_pushb);
+  Reg.Add('json_pushnull@:@',  @t_json_pushnull);
+  Reg.Add('json_push@:@@',     @t_json_push);
+  // keys, clone, merge, and a handle's id
+  Reg.Add('json_keys@:@',      @t_json_keys);
+  Reg.Add('json_clone@:@',     @t_json_clone);
+  Reg.Add('json_merge@:@@',    @t_json_merge);
+  Reg.Add('pnttonum:@',        @t_pnttonum);
 end;
 
 end.

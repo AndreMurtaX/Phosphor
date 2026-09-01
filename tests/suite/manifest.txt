@@ -26,3 +26,4 @@
 30_strlib_full
 09_json
 20_datetime
+27_json

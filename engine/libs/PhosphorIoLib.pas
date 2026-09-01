@@ -152,6 +152,21 @@ begin
   if dot > 0 then Result := ValStr(Copy(p, 1, dot - 1) + ext) else Result := ValStr(p + ext);
 end;
 
+// the directory part, WITH its trailing separator ("C:\folder\notes.txt" ->
+// "C:\folder\"); empty when the path has no separator.
+function t_extractfilepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var p: String;
+begin
+  Err := NoError; p := Args[0].Str;
+  Result := ValStr(Copy(p, 1, LastSep(p)));
+end;
+
+function t_dir_exists(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValInt(Ord(DirectoryExists(Args[0].Str)));
+end;
+
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('file_writealltext:$$',        @t_file_writealltext);
@@ -164,6 +179,13 @@ begin
   Reg.Add('path_getextension$:$',        @t_path_getextension);
   Reg.Add('path_getfilenamenoext$:$',    @t_path_getfilenamenoext);
   Reg.Add('path_changeextension$:$$',    @t_path_changeextension);
+  // extractfile* are the SysLib spelling of the same string surgery (both take
+  // '/' and '\'); extractfilepath$ keeps the trailing separator.
+  Reg.Add('extractfilename$:$',          @t_path_getfilename);
+  Reg.Add('extractfileext$:$',           @t_path_getextension);
+  Reg.Add('extractfilepath$:$',          @t_extractfilepath);
+  Reg.Add('changefileext$:$$',           @t_path_changeextension);
+  Reg.Add('dir_exists:$',                @t_dir_exists);
 end;
 
 end.

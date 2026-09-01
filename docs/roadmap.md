@@ -154,16 +154,18 @@ and is unverifiable until the engine exists).
    reject "not a valid string list handle". `chr$` started `PhosphorStrLib`.
    `ON ERROR` (the language-level handler) is a later step.
 
-8. **String + numeric libraries.** *(numeric DONE 2026-09-01; string next.)*
-   `engine/libs/PhosphorNumLib`: abs/sqr(=sqrt)/sgn/min/max/round/fix/cint/frac/
-   log10/log2/ln/exp/sin/cos/tan/asin/acos/atan/degtorad/radtodeg/randomize/rnd/
-   isnan/isinfinite. `07_numbers.bas` (verbatim, 38 asserts) green.
-   **Remaining — string library** (`PhosphorStrLib`, started with `chr$`):
-   `mid$`/`instr`/`len` base-1, `ucase$`/`left$`/`right$`/`trim$`/…, `stri$`/
-   `val`/`asc`, and the string bracket sugar `s$[n]` (line) / `s$[[n]]`
-   (character, base-1 by codepoint). `06_strings.bas` needs base-1 index
-   adjustment (reference is 0-based); `stri$` then unlocks the full
-   `03_functions.bas`.
+8. **String + numeric libraries.** *(DONE 2026-09-01.)*
+   `PhosphorNumLib`: abs/sqr(=sqrt)/sgn/min/max/round/fix/cint/frac/log10/log2/ln/
+   exp/trig+inverse/degtorad/radtodeg/randomize/rnd/isnan/isinfinite —
+   `07_numbers.bas` (38) green. `PhosphorStrLib`: ucase$/lcase$/len/left$/right$/
+   trim family/reverse$/asc/chr$/hex$/bin$/oct$/val/stri$/space$/string$/
+   mulstring$/replacestr$/replacetext$/countstr/containsstr/starts*/ends*/
+   isnumeric/isalpha/count/word$/wordcount/instr/instrrev — codepoint-aware
+   (len/left$/right$/reverse$/asc), `instr` 1-based (0 absent). String index
+   sugar `s$[n]` (line) and `s$[[n]]` (character, base-1 by codepoint) added to
+   the lexer/compiler. `06_strings.bas` (base-1 adjusted, 62) green. `stri$`
+   unlocked the FULL `03_functions.bas` (21, imported #→@) — replaces the 03a
+   subset. 12 suite files + 9 negatives green.
 
 9. **Pure-RTL library breadth (phase-1 subset)** — json, datetime, config,
    encoding, ioutils, classic file I/O + `PRINT USING`; excludes

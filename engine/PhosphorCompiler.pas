@@ -400,18 +400,41 @@ begin
         begin
           EmitLoadVar(t.StrVal, t.Line);
           FLex.Advance;
-          // bracket sugar: a@[i] -> arr_get(a@, i) (handle variables only)
+          // bracket sugar: a@[i] -> array element; s$[n] -> line n; s$[[n]] -> char n
           if FLex.Cur.Kind = tkLBracket then
           begin
-            if VarTypeOf(t.StrVal) <> vtHandle then
+            if VarTypeOf(t.StrVal) = vtHandle then
             begin
-              Fail('[] indexing is only for handle (@) variables for now', t.Line);
+              FLex.Advance;
+              ParseExpr;
+              Expect(tkRBracket, ''']''');
+              FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
+            end
+            else if VarTypeOf(t.StrVal) = vtString then
+            begin
+              if FLex.Peek.Kind = tkLBracket then
+              begin
+                // s$[[n]] -> strchar$(s$, n)  (character, base-1 by codepoint)
+                FLex.Advance; FLex.Advance;   // '[' '['
+                ParseExpr;
+                Expect(tkRBracket, ''']''');
+                Expect(tkRBracket, ''']''');
+                FProg.Emit(opCall, FProg.Consts.Add(ValStr('strchar$')), 2, t.Line);
+              end
+              else
+              begin
+                // s$[n] -> strline$(s$, n)  (line, base-1)
+                FLex.Advance;
+                ParseExpr;
+                Expect(tkRBracket, ''']''');
+                FProg.Emit(opCall, FProg.Consts.Add(ValStr('strline$')), 2, t.Line);
+              end;
+            end
+            else
+            begin
+              Fail('[] indexing needs a handle (@) or string ($) variable', t.Line);
               Exit;
             end;
-            FLex.Advance;
-            ParseExpr;
-            Expect(tkRBracket, ''']''');
-            FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
             FBool := False;
           end;
         end;

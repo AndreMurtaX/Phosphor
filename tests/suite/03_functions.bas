@@ -1,7 +1,6 @@
 rem ---------------------------------------------------------------
-rem User functions (phase-5 subset of 03_functions.bas): arguments,
-rem locals, recursion, string return, local isolation, nested calls.
-rem The pointer-return and stri$ cases wait for arrays/handles/string lib.
+rem User defined functions: arguments, locals, recursion, and the
+rem three return kinds (numeric, string, pointer).
 rem ---------------------------------------------------------------
 
 function double(n)
@@ -29,9 +28,21 @@ function fib(n) local a, b
   return a + b
 endfunction
 
+rem locals must not leak into the caller's scope
 function uses_local() local counter
   counter = 999
   return counter
+endfunction
+
+function mixed$(n, sep$) local out$
+  out$ = sep$ + stri$(n) + sep$
+  return out$
+endfunction
+
+function makearray@(size) local a@
+  a@ = dim@(size)
+  narr_set@(a@, 1, 11)
+  return a@
 endfunction
 
 test_case("func/numeric")
@@ -63,6 +74,14 @@ counter = 1
 r = uses_local()
 assert_eq(r, 999, "function sees its own local")
 assert_eq(counter, 1, "caller's variable is untouched")
+
+test_case("func/mixed-args")
+assert_eq(mixed$(7, "|"), "|7|")
+
+test_case("func/pointer-return")
+a@ = makearray@(4)
+assert_eq(narr_get(a@, 1), 11)
+assert_eq(ubound(a@, 1), 4)
 
 test_case("func/nested-calls")
 assert_eq(double(double(5)), 20)

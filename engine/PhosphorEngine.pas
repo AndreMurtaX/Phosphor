@@ -25,7 +25,7 @@ uses
   PhosphorCompiler, PhosphorVM, PhosphorHandles,
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
-  PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib;
+  PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorConfigLib;
 
 const
   PhosphorVersion = '0.0.1';
@@ -71,6 +71,7 @@ begin
   RegisterDateTimeFuncs(FRegistry);
   RegisterRegexFuncs(FRegistry);
   RegisterIoFuncs(FRegistry);
+  RegisterConfigFuncs(FRegistry);
   FOnOutput := nil;
   FErrorLine := 0;
   FErrorMessage := '';

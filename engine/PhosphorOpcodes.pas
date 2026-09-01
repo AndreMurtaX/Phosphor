@@ -55,7 +55,11 @@ type
     opJumpIfFalse = 22, // pop a bool; if false, jump to A
     opAnd      = 23,
     opOr       = 24,
-    opNot      = 25
+    opNot      = 25,
+    opJump     = 26,  // unconditional jump to A
+    opHalt     = 27,  // stop execution (END)
+    opGosub    = 28,  // push the return address (next instr), jump to A
+    opReturn   = 29   // pop the return address, jump there
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -159,7 +163,8 @@ begin
     (Ord(opNE) = 15) and (Ord(opLT) = 16) and (Ord(opLE) = 17) and
     (Ord(opGT) = 18) and (Ord(opGE) = 19) and (Ord(opLoadVar) = 20) and
     (Ord(opStoreVar) = 21) and (Ord(opJumpIfFalse) = 22) and (Ord(opAnd) = 23) and
-    (Ord(opOr) = 24) and (Ord(opNot) = 25);
+    (Ord(opOr) = 24) and (Ord(opNot) = 25) and (Ord(opJump) = 26) and
+    (Ord(opHalt) = 27) and (Ord(opGosub) = 28) and (Ord(opReturn) = 29);
 end;
 
 end.

@@ -4,19 +4,20 @@
   MIT License. Copyright (c) 2026 Andre Murta.
 
   Recursive-descent parser emitting a TProgram. Calls resolve on the actual
-  runtime kinds of their arguments (dispatch is the type assertion), so the
-  compiler stays syntactic. Variables are typed by their name suffix (the suffix
-  is part of the name); the store is type-checked at run time.
+  runtime kinds of their arguments (dispatch is the type assertion). Variables
+  are typed by their name suffix; the store is type-checked at run time.
 
-  Strict boolean (decisions.md): a comparison produces a value everywhere, but a
-  bare value is NOT a condition. Enforced structurally: FBool tracks whether the
-  last-parsed expression's top-level result came from a comparison or a logical
-  operator (and/or/not). A condition that is a bare value -- a number, a bool
-  literal, a variable -- leaves FBool false and is rejected. That removes a
-  special case rather than adding one.
+  Strict boolean (decisions.md): a comparison is a value everywhere, but a bare
+  value is NOT a condition. Enforced structurally via FBool (did the last
+  expression's top come from a comparison or a logical operator).
 
-  Increment-3 grammar: expression statements, PRINT/PRINTLN, LET / assignment,
-  and inline IF (`if <condition> then <statement>`). Block IF and loops later.
+  Control flow (increment 4) is compiled to jumps and backpatched:
+    * block and inline IF / ELSE / ENDIF
+    * WHILE/ENDWHILE, DO WHILE/LOOP, REPEAT/UNTIL, FOR/NEXT (+STEP)
+    * BREAK / CONTINUE (per innermost loop)
+    * SELECT CASE / CASE / CASE ELSE / ENDSELECT
+    * GOTO / GOSUB / RETURN / END with numeric line labels (forward references
+      resolved after the whole program is parsed).
 ******************************************************************************}
 unit PhosphorCompiler;
 
@@ -36,14 +37,37 @@ type
     FFailed: Boolean;
     FErr: String;
     FErrLine: Integer;
-    FBool: Boolean;   // did the last-parsed expression's top come from a compare/logical op?
+    FBool: Boolean;
     FVarNames: array of String;
     FVarTypes: array of TVarType;
     FVarCount: Integer;
+    FHidden: Integer;
+    // loop context stack (for BREAK / CONTINUE)
+    FLoopBreaks: array of array of Integer;
+    FLoopConts: array of array of Integer;
+    FLoopDepth: Integer;
+    // line labels and the GOTO/GOSUB sites that reference them
+    FLabelLine: array of Int64;
+    FLabelPos: array of Integer;
+    FLabelCount: Integer;
+    FGotoInstr: array of Integer;
+    FGotoLine: array of Int64;
+    FGotoCount: Integer;
     procedure Fail(const AMsg: String; ALine: Integer);
     procedure Expect(AKind: TTokenKind; const AWhat: String);
     function IsKeyword(const AKw: String): Boolean;
+    function CurIsTerm(const ATerms: array of String): Boolean;
     function VarIndex(const AName: String): Integer;
+    function NewHiddenVar(AType: TVarType): Integer;
+    procedure PushLoop;
+    procedure PopLoop;
+    procedure AddBreak(AInstr: Integer);
+    procedure AddCont(AInstr: Integer);
+    procedure PatchBreaks(ATarget: Integer);
+    procedure PatchConts(ATarget: Integer);
+    procedure RecordLabel(ALine: Int64; APos: Integer);
+    procedure AddGoto(AInstr: Integer; ALine: Int64);
+    procedure ResolveGotos;
     procedure ParseExpr;
     procedure ParseOr;
     procedure ParseAnd;
@@ -56,7 +80,13 @@ type
     procedure ParsePrimary;
     procedure ParseCall(const AName: String; ALine: Integer);
     procedure ParseCondition;
+    procedure ParseBlockUntil(const ATerms: array of String);
     procedure ParseIf;
+    procedure ParseWhile;
+    procedure ParseDo;
+    procedure ParseRepeat;
+    procedure ParseFor;
+    procedure ParseSelect;
     procedure ParseStatement;
   public
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
@@ -88,13 +118,20 @@ begin
   Result := (FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = AKw);
 end;
 
+function TPhosphorCompiler.CurIsTerm(const ATerms: array of String): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  if FLex.Cur.Kind <> tkIdent then Exit;
+  for i := 0 to High(ATerms) do
+    if FLex.Cur.StrVal = ATerms[i] then Exit(True);
+end;
+
 function TPhosphorCompiler.VarIndex(const AName: String): Integer;
-var
-  i: Integer;
+var i: Integer;
 begin
   for i := 0 to FVarCount - 1 do
-    if FVarNames[i] = AName then
-      Exit(i);
+    if FVarNames[i] = AName then Exit(i);
   if FVarCount = Length(FVarNames) then
   begin
     SetLength(FVarNames, (FVarCount + 1) * 2);
@@ -106,9 +143,106 @@ begin
   Inc(FVarCount);
 end;
 
+function TPhosphorCompiler.NewHiddenVar(AType: TVarType): Integer;
+var name: String;
+begin
+  name := '__h' + IntToStr(FHidden);
+  Inc(FHidden);
+  Result := VarIndex(name);
+  FVarTypes[Result] := AType;   // override the suffix-derived type
+end;
+
+procedure TPhosphorCompiler.PushLoop;
+begin
+  if FLoopDepth = Length(FLoopBreaks) then
+  begin
+    SetLength(FLoopBreaks, (FLoopDepth + 1) * 2);
+    SetLength(FLoopConts, (FLoopDepth + 1) * 2);
+  end;
+  FLoopBreaks[FLoopDepth] := nil;
+  FLoopConts[FLoopDepth] := nil;
+  Inc(FLoopDepth);
+end;
+
+procedure TPhosphorCompiler.PopLoop;
+begin
+  if FLoopDepth > 0 then Dec(FLoopDepth);
+end;
+
+procedure TPhosphorCompiler.AddBreak(AInstr: Integer);
+var n: Integer;
+begin
+  n := Length(FLoopBreaks[FLoopDepth - 1]);
+  SetLength(FLoopBreaks[FLoopDepth - 1], n + 1);
+  FLoopBreaks[FLoopDepth - 1][n] := AInstr;
+end;
+
+procedure TPhosphorCompiler.AddCont(AInstr: Integer);
+var n: Integer;
+begin
+  n := Length(FLoopConts[FLoopDepth - 1]);
+  SetLength(FLoopConts[FLoopDepth - 1], n + 1);
+  FLoopConts[FLoopDepth - 1][n] := AInstr;
+end;
+
+procedure TPhosphorCompiler.PatchBreaks(ATarget: Integer);
+var i: Integer;
+begin
+  for i := 0 to High(FLoopBreaks[FLoopDepth - 1]) do
+    FProg.Patch(FLoopBreaks[FLoopDepth - 1][i], ATarget);
+end;
+
+procedure TPhosphorCompiler.PatchConts(ATarget: Integer);
+var i: Integer;
+begin
+  for i := 0 to High(FLoopConts[FLoopDepth - 1]) do
+    FProg.Patch(FLoopConts[FLoopDepth - 1][i], ATarget);
+end;
+
+procedure TPhosphorCompiler.RecordLabel(ALine: Int64; APos: Integer);
+begin
+  if FLabelCount = Length(FLabelLine) then
+  begin
+    SetLength(FLabelLine, (FLabelCount + 1) * 2);
+    SetLength(FLabelPos, (FLabelCount + 1) * 2);
+  end;
+  FLabelLine[FLabelCount] := ALine;
+  FLabelPos[FLabelCount] := APos;
+  Inc(FLabelCount);
+end;
+
+procedure TPhosphorCompiler.AddGoto(AInstr: Integer; ALine: Int64);
+begin
+  if FGotoCount = Length(FGotoInstr) then
+  begin
+    SetLength(FGotoInstr, (FGotoCount + 1) * 2);
+    SetLength(FGotoLine, (FGotoCount + 1) * 2);
+  end;
+  FGotoInstr[FGotoCount] := AInstr;
+  FGotoLine[FGotoCount] := ALine;
+  Inc(FGotoCount);
+end;
+
+procedure TPhosphorCompiler.ResolveGotos;
+var g, l, pos: Integer;
+begin
+  for g := 0 to FGotoCount - 1 do
+  begin
+    pos := -1;
+    for l := 0 to FLabelCount - 1 do
+      if FLabelLine[l] = FGotoLine[g] then begin pos := FLabelPos[l]; Break; end;
+    if pos < 0 then
+    begin
+      Fail('undefined line number ' + IntToStr(FGotoLine[g]), 0);
+      Exit;
+    end;
+    FProg.Patch(FGotoInstr[g], pos);
+  end;
+end;
+
+// --- expressions ------------------------------------------------------------
 procedure TPhosphorCompiler.ParseCall(const AName: String; ALine: Integer);
-var
-  argc: Integer;
+var argc: Integer;
 begin
   FLex.Advance; // '('
   argc := 0;
@@ -126,60 +260,31 @@ begin
   Expect(tkRParen, '")"');
   if FFailed then Exit;
   FProg.Emit(opCall, FProg.Consts.Add(ValStr(AName)), argc, ALine);
-  FBool := False;   // a call's result type is not statically a condition
+  FBool := False;
 end;
 
 procedure TPhosphorCompiler.ParsePrimary;
-var
-  t: TToken;
+var t: TToken;
 begin
   if FFailed then Exit;
   FBool := False;
   t := FLex.Cur;
   case t.Kind of
-    tkInt:
-      begin
-        FProg.Emit(opPushConst, FProg.Consts.Add(ValInt(t.IntVal)), 0, t.Line);
-        FLex.Advance;
-      end;
-    tkDouble:
-      begin
-        FProg.Emit(opPushConst, FProg.Consts.Add(ValDouble(t.DblVal)), 0, t.Line);
-        FLex.Advance;
-      end;
-    tkString:
-      begin
-        FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(t.StrVal)), 0, t.Line);
-        FLex.Advance;
-      end;
+    tkInt:    begin FProg.Emit(opPushConst, FProg.Consts.Add(ValInt(t.IntVal)), 0, t.Line); FLex.Advance; end;
+    tkDouble: begin FProg.Emit(opPushConst, FProg.Consts.Add(ValDouble(t.DblVal)), 0, t.Line); FLex.Advance; end;
+    tkString: begin FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(t.StrVal)), 0, t.Line); FLex.Advance; end;
     tkLParen:
       begin
         FLex.Advance;
-        ParseExpr;                 // a parenthesized condition stays a condition
+        ParseExpr;
         Expect(tkRParen, '")"');
       end;
     tkIdent:
       begin
-        if t.StrVal = 'true' then
-        begin
-          FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(True)), 0, t.Line);
-          FLex.Advance;
-        end
-        else if t.StrVal = 'false' then
-        begin
-          FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(False)), 0, t.Line);
-          FLex.Advance;
-        end
-        else if FLex.Peek.Kind = tkLParen then
-        begin
-          FLex.Advance; // the name
-          ParseCall(t.StrVal, t.Line);
-        end
-        else
-        begin
-          FProg.Emit(opLoadVar, VarIndex(t.StrVal), 0, t.Line);  // variable read
-          FLex.Advance;
-        end;
+        if t.StrVal = 'true' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(True)), 0, t.Line); FLex.Advance; end
+        else if t.StrVal = 'false' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(False)), 0, t.Line); FLex.Advance; end
+        else if FLex.Peek.Kind = tkLParen then begin FLex.Advance; ParseCall(t.StrVal, t.Line); end
+        else begin FProg.Emit(opLoadVar, VarIndex(t.StrVal), 0, t.Line); FLex.Advance; end;
       end;
   else
     Fail('unexpected token in expression', t.Line);
@@ -187,54 +292,36 @@ begin
 end;
 
 procedure TPhosphorCompiler.ParseUnary;
-var
-  ln: Integer;
+var ln: Integer;
 begin
   if FFailed then Exit;
   if FLex.Cur.Kind = tkMinus then
   begin
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseUnary;
-    FProg.Emit(opNeg, 0, 0, ln);
-    FBool := False;
+    ln := FLex.Cur.Line; FLex.Advance; ParseUnary;
+    FProg.Emit(opNeg, 0, 0, ln); FBool := False;
   end
-  else if FLex.Cur.Kind = tkPlus then
-  begin
-    FLex.Advance;
-    ParseUnary;
-  end
-  else
-    ParsePrimary;
+  else if FLex.Cur.Kind = tkPlus then begin FLex.Advance; ParseUnary; end
+  else ParsePrimary;
 end;
 
 procedure TPhosphorCompiler.ParsePower;
-var
-  ln: Integer;
+var ln: Integer;
 begin
   ParseUnary;
   while (not FFailed) and (FLex.Cur.Kind = tkCaret) do
   begin
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseUnary;
-    FProg.Emit(opPow, 0, 0, ln);
-    FBool := False;
+    ln := FLex.Cur.Line; FLex.Advance; ParseUnary;
+    FProg.Emit(opPow, 0, 0, ln); FBool := False;
   end;
 end;
 
 procedure TPhosphorCompiler.ParseMultiplicative;
-var
-  k: TTokenKind;
-  ln: Integer;
+var k: TTokenKind; ln: Integer;
 begin
   ParsePower;
   while (not FFailed) and (FLex.Cur.Kind in [tkStar, tkSlash, tkBackslash, tkMod]) do
   begin
-    k := FLex.Cur.Kind;
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParsePower;
+    k := FLex.Cur.Kind; ln := FLex.Cur.Line; FLex.Advance; ParsePower;
     case k of
       tkStar:      FProg.Emit(opMul, 0, 0, ln);
       tkSlash:     FProg.Emit(opDivReal, 0, 0, ln);
@@ -246,35 +333,24 @@ begin
 end;
 
 procedure TPhosphorCompiler.ParseAdditive;
-var
-  k: TTokenKind;
-  ln: Integer;
+var k: TTokenKind; ln: Integer;
 begin
   ParseMultiplicative;
   while (not FFailed) and (FLex.Cur.Kind in [tkPlus, tkMinus]) do
   begin
-    k := FLex.Cur.Kind;
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseMultiplicative;
-    if k = tkPlus then FProg.Emit(opAdd, 0, 0, ln)
-    else FProg.Emit(opSub, 0, 0, ln);
+    k := FLex.Cur.Kind; ln := FLex.Cur.Line; FLex.Advance; ParseMultiplicative;
+    if k = tkPlus then FProg.Emit(opAdd, 0, 0, ln) else FProg.Emit(opSub, 0, 0, ln);
     FBool := False;
   end;
 end;
 
 procedure TPhosphorCompiler.ParseComparison;
-var
-  k: TTokenKind;
-  ln: Integer;
+var k: TTokenKind; ln: Integer;
 begin
   ParseAdditive;
   if (not FFailed) and (FLex.Cur.Kind in [tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE]) then
   begin
-    k := FLex.Cur.Kind;
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseAdditive;
+    k := FLex.Cur.Kind; ln := FLex.Cur.Line; FLex.Advance; ParseAdditive;
     case k of
       tkEQ: FProg.Emit(opEQ, 0, 0, ln);
       tkNE: FProg.Emit(opNE, 0, 0, ln);
@@ -283,53 +359,40 @@ begin
       tkGT: FProg.Emit(opGT, 0, 0, ln);
       tkGE: FProg.Emit(opGE, 0, 0, ln);
     end;
-    FBool := True;   // a comparison IS bool-producing
+    FBool := True;
   end;
 end;
 
 procedure TPhosphorCompiler.ParseNot;
-var
-  ln: Integer;
+var ln: Integer;
 begin
   if IsKeyword('not') then
   begin
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseNot;
-    FProg.Emit(opNot, 0, 0, ln);
-    FBool := True;
+    ln := FLex.Cur.Line; FLex.Advance; ParseNot;
+    FProg.Emit(opNot, 0, 0, ln); FBool := True;
   end
-  else
-    ParseComparison;
+  else ParseComparison;
 end;
 
 procedure TPhosphorCompiler.ParseAnd;
-var
-  ln: Integer;
+var ln: Integer;
 begin
   ParseNot;
   while (not FFailed) and IsKeyword('and') do
   begin
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseNot;
-    FProg.Emit(opAnd, 0, 0, ln);
-    FBool := True;
+    ln := FLex.Cur.Line; FLex.Advance; ParseNot;
+    FProg.Emit(opAnd, 0, 0, ln); FBool := True;
   end;
 end;
 
 procedure TPhosphorCompiler.ParseOr;
-var
-  ln: Integer;
+var ln: Integer;
 begin
   ParseAnd;
   while (not FFailed) and IsKeyword('or') do
   begin
-    ln := FLex.Cur.Line;
-    FLex.Advance;
-    ParseAnd;
-    FProg.Emit(opOr, 0, 0, ln);
-    FBool := True;
+    ln := FLex.Cur.Line; FLex.Advance; ParseAnd;
+    FProg.Emit(opOr, 0, 0, ln); FBool := True;
   end;
 end;
 
@@ -339,8 +402,7 @@ begin
 end;
 
 procedure TPhosphorCompiler.ParseCondition;
-var
-  ln: Integer;
+var ln: Integer;
 begin
   ln := FLex.Cur.Line;
   ParseExpr;
@@ -349,44 +411,290 @@ begin
          'expression (and/or/not)', ln);
 end;
 
+// --- statement blocks -------------------------------------------------------
+procedure TPhosphorCompiler.ParseBlockUntil(const ATerms: array of String);
+begin
+  while not FFailed do
+  begin
+    while FLex.Cur.Kind = tkEOL do FLex.Advance;
+    if FLex.Cur.Kind = tkEOF then Exit;
+    if CurIsTerm(ATerms) then Exit;
+    ParseStatement;
+    if FFailed then Exit;
+    if FLex.Cur.Kind = tkEOL then FLex.Advance
+    else if (FLex.Cur.Kind <> tkEOF) and not CurIsTerm(ATerms) then
+      Fail('expected end of line', FLex.Cur.Line);
+  end;
+end;
+
 procedure TPhosphorCompiler.ParseIf;
-var
-  ln, jIdx: Integer;
+var ln, jFalse, jEnd: Integer;
 begin
   ln := FLex.Cur.Line;
   FLex.Advance; // 'if'
   ParseCondition;
   if FFailed then Exit;
-  if not IsKeyword('then') then
-  begin
-    Fail('expected ''then''', FLex.Cur.Line);
-    Exit;
-  end;
+  if not IsKeyword('then') then begin Fail('expected ''then''', FLex.Cur.Line); Exit; end;
   FLex.Advance; // 'then'
   if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
   begin
-    Fail('block IF (then ... end if) is a later step; write an inline ' +
-         '''if <condition> then <statement>''', ln);
-    Exit;
+    // block IF
+    jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+    ParseBlockUntil(['else', 'endif']);
+    if FFailed then Exit;
+    if IsKeyword('else') then
+    begin
+      FLex.Advance;
+      jEnd := FProg.Emit(opJump, 0, 0, ln);
+      FProg.Patch(jFalse, FProg.Count);
+      ParseBlockUntil(['endif']);
+      if FFailed then Exit;
+      FProg.Patch(jEnd, FProg.Count);
+    end
+    else
+      FProg.Patch(jFalse, FProg.Count);
+    if not IsKeyword('endif') then begin Fail('expected ''endif''', FLex.Cur.Line); Exit; end;
+    FLex.Advance;
+  end
+  else
+  begin
+    // inline IF
+    jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+    ParseStatement;
+    if not FFailed then FProg.Patch(jFalse, FProg.Count);
   end;
-  jIdx := FProg.Emit(opJumpIfFalse, 0, 0, ln);
-  ParseStatement;                       // the single then-branch statement
-  if not FFailed then
-    FProg.Patch(jIdx, FProg.Count);     // if false, skip past the then-branch
+end;
+
+procedure TPhosphorCompiler.ParseWhile;
+var ln, condStart, jFalse, afterLoop: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance; // 'while'
+  PushLoop;
+  condStart := FProg.Count;
+  ParseCondition;
+  if FFailed then Exit;
+  jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+  ParseBlockUntil(['endwhile']);
+  if FFailed then Exit;
+  FProg.Emit(opJump, condStart, 0, ln);
+  afterLoop := FProg.Count;
+  FProg.Patch(jFalse, afterLoop);
+  PatchBreaks(afterLoop);
+  PatchConts(condStart);
+  PopLoop;
+  if not IsKeyword('endwhile') then begin Fail('expected ''endwhile''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+end;
+
+procedure TPhosphorCompiler.ParseDo;
+var ln, condStart, jFalse, afterLoop: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance; // 'do'
+  if not IsKeyword('while') then begin Fail('only ''do while <cond> ... loop'' is supported', FLex.Cur.Line); Exit; end;
+  FLex.Advance; // 'while'
+  PushLoop;
+  condStart := FProg.Count;
+  ParseCondition;
+  if FFailed then Exit;
+  jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+  ParseBlockUntil(['loop']);
+  if FFailed then Exit;
+  FProg.Emit(opJump, condStart, 0, ln);
+  afterLoop := FProg.Count;
+  FProg.Patch(jFalse, afterLoop);
+  PatchBreaks(afterLoop);
+  PatchConts(condStart);
+  PopLoop;
+  if not IsKeyword('loop') then begin Fail('expected ''loop''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+end;
+
+procedure TPhosphorCompiler.ParseRepeat;
+var ln, bodyStart, contTarget, afterLoop: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance; // 'repeat'
+  PushLoop;
+  bodyStart := FProg.Count;
+  ParseBlockUntil(['until']);
+  if FFailed then Exit;
+  contTarget := FProg.Count;   // continue re-checks the until condition
+  if not IsKeyword('until') then begin Fail('expected ''until''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+  ParseCondition;
+  if FFailed then Exit;
+  FProg.Emit(opJumpIfFalse, bodyStart, 0, ln);  // loop back while condition is false
+  afterLoop := FProg.Count;
+  PatchBreaks(afterLoop);
+  PatchConts(contTarget);
+  PopLoop;
+end;
+
+procedure TPhosphorCompiler.ParseFor;
+var
+  ln, loopVar, endVar, condStart, jFalse, incPoint, afterLoop: Integer;
+  step: TValue;
+  down: Boolean;
+  neg: Boolean;
+  vname: String;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance; // 'for'
+  if FLex.Cur.Kind <> tkIdent then begin Fail('expected a loop variable after ''for''', FLex.Cur.Line); Exit; end;
+  vname := FLex.Cur.StrVal;
+  loopVar := VarIndex(vname);
+  FLex.Advance;
+  Expect(tkEQ, '''=''');
+  if FFailed then Exit;
+  ParseExpr;                                    // start value
+  FProg.Emit(opStoreVar, loopVar, 0, ln);
+  if not IsKeyword('to') then begin Fail('expected ''to''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+  endVar := NewHiddenVar(vtNumber);
+  ParseExpr;                                     // end value
+  FProg.Emit(opStoreVar, endVar, 0, ln);
+
+  // STEP: optional numeric literal (possibly negative); default +1
+  step := ValInt(1);
+  down := False;
+  if IsKeyword('step') then
+  begin
+    FLex.Advance;
+    neg := False;
+    if FLex.Cur.Kind = tkMinus then begin neg := True; FLex.Advance; end
+    else if FLex.Cur.Kind = tkPlus then FLex.Advance;
+    if FLex.Cur.Kind = tkInt then
+    begin
+      if neg then step := ValInt(-FLex.Cur.IntVal) else step := ValInt(FLex.Cur.IntVal);
+      FLex.Advance;
+    end
+    else if FLex.Cur.Kind = tkDouble then
+    begin
+      if neg then step := ValDouble(-FLex.Cur.DblVal) else step := ValDouble(FLex.Cur.DblVal);
+      FLex.Advance;
+    end
+    else begin Fail('for step must be a numeric literal', FLex.Cur.Line); Exit; end;
+    down := AsDouble(step) < 0;
+  end;
+
+  PushLoop;
+  condStart := FProg.Count;
+  FProg.Emit(opLoadVar, loopVar, 0, ln);
+  FProg.Emit(opLoadVar, endVar, 0, ln);
+  if down then FProg.Emit(opGE, 0, 0, ln) else FProg.Emit(opLE, 0, 0, ln);
+  jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+  ParseBlockUntil(['next']);
+  if FFailed then Exit;
+  incPoint := FProg.Count;                       // continue jumps to the increment
+  FProg.Emit(opLoadVar, loopVar, 0, ln);
+  FProg.Emit(opPushConst, FProg.Consts.Add(step), 0, ln);
+  FProg.Emit(opAdd, 0, 0, ln);
+  FProg.Emit(opStoreVar, loopVar, 0, ln);
+  FProg.Emit(opJump, condStart, 0, ln);
+  afterLoop := FProg.Count;
+  FProg.Patch(jFalse, afterLoop);
+  PatchBreaks(afterLoop);
+  PatchConts(incPoint);
+  PopLoop;
+  if not IsKeyword('next') then begin Fail('expected ''next''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+end;
+
+procedure TPhosphorCompiler.ParseSelect;
+var
+  ln, selVar, jNext, endTarget, i: Integer;
+  endFixups: array of Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance; // 'select'
+  if not IsKeyword('case') then begin Fail('expected ''case'' after ''select''', FLex.Cur.Line); Exit; end;
+  FLex.Advance; // 'case'
+  selVar := NewHiddenVar(vtAny);
+  ParseExpr;                                 // the subject
+  FProg.Emit(opStoreVar, selVar, 0, ln);
+  endFixups := nil;
+
+  while not FFailed do
+  begin
+    while FLex.Cur.Kind = tkEOL do FLex.Advance;
+    if IsKeyword('endselect') then Break;
+    if not IsKeyword('case') then begin Fail('expected ''case'' or ''endselect''', FLex.Cur.Line); Exit; end;
+    FLex.Advance; // 'case'
+    if IsKeyword('else') then
+    begin
+      FLex.Advance;
+      ParseBlockUntil(['endselect']);
+      Break;
+    end;
+    // case <value>
+    FProg.Emit(opLoadVar, selVar, 0, ln);
+    ParseExpr;
+    FProg.Emit(opEQ, 0, 0, ln);
+    jNext := FProg.Emit(opJumpIfFalse, 0, 0, ln);
+    ParseBlockUntil(['case', 'endselect']);
+    if FFailed then Exit;
+    SetLength(endFixups, Length(endFixups) + 1);
+    endFixups[High(endFixups)] := FProg.Emit(opJump, 0, 0, ln);
+    FProg.Patch(jNext, FProg.Count);
+  end;
+  if FFailed then Exit;
+  if not IsKeyword('endselect') then begin Fail('expected ''endselect''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+  endTarget := FProg.Count;
+  for i := 0 to High(endFixups) do
+    FProg.Patch(endFixups[i], endTarget);
 end;
 
 procedure TPhosphorCompiler.ParseStatement;
 var
-  t, nameTok: TToken;
+  t: TToken;
+  i: Integer;
 begin
   t := FLex.Cur;
   if t.Kind = tkIdent then
   begin
-    if t.StrVal = 'if' then
+    if t.StrVal = 'if' then begin ParseIf; Exit; end;
+    if t.StrVal = 'while' then begin ParseWhile; Exit; end;
+    if t.StrVal = 'do' then begin ParseDo; Exit; end;
+    if t.StrVal = 'repeat' then begin ParseRepeat; Exit; end;
+    if t.StrVal = 'for' then begin ParseFor; Exit; end;
+    if t.StrVal = 'select' then begin ParseSelect; Exit; end;
+    if t.StrVal = 'break' then
     begin
-      ParseIf;
+      FLex.Advance;
+      if FLoopDepth = 0 then Fail('''break'' outside a loop', t.Line)
+      else AddBreak(FProg.Emit(opJump, 0, 0, t.Line));
       Exit;
     end;
+    if t.StrVal = 'continue' then
+    begin
+      FLex.Advance;
+      if FLoopDepth = 0 then Fail('''continue'' outside a loop', t.Line)
+      else AddCont(FProg.Emit(opJump, 0, 0, t.Line));
+      Exit;
+    end;
+    if t.StrVal = 'goto' then
+    begin
+      FLex.Advance;
+      if FLex.Cur.Kind <> tkInt then begin Fail('''goto'' needs a line number', FLex.Cur.Line); Exit; end;
+      i := FProg.Emit(opJump, 0, 0, t.Line);
+      AddGoto(i, FLex.Cur.IntVal);
+      FLex.Advance;
+      Exit;
+    end;
+    if t.StrVal = 'gosub' then
+    begin
+      FLex.Advance;
+      if FLex.Cur.Kind <> tkInt then begin Fail('''gosub'' needs a line number', FLex.Cur.Line); Exit; end;
+      i := FProg.Emit(opGosub, 0, 0, t.Line);
+      AddGoto(i, FLex.Cur.IntVal);
+      FLex.Advance;
+      Exit;
+    end;
+    if t.StrVal = 'return' then begin FLex.Advance; FProg.Emit(opReturn, 0, 0, t.Line); Exit; end;
+    if t.StrVal = 'end' then begin FLex.Advance; FProg.Emit(opHalt, 0, 0, t.Line); Exit; end;
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
       FLex.Advance;
@@ -409,57 +717,52 @@ begin
     if t.StrVal = 'let' then
     begin
       FLex.Advance;
-      if FLex.Cur.Kind <> tkIdent then
-      begin
-        Fail('expected a variable name after ''let''', FLex.Cur.Line);
-        Exit;
-      end;
-      nameTok := FLex.Cur;
+      if FLex.Cur.Kind <> tkIdent then begin Fail('expected a variable name after ''let''', FLex.Cur.Line); Exit; end;
+      t := FLex.Cur;
       FLex.Advance;
       Expect(tkEQ, '''=''');
       if FFailed then Exit;
       ParseExpr;
-      if not FFailed then
-        FProg.Emit(opStoreVar, VarIndex(nameTok.StrVal), 0, nameTok.Line);
+      if not FFailed then FProg.Emit(opStoreVar, VarIndex(t.StrVal), 0, t.Line);
       Exit;
     end;
-    // assignment: <ident> = <expr>
     if (t.StrVal <> 'true') and (t.StrVal <> 'false') and (FLex.Peek.Kind = tkEQ) then
     begin
-      FLex.Advance;   // the name
-      FLex.Advance;   // '='
+      FLex.Advance;  // name
+      FLex.Advance;  // '='
       ParseExpr;
-      if not FFailed then
-        FProg.Emit(opStoreVar, VarIndex(t.StrVal), 0, t.Line);
+      if not FFailed then FProg.Emit(opStoreVar, VarIndex(t.StrVal), 0, t.Line);
       Exit;
     end;
   end;
-  // expression statement: evaluate and discard the result
+  // expression statement
   ParseExpr;
-  if not FFailed then
-    FProg.Emit(opPop, 0, 0, t.Line);
+  if not FFailed then FProg.Emit(opPop, 0, 0, t.Line);
 end;
 
 function TPhosphorCompiler.Compile(const ASource: String; out AProg: TProgram): Boolean;
-var
-  i: Integer;
+var i: Integer;
 begin
-  FFailed := False;
-  FErr := '';
-  FErrLine := 0;
-  FVarCount := 0;
-  FBool := False;
+  FFailed := False; FErr := ''; FErrLine := 0;
+  FVarCount := 0; FHidden := 0; FLoopDepth := 0;
+  FLabelCount := 0; FGotoCount := 0; FBool := False;
   FProg := TProgram.Create;
   FLex := TLexer.Create(ASource);
   try
-    if not FLex.Ok then
-      Fail(FLex.ErrorMessage, FLex.ErrorLine);
+    if not FLex.Ok then Fail(FLex.ErrorMessage, FLex.ErrorLine);
     while (not FFailed) and (FLex.Cur.Kind <> tkEOF) do
     begin
-      if FLex.Cur.Kind = tkEOL then
+      if FLex.Cur.Kind = tkEOL then begin FLex.Advance; Continue; end;
+      // a leading line number is a label
+      if FLex.Cur.Kind = tkInt then
       begin
+        RecordLabel(FLex.Cur.IntVal, FProg.Count);
         FLex.Advance;
-        Continue;
+        if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
+        begin
+          if FLex.Cur.Kind = tkEOL then FLex.Advance;
+          Continue;
+        end;
       end;
       ParseStatement;
       if FFailed then Break;
@@ -468,23 +771,20 @@ begin
       else if FLex.Cur.Kind = tkEOL then
         FLex.Advance;
     end;
+    if not FFailed then ResolveGotos;
   finally
     FLex.Free;
   end;
   if FFailed then
   begin
-    FProg.Free;
-    AProg := nil;
-    Result := False;
+    FProg.Free; AProg := nil; Result := False;
   end
   else
   begin
     FProg.VarCount := FVarCount;
     SetLength(FProg.VarTypes, FVarCount);
-    for i := 0 to FVarCount - 1 do
-      FProg.VarTypes[i] := FVarTypes[i];
-    AProg := FProg;
-    Result := True;
+    for i := 0 to FVarCount - 1 do FProg.VarTypes[i] := FVarTypes[i];
+    AProg := FProg; Result := True;
   end;
 end;
 

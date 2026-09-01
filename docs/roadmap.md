@@ -95,7 +95,15 @@ and is unverifiable until the engine exists).
    Correction to the sketch: bool is distinct and does not widen, so 05/07 stay
    **rejections**, not positives — see [decisions.md](decisions.md).
 
-4. **Block control flow + the rest** — IF/ELSEIF/ELSE,
+4. **Control flow.** *(DONE 2026-09-01.)* Block + inline IF/ELSE/ENDIF (nested),
+   WHILE/ENDWHILE, DO WHILE/LOOP, REPEAT/UNTIL, FOR/NEXT (+STEP, nested),
+   BREAK/CONTINUE (per innermost loop), SELECT CASE/CASE ELSE/ENDSELECT, and
+   GOTO/GOSUB/RETURN/END with numeric line labels (forward refs resolved after
+   parse). Compiled to jumps with backpatching; a GOSUB return stack in the VM.
+   `tests/suite/02_control_flow.bas` (19 asserts) byte-exact green. Original
+   step-4 sketch below (ELSEIF and the negatives are folded in as features land):
+
+   IF/ELSEIF/ELSE,
    WHILE, DO/LOOP, REPEAT/UNTIL, FOR/NEXT, SELECT CASE, jump/label backpatching.
    Negatives 06/08 reject *for the strict-boolean reason*; 11 (spaced compound
    op) rejects.

@@ -63,7 +63,7 @@ Write-Host ''
 # --- run the manifest --------------------------------------------------------
 $suite = Join-Path $root 'tests\suite'
 $negDir = Join-Path $root 'tests\negative'
-$manifest = @('00_harness', '00b_kernel', '01_language_core')
+$manifest = @('00_harness', '00b_kernel', '01_language_core', '02_control_flow')
 $tmp = [System.IO.Path]::GetTempPath()
 
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {

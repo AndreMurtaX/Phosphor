@@ -57,8 +57,9 @@ type
 
   { A variable's declared type, fixed by its name suffix (the suffix is part of
     the name). vtNumber (no suffix) holds the numeric family: an int% or a
-    Double. }
-  TVarType = (vtNumber, vtString, vtInt, vtHandle, vtBool);
+    Double. vtAny is internal only (compiler-generated hidden temporaries, e.g.
+    a SELECT subject) -- no source suffix maps to it. }
+  TVarType = (vtNumber, vtString, vtInt, vtHandle, vtBool, vtAny);
 
 // Constructors ---------------------------------------------------------------
 function ValDouble(const X: Double): TValue;
@@ -183,8 +184,7 @@ end;
 // --- checked Int64 primitives ----------------------------------------------
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
 begin
-  if ((B > 0) and (A > High(Int64) - B)) or
-     ((B < 0) and (A < Low(Int64) - B)) then
+  if ((B > 0) and (A > High(Int64) - B)) or ((B < 0) and (A < Low(Int64) - B)) then
     Exit(False);
   R := A + B;
   Result := True;
@@ -478,6 +478,7 @@ begin
     vtInt:    Result := 'int';
     vtHandle: Result := 'handle';
     vtBool:   Result := 'bool';
+    vtAny:    Result := 'any';
   else
     Result := '?';
   end;
@@ -491,7 +492,7 @@ begin
     vtHandle: Result := ValHandle(0);
     vtBool:   Result := ValBool(False);
   else
-    Result := ValInt(0);   // vtNumber defaults to int% 0
+    Result := ValInt(0);   // vtNumber and vtAny default to int% 0
   end;
 end;
 
@@ -509,6 +510,7 @@ begin
     vtString: Result := V.Kind = vkString;
     vtHandle: Result := V.Kind = vkHandle;
     vtBool:   Result := V.Kind = vkBool;
+    vtAny:    Result := True;
   else
     Result := False;
   end;

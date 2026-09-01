@@ -24,6 +24,8 @@ type
     FStack: array of TValue;
     FSP: Integer;    // points one past the top
     FVars: array of TValue;
+    FCallStack: array of Integer;   // GOSUB return addresses
+    FCSP: Integer;
     procedure Push(const V: TValue);
     function Pop: TValue;
   public
@@ -100,6 +102,7 @@ begin
   args := nil;
   kinds := nil;
   FSP := 0;
+  FCSP := 0;
   LastError := NoError;
   ErrorLine := 0;
   SetLength(FVars, AProg.VarCount);
@@ -173,6 +176,33 @@ begin
             pc := ins.A;
             Continue;
           end;
+        end;
+      opJump:
+        begin
+          pc := ins.A;
+          Continue;
+        end;
+      opHalt: Exit(True);
+      opGosub:
+        begin
+          if FCSP = Length(FCallStack) then
+            SetLength(FCallStack, (FCSP + 1) * 2);
+          FCallStack[FCSP] := pc + 1;   // resume after the GOSUB
+          Inc(FCSP);
+          pc := ins.A;
+          Continue;
+        end;
+      opReturn:
+        begin
+          if FCSP = 0 then
+          begin
+            LastError := MakeError(peRuntime, 'RETURN without GOSUB');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+          Dec(FCSP);
+          pc := FCallStack[FCSP];
+          Continue;
         end;
       opCall:
         begin

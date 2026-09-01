@@ -22,7 +22,7 @@ for d in /usr/share/lazarus/*/lcl/units/${cpu}-linux /usr/lib/lazarus/*/lcl/unit
   [ -d "$d/gtk2" ] && { lcl="$d"; break; }
 done
 [ -n "$lcl" ] || { echo "LCL gtk2 units not found (install lazarus/lcl-gtk2)"; exit 1; }
-lazroot="$(cd "$lcl/../../../.." && pwd)"   # .../lazarus/<ver>
+lazroot="${lcl%/lcl/units/*}"   # strip '/lcl/units/<cpu>-linux' -> .../lazarus/<ver>
 
 # headless display: keep an existing one, else the live session's XWayland
 if [ -z "${DISPLAY:-}" ]; then

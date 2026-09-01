@@ -23,7 +23,8 @@ uses
   SysUtils,
   PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
   PhosphorCompiler, PhosphorVM, PhosphorHandles,
-  PhosphorArrayLib, PhosphorDictLib;   // library packages (engine/libs)
+  // library packages (engine/libs)
+  PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib;
 
 const
   PhosphorVersion = '0.0.1';
@@ -62,6 +63,8 @@ begin
   FRegistry := TPhosphorRegistry.Create;
   RegisterArrayFuncs(FRegistry);   // built-in library packages (engine/libs)
   RegisterDictFuncs(FRegistry);
+  RegisterStrListFuncs(FRegistry);
+  RegisterStrFuncs(FRegistry);
   FOnOutput := nil;
   FErrorLine := 0;
   FErrorMessage := '';

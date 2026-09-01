@@ -140,16 +140,19 @@ and is unverifiable until the engine exists).
    The char index `s$[[n]]` (string, by codepoint) rides with the string lib
    (step 8). The handle registry is also the prereq for step 7's dict/stringlist.
 
-7. **Handle libraries + error-state contract.** *(dict DONE 2026-09-01;
-   stringlist next.)* Also reorganized the function packages into `engine/libs/`
+7. **Handle libraries + error-state contract.** *(DONE 2026-09-01.)* Also
+   reorganized the function packages into `engine/libs/`
    (like Plan9Basic's `engine/Libs`), integrated only through the registry.
    `PhosphorDictLib` (dict@/sdict@/pdict@ + set/get/getdef/count/haskey/remove/
    clear/typename) and `08_dict.bas` (24 asserts) green. Fabricated-handle
    negatives 02/03/04 reject *for the library's recorded reason* ("not a valid
    array/dictionary handle") via `pointer@` (fabricate) + `arr_free`. `print`
-   gained `;`-separated items. **Remaining:** stringlist (`strings@`, 0-based in
-   the reference → base-1 in Phosphor, needs index adjustment on import) and its
-   negatives 09/10; `ON ERROR` (the language-level handler) is a later step.
+   gained `;`-separated items. **Stringlist** (`PhosphorStrListLib`: strings@ +
+   add/count/strings$/indexof/insert/delete/sort/exchange/clear/text/values/
+   indexofname/commatext) is base-1 (reference is 0-based; imported with +1 and
+   indexof-absent = 0); `10_strlist.bas` (27 asserts) green; negatives 09/10
+   reject "not a valid string list handle". `chr$` started `PhosphorStrLib`.
+   `ON ERROR` (the language-level handler) is a later step.
 
 8. **String + numeric libraries** — `mid$`/`instr`/`len` base-1 everywhere;
    `max()`/`min()` replacing the freed `?>`/`?<`.

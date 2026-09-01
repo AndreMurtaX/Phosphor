@@ -151,11 +151,18 @@ third host + `docs/embedding.md`), and deployable (the `.pbc` on-disk bytecode a
 the self-extracting `pack`). External integrations (sqlite/http/zip/base64) remain
 opt-in host packages for whenever they are wanted; the engine stays dependency-free.
 
-**Parallel / optional — integration libraries as opt-in host packages.** sqlite,
-http, zip, base64 (the phase-1 deferrals `23/32/33/34` + `11_encoding`), each an
-**opt-in package under `host/`** that the embedder links if it wants it, exactly
-like the GUI libs — the engine stays dependency-free and the boundary check keeps
-passing. These are breadth, not a gate; they can land any time, in any order.
+**Parallel / optional — integration libraries as opt-in host packages.** *Started
+(2026-09-01).* Each is an **opt-in package under `host/packages/`** that a host
+registers if it wants it, exactly like the GUI libs — the engine stays
+dependency-free and the boundary check keeps passing. **Landed:** `PhosphorBase64Lib`
+(base64/hex, from FPC's fcl-base) and `PhosphorZipLib` (zip archives, from FPC's
+paszlib) — both ship with the compiler, so no external runtime library, and both are
+byte-exact green on Windows and Linux via `host/packages/phosphorpkgtest` +
+`scripts/test-packages.{ps1,sh}` (`tests/packages/00_base64`, `01_zip`). **Ready to
+add when their runtime dependency is provisioned:** `sqlite` (needs `sqlite3.dll` /
+`libsqlite3.so` — the FPC `sqlite3*` units are present) and `http` (needs a server /
+OpenSSL to test) — kept out until they can be verified against reality, not stubbed.
+These are breadth, not a gate; they land any time.
 
 ## Rejected approaches (the traps the reasoning refuted)
 

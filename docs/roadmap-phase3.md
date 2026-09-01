@@ -52,20 +52,23 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
 1–2, verify against reality — byte-exact where output is deterministic, on Windows
 **and** Linux — and keep the engine host-agnostic (the boundary check must pass).
 
-1. **`ON ERROR` — catchable runtime errors.** Today `Run` aborts on the first
-   runtime error (div-by-zero, a bad handle, a store type-mismatch) and returns
-   its line. Expose the engine's existing record-don't-raise error state to BASIC:
+1. **`ON ERROR` — catchable runtime errors.** *DONE (2026-09-01, commit bdc1b44).*
    `on error goto <label>` installs a handler, `on error goto 0` clears it; inside
-   the handler `err()` / `errmsg$()` / `erl()` read the code / message / line, and
-   `resume` / `resume next` continue at the failing or the following statement.
-   (Owner decision: `on error goto` vs a structured `try/catch` — lean `on error`,
-   BASIC-idiomatic and matching the lineage; `try` can be sugar over it later.)
-   **Gate:** a suite file where a caught div-by-zero and a caught bad-handle let
-   the program continue, `err()` reports the right code, `resume next` skips the
-   failing statement; a negative proves an *uncaught* error still aborts. Opcodes
-   added here are the last additions before the format freeze.
-   **Deferral cost:** no embedded host can run a fallible script without the whole
-   run dying; and freezing `.pbc` first means bumping its version when this lands.
+   it `err()` / `errmsg$()` / `erl()` read the code / message / line, `err_clear()`
+   resets them, `resume` retries the failing statement and `resume next` continues
+   at the following one, and `error(msg$)` raises a catchable error. (Decided:
+   `on error goto`, BASIC-idiomatic; a structured `try` can be sugar over it later.)
+   Built with three opcodes (`opStmt` marks a clean statement boundary; `opSet
+   ErrHandler`; `opResume`) and one `Fault()` funnel in the VM through which every
+   runtime-error site now routes; `err`/`errmsg$`/`erl`/`err_clear` are host-aware
+   (they read the VM through the callfunc seam) in `engine/libs/PhosphorErrLib`.
+   **Gate met:** `tests/suite/49_on_error` (9 asserts — catch + resume next, resume
+   retry, `error()`, `err_clear`, an error caught from a called function) byte-exact
+   green on Windows and Linux; `negative/13_resume_no_handler` rejects `resume` with
+   no handler; the full engine + GUI suites still green; `-B -vewn` clean. **Scope
+   note:** `resume`/`resume next` target the failing statement in the handler's own
+   frame; an error caught from a deeper called function should recover with `goto`,
+   not resume — a later refinement can lift that.
 
 2. **Execution limits — safe to embed untrusted scripts.** Opt-in ceilings the
    host sets before `Run`: a **step budget** (halt with a catchable "step budget

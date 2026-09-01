@@ -37,12 +37,18 @@ type
     than frees, so the handle registry frees the form once, at the end. }
   TFormCloser = class(TComponent)
     procedure DoClose(Sender: TObject; var CloseAction: TCloseAction);
+    function Handler: TCloseEvent;
   end;
 
 procedure TFormCloser.DoClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
   CloseAction := caHide;
   Application.Terminate;
+end;
+
+function TFormCloser.Handler: TCloseEvent;
+begin
+  Result := @DoClose;
 end;
 
 function f_form(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -109,16 +115,15 @@ begin
 end;
 
 function f_form_show(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TComponent; closer: TFormCloser;
+var c: TComponent;
 begin
   Err := NoError;
   if GuiResolve(Args[0].Hnd, TForm, c) then
   begin
     if not Assigned(TForm(c).OnClose) then
-    begin
-      closer := TFormCloser.Create(c);   // owned by the form
-      TForm(c).OnClose := @closer.DoClose;
-    end;
+      // The closer is owned by the form (freed with it) and reached only through
+      // the assigned method pointer, so no local reference is kept.
+      TForm(c).OnClose := TFormCloser.Create(c).Handler;
     TForm(c).Show;
   end;
   Result := Args[0];

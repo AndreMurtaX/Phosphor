@@ -167,12 +167,21 @@ client -- `http_get$`/`http_status`/`http_post$`, over FPC's `fphttpclient`) is
 **verified against a real server on both OSes**: plain HTTP over loopback needs no
 external library (only HTTPS would pull OpenSSL), so its own runner
 `host/packages/phosphorhttptest` stands up a live `TFPHTTPServer` and the test drives
-real requests at it -- no mocks, no network. The `base64`/`zip`/`sqlite` tests run
-through `phosphorpkgtest`; the `http` test through `phosphorhttptest`; all via
-`scripts/test-packages.{ps1,sh}` (`tests/packages/00_base64`, `01_zip`, `02_sqlite`,
-`03_http`). **Still out:** an HTTP**S** helper (would need OpenSSL provisioned to
-verify) -- kept out until it can be tested against reality, not stubbed. These are
-breadth, not a gate; they land any time.
+real requests at it -- no mocks, no network. It also **improves on the reference
+socket layer**: FPC 3.2.2's `TInetSocket` connects only to a host's FIRST A record,
+so one dead IP sinks the request even when the host's other IPs are healthy;
+`PhosphorHttpLib` resolves ALL of a host's A records and tries each until one connects
+(a `TFPHTTPClient` subclass pins the connect target while keeping the real hostname in
+`Host:`). That fallback is proven deterministically -- the test server binds
+`127.0.0.1` only and a test-only `http_get_via$` forces the candidate list, so
+`"127.0.0.9,127.0.0.1"` must skip the dead address and reach the live one, no DNS or
+real network involved. The `base64`/`zip`/`sqlite` tests run through `phosphorpkgtest`;
+the `http` test through `phosphorhttptest`; all via `scripts/test-packages.{ps1,sh}`
+(`tests/packages/00_base64`, `01_zip`, `02_sqlite`, `03_http`). **Still out:** an
+HTTP**S** helper, and IPv6 endpoints (FPC's socket layer is IPv4-only, so reaching an
+AAAA host would need a hand-rolled `AF_INET6` connect) -- both kept out until they can
+be tested against reality, not stubbed. These are breadth, not a gate; they land any
+time.
 
 ## Rejected approaches (the traps the reasoning refuted)
 

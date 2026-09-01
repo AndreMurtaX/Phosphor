@@ -26,7 +26,7 @@ program phosphorhttptest;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils, Classes, fphttpserver, httpdefs,
+  SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib;
 
@@ -39,6 +39,13 @@ var
 { ---- the local test server -------------------------------------------------}
 
 type
+  { TFPHttpServer keeps the bind Address protected; republish it so we can pin the
+    server to loopback only (the fallback test needs a genuinely dead 127.0.0.x). }
+  TBoundHttpServer = class(TFPHTTPServer)
+  published
+    property Address;
+  end;
+
   { The server runs in its own thread, and that same object carries the request
     handler -- so the object is plainly used (th.Start), no stray instance. }
   TServerThread = class(TThread)
@@ -99,6 +106,21 @@ begin
   Result := ValStr(BaseURL);
 end;
 
+{ Test-only: GET url$ but FORCE the candidate connect addresses (comma-separated),
+  so the package's multi-address fallback can be proven deterministically -- no DNS,
+  no real network. e.g. http_get_via$(url$, "127.0.0.9,127.0.0.1") must skip the dead
+  loopback address and connect to the live server. Lives in the runner, not the
+  package, so the package's BASIC API stays http_get$/http_status/http_post$. }
+function f_http_get_via(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var addrs: TStringDynArray; status: Integer;
+begin
+  Err := NoError;
+  addrs := SplitString(Args[1].Str, ',');
+  { Short connect timeout: a dead loopback alias times out (rather than refusing) on
+    Windows, and we don't want the fallback proof to wait seconds for that. }
+  Result := ValStr(HttpFetch('GET', Args[0].Str, '', addrs, status, 800));
+end;
+
 { ---- the usual byte-exact package-test scaffolding -------------------------}
 
 function ReadSource(const APath: String): String;
@@ -128,7 +150,7 @@ end;
 
 var
   eng: TPhosphorEngine;
-  srv: TFPHTTPServer;
+  srv: TBoundHttpServer;
   th: TServerThread;
   path: String;
   rc, i, waited: Integer;
@@ -147,8 +169,11 @@ begin
 
   BaseURL := 'http://127.0.0.1:' + IntToStr(SRV_PORT);
 
-  { Stand up the local server in a background thread. }
-  srv := TFPHTTPServer.Create(nil);
+  { Stand up the local server in a background thread. Bind loopback ONLY, so that a
+    127.0.0.x address other than .1 is genuinely dead -- the fallback test relies on
+    that to prove it skips a dead address. }
+  srv := TBoundHttpServer.Create(nil);
+  srv.Address := '127.0.0.1';
   srv.Port := SRV_PORT;
   srv.Threaded := True;
   th := TServerThread.Create(True);
@@ -175,6 +200,7 @@ begin
     RegisterTestFuncs(eng.Registry);
     RegisterHttpFuncs(eng.Registry);
     eng.Registry.Add('server_url$:', @f_server_url);
+    eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
     ResetTestState;
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

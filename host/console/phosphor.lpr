@@ -33,6 +33,7 @@ program phosphor;
 
 uses
   {$IFDEF WINDOWS}Windows,{$ENDIF}
+  {$IFDEF UNIX}BaseUnix,{$ENDIF}
   SysUtils, Classes, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes, PhosphorBytecode;
 
 type
@@ -278,6 +279,145 @@ begin
   end;
 end;
 
+// --- self-extracting deployment (phosphor pack) ------------------------------
+// A packed application is this stub binary with a .pbc payload appended, behind a
+// fixed trailer at the very end (PE and ELF both ignore trailing bytes). The stub
+// reads its own tail at startup; if the trailer's magic is there, it runs the
+// embedded payload. Same phosphor binary: bare it is the CLI, packed it is an app.
+
+const
+  PACK_MAGIC   = 'PHOSPBC1';       // 8 bytes at the very end of a packed file
+  PACK_TRAILER = 8 + 8 + 4 + 8;    // offset(i64) + size(i64) + checksum(u32) + magic(8)
+
+function SelfExePath: String;
+{$IFDEF WINDOWS}
+var buf: array[0..1023] of WideChar; n: DWORD; ws: WideString;
+begin
+  n := GetModuleFileNameW(0, @buf[0], Length(buf));
+  SetLength(ws, n);
+  if n > 0 then Move(buf[0], ws[1], n * SizeOf(WideChar));
+  Result := UTF8Encode(ws);
+end;
+{$ELSE}
+begin
+  Result := fpReadLink('/proc/self/exe');
+end;
+{$ENDIF}
+
+function PayloadChecksum(const ABytes; ACount: Int64): LongWord;
+var p: PByte; i: Int64;
+begin
+  Result := LongWord(2166136261);   // FNV-1a, enough to catch corruption
+  p := @ABytes;
+  for i := 0 to ACount - 1 do
+  begin
+    Result := (Result xor p^) * LongWord(16777619);
+    Inc(p);
+  end;
+end;
+
+procedure WLE64(S: TStream; V: Int64);    begin V := NtoLE(V); S.WriteBuffer(V, 8); end;
+function  RLE64(S: TStream): Int64;        begin S.ReadBuffer(Result, 8); Result := LEToN(Result); end;
+procedure WLE32(S: TStream; V: LongWord);  begin V := NtoLE(V); S.WriteBuffer(V, 4); end;
+function  RLE32(S: TStream): LongWord;     begin S.ReadBuffer(Result, 4); Result := LEToN(Result); end;
+
+{ Compile AInBas, copy this running binary (the stub) to AOutExe, and append the
+  .pbc payload plus the trailer -- a standalone executable that needs no install. }
+function PackFile(const AInBas, AOutExe: String): Integer;
+var
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  payload: TBytesStream;
+  src, dst: TFileStream;
+  off: Int64;
+begin
+  if not FileExists(AInBas) then begin Writeln(StdErr, 'phosphor: file not found: ', AInBas); Exit(2); end;
+  comp := TPhosphorCompiler.Create;
+  try
+    if not comp.Compile(ReadSource(AInBas), prog) then
+    begin
+      Writeln(StdErr, Format('phosphor: %s:%d: %s', [AInBas, comp.ErrorLine, comp.ErrorMessage]));
+      Exit(1);
+    end;
+  finally
+    comp.Free;
+  end;
+
+  payload := TBytesStream.Create;
+  try
+    WriteProgram(payload, prog);
+    prog.Free;
+    src := TFileStream.Create(SelfExePath, fmOpenRead or fmShareDenyNone);
+    dst := TFileStream.Create(AOutExe, fmCreate);
+    try
+      dst.CopyFrom(src, 0);                 // the whole stub binary
+      off := dst.Position;                  // the payload starts here
+      if payload.Size > 0 then dst.WriteBuffer(payload.Memory^, payload.Size);
+      WLE64(dst, off);
+      WLE64(dst, payload.Size);
+      WLE32(dst, PayloadChecksum(payload.Memory^, payload.Size));
+      dst.WriteBuffer(PACK_MAGIC[1], 8);
+    finally
+      src.Free; dst.Free;
+    end;
+  finally
+    payload.Free;
+  end;
+  {$IFDEF UNIX} FpChmod(AOutExe, &755); {$ENDIF}   // make it runnable
+  Result := 0;
+end;
+
+{ True if THIS binary carries an embedded .pbc payload (a valid trailer). }
+function TryReadEmbeddedPayload(out APayload: TBytesStream): Boolean;
+var
+  fs: TFileStream;
+  total, off, siz: Int64;
+  ck: LongWord;
+  magic: array[0..7] of Char;
+begin
+  Result := False;
+  APayload := nil;
+  try
+    fs := TFileStream.Create(SelfExePath, fmOpenRead or fmShareDenyNone);
+  except
+    Exit;   // cannot read our own file -> just be the CLI
+  end;
+  try
+    total := fs.Size;
+    if total < PACK_TRAILER then Exit;
+    fs.Position := total - PACK_TRAILER;
+    off := RLE64(fs); siz := RLE64(fs); ck := RLE32(fs); fs.ReadBuffer(magic[0], 8);
+    if magic <> PACK_MAGIC then Exit;                          // a bare stub -> CLI
+    if (off < 0) or (siz <= 0) or (off + siz > total - PACK_TRAILER) then Exit;
+    APayload := TBytesStream.Create;
+    APayload.Size := siz;
+    fs.Position := off;
+    fs.ReadBuffer(APayload.Memory^, siz);
+    if PayloadChecksum(APayload.Memory^, siz) <> ck then
+    begin APayload.Free; APayload := nil; Exit; end;
+    APayload.Position := 0;
+    Result := True;
+  finally
+    fs.Free;
+  end;
+end;
+
+{ Run an embedded payload; a packed app ignores its CLI arguments. }
+function RunEmbedded(APayload: TBytesStream): Integer;
+var host: TConsoleHost; eng: TPhosphorEngine; line: Integer;
+begin
+  host := TConsoleHost.Create('');
+  eng := TPhosphorEngine.Create;
+  try
+    eng.OnOutput := @host.Output;
+    line := eng.RunBytecode(APayload);
+    if line <> 0 then begin Writeln(StdErr, Format('phosphor: %d: %s', [line, eng.ErrorMessage])); Exit(1); end;
+    Result := 0;
+  finally
+    eng.Free; host.Free;
+  end;
+end;
+
 function Repl: Integer;
 var
   host: TConsoleHost;
@@ -329,9 +469,18 @@ begin
 end;
 
 var
-  i: Integer;
+  i, code: Integer;
   arg, filePath, outPath: String;
+  payload: TBytesStream;
 begin
+  // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
+  if TryReadEmbeddedPayload(payload) then
+  begin
+    code := RunEmbedded(payload);
+    payload.Free;
+    Halt(code);
+  end;
+
   // `phosphor compile <in.bas> <out.pbc>` -- compile to bytecode and stop.
   if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
   begin
@@ -341,6 +490,17 @@ begin
       Halt(2);
     end;
     Halt(CompileFile(ParamStr(2), ParamStr(3)));
+  end;
+
+  // `phosphor pack <in.bas> <out.exe>` -- make a standalone executable and stop.
+  if (ParamCount >= 1) and (ParamStr(1) = 'pack') then
+  begin
+    if ParamCount < 3 then
+    begin
+      Writeln(StdErr, 'usage: phosphor pack <in.bas> <out' + {$IFDEF WINDOWS}'.exe>'{$ELSE}'>'{$ENDIF});
+      Halt(2);
+    end;
+    Halt(PackFile(ParamStr(2), ParamStr(3)));
   end;
 
   filePath := '';
@@ -358,6 +518,7 @@ begin
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor compile <in.bas> <out.pbc>');
+      Writeln('       phosphor pack <in.bas> <out>   (standalone executable)');
       Writeln('       phosphor            (REPL)');
       Writeln('       phosphor --diag     (console/UTF-8 self-check)');
       Writeln('       phosphor --version');

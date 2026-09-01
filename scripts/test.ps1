@@ -71,8 +71,18 @@ if ($LASTEXITCODE -ne 0) { throw "runner (--out) exited $LASTEXITCODE" }
 cmd /c "`"$exe`" run `"$bas`" > `"$outB`""
 if ($LASTEXITCODE -ne 0) { throw "runner (stdout redirect) exited $LASTEXITCODE" }
 
+# C. packed standalone executable: pack hello.bas into a self-extracting exe, run
+#    it with no arguments, and compare -- proves the .pbc rides in the binary.
+$packExe = Join-Path $tmp 'phosphor_hello_packed.exe'
+$outC    = Join-Path $tmp 'phosphor_hello.C.actual'
+& $exe 'pack' $bas $packExe
+if ($LASTEXITCODE -ne 0) { throw "pack exited $LASTEXITCODE" }
+cmd /c "`"$packExe`" > `"$outC`""
+if ($LASTEXITCODE -ne 0) { throw "packed exe exited $LASTEXITCODE" }
+
 Write-Host ''
 $okA = Test-Golden 'A:--out        ' $outA $expectedBytes
 $okB = Test-Golden 'B:stdout-redir ' $outB $expectedBytes
+$okC = Test-Golden 'C:packed       ' $outC $expectedBytes
 
-if ($okA -and $okB) { exit 0 } else { exit 1 }
+if ($okA -and $okB -and $okC) { exit 0 } else { exit 1 }

@@ -127,17 +127,29 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    end-to-end. Byte-exact green on Windows and Linux; the same `.pbc` runs on both
    (Double + endianness fixed). `-B -vewn` clean.
 
-5. **Self-extracting deployment.** A per-platform stub that appends a `.pbc`
-   payload to a runner binary, so `phosphorpack app.bas → app` yields a standalone
-   executable that reads its own tail and runs the embedded bytecode — no Phosphor
-   install on the target. The docs state the **antivirus/dropper caveat plainly**
-   (a binary that executes its own appended payload is the classic shape heuristic
-   AV flags; decisions.md records this up front).
-   **Gate:** a packed executable runs on a clean machine with the same output; the
-   stub is per-platform but the `.pbc` it carries is not; the AV caveat is
-   documented.
-   **Deferral cost:** the "one file to ship" story; last because it depends on the
-   format and is the most deployment-fiddly.
+5. **Self-extracting deployment.** *DONE (2026-09-01).* `phosphor pack app.bas
+   app.exe` compiles the script and appends the `.pbc` payload to a copy of the
+   `phosphor` binary (the *stub*) behind a fixed little-endian trailer
+   (payload-offset, size, an FNV checksum, and the magic `PHOSPBC1`, at the very
+   end — PE and ELF both ignore trailing bytes). At startup the stub reads its own
+   tail (`GetModuleFileNameW` / `/proc/self/exe`); if the trailer's magic is there
+   and the checksum matches, it runs the embedded bytecode and ignores its CLI
+   arguments — so the SAME `phosphor` binary is the CLI tool bare and a standalone
+   app once packed (on Unix the packed file is `chmod +x`'d). The AV/dropper caveat
+   is stated plainly in [decisions.md](decisions.md) ("On-disk bytecode"). **Gate
+   met:** `test.{ps1,sh}` add a third path — pack `hello.bas`, run the standalone
+   executable with no arguments, byte-compare to the same golden as the `--out` and
+   stdout paths (all three flip under `-ProveFailure`); verified on Windows and
+   Linux. `-B -vewn` clean.
+
+## Status — PHASE 3 STEPS 1–5 COMPLETE (2026-09-01)
+
+Phosphor is now robust to run (catchable `ON ERROR`, in the label, function-call,
+and `resume`/`resume next` forms), safe to embed untrusted scripts (fatal step /
+time / output ceilings), documented and demonstrated as an embedding library (a
+third host + `docs/embedding.md`), and deployable (the `.pbc` on-disk bytecode and
+the self-extracting `pack`). External integrations (sqlite/http/zip/base64) remain
+opt-in host packages for whenever they are wanted; the engine stays dependency-free.
 
 **Parallel / optional — integration libraries as opt-in host packages.** sqlite,
 http, zip, base64 (the phase-1 deferrals `23/32/33/34` + `11_encoding`), each an

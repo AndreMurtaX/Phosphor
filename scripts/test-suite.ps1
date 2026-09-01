@@ -140,6 +140,31 @@ else {
             }
         }
     }
+
+    # Pascal probes: host-facing tests a .bas file cannot express (the value kernel,
+    # the execution limits). Each prints ok:/fail: and exits non-zero on a failure.
+    Write-Host ''
+    foreach ($probe in @('probe_value','probe_limits')) {
+        $psrc = Join-Path $root "tests\$probe.lpr"
+        if (-not (Test-Path $psrc)) { continue }
+        $pexe = Join-Path $binDir "$probe.exe"
+        if (Test-Path $pexe) { Remove-Item $pexe -Force }
+        & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+            "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
+            "-FU$unitsDir" "-FE$binDir" "-o$pexe" $psrc | Out-Null
+        if (-not (Test-Path $pexe)) { Write-Host ("FAIL  probe: {0}  did not build" -f $probe) -ForegroundColor Red; $allOk = $false; continue }
+        $pout = Join-Path $tmp 'probe.out'
+        $perr = Join-Path $tmp 'probe.err'
+        cmd /c "`"$pexe`" > `"$pout`" 2> `"$perr`""
+        $pcode = $LASTEXITCODE
+        $psum = ((Get-Content -Raw $pout) -replace "`r?`n"," ").Trim()
+        if ($pcode -eq 0) { Write-Host ("PASS  probe: {0}  ({1})" -f $probe, $psum) -ForegroundColor Green }
+        else {
+            Write-Host ("FAIL  probe: {0}  ({1})" -f $probe, $psum) -ForegroundColor Red
+            $why = (Get-Content -Raw $perr).Trim(); if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
+            $allOk = $false
+        }
+    }
 }
 
 Write-Host ''

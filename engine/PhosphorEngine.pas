@@ -41,6 +41,9 @@ type
     FErrorLine: Integer;
     FErrorMessage: String;
     FLastError: TPhosphorError;
+    FMaxSteps: Int64;
+    FMaxOutputBytes: Int64;
+    FTimeoutMs: Int64;
   public
     constructor Create;
     destructor Destroy; override;
@@ -52,6 +55,12 @@ type
     property ErrorLine: Integer read FErrorLine;
     property ErrorMessage: String read FErrorMessage;
     property LastError: TPhosphorError read FLastError;
+    { Execution ceilings for running untrusted scripts; 0 (the default) = no limit.
+      A ceiling is fatal -- ON ERROR cannot catch it -- so a script cannot escape
+      it. LastError.Code is peLimit when one is hit. }
+    property MaxSteps: Int64 read FMaxSteps write FMaxSteps;
+    property MaxOutputBytes: Int64 read FMaxOutputBytes write FMaxOutputBytes;
+    property TimeoutMs: Int64 read FTimeoutMs write FTimeoutMs;
   end;
 
 implementation
@@ -81,6 +90,9 @@ begin
   FErrorLine := 0;
   FErrorMessage := '';
   FLastError := NoError;
+  FMaxSteps := 0;
+  FMaxOutputBytes := 0;
+  FTimeoutMs := 0;
 end;
 
 destructor TPhosphorEngine.Destroy;
@@ -118,6 +130,9 @@ begin
   try
     vm.Registry := FRegistry;
     vm.OnOutput := FOnOutput;
+    vm.MaxSteps := FMaxSteps;
+    vm.MaxOutputBytes := FMaxOutputBytes;
+    vm.TimeoutMs := FTimeoutMs;
     if not vm.Run(prog) then
     begin
       FLastError := vm.LastError;

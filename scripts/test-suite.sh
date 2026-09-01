@@ -57,6 +57,20 @@ for f in "$neg"/*.bas; do
   fi
 done
 
+# Pascal probes: host-facing tests a .bas file cannot express (the value kernel,
+# the execution limits). Each prints ok:/fail: and exits non-zero on a failure.
+echo
+for probe in probe_value probe_limits; do
+  [ -f "$root/tests/$probe.lpr" ] || continue
+  pexe="$bin/$probe"; rm -f "$pexe"
+  "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+    -Fu"$root/engine" -Fu"$root/engine/libs" -FU"$units" -FE"$bin" -o"$pexe" \
+    "$root/tests/$probe.lpr" >/dev/null 2>&1
+  if [ ! -x "$pexe" ]; then echo "FAIL  probe: $probe  did not build"; allok=1; continue; fi
+  pout="$("$pexe" 2>/dev/null | tr '\n' ' ')"; pcode=$?
+  if [ "$pcode" -eq 0 ]; then echo "PASS  probe: $probe  ($pout)"; else echo "FAIL  probe: $probe  ($pout)"; allok=1; fi
+done
+
 echo
 if [ "$allok" -eq 0 ]; then echo "SUITE OK"; else echo "SUITE FAILED"; fi
 exit "$allok"

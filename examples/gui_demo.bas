@@ -67,9 +67,9 @@ function on_greet(sender@)
   msg$ = msg$ + ")"
   label_caption@(status@, msg$)
   return 0
-endfunction
+end function
 
 function on_quit(sender@)
   app_quit()
   return 0
-endfunction
+end function

@@ -98,9 +98,12 @@ begin
   e := ValPow(ValInt(2), ValInt(10), r);
   CheckDouble(r, 1024, 'pow 2^10 = 1024 double');
 
-  // type errors and div-by-zero are recorded, not raised
+  // '+' concatenates when either side is a string: the other is coerced to its
+  // text and the two are joined (a phase-1 decision; not a type error).
   e := ValAdd(ValStr('a'), ValInt(1), r);
-  CheckErr(e, peTypeMismatch, 'string + int -> type mismatch');
+  Report(not IsError(e), 'string + int -> no error');
+  CheckStr(r, 'a1', 'string + int concatenates to "a1"');
+  // div-by-zero and real type errors are still recorded, not raised
   e := ValDivReal(ValInt(1), ValInt(0), r);
   CheckErr(e, peDivByZero, 'div by zero -> error');
 

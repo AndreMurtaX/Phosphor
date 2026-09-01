@@ -27,7 +27,9 @@ type
     peTypeMismatch    = 3,  // an operator or a call got a kind it cannot accept
     peUnknownFunction = 4,  // no registry overload matches name + argument kinds
     peSyntax          = 5,
-    peRuntime         = 6
+    peRuntime         = 6,
+    peLimit           = 7   // a host execution limit was hit (steps/time/output);
+                            // fatal by design -- ON ERROR cannot catch it
   );
 
   TPhosphorError = record

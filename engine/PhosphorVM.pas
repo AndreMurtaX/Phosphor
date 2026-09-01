@@ -50,6 +50,12 @@ type
     FErrLine: Integer;
     FStmtPC, FStmtSP, FStmtFrameSP: Integer;          // current statement boundary
     FErrStmtPC, FErrStmtSP, FErrStmtFrameSP: Integer; // the failing statement, for resume
+    // Execution limits (set from the engine before Run; 0 = unlimited). Counters
+    // are reset per Run. A limit is FATAL -- it aborts with peLimit and cannot be
+    // caught by ON ERROR, so a script cannot escape its own ceiling.
+    FSteps: Int64;
+    FOutputBytes: Int64;
+    FStartTick: QWord;
     procedure Push(const V: TValue);
     function Pop: TValue;
     { The fetch-decode-execute loop. Runs from AStartPC until the program halts
@@ -63,6 +69,10 @@ type
     Registry: TPhosphorRegistry;
     LastError: TPhosphorError;
     ErrorLine: Integer;
+    // Host-set execution ceilings; 0 = unlimited (the default, zero cost).
+    MaxSteps: Int64;        // instruction budget (the answer to an infinite loop)
+    MaxOutputBytes: Int64;  // total bytes emitted through OnOutput
+    TimeoutMs: Int64;       // wall-clock ceiling in milliseconds
     constructor Create;
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)
     { Call a BASIC user function by name, re-entrantly, over the SAME globals and
@@ -135,6 +145,9 @@ begin
   FErrCode := 0; FErrMsg := ''; FErrLine := 0;
   FStmtPC := 0; FStmtSP := 0; FStmtFrameSP := 0;
   FErrStmtPC := 0; FErrStmtSP := 0; FErrStmtFrameSP := 0;
+  FSteps := 0;
+  FOutputBytes := 0;
+  FStartTick := GetTickCount64;
   SetLength(FVars, AProg.VarCount);
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
@@ -192,6 +205,21 @@ var
     end;
   end;
 
+  { Emit output, enforcing the output-byte ceiling. False = the ceiling was hit
+    (a fatal peLimit is set; the caller must Exit(False)). }
+  function EmitOutput(const S: String): Boolean;
+  begin
+    if (MaxOutputBytes > 0) and (FOutputBytes + Length(S) > MaxOutputBytes) then
+    begin
+      LastError := MakeError(peLimit, 'output limit exceeded (' + IntToStr(MaxOutputBytes) + ' bytes)');
+      ErrorLine := ins.Line;
+      Exit(False);
+    end;
+    Inc(FOutputBytes, Length(S));
+    if Assigned(OnOutput) then OnOutput(S);
+    Result := True;
+  end;
+
 begin
   args := nil;
   kinds := nil;
@@ -199,6 +227,20 @@ begin
   while pc < FProg.Count do
   begin
     ins := FProg.Instr(pc);
+    Inc(FSteps);
+    if (MaxSteps > 0) and (FSteps > MaxSteps) then
+    begin
+      LastError := MakeError(peLimit, 'step budget exceeded (' + IntToStr(MaxSteps) + ' instructions)');
+      ErrorLine := ins.Line;
+      Exit(False);
+    end;
+    if (TimeoutMs > 0) and ((FSteps and $FFF) = 0) and
+       (GetTickCount64 - FStartTick > QWord(TimeoutMs)) then
+    begin
+      LastError := MakeError(peLimit, 'time limit exceeded (' + IntToStr(TimeoutMs) + ' ms)');
+      ErrorLine := ins.Line;
+      Exit(False);
+    end;
     case ins.Op of
       opNop: ;
       opPushConst: Push(FProg.Consts.Get(ins.A));
@@ -206,12 +248,12 @@ begin
       opPrint:
         begin
           v := Pop;
-          if Assigned(OnOutput) then OnOutput(ValToStr(v));
+          if not EmitOutput(ValToStr(v)) then Exit(False);
         end;
       opPrintLn:
         begin
           v := Pop;
-          if Assigned(OnOutput) then OnOutput(ValToStr(v) + #10);
+          if not EmitOutput(ValToStr(v) + #10) then Exit(False);
         end;
       opNeg:     begin a := Pop; case Bin(Negate(a, r), r) of 1: Continue; 2: Exit(False); end; end;
       opAdd:     begin b := Pop; a := Pop; case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;

@@ -138,6 +138,11 @@ Two supported ways to get a Linux binary, in order of preference:
   same byte-exact goldens; the `.expected` files are marked `-text` so their LF
   bytes are identical on both platforms). `lazbuild host/console/phosphor.lpi`
   also works on Linux and is the IDE path.
+
+  **Verified 2026-09-01** on Ubuntu (Linux 6.8, x86_64, FPC 3.2.2): all three
+  scripts pass natively — the four suite files and four negatives are byte-exact
+  green, the goldens are identical to the Windows run, and UTF-8 output renders
+  correctly through the raw-byte path. Phosphor is confirmed cross-platform.
 - **Cross-compile from Windows.** Install the FPC cross bits above
   (`fpcupdeluxe` is the usual way to add the `x86_64-linux` cross target and its
   binutils on Windows). Workable, more moving parts; revisit if a Windows-only

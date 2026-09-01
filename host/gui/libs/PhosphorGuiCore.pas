@@ -41,10 +41,12 @@ uses
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorVM;
 
 type
-  { A registry entry for an LCL object. Owns is true only for a top-level form;
-    a child control's wrapper leaves the LCL parent/owner chain to free it. }
+  { A registry entry for an LCL object. Control is a TObject so a handle can also
+    wrap a non-TComponent (a TTreeNode, a TListItem), not only a control. Owns is
+    true only for a top-level form (or a timer): its wrapper frees it. A child
+    control, a node or an item is non-owning -- its container frees it. }
   TGuiHandle = class
-    Control: TComponent;
+    Control: TObject;
     Owns: Boolean;
     destructor Destroy; override;
   end;
@@ -69,10 +71,12 @@ var
     handle is 1; a handler that failed at run time is 2. }
   GGuiError: Integer;
 
-{ Register AControl under a fresh '@' handle; AOwns ties its lifetime here. }
-function GuiRegister(AControl: TComponent; AOwns: Boolean): Int64;
+{ Register AObj under a fresh '@' handle; AOwns ties its lifetime here. }
+function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;
 { Resolve a handle to an object of (at least) AClass. Records GGuiError and
   returns False on a fabricated, freed or wrong-class handle. }
+function GuiResolveObj(AId: Int64; AClass: TClass; out AObj: TObject): Boolean;
+{ The common case: AClass is a TComponent subclass, so the object is a TComponent. }
 function GuiResolve(AId: Int64; AClass: TClass; out AComp: TComponent): Boolean;
 { The bridge serving AControl's AEventName, created on demand (one per event). }
 function GuiBridgeOf(AControl: TComponent; const AEventName: String): TGuiEventBridge;
@@ -110,22 +114,22 @@ begin
     GGuiError := 2;   // a handler that failed is recorded, not raised
 end;
 
-function GuiRegister(AControl: TComponent; AOwns: Boolean): Int64;
+function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;
 var
   h: TGuiHandle;
 begin
   h := TGuiHandle.Create;
-  h.Control := AControl;
+  h.Control := AObj;
   h.Owns := AOwns;
   Result := RegisterHandle(h);
 end;
 
-function GuiResolve(AId: Int64; AClass: TClass; out AComp: TComponent): Boolean;
+function GuiResolveObj(AId: Int64; AClass: TClass; out AObj: TObject): Boolean;
 var
   o: TObject;
   h: TGuiHandle;
 begin
-  AComp := nil;
+  AObj := nil;
   o := HandleObj(AId);
   if not (o is TGuiHandle) then
   begin
@@ -138,8 +142,17 @@ begin
     GGuiError := 1;   // a valid handle, but of the wrong class
     Exit(False);
   end;
-  AComp := h.Control;
+  AObj := h.Control;
   Result := True;
+end;
+
+function GuiResolve(AId: Int64; AClass: TClass; out AComp: TComponent): Boolean;
+var
+  o: TObject;
+begin
+  AComp := nil;
+  Result := GuiResolveObj(AId, AClass, o);
+  if Result then AComp := TComponent(o);   // AClass is a TComponent subclass here
 end;
 
 function GuiBridgeOf(AControl: TComponent; const AEventName: String): TGuiEventBridge;

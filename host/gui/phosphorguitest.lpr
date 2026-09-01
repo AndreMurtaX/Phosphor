@@ -27,7 +27,7 @@ uses
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
-  PhosphorImageLib, PhosphorGridLib;
+  PhosphorImageLib, PhosphorGridLib, PhosphorTreeListLib;
 
 function ReadSource(const APath: String): String;
 var
@@ -92,6 +92,7 @@ begin
     RegisterTimerFuncs(eng.Registry);
     RegisterImageFuncs(eng.Registry);
     RegisterGridFuncs(eng.Registry);
+    RegisterTreeListFuncs(eng.Registry);
     ResetTestState;
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

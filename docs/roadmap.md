@@ -34,8 +34,9 @@ it drags `Data.DB` / `HttpClient` / `zip` past architecture.md's "no external
 dependencies". Phase 1 is a **named subset** of core + pure-RTL files; defer
 `23_archive`, `32_http_offline`, `33_rag`, `34_sqlite_full`.
 
-Reconcile the semantic reversions (strict boolean, base-1, 05/07 reclassification,
-`#`→`@`, `?>`/`?<`→`max`/`min`) as a **rule set before parser semantics land**,
+Reconcile the semantic reversions (strict boolean, base-1, 05/07 kept as
+type-mismatch rejections, `#`→`@`, `?>`/`?<`→`max`/`min`) as a **rule set before
+parser semantics land**,
 and verify each parser-constraining negative **at the step that builds its
 feature** — asserting the rejection *reason*, never batched at the end (the
 `--expect-fail` runner greens any non-pass, so a negative can "pass" hollow as an
@@ -76,23 +77,25 @@ and is unverifiable until the engine exists).
 2. **Reconciliation & scope charter** (rules, not a 45-file manifest) — freeze
    the cross-cutting reversions and draw the phase-1 line (named subset;
    `23/32/33/34` and their zip/HttpClient/Data.DB deps explicitly out).
-   **Gate:** rules in docs; negative 05 moved to positive, 07 tagged with its
-   decided reason; the phase-1 subset and deferred-library list referenced by the
-   runner manifest.
+   **Gate:** rules in docs; negatives 05/07 kept as rejections with their decided
+   reason (bool → numeric var is a type-mismatch; see step 3 and decisions.md);
+   the phase-1 subset and deferred-library list referenced by the runner manifest.
    **Deferral cost:** without it, a failing oracle file pulls the parser toward
    the exact semantics decisions.md rejects, and a negative-suite test then
    *defends* the wrong behaviour.
 
-3. **Variables + five-kind arithmetic/promotion/overflow + boolean operators +
-   comparison-as-value** — splits the proposers' step-3 big-bang (which also
-   needed inline-IF and `and/or/not`). Reclassified positive 05 verified here.
-   **Gate:** promotion/overflow oracle passes; reclassified-05 passes as positive;
-   assert numeric family still dispatches with real variables.
-   **Deferral cost:** a wrong promotion/overflow rule corrupts arithmetic across
-   every later file; retrofitting the fifth type after exec grows rewrites every
-   operator handler.
+3. **Variables + boolean operators + inline IF + strict-boolean conditions.**
+   *(DONE 2026-09-01.)* Variables typed by suffix (run-time store type-check),
+   `and`/`or`/`not`, `true`/`false` literals, and inline `if <cond> then <stmt>`.
+   Arithmetic/promotion/overflow were already the kernel's (increment 1). Strict
+   boolean is structural: a bare value leaves the parser's "produced-bool" flag
+   false and a condition rejects it. `tests/suite/01_language_core.bas` (32
+   asserts) is byte-exact green; negatives 05/07 (bool → numeric var: type
+   mismatch) and 06/08 (bare value as condition) reject for the intended reason.
+   Correction to the sketch: bool is distinct and does not widen, so 05/07 stay
+   **rejections**, not positives — see [decisions.md](decisions.md).
 
-4. **Control flow + strict-boolean condition enforcement** — IF/ELSEIF/ELSE,
+4. **Block control flow + the rest** — IF/ELSEIF/ELSE,
    WHILE, DO/LOOP, REPEAT/UNTIL, FOR/NEXT, SELECT CASE, jump/label backpatching.
    Negatives 06/08 reject *for the strict-boolean reason*; 11 (spaced compound
    op) rejects.
@@ -180,8 +183,8 @@ New engine units (all host-agnostic; the boundary scan must still pass):
 Gates: **PRIMARY** — runner on verbatim `00_harness.bas` byte-exact, exit 0.
 **HARDENING** — `00b_kernel.bas` proves `7\2`=int 3; `3+4` Kind stays vkInt;
 `10/4`=vkDouble 2.5; an int% boundary `+` returns a catchable error result (not an
-exception, not a silent Double); `ok? = 2 > 1 : assert_true(ok?)` proves
-comparison is a usable bool value (reclassified-positive 05). **PROOF-OF-FAILURE**
+exception, not a silent Double); `assert_true(2 > 1)` through a `?` bool overload
+proves comparison flows as a usable bool value. **PROOF-OF-FAILURE**
 — corrupting one expected value makes the runner report a failure and exit
 non-zero; corrupting one opcode literal fires the numbering assertion; both shown
 `-ProveFailure` style before a clean PASS.

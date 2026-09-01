@@ -23,6 +23,7 @@ type
   private
     FStack: array of TValue;
     FSP: Integer;    // points one past the top
+    FVars: array of TValue;
     procedure Push(const V: TValue);
     function Pop: TValue;
   public
@@ -101,6 +102,9 @@ begin
   FSP := 0;
   LastError := NoError;
   ErrorLine := 0;
+  SetLength(FVars, AProg.VarCount);
+  for i := 0 to AProg.VarCount - 1 do
+    FVars[i] := DefaultValue(AProg.VarTypes[i]);
   pc := 0;
   while pc < AProg.Count do
   begin
@@ -138,6 +142,38 @@ begin
       opLE:      begin b := Pop; a := Pop; if not Bin(ValCompare(coLE, a, b, r), r) then Exit(False); end;
       opGT:      begin b := Pop; a := Pop; if not Bin(ValCompare(coGT, a, b, r), r) then Exit(False); end;
       opGE:      begin b := Pop; a := Pop; if not Bin(ValCompare(coGE, a, b, r), r) then Exit(False); end;
+      opAnd:     begin b := Pop; a := Pop; if not Bin(ValAnd(a, b, r), r) then Exit(False); end;
+      opOr:      begin b := Pop; a := Pop; if not Bin(ValOr(a, b, r), r) then Exit(False); end;
+      opNot:     begin a := Pop; if not Bin(ValNot(a, r), r) then Exit(False); end;
+      opLoadVar: Push(FVars[ins.A]);
+      opStoreVar:
+        begin
+          v := Pop;
+          if CanStore(AProg.VarTypes[ins.A], v, r) then
+            FVars[ins.A] := r
+          else
+          begin
+            LastError := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
+              ' into ' + VarTypeName(AProg.VarTypes[ins.A]) + ' variable');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+        end;
+      opJumpIfFalse:
+        begin
+          v := Pop;
+          if v.Kind <> vkBool then
+          begin
+            LastError := MakeError(peTypeMismatch, 'condition is not a boolean');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+          if not v.Bl then
+          begin
+            pc := ins.A;
+            Continue;
+          end;
+        end;
       opCall:
         begin
           argc := ins.B;

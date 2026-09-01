@@ -62,7 +62,8 @@ Write-Host ''
 
 # --- run the manifest --------------------------------------------------------
 $suite = Join-Path $root 'tests\suite'
-$manifest = @('00_harness', '00b_kernel')
+$negDir = Join-Path $root 'tests\negative'
+$manifest = @('00_harness', '00b_kernel', '01_language_core')
 $tmp = [System.IO.Path]::GetTempPath()
 
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {
@@ -110,6 +111,26 @@ else {
         $bas = Join-Path $suite "$name.bas"
         $exp = [System.IO.File]::ReadAllBytes((Join-Path $suite "$name.expected"))
         if (-not (Run-One $bas $exp 0 $name)) { $allOk = $false }
+    }
+
+    # Negatives: each MUST be rejected (non-zero exit). A negative that RUNS is
+    # a failure of the language, so this is a real gate, not decoration.
+    if (Test-Path $negDir) {
+        Write-Host ''
+        foreach ($neg in Get-ChildItem $negDir -Filter *.bas | Sort-Object Name) {
+            $out = Join-Path $tmp 'phosphortest.out'
+            $err = Join-Path $tmp 'phosphortest.err'
+            cmd /c "`"$exe`" `"$($neg.FullName)`" > `"$out`" 2> `"$err`""
+            $code = $LASTEXITCODE
+            if ($code -ne 0) {
+                $why = (Get-Content -Raw $err).Trim()
+                Write-Host ("PASS  reject: {0}  (exit {1})" -f $neg.Name, $code) -ForegroundColor Green
+                if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
+            } else {
+                Write-Host ("FAIL  reject: {0}  ran instead of being rejected" -f $neg.Name) -ForegroundColor Red
+                $allOk = $false
+            }
+        }
     }
 }
 

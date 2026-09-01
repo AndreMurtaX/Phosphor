@@ -55,6 +55,11 @@ type
 
   TCmpOp = (coEQ, coNE, coLT, coLE, coGT, coGE);
 
+  { A variable's declared type, fixed by its name suffix (the suffix is part of
+    the name). vtNumber (no suffix) holds the numeric family: an int% or a
+    Double. }
+  TVarType = (vtNumber, vtString, vtInt, vtHandle, vtBool);
+
 // Constructors ---------------------------------------------------------------
 function ValDouble(const X: Double): TValue;
 function ValInt(const X: Int64): TValue;
@@ -78,6 +83,17 @@ function ValDivInt(const A, B: TValue; out R: TValue): TPhosphorError;   // \
 function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
 function ValPow(const A, B: TValue; out R: TValue): TPhosphorError;      // ^ -> double
 function ValCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError; // -> bool
+function ValAnd(const A, B: TValue; out R: TValue): TPhosphorError;   // bool operands
+function ValOr(const A, B: TValue; out R: TValue): TPhosphorError;
+function ValNot(const A: TValue; out R: TValue): TPhosphorError;
+
+// Variable typing (from the name suffix) and its storage rules ---------------
+function VarTypeOf(const AName: String): TVarType;
+function VarTypeName(T: TVarType): String;
+function DefaultValue(T: TVarType): TValue;
+// True if V may be stored into a variable of type T; Coerced is what to store
+// (e.g. a Double rounded into an int% slot).
+function CanStore(T: TVarType; const V: TValue; out Coerced: TValue): Boolean;
 
 // Checked Int64 primitives (exposed so libraries can test overflow-as-error) -
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
@@ -405,6 +421,97 @@ begin
   end;
   R := ValBool(eq);
   Result := NoError;
+end;
+
+function BothBool(const A, B: TValue): Boolean; inline;
+begin
+  Result := (A.Kind = vkBool) and (B.Kind = vkBool);
+end;
+
+function ValAnd(const A, B: TValue; out R: TValue): TPhosphorError;
+begin
+  R := Default(TValue);
+  if not BothBool(A, B) then
+    Exit(MakeError(peTypeMismatch, '''and'' needs booleans'));
+  R := ValBool(A.Bl and B.Bl);
+  Result := NoError;
+end;
+
+function ValOr(const A, B: TValue; out R: TValue): TPhosphorError;
+begin
+  R := Default(TValue);
+  if not BothBool(A, B) then
+    Exit(MakeError(peTypeMismatch, '''or'' needs booleans'));
+  R := ValBool(A.Bl or B.Bl);
+  Result := NoError;
+end;
+
+function ValNot(const A: TValue; out R: TValue): TPhosphorError;
+begin
+  R := Default(TValue);
+  if A.Kind <> vkBool then
+    Exit(MakeError(peTypeMismatch, '''not'' needs a boolean'));
+  R := ValBool(not A.Bl);
+  Result := NoError;
+end;
+
+function VarTypeOf(const AName: String): TVarType;
+var
+  last: Char;
+begin
+  Result := vtNumber;
+  if AName = '' then Exit;
+  last := AName[Length(AName)];
+  case last of
+    '$': Result := vtString;
+    '%': Result := vtInt;
+    '@': Result := vtHandle;
+    '?': Result := vtBool;
+  end;
+end;
+
+function VarTypeName(T: TVarType): String;
+begin
+  case T of
+    vtNumber: Result := 'number';
+    vtString: Result := 'string';
+    vtInt:    Result := 'int';
+    vtHandle: Result := 'handle';
+    vtBool:   Result := 'bool';
+  else
+    Result := '?';
+  end;
+end;
+
+function DefaultValue(T: TVarType): TValue;
+begin
+  case T of
+    vtString: Result := ValStr('');
+    vtInt:    Result := ValInt(0);
+    vtHandle: Result := ValHandle(0);
+    vtBool:   Result := ValBool(False);
+  else
+    Result := ValInt(0);   // vtNumber defaults to int% 0
+  end;
+end;
+
+function CanStore(T: TVarType; const V: TValue; out Coerced: TValue): Boolean;
+begin
+  Coerced := V;
+  case T of
+    vtNumber: Result := (V.Kind = vkInt) or (V.Kind = vkDouble);
+    vtInt:
+      begin
+        if V.Kind = vkInt then Result := True
+        else if V.Kind = vkDouble then begin Coerced := ValInt(Round(V.Num)); Result := True; end
+        else Result := False;
+      end;
+    vtString: Result := V.Kind = vkString;
+    vtHandle: Result := V.Kind = vkHandle;
+    vtBool:   Result := V.Kind = vkBool;
+  else
+    Result := False;
+  end;
 end;
 
 initialization

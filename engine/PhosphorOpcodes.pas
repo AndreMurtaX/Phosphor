@@ -49,7 +49,13 @@ type
     opLT       = 16,
     opLE       = 17,
     opGT       = 18,
-    opGE       = 19
+    opGE       = 19,
+    opLoadVar  = 20,  // A = variable index -> push its value
+    opStoreVar = 21,  // A = variable index -> pop and store (type-checked)
+    opJumpIfFalse = 22, // pop a bool; if false, jump to A
+    opAnd      = 23,
+    opOr       = 24,
+    opNot      = 25
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -77,9 +83,12 @@ type
     FCount: Integer;
   public
     Consts: TConstPool;
+    VarCount: Integer;              // number of distinct variables
+    VarTypes: array of TVarType;    // declared type of each variable (by index)
     constructor Create;
     destructor Destroy; override;
     function Emit(Op: TOpcode; A, B, Line: Integer): Integer;
+    procedure Patch(Index, NewA: Integer);   // set A of an already-emitted instr
     function Instr(Index: Integer): TInstr;
     property Count: Integer read FCount;
   end;
@@ -127,6 +136,11 @@ begin
   Inc(FCount);
 end;
 
+procedure TProgram.Patch(Index, NewA: Integer);
+begin
+  FInstrs[Index].A := NewA;
+end;
+
 function TProgram.Instr(Index: Integer): TInstr;
 begin
   Result := FInstrs[Index];
@@ -143,7 +157,9 @@ begin
     (Ord(opMul) = 9) and (Ord(opDivReal) = 10) and (Ord(opDivInt) = 11) and
     (Ord(opPow) = 12) and (Ord(opMod) = 13) and (Ord(opEQ) = 14) and
     (Ord(opNE) = 15) and (Ord(opLT) = 16) and (Ord(opLE) = 17) and
-    (Ord(opGT) = 18) and (Ord(opGE) = 19);
+    (Ord(opGT) = 18) and (Ord(opGE) = 19) and (Ord(opLoadVar) = 20) and
+    (Ord(opStoreVar) = 21) and (Ord(opJumpIfFalse) = 22) and (Ord(opAnd) = 23) and
+    (Ord(opOr) = 24) and (Ord(opNot) = 25);
 end;
 
 end.

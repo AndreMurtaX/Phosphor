@@ -106,9 +106,14 @@ Settled when the phase-1 [roadmap](roadmap.md) surfaced them as freeze-now forks
   string library decodes UTF-8 to index; raw-byte slicing stays for I/O only.
 - **`bool` has its own signature type-code `?`** and does not widen to numeric
   (unlike `int%`, which binds to an `n` slot by widening to Double). Consequence:
-  assigning a `bool?` to a numeric variable (`x = true`) is a type-mismatch —
-  negative test 07 stays a rejection, for this new documented reason rather than
-  the removed "true is not a value".
+  assigning a `bool?` to a numeric variable (`x = true` or `x = 2 > 1`) is a
+  type-mismatch — negative tests **05 and 07 both stay rejections**, for this new
+  documented reason rather than the removed "comparison is not a value" / "true
+  is not a value". (This overrides the council's earlier guess that 05/07 would
+  become positive; that guess predates the bool-distinct decision.) A comparison
+  is still a usable value — it just needs a bool destination (`ok? = 2 > 1`) or a
+  bool context. And a bare value — number, bool literal, or variable — is never a
+  condition (negatives 06 and 08), enforced structurally in the parser.
 - **The registry type-code alphabet is `n % $ @ ?`** (`#` is never a code). `n`
   is the numeric family (a Double, or an `int%` widened into it); `%` is an
   exact `int%` slot that does not widen. Resolution prefers the fewest widenings,

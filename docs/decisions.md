@@ -93,6 +93,23 @@ already exists.
 UTF-8 everywhere, declared explicitly, settled on day one. See
 [architecture.md](architecture.md), "UTF-8".
 
+## Resolved specifics (owner decisions, 2026-08-31)
+
+Settled when the phase-1 [roadmap](roadmap.md) surfaced them as freeze-now forks:
+
+- **Signature separator is `:`** — `Lib.Add('name:signature')`. The registry `:`
+  is parsed in Pascal at registration time and never collides with a source-level
+  statement `:`.
+- **String-literal escape is a doubled quote** — `""` inside a literal yields one
+  `"`. There is no escape character; `\` is exclusively integer division.
+- **`s$[[n]]` character indexing is base-1 by codepoint** (not by byte). The
+  string library decodes UTF-8 to index; raw-byte slicing stays for I/O only.
+- **`bool` has its own signature type-code `?`** and does not widen to numeric
+  (unlike `int%`, which binds to an `n` slot by widening to Double). Consequence:
+  assigning a `bool?` to a numeric variable (`x = true`) is a type-mismatch —
+  negative test 07 stays a rejection, for this new documented reason rather than
+  the removed "true is not a value".
+
 ## Extensibility
 
 The registry `Lib.Add('name:signature')` (note the `:` separator, per the `@`

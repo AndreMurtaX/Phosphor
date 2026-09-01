@@ -197,25 +197,22 @@ non-zero; corrupting one opcode literal fires the numbering assertion; both show
   step that builds its feature, asserting the reason; final step is regression
   only.
 
-## Open questions — owner decisions (PENDING)
+## Open questions — owner decisions
 
-These are the "cheap now, expensive later" forks the council surfaced. Freezing
-them shapes increment 1 (the alphabet and lexer) and steps 3/8.
+The "cheap now, expensive later" forks the council surfaced. Freezing them shapes
+increment 1 (the alphabet and lexer) and steps 3/8.
 
-1. **Signature separator** — `:` (decisions.md's own choice) or `|`. Wrinkle: if
-   `:` is also the BASIC statement separator (suite file 44), the lexer must keep
-   registration-time `:` (Pascal) distinct from source `:`. *(They never collide
-   in increment 1; the registry `:` is parsed in Pascal, not source.)*
-2. **String-escape rule**, now that `\` is integer division — embedded quote as
-   doubled `""`, a new escape character, or no in-literal escapes? Governs the
-   lexer's literal slicer and every string literal in the suite.
-3. **`s$[[n]]` character indexing under UTF-8** — base-1 by **byte** or by
-   **codepoint**? Pins the entire string library and every multibyte assertion.
-4. **Does `bool` get its own signature type-code `?`** (distinct overloads), or
-   fold into the numeric family `n` the way int% does? Freezing the alphabet now
-   is cheap. *(This also decides negative 07: if bool is distinct and does not
-   widen to numeric, `x = true` on a numeric `x` is a type-mismatch rejection —
-   07 stays negative for a NEW, documented reason.)*
+RESOLVED 2026-08-31 (see [decisions.md](decisions.md), "Resolved specifics"):
+
+1. **Signature separator** — `:`. ✔
+2. **String-escape rule** — doubled quote `""`; no escape character. ✔
+3. **`s$[[n]]` character indexing under UTF-8** — base-1 by **codepoint**. ✔
+4. **`bool` signature type-code** — distinct `?`, no widening to numeric; so
+   `x = true` on a numeric `x` is a type-mismatch and negative 07 stays a
+   rejection for that new reason. ✔
+
+STILL PENDING (needed before its step, not before increment 1):
+
 5. **too-many-globals cap** (negative 01) — reuse Plan9Basic's `13_global_limit`
    value or choose a new one, and enforce at compile or run time? Needed before
    step 5.

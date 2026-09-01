@@ -25,7 +25,7 @@ interface
 
 uses
   SysUtils, Classes, Controls, StdCtrls,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorVM, PhosphorGuiCore;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterButtonFuncs(Reg: TPhosphorRegistry);
 
@@ -74,21 +74,11 @@ end;
 function f_button_onclick(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   c: TComponent;
-  btn: TButton;
-  bridge: TGuiEventBridge;
 begin
   Err := NoError;
   Result := Args[0];
   if not GuiResolve(Args[0].Hnd, TButton, c) then Exit;
-  btn := TButton(c);
-  if Args[1].Str = '' then
-  begin
-    btn.OnClick := nil;   // an empty name stops the event
-    Exit;
-  end;
-  bridge := GuiBridgeOf(btn);
-  bridge.Bind(TPhosphorVM(AVM), Args[1].Str, Args[0].Hnd);
-  btn.OnClick := @bridge.Fire;
+  TButton(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', Args[1].Str, Args[0].Hnd);
 end;
 
 procedure RegisterButtonFuncs(Reg: TPhosphorRegistry);

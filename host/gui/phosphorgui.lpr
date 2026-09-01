@@ -20,7 +20,8 @@ uses
   Forms,
   SysUtils, Classes,
   PhosphorEngine,
-  PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib;
+  PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
+  PhosphorLabelLib, PhosphorEditLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -82,6 +83,8 @@ begin
     RegisterControlFuncs(eng.Registry);
     RegisterFormFuncs(eng.Registry);
     RegisterButtonFuncs(eng.Registry);
+    RegisterLabelFuncs(eng.Registry);
+    RegisterEditFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin

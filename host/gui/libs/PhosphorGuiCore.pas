@@ -49,16 +49,19 @@ type
     destructor Destroy; override;
   end;
 
-  { Carries one bound event back into BASIC. Owned by the control it serves. }
+  { Carries one bound event back into BASIC. Owned by the control it serves; one
+    bridge per event name, so a control can wire onclick AND onchange at once. }
   TGuiEventBridge = class(TComponent)
   private
     FVM: TPhosphorVM;
     FHandler: String;
     FSenderId: Int64;
+    FEventName: String;   // which event this bridge serves (e.g. 'onclick')
   public
     procedure Bind(AVM: TPhosphorVM; const AHandler: String; ASenderId: Int64);
     procedure Fire(Sender: TObject);   // matches TNotifyEvent
     property Handler: String read FHandler;
+    property EventName: String read FEventName write FEventName;
   end;
 
 var
@@ -71,8 +74,13 @@ function GuiRegister(AControl: TComponent; AOwns: Boolean): Int64;
 { Resolve a handle to an object of (at least) AClass. Records GGuiError and
   returns False on a fabricated, freed or wrong-class handle. }
 function GuiResolve(AId: Int64; AClass: TClass; out AComp: TComponent): Boolean;
-{ The bridge bound to AControl for its single event, created on demand. }
-function GuiBridgeOf(AControl: TComponent): TGuiEventBridge;
+{ The bridge serving AControl's AEventName, created on demand (one per event). }
+function GuiBridgeOf(AControl: TComponent; const AEventName: String): TGuiEventBridge;
+{ Wire a TNotifyEvent by BASIC function name: find/create the bridge for AEvent,
+  bind it, and return the method to assign to the control's event property -- or
+  nil when AHandler is '' (which unwires). One line per event in a control lib. }
+function GuiNotifyHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TNotifyEvent;
 
 procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
 
@@ -134,14 +142,28 @@ begin
   Result := True;
 end;
 
-function GuiBridgeOf(AControl: TComponent): TGuiEventBridge;
+function GuiBridgeOf(AControl: TComponent; const AEventName: String): TGuiEventBridge;
 var
   i: Integer;
 begin
   for i := 0 to AControl.ComponentCount - 1 do
-    if AControl.Components[i] is TGuiEventBridge then
+    if (AControl.Components[i] is TGuiEventBridge) and
+       (TGuiEventBridge(AControl.Components[i]).EventName = AEventName) then
       Exit(TGuiEventBridge(AControl.Components[i]));
   Result := TGuiEventBridge.Create(AControl);   // owned by the control
+  Result.EventName := AEventName;
+end;
+
+function GuiNotifyHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TNotifyEvent;
+var
+  bridge: TGuiEventBridge;
+begin
+  if AHandler = '' then
+    Exit(nil);   // an empty name unwires the event
+  bridge := GuiBridgeOf(AControl, AEvent);
+  bridge.Bind(TPhosphorVM(AVM), AHandler, ASenderId);
+  Result := @bridge.Fire;
 end;
 
 // --- app_* : the message loop, for the interactive host ---------------------

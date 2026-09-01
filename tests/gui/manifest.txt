@@ -4,3 +4,4 @@
 00_smoke
 01_events
 02_control
+03_input

@@ -36,6 +36,7 @@ type
     FCSP: Integer;
     FFrames: array of TCallFrame;   // user-function activation frames
     FFrameSP: Integer;
+    FDataPtr: Integer;              // READ position in the DATA pool
     procedure Push(const V: TValue);
     function Pop: TValue;
   public
@@ -115,6 +116,7 @@ begin
   FSP := 0;
   FCSP := 0;
   FFrameSP := 0;
+  FDataPtr := 0;
   LastError := NoError;
   ErrorLine := 0;
   SetLength(FVars, AProg.VarCount);
@@ -194,6 +196,18 @@ begin
           pc := ins.A;
           Continue;
         end;
+      opReadData:
+        begin
+          if FDataPtr >= AProg.DataCount then
+          begin
+            LastError := MakeError(peRuntime, 'out of DATA');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+          Push(AProg.DataPool[FDataPtr]);
+          Inc(FDataPtr);
+        end;
+      opRestore: FDataPtr := 0;
       opHalt: Exit(True);
       opGosub:
         begin

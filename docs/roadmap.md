@@ -124,9 +124,18 @@ and is unverifiable until the engine exists).
    **Original gate:** `03_functions` green; negative 01 rejects for the intended
    reason; a recursion/frame-teardown probe shows no local leakage.
 
-6. **Arrays + DATA/READ/RESTORE** — `dim`, base-1 line index `s$[n]` and char
-   index `s$[[n]]`, index-rounds. Validates the base-1-adjusted files.
-   **Gate:** `04_arrays` + `05_data_read` green; a deliberate base-0 leak fails.
+6. **DATA/READ/RESTORE.** *(DONE 2026-09-01.)* `data <consts>` collected into a
+   source-order pool; `read <var>[, ...]` reads the next item and advances a data
+   pointer; `restore` rewinds. `tests/suite/05_data_read.bas` (7 asserts) green.
+   Arrays are split into their own step (6b) because they need handles.
+
+6b. **Arrays (with handles).** `dim`, base-1 indexing, bracket sugar `a@[i]` /
+   `a@[i] = x`, `ndims`/`lbound`/`ubound`/`arraysize`/`arraytype`, numeric/string/
+   pointer arrays, and the char index `s$[[n]]` by codepoint. Needs the handle
+   type `@` + a handle registry (was step 7) + an array library, so arrays and
+   handles land together. `04_arrays.bas` (import with `#`→`@`) is the target;
+   this also unlocks `03_functions.bas`'s `func/pointer-return`.
+   **Gate:** `04_arrays` green; a deliberate base-0 leak fails.
 
 7. **Handle registry + error-state contract, end-to-end** — the `@` handle type
    and the first handle-minting packages (dict@, stringlist@, array@); fabricated

@@ -823,6 +823,50 @@ begin
       Exit;
     end;
     if t.StrVal = 'end' then begin FLex.Advance; FProg.Emit(opHalt, 0, 0, t.Line); Exit; end;
+    if t.StrVal = 'data' then
+    begin
+      FLex.Advance;
+      while not FFailed do
+      begin
+        // one DATA constant: optional sign, then a number or a string
+        if FLex.Cur.Kind = tkMinus then
+        begin
+          FLex.Advance;
+          if FLex.Cur.Kind = tkInt then FProg.AddData(ValInt(-FLex.Cur.IntVal))
+          else if FLex.Cur.Kind = tkDouble then FProg.AddData(ValDouble(-FLex.Cur.DblVal))
+          else begin Fail('DATA expects a number after ''-''', FLex.Cur.Line); Exit; end;
+          FLex.Advance;
+        end
+        else
+        begin
+          if FLex.Cur.Kind = tkPlus then FLex.Advance;
+          case FLex.Cur.Kind of
+            tkInt:    begin FProg.AddData(ValInt(FLex.Cur.IntVal)); FLex.Advance; end;
+            tkDouble: begin FProg.AddData(ValDouble(FLex.Cur.DblVal)); FLex.Advance; end;
+            tkString: begin FProg.AddData(ValStr(FLex.Cur.StrVal)); FLex.Advance; end;
+          else
+            Fail('DATA item must be a number or a string', FLex.Cur.Line); Exit;
+          end;
+        end;
+        if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+      end;
+      Exit;
+    end;
+    if t.StrVal = 'read' then
+    begin
+      FLex.Advance;
+      while not FFailed do
+      begin
+        if FLex.Cur.Kind <> tkIdent then begin Fail('READ needs a variable', FLex.Cur.Line); Exit; end;
+        t := FLex.Cur;
+        FLex.Advance;
+        FProg.Emit(opReadData, 0, 0, t.Line);
+        EmitStoreVar(t.StrVal, t.Line);
+        if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+      end;
+      Exit;
+    end;
+    if t.StrVal = 'restore' then begin FLex.Advance; FProg.Emit(opRestore, 0, 0, t.Line); Exit; end;
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
       FLex.Advance;

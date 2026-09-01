@@ -62,7 +62,9 @@ type
     opReturn   = 29,  // pop the return address, jump there
     opLoadLocal  = 30, // A = local slot -> push current frame's local
     opStoreLocal = 31, // A = local slot -> pop and store into current frame
-    opRetFunc    = 32  // return from a user function (value already on the stack)
+    opRetFunc    = 32, // return from a user function (value already on the stack)
+    opReadData   = 33, // push the next DATA item, advance the data pointer
+    opRestore    = 34  // reset the data pointer to the first item
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -104,6 +106,8 @@ type
     VarTypes: array of TVarType;    // declared type of each global (by index)
     UserFuncs: array of TUserFunc;
     UserFuncCount: Integer;
+    DataPool: array of TValue;      // DATA items, in source order
+    DataCount: Integer;
     constructor Create;
     destructor Destroy; override;
     function Emit(Op: TOpcode; A, B, Line: Integer): Integer;
@@ -112,6 +116,7 @@ type
     function AddUserFunc(const AName: String; AEntry, AParamCount: Integer;
                          const ALocalTypes: array of TVarType; ARetType: TVarType): Integer;
     function FindUserFunc(const AName: String; AArgCount: Integer): Integer;
+    procedure AddData(const V: TValue);
     property Count: Integer read FCount;
   end;
 
@@ -195,6 +200,14 @@ begin
   Result := -1;
 end;
 
+procedure TProgram.AddData(const V: TValue);
+begin
+  if DataCount = Length(DataPool) then
+    SetLength(DataPool, (DataCount + 1) * 2);
+  DataPool[DataCount] := V;
+  Inc(DataCount);
+end;
+
 { Fires if an opcode was renumbered or reordered -- the silent-format-break the
   discipline exists to prevent. Called at engine startup. }
 function VerifyOpcodeNumbering: Boolean;
@@ -210,7 +223,8 @@ begin
     (Ord(opStoreVar) = 21) and (Ord(opJumpIfFalse) = 22) and (Ord(opAnd) = 23) and
     (Ord(opOr) = 24) and (Ord(opNot) = 25) and (Ord(opJump) = 26) and
     (Ord(opHalt) = 27) and (Ord(opGosub) = 28) and (Ord(opReturn) = 29) and
-    (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32);
+    (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32) and
+    (Ord(opReadData) = 33) and (Ord(opRestore) = 34);
 end;
 
 end.

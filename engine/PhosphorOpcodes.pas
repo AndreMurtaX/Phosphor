@@ -59,7 +59,10 @@ type
     opJump     = 26,  // unconditional jump to A
     opHalt     = 27,  // stop execution (END)
     opGosub    = 28,  // push the return address (next instr), jump to A
-    opReturn   = 29   // pop the return address, jump there
+    opReturn   = 29,  // pop the return address, jump there
+    opLoadLocal  = 30, // A = local slot -> push current frame's local
+    opStoreLocal = 31, // A = local slot -> pop and store into current frame
+    opRetFunc    = 32  // return from a user function (value already on the stack)
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -81,19 +84,34 @@ type
     property Count: Integer read FCount;
   end;
 
+  { A user-defined function. Locals are the frame slots: parameters first
+    (ParamCount of them), then declared locals. RetType is from the name suffix. }
+  TUserFunc = record
+    Name: String;
+    Entry: Integer;
+    ParamCount: Integer;
+    LocalTypes: array of TVarType;
+    RetType: TVarType;
+  end;
+
   TProgram = class
   private
     FInstrs: array of TInstr;
     FCount: Integer;
   public
     Consts: TConstPool;
-    VarCount: Integer;              // number of distinct variables
-    VarTypes: array of TVarType;    // declared type of each variable (by index)
+    VarCount: Integer;              // number of distinct global variables
+    VarTypes: array of TVarType;    // declared type of each global (by index)
+    UserFuncs: array of TUserFunc;
+    UserFuncCount: Integer;
     constructor Create;
     destructor Destroy; override;
     function Emit(Op: TOpcode; A, B, Line: Integer): Integer;
     procedure Patch(Index, NewA: Integer);   // set A of an already-emitted instr
     function Instr(Index: Integer): TInstr;
+    function AddUserFunc(const AName: String; AEntry, AParamCount: Integer;
+                         const ALocalTypes: array of TVarType; ARetType: TVarType): Integer;
+    function FindUserFunc(const AName: String; AArgCount: Integer): Integer;
     property Count: Integer read FCount;
   end;
 
@@ -150,6 +168,33 @@ begin
   Result := FInstrs[Index];
 end;
 
+function TProgram.AddUserFunc(const AName: String; AEntry, AParamCount: Integer;
+  const ALocalTypes: array of TVarType; ARetType: TVarType): Integer;
+var i: Integer;
+begin
+  if UserFuncCount = Length(UserFuncs) then
+    SetLength(UserFuncs, (UserFuncCount + 1) * 2);
+  UserFuncs[UserFuncCount].Name := LowerCase(AName);
+  UserFuncs[UserFuncCount].Entry := AEntry;
+  UserFuncs[UserFuncCount].ParamCount := AParamCount;
+  SetLength(UserFuncs[UserFuncCount].LocalTypes, Length(ALocalTypes));
+  for i := 0 to High(ALocalTypes) do
+    UserFuncs[UserFuncCount].LocalTypes[i] := ALocalTypes[i];
+  UserFuncs[UserFuncCount].RetType := ARetType;
+  Result := UserFuncCount;
+  Inc(UserFuncCount);
+end;
+
+function TProgram.FindUserFunc(const AName: String; AArgCount: Integer): Integer;
+var i: Integer; ln: String;
+begin
+  ln := LowerCase(AName);
+  for i := 0 to UserFuncCount - 1 do
+    if (UserFuncs[i].Name = ln) and (UserFuncs[i].ParamCount = AArgCount) then
+      Exit(i);
+  Result := -1;
+end;
+
 { Fires if an opcode was renumbered or reordered -- the silent-format-break the
   discipline exists to prevent. Called at engine startup. }
 function VerifyOpcodeNumbering: Boolean;
@@ -164,7 +209,8 @@ begin
     (Ord(opGT) = 18) and (Ord(opGE) = 19) and (Ord(opLoadVar) = 20) and
     (Ord(opStoreVar) = 21) and (Ord(opJumpIfFalse) = 22) and (Ord(opAnd) = 23) and
     (Ord(opOr) = 24) and (Ord(opNot) = 25) and (Ord(opJump) = 26) and
-    (Ord(opHalt) = 27) and (Ord(opGosub) = 28) and (Ord(opReturn) = 29);
+    (Ord(opHalt) = 27) and (Ord(opGosub) = 28) and (Ord(opReturn) = 29) and
+    (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32);
 end;
 
 end.

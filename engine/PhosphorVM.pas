@@ -19,6 +19,14 @@ uses
   SysUtils, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry;
 
 type
+  { One activation of a user function: its local frame (parameters first, then
+    declared locals), the function it belongs to, and where to resume. }
+  TCallFrame = record
+    Locals: array of TValue;
+    FuncIndex: Integer;
+    ReturnAddr: Integer;
+  end;
+
   TPhosphorVM = class
   private
     FStack: array of TValue;
@@ -26,6 +34,8 @@ type
     FVars: array of TValue;
     FCallStack: array of Integer;   // GOSUB return addresses
     FCSP: Integer;
+    FFrames: array of TCallFrame;   // user-function activation frames
+    FFrameSP: Integer;
     procedure Push(const V: TValue);
     function Pop: TValue;
   public
@@ -78,13 +88,14 @@ end;
 
 function TPhosphorVM.Run(AProg: TProgram): Boolean;
 var
-  pc, i, argc: Integer;
+  pc, i, argc, ufi: Integer;
   ins: TInstr;
   a, b, r, v: TValue;
   e: TPhosphorError;
   args: array of TValue;
   kinds: array of TValueKind;
   fn: TPhosphorFunc;
+  lt: TVarType;
 
   function Bin(AErr: TPhosphorError; const AResult: TValue): Boolean;
   begin
@@ -103,6 +114,7 @@ begin
   kinds := nil;
   FSP := 0;
   FCSP := 0;
+  FFrameSP := 0;
   LastError := NoError;
   ErrorLine := 0;
   SetLength(FVars, AProg.VarCount);
@@ -204,9 +216,54 @@ begin
           pc := FCallStack[FCSP];
           Continue;
         end;
+      opLoadLocal: Push(FFrames[FFrameSP - 1].Locals[ins.A]);
+      opStoreLocal:
+        begin
+          v := Pop;
+          lt := AProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].LocalTypes[ins.A];
+          if CanStore(lt, v, r) then
+            FFrames[FFrameSP - 1].Locals[ins.A] := r
+          else
+          begin
+            LastError := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
+              ' into ' + VarTypeName(lt) + ' local');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+        end;
+      opRetFunc:
+        begin
+          if FFrameSP = 0 then
+          begin
+            LastError := MakeError(peRuntime, 'return outside a function');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
+          pc := FFrames[FFrameSP - 1].ReturnAddr;  // value stays on the stack
+          Dec(FFrameSP);
+          Continue;
+        end;
       opCall:
         begin
           argc := ins.B;
+          // A user function shadows the library registry for the same name+arity.
+          ufi := AProg.FindUserFunc(AProg.Consts.Get(ins.A).Str, argc);
+          if ufi >= 0 then
+          begin
+            if FFrameSP = Length(FFrames) then
+              SetLength(FFrames, (FFrameSP + 1) * 2);
+            SetLength(FFrames[FFrameSP].Locals, Length(AProg.UserFuncs[ufi].LocalTypes));
+            for i := argc - 1 downto 0 do
+              FFrames[FFrameSP].Locals[i] := Pop;
+            for i := argc to High(AProg.UserFuncs[ufi].LocalTypes) do
+              FFrames[FFrameSP].Locals[i] := DefaultValue(AProg.UserFuncs[ufi].LocalTypes[i]);
+            FFrames[FFrameSP].FuncIndex := ufi;
+            FFrames[FFrameSP].ReturnAddr := pc + 1;
+            Inc(FFrameSP);
+            pc := AProg.UserFuncs[ufi].Entry;
+            Continue;
+          end;
+          // library call
           SetLength(args, argc);
           SetLength(kinds, argc);
           for i := argc - 1 downto 0 do

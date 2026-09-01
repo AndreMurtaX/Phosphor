@@ -111,11 +111,18 @@ and is unverifiable until the engine exists).
    06/08 reject with the strict-boolean diagnostic; a jump-backpatch nesting probe
    passes.
 
-5. **User functions + global cap** — function/local/return, recursion, typed
-   local frames respecting all five kinds; global-limit wired so negative 01
-   rejects at the cap.
-   **Gate:** `03_functions` green; negative 01 rejects for the intended reason; a
-   recursion/frame-teardown probe shows no local leakage.
+5. **User functions.** *(DONE 2026-09-01 — functions; global cap deferred.)*
+   `function name(params) [local ...] ... endfunction`, `return <expr>`,
+   recursion, per-call frames (params + locals isolated from globals: a name in
+   the local list is a frame slot, any other name is a global). Calls resolve to
+   a user function first, else the library registry, so forward references work.
+   `tests/suite/03a_functions.bas` (18 asserts — the function subset of
+   03_functions) is byte-exact green. Full `03_functions.bas` waits on
+   arrays/handles (`func/pointer-return`) and the string lib `stri$`
+   (`func/mixed-args`), steps 6-8. The global cap (negative 01 / 13_global_limit)
+   is deferred with those files; its value is Claude/council's to decide.
+   **Original gate:** `03_functions` green; negative 01 rejects for the intended
+   reason; a recursion/frame-teardown probe shows no local leakage.
 
 6. **Arrays + DATA/READ/RESTORE** — `dim`, base-1 line index `s$[n]` and char
    index `s$[[n]]`, index-rounds. Validates the base-1-adjusted files.

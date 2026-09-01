@@ -42,6 +42,12 @@ type
     FVarTypes: array of TVarType;
     FVarCount: Integer;
     FHidden: Integer;
+    // current-function scope (params + locals live in a frame, not the globals)
+    FInFunction: Boolean;
+    FLocalNames: array of String;
+    FLocalTypes: array of TVarType;
+    FLocalCount: Integer;
+    FRetType: TVarType;
     // loop context stack (for BREAK / CONTINUE)
     FLoopBreaks: array of array of Integer;
     FLoopConts: array of array of Integer;
@@ -59,6 +65,11 @@ type
     function CurIsTerm(const ATerms: array of String): Boolean;
     function VarIndex(const AName: String): Integer;
     function NewHiddenVar(AType: TVarType): Integer;
+    function LocalIndex(const AName: String): Integer;
+    procedure AddLocal(const AName: String);
+    procedure EmitLoadVar(const AName: String; ALine: Integer);
+    procedure EmitStoreVar(const AName: String; ALine: Integer);
+    procedure ParseFunction;
     procedure PushLoop;
     procedure PopLoop;
     procedure AddBreak(AInstr: Integer);
@@ -150,6 +161,107 @@ begin
   Inc(FHidden);
   Result := VarIndex(name);
   FVarTypes[Result] := AType;   // override the suffix-derived type
+end;
+
+function TPhosphorCompiler.LocalIndex(const AName: String): Integer;
+var i: Integer;
+begin
+  Result := -1;
+  if not FInFunction then Exit;
+  for i := 0 to FLocalCount - 1 do
+    if FLocalNames[i] = AName then Exit(i);
+end;
+
+procedure TPhosphorCompiler.AddLocal(const AName: String);
+begin
+  if FLocalCount = Length(FLocalNames) then
+  begin
+    SetLength(FLocalNames, (FLocalCount + 1) * 2);
+    SetLength(FLocalTypes, (FLocalCount + 1) * 2);
+  end;
+  FLocalNames[FLocalCount] := AName;
+  FLocalTypes[FLocalCount] := VarTypeOf(AName);
+  Inc(FLocalCount);
+end;
+
+{ A name that is a parameter/local of the current function refers to a frame
+  slot; any other name is a global. }
+procedure TPhosphorCompiler.EmitLoadVar(const AName: String; ALine: Integer);
+var li: Integer;
+begin
+  li := LocalIndex(AName);
+  if li >= 0 then FProg.Emit(opLoadLocal, li, 0, ALine)
+  else FProg.Emit(opLoadVar, VarIndex(AName), 0, ALine);
+end;
+
+procedure TPhosphorCompiler.EmitStoreVar(const AName: String; ALine: Integer);
+var li: Integer;
+begin
+  li := LocalIndex(AName);
+  if li >= 0 then FProg.Emit(opStoreLocal, li, 0, ALine)
+  else FProg.Emit(opStoreVar, VarIndex(AName), 0, ALine);
+end;
+
+procedure TPhosphorCompiler.ParseFunction;
+var
+  ln, entry, jOver, paramCount, i: Integer;
+  funcName: String;
+  retType: TVarType;
+  ltypes: array of TVarType;
+begin
+  ltypes := nil;
+  if FInFunction then begin Fail('nested functions are not supported', FLex.Cur.Line); Exit; end;
+  ln := FLex.Cur.Line;
+  FLex.Advance; // 'function'
+  if FLex.Cur.Kind <> tkIdent then begin Fail('expected a function name', FLex.Cur.Line); Exit; end;
+  funcName := FLex.Cur.StrVal;
+  retType := VarTypeOf(funcName);
+  FLex.Advance;
+  Expect(tkLParen, '''(''');
+  if FFailed then Exit;
+  FLocalCount := 0;
+  paramCount := 0;
+  if FLex.Cur.Kind <> tkRParen then
+    while not FFailed do
+    begin
+      if FLex.Cur.Kind <> tkIdent then begin Fail('expected a parameter name', FLex.Cur.Line); Exit; end;
+      AddLocal(FLex.Cur.StrVal);
+      Inc(paramCount);
+      FLex.Advance;
+      if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+    end;
+  Expect(tkRParen, ''')''');
+  if FFailed then Exit;
+  if IsKeyword('local') then
+  begin
+    FLex.Advance;
+    while not FFailed do
+    begin
+      if FLex.Cur.Kind <> tkIdent then begin Fail('expected a local variable name', FLex.Cur.Line); Exit; end;
+      AddLocal(FLex.Cur.StrVal);
+      FLex.Advance;
+      if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+    end;
+  end;
+
+  FInFunction := True;
+  FRetType := retType;
+  jOver := FProg.Emit(opJump, 0, 0, ln);   // skip the body in normal flow
+  entry := FProg.Count;
+  SetLength(ltypes, FLocalCount);
+  for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];
+  FProg.AddUserFunc(funcName, entry, paramCount, ltypes, retType);
+
+  ParseBlockUntil(['endfunction']);
+  if FFailed then Exit;
+  // fall-through default return
+  FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(retType)), 0, ln);
+  FProg.Emit(opRetFunc, 0, 0, ln);
+  FProg.Patch(jOver, FProg.Count);
+  if not IsKeyword('endfunction') then begin Fail('expected ''endfunction''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+  FInFunction := False;
+  FLocalCount := 0;
 end;
 
 procedure TPhosphorCompiler.PushLoop;
@@ -284,7 +396,7 @@ begin
         if t.StrVal = 'true' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(True)), 0, t.Line); FLex.Advance; end
         else if t.StrVal = 'false' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(False)), 0, t.Line); FLex.Advance; end
         else if FLex.Peek.Kind = tkLParen then begin FLex.Advance; ParseCall(t.StrVal, t.Line); end
-        else begin FProg.Emit(opLoadVar, VarIndex(t.StrVal), 0, t.Line); FLex.Advance; end;
+        else begin EmitLoadVar(t.StrVal, t.Line); FLex.Advance; end;
       end;
   else
     Fail('unexpected token in expression', t.Line);
@@ -655,6 +767,7 @@ begin
   t := FLex.Cur;
   if t.Kind = tkIdent then
   begin
+    if t.StrVal = 'function' then begin ParseFunction; Exit; end;
     if t.StrVal = 'if' then begin ParseIf; Exit; end;
     if t.StrVal = 'while' then begin ParseWhile; Exit; end;
     if t.StrVal = 'do' then begin ParseDo; Exit; end;
@@ -693,7 +806,22 @@ begin
       FLex.Advance;
       Exit;
     end;
-    if t.StrVal = 'return' then begin FLex.Advance; FProg.Emit(opReturn, 0, 0, t.Line); Exit; end;
+    if t.StrVal = 'return' then
+    begin
+      FLex.Advance;
+      if FInFunction then
+      begin
+        // a function return carries a value (default of the return type if bare)
+        if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
+          FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(FRetType)), 0, t.Line)
+        else
+          ParseExpr;
+        FProg.Emit(opRetFunc, 0, 0, t.Line);
+      end
+      else
+        FProg.Emit(opReturn, 0, 0, t.Line);   // GOSUB return
+      Exit;
+    end;
     if t.StrVal = 'end' then begin FLex.Advance; FProg.Emit(opHalt, 0, 0, t.Line); Exit; end;
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
@@ -723,7 +851,7 @@ begin
       Expect(tkEQ, '''=''');
       if FFailed then Exit;
       ParseExpr;
-      if not FFailed then FProg.Emit(opStoreVar, VarIndex(t.StrVal), 0, t.Line);
+      if not FFailed then EmitStoreVar(t.StrVal, t.Line);
       Exit;
     end;
     if (t.StrVal <> 'true') and (t.StrVal <> 'false') and (FLex.Peek.Kind = tkEQ) then
@@ -731,7 +859,7 @@ begin
       FLex.Advance;  // name
       FLex.Advance;  // '='
       ParseExpr;
-      if not FFailed then FProg.Emit(opStoreVar, VarIndex(t.StrVal), 0, t.Line);
+      if not FFailed then EmitStoreVar(t.StrVal, t.Line);
       Exit;
     end;
   end;
@@ -746,6 +874,7 @@ begin
   FFailed := False; FErr := ''; FErrLine := 0;
   FVarCount := 0; FHidden := 0; FLoopDepth := 0;
   FLabelCount := 0; FGotoCount := 0; FBool := False;
+  FInFunction := False; FLocalCount := 0; FRetType := vtNumber;
   FProg := TProgram.Create;
   FLex := TLexer.Create(ASource);
   try

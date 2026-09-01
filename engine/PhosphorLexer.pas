@@ -26,6 +26,7 @@ type
     tkInt, tkDouble, tkString, tkIdent,
     tkComma, tkSemicolon, tkColon, tkLParen, tkRParen, tkLBracket, tkRBracket,
     tkPlus, tkMinus, tkStar, tkSlash, tkBackslash, tkCaret, tkMod,
+    tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq,
     tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE
   );
 
@@ -295,10 +296,26 @@ begin
 
     // operators and punctuation
     case c of
-      '+': begin PushSimple(tkPlus, startLine); Inc(FPos); end;
-      '-': begin PushSimple(tkMinus, startLine); Inc(FPos); end;
-      '*': begin PushSimple(tkStar, startLine); Inc(FPos); end;
-      '/': begin PushSimple(tkSlash, startLine); Inc(FPos); end;
+      '+':
+        begin
+          if (FPos < len) and (FSrc[FPos + 1] = '=') then begin PushSimple(tkPlusEq, startLine); Inc(FPos, 2); end
+          else begin PushSimple(tkPlus, startLine); Inc(FPos); end;
+        end;
+      '-':
+        begin
+          if (FPos < len) and (FSrc[FPos + 1] = '=') then begin PushSimple(tkMinusEq, startLine); Inc(FPos, 2); end
+          else begin PushSimple(tkMinus, startLine); Inc(FPos); end;
+        end;
+      '*':
+        begin
+          if (FPos < len) and (FSrc[FPos + 1] = '=') then begin PushSimple(tkStarEq, startLine); Inc(FPos, 2); end
+          else begin PushSimple(tkStar, startLine); Inc(FPos); end;
+        end;
+      '/':
+        begin
+          if (FPos < len) and (FSrc[FPos + 1] = '=') then begin PushSimple(tkSlashEq, startLine); Inc(FPos, 2); end
+          else begin PushSimple(tkSlash, startLine); Inc(FPos); end;
+        end;
       '\': begin PushSimple(tkBackslash, startLine); Inc(FPos); end;
       '^': begin PushSimple(tkCaret, startLine); Inc(FPos); end;
       '(': begin PushSimple(tkLParen, startLine); Inc(FPos); end;

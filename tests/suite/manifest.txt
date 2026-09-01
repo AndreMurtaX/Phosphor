@@ -16,3 +16,6 @@
 41_syntax_string_plus_number
 39_syntax_let_list
 40_syntax_inline_else
+38_syntax_compound
+42_syntax_elseif
+43_syntax_const

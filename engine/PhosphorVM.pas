@@ -208,6 +208,13 @@ begin
           Inc(FDataPtr);
         end;
       opRestore: FDataPtr := 0;
+      opDup2:
+        begin
+          a := FStack[FSP - 2];
+          b := FStack[FSP - 1];
+          Push(a);
+          Push(b);
+        end;
       opHalt: Exit(True);
       opGosub:
         begin

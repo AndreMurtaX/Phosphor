@@ -74,6 +74,7 @@ type
     procedure AddLocal(const AName: String);
     procedure EmitLoadVar(const AName: String; ALine: Integer);
     procedure EmitStoreVar(const AName: String; ALine: Integer);
+    function CompoundOp(K: TTokenKind): TOpcode;
     procedure ParseFunction;
     procedure PushLoop;
     procedure PopLoop;
@@ -213,6 +214,17 @@ begin
   li := LocalIndex(AName);
   if li >= 0 then FProg.Emit(opStoreLocal, li, 0, ALine)
   else FProg.Emit(opStoreVar, VarIndex(AName), 0, ALine);
+end;
+
+function TPhosphorCompiler.CompoundOp(K: TTokenKind): TOpcode;
+begin
+  case K of
+    tkMinusEq: Result := opSub;
+    tkStarEq:  Result := opMul;
+    tkSlashEq: Result := opDivReal;
+  else
+    Result := opAdd;   // tkPlusEq
+  end;
 end;
 
 procedure TPhosphorCompiler.ParseFunction;
@@ -734,7 +746,7 @@ end;
 
 procedure TPhosphorCompiler.ParseFor;
 var
-  ln, loopVar, endVar, condStart, jFalse, incPoint, afterLoop: Integer;
+  ln, endVar, condStart, jFalse, incPoint, afterLoop: Integer;
   step: TValue;
   down: Boolean;
   neg: Boolean;
@@ -743,13 +755,12 @@ begin
   ln := FLex.Cur.Line;
   FLex.Advance; // 'for'
   if FLex.Cur.Kind <> tkIdent then begin Fail('expected a loop variable after ''for''', FLex.Cur.Line); Exit; end;
-  vname := FLex.Cur.StrVal;
-  loopVar := VarIndex(vname);
+  vname := FLex.Cur.StrVal;   // resolved through the scope (local inside a function, else global)
   FLex.Advance;
   Expect(tkEQ, '''=''');
   if FFailed then Exit;
   ParseExpr;                                    // start value
-  FProg.Emit(opStoreVar, loopVar, 0, ln);
+  EmitStoreVar(vname, ln);
   if not IsKeyword('to') then begin Fail('expected ''to''', FLex.Cur.Line); Exit; end;
   FLex.Advance;
   endVar := NewHiddenVar(vtNumber);
@@ -781,17 +792,17 @@ begin
 
   PushLoop;
   condStart := FProg.Count;
-  FProg.Emit(opLoadVar, loopVar, 0, ln);
+  EmitLoadVar(vname, ln);
   FProg.Emit(opLoadVar, endVar, 0, ln);
   if down then FProg.Emit(opGE, 0, 0, ln) else FProg.Emit(opLE, 0, 0, ln);
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
   ParseBlockUntil(['next']);
   if FFailed then Exit;
   incPoint := FProg.Count;                       // continue jumps to the increment
-  FProg.Emit(opLoadVar, loopVar, 0, ln);
+  EmitLoadVar(vname, ln);
   FProg.Emit(opPushConst, FProg.Consts.Add(step), 0, ln);
   FProg.Emit(opAdd, 0, 0, ln);
-  FProg.Emit(opStoreVar, loopVar, 0, ln);
+  EmitStoreVar(vname, ln);
   FProg.Emit(opJump, condStart, 0, ln);
   afterLoop := FProg.Count;
   FProg.Patch(jFalse, afterLoop);
@@ -854,6 +865,7 @@ var
   cname: String;
   cval: TValue;
   neg: Boolean;
+  k: TTokenKind;
 begin
   t := FLex.Cur;
   if t.Kind = tkIdent then
@@ -973,6 +985,17 @@ begin
         ParseExpr;                     // the value
         FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 3, t.Line);
       end
+      else if FLex.Cur.Kind in [tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq] then
+      begin
+        // a@[i] op= x  ==  a@[i] = a@[i] op x, index evaluated once
+        k := FLex.Cur.Kind;
+        FLex.Advance;
+        FProg.Emit(opDup2, 0, 0, t.Line);                                    // [h,i,h,i]
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);  // [h,i,elem]
+        ParseExpr;                                                            // [h,i,elem,rhs]
+        FProg.Emit(CompoundOp(k), 0, 0, t.Line);                             // [h,i,newval]
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 3, t.Line);
+      end
       else
         FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
       FProg.Emit(opPop, 0, 0, t.Line);  // statement: discard the call result
@@ -1064,6 +1087,22 @@ begin
       FLex.Advance;  // '='
       ParseExpr;
       if not FFailed then EmitStoreVar(t.StrVal, t.Line);
+      Exit;
+    end;
+    // compound assignment: <var> op= <expr>  ==  <var> = <var> op <expr>
+    if (t.StrVal <> 'true') and (t.StrVal <> 'false') and
+       (FLex.Peek.Kind in [tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq]) then
+    begin
+      k := FLex.Peek.Kind;
+      FLex.Advance;  // name
+      FLex.Advance;  // compound op
+      EmitLoadVar(t.StrVal, t.Line);
+      ParseExpr;
+      if not FFailed then
+      begin
+        FProg.Emit(CompoundOp(k), 0, 0, t.Line);
+        EmitStoreVar(t.StrVal, t.Line);
+      end;
       Exit;
     end;
   end;

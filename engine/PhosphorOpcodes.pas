@@ -64,7 +64,8 @@ type
     opStoreLocal = 31, // A = local slot -> pop and store into current frame
     opRetFunc    = 32, // return from a user function (value already on the stack)
     opReadData   = 33, // push the next DATA item, advance the data pointer
-    opRestore    = 34  // reset the data pointer to the first item
+    opRestore    = 34, // reset the data pointer to the first item
+    opDup2       = 35  // duplicate the top two stack values (for a@[i] op= x)
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -224,7 +225,7 @@ begin
     (Ord(opOr) = 24) and (Ord(opNot) = 25) and (Ord(opJump) = 26) and
     (Ord(opHalt) = 27) and (Ord(opGosub) = 28) and (Ord(opReturn) = 29) and
     (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32) and
-    (Ord(opReadData) = 33) and (Ord(opRestore) = 34);
+    (Ord(opReadData) = 33) and (Ord(opRestore) = 34) and (Ord(opDup2) = 35);
 end;
 
 end.

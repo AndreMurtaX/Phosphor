@@ -1041,14 +1041,19 @@ begin
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
       FLex.Advance;
-      // `;`-separated items, printed adjacent (no separator); PRINTLN adds a
-      // trailing newline, PRINT does not.
+      // Items separated by `;` (adjacent, no separator) or `,` (a tab to the
+      // next zone). PRINTLN adds a trailing newline, PRINT does not.
       if (FLex.Cur.Kind <> tkEOL) and (FLex.Cur.Kind <> tkEOF) then
       begin
         ParseExpr;
         FProg.Emit(opPrint, 0, 0, t.Line);
-        while (not FFailed) and (FLex.Cur.Kind = tkSemicolon) do
+        while (not FFailed) and ((FLex.Cur.Kind = tkSemicolon) or (FLex.Cur.Kind = tkComma)) do
         begin
+          if FLex.Cur.Kind = tkComma then
+          begin
+            FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(#9)), 0, t.Line);
+            FProg.Emit(opPrint, 0, 0, t.Line);
+          end;
           FLex.Advance;
           if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then Break;
           ParseExpr;

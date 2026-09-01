@@ -20,3 +20,4 @@
 42_syntax_elseif
 43_syntax_const
 37_syntax_return
+35_print_paths

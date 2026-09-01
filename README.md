@@ -19,7 +19,8 @@ a string literal (plus `REM` / `'` comments). What that already demonstrates:
 - the full **build → link → run → byte-exact golden compare** loop, on win64.
 
 The real lexer, parser, exec core, and the five-type value model replace the
-stub next. The founding brief is in [prompt-inicial.md](prompt-inicial.md).
+stub next, following the adversarially-vetted [docs/roadmap.md](docs/roadmap.md).
+The founding brief is in [prompt-inicial.md](prompt-inicial.md).
 
 ## Quickstart
 
@@ -56,3 +57,6 @@ box here; Linux needs a native `fpc` (or a cross toolchain) — see
 - [docs/decisions.md](docs/decisions.md) — the frozen language decisions (five
   types, `@` handles, base-1, strict boolean, …) and the on-disk-bytecode
   decisions taken up front.
+- [docs/roadmap.md](docs/roadmap.md) — the adversarially-vetted phase-1 build
+  sequence, the first-increment definition-of-done, rejected approaches, and the
+  open questions still pending an owner decision.

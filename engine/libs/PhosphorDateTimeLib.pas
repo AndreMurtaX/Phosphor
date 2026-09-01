@@ -117,6 +117,107 @@ begin E := NoError; Result := ValDouble(Yesterday); end;
 function t_istoday(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValInt(Ord(IsToday(D0(A)))); end;
 
+// --- ISO 8601 rendering and parsing -----------------------------------------
+// Phosphor's date strings are ISO 8601 (yyyy-mm-dd, hh:nn:ss), fixed rather than
+// locale-following, so the same text parses and renders the same on any machine
+// -- render/parse are exact inverses and a hard-coded "2020-06-15" is read the
+// same everywhere. (The reference used the machine's locale format.)
+var
+  ISOFS: TFormatSettings;
+
+function t_datetostr(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(DateToStr(D0(A), ISOFS)); end;
+function t_timetostr(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(TimeToStr(D0(A), ISOFS)); end;
+function t_datetimetostr(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(DateTimeToStr(D0(A), ISOFS)); end;
+function t_date_s(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(DateToStr(Date, ISOFS)); end;
+function t_time_s(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(TimeToStr(Time, ISOFS)); end;
+function t_datetime_s(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(DateTimeToStr(Now, ISOFS)); end;
+function t_formatdatetime(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValStr(FormatDateTime(A[0].Str, AsDouble(A[1]), ISOFS)); end;
+
+function t_strtodate(const A: array of TValue; out E: TPhosphorError): TValue;
+var d: TDateTime;
+begin
+  Result := ValInt(0);
+  try d := StrToDate(A[0].Str, ISOFS);
+  except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid date: ' + Ex.Message); Exit; end; end;
+  E := NoError; Result := ValDouble(d);
+end;
+function t_strtotime(const A: array of TValue; out E: TPhosphorError): TValue;
+var d: TDateTime;
+begin
+  Result := ValInt(0);
+  try d := StrToTime(A[0].Str, ISOFS);
+  except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid time: ' + Ex.Message); Exit; end; end;
+  E := NoError; Result := ValDouble(d);
+end;
+function t_strtodatetime(const A: array of TValue; out E: TPhosphorError): TValue;
+var d: TDateTime;
+begin
+  Result := ValInt(0);
+  try d := StrToDateTime(A[0].Str, ISOFS);
+  except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid datetime: ' + Ex.Message); Exit; end; end;
+  E := NoError; Result := ValDouble(d);
+end;
+
+// --- the clock (no arguments) -----------------------------------------------
+function t_date(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(Date); end;
+function t_time(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(Time); end;
+function t_gettime(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(Now); end;
+
+// --- finer increments -------------------------------------------------------
+function t_inchour(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(IncHour(D0(A), I1(A))); end;
+function t_incminute(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(IncMinute(D0(A), I1(A))); end;
+function t_incsecond(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(IncSecond(D0(A), I1(A))); end;
+function t_incmillisecond(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(IncMilliSecond(D0(A), I1(A))); end;
+
+// --- year lengths taking a date ---------------------------------------------
+function t_daysinyear(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(DaysInYear(D0(A))); end;
+function t_weeksinyear(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(WeeksInYear(D0(A))); end;
+
+// --- more distances ---------------------------------------------------------
+function t_weeksbetween(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(WeeksBetween(D0(A), D1(A))); end;
+function t_monthsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(MonthsBetween(D0(A), D1(A))); end;
+function t_yearsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(YearsBetween(D0(A), D1(A))); end;
+function t_millisecondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(MilliSecondsBetween(D0(A), D1(A))); end;
+
+// --- spans (fractional distances) -------------------------------------------
+function t_hourspan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(HourSpan(D0(A), D1(A))); end;
+function t_minutespan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(MinuteSpan(D0(A), D1(A))); end;
+function t_secondspan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(SecondSpan(D0(A), D1(A))); end;
+function t_millisecondspan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(MilliSecondSpan(D0(A), D1(A))); end;
+function t_weekspan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(WeekSpan(D0(A), D1(A))); end;
+function t_monthspan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(MonthSpan(D0(A), D1(A))); end;
+function t_yearspan(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValDouble(YearSpan(D0(A), D1(A))); end;
+
+function t_millisecondof(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValInt(MilliSecondOf(D0(A))); end;
+
 procedure RegisterDateTimeFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('yearof:n',          @t_yearof);
@@ -154,6 +255,52 @@ begin
   Reg.Add('tomorrow:',         @t_tomorrow);
   Reg.Add('yesterday:',        @t_yesterday);
   Reg.Add('istoday:n',         @t_istoday);
+  // string rendering and parsing (ISO 8601)
+  Reg.Add('datetostr$:n',      @t_datetostr);
+  Reg.Add('timetostr$:n',      @t_timetostr);
+  Reg.Add('datetimetostr$:n',  @t_datetimetostr);
+  Reg.Add('date$:',            @t_date_s);
+  Reg.Add('time$:',            @t_time_s);
+  Reg.Add('datetime$:',        @t_datetime_s);
+  Reg.Add('formatdatetime$:$n',@t_formatdatetime);
+  Reg.Add('strtodate:$',       @t_strtodate);
+  Reg.Add('strtotime:$',       @t_strtotime);
+  Reg.Add('strtodatetime:$',   @t_strtodatetime);
+  // the clock
+  Reg.Add('date:',             @t_date);
+  Reg.Add('time:',             @t_time);
+  Reg.Add('gettime:',          @t_gettime);
+  // finer increments
+  Reg.Add('inchour:nn',        @t_inchour);
+  Reg.Add('incminute:nn',      @t_incminute);
+  Reg.Add('incsecond:nn',      @t_incsecond);
+  Reg.Add('incmillisecond:nn', @t_incmillisecond);
+  // year lengths taking a date
+  Reg.Add('daysinyear:n',      @t_daysinyear);
+  Reg.Add('weeksinyear:n',     @t_weeksinyear);
+  // more distances
+  Reg.Add('weeksbetween:nn',   @t_weeksbetween);
+  Reg.Add('monthsbetween:nn',  @t_monthsbetween);
+  Reg.Add('yearsbetween:nn',   @t_yearsbetween);
+  Reg.Add('millisecondsbetween:nn', @t_millisecondsbetween);
+  // spans
+  Reg.Add('hourspan:nn',       @t_hourspan);
+  Reg.Add('minutespan:nn',     @t_minutespan);
+  Reg.Add('secondspan:nn',     @t_secondspan);
+  Reg.Add('millisecondspan:nn',@t_millisecondspan);
+  Reg.Add('weekspan:nn',       @t_weekspan);
+  Reg.Add('monthspan:nn',      @t_monthspan);
+  Reg.Add('yearspan:nn',       @t_yearspan);
+  Reg.Add('millisecondof:n',   @t_millisecondof);
 end;
+
+initialization
+  ISOFS := DefaultFormatSettings;
+  ISOFS.DateSeparator := '-';
+  ISOFS.TimeSeparator := ':';
+  ISOFS.ShortDateFormat := 'yyyy-mm-dd';
+  ISOFS.LongDateFormat := 'yyyy-mm-dd';
+  ISOFS.ShortTimeFormat := 'hh:nn:ss';
+  ISOFS.LongTimeFormat := 'hh:nn:ss';
 
 end.

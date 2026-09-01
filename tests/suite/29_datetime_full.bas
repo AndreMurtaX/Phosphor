@@ -1,0 +1,125 @@
+rem ---------------------------------------------------------------
+rem DateTimeLib, second half. 20_datetime.bas covers the calendar
+rem parts; check-coverage.py reported the arithmetic, the spans, the
+rem differences and the clock still at 36/66.
+rem
+rem The map for this file came from Examples/, where the applets call
+rem these in earnest and assert almost nothing. What is added here is
+rem the assertion.
+rem
+rem Nothing asserts the wall clock. now(), date() and time() answer
+rem whatever the machine says, so what is checked is the relationship
+rem between them, which holds on any machine at any moment.
+rem ---------------------------------------------------------------
+
+test_case("datetime/clock")
+rem A date is a whole number of days and a time is the fraction after
+rem the point, so the two halves of now() have to add back up to it.
+n = now()
+assert_true(n, "now answers a moment")
+
+d = date()
+t = time()
+assert_eq(d, int(d), "date is a whole number of days")
+if t < 1 then frac_ok = 1
+assert_true(frac_ok, "and time is the fraction under one day")
+
+assert_true(len(date$()), "date$ renders the date")
+assert_true(len(time$()), "time$ renders the time")
+assert_true(len(datetime$()), "datetime$ renders both")
+
+g = gettime()
+assert_true(g, "gettime answers a moment too")
+
+test_case("datetime/render-and-parse")
+rem A fixed moment, so the round trip is about the functions and not
+rem about the clock. 2020-06-15 is a Monday, which matters later.
+fixed = strtodate("2020-06-15")
+assert_true(fixed, "strtodate reads a date")
+assert_eq(yearof(fixed), 2020, "the year survives")
+assert_eq(monthof(fixed), 6, "the month")
+assert_eq(dayof(fixed), 15, "and the day")
+
+rendered$ = datetostr$(fixed)
+assert_true(len(rendered$), "datetostr$ renders it")
+assert_eq(strtodate(rendered$), fixed, "and strtodate reads back what was rendered")
+
+full$ = datetimetostr$(fixed)
+assert_true(len(full$), "datetimetostr$ renders date and time")
+assert_near(strtodatetime(full$), fixed, 0.001, "and strtodatetime reads it back")
+
+clock = strtotime("14:30:00")
+assert_true(clock, "strtotime reads a time")
+assert_eq(hourof(clock), 14, "with the hour")
+assert_eq(minuteof(clock), 30, "and the minute")
+assert_true(len(timetostr$(clock)), "timetostr$ renders it")
+
+test_case("datetime/format")
+rem formatdatetime$ takes the pattern first and the value second, which
+rem is the opposite of what a reader of Delphi expects.
+assert_eq(formatdatetime$("yyyy", fixed), "2020", "a year pattern")
+assert_eq(formatdatetime$("yyyy-mm-dd", fixed), "2020-06-15", "a full date pattern")
+
+test_case("datetime/increments")
+rem Each inc* moves by its own unit and nothing else. A day is 1, an
+rem hour is 1/24, and the smaller ones follow from there.
+assert_eq(incday(fixed, 1) - fixed, 1, "incday moves a whole day")
+assert_near(inchour(fixed, 24) - fixed, 1, 0.0001, "twenty-four hours make one")
+assert_near(incminute(fixed, 60) - fixed, inchour(fixed, 1) - fixed, 0.0001, "sixty minutes make an hour")
+assert_near(incsecond(fixed, 60) - fixed, incminute(fixed, 1) - fixed, 0.0001, "sixty seconds make a minute")
+assert_near(incmillisecond(fixed, 1000) - fixed, incsecond(fixed, 1) - fixed, 0.0001, "a thousand milliseconds make a second")
+
+assert_eq(incweek(fixed, 1) - fixed, 7, "incweek moves seven days")
+assert_eq(yearof(incyear(fixed, 1)), 2021, "incyear moves the year")
+assert_eq(monthof(incyear(fixed, 1)), 6, "and leaves the month alone")
+
+rem Negative moves go backwards, which is the only way to subtract.
+assert_eq(incday(fixed, -1), fixed - 1, "a negative increment goes back")
+
+test_case("datetime/differences")
+rem The *between family answers whole units elapsed, counting down.
+later = incday(fixed, 400)
+assert_eq(daysbetween(fixed, later), 400, "daysbetween counts days")
+assert_eq(weeksbetween(fixed, later), 57, "weeksbetween counts whole weeks")
+assert_eq(monthsbetween(fixed, later), 13, "monthsbetween counts whole months")
+assert_eq(yearsbetween(fixed, later), 1, "yearsbetween counts whole years")
+
+hourslater = inchour(fixed, 50)
+assert_eq(hoursbetween(fixed, hourslater), 50, "hoursbetween counts hours")
+assert_eq(minutesbetween(fixed, inchour(fixed, 2)), 120, "minutesbetween counts minutes")
+assert_eq(secondsbetween(fixed, incminute(fixed, 3)), 180, "secondsbetween counts seconds")
+assert_eq(millisecondsbetween(fixed, incsecond(fixed, 2)), 2000, "millisecondsbetween counts milliseconds")
+
+test_case("datetime/spans")
+rem A span is the same distance as a fraction rather than a whole
+rem count, so half a day is 0.5 days and 12 hours, not 0 and 12.
+half = inchour(fixed, 12)
+assert_near(dayspan(fixed, half), 0.5, 0.0001, "dayspan answers a fraction of a day")
+assert_near(hourspan(fixed, half), 12, 0.0001, "hourspan answers twelve hours")
+assert_near(minutespan(fixed, half), 720, 0.01, "minutespan answers seven hundred and twenty minutes")
+assert_near(secondspan(fixed, half), 43200, 1, "secondspan follows")
+assert_near(millisecondspan(fixed, half), 43200000, 1000, "and millisecondspan")
+
+assert_near(weekspan(fixed, incday(fixed, 7)), 1, 0.0001, "weekspan answers one week")
+assert_near(monthspan(fixed, incyear(fixed, 1)), 12, 0.2, "monthspan answers twelve months in a year")
+assert_near(yearspan(fixed, incyear(fixed, 1)), 1, 0.01, "and yearspan answers one")
+
+test_case("datetime/parts")
+rem millisecondof completes the of* family the other tests already use.
+stamp = incmillisecond(strtotime("10:20:30"), 400)
+assert_eq(millisecondof(stamp), 400, "millisecondof reads the milliseconds")
+assert_eq(secondof(stamp), 30, "beside the seconds")
+
+test_case("datetime/year-lengths")
+rem 2020 is a leap year and 2021 is not, which is the whole difference
+rem these two are for.
+assert_eq(daysinyear(strtodate("2020-01-01")), 366, "a leap year has 366 days")
+assert_eq(daysinyear(strtodate("2021-01-01")), 365, "and a common year 365")
+
+rem A year spans 52 or 53 ISO weeks depending on where its days fall.
+w2020 = weeksinyear(strtodate("2020-01-01"))
+if w2020 >= 52 then weeks_ok = 1
+assert_true(weeks_ok, "weeksinyear answers 52 or 53")
+if w2020 <= 53 then weeks_ok2 = 1
+assert_true(weeks_ok2, "and never more")
+assert_eq(weekof(fixed), 25, "weekof answers the ISO week 2020-06-15 falls in")

@@ -35,6 +35,7 @@ var
 function CpStarts(const S: String): TInt64DynArray;
 var i, n: Integer;
 begin
+  Result := nil;
   SetLength(Result, Length(S) + 1);
   n := 0;
   for i := 1 to Length(S) do
@@ -95,6 +96,7 @@ end;
 function SplitBy(const S, Sep: String): TStringArray;
 var start, i, n: Integer;
 begin
+  Result := nil;
   SetLength(Result, 0);
   if Sep = '' then
   begin
@@ -125,7 +127,7 @@ begin
 end;
 
 // --- library functions ------------------------------------------------------
-function s0(const Args: array of TValue): String; inline; begin Result := Args[0].Str; end;
+function s0(const Args: array of TValue): String; begin Result := Args[0].Str; end;
 
 function f_ucase(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValStr(UpperCase(s0(A))); end;

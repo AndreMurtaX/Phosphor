@@ -22,7 +22,7 @@ procedure RegisterNumFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
-function N(const Args: array of TValue): Double; inline;
+function N(const Args: array of TValue): Double;
 begin Result := AsDouble(Args[0]); end;
 
 function f_abs(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -47,6 +47,8 @@ function f_cint(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValInt(Trunc(N(Args))); end;
 function f_frac(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Frac(N(Args))); end;
+function f_int(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError; Result := ValInt(Floor(N(Args))); end;   // BASIC INT: floor
 
 function f_log10(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Log10(N(Args))); end;
@@ -103,6 +105,7 @@ begin
   Reg.Add('fix:n',  @f_fix);
   Reg.Add('cint:n', @f_cint);
   Reg.Add('frac:n', @f_frac);
+  Reg.Add('int:n',  @f_int);
   Reg.Add('log10:n', @f_log10);
   Reg.Add('log2:n', @f_log2);
   Reg.Add('ln:n',   @f_ln);

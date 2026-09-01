@@ -1,0 +1,83 @@
+{******************************************************************************
+  Phosphor BASIC -- menu library (a GUI package under host/gui/libs)
+
+  MIT License. Copyright (c) 2026 Andre Murta.
+
+    mainmenu@(form@)                    the form's menu bar
+    menuitem@(parent@[, caption$])      an item; parent is a main menu (a top-
+                                        level item) or a menu item (a submenu)
+    menuitem_caption@/$
+    menuitem_onclick@(mi@, "func")      run a BASIC routine when it is chosen
+    menuitem_click@(mi@)                choose it programmatically (headless: fires
+                                        OnClick synchronously, no window needed)
+
+  A menu item is a TComponent, not a TControl, so the control_* helpers do not
+  apply; its own caption/onclick are here.
+******************************************************************************}
+unit PhosphorMenuLib;
+
+{$mode objfpc}{$H+}{$J-}
+{$codepage UTF8}
+
+interface
+
+uses
+  SysUtils, Classes, Controls, Forms, Menus,
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
+
+procedure RegisterMenuFuncs(Reg: TPhosphorRegistry);
+
+implementation
+
+function f_mainmenu(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; mm: TMainMenu;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TForm, c) then begin Result := ValHandle(0); Exit; end;
+  mm := TMainMenu.Create(c);
+  TForm(c).Menu := mm;
+  Result := ValHandle(GuiRegister(mm, False));
+end;
+
+function f_menuitem(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; item: TMenuItem;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TComponent, c) then begin Result := ValHandle(0); Exit; end;
+  if c is TMainMenu then
+    item := TMenuItem.Create(TMainMenu(c))
+  else if c is TMenuItem then
+    item := TMenuItem.Create(TMenuItem(c).Owner)
+  else
+  begin
+    GGuiError := 1;   // parent is neither a main menu nor a menu item
+    Result := ValHandle(0);
+    Exit;
+  end;
+  if Length(A) >= 2 then item.Caption := A[1].Str;
+  if c is TMainMenu then TMainMenu(c).Items.Add(item)
+  else TMenuItem(c).Add(item);
+  Result := ValHandle(GuiRegister(item, False));
+end;
+
+function f_mi_caption_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMenuItem, c) then TMenuItem(c).Caption := A[1].Str; Result := A[0]; end;
+function f_mi_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMenuItem, c) then Result := ValStr(TMenuItem(c).Caption) else Result := ValStr(''); end;
+function f_mi_click(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMenuItem, c) then TMenuItem(c).Click; Result := A[0]; end;
+function f_mi_onclick(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TMenuItem, c) then TMenuItem(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', A[1].Str, A[0].Hnd); end;
+
+procedure RegisterMenuFuncs(Reg: TPhosphorRegistry);
+begin
+  Reg.Add('mainmenu@:@', @f_mainmenu);
+  Reg.Add('menuitem@:@',  @f_menuitem);
+  Reg.Add('menuitem@:@$', @f_menuitem);
+  Reg.Add('menuitem_caption@:@$', @f_mi_caption_set);
+  Reg.Add('menuitem_caption$:@',  @f_mi_caption_get);
+  Reg.Add('menuitem_click@:@',    @f_mi_click);
+  Reg.AddHost('menuitem_onclick@:@$', @f_mi_onclick);
+end;
+
+end.

@@ -4,20 +4,27 @@
   MIT License. Copyright (c) 2026 Andre Murta.
 
   The engine is host-agnostic; this program is one host. It wires the engine's
-  OnOutput callback to a byte stream and offers two ways in: run a .bas file, or
-  a line-at-a-time REPL. It is deliberately small -- the point of a host is that
-  it is small.
+  OnOutput callback to output, and offers two ways in: run a .bas file, or a
+  line-at-a-time REPL.
 
   Usage:
     phosphor <file.bas>              run a file, output to stdout
     phosphor run <file.bas>          same, explicit verb
     phosphor run <file.bas> --out F  run a file, output bytes to F (used by tests)
     phosphor                         REPL
+    phosphor --diag                  print console detection + a known UTF-8 line
     phosphor --version | --help
 
-  UTF-8: output goes to the OS stdout handle as raw bytes, so the golden test is
-  byte-exact regardless of the console codepage. On Windows we still switch the
-  console to UTF-8 (65001) so interactive glyphs render.
+  UTF-8 on Windows -- the subtlety this host exists to get right:
+
+    Writing raw UTF-8 bytes to a *console* handle (WriteFile), or reading it with
+    ReadLn under code page 65001, is unreliable for non-ASCII: it renders as
+    mojibake. The robust path is the console's native Unicode: WriteConsoleW /
+    ReadConsoleW (UTF-16). So when a handle is an interactive console we go
+    through those; when it is redirected to a file or pipe we write/read raw
+    UTF-8 bytes, which keeps file output byte-exact (and is what the golden test
+    checks). On Linux the terminal is UTF-8 natively, so raw bytes are correct
+    there too.
 ******************************************************************************}
 program phosphor;
 
@@ -30,53 +37,139 @@ uses
 
 type
   { The whole host side of the boundary: give the engine somewhere to put its
-    output. The target is either the real stdout or a file (--out). }
+    output, and (for the REPL) a way to read a line. }
   TConsoleHost = class
   private
-    FTarget: TStream;
-    FOwnsTarget: Boolean;
+    FOutFile: TStream;       // non-nil only in --out file mode
+    {$IFDEF WINDOWS}
+    FStdOut, FStdIn: THandle;
+    FOutIsConsole: Boolean;  // stdout is an interactive console (not redirected)
+    FInIsConsole: Boolean;   // stdin  is an interactive console
+    {$ENDIF}
   public
     constructor Create(const AOutPath: String);
     destructor Destroy; override;
     procedure Output(const AText: String); // matches TPhosphorOutputProc
+    function ReadLine(out ALine: String): Boolean; // False at end of input
+    function StdoutIsConsole: Boolean;
+    function StdinIsConsole: Boolean;
   end;
 
 constructor TConsoleHost.Create(const AOutPath: String);
+{$IFDEF WINDOWS}
+var
+  mode: DWORD;
+{$ENDIF}
 begin
   inherited Create;
+  FOutFile := nil;
   if AOutPath <> '' then
-  begin
-    FTarget := TFileStream.Create(AOutPath, fmCreate);
-    FOwnsTarget := True;
-  end
-  else
-  begin
-    { Write raw bytes straight to the stdout handle (fd 1 on Unix, the console
-      handle on Windows). We do not own it, so we must not free it. }
-    FTarget := THandleStream.Create(StdOutputHandle);
-    FOwnsTarget := False;
-  end;
+    FOutFile := TFileStream.Create(AOutPath, fmCreate);
+  {$IFDEF WINDOWS}
+  mode := 0;
+  FStdOut := StdOutputHandle;
+  FStdIn := StdInputHandle;
+  { GetConsoleMode succeeds only on a real console handle; a file/pipe fails it. }
+  FOutIsConsole := (FOutFile = nil) and GetConsoleMode(FStdOut, mode);
+  FInIsConsole := GetConsoleMode(FStdIn, mode);
+  {$ENDIF}
 end;
 
 destructor TConsoleHost.Destroy;
 begin
-  if FOwnsTarget then
-    FTarget.Free;
+  FOutFile.Free; // nil-safe
   inherited Destroy;
 end;
 
-procedure TConsoleHost.Output(const AText: String);
-begin
-  if Length(AText) > 0 then
-    FTarget.WriteBuffer(AText[1], Length(AText));
-end;
-
-procedure SetupConsoleUTF8;
+function TConsoleHost.StdoutIsConsole: Boolean;
 begin
   {$IFDEF WINDOWS}
-  SetConsoleOutputCP(CP_UTF8);
-  SetConsoleCP(CP_UTF8);
+  Result := FOutIsConsole;
+  {$ELSE}
+  Result := False;
   {$ENDIF}
+end;
+
+function TConsoleHost.StdinIsConsole: Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := FInIsConsole;
+  {$ELSE}
+  Result := False;
+  {$ENDIF}
+end;
+
+procedure TConsoleHost.Output(const AText: String);
+{$IFDEF WINDOWS}
+var
+  w: WideString;
+  written: DWORD;
+{$ENDIF}
+begin
+  if Length(AText) = 0 then
+    Exit;
+  if FOutFile <> nil then
+  begin
+    FOutFile.WriteBuffer(AText[1], Length(AText));
+    Exit;
+  end;
+  {$IFDEF WINDOWS}
+  if FOutIsConsole then
+  begin
+    written := 0;
+    w := UTF8Decode(AText);           // UTF-8 bytes -> UTF-16 for the console
+    if Length(w) > 0 then
+      WriteConsoleW(FStdOut, PWideChar(w), Length(w), written, nil);
+    Exit;
+  end;
+  {$ENDIF}
+  { Redirected (pipe/file) or non-Windows: raw UTF-8 bytes, byte-exact. }
+  FileWrite(StdOutputHandle, AText[1], Length(AText));
+end;
+
+function TConsoleHost.ReadLine(out ALine: String): Boolean;
+{$IFDEF WINDOWS}
+var
+  wbuf: array[0..8191] of WideChar;
+  numRead: DWORD;
+  w: WideString;
+  z: Integer;
+  hadEOF: Boolean;
+{$ENDIF}
+begin
+  ALine := '';
+  {$IFDEF WINDOWS}
+  if FInIsConsole then
+  begin
+    w := '';
+    numRead := 0;
+    if not ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil) then
+      Exit(False);
+    if numRead = 0 then
+      Exit(False);                    // Ctrl+Z at line start -> EOF
+    SetLength(w, numRead);
+    Move(wbuf[0], w[1], numRead * SizeOf(WideChar));
+    { A Ctrl+Z (#26) anywhere ends input; keep any text before it. }
+    hadEOF := False;
+    z := Pos(WideChar($1A), w);
+    if z > 0 then
+    begin
+      SetLength(w, z - 1);
+      hadEOF := True;
+    end;
+    while (Length(w) > 0) and ((w[Length(w)] = #10) or (w[Length(w)] = #13)) do
+      SetLength(w, Length(w) - 1);
+    ALine := UTF8Encode(w);           // UTF-16 -> UTF-8 bytes for the engine
+    if hadEOF and (Length(ALine) = 0) then
+      Exit(False);
+    Exit(True);
+  end;
+  {$ENDIF}
+  { Redirected stdin or non-Windows: standard line read (raw bytes). }
+  if EOF(Input) then
+    Exit(False);
+  ReadLn(ALine);
+  Result := True;
 end;
 
 { Reads a whole file as raw bytes and strips a leading UTF-8 BOM if present, so
@@ -139,16 +232,16 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
-    Writeln('Phosphor BASIC ', PhosphorVersion, ' -- skeleton REPL (PRINT/PRINTLN only). Ctrl+Z / Ctrl+D to quit.');
+    host.Output('Phosphor BASIC ' + PhosphorVersion +
+                ' -- skeleton REPL (PRINT/PRINTLN only). Ctrl+Z then Enter to quit.'#10);
     while True do
     begin
-      Write('phosphor> ');
-      if EOF(Input) then
+      host.Output('phosphor> ');
+      if not host.ReadLine(line) then
       begin
-        Writeln;
+        host.Output(#10);
         Break;
       end;
-      ReadLn(line);
       if eng.Run(line) <> 0 then
         Writeln(StdErr, 'error: ', eng.ErrorMessage);
     end;
@@ -159,12 +252,30 @@ begin
   end;
 end;
 
+{ A deterministic thing to run in a real terminal: reports whether the handles
+  are consoles, then prints a known UTF-8 line through the same path the engine
+  uses. On a fixed console it must render "Ola -- cafe -- acucar -- coffee --
+  pi" with the proper accents and symbols. }
+function Diag: Integer;
+var
+  host: TConsoleHost;
+begin
+  host := TConsoleHost.Create('');
+  try
+    Writeln(StdErr, 'stdout is console: ', host.StdoutIsConsole);
+    Writeln(StdErr, 'stdin  is console: ', host.StdinIsConsole);
+    Flush(StdErr);
+    host.Output('UTF-8 check: Olá — café — açúcar — ☕ — π ≈ 3.14159'#10);
+    Result := 0;
+  finally
+    host.Free;
+  end;
+end;
+
 var
   i: Integer;
   arg, filePath, outPath: String;
 begin
-  SetupConsoleUTF8;
-
   filePath := '';
   outPath := '';
   i := 1;
@@ -180,9 +291,12 @@ begin
     begin
       Writeln('usage: phosphor [run] <file.bas> [--out <path>]');
       Writeln('       phosphor            (REPL)');
+      Writeln('       phosphor --diag     (console/UTF-8 self-check)');
       Writeln('       phosphor --version');
       Halt(0);
     end
+    else if arg = '--diag' then
+      Halt(Diag)
     else if arg = 'run' then
       { optional verb; ignore }
     else if arg = '--out' then

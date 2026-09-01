@@ -158,14 +158,24 @@ VM gtk2 build flags that worked (fpc direct, Lazarus 4.8 at `/usr/share/lazarus/
    never realizes a window headless — a no-op until the interactive host shows the
    form; without the guard it hung.)
 
-5. **Control breadth + geometry + containers**, one isolated library unit per
-   family under `host/gui/libs/` (mirroring `engine/libs/`): label, edit,
-   checkbox, panel, listbox, image, timer, … Each imports its reference test,
-   adapted to Phosphor's conventions. **Gate:** each family's file green as it
-   lands.
+5. **Control breadth + geometry + containers.** *DONE (2026-09-01).* The planned
+   control subset landed as isolated packages under `host/gui/libs/`, each with a
+   byte-exact GUI test file green on Windows AND Linux: text (label/edit/memo),
+   choice (checkbox/radio/combobox/listbox), containers (panel/groupbox/scrollbox/
+   pagecontrol+tabsheet), range (trackbar/progressbar/scrollbar), menus + timer,
+   image + string grid, tree view + list view (handles generalized to any TObject
+   for the non-TComponent nodes/items), canvas drawing (an off-screen bitmap +
+   `canvas_*`, proven by reading a pixel back, shown in an image; the LCL-native
+   answer to the reference's shapes/path) + TShape, and the common dialogs
+   (configuration byte-exact; modal Execute interactive-only). Event dispatch was
+   generalized (one bridge per event name; `GuiNotifyHandler`), and LCL fires
+   OnChange/OnClick on a programmatic change so events are headless-testable.
+   `tests/gui/00`–`10` (11 files) green on both OSes; the engine/console suite
+   stays green; the interactive `phosphorgui` builds clean.
 
-6. **Interactive examples** — a couple of the reference's small games/apps run on
-   the real host, as the human-facing proof the loop and events deliver.
+6. **Interactive examples** — a couple of small apps run on the real host, as the
+   human-facing proof the loop and events deliver. *(Remaining: the pieces are all
+   in place; this is the demo pass.)*
 
 Deferred exactly as phase 1 deferred them: anything pulling an external
 dependency (sqlite, http, zip, media) stays out until its own phase.

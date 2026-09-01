@@ -21,3 +21,4 @@
 43_syntax_const
 37_syntax_return
 35_print_paths
+36_string_append

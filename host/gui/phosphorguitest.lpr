@@ -25,7 +25,7 @@ uses
   SysUtils, Classes,
   PhosphorEngine, PhosphorTestLib,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
-  PhosphorLabelLib, PhosphorEditLib;
+  PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib;
 
 function ReadSource(const APath: String): String;
 var
@@ -83,6 +83,7 @@ begin
     RegisterButtonFuncs(eng.Registry);
     RegisterLabelFuncs(eng.Registry);
     RegisterEditFuncs(eng.Registry);
+    RegisterChoiceFuncs(eng.Registry);
     ResetTestState;
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

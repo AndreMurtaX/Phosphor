@@ -121,10 +121,23 @@ emitting a broken command.
 
 Two supported ways to get a Linux binary, in order of preference:
 
-- **Build natively on Linux.** The phase-1 engine and console host are plain
-  console FPC with no external dependencies, so a native `fpc` on a Linux box,
-  in WSL2, or on a Linux CI runner compiles the same sources unchanged. This is
-  the honest, low-friction path and the one CI will use.
+- **Build natively on Linux** (recommended). The phase-1 engine and console host
+  are plain console FPC with no external dependencies, so a native `fpc` on a
+  Linux box, in WSL2, or on a Linux CI runner compiles the same sources
+  unchanged. The console host is already portable: it guards the Windows console
+  API with `{$IFDEF WINDOWS}` and falls back to raw UTF-8 bytes on Unix (where
+  the terminal is UTF-8 natively). Run, from a checkout on the Linux machine:
+
+  ```
+  bash scripts/build.sh          # build the console host
+  bash scripts/test.sh           # skeleton smoke test (byte-exact golden)
+  bash scripts/test-suite.sh     # the oracle suite + negatives
+  ```
+
+  These are the Unix counterparts of the `.ps1` scripts (same boundary check,
+  same byte-exact goldens; the `.expected` files are marked `-text` so their LF
+  bytes are identical on both platforms). `lazbuild host/console/phosphor.lpi`
+  also works on Linux and is the IDE path.
 - **Cross-compile from Windows.** Install the FPC cross bits above
   (`fpcupdeluxe` is the usual way to add the `x86_64-linux` cross target and its
   binutils on Windows). Workable, more moving parts; revisit if a Windows-only

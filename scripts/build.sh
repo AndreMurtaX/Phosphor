@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Builds the Phosphor console host on Linux (or any Unix) with FPC.
+# The Unix counterpart of scripts/build.ps1: same boundary check, same
+# trust-the-artifact discipline. The engine and host sources are portable; the
+# console host guards the Windows console API with {$IFDEF WINDOWS} and falls
+# back to raw UTF-8 bytes on Unix (where the terminal is UTF-8 natively).
+#
+# Usage:  bash scripts/build.sh          (set FPC=/path/to/fpc to override)
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname "$here")"
+FPC="${FPC:-$(command -v fpc || true)}"
+[ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
+
+# --- boundary check: the engine must not reach a host/GUI unit ---------------
+forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
+violation=0
+for f in "$root"/engine/*.pas; do
+  flat="$(tr '\n' ' ' < "$f" | tr 'A-Z' 'a-z')"
+  for u in $forbidden; do
+    if printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]"; then
+      echo "BOUNDARY VIOLATION: $(basename "$f") uses '$u'"
+      violation=1
+    fi
+  done
+done
+[ "$violation" -eq 0 ] || { echo "engine must stay host-agnostic (see docs/architecture.md)"; exit 1; }
+echo "boundary check: engine stays host-agnostic"
+
+# --- compile -----------------------------------------------------------------
+bin="$root/bin"
+cpu="$("$FPC" -iTP)"           # e.g. x86_64
+units="$bin/units/${cpu}-linux"
+exe="$bin/phosphor"
+mkdir -p "$units"
+rm -f "$exe"
+
+echo "compiler: $FPC"
+"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+  -Fu"$root/engine" -FU"$units" -FE"$bin" -o"$exe" \
+  "$root/host/console/phosphor.lpr"
+
+# --- trust the artifact, not the exit code -----------------------------------
+[ -x "$exe" ] || { echo "no binary produced; build failed"; exit 1; }
+ver="$("$exe" --version)"
+case "$ver" in
+  *"Phosphor BASIC"*) ;;
+  *) echo "binary exists but does not run as expected: '$ver'"; exit 1 ;;
+esac
+echo "built:  $exe"
+echo "verify: $ver"

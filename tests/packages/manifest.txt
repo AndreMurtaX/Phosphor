@@ -1,5 +1,7 @@
 # Opt-in host package suite manifest. Read by test-packages.{ps1,sh}.
 # 02_sqlite is conditional: run only where the SQLite runtime library is present.
+# 03_http runs against a local server the runner (phosphorhttptest) stands up.
 00_base64
 01_zip
 02_sqlite
+03_http

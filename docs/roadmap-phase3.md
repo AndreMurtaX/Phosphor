@@ -162,11 +162,16 @@ via FPC's SQLdb driver: `sqlite_open@`/`exec`/`scalar$`/`scalar`/`query$`/`close
 needs the SQLite runtime library, so it is **verified against reality where the
 library is present** (byte-exact on the Linux VM, which has `libsqlite3.so`) and the
 suite **skips it where it is absent** (Windows here has no `sqlite3.dll`) — the same
-skip pattern the headless GUI suite uses for a display. All run through
-`host/packages/phosphorpkgtest` + `scripts/test-packages.{ps1,sh}`
-(`tests/packages/00_base64`, `01_zip`, `02_sqlite`). **Still out:** `http` — its
-client ships with FPC (`fphttpclient`) but testing it needs a server / OpenSSL, so
-it stays out until it can be verified against reality, not stubbed. These are
+skip pattern the headless GUI suite uses for a display. `PhosphorHttpLib` (an HTTP
+client -- `http_get$`/`http_status`/`http_post$`, over FPC's `fphttpclient`) is
+**verified against a real server on both OSes**: plain HTTP over loopback needs no
+external library (only HTTPS would pull OpenSSL), so its own runner
+`host/packages/phosphorhttptest` stands up a live `TFPHTTPServer` and the test drives
+real requests at it -- no mocks, no network. The `base64`/`zip`/`sqlite` tests run
+through `phosphorpkgtest`; the `http` test through `phosphorhttptest`; all via
+`scripts/test-packages.{ps1,sh}` (`tests/packages/00_base64`, `01_zip`, `02_sqlite`,
+`03_http`). **Still out:** an HTTP**S** helper (would need OpenSSL provisioned to
+verify) -- kept out until it can be tested against reality, not stubbed. These are
 breadth, not a gate; they land any time.
 
 ## Rejected approaches (the traps the reasoning refuted)

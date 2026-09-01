@@ -18,7 +18,18 @@ mkdir -p "$units"; rm -f "$exe"
   -FU"$units" -FE"$bin" -o"$exe" \
   "$root/host/packages/phosphorpkgtest.lpr" >/dev/null
 [ -x "$exe" ] || { echo "phosphorpkgtest did not build"; exit 1; }
-echo "package runner built: $exe"; echo
+echo "package runner built: $exe"
+
+# The http package is exercised against a real local server, so it has its own runner
+# (phosphorhttptest) that stands the server up. Plain HTTP needs no external library.
+httpunits="$bin/http-units/${cpu}-linux"; httpexe="$bin/phosphorhttptest"
+mkdir -p "$httpunits"; rm -f "$httpexe"
+"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+  -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -Fu"$root/host/packages" \
+  -FU"$httpunits" -FE"$bin" -o"$httpexe" \
+  "$root/host/packages/phosphorhttptest.lpr" >/dev/null
+[ -x "$httpexe" ] || { echo "phosphorhttptest did not build"; exit 1; }
+echo "http runner built:    $httpexe"; echo
 
 pkg="$root/tests/packages"
 manifest="$(grep -vE '^[[:space:]]*#' "$pkg/manifest.txt" | tr '\n' ' ')"
@@ -33,7 +44,9 @@ for name in $manifest; do
   case "$name" in
     *sqlite*) [ "$sqlite_avail" -eq 1 ] || { echo "SKIP  $name  (SQLite runtime library not found)"; continue; } ;;
   esac
-  "$exe" "$pkg/$name.bas" > "$out" 2> "$err"; code=$?
+  # The http test needs the server-standing runner; everything else uses the plain one.
+  case "$name" in *http*) runner="$httpexe" ;; *) runner="$exe" ;; esac
+  "$runner" "$pkg/$name.bas" > "$out" 2> "$err"; code=$?
   if [ "$code" -eq 0 ] && cmp -s "$out" "$pkg/$name.expected"; then
     echo "PASS  $name  ($(wc -c <"$out") B, exit 0)"
   else

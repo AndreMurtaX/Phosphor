@@ -38,6 +38,20 @@ if (Test-Path $exe) { Remove-Item $exe -Force }
     (Join-Path $root 'host\packages\phosphorpkgtest.lpr') | Out-Null
 if (-not (Test-Path $exe)) { throw "phosphorpkgtest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "package runner built: $exe" -ForegroundColor DarkGray
+
+# The HTTP package is exercised against a real local server, so it has its own runner
+# (phosphorhttptest) that stands the server up. Plain HTTP needs no external library.
+$httpUnits = Join-Path $binDir 'http-units\x86_64-win64'
+$httpExe   = Join-Path $binDir 'phosphorhttptest.exe'
+New-Item -ItemType Directory -Force $httpUnits | Out-Null
+if (Test-Path $httpExe) { Remove-Item $httpExe -Force }
+& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+    "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
+    "-Fu$(Join-Path $root 'tests')" "-Fu$(Join-Path $root 'host\packages')" `
+    "-FU$httpUnits" "-FE$binDir" "-o$httpExe" `
+    (Join-Path $root 'host\packages\phosphorhttptest.lpr') | Out-Null
+if (-not (Test-Path $httpExe)) { throw "phosphorhttptest did not build (fpc exit $LASTEXITCODE)" }
+Write-Host "http runner built:    $httpExe" -ForegroundColor DarkGray
 Write-Host ''
 
 $pkg = Join-Path $root 'tests\packages'
@@ -59,7 +73,9 @@ foreach ($name in $manifest) {
     $exp = [System.IO.File]::ReadAllBytes((Join-Path $pkg "$name.expected"))
     $out = Join-Path $tmp 'phosphorpkgtest.out'
     $err = Join-Path $tmp 'phosphorpkgtest.err'
-    cmd /c "`"$exe`" `"$bas`" > `"$out`" 2> `"$err`""
+    # The http test needs the server-standing runner; everything else uses the plain one.
+    $runner = if ($name -like '*http*') { $httpExe } else { $exe }
+    cmd /c "`"$runner`" `"$bas`" > `"$out`" 2> `"$err`""
     $code = $LASTEXITCODE
     $act = [System.IO.File]::ReadAllBytes($out)
     $same = ($act.Length -eq $exp.Length)

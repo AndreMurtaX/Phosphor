@@ -100,6 +100,7 @@ type
     procedure ParseUnary;
     procedure ParsePrimary;
     procedure ParseJsonLiteral;   // [ ... ] / { ... } assigned to a handle
+    procedure ParseOnGoto;        // on <expr> goto/gosub label1, label2, ...
     procedure ParseCall(const AName: String; ALine: Integer);
     procedure ParseCondition;
     procedure ParseBlockUntil(const ATerms: array of String);
@@ -591,6 +592,55 @@ begin
   FBool := False;
 end;
 
+{ Computed jump: the 1-based selector picks the Nth label. Compiled as a chain of
+  equality tests -- if the selector equals i, take label i; an out-of-range value
+  matches nothing and falls through. GOSUB branches return here and then skip to
+  the end so the following labels are not re-tested. }
+procedure TPhosphorCompiler.ParseOnGoto;
+var
+  ln, tmp, idx, jNext, j: Integer;
+  isGosub: Boolean;
+  labelName: String;
+  endJumps: array of Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;                       // 'on'
+  tmp := NewHiddenVar(vtNumber);
+  ParseExpr;                          // the selector
+  if FFailed then Exit;
+  FProg.Emit(opStoreVar, tmp, 0, ln);
+  if IsKeyword('gosub') then isGosub := True
+  else if IsKeyword('goto') then isGosub := False
+  else begin Fail('expected ''goto'' or ''gosub'' after ''on <expr>''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;                       // 'goto' / 'gosub'
+  endJumps := nil;
+  idx := 1;
+  repeat
+    if FLex.Cur.Kind = tkInt then labelName := IntToStr(FLex.Cur.IntVal)
+    else if FLex.Cur.Kind = tkIdent then labelName := FLex.Cur.StrVal
+    else begin Fail('''on'' needs a list of labels', FLex.Cur.Line); Exit; end;
+    FLex.Advance;
+    FProg.Emit(opLoadVar, tmp, 0, ln);
+    FProg.Emit(opPushConst, FProg.Consts.Add(ValInt(idx)), 0, ln);
+    FProg.Emit(opEQ, 0, 0, ln);
+    jNext := FProg.Emit(opJumpIfFalse, 0, 0, ln);   // selector <> idx: next test
+    if isGosub then
+    begin
+      j := FProg.Emit(opGosub, 0, 0, ln); AddGoto(j, labelName);
+      SetLength(endJumps, Length(endJumps) + 1);
+      endJumps[High(endJumps)] := FProg.Emit(opJump, 0, 0, ln);   // after return, jump to end
+    end
+    else
+    begin
+      j := FProg.Emit(opJump, 0, 0, ln); AddGoto(j, labelName);
+    end;
+    FProg.Patch(jNext, FProg.Count);
+    Inc(idx);
+    if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+  until FFailed;
+  for j := 0 to High(endJumps) do FProg.Patch(endJumps[j], FProg.Count);
+end;
+
 procedure TPhosphorCompiler.ParseUnary;
 var ln: Integer;
 begin
@@ -1006,6 +1056,14 @@ begin
       FLex.Advance;
       if FLoopDepth = 0 then Fail('''continue'' outside a loop', t.Line)
       else AddCont(FProg.Emit(opJump, 0, 0, t.Line));
+      Exit;
+    end;
+    // `on <expr> goto/gosub ...` -- but `on` is contextual: `on = 5` is still a
+    // variable, so only a non-assignment follower opens the computed jump.
+    if (t.StrVal = 'on') and
+       not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
+    begin
+      ParseOnGoto;
       Exit;
     end;
     if t.StrVal = 'goto' then

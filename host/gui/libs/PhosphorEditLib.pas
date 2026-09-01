@@ -29,7 +29,7 @@ unit PhosphorEditLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, StdCtrls,
+  SysUtils, Classes, Controls, StdCtrls, Spin, MaskEdit,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterEditFuncs(Reg: TPhosphorRegistry);
@@ -128,6 +128,60 @@ var c: TComponent; begin
     TMemo(c).OnChange := GuiNotifyHandler(AVM, c, 'onchange', Args[1].Str, Args[0].Hnd);
 end;
 
+// --- spin edit (integer) ----------------------------------------------------
+function f_spinedit(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; s: TSpinEdit;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  s := TSpinEdit.Create(pc); s.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(s, False));
+end;
+function f_spin_value_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).Value := Round(AsDouble(A[1])); Result := A[0]; end;
+function f_spin_value_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then Result := ValInt(TSpinEdit(c).Value) else Result := ValInt(0); end;
+function f_spin_min_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).MinValue := Round(AsDouble(A[1])); Result := A[0]; end;
+function f_spin_max_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).MaxValue := Round(AsDouble(A[1])); Result := A[0]; end;
+function f_spin_onchange(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).OnChange := GuiNotifyHandler(AVM, c, 'onchange', A[1].Str, A[0].Hnd); end;
+
+// --- float spin edit --------------------------------------------------------
+function f_floatspin(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; s: TFloatSpinEdit;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  s := TFloatSpinEdit.Create(pc); s.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(s, False));
+end;
+function f_fspin_value_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c) then TFloatSpinEdit(c).Value := AsDouble(A[1]); Result := A[0]; end;
+function f_fspin_value_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c) then Result := ValDouble(TFloatSpinEdit(c).Value) else Result := ValDouble(0); end;
+function f_fspin_decimals_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c) then TFloatSpinEdit(c).DecimalPlaces := Round(AsDouble(A[1])); Result := A[0]; end;
+
+// --- mask edit --------------------------------------------------------------
+function f_maskedit(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; m: TMaskEdit;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  m := TMaskEdit.Create(pc); m.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(m, False));
+end;
+function f_mask_text_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMaskEdit, c) then TMaskEdit(c).Text := A[1].Str; Result := A[0]; end;
+function f_mask_text_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMaskEdit, c) then Result := ValStr(TMaskEdit(c).Text) else Result := ValStr(''); end;
+function f_mask_mask_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMaskEdit, c) then TMaskEdit(c).EditMask := A[1].Str; Result := A[0]; end;
+function f_mask_mask_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TMaskEdit, c) then Result := ValStr(TMaskEdit(c).EditMask) else Result := ValStr(''); end;
+
 procedure RegisterEditFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('edit@:@', @f_edit);
@@ -153,6 +207,19 @@ begin
   Reg.Add('memo_readonly@:@n', @f_memo_readonly_set);
   Reg.Add('memo_readonly:@',   @f_memo_readonly_get);
   Reg.AddHost('memo_onchange@:@$', @f_memo_onchange);
+
+  Reg.Add('spinedit@:@', @f_spinedit);
+  Reg.Add('spinedit_value@:@n', @f_spin_value_set); Reg.Add('spinedit_value:@', @f_spin_value_get);
+  Reg.Add('spinedit_min@:@n', @f_spin_min_set);     Reg.Add('spinedit_max@:@n', @f_spin_max_set);
+  Reg.AddHost('spinedit_onchange@:@$', @f_spin_onchange);
+
+  Reg.Add('floatspinedit@:@', @f_floatspin);
+  Reg.Add('floatspinedit_value@:@n', @f_fspin_value_set); Reg.Add('floatspinedit_value:@', @f_fspin_value_get);
+  Reg.Add('floatspinedit_decimals@:@n', @f_fspin_decimals_set);
+
+  Reg.Add('maskedit@:@', @f_maskedit);
+  Reg.Add('maskedit_text@:@$', @f_mask_text_set); Reg.Add('maskedit_text$:@', @f_mask_text_get);
+  Reg.Add('maskedit_mask@:@$', @f_mask_mask_set); Reg.Add('maskedit_mask$:@', @f_mask_mask_get);
 end;
 
 end.

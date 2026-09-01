@@ -26,7 +26,7 @@ unit PhosphorChoiceLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, StdCtrls,
+  SysUtils, Classes, Controls, StdCtrls, CheckLst,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterChoiceFuncs(Reg: TPhosphorRegistry);
@@ -153,8 +153,58 @@ end;
 function f_list_onclick(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TListBox, c) then TListBox(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', A[1].Str, A[0].Hnd); end;
 
+// --- toggle box (a button that stays in/out) --------------------------------
+function f_togglebox(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TToggleBox, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+function f_tg_caption_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TToggleBox, c) then TToggleBox(c).Caption := A[1].Str; Result := A[0]; end;
+function f_tg_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TToggleBox, c) then Result := ValStr(TToggleBox(c).Caption) else Result := ValStr(''); end;
+function f_tg_checked_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TToggleBox, c) then TToggleBox(c).Checked := ArgOn(A[1]); Result := A[0]; end;
+function f_tg_checked_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TToggleBox, c) then Result := ValInt(Ord(TToggleBox(c).Checked)) else Result := ValInt(0); end;
+function f_tg_onchange(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TToggleBox, c) then TToggleBox(c).OnChange := GuiNotifyHandler(AVM, c, 'onchange', A[1].Str, A[0].Hnd); end;
+
+// --- check list box (a list whose items each carry a check) -----------------
+function f_checklist(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TCheckListBox, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+function f_clb_add(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCheckListBox, c) then TCheckListBox(c).Items.Add(A[1].Str); Result := A[0]; end;
+function f_clb_count(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCheckListBox, c) then Result := ValInt(TCheckListBox(c).Items.Count) else Result := ValInt(0); end;
+function f_clb_item(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer;
+begin
+  E := NoError; Result := ValStr('');
+  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValStr(TCheckListBox(c).Items[n-1]); end;
+end;
+function f_clb_checked_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then TCheckListBox(c).Checked[n-1] := ArgOn(A[2]) else GGuiError := 1; end;
+end;
+function f_clb_checked_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer;
+begin
+  E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValInt(Ord(TCheckListBox(c).Checked[n-1])); end;
+end;
+
 procedure RegisterChoiceFuncs(Reg: TPhosphorRegistry);
 begin
+  // togglebox
+  Reg.Add('togglebox@:@', @f_togglebox);
+  Reg.Add('togglebox_caption@:@$', @f_tg_caption_set); Reg.Add('togglebox_caption$:@', @f_tg_caption_get);
+  Reg.Add('togglebox_checked@:@n', @f_tg_checked_set); Reg.Add('togglebox_checked:@', @f_tg_checked_get);
+  Reg.AddHost('togglebox_onchange@:@$', @f_tg_onchange);
+  // check list box
+  Reg.Add('checklistbox@:@', @f_checklist);
+  Reg.Add('checklist_add@:@$', @f_clb_add);   Reg.Add('checklist_count:@', @f_clb_count);
+  Reg.Add('checklist_item$:@n', @f_clb_item);
+  Reg.Add('checklist_checked@:@nn', @f_clb_checked_set); Reg.Add('checklist_checked:@n', @f_clb_checked_get);
   // checkbox
   Reg.Add('checkbox@:@', @f_checkbox);
   Reg.Add('checkbox_caption@:@$', @f_cb_caption_set); Reg.Add('checkbox_caption$:@', @f_cb_caption_get);

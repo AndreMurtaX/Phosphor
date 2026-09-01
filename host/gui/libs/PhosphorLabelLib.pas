@@ -59,12 +59,32 @@ begin
   else Result := ValStr('');
 end;
 
+// --- static text (a bordered, non-word-wrapping caption) --------------------
+function f_statictext(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var pc: TComponent; st: TStaticText;
+begin
+  Err := NoError;
+  if not GuiResolve(Args[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  st := TStaticText.Create(pc);
+  st.Parent := TWinControl(pc);
+  if Length(Args) >= 2 then st.Caption := Args[1].Str;
+  Result := ValHandle(GuiRegister(st, False));
+end;
+function f_st_caption_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TStaticText, c) then TStaticText(c).Caption := Args[1].Str; Result := Args[0]; end;
+function f_st_caption_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TStaticText, c) then Result := ValStr(TStaticText(c).Caption) else Result := ValStr(''); end;
+
 procedure RegisterLabelFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('label@:@',   @f_label);
   Reg.Add('label@:@$',  @f_label);
   Reg.Add('label_caption@:@$', @f_caption_set);
   Reg.Add('label_caption$:@',  @f_caption_get);
+  Reg.Add('statictext@:@',  @f_statictext);
+  Reg.Add('statictext@:@$', @f_statictext);
+  Reg.Add('statictext_caption@:@$', @f_st_caption_set);
+  Reg.Add('statictext_caption$:@',  @f_st_caption_get);
 end;
 
 end.

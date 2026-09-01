@@ -24,7 +24,7 @@ unit PhosphorButtonLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, StdCtrls,
+  SysUtils, Classes, Controls, StdCtrls, Buttons,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterButtonFuncs(Reg: TPhosphorRegistry);
@@ -81,6 +81,48 @@ begin
   TButton(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', Args[1].Str, Args[0].Hnd);
 end;
 
+// --- bitmap button ----------------------------------------------------------
+function f_bitbtn(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var pc: TComponent; b: TBitBtn;
+begin
+  Err := NoError;
+  if not GuiResolve(Args[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  b := TBitBtn.Create(pc); b.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(b, False));
+end;
+function f_bb_caption_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TBitBtn, c) then TBitBtn(c).Caption := Args[1].Str; Result := Args[0]; end;
+function f_bb_caption_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TBitBtn, c) then Result := ValStr(TBitBtn(c).Caption) else Result := ValStr(''); end;
+function f_bb_click(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TBitBtn, c) then TBitBtn(c).Click; Result := Args[0]; end;
+function f_bb_onclick(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; Result := Args[0]; if GuiResolve(Args[0].Hnd, TBitBtn, c) then TBitBtn(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', Args[1].Str, Args[0].Hnd); end;
+
+// --- speed button (toolbar-style, groupable toggle) -------------------------
+function f_speedbutton(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var pc: TComponent; s: TSpeedButton;
+begin
+  Err := NoError;
+  if not GuiResolve(Args[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  s := TSpeedButton.Create(pc); s.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(s, False));
+end;
+function f_sb_caption_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).Caption := Args[1].Str; Result := Args[0]; end;
+function f_sb_caption_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then Result := ValStr(TSpeedButton(c).Caption) else Result := ValStr(''); end;
+function f_sb_down_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).Down := Round(AsDouble(Args[1])) <> 0; Result := Args[0]; end;
+function f_sb_down_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then Result := ValInt(Ord(TSpeedButton(c).Down)) else Result := ValInt(0); end;
+function f_sb_groupindex_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).GroupIndex := Round(AsDouble(Args[1])); Result := Args[0]; end;
+function f_sb_click(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).Click; Result := Args[0]; end;
+function f_sb_onclick(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent; begin Err := NoError; Result := Args[0]; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', Args[1].Str, Args[0].Hnd); end;
+
 procedure RegisterButtonFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('button@:@', @f_button);
@@ -88,6 +130,18 @@ begin
   Reg.Add('button_caption$:@',  @f_button_caption_get);
   Reg.Add('button_click:@',     @f_button_click);
   Reg.AddHost('button_onclick@:@$', @f_button_onclick);
+
+  Reg.Add('bitbtn@:@', @f_bitbtn);
+  Reg.Add('bitbtn_caption@:@$', @f_bb_caption_set); Reg.Add('bitbtn_caption$:@', @f_bb_caption_get);
+  Reg.Add('bitbtn_click:@', @f_bb_click);
+  Reg.AddHost('bitbtn_onclick@:@$', @f_bb_onclick);
+
+  Reg.Add('speedbutton@:@', @f_speedbutton);
+  Reg.Add('speedbutton_caption@:@$', @f_sb_caption_set); Reg.Add('speedbutton_caption$:@', @f_sb_caption_get);
+  Reg.Add('speedbutton_down@:@n', @f_sb_down_set); Reg.Add('speedbutton_down:@', @f_sb_down_get);
+  Reg.Add('speedbutton_groupindex@:@n', @f_sb_groupindex_set);
+  Reg.Add('speedbutton_click:@', @f_sb_click);
+  Reg.AddHost('speedbutton_onclick@:@$', @f_sb_onclick);
 end;
 
 end.

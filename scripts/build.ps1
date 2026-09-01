@@ -100,6 +100,7 @@ $args = @(
     '-Mobjfpc', '-Scghi', '-O2', '-vewn',
     "-T$TargetOS",
     "-Fu$engineDir",
+    "-Fu$(Join-Path $engineDir 'libs')",
     "-FU$unitsDir",
     "-FE$binDir",
     "-o$exe",

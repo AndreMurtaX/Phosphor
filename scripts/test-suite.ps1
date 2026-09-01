@@ -53,7 +53,7 @@ New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
 & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
-    "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'tests')" `
+    "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" "-Fu$(Join-Path $root 'tests')" `
     "-FU$unitsDir" "-FE$binDir" "-o$exe" `
     (Join-Path $root 'host\console\phosphortest.lpr') | Out-Null
 if (-not (Test-Path $exe)) { throw "phosphortest did not build (fpc exit $LASTEXITCODE)" }

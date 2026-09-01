@@ -908,19 +908,24 @@ begin
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
       FLex.Advance;
-      if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then
-      begin
-        if t.StrVal = 'println' then
-        begin
-          FProg.Emit(opPushConst, FProg.Consts.Add(ValStr('')), 0, t.Line);
-          FProg.Emit(opPrintLn, 0, 0, t.Line);
-        end;
-      end
-      else
+      // `;`-separated items, printed adjacent (no separator); PRINTLN adds a
+      // trailing newline, PRINT does not.
+      if (FLex.Cur.Kind <> tkEOL) and (FLex.Cur.Kind <> tkEOF) then
       begin
         ParseExpr;
-        if t.StrVal = 'println' then FProg.Emit(opPrintLn, 0, 0, t.Line)
-        else FProg.Emit(opPrint, 0, 0, t.Line);
+        FProg.Emit(opPrint, 0, 0, t.Line);
+        while (not FFailed) and (FLex.Cur.Kind = tkSemicolon) do
+        begin
+          FLex.Advance;
+          if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) then Break;
+          ParseExpr;
+          FProg.Emit(opPrint, 0, 0, t.Line);
+        end;
+      end;
+      if (not FFailed) and (t.StrVal = 'println') then
+      begin
+        FProg.Emit(opPushConst, FProg.Consts.Add(ValStr('')), 0, t.Line);
+        FProg.Emit(opPrintLn, 0, 0, t.Line);
       end;
       Exit;
     end;

@@ -11,7 +11,7 @@ FPC="${FPC:-$(command -v fpc || true)}"
 
 # boundary check (same as build.sh)
 forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
-for f in "$root"/engine/*.pas; do
+for f in $(find "$root/engine" -name '*.pas'); do
   flat="$(tr '\n' ' ' < "$f" | tr 'A-Z' 'a-z')"
   for u in $forbidden; do
     printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]" && { echo "boundary violation: $(basename "$f") uses '$u'"; exit 1; }
@@ -23,7 +23,7 @@ bin="$root/bin"; cpu="$("$FPC" -iTP)"; units="$bin/units/${cpu}-linux"
 exe="$bin/phosphortest"
 mkdir -p "$units"; rm -f "$exe"
 "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
-  -Fu"$root/engine" -Fu"$root/tests" -FU"$units" -FE"$bin" -o"$exe" \
+  -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -FU"$units" -FE"$bin" -o"$exe" \
   "$root/host/console/phosphortest.lpr" >/dev/null
 [ -x "$exe" ] || { echo "phosphortest did not build"; exit 1; }
 echo "runner built: $exe"; echo

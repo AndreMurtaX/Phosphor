@@ -22,9 +22,12 @@ meant to catch the mistake before it can be linked.
 
 ```
 Phosphor/
-  engine/                 the library. Host-agnostic, GUI-free, no I/O of its own.
+  engine/                 the library core. Host-agnostic, GUI-free, no I/O of its own.
     PhosphorEngine.pas      public facade (TPhosphorEngine, OnOutput callback).
-                            << WALKING SKELETON today: PRINT/PRINTLN only. >>
+    PhosphorValue/Errors/Opcodes/Lexer/Compiler/VM/Registry/Handles.pas  the core.
+    libs/                 function packages, integrated only through the registry
+                          (like Plan9Basic's engine/Libs): PhosphorArrayLib,
+                          PhosphorDictLib, ... The engine registers them in Create.
   host/
     console/              the first consumer: REPL + file runner.
       phosphor.lpr          program; produces the `phosphor` binary.

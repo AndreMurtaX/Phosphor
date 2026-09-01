@@ -9,3 +9,4 @@
 03b_end_spellings
 05_data_read
 04_arrays
+08_dict

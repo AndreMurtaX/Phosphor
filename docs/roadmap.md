@@ -140,12 +140,16 @@ and is unverifiable until the engine exists).
    The char index `s$[[n]]` (string, by codepoint) rides with the string lib
    (step 8). The handle registry is also the prereq for step 7's dict/stringlist.
 
-7. **Handle registry + error-state contract, end-to-end** — the `@` handle type
-   and the first handle-minting packages (dict@, stringlist@, array@); fabricated
-   or freed handles are rejected *for the library's recorded reason* (needs the
-   library present, not a hollow unknown-function pass).
-   **Gate:** handle files green; negatives 02/03/04/09/10 reject with the
-   library's recorded detail; `ON ERROR` reads the increment-1 error record.
+7. **Handle libraries + error-state contract.** *(dict DONE 2026-09-01;
+   stringlist next.)* Also reorganized the function packages into `engine/libs/`
+   (like Plan9Basic's `engine/Libs`), integrated only through the registry.
+   `PhosphorDictLib` (dict@/sdict@/pdict@ + set/get/getdef/count/haskey/remove/
+   clear/typename) and `08_dict.bas` (24 asserts) green. Fabricated-handle
+   negatives 02/03/04 reject *for the library's recorded reason* ("not a valid
+   array/dictionary handle") via `pointer@` (fabricate) + `arr_free`. `print`
+   gained `;`-separated items. **Remaining:** stringlist (`strings@`, 0-based in
+   the reference → base-1 in Phosphor, needs index adjustment on import) and its
+   negatives 09/10; `ON ERROR` (the language-level handler) is a later step.
 
 8. **String + numeric libraries** — `mid$`/`instr`/`len` base-1 everywhere;
    `max()`/`min()` replacing the freed `?>`/`?<`.

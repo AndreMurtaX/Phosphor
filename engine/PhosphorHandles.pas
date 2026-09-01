@@ -1,5 +1,5 @@
 {******************************************************************************
-  Phosphor BASIC -- handle registry and the array object
+  Phosphor BASIC -- handle registry (core infrastructure)
 
   MIT License. Copyright (c) 2026 Andre Murta.
 
@@ -10,8 +10,9 @@
   object and is called at the start of each Run so handles never leak between
   programs.
 
-  TPhosphorArray is the first handle-managed object: a 1-based, N-dimensional
-  array of TValue whose element kind is numeric, string, or pointer (a handle).
+  This unit knows nothing about what the objects ARE -- the handle-based
+  collections (arrays, dicts, ...) live in the library packages under
+  engine/libs and only store/retrieve their objects here as plain TObjects.
 ******************************************************************************}
 unit PhosphorHandles;
 
@@ -20,95 +21,14 @@ unit PhosphorHandles;
 
 interface
 
-uses
-  SysUtils, PhosphorValue, PhosphorErrors;
-
-type
-  TArrayKind = (akNumeric, akString, akPointer);
-
-  TPhosphorArray = class
-  public
-    Kind: TArrayKind;
-    Dims: array of Int64;      // size of each dimension (all lower bounds are 1)
-    Data: array of TValue;     // row-major, flat
-    constructor Create(AKind: TArrayKind; const ADims: array of Int64);
-    function TotalSize: Int64;
-    function TypeName: String;
-    // Converts 1-based per-dimension indices to a flat 0-based index; returns
-    // an error (never raises) on wrong rank or out-of-bounds.
-    function FlatIndex(const AIdx: array of Int64; out AFlat: Int64): TPhosphorError;
-  end;
-
 function RegisterHandle(AObj: TObject): Int64;
 function HandleObj(AId: Int64): TObject;
 function IsHandle(AId: Int64): Boolean;
+function FreeHandle(AId: Int64): Boolean;   // free one object, invalidate its id
 procedure ResetHandles;
 
 implementation
 
-constructor TPhosphorArray.Create(AKind: TArrayKind; const ADims: array of Int64);
-var
-  i: Integer;
-  total: Int64;
-  def: TValue;
-begin
-  inherited Create;
-  Kind := AKind;
-  SetLength(Dims, Length(ADims));
-  total := 1;
-  for i := 0 to High(ADims) do
-  begin
-    Dims[i] := ADims[i];
-    total := total * ADims[i];
-  end;
-  case AKind of
-    akString:  def := ValStr('');
-    akPointer: def := ValHandle(0);
-  else
-    def := ValDouble(0);
-  end;
-  SetLength(Data, total);
-  for i := 0 to High(Data) do
-    Data[i] := def;
-end;
-
-function TPhosphorArray.TotalSize: Int64;
-var i: Integer;
-begin
-  Result := 1;
-  for i := 0 to High(Dims) do
-    Result := Result * Dims[i];
-end;
-
-function TPhosphorArray.TypeName: String;
-begin
-  case Kind of
-    akString:  Result := 'string';
-    akPointer: Result := 'pointer';
-  else
-    Result := 'numeric';
-  end;
-end;
-
-function TPhosphorArray.FlatIndex(const AIdx: array of Int64; out AFlat: Int64): TPhosphorError;
-var
-  d: Integer;
-begin
-  AFlat := 0;
-  if Length(AIdx) <> Length(Dims) then
-    Exit(MakeError(peRuntime, Format('array has %d dimensions, got %d indices',
-      [Length(Dims), Length(AIdx)])));
-  for d := 0 to High(Dims) do
-  begin
-    if (AIdx[d] < 1) or (AIdx[d] > Dims[d]) then
-      Exit(MakeError(peRuntime, Format('index %d out of bounds 1..%d on dimension %d',
-        [AIdx[d], Dims[d], d + 1])));
-    AFlat := AFlat * Dims[d] + (AIdx[d] - 1);
-  end;
-  Result := NoError;
-end;
-
-// --- registry ---------------------------------------------------------------
 var
   GObjs: array of TObject;
   GCount: Integer;
@@ -133,6 +53,15 @@ begin
     Result := GObjs[AId - 1]
   else
     Result := nil;
+end;
+
+function FreeHandle(AId: Int64): Boolean;
+begin
+  if not IsHandle(AId) then
+    Exit(False);
+  GObjs[AId - 1].Free;
+  GObjs[AId - 1] := nil;   // id stays used but now invalid (IsHandle is false)
+  Result := True;
 end;
 
 procedure ResetHandles;

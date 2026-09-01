@@ -44,6 +44,10 @@ type
 
   TValueKind = (vkDouble, vkString, vkInt, vkHandle, vkBool);
 
+  { The element/value kind of a handle-based collection (array, dict). Shared by
+    the library packages under engine/libs. }
+  TArrayKind = (akNumeric, akString, akPointer);
+
   TValue = record
     Kind: TValueKind;
     Num: Double;    // vkDouble

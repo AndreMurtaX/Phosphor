@@ -16,7 +16,7 @@ FPC="${FPC:-$(command -v fpc || true)}"
 # --- boundary check: the engine must not reach a host/GUI unit ---------------
 forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
 violation=0
-for f in "$root"/engine/*.pas; do
+for f in $(find "$root/engine" -name '*.pas'); do
   flat="$(tr '\n' ' ' < "$f" | tr 'A-Z' 'a-z')"
   for u in $forbidden; do
     if printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]"; then
@@ -38,7 +38,7 @@ rm -f "$exe"
 
 echo "compiler: $FPC"
 "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
-  -Fu"$root/engine" -FU"$units" -FE"$bin" -o"$exe" \
+  -Fu"$root/engine" -Fu"$root/engine/libs" -FU"$units" -FE"$bin" -o"$exe" \
   "$root/host/console/phosphor.lpr"
 
 # --- trust the artifact, not the exit code -----------------------------------

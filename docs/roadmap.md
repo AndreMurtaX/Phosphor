@@ -154,10 +154,16 @@ and is unverifiable until the engine exists).
    reject "not a valid string list handle". `chr$` started `PhosphorStrLib`.
    `ON ERROR` (the language-level handler) is a later step.
 
-8. **String + numeric libraries** — `mid$`/`instr`/`len` base-1 everywhere;
-   `max()`/`min()` replacing the freed `?>`/`?<`.
-   **Gate:** `06_strings` + `07_numbers` + the 13 base-1-adjusted files green; a
-   multibyte-input index probe matches the decided byte-vs-codepoint rule.
+8. **String + numeric libraries.** *(numeric DONE 2026-09-01; string next.)*
+   `engine/libs/PhosphorNumLib`: abs/sqr(=sqrt)/sgn/min/max/round/fix/cint/frac/
+   log10/log2/ln/exp/sin/cos/tan/asin/acos/atan/degtorad/radtodeg/randomize/rnd/
+   isnan/isinfinite. `07_numbers.bas` (verbatim, 38 asserts) green.
+   **Remaining — string library** (`PhosphorStrLib`, started with `chr$`):
+   `mid$`/`instr`/`len` base-1, `ucase$`/`left$`/`right$`/`trim$`/…, `stri$`/
+   `val`/`asc`, and the string bracket sugar `s$[n]` (line) / `s$[[n]]`
+   (character, base-1 by codepoint). `06_strings.bas` needs base-1 index
+   adjustment (reference is 0-based); `stri$` then unlocks the full
+   `03_functions.bas`.
 
 9. **Pure-RTL library breadth (phase-1 subset)** — json, datetime, config,
    encoding, ioutils, classic file I/O + `PRINT USING`; excludes

@@ -24,7 +24,7 @@ uses
   PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
   PhosphorCompiler, PhosphorVM, PhosphorHandles,
   // library packages (engine/libs)
-  PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib;
+  PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib;
 
 const
   PhosphorVersion = '0.0.1';
@@ -65,6 +65,7 @@ begin
   RegisterDictFuncs(FRegistry);
   RegisterStrListFuncs(FRegistry);
   RegisterStrFuncs(FRegistry);
+  RegisterNumFuncs(FRegistry);
   FOnOutput := nil;
   FErrorLine := 0;
   FErrorMessage := '';

@@ -49,6 +49,7 @@ type
     FErrLine: Integer;
     procedure Push(const T: TToken);
     procedure PushSimple(K: TTokenKind; ALine: Integer);
+    procedure MergeCompoundKeywords;
     function Tokenize: Boolean;
   public
     constructor Create(const ASource: String);
@@ -109,6 +110,48 @@ begin
   T.Kind := K;
   T.Line := ALine;
   Push(T);
+end;
+
+{ Accepts the two-word block terminators (`end if`, `end while`, `end select`,
+  `end function`) as equivalents of the one-word forms, like Plan9Basic. Merges
+  an `end` token immediately followed by one of those keywords into a single
+  `endif`/`endwhile`/... identifier. A bare `end` (the END statement) is left
+  alone, and `end` on its own line before `function` (a new definition) is never
+  merged because an EOL token separates them. }
+procedure TLexer.MergeCompoundKeywords;
+var
+  i, j: Integer;
+  merged: String;
+begin
+  i := 0;
+  j := 0;
+  while i < FCount do
+  begin
+    merged := '';
+    if (FTokens[i].Kind = tkIdent) and (FTokens[i].StrVal = 'end') and
+       (i + 1 < FCount) and (FTokens[i + 1].Kind = tkIdent) then
+    begin
+      case FTokens[i + 1].StrVal of
+        'if':       merged := 'endif';
+        'while':    merged := 'endwhile';
+        'select':   merged := 'endselect';
+        'function': merged := 'endfunction';
+      end;
+    end;
+    if merged <> '' then
+    begin
+      FTokens[j] := FTokens[i];      // keep 'end's line/position
+      FTokens[j].StrVal := merged;
+      Inc(i, 2);
+    end
+    else
+    begin
+      FTokens[j] := FTokens[i];
+      Inc(i);
+    end;
+    Inc(j);
+  end;
+  FCount := j;
 end;
 
 function TLexer.Tokenize: Boolean;
@@ -282,6 +325,7 @@ begin
 
   PushSimple(tkEOL, FLine);   // terminate the last statement
   PushSimple(tkEOF, FLine);
+  MergeCompoundKeywords;
   Result := True;
 end;
 

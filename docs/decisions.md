@@ -84,6 +84,12 @@ already exists.
 
 ## Rules carried over from Plan9Basic
 
+- **Two-word block terminators are accepted as equivalents of the one-word
+  forms** (like Plan9Basic): `end if` = `endif`, `end while` = `endwhile`,
+  `end select` = `endselect`, `end function` = `endfunction`. The lexer merges an
+  `end` token immediately followed by the keyword; a bare `end` (the END
+  statement) and `end` on its own line before a `function` definition are left
+  alone (an EOL separates them).
 - `sqr()` is square root.
 - `s$[n]` indexes a line; `s$[[n]]` indexes a character (both base 1 now).
 - `do while <cond> ... loop`; `function f(n) local a, b ... endfunction`.

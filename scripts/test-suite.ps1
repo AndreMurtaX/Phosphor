@@ -63,7 +63,9 @@ Write-Host ''
 # --- run the manifest --------------------------------------------------------
 $suite = Join-Path $root 'tests\suite'
 $negDir = Join-Path $root 'tests\negative'
-$manifest = @('00_harness', '00b_kernel', '01_language_core', '02_control_flow', '03a_functions')
+# Single-source manifest, shared with test-suite.sh so Windows/Linux never drift.
+$manifest = Get-Content (Join-Path $suite 'manifest.txt') |
+    ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
 $tmp = [System.IO.Path]::GetTempPath()
 
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {

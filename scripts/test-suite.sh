@@ -29,7 +29,8 @@ mkdir -p "$units"; rm -f "$exe"
 echo "runner built: $exe"; echo
 
 suite="$root/tests/suite"; neg="$root/tests/negative"
-manifest="00_harness 00b_kernel 01_language_core 02_control_flow"
+# Single-source manifest, shared with test-suite.ps1 so Windows/Linux never drift.
+manifest="$(grep -vE '^[[:space:]]*#' "$suite/manifest.txt" | tr '\n' ' ')"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
 

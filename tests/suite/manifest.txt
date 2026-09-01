@@ -1,0 +1,9 @@
+# Phase-1 oracle suite manifest (one file basename per line; '#' comments ignored).
+# Read by BOTH scripts/test-suite.ps1 and scripts/test-suite.sh so the Windows
+# and Linux runs never drift. Add a line here when a suite file goes green.
+00_harness
+00b_kernel
+01_language_core
+02_control_flow
+03a_functions
+03b_end_spellings

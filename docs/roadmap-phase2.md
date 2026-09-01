@@ -99,12 +99,26 @@ widgetset** (win32 on Windows), writing its `passed:/failed:` summary through
 byte-exact whatever the subsystem, since the golden capture redirects stdout to a
 file). The interactive host is verified by hand on the Windows desktop.
 
-Cross-platform note: Windows headless is proven. The Linux VM is reached over SSH
-with no display, so its byte-exact GUI run needs the platform widgetset (gtk2/qt5)
-under a virtual framebuffer (`xvfb-run`) — an increment-2 task on the VM (it needs
-xvfb + the gtk2 LCL units present). Until then, GUI suite files are byte-exact on
-Windows, the LCL library code is cross-platform by construction, and the phase-1
-engine/console suite stays green on both OSes.
+Cross-platform: **both OSes are proven** (spike, 2026-09-01). Windows needs no
+display at all — the win32 widgetset constructs and fires events headless. On the
+Linux VM (GNOME/Wayland), the same spike built against the **gtk2** widgetset runs
+against the session's **live XWayland display** and reports `fired=2` with nothing
+shown — no `xvfb`, no `sudo`. The Linux GUI runner therefore exports:
+
+    DISPLAY=:0
+    XAUTHORITY=$(ls /run/user/$(id -u)/.mutter-Xwaylandauth.* | head -1)
+
+(the auth-cookie filename carries a per-session random suffix, so it is globbed,
+not hard-coded). This depends on a desktop session being logged in on the VM; if
+none is, the runner skips the GUI files with a clear message rather than failing.
+`xvfb-run` would remove that dependency but needs a one-time `sudo apt install
+xvfb` on the VM — kept as an optional convenience, not a requirement. The engine
+and console suites stay byte-exact green on both OSes regardless.
+
+VM gtk2 build flags that worked (fpc direct, Lazarus 4.8 at `/usr/share/lazarus/
+4.8.0`): `-Tlinux -dLCL -dLCLgtk2 -Fu<laz>/lcl/units/x86_64-linux/gtk2
+-Fu<laz>/lcl/units/x86_64-linux -Fu<laz>/components/lazutils/lib/x86_64-linux
+-Fu<laz>/packager/units/x86_64-linux` (create the `-FU` unit-output dir first).
 
 ## Sequence (each step: gate; deferral cost)
 

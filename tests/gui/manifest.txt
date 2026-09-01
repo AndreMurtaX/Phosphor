@@ -8,3 +8,4 @@
 04_choice
 05_layout
 06_menu_timer
+07_image_grid

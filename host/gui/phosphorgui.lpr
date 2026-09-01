@@ -22,7 +22,8 @@ uses
   PhosphorEngine,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
-  PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib;
+  PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
+  PhosphorImageLib, PhosphorGridLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -91,6 +92,8 @@ begin
     RegisterRangeFuncs(eng.Registry);
     RegisterMenuFuncs(eng.Registry);
     RegisterTimerFuncs(eng.Registry);
+    RegisterImageFuncs(eng.Registry);
+    RegisterGridFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin

@@ -648,7 +648,17 @@ begin
   ln := FLex.Cur.Line;
   FLex.Advance;   // 'on'
   FLex.Advance;   // 'error'
-  if not IsKeyword('goto') then begin Fail('expected ''goto'' after ''on error''', FLex.Cur.Line); Exit; end;
+  if IsKeyword('call') then
+  begin
+    FLex.Advance;   // 'call'
+    if FLex.Cur.Kind <> tkIdent then begin Fail('''on error call'' needs a function name', FLex.Cur.Line); Exit; end;
+    // B = 1 marks the call form; A = the const index of the function name. The VM
+    // runs func(code%, msg$) on a fault and continues (return 0) or aborts (else).
+    FProg.Emit(opSetErrHandler, FProg.Consts.Add(ValStr(FLex.Cur.StrVal)), 1, ln);
+    FLex.Advance;   // the function name
+    Exit;
+  end;
+  if not IsKeyword('goto') then begin Fail('expected ''goto'' or ''call'' after ''on error''', FLex.Cur.Line); Exit; end;
   FLex.Advance;   // 'goto'
   if (FLex.Cur.Kind = tkInt) and (FLex.Cur.IntVal = 0) then
   begin

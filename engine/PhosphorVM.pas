@@ -44,6 +44,8 @@ type
     // handler runs and moves FStmt* on. FInHandler blocks re-entry until a resume.
     FErrHandler: Integer;
     FErrHandlerSP, FErrHandlerFrameSP: Integer;
+    FErrHandlerMode: Integer;    // 0 = goto a label, 1 = call a function
+    FErrHandlerFuncIdx: Integer; // const-pool index of the function name (call mode)
     FInHandler: Boolean;
     FErrCode: Integer;              // last caught error: code / message / line
     FErrMsg: String;
@@ -141,6 +143,8 @@ begin
   LastError := NoError;
   ErrorLine := 0;
   FErrHandler := -1;
+  FErrHandlerMode := 0;
+  FErrHandlerFuncIdx := 0;
   FInHandler := False;
   FErrCode := 0; FErrMsg := ''; FErrLine := 0;
   FStmtPC := 0; FStmtSP := 0; FStmtFrameSP := 0;
@@ -170,6 +174,9 @@ var
     caller should Exit(False)). The handler runs at the stack/frame level it was
     installed at; the failing statement is remembered for resume. }
   function Fault(const AErr: TPhosphorError): Boolean;
+  var
+    callErr: TPhosphorError;
+    callRet: TValue;
   begin
     FErrCode := Ord(AErr.Code);
     FErrMsg := AErr.Message;
@@ -178,9 +185,34 @@ var
     begin
       FErrStmtPC := FStmtPC; FErrStmtSP := FStmtSP; FErrStmtFrameSP := FStmtFrameSP;
       FSP := FErrHandlerSP; FFrameSP := FErrHandlerFrameSP;
-      FInHandler := True;
-      pc := FErrHandler;
-      Result := True;
+      if FErrHandlerMode = 1 then
+      begin
+        // `on error call func`: run func(code%, msg$), then continue by its result
+        // (return 0 = resume next; return non-zero = abort, re-raising the error).
+        FInHandler := True;
+        callRet := CallUserFunc(FProg.Consts.Get(FErrHandlerFuncIdx).Str,
+                                [ValInt(FErrCode), ValStr(FErrMsg)], callErr);
+        FInHandler := False;
+        if IsError(callErr) then
+        begin
+          LastError := callErr; ErrorLine := FErrLine; Exit(False);
+        end;
+        if (callRet.Kind in [vkInt, vkDouble]) and (AsDouble(callRet) <> 0) then
+        begin
+          LastError := AErr; ErrorLine := FErrLine; Exit(False);   // handler said: abort
+        end;
+        FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;             // resume next
+        pc := FErrStmtPC + 1;
+        while (pc < FProg.Count) and (FProg.Instr(pc).Op <> opStmt) do Inc(pc);
+        Result := True;
+      end
+      else
+      begin
+        // `on error goto label`: jump to the handler
+        FInHandler := True;
+        pc := FErrHandler;
+        Result := True;
+      end;
     end
     else
     begin
@@ -322,12 +354,16 @@ begin
         end;
       opSetErrHandler:
         begin
-          FErrHandler := ins.A;   // -1 disables (on error goto 0)
-          if ins.A >= 0 then
+          FErrHandlerMode := ins.B;   // 0 = goto a label (A = pc), 1 = call a func (A = name idx)
+          if (ins.B = 0) and (ins.A < 0) then
+            FErrHandler := -1         // on error goto 0 -- disable
+          else
           begin
+            FErrHandler := ins.A;     // installed (a pc for goto, a name index for call)
+            if ins.B = 1 then FErrHandlerFuncIdx := ins.A;
             FErrHandlerSP := FSP; FErrHandlerFrameSP := FFrameSP;
           end;
-          FInHandler := False;    // (re-)installing re-arms the handler
+          FInHandler := False;        // (re-)installing re-arms the handler
         end;
       opResume:
         begin

@@ -81,6 +81,29 @@ h5:
   goto done
 done:
 
+test_case("onerror/call a handler function")
+rem `on error call func` runs func(code%, msg$) on a fault; returning 0 resumes
+rem at the next statement (returning non-zero would abort -- see negative 14).
+callcount = 0
+callcode = 0
+callmsg$ = ""
+after_call = 0
+on error call on_fault
+w = 1 / 0
+after_call = 7
+assert_eq(callcount, 1, "the handler function was called once")
+assert_eq(callcode, 2, "it received the div-by-zero code")
+assert_eq(callmsg$, "division by zero", "and the message")
+assert_eq(after_call, 7, "execution resumed at the statement after the fault")
+on error goto 0
+
 function risky(n)
   return 10 / n
+endfunction
+
+function on_fault(code, msg$)
+  callcount = callcount + 1
+  callcode = code
+  callmsg$ = msg$
+  return 0
 endfunction

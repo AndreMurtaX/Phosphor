@@ -165,6 +165,16 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 4 · `19_language_contract` (functional-equivalence adaptation).**
+  Green both OSes, 16 asserts, no human needed — the first *adaptation* rather than a
+  byte-exact port. Plan9Basic indexes strings from 0; Phosphor from 1 (a deliberate
+  divergence). The builder confirmed Phosphor's base against `06_strings`/`46`/`47`,
+  renamed the "…-from-zero" cases to "…-from-one", shifted every char-index constant
+  +1, and — the good part — ran a **see-check-fail probe** proving the oracle's base-0
+  indices genuinely MISS under Phosphor (`s$[0]`→"", quote at `[[9]]` not `[[8]]`), so
+  the assertions pass because the semantics is right, not because a constant was fudged.
+  This is the template for every "not a port" file: adapt to Phosphor's documented
+  semantics, then prove the divergence is exercised, don't assume it.
 - **2026-09-02 · round 3 · `14_handle_registry` (probe classes + registry rules).**
   Green both OSes, faithful 16-assert port, no human needed. Reused the existing
   `PhosphorHandles` validation path (no second path, no weakening): `IsHandle` rejects a

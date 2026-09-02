@@ -202,6 +202,31 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 15 · a stateful REPL.** The owner typed six lines at the prompt
+  and found `let br? = 2 = 2` / `println br?` printing `false`. The LANGUAGE was right
+  (one program prints `true`); the REPL ran every line as its own program, so each
+  line's state was executed and thrown away. Lessons:
+  - **A tool that documents its own defect has still shipped the defect.** The banner
+    literally said "Each line runs as its own program" — an accurate sentence that made
+    the tool useless for its one job. Honesty in a message is not a substitute for
+    fixing the thing; if a limitation reads as absurd when a user hits it, it is a bug.
+  - **Verify the user's claim BOTH ways before touching anything.** Two of the three
+    surprising lines were correct (`a% = 10.5` → `10.00` is integer coercion with
+    ties-to-even). Running the same source as ONE program isolated the real defect to
+    the host in one probe, and stopped a "fix" to the perfectly good boolean path.
+  - **Append-only compilation makes an incremental REPL almost free.** Globals get
+    their index on FIRST appearance and instructions are emitted in order, so compiling
+    `session + newline` leaves every earlier index and instruction position untouched:
+    run from the previous instruction count over a VM whose globals persist and you get
+    variables AND user functions carrying across lines, with no new symbol-table
+    machinery. `RunFrom` grows FVars without clearing it and leaves handles, channels,
+    the DATA cursor and the ON ERROR handler alone.
+  - **Reuse the compiler's own error messages as a signal.** Multi-line blocks work
+    because the host treats exactly the compiler's unterminated-block messages
+    (`expected 'endif'`, …) as "keep reading" and shows a `...>` prompt — no second
+    parser, no brace counting.
+  - **A REPL is testable.** `tests/classic/*.repl` pipes a session to stdin and pins the
+    whole transcript, prompts included, byte-exact on both OSes.
 - **2026-09-02 · round 14 · streamed channels + random access.** Closed the two limits
   round 13 reported honestly instead of hiding: `open … for input` slurped the whole
   file, and there was no way to reach a byte at a known offset. A channel now streams

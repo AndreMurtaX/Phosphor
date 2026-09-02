@@ -67,6 +67,12 @@ So:
   `TPhosphorVM`. Type codes: `n` numeric (int%|double), `$` string, `@` handle, `?`
   bool, `nn`/`$$`/… for arity. Read a numeric arg with `AsDouble(Args[i])` (handles
   int%↔double); a zero-arg fn is `'name:'`.
+- **Test-only stand-ins belong to the test runner, not the shipped engine.** A probe
+  class / helper used only by an oracle file goes in `tests/PhosphorTestLib.pas` (which
+  the runner registers), never in an engine `engine/libs/*` unit — the console/host
+  binaries must not ship a test artifact. **`Reg.Add` overwrites by signature**, so if
+  both the engine and the runner register the same name the later one silently shadows
+  the earlier — keep exactly one source.
 - **External integrations are opt-in HOST packages** under `host/packages/`, registered
   by a host that wants them — never in the engine. Each package = a unit + a byte-exact
   `tests/packages/NN_*.bas` + a manifest line; **library-gate** it (skip cleanly) where
@@ -159,6 +165,16 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 3 · `14_handle_registry` (probe classes + registry rules).**
+  Green both OSes, faithful 16-assert port, no human needed. Reused the existing
+  `PhosphorHandles` validation path (no second path, no weakening): `IsHandle` rejects a
+  fabricated/nil/large `pointer@(n)`; `HandleObj(h) is TProbeA` discriminates class;
+  `FreeHandle` revokes so a stale id is refused; a runner-side counter does the
+  accounting (the registry keeps no live total, which is fine). Lesson (§2): a
+  **pre-existing engine-side probe** in `PhosphorPlatformLib` that `24_platform_std`
+  used had to move to the runner — a test stand-in must not ship in the StdLib, and
+  because `Reg.Add` overwrites by signature, keeping both would have silently shadowed
+  one. One source, on the runner side.
 - **2026-09-02 · hardening · a latent note the process hid.** Round 2's builder flagged
   a `FpRead not inlined` note on the *Linux* build of `PhosphorCrtLib` — pre-existing,
   from the keyboard-input work, and it had escaped every prior "green" run. Root cause

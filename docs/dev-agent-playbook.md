@@ -202,6 +202,47 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 12 · scope-completion audit (standard-BASIC commands + library
+  review).** A strict re-audit against the founding brief (`prompt-inicial.md`, not the
+  oracle) found the standard-BASIC command set unbuilt despite "oracle complete". Built
+  it all — `INPUT`/`LINE INPUT`/`INPUT$`, classic `#` file I/O (OPEN/PRINT#/INPUT#/LINE
+  INPUT#/CLOSE/EOF/LOF/LOC), `PRINT USING`, `SWAP`, `while…wend` — green byte-exact both
+  OSes (`tests/classic`). Integrated every package into the console host so run/compile/
+  pack reach the whole surface. Then a **3-agent adversarial library review** (each bug
+  reproduced with a probe before the fix) found real defects, all fixed + regression-
+  tested. **New rules folded in:**
+  - **The `{$codepage UTF8}` byte-concat trap (paid for THREE times: hex_decode$,
+    http_urldecode$, string$).** Accumulating raw bytes with `r := r + Chr(b)` re-encodes
+    any byte ≥ 128 to its UTF-8 form or `'?'` — silent corruption in any codec advertised
+    as byte-exact. Build byte strings by INDEXED assignment into a `RawByteString`
+    (`SetLength(r,n); r[i] := Chr(b)`), exactly as the gzip header does; `ValStr` of a
+    RawByteString keeps the bytes. A single-expression `Chr(a)+Chr(b)` (chr$/ucase$) is
+    SAFE — only loop accumulation over a CP_UTF8 string corrupts. Grep new byte code for
+    `:= .* \+ Chr(`.
+  - **A library function must never crash the interpreter.** An unguarded Double→Int64
+    (`Round`/`Trunc`/`Floor` on a value past Int64 range, or `AsFloat`/`AsString` on an
+    off-type JSON node) raised an FPC exception that escaped `Run` and killed the process
+    — ON ERROR could not catch it, so an untrusted script could take the host down with
+    one big number. Fix is TWO-layer: a central `try/except` around the VM's library-call
+    dispatch converts ANY library exception into a CATCHABLE engine error (the safety
+    net, `PhosphorVM` opCall), plus `PhosphorValue.InI64Range` / VM `SafeI32` guards at
+    the hot conversion sites for clean messages. A reader returns a value/default, never
+    raises (`json_getn`/`gets$` coerce; `json_parse('')` reports an error not a nil node).
+  - **`local` goes on the `function` line** (`function f() local a, b`), never a separate
+    line — cost two test rewrites. Other confirmed non-bugs worth pinning: `dim@(n)`
+    creates an array; `zip_addstr(z@, text$, name$)` is content-then-name; `assert_true`
+    has no bool+message form (`:?` only); `resume <label>` is unsupported (`resume next`).
+  - **Coverage is a measurable, repeatable asset** (`scripts/coverage.py`, 655/655): it
+    enumerates every registered built-in and fails on any untested one. It found 6 real
+    gaps (5 CRT cursor helpers, `http_ca_file$`) the oracle never touched.
+  - **Consistency findings the OWNER (user) caught, not the agents:** `callfunc%` /
+    `callfunc?` were missing (only 3 of 5 return-suffix spellings) — completeness of the
+    five-type model must be checked across EVERY facet (function names, params, and the
+    dynamic-call primitive all take all five suffixes). Rule: when a feature is "one per
+    value kind", assert all five exist.
+  No human FIXED anything this round, but the human's inspection surfaced two gaps the
+  three review agents missed — a reminder that adversarial review complements, does not
+  replace, an owner reading for consistency.
 - **2026-09-02 · round 11 · local RAG retrieval index (oracle 33) — THE LAST ORACLE
   FILE.** Green both OSes, `tests/suite/33_rag` 22 asserts, no human needed. New PURE
   ENGINE lib `engine/libs/PhosphorRagLib` (registered in `PhosphorEngine`, boundary

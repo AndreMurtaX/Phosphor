@@ -46,3 +46,4 @@
 19_language_contract
 28_strlist
 17_host_services
+16_doc_examples

@@ -7,14 +7,26 @@ The spiritual successor to Plan9Basic (Delphi/FireMonkey, now frozen). **Not a
 port:** several language decisions change on purpose — see
 [docs/decisions.md](docs/decisions.md).
 
-## Status — a complete interpreter
+## Status — the language + library oracle is complete
 
 Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact green on
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
 dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
 rules), the negative suite, and nine opt-in host packages. Around **700 built-in
 functions** are registered across the standard libraries. Errors are *values*, not
-crashes: a library records its error state and the program keeps running.
+crashes: a library records its error state and the program keeps running. It is a
+real, working interpreter — not a skeleton.
+
+**What "complete" means here, precisely:** complete *against the oracle* — the bar this
+project set. It is **not** a feature-complete general-purpose BASIC yet. Three classic
+statements from the design wishlist are **not built**: the `INPUT` statement, classic
+`#`-number file I/O (`OPEN … AS #1`, `PRINT #`, `LINE INPUT #`, `CLOSE #`), and
+`PRINT USING`. The oracle never exercises them, so their absence does not make the
+oracle incomplete — but it does mean an interactive console program that reads keyboard
+input can't be written in pure Phosphor BASIC today. File work is done with the Io
+library functions (`file_writealltext`, `file_readalltext$`, `savetext$`, `opentext$`,
+`dir_*`/`path_*`). [docs/language-reference.md](docs/language-reference.md) documents
+exactly what runs.
 
 What it is, precisely: an **engine-as-library** (`engine/`) that does no I/O of its
 own and never names a host or GUI unit — the build fails if it does. Everything a

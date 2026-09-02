@@ -16,7 +16,12 @@ unit PhosphorVM;
 interface
 
 uses
-  SysUtils, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry;
+  SysUtils, Classes, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry;
+
+const
+  { Classic file-I/O channel numbers run 1..MaxChannel (#0 is not used). The cap
+    keeps the channel table a fixed, cheap array; classic BASICs cap far lower. }
+  MaxChannel = 255;
 
 type
   { One activation of a user function: its local frame (parameters first, then
@@ -25,6 +30,19 @@ type
     Locals: array of TValue;
     FuncIndex: Integer;
     ReturnAddr: Integer;
+  end;
+
+  { An open file channel for classic I/O (OPEN ... AS #n). INPUT mode reads the
+    whole file into Buf once and walks a 1-based cursor over it (so INPUT#, LINE
+    INPUT#, EOF and LOC are cheap and need no re-seeking); OUTPUT/APPEND write
+    straight through Stream and flush on CLOSE. }
+  TChannelMode = (cmInput, cmOutput, cmAppend);
+  TFileChannel = record
+    Open: Boolean;
+    Mode: TChannelMode;
+    Stream: TFileStream;   // OUTPUT / APPEND
+    Buf: String;           // INPUT: the whole file
+    Pos: Integer;          // INPUT: 1-based read cursor into Buf
   end;
 
   TPhosphorVM = class
@@ -61,8 +79,36 @@ type
     // Debug tracing, set by the TRACE statement (opTrace). BREAKPOINT reports the
     // frame through OnBreakpoint only while this is on; off, it is a pure no-op.
     FTrace: Boolean;
+    // Classic-I/O state, all per-Run. FChannels[n] is the file on #n. The console
+    // INPUT buffer holds the last line read for INPUT/LINE INPUT; the console char
+    // buffer feeds INPUT$(n) from a line-based host, keeping any unread remainder.
+    FChannels: array[1..MaxChannel] of TFileChannel;
+    FInBuf: String;         // console INPUT: the current line
+    FInPos: Integer;        // console INPUT: 1-based cursor into FInBuf
+    FCharBuf: String;       // console INPUT$: buffered characters not yet consumed
+    FCharPos: Integer;      // console INPUT$: 1-based cursor into FCharBuf
     procedure Push(const V: TValue);
     function Pop: TValue;
+    procedure CloseAllChannels;
+    function ValidChannel(ANum: Integer): Boolean;
+    // Classic-I/O primitives. Each returns an engine error (NoError on success) so
+    // the opcode handlers can route a failure through Fault (ON ERROR-catchable).
+    function ChanOpen(ANum, AMode: Integer; const APath: String): TPhosphorError;
+    function ChanClose(ANum: Integer): TPhosphorError;
+    function ChanWrite(ANum: Integer; const S: String): TPhosphorError;
+    function ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
+    function ChanLine(ANum: Integer; out S: String): TPhosphorError;
+    function ChanChars(ANum, ACount: Integer; out S: String): TPhosphorError;
+    function ChanEof(ANum: Integer; out B: Boolean): TPhosphorError;
+    function ChanLof(ANum: Integer; out N: Int64): TPhosphorError;
+    function ChanLoc(ANum: Integer; out N: Int64): TPhosphorError;
+    // Console INPUT primitives (over the OnInput seam). INPUT / LINE INPUT and
+    // INPUT$ share one console buffer (FCharBuf/FCharPos), so char reads and line
+    // reads consume the same stream in order, as a classic BASIC console does.
+    function PullLine: Boolean;                       // append one host line; False at EOF
+    function ReadInputLine: Boolean;                  // fill FInBuf; False at EOF
+    function InputField(ATypeCode: Integer; out V: TValue): TPhosphorError;
+    function InputChars(ACount: Integer): String;
     { The fetch-decode-execute loop. Runs from AStartPC until the program halts
       (or its instructions run out) OR a user-function return brings the frame
       stack back down to AStopFrameSP -- the bound that lets CallUserFunc invoke
@@ -71,6 +117,10 @@ type
     function ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
   public
     OnOutput: TPhosphorOutputProc;
+    { The INPUT seam, nil by default (a headless host installs none). The VM asks
+      the host for the next console line through it; with none installed, INPUT
+      reads as empty. Wired like OnOutput -- the engine only offers the seam. }
+    OnInput: TPhosphorInputProc;
     { The BREAKPOINT seam, nil by default (a headless host installs none). The VM
       calls it -- and only while tracing is on -- to REPORT a breakpoint's frame,
       then continues unconditionally. It must never block; see the opBreakpoint
@@ -90,6 +140,7 @@ type
     MaxOutputBytes: Int64;  // total bytes emitted through OnOutput
     TimeoutMs: Int64;       // wall-clock ceiling in milliseconds
     constructor Create;
+    destructor Destroy; override;   // closes any file channels left open
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)
     { Call a BASIC user function by name, re-entrantly, over the SAME globals and
       handles as the running program. This is the host callback seam: an event
@@ -136,6 +187,529 @@ begin
   Result := FStack[FSP];
 end;
 
+destructor TPhosphorVM.Destroy;
+begin
+  CloseAllChannels;
+  inherited Destroy;
+end;
+
+procedure TPhosphorVM.CloseAllChannels;
+var i: Integer;
+begin
+  for i := 1 to MaxChannel do
+    if FChannels[i].Open then
+    begin
+      FChannels[i].Stream.Free;   // nil-safe (INPUT channels keep Stream nil)
+      FChannels[i].Stream := nil;
+      FChannels[i].Buf := '';
+      FChannels[i].Open := False;
+    end;
+end;
+
+function TPhosphorVM.ValidChannel(ANum: Integer): Boolean;
+begin
+  Result := (ANum >= 1) and (ANum <= MaxChannel);
+end;
+
+{ --- classic-I/O field parsing (shared by console INPUT and INPUT#) ------------
+  Take the next delimited field from Buf starting at Pos (1-based), advancing Pos
+  past it and one trailing comma. In file mode leading blanks and newlines are
+  skipped and an unquoted field ends at a comma OR any whitespace/newline; on the
+  console a field ends only at a comma (interior spaces are kept). A leading double
+  quote reads a quoted string, with "" meaning a literal quote. }
+function NextFieldStr(const Buf: String; var Pos: Integer; AFileMode: Boolean): String;
+var
+  n: Integer;
+begin
+  Result := '';
+  n := Length(Buf);
+  if AFileMode then
+    while (Pos <= n) and ((Buf[Pos] = ' ') or (Buf[Pos] = #9) or
+                          (Buf[Pos] = #13) or (Buf[Pos] = #10)) do Inc(Pos);
+  if (Pos <= n) and (Buf[Pos] = '"') then
+  begin
+    Inc(Pos);   // opening quote
+    while Pos <= n do
+    begin
+      if Buf[Pos] = '"' then
+      begin
+        if (Pos < n) and (Buf[Pos + 1] = '"') then
+          begin Result := Result + '"'; Inc(Pos, 2); end   // "" -> a literal quote
+        else
+          begin Inc(Pos); Break; end;                       // closing quote
+      end
+      else
+        begin Result := Result + Buf[Pos]; Inc(Pos); end;
+    end;
+  end
+  else
+  begin
+    while Pos <= n do
+    begin
+      if Buf[Pos] = ',' then Break;
+      if AFileMode and ((Buf[Pos] = ' ') or (Buf[Pos] = #9) or
+                        (Buf[Pos] = #13) or (Buf[Pos] = #10)) then Break;
+      Result := Result + Buf[Pos];
+      Inc(Pos);
+    end;
+    if not AFileMode then
+      while (Length(Result) > 0) and (Result[Length(Result)] = ' ') do
+        SetLength(Result, Length(Result) - 1);
+  end;
+  // consume a single trailing separator comma (skip blanks before it in file mode)
+  if AFileMode then
+    while (Pos <= n) and ((Buf[Pos] = ' ') or (Buf[Pos] = #9) or
+                          (Buf[Pos] = #13) or (Buf[Pos] = #10)) do Inc(Pos);
+  if (Pos <= n) and (Buf[Pos] = ',') then Inc(Pos);
+end;
+
+{ Coerce a raw input field to a variable's type. Type code: 0 number, 1 string,
+  2 int, 3 bool. An empty field takes the type's default; a non-empty field that
+  will not parse is a catchable runtime error. }
+function CoerceField(const AField: String; ATypeCode: Integer; out V: TValue): TPhosphorError;
+var
+  iv: Int64;
+  dv: Double;
+  fs: TFormatSettings;
+  low: String;
+begin
+  Result := NoError;
+  V := Default(TValue);
+  case ATypeCode of
+    1: V := ValStr(AField);
+    0, 2:
+      begin
+        if AField = '' then
+        begin
+          if ATypeCode = 2 then V := ValInt(0) else V := ValInt(0);
+          Exit;
+        end;
+        if TryStrToInt64(AField, iv) then
+        begin
+          if ATypeCode = 2 then V := ValInt(iv)
+          else V := ValInt(iv);   // vtNumber holds an int% happily
+          Exit;
+        end;
+        fs := DefaultFormatSettings;
+        fs.DecimalSeparator := '.';
+        fs.ThousandSeparator := #0;
+        if TryStrToFloat(AField, dv, fs) then
+        begin
+          if ATypeCode = 2 then V := ValInt(Round(dv))
+          else V := ValDouble(dv);
+        end
+        else
+          Result := MakeError(peRuntime, '"' + AField + '" is not a number');
+      end;
+    3:
+      begin
+        low := LowerCase(AField);
+        if (low = 'true') or (low = '1') or (low = 'yes') then V := ValBool(True)
+        else if (low = 'false') or (low = '0') or (low = 'no') or (low = '') then V := ValBool(False)
+        else Result := MakeError(peRuntime, '"' + AField + '" is not true/false');
+      end;
+  else
+    Result := MakeError(peTypeMismatch, 'cannot read input into this variable');
+  end;
+end;
+
+// --- console INPUT -----------------------------------------------------------
+function TPhosphorVM.PullLine: Boolean;
+var line: String;
+begin
+  Result := Assigned(OnInput) and OnInput(line);
+  if Result then FCharBuf := FCharBuf + line + #10;   // the stripped newline is significant
+end;
+
+function TPhosphorVM.ReadInputLine: Boolean;
+var nl, i: Integer;
+begin
+  // Take the next line out of the shared console buffer, pulling host lines until
+  // a newline (or the input) runs out. INPUT$ reads from the same cursor, so a
+  // mid-line INPUT$ leaves the rest of the line for the next LINE INPUT.
+  nl := 0;
+  while nl = 0 do
+  begin
+    for i := FCharPos to Length(FCharBuf) do
+      if FCharBuf[i] = #10 then begin nl := i; Break; end;
+    if nl > 0 then Break;
+    if not PullLine then Break;
+  end;
+  if (nl = 0) and (FCharPos > Length(FCharBuf)) then
+  begin
+    FInBuf := ''; FInPos := 1;
+    Exit(False);   // no input remains
+  end;
+  if nl = 0 then nl := Length(FCharBuf) + 1;   // a final line with no trailing newline
+  FInBuf := Copy(FCharBuf, FCharPos, nl - FCharPos);
+  if (Length(FInBuf) > 0) and (FInBuf[Length(FInBuf)] = #13) then
+    SetLength(FInBuf, Length(FInBuf) - 1);      // drop a CR from a CRLF line
+  FInPos := 1;
+  FCharPos := nl + 1;
+  if FCharPos > Length(FCharBuf) then begin FCharBuf := ''; FCharPos := 1; end;
+  Result := True;
+end;
+
+function TPhosphorVM.InputField(ATypeCode: Integer; out V: TValue): TPhosphorError;
+var field: String;
+begin
+  field := NextFieldStr(FInBuf, FInPos, False);
+  Result := CoerceField(field, ATypeCode, V);
+end;
+
+function TPhosphorVM.InputChars(ACount: Integer): String;
+begin
+  Result := '';
+  if ACount <= 0 then Exit;
+  while (Length(FCharBuf) - FCharPos + 1) < ACount do
+    if not PullLine then Break;   // EOF: hand back whatever is buffered
+  if FCharPos > Length(FCharBuf) then Exit;
+  Result := Copy(FCharBuf, FCharPos, ACount);
+  Inc(FCharPos, Length(Result));
+  if FCharPos > Length(FCharBuf) then begin FCharBuf := ''; FCharPos := 1; end;
+end;
+
+// --- file channels -----------------------------------------------------------
+function TPhosphorVM.ChanOpen(ANum, AMode: Integer; const APath: String): TPhosphorError;
+var
+  fmode: TChannelMode;
+  ss: TStringStream;
+  fs: TFileStream;
+begin
+  Result := NoError;
+  if not ValidChannel(ANum) then
+    Exit(MakeError(peRuntime, 'file number #' + IntToStr(ANum) + ' is out of range (1..' + IntToStr(MaxChannel) + ')'));
+  if FChannels[ANum].Open then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is already open'));
+  case AMode of
+    0: fmode := cmInput;
+    1: fmode := cmOutput;
+    2: fmode := cmAppend;
+  else
+    Exit(MakeError(peRuntime, 'bad OPEN mode'));
+  end;
+  try
+    FillChar(FChannels[ANum], SizeOf(FChannels[ANum]), 0);
+    FChannels[ANum].Mode := fmode;
+    if fmode = cmInput then
+    begin
+      if not FileExists(APath) then
+        Exit(MakeError(peRuntime, 'cannot open "' + APath + '" for input: no such file'));
+      ss := TStringStream.Create('');
+      fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+      try
+        ss.CopyFrom(fs, 0);
+      finally
+        fs.Free;
+      end;
+      FChannels[ANum].Buf := ss.DataString;
+      ss.Free;
+      FChannels[ANum].Pos := 1;
+      FChannels[ANum].Stream := nil;
+    end
+    else if fmode = cmOutput then
+      FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate)
+    else // append
+    begin
+      if FileExists(APath) then
+      begin
+        FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenReadWrite or fmShareDenyWrite);
+        FChannels[ANum].Stream.Seek(0, soEnd);
+      end
+      else
+        FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+    end;
+    FChannels[ANum].Open := True;
+  except
+    on E: Exception do
+      Result := MakeError(peRuntime, 'cannot open "' + APath + '": ' + E.Message);
+  end;
+end;
+
+function TPhosphorVM.ChanClose(ANum: Integer): TPhosphorError;
+begin
+  Result := NoError;
+  if ANum < 0 then begin CloseAllChannels; Exit; end;
+  if not ValidChannel(ANum) then
+    Exit(MakeError(peRuntime, 'file number #' + IntToStr(ANum) + ' is out of range'));
+  if not FChannels[ANum].Open then Exit;   // closing an unopened channel is a no-op
+  FChannels[ANum].Stream.Free;
+  FChannels[ANum].Stream := nil;
+  FChannels[ANum].Buf := '';
+  FChannels[ANum].Open := False;
+end;
+
+function TPhosphorVM.ChanWrite(ANum: Integer; const S: String): TPhosphorError;
+begin
+  Result := NoError;
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  if FChannels[ANum].Mode = cmInput then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is open for input, not output'));
+  if Length(S) > 0 then
+    FChannels[ANum].Stream.WriteBuffer(S[1], Length(S));
+end;
+
+function TPhosphorVM.ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
+var field: String;
+begin
+  V := Default(TValue);
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  if FChannels[ANum].Mode <> cmInput then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
+  field := NextFieldStr(FChannels[ANum].Buf, FChannels[ANum].Pos, True);
+  Result := CoerceField(field, ATypeCode, V);
+end;
+
+function TPhosphorVM.ChanLine(ANum: Integer; out S: String): TPhosphorError;
+var buf: String; p, n: Integer;
+begin
+  S := '';
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  if FChannels[ANum].Mode <> cmInput then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
+  Result := NoError;
+  buf := FChannels[ANum].Buf;
+  n := Length(buf);
+  p := FChannels[ANum].Pos;
+  while (p <= n) and (buf[p] <> #10) and (buf[p] <> #13) do
+  begin
+    S := S + buf[p];
+    Inc(p);
+  end;
+  // step over the line terminator (CR, LF, or CRLF)
+  if (p <= n) and (buf[p] = #13) then Inc(p);
+  if (p <= n) and (buf[p] = #10) then Inc(p);
+  FChannels[ANum].Pos := p;
+end;
+
+function TPhosphorVM.ChanChars(ANum, ACount: Integer; out S: String): TPhosphorError;
+var buf: String; avail: Integer;
+begin
+  S := '';
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  if FChannels[ANum].Mode <> cmInput then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
+  Result := NoError;
+  if ACount <= 0 then Exit;
+  buf := FChannels[ANum].Buf;
+  avail := Length(buf) - FChannels[ANum].Pos + 1;
+  if avail <= 0 then Exit;
+  if ACount > avail then ACount := avail;
+  S := Copy(buf, FChannels[ANum].Pos, ACount);
+  Inc(FChannels[ANum].Pos, ACount);
+end;
+
+function TPhosphorVM.ChanEof(ANum: Integer; out B: Boolean): TPhosphorError;
+begin
+  B := True;
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  if FChannels[ANum].Mode <> cmInput then
+    Exit(MakeError(peRuntime, 'eof() needs a file open for input'));
+  Result := NoError;
+  B := FChannels[ANum].Pos > Length(FChannels[ANum].Buf);
+end;
+
+function TPhosphorVM.ChanLof(ANum: Integer; out N: Int64): TPhosphorError;
+begin
+  N := 0;
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  Result := NoError;
+  if FChannels[ANum].Mode = cmInput then
+    N := Length(FChannels[ANum].Buf)
+  else
+    N := FChannels[ANum].Stream.Size;
+end;
+
+function TPhosphorVM.ChanLoc(ANum: Integer; out N: Int64): TPhosphorError;
+begin
+  N := 0;
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  Result := NoError;
+  if FChannels[ANum].Mode = cmInput then
+    N := FChannels[ANum].Pos - 1     // bytes consumed so far
+  else
+    N := FChannels[ANum].Stream.Position;
+end;
+
+// --- PRINT USING formatter ---------------------------------------------------
+// A classic-BASIC subset: numeric fields of '#' digit positions with optional
+// '.' decimals, ',' grouping, a leading '+' or '$$'/'**', and a trailing '+'/'-';
+// string fields '&' (whole), '!' (first char) and '\ \' (fixed width); '_' escapes
+// the next literal character. Values fill fields left to right; if values remain
+// after the format ends and it held at least one field, the format repeats.
+function GroupThousands(const Digits: String): String;
+var i, c: Integer;
+begin
+  Result := '';
+  c := 0;
+  for i := Length(Digits) downto 1 do
+  begin
+    Result := Digits[i] + Result;
+    Inc(c);
+    if (c mod 3 = 0) and (i > 1) then Result := ',' + Result;
+  end;
+end;
+
+function FormatNumericField(const Spec: String; const V: TValue): String;
+var
+  s, core, intPartStr, fracPartStr, numText, leftSign, trailSignStr, dollarStr, intField: String;
+  fracDigits, width, pad, dotPos2, i: Integer;
+  grouping, signLead, trailPlus, trailMinus, dollar, starFill, neg: Boolean;
+  dotPos: Integer;
+  av: Double;
+  fs: TFormatSettings;
+  padChar: Char;
+begin
+  s := Spec;
+  dollar := False; starFill := False; signLead := False;
+  trailPlus := False; trailMinus := False;
+  if (Length(s) >= 2) and (s[1] = '$') and (s[2] = '$') then begin dollar := True; Delete(s, 1, 2); end
+  else if (Length(s) >= 2) and (s[1] = '*') and (s[2] = '*') then begin starFill := True; Delete(s, 1, 2); end;
+  if (Length(s) >= 1) and (s[1] = '+') then begin signLead := True; Delete(s, 1, 1); end;
+  if (Length(s) >= 1) and (s[Length(s)] = '+') then begin trailPlus := True; SetLength(s, Length(s) - 1); end
+  else if (Length(s) >= 1) and (s[Length(s)] = '-') then begin trailMinus := True; SetLength(s, Length(s) - 1); end;
+  grouping := Pos(',', s) > 0;
+  dotPos := Pos('.', s);
+  fracDigits := 0;
+  if dotPos > 0 then
+    for i := dotPos + 1 to Length(s) do if s[i] = '#' then Inc(fracDigits);
+  // The integer field width is the count of positions the spec devotes to the
+  // integer part -- including any leading '$$'/'**'/'+' and grouping commas, but
+  // not a trailing sign -- so the sign or floating '$' occupies a real column.
+  begin
+    core := Spec;
+    if (Length(core) >= 1) and (core[Length(core)] in ['+', '-']) then
+      SetLength(core, Length(core) - 1);
+    dotPos2 := Pos('.', core);
+    if dotPos2 > 0 then width := dotPos2 - 1 else width := Length(core);
+  end;
+
+  av := AsDouble(V);
+  neg := av < 0;
+  fs := DefaultFormatSettings;
+  fs.DecimalSeparator := '.';
+  fs.ThousandSeparator := #0;
+  numText := FloatToStrF(Abs(av), ffFixed, 18, fracDigits, fs);
+  dotPos2 := Pos('.', numText);
+  if dotPos2 = 0 then begin intPartStr := numText; fracPartStr := ''; end
+  else begin intPartStr := Copy(numText, 1, dotPos2 - 1); fracPartStr := Copy(numText, dotPos2 + 1, MaxInt); end;
+  if grouping then intPartStr := GroupThousands(intPartStr);
+
+  leftSign := ''; trailSignStr := '';
+  if trailPlus then begin if neg then trailSignStr := '-' else trailSignStr := '+'; end
+  else if trailMinus then begin if neg then trailSignStr := '-' else trailSignStr := ' '; end
+  else if signLead then begin if neg then leftSign := '-' else leftSign := '+'; end
+  else if neg then leftSign := '-';
+  if dollar then dollarStr := '$' else dollarStr := '';
+
+  core := dollarStr + leftSign + intPartStr;
+  if starFill then padChar := '*' else padChar := ' ';
+  pad := width - Length(core);
+  if pad >= 0 then intField := StringOfChar(padChar, pad) + core
+  else intField := '%' + core;   // overflow: the classic leading '%'
+
+  Result := intField;
+  if dotPos > 0 then Result := Result + '.' + fracPartStr;
+  Result := Result + trailSignStr;
+end;
+
+function ValFieldStr(const V: TValue): String;
+begin
+  if V.Kind = vkString then Result := V.Str else Result := ValToStr(V);
+end;
+
+function FormatUsing(const Fmt: String; const Vals: array of TValue): String;
+var
+  i, j, n, vi: Integer;
+  spec, sv: String;
+  width: Integer;
+  fieldSeen: Boolean;
+
+  function NextVal: TValue;
+  begin
+    if vi <= High(Vals) then begin Result := Vals[vi]; Inc(vi); end
+    else begin Result := ValInt(0); Inc(vi); end;
+  end;
+
+begin
+  Result := '';
+  n := Length(Fmt);
+  vi := 0;
+  fieldSeen := False;
+  i := 1;
+  while i <= n do
+  begin
+    // numeric field?
+    if (Fmt[i] = '#') or
+       ((Fmt[i] = '+') and (i < n) and (Fmt[i + 1] in ['#', '.', '$', '*'])) or
+       ((Fmt[i] = '$') and (i < n) and (Fmt[i + 1] = '$')) or
+       ((Fmt[i] = '*') and (i < n) and (Fmt[i + 1] = '*')) then
+    begin
+      j := i;
+      if (Fmt[j] = '$') and (j < n) and (Fmt[j + 1] = '$') then Inc(j, 2)
+      else if (Fmt[j] = '*') and (j < n) and (Fmt[j + 1] = '*') then Inc(j, 2);
+      if (j <= n) and (Fmt[j] = '+') then Inc(j);
+      while (j <= n) and (Fmt[j] in ['#', ',', '.']) do Inc(j);
+      if (j <= n) and (Fmt[j] in ['+', '-']) then Inc(j);
+      spec := Copy(Fmt, i, j - i);
+      Result := Result + FormatNumericField(spec, NextVal);
+      fieldSeen := True;
+      i := j;
+    end
+    else if Fmt[i] = '&' then
+    begin
+      Result := Result + ValFieldStr(NextVal);
+      fieldSeen := True;
+      Inc(i);
+    end
+    else if Fmt[i] = '!' then
+    begin
+      sv := ValFieldStr(NextVal);
+      if Length(sv) > 0 then Result := Result + sv[1] else Result := Result + ' ';
+      fieldSeen := True;
+      Inc(i);
+    end
+    else if Fmt[i] = '\' then
+    begin
+      // '\' ... '\' -- a fixed-width string field of (2 + inner spaces) columns.
+      j := i + 1;
+      while (j <= n) and (Fmt[j] <> '\') do Inc(j);
+      if j <= n then
+      begin
+        width := j - i + 1;
+        sv := ValFieldStr(NextVal);
+        if Length(sv) >= width then sv := Copy(sv, 1, width)
+        else sv := sv + StringOfChar(' ', width - Length(sv));
+        Result := Result + sv;
+        fieldSeen := True;
+        i := j + 1;
+      end
+      else
+        begin Result := Result + Fmt[i]; Inc(i); end;   // an unpaired '\' is literal
+    end
+    else if (Fmt[i] = '_') and (i < n) then
+    begin
+      Result := Result + Fmt[i + 1];   // '_' escapes the next character literally
+      Inc(i, 2);
+    end
+    else
+    begin
+      Result := Result + Fmt[i];
+      Inc(i);
+    end;
+    // reached the end with values to spare and fields to reuse: repeat the format
+    if (i > n) and fieldSeen and (vi <= High(Vals)) then
+      i := 1;
+  end;
+end;
+
 function SignatureOf(const AName: String; const AArgs: array of TValue): String;
 var
   i: Integer;
@@ -167,6 +741,9 @@ begin
   FOutputBytes := 0;
   FStartTick := GetTickCount64;
   FTrace := False;
+  CloseAllChannels;            // no file channel leaks between programs
+  FInBuf := ''; FInPos := 1;
+  FCharBuf := ''; FCharPos := 1;
   SetLength(FVars, AProg.VarCount);
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
@@ -184,6 +761,10 @@ var
   res: TResolvedFunc;
   lt: TVarType;
   bpOps: array of TValue;   // a BREAKPOINT's popped operand values
+  usingVals: array of TValue;   // a PRINT USING statement's popped values
+  sTmp: String;             // scratch for the classic-I/O handlers
+  bTmp: Boolean;
+  nTmp: Int64;
 
   { A runtime error. Returns True if an ON ERROR handler took it (pc now points at
     the handler; the caller should Continue), False to abort (LastError set; the
@@ -272,6 +853,10 @@ begin
   args := nil;
   kinds := nil;
   bpOps := nil;
+  usingVals := nil;
+  sTmp := '';
+  bTmp := False;
+  nTmp := 0;
   pc := AStartPC;
   while pc < FProg.Count do
   begin
@@ -518,6 +1103,101 @@ begin
             if Fault(e) then Continue else Exit(False);
           end;
           Push(r);
+        end;
+      // --- classic console input -----------------------------------------------
+      opInputLine: ReadInputLine;   // fill the input buffer; EOF just leaves it empty
+      opInputField:
+        begin
+          e := InputField(ins.A, v);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(v);
+        end;
+      opInputAll:
+        begin
+          Push(ValStr(Copy(FInBuf, FInPos, MaxInt)));
+          FInPos := Length(FInBuf) + 1;
+        end;
+      opInputChars:
+        begin
+          a := Pop;   // count
+          Push(ValStr(InputChars(Round(AsDouble(a)))));
+        end;
+      // --- classic file I/O ----------------------------------------------------
+      opOpenFile:
+        begin
+          a := Pop;   // channel number (pushed last)
+          b := Pop;   // path (pushed first)
+          e := ChanOpen(Round(AsDouble(a)), ins.A, ValToStr(b));
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+        end;
+      opCloseFile:
+        begin
+          if ins.A = 1 then
+            ChanClose(-1)                 // CLOSE with no argument: close every channel
+          else
+          begin
+            a := Pop;
+            e := ChanClose(Round(AsDouble(a)));
+            if IsError(e) then if Fault(e) then Continue else Exit(False);
+          end;
+        end;
+      opPrintFile:
+        begin
+          v := Pop;   // the value (pushed last)
+          a := Pop;   // channel number (pushed first)
+          e := ChanWrite(Round(AsDouble(a)), ValToStr(v));
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+        end;
+      opFileField:
+        begin
+          a := Pop;   // channel number
+          e := ChanField(Round(AsDouble(a)), ins.A, v);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(v);
+        end;
+      opFileLine:
+        begin
+          a := Pop;
+          e := ChanLine(Round(AsDouble(a)), sTmp);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(ValStr(sTmp));
+        end;
+      opFileChars:
+        begin
+          a := Pop;   // channel number (pushed last, on top)
+          b := Pop;   // count (pushed first)
+          e := ChanChars(Round(AsDouble(a)), Round(AsDouble(b)), sTmp);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(ValStr(sTmp));
+        end;
+      opEofFile:
+        begin
+          a := Pop;
+          e := ChanEof(Round(AsDouble(a)), bTmp);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(ValBool(bTmp));
+        end;
+      opLofFile:
+        begin
+          a := Pop;
+          e := ChanLof(Round(AsDouble(a)), nTmp);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(ValInt(nTmp));
+        end;
+      opLocFile:
+        begin
+          a := Pop;
+          e := ChanLoc(Round(AsDouble(a)), nTmp);
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
+          Push(ValInt(nTmp));
+        end;
+      // --- formatted output ----------------------------------------------------
+      opPrintUsing:
+        begin
+          SetLength(usingVals, ins.A);
+          for i := ins.A - 1 downto 0 do usingVals[i] := Pop;
+          v := Pop;   // the format string (pushed first)
+          if not EmitOutput(FormatUsing(ValToStr(v), usingVals)) then Exit(False);
         end;
     else
       if Fault(MakeError(peRuntime, 'bad opcode ' + IntToStr(Ord(ins.Op)))) then Continue else Exit(False);

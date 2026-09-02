@@ -1,0 +1,10 @@
+1: alpha
+2: beta
+3: xyz
+4: 42,gamma
+lines: 4
+lof: 24
+record: 42/gamma
+after append: 5
+head: [alpha]
+deleted: 1

@@ -113,6 +113,16 @@ type
     procedure ParseSelect;
     procedure ParseTrace;         // trace <expr>
     procedure ParseBreakpoint;    // breakpoint <msg> [, <expr>]*
+    procedure ParseInput(AIsLine: Boolean);  // input / line input (console or #file)
+    procedure ParseOpen;          // open <path> for input|output|append as #n
+    procedure ParseClose;         // close [#n [, #n]...]  (bare = close all)
+    procedure ParseSwap;          // swap <lvalue>, <lvalue>
+    procedure ParsePrintFile(AAddNewline: Boolean);   // print #n [, item[; item...]]
+    procedure ParsePrintUsing(AAddNewline: Boolean);  // print using fmt$; args
+    procedure EmitReadTarget(APos: Integer);   // SWAP: emit code that reads an lvalue
+    procedure EmitWriteTarget(APos, ATempVar: Integer); // SWAP: assign a temp into an lvalue
+    procedure SkipTarget;         // SWAP: advance the lexer past one lvalue
+    function  InputTypeCode(const AName: String): Integer;
     procedure ParseStatement;
   public
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
@@ -472,6 +482,40 @@ begin
       begin
         if t.StrVal = 'true' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(True)), 0, t.Line); FLex.Advance; end
         else if t.StrVal = 'false' then begin FProg.Emit(opPushConst, FProg.Consts.Add(ValBool(False)), 0, t.Line); FLex.Advance; end
+        // INPUT$(n) reads n console chars; INPUT$(n, #f) reads them from a file --
+        // both need VM-side I/O state, so they are opcodes, not registry calls.
+        else if (t.StrVal = 'input$') and (FLex.Peek.Kind = tkLParen) then
+        begin
+          FLex.Advance; FLex.Advance;   // 'input$' '('
+          ParseExpr;                    // the character count
+          if FLex.Cur.Kind = tkComma then
+          begin
+            FLex.Advance;
+            if FLex.Cur.Kind = tkHash then FLex.Advance;   // optional '#'
+            ParseExpr;                  // the file number  -> stack [count, chan]
+            Expect(tkRParen, '")"');
+            FProg.Emit(opFileChars, 0, 0, t.Line);
+          end
+          else
+          begin
+            Expect(tkRParen, '")"');
+            FProg.Emit(opInputChars, 0, 0, t.Line);
+          end;
+          FBool := False;
+        end
+        // EOF(#f)/LOF(#f)/LOC(#f): file-channel state, so opcodes over the VM table.
+        else if ((t.StrVal = 'eof') or (t.StrVal = 'lof') or (t.StrVal = 'loc')) and
+                (FLex.Peek.Kind = tkLParen) then
+        begin
+          FLex.Advance; FLex.Advance;   // name '('
+          if FLex.Cur.Kind = tkHash then FLex.Advance;   // optional '#'
+          ParseExpr;                    // the file number
+          Expect(tkRParen, '")"');
+          if t.StrVal = 'eof' then FProg.Emit(opEofFile, 0, 0, t.Line)
+          else if t.StrVal = 'lof' then FProg.Emit(opLofFile, 0, 0, t.Line)
+          else FProg.Emit(opLocFile, 0, 0, t.Line);
+          FBool := False;
+        end
         else if FLex.Peek.Kind = tkLParen then begin FLex.Advance; ParseCall(t.StrVal, t.Line); end
         else if ConstIndex(t.StrVal) >= 0 then
         begin
@@ -905,7 +949,7 @@ begin
   ParseCondition;
   if FFailed then Exit;
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
-  ParseBlockUntil(['endwhile']);
+  ParseBlockUntil(['endwhile', 'wend']);   // `wend` is the classic terminator
   if FFailed then Exit;
   FProg.Emit(opJump, condStart, 0, ln);
   afterLoop := FProg.Count;
@@ -913,7 +957,8 @@ begin
   PatchBreaks(afterLoop);
   PatchConts(condStart);
   PopLoop;
-  if not IsKeyword('endwhile') then begin Fail('expected ''endwhile''', FLex.Cur.Line); Exit; end;
+  if not (IsKeyword('endwhile') or IsKeyword('wend')) then
+  begin Fail('expected ''endwhile'' or ''wend''', FLex.Cur.Line); Exit; end;
   FLex.Advance;
 end;
 
@@ -1117,6 +1162,301 @@ begin
   FProg.Emit(opBreakpoint, nops, 0, ln);
 end;
 
+{ The type code an INPUT field is coerced to: 0 number, 1 string, 2 int, 3 bool;
+  -1 for a handle (which INPUT cannot fill). Read from the name suffix. }
+function TPhosphorCompiler.InputTypeCode(const AName: String): Integer;
+begin
+  case VarTypeOf(AName) of
+    vtString: Result := 1;
+    vtInt:    Result := 2;
+    vtBool:   Result := 3;
+    vtHandle: Result := -1;
+  else
+    Result := 0;   // vtNumber
+  end;
+end;
+
+{ INPUT / LINE INPUT, from the console or from a #file. Console INPUT prompts with
+  "? " (a leading string prompt with ';' keeps it, ',' drops it); LINE INPUT does
+  not prompt. File forms (`input #f, ...`) read the channel's buffer. }
+procedure TPhosphorCompiler.ParseInput(AIsLine: Boolean);
+var
+  ln, chTmp, tc: Integer;
+  vname: String;
+  isFile, hasPrompt: Boolean;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // past 'input'
+  isFile := FLex.Cur.Kind = tkHash;
+  if isFile then
+  begin
+    FLex.Advance;                       // '#'
+    ParseExpr;                          // the file number
+    if FFailed then Exit;
+    chTmp := NewHiddenVar(vtNumber);
+    FProg.Emit(opStoreVar, chTmp, 0, ln);
+    Expect(tkComma, '","');
+    if FFailed then Exit;
+  end
+  else
+  begin
+    chTmp := 0;
+    hasPrompt := (FLex.Cur.Kind = tkString) and (FLex.Peek.Kind in [tkSemicolon, tkComma]);
+    if hasPrompt then
+    begin
+      FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(FLex.Cur.StrVal)), 0, ln);
+      FProg.Emit(opPrint, 0, 0, ln);
+      FLex.Advance;                     // the prompt string
+      // A ';' after the prompt adds the "? " of a classic INPUT; LINE INPUT never
+      // adds it. Either way ',' suppresses it.
+      if (FLex.Cur.Kind = tkSemicolon) and (not AIsLine) then
+      begin
+        FProg.Emit(opPushConst, FProg.Consts.Add(ValStr('? ')), 0, ln);
+        FProg.Emit(opPrint, 0, 0, ln);
+      end;
+      FLex.Advance;                     // the ';' or ','
+    end
+    else if not AIsLine then
+    begin
+      FProg.Emit(opPushConst, FProg.Consts.Add(ValStr('? ')), 0, ln);
+      FProg.Emit(opPrint, 0, 0, ln);
+    end;
+    FProg.Emit(opInputLine, 0, 0, ln);
+  end;
+
+  repeat
+    if FLex.Cur.Kind <> tkIdent then begin Fail('INPUT needs a variable', FLex.Cur.Line); Exit; end;
+    vname := FLex.Cur.StrVal;
+    tc := InputTypeCode(vname);
+    if tc < 0 then begin Fail('cannot INPUT into a handle variable', FLex.Cur.Line); Exit; end;
+    if AIsLine and (VarTypeOf(vname) <> vtString) then
+    begin Fail('LINE INPUT needs a string ($) variable', FLex.Cur.Line); Exit; end;
+    FLex.Advance;
+    if isFile then
+    begin
+      FProg.Emit(opLoadVar, chTmp, 0, ln);
+      if AIsLine then FProg.Emit(opFileLine, 0, 0, ln)
+      else FProg.Emit(opFileField, tc, 0, ln);
+    end
+    else
+    begin
+      if AIsLine then FProg.Emit(opInputAll, 0, 0, ln)
+      else FProg.Emit(opInputField, tc, 0, ln);
+    end;
+    EmitStoreVar(vname, ln);
+    if FFailed then Exit;
+    if AIsLine then Break;              // LINE INPUT fills exactly one variable
+    if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+  until FFailed;
+end;
+
+{ OPEN <path> FOR input|output|append AS #n -- opens a classic file channel. }
+procedure TPhosphorCompiler.ParseOpen;
+var ln, modeCode: Integer; modeStr: String;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // 'open'
+  ParseExpr;      // the path (pushed first)
+  if FFailed then Exit;
+  if not ((FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'for')) then
+  begin Fail('OPEN needs ''for''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+  if FLex.Cur.Kind <> tkIdent then begin Fail('OPEN mode must be input, output or append', FLex.Cur.Line); Exit; end;
+  modeStr := FLex.Cur.StrVal;
+  if modeStr = 'input' then modeCode := 0
+  else if modeStr = 'output' then modeCode := 1
+  else if modeStr = 'append' then modeCode := 2
+  else begin Fail('OPEN mode must be input, output or append', FLex.Cur.Line); Exit; end;
+  FLex.Advance;   // the mode
+  if not ((FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'as')) then
+  begin Fail('OPEN needs ''as''', FLex.Cur.Line); Exit; end;
+  FLex.Advance;
+  if FLex.Cur.Kind = tkHash then FLex.Advance;   // optional '#'
+  ParseExpr;      // the file number (pushed second) -> [path, chan]
+  if FFailed then Exit;
+  FProg.Emit(opOpenFile, modeCode, 0, ln);
+end;
+
+{ CLOSE [#n [, #n]...] -- closes the named channels; bare CLOSE closes them all. }
+procedure TPhosphorCompiler.ParseClose;
+var ln: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // 'close'
+  if FLex.Cur.Kind in [tkEOL, tkEOF, tkColon] then
+  begin FProg.Emit(opCloseFile, 1, 0, ln); Exit; end;   // close every channel
+  repeat
+    if FLex.Cur.Kind = tkHash then FLex.Advance;
+    ParseExpr;
+    if FFailed then Exit;
+    FProg.Emit(opCloseFile, 0, 0, ln);
+    if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
+  until FFailed;
+end;
+
+{ PRINT #n [, item[(;|,) item]...] -- writes items to a file channel (';' adjacent,
+  ',' a tab). PRINTLN #n adds a trailing newline; PRINT #n does not. }
+procedure TPhosphorCompiler.ParsePrintFile(AAddNewline: Boolean);
+var ln, chTmp: Integer;
+begin
+  ln := FLex.Cur.Line;   // Cur = '#'
+  FLex.Advance;          // '#'
+  ParseExpr;             // the file number
+  if FFailed then Exit;
+  chTmp := NewHiddenVar(vtNumber);
+  FProg.Emit(opStoreVar, chTmp, 0, ln);
+  if FLex.Cur.Kind = tkComma then FLex.Advance;   // the comma after #n
+  while (not FFailed) and not (FLex.Cur.Kind in [tkEOL, tkEOF, tkColon]) do
+  begin
+    FProg.Emit(opLoadVar, chTmp, 0, ln);
+    ParseExpr;
+    if FFailed then Exit;
+    FProg.Emit(opPrintFile, 0, 0, ln);
+    if FLex.Cur.Kind = tkComma then
+    begin
+      FProg.Emit(opLoadVar, chTmp, 0, ln);
+      FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(#9)), 0, ln);
+      FProg.Emit(opPrintFile, 0, 0, ln);
+      FLex.Advance;
+    end
+    else if FLex.Cur.Kind = tkSemicolon then
+      FLex.Advance
+    else
+      Break;
+  end;
+  if AAddNewline then
+  begin
+    FProg.Emit(opLoadVar, chTmp, 0, ln);
+    FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(#10)), 0, ln);
+    FProg.Emit(opPrintFile, 0, 0, ln);
+  end;
+end;
+
+{ PRINT USING fmt$; a[; b...] -- emits the values through the format string. }
+procedure TPhosphorCompiler.ParsePrintUsing(AAddNewline: Boolean);
+var ln, argc: Integer;
+begin
+  ln := FLex.Cur.Line;
+  ParseExpr;      // the format string (pushed first)
+  if FFailed then Exit;
+  if FLex.Cur.Kind in [tkSemicolon, tkComma] then FLex.Advance
+  else begin Fail('PRINT USING needs '';'' after the format', FLex.Cur.Line); Exit; end;
+  argc := 0;
+  if not (FLex.Cur.Kind in [tkEOL, tkEOF, tkColon]) then
+  begin
+    ParseExpr; Inc(argc);
+    while (not FFailed) and (FLex.Cur.Kind in [tkSemicolon, tkComma]) do
+    begin
+      FLex.Advance;
+      if FLex.Cur.Kind in [tkEOL, tkEOF, tkColon] then Break;
+      ParseExpr; Inc(argc);
+    end;
+  end;
+  if FFailed then Exit;
+  FProg.Emit(opPrintUsing, argc, 0, ln);
+  if AAddNewline then
+  begin
+    FProg.Emit(opPushConst, FProg.Consts.Add(ValStr('')), 0, ln);
+    FProg.Emit(opPrintLn, 0, 0, ln);
+  end;
+end;
+
+{ SWAP support. A target is a scalar variable or an @-array element. The two are
+  read into hidden temporaries first, then cross-written, so aliasing is safe and
+  the exchange is atomic in effect. Index expressions are re-parsed (via the lexer
+  marks) for the read and the write; keep them side-effect free. }
+procedure TPhosphorCompiler.SkipTarget;
+var depth: Integer;
+begin
+  if FLex.Cur.Kind <> tkIdent then begin Fail('SWAP needs a variable', FLex.Cur.Line); Exit; end;
+  FLex.Advance;   // the name
+  if FLex.Cur.Kind = tkLBracket then
+  begin
+    depth := 0;
+    repeat
+      if FLex.Cur.Kind = tkLBracket then Inc(depth)
+      else if FLex.Cur.Kind = tkRBracket then Dec(depth);
+      if FLex.Cur.Kind in [tkEOL, tkEOF] then begin Fail('unterminated index in SWAP', FLex.Cur.Line); Exit; end;
+      FLex.Advance;
+    until depth = 0;
+  end;
+end;
+
+procedure TPhosphorCompiler.EmitReadTarget(APos: Integer);
+var name: String; ln, nidx: Integer;
+begin
+  FLex.Reset(APos);
+  name := FLex.Cur.StrVal;
+  ln := FLex.Cur.Line;
+  if FLex.Peek.Kind = tkLBracket then
+  begin
+    if VarTypeOf(name) <> vtHandle then begin Fail('SWAP can index only a handle (@) variable', ln); Exit; end;
+    EmitLoadVar(name, ln);      // the handle
+    FLex.Advance; FLex.Advance; // the name, '['
+    ParseExpr; nidx := 1;
+    while (not FFailed) and (FLex.Cur.Kind = tkComma) do
+    begin FLex.Advance; ParseExpr; Inc(nidx); end;
+    Expect(tkRBracket, ''']''');
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, ln);
+  end
+  else
+  begin
+    EmitLoadVar(name, ln);
+    FLex.Advance;               // the name
+  end;
+end;
+
+procedure TPhosphorCompiler.EmitWriteTarget(APos, ATempVar: Integer);
+var name: String; ln, nidx: Integer;
+begin
+  FLex.Reset(APos);
+  name := FLex.Cur.StrVal;
+  ln := FLex.Cur.Line;
+  if FLex.Peek.Kind = tkLBracket then
+  begin
+    if VarTypeOf(name) <> vtHandle then begin Fail('SWAP can index only a handle (@) variable', ln); Exit; end;
+    EmitLoadVar(name, ln);      // the handle
+    FLex.Advance; FLex.Advance; // the name, '['
+    ParseExpr; nidx := 1;
+    while (not FFailed) and (FLex.Cur.Kind = tkComma) do
+    begin FLex.Advance; ParseExpr; Inc(nidx); end;
+    Expect(tkRBracket, ''']''');
+    FProg.Emit(opLoadVar, ATempVar, 0, ln);   // the value to store
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 1 + nidx + 1, ln);
+    FProg.Emit(opPop, 0, 0, ln);              // discard arr_set's returned handle
+  end
+  else
+  begin
+    FProg.Emit(opLoadVar, ATempVar, 0, ln);
+    FLex.Advance;               // the name
+    EmitStoreVar(name, ln);
+  end;
+end;
+
+procedure TPhosphorCompiler.ParseSwap;
+var m1, m2, mEnd, t1, t2: Integer;
+begin
+  FLex.Advance;   // 'swap'
+  m1 := FLex.Mark;
+  SkipTarget;
+  if FFailed then Exit;
+  Expect(tkComma, '","');
+  if FFailed then Exit;
+  m2 := FLex.Mark;
+  SkipTarget;
+  if FFailed then Exit;
+  mEnd := FLex.Mark;
+  t1 := NewHiddenVar(vtAny);
+  t2 := NewHiddenVar(vtAny);
+  EmitReadTarget(m1);  if FFailed then Exit;
+  FProg.Emit(opStoreVar, t1, 0, FLex.Cur.Line);
+  EmitReadTarget(m2);  if FFailed then Exit;
+  FProg.Emit(opStoreVar, t2, 0, FLex.Cur.Line);
+  EmitWriteTarget(m1, t2);  if FFailed then Exit;
+  EmitWriteTarget(m2, t1);  if FFailed then Exit;
+  FLex.Reset(mEnd);
+end;
+
 procedure TPhosphorCompiler.ParseStatement;
 var
   t: TToken;
@@ -1264,6 +1604,25 @@ begin
       Exit;
     end;
     if t.StrVal = 'restore' then begin FLex.Advance; FProg.Emit(opRestore, 0, 0, t.Line); Exit; end;
+    // Classic console/file INPUT. `input` is contextual: a statement only when a
+    // variable, string prompt or '#' follows (so `input = 5` stays an assignment).
+    if (t.StrVal = 'input') and (FLex.Peek.Kind in [tkIdent, tkString, tkHash]) then
+    begin ParseInput(False); Exit; end;
+    // `line input ...` -- the two-word form; `line` alone stays an ordinary name.
+    if (t.StrVal = 'line') and (FLex.Peek.Kind = tkIdent) and (FLex.Peek.StrVal = 'input') then
+    begin FLex.Advance; ParseInput(True); Exit; end;
+    // `open <path> for input|output|append as #n` -- contextual like `on`.
+    if (t.StrVal = 'open') and
+       not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket, tkEOL, tkEOF, tkColon]) then
+    begin ParseOpen; Exit; end;
+    // `close [#n[, #n]...]` or bare `close` (every channel).
+    if (t.StrVal = 'close') and
+       not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
+    begin ParseClose; Exit; end;
+    // `swap <var>, <var>` (scalars or @-array elements).
+    if (t.StrVal = 'swap') and
+       not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
+    begin ParseSwap; Exit; end;
     // indexed handle: a@[i,...] = <expr> (set), a@[i,...] op= <expr> (compound),
     // or a@[i,...] alone (expression stmt). N comma-separated indices are allowed.
     if (VarTypeOf(t.StrVal) = vtHandle) and (FLex.Peek.Kind = tkLBracket) then
@@ -1308,6 +1667,11 @@ begin
     if (t.StrVal = 'print') or (t.StrVal = 'println') then
     begin
       FLex.Advance;
+      // `print #n, ...` writes to a file channel; `print using fmt$; ...` formats.
+      if FLex.Cur.Kind = tkHash then
+      begin ParsePrintFile(t.StrVal = 'println'); Exit; end;
+      if (FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'using') then
+      begin FLex.Advance; ParsePrintUsing(t.StrVal = 'println'); Exit; end;
       // Items separated by `;` (adjacent, no separator) or `,` (a tab to the
       // next zone). PRINTLN adds a trailing newline, PRINT does not.
       if (FLex.Cur.Kind <> tkEOL) and (FLex.Cur.Kind <> tkEOF) then

@@ -1,0 +1,8 @@
+str: PHOSPHOR 8
+num: 5 9
+dict: 42
+json: 7
+base64: Phosphor
+gzip: hello world hello world
+zip: 1 zipped!
+done: 1

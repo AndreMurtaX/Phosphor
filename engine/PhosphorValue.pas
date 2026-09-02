@@ -42,6 +42,14 @@ type
     trailing LF into the text; PRINT does not. }
   TPhosphorOutputProc = procedure(const AText: String) of object;
 
+  { The engine's one INPUT seam -- the dual of OnOutput. The VM asks the host for
+    the next line of console input (INPUT / LINE INPUT / INPUT$); the host fills
+    ALine (UTF-8, newline stripped) and returns True, or returns False at end of
+    input. Nil by default: a headless host installs none, and INPUT then reads as
+    empty (each field takes its type's default). Declared here (a low-level unit)
+    so the VM and the engine facade share it without a circular dependency. }
+  TPhosphorInputProc = function(out ALine: String): Boolean of object;
+
   TValueKind = (vkDouble, vkString, vkInt, vkHandle, vkBool);
 
   { The element/value kind of a handle-based collection (array, dict). Shared by

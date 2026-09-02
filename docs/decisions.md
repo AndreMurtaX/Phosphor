@@ -82,14 +82,25 @@ no error handling at all. Fixing this is a founding goal, not a later addition.
 `SWAP`; `RANDOMIZE`; `max()` and `min()`. `DEF FN` stays out — `function`
 already exists.
 
-> **STATUS (2026-09-02, oracle-complete milestone) — this is the INTENDED set, not a
-> statement of what is built.** `RANDOMIZE` and `max()`/`min()` are in. As of now,
-> **`PRINT USING`, the classic `#` file I/O (`OPEN … AS #1`, `PRINT #`, `INPUT #`,
-> `LINE INPUT #`, `CLOSE #`), and the `INPUT` statement are NOT implemented** — file
-> work is done with the Io library functions (`file_writealltext`, `file_readalltext$`,
-> `savetext$`, `opentext$`, the `dir_*`/`path_*` families). The current, verified
-> language surface is documented in [language-reference.md](language-reference.md),
-> which is the authority for what actually runs.
+> **STATUS (2026-09-02, standard-command milestone) — this whole set is now BUILT and
+> tested.** `RANDOMIZE`, `max()`/`min()`; the `INPUT` / `LINE INPUT` statements and the
+> `INPUT$` function (synchronous, over a host input seam); classic `#`-number file I/O
+> (`OPEN … FOR input|output|append AS #n`, `PRINT #`, `INPUT #`, `LINE INPUT #`, `CLOSE`,
+> plus `EOF`/`LOF`/`LOC` and `INPUT$(n, #f)`); `PRINT USING`; and `SWAP` — all covered by
+> `tests/classic` (byte-exact, both OSes). They live alongside the IOUtils-style Io
+> functions (`file_writealltext`, `file_readalltext$`, `savetext$`, `dir_*`/`path_*`), so
+> file work can be done either way. `while … wend` is accepted as well as `endwhile`.
+> [language-reference.md](language-reference.md) documents the full surface.
+
+### PRINT USING format language
+
+A classic subset. Numeric fields: `#` digit positions, `.` decimals, `,` grouping, a
+leading `+` (always-show sign) or `$$` (floating dollar) or `**` (asterisk fill), and a
+trailing `+`/`-`; a value too wide for its field is prefixed with `%`. String fields:
+`&` (the whole string), `!` (its first character), and `\`…`\` (a fixed-width field of
+2 + the inner spaces). `_x` emits `x` literally. Values fill fields left to right, and
+the format repeats while values remain. Because Phosphor string literals use backslash
+escapes, a `\`…`\` field is written with doubled backslashes: `"\\   \\"`.
 
 ## Rules carried over from Plan9Basic
 

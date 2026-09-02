@@ -71,8 +71,26 @@ type
     opResume     = 38, // A = 0 retry the failing statement, 1 continue at the next
     opDupN       = 39, // duplicate the top A stack values (for a@[i,j,..] op= x)
     opTrace      = 40, // pop 1 value; VM's trace flag := (value <> 0)
-    opBreakpoint = 41  // A = operand count; pop A operand values + the message,
+    opBreakpoint = 41, // A = operand count; pop A operand values + the message,
                        //   report-and-continue (never blocks; see PhosphorVM)
+    // --- classic console input (INPUT / LINE INPUT / INPUT$) -----------------
+    opInputLine  = 42, // read one console line into the input buffer (via OnInput)
+    opInputField = 43, // A = type code (0 num,1 str,2 int,3 bool): next comma-field
+                       //   of the input buffer, coerced -> push
+    opInputAll   = 44, // push the whole remaining input-buffer line as a string
+    opInputChars = 45, // pop count; read that many console characters -> push string
+    // --- classic file I/O over #-numbered channels ---------------------------
+    opOpenFile   = 46, // A = mode (0 input,1 output,2 append); pop channel#, pop path$
+    opCloseFile  = 47, // A: 0 = pop channel# and close it; 1 = close every channel
+    opPrintFile  = 48, // pop value, pop channel#: write the value's text to the file
+    opFileField  = 49, // A = type code; pop channel#: next field of the file -> push
+    opFileLine   = 50, // pop channel#: next whole line of the file -> push string
+    opFileChars  = 51, // pop count, pop channel#: read that many chars -> push string
+    opEofFile    = 52, // pop channel#: push true if the read cursor is at/after end
+    opLofFile    = 53, // pop channel#: push the file length in bytes (int)
+    opLocFile    = 54, // pop channel#: push the 1-based read/write cursor (int)
+    // --- formatted output ----------------------------------------------------
+    opPrintUsing = 55  // A = value count; pop A values + the format$: emit formatted
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -234,7 +252,12 @@ begin
     (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32) and
     (Ord(opReadData) = 33) and (Ord(opRestore) = 34) and (Ord(opDup2) = 35) and
     (Ord(opStmt) = 36) and (Ord(opSetErrHandler) = 37) and (Ord(opResume) = 38) and
-    (Ord(opDupN) = 39) and (Ord(opTrace) = 40) and (Ord(opBreakpoint) = 41);
+    (Ord(opDupN) = 39) and (Ord(opTrace) = 40) and (Ord(opBreakpoint) = 41) and
+    (Ord(opInputLine) = 42) and (Ord(opInputField) = 43) and (Ord(opInputAll) = 44) and
+    (Ord(opInputChars) = 45) and (Ord(opOpenFile) = 46) and (Ord(opCloseFile) = 47) and
+    (Ord(opPrintFile) = 48) and (Ord(opFileField) = 49) and (Ord(opFileLine) = 50) and
+    (Ord(opFileChars) = 51) and (Ord(opEofFile) = 52) and (Ord(opLofFile) = 53) and
+    (Ord(opLocFile) = 54) and (Ord(opPrintUsing) = 55);
 end;
 
 end.

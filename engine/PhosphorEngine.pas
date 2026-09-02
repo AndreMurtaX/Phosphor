@@ -39,6 +39,7 @@ type
   private
     FRegistry: TPhosphorRegistry;
     FOnOutput: TPhosphorOutputProc;
+    FOnInput: TPhosphorInputProc;
     FOnBreakpoint: TPhosphorBreakpointProc;
     FHostServices: THostServices;
     FErrorLine: Integer;
@@ -75,6 +76,10 @@ type
     procedure Finish;
     property Registry: TPhosphorRegistry read FRegistry;
     property OnOutput: TPhosphorOutputProc read FOnOutput write FOnOutput;
+    { The INPUT seam. Nil by default: a headless host installs none, and INPUT /
+      LINE INPUT / INPUT$ then read as empty. A console host wires it to a line
+      reader; the engine only ever offers the seam. }
+    property OnInput: TPhosphorInputProc read FOnInput write FOnInput;
     { The BREAKPOINT seam. Nil by default: with none installed (a headless host),
       BREAKPOINT reports nothing and continues. A host that wants a debug pause
       assigns a report-only callback here -- the engine never blocks on it. }
@@ -121,6 +126,7 @@ begin
   RegisterHostFuncs(FRegistry);
   RegisterRagFuncs(FRegistry);
   FOnOutput := nil;
+  FOnInput := nil;
   FOnBreakpoint := nil;
   FHostServices := Default(THostServices);
   FErrorLine := 0;
@@ -164,6 +170,7 @@ procedure TPhosphorEngine.ConfigureVM(AVM: TPhosphorVM);
 begin
   AVM.Registry := FRegistry;
   AVM.OnOutput := FOnOutput;
+  AVM.OnInput := FOnInput;
   AVM.OnBreakpoint := FOnBreakpoint;
   AVM.HostServices := FHostServices;
   AVM.MaxSteps := FMaxSteps;

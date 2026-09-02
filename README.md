@@ -7,7 +7,7 @@ The spiritual successor to Plan9Basic (Delphi/FireMonkey, now frozen). **Not a
 port:** several language decisions change on purpose — see
 [docs/decisions.md](docs/decisions.md).
 
-## Status — the language + library oracle is complete
+## Status — the full language + libraries
 
 Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact green on
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
@@ -17,16 +17,15 @@ functions** are registered across the standard libraries. Errors are *values*, n
 crashes: a library records its error state and the program keeps running. It is a
 real, working interpreter — not a skeleton.
 
-**What "complete" means here, precisely:** complete *against the oracle* — the bar this
-project set. It is **not** a feature-complete general-purpose BASIC yet. Three classic
-statements from the design wishlist are **not built**: the `INPUT` statement, classic
-`#`-number file I/O (`OPEN … AS #1`, `PRINT #`, `LINE INPUT #`, `CLOSE #`), and
-`PRINT USING`. The oracle never exercises them, so their absence does not make the
-oracle incomplete — but it does mean an interactive console program that reads keyboard
-input can't be written in pure Phosphor BASIC today. File work is done with the Io
-library functions (`file_writealltext`, `file_readalltext$`, `savetext$`, `opentext$`,
-`dir_*`/`path_*`). [docs/language-reference.md](docs/language-reference.md) documents
-exactly what runs.
+**The standard-BASIC command set from the founding brief is built** and covered by
+`tests/classic` (byte-exact, both OSes): the `INPUT` / `LINE INPUT` statements and the
+`INPUT$` function; classic `#`-number file I/O (`OPEN … FOR input|output|append AS #n`,
+`PRINT #`, `INPUT #`, `LINE INPUT #`, `CLOSE`, and `EOF`/`LOF`/`LOC`); `PRINT USING`;
+`SWAP`; and `while … wend`. These live alongside the IOUtils-style Io functions
+(`file_writealltext`, `file_readalltext$`, `savetext$`, `dir_*`/`path_*`), so a file can
+be worked either way. The `phosphor` host links **every** function package, so a program
+it runs, compiles or packs reaches the whole library surface.
+[docs/language-reference.md](docs/language-reference.md) documents it all.
 
 What it is, precisely: an **engine-as-library** (`engine/`) that does no I/O of its
 own and never names a host or GUI unit — the build fails if it does. Everything a
@@ -90,7 +89,7 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `host/gui/`      | `phosphorgui`, the LCL GUI host.                                 |
 | `host/embed/`    | an example of embedding the engine.                              |
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
-| `tests/`         | the byte-exact oracle suite, negatives, and package tests.       |
+| `tests/`         | the byte-exact oracle suite, negatives, classic tests, packages. |
 | `examples/`      | runnable example programs.                                       |
 | `scripts/`       | `build.{ps1,sh}`, `test-suite.{ps1,sh}`, `test-packages.{ps1,sh}`.|
 | `docs/`          | the documentation above.                                         |

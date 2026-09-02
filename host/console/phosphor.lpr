@@ -35,7 +35,14 @@ uses
   {$IFDEF WINDOWS}Windows,{$ENDIF}
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
   SysUtils, Classes, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes, PhosphorBytecode,
-  PhosphorCrtLib;   // this host opts into the CRT console-control package
+  PhosphorRegistry,
+  // This host opts into EVERY shipped function package, so a program run, compiled
+  // or packed by `phosphor` can reach the whole library surface (~700 built-ins).
+  // The external-dependency packages (sqlite, http) load their libraries lazily,
+  // so the binary builds and runs everywhere; only an actually-called function
+  // whose library is absent reports an error, and the rest keep working.
+  PhosphorCrtLib, PhosphorBase64Lib, PhosphorZipLib, PhosphorGzipLib,
+  PhosphorHttpLib, PhosphorSqliteLib;
 
 type
   { The whole host side of the boundary: give the engine somewhere to put its
@@ -174,6 +181,18 @@ begin
   Result := True;
 end;
 
+{ Register every shipped function package into a registry, so a program run,
+  compiled or packed by this host can reach the whole library surface. }
+procedure RegisterAllPackages(Reg: TPhosphorRegistry);
+begin
+  RegisterCrtFuncs(Reg);
+  RegisterBase64Funcs(Reg);
+  RegisterZipFuncs(Reg);
+  RegisterGzipFuncs(Reg);
+  RegisterHttpFuncs(Reg);
+  RegisterSqliteFuncs(Reg);
+end;
+
 { Reads a whole file as raw bytes and strips a leading UTF-8 BOM if present, so
   a BOM-saved source never trips the first keyword. }
 function ReadSource(const APath: String): String;
@@ -260,7 +279,8 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
-    RegisterCrtFuncs(eng.Registry);
+    eng.OnInput := @host.ReadLine;
+    RegisterAllPackages(eng.Registry);
     if IsBytecode(APath) then
     begin
       // a precompiled .pbc: run it without the lexer/compiler
@@ -412,7 +432,8 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
-    RegisterCrtFuncs(eng.Registry);
+    eng.OnInput := @host.ReadLine;
+    RegisterAllPackages(eng.Registry);
     line := eng.RunBytecode(APayload);
     if line <> 0 then begin Writeln(StdErr, Format('phosphor: %d: %s', [line, eng.ErrorMessage])); Exit(1); end;
     Result := 0;
@@ -431,9 +452,10 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
-    RegisterCrtFuncs(eng.Registry);
+    eng.OnInput := @host.ReadLine;
+    RegisterAllPackages(eng.Registry);
     host.Output('Phosphor BASIC ' + PhosphorVersion +
-                ' -- skeleton REPL (PRINT/PRINTLN only). Ctrl+Z then Enter to quit.'#10);
+                ' -- REPL. Each line runs as its own program. Ctrl+Z then Enter to quit.'#10);
     while True do
     begin
       host.Output('phosphor> ');

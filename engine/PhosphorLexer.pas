@@ -28,7 +28,8 @@ type
     tkLBrace, tkRBrace,
     tkPlus, tkMinus, tkStar, tkSlash, tkBackslash, tkCaret, tkMod,
     tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq,
-    tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE
+    tkEQ, tkNE, tkLT, tkLE, tkGT, tkGE,
+    tkHash    // '#' -- a file number in classic I/O (PRINT #1, INPUT #1, CLOSE #1)
   );
 
   TToken = record
@@ -58,6 +59,8 @@ type
     function Cur: TToken;
     function Peek: TToken;   // one past Cur
     procedure Advance;
+    function Mark: Integer;             // current token position, for re-parsing
+    procedure Reset(APos: Integer);     // rewind to a position from Mark
     function Ok: Boolean;
     property ErrorMessage: String read FErr;
     property ErrorLine: Integer read FErrLine;
@@ -360,6 +363,7 @@ begin
       ',': begin PushSimple(tkComma, startLine); Inc(FPos); end;
       ';': begin PushSimple(tkSemicolon, startLine); Inc(FPos); end;
       ':': begin PushSimple(tkColon, startLine); Inc(FPos); end;
+      '#': begin PushSimple(tkHash, startLine); Inc(FPos); end;
       '=': begin PushSimple(tkEQ, startLine); Inc(FPos); end;
       '<':
         begin
@@ -407,6 +411,17 @@ procedure TLexer.Advance;
 begin
   if FIndex < FCount - 1 then
     Inc(FIndex);
+end;
+
+function TLexer.Mark: Integer;
+begin
+  Result := FIndex;
+end;
+
+procedure TLexer.Reset(APos: Integer);
+begin
+  if (APos >= 0) and (APos < FCount) then
+    FIndex := APos;
 end;
 
 function TLexer.Ok: Boolean;

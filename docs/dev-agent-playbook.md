@@ -202,6 +202,49 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 11 · local RAG retrieval index (oracle 33) — THE LAST ORACLE
+  FILE.** Green both OSes, `tests/suite/33_rag` 22 asserts, no human needed. New PURE
+  ENGINE lib `engine/libs/PhosphorRagLib` (registered in `PhosphorEngine`, boundary
+  clean — only `SysUtils`/`Classes`/`StrUtils`/`fpjson`): a dependency-free retrieval
+  index over a folder of markdown docs with YAML-style front-matter, reproducing the
+  Delphi reference's multi-signal keyword scoring (tags×3 + title×2.5 + functions×5 +
+  id×3 + library-hint×10 + language boost) so the same query picks the same document.
+  Functions: `rag@`/`rag_free`/`rag_rebuild@`, `rag_retrieve$`/`_json$`/`_budget$`,
+  `rag_doc$`/`rag_functions$`/`rag_tags$`, `rag_analyze$`, `rag_count`/`rag_funccount`,
+  `rag_summary$`, `rag_error`. Five things worth folding in:
+  (1) **`next` is BARE in Phosphor** — no loop variable. Porting a reference
+  `for k … next k` verbatim halts the parser with "expected end of line" on the
+  `next k`; drop the variable. (Same class as round-1's syntax divergences; belongs
+  in §4 as a porting checklist item.)
+  (2) **objfpc reserved-word / case-insensitive name traps, twice in one file:** a
+  nested `procedure Try(...)` is a compile break (`try` is reserved → "Syntax error,
+  identifier expected but TRY found"), and a local `stop: Boolean` collides
+  case-insensitively with a `const STOP: array…` ("Duplicate identifier STOP"). Name
+  loop-scratch vars distinctly from any const in scope, and never a keyword.
+  (3) **Improve-beyond-reference, made VISIBLE:** the reference's validator RAISED on
+  a bad handle, so its own test could only *comment* that "a fabricated handle is
+  refused… provoked where it can be seen" — it could not assert it without halting.
+  Phosphor's errors-as-values design turns the refusal into an actual passing
+  assertion: `rag_count(pointer@(n))` answers 0 (IsHandle refuses to dereference the
+  fabricated id) and `rag_error()` reads the reason (the ioerror/valcode pattern). The
+  round-3 handle discipline, finally a green line instead of a comment. This is the
+  memory rule "improve beyond reference where it has an artifact" — the artifact was a
+  property the reference wanted to prove but its raise-on-invalid design forbade.
+  (4) **The budget-poison regression the oracle pins passes EITHER WAY, but reproduce
+  it honestly:** an over-budget doc is admitted *truncated* only when its score ≥ the
+  high-relevance threshold (8.0), so caching the FULL loaded content and truncating a
+  LOCAL copy is what keeps a small-budget-first call from poisoning a later
+  large-budget one. A naive "load, truncate, cache truncated" would pass the first
+  assertion and fail the second — exactly the defect the oracle's comment narrates.
+  (5) **instr divergence proven, not assumed (round-4 template):** a see-check-fail
+  confirmed `instr` of an absent substring is 0 in Phosphor (asserting the reference's
+  `-1` FAILED with "got 0"), so the `0` is right semantics, not a fudged constant; the
+  reference's `instr(...) + 1` "contains" idiom drops the `+1` (round-5 again), and
+  function suffixes carry Phosphor's `@` where the Delphi reference wrote `#`.
+  **★ WITH 33 GREEN ON BOTH OSes, THE ENTIRE PLAN9BASIC ORACLE `tests/suite` CORPUS IS
+  COMPLETE** — every portable oracle file (including the four external-dep deferrals
+  23/32/33/34) now has a Phosphor equivalent, byte-exact green on Windows AND the Linux
+  VM, boundary intact, zero warnings/notes.
 - **2026-09-02 · round 10 · HTTP offline config surface (oracle 32).** Green both OSes,
   `tests/packages/08_http_offline` 68 asserts, no human needed, no library-gate (plain
   config needs no runtime lib). Extended `PhosphorHttpLib` with a client-config handle

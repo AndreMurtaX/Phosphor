@@ -26,22 +26,43 @@ is not lost). The fallback already blunts IPv6's main practical benefit.
 Delivered the same way as every package: verify against reality, byte-exact on both
 OSes, library-gated where the runtime dependency is absent, no stubs.
 
-### Step 1 — the client speaks TLS
+### Step 1 — the client speaks TLS  *(DONE 2026-09-01)*
 
-Add the OpenSSL-backed socket handler so `TFPHTTPClient` handles `https://`. In FPC
-this is a `uses` line — `opensslsockets` registers itself as the default handler; the
-client picks TLS automatically for `https` URLs. `PhosphorHttpLib` keeps the same
-three functions (`http_get$`/`http_status`/`http_post$`) — they gain HTTPS for free
-because a URL's scheme, not a new API, selects it.
+Added the OpenSSL-backed socket handler so `TFPHTTPClient` handles `https://`: a
+single `uses` line (`opensslsockets` self-registers as the default handler) and a
+guard so https uses the plain resolve-and-dial path (not the IP-pinning fallback,
+which would feed the TLS layer an IP for SNI/verification — reconciled in Step 3).
+`PhosphorHttpLib` keeps the same three functions; the URL scheme, not a new API,
+selects TLS.
 
-- **Gate:** a one-off reality spot-check (like the HTTP one) — `http_status`/
-  `http_get$` against a real public HTTPS host returns 200 with a real body — proving
-  TLS + certificate trust work end to end over real network. (Spot-check only; not a
-  permanent test — see Step 2 for the deterministic one.)
-- **Unknown to resolve first:** whether FPC's default handler verifies the peer
-  certificate, and against what. This decides whether the public spot-check needs the
-  system trust store and whether Step 2's self-signed server needs verification turned
-  off.
+- **Gate — MET.** Reality spot-check: `http_status("https://example.com/")` → 200,
+  `http_get$` → a real 559-byte body, on **Windows** (OpenSSL DLLs loaded from the
+  toolchain) and to be cross-checked on the Linux VM. Plain http is unaffected (full
+  package suite still green, `03_http` byte-exact).
+- **Unknown — RESOLVED, and it matters.** FPC's default OpenSSL handler does **NOT
+  verify** the peer certificate: `expired`, `self-signed`, and `wrong.host`
+  `badssl.com` *all* returned 200. So TLS here encrypts but does not authenticate —
+  a real MITM footgun. Two consequences: Step 2's self-signed local server needs no
+  trust configuration (the client accepts it as-is), and shipping HTTPS is not "done"
+  until verification is addressed (Step 1b).
+
+### Step 1b — certificate verification (the security gap Step 1 surfaced)
+
+**Decision (owner):** a shipping HTTP client must **verify certificates by default** —
+silently accepting a forged, expired, or wrong-host certificate defeats the point of
+TLS. This is an improve-on-the-reference item, not optional polish. Turn on peer
+verification on the OpenSSL socket handler and give it a CA trust source per OS
+(Linux: the system bundle, e.g. `/etc/ssl/certs`; Windows: the system store or a
+bundled `cacert.pem`, since there is no standard bundle file). Keep an explicit,
+per-request opt-out for deliberately-insecure cases (a self-signed dev server) — off
+by default, never a blanket trust-all.
+
+- **Gate:** the badssl probe inverts — `expired`/`self-signed`/`wrong.host` now fail
+  (status 0 / no body) while `example.com` and other well-formed certs still return
+  200; on both OSes. Deterministic proof rides Step 2 (the local self-signed server,
+  reached with verification explicitly relaxed for that one test).
+- **Risk:** cross-platform CA location is the real work; if a clean Windows trust
+  source proves fiddly, a vendored `cacert.pem` is the fallback, refreshed as data.
 
 ### Step 2 — the permanent test: a local TLS server, library-gated
 

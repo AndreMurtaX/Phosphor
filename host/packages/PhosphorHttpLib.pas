@@ -4,9 +4,12 @@
   MIT License. Copyright (c) 2026 Andre Murta.
 
   An opt-in package (host/packages/, RegisterHttpFuncs) over FPC's TFPHTTPClient.
-  Plain HTTP needs no external runtime library (only HTTPS would pull OpenSSL), so
-  it is verified against reality with a local server the test spins up -- no network
-  and no external dependency.
+  The same three functions serve both http:// and https:// -- the URL scheme selects
+  TLS, no separate API. Plain HTTP needs no external library; https:// needs the
+  OpenSSL runtime (libssl/libcrypto), pulled in by the opensslsockets handler in the
+  uses clause -- so a host that never fetches https carries no dependency, and one
+  that does gets it where OpenSSL is installed (library-gated in the test suite, like
+  sqlite).
 
     http_get$(url$)          GET url$, return the response body
     http_status(url$)        GET url$, return the HTTP status code (0 on failure)
@@ -35,7 +38,8 @@ unit PhosphorHttpLib;
 interface
 
 uses
-  SysUtils, Classes, Types, fphttpclient, ssockets, resolve, sockets, URIParser,
+  SysUtils, Classes, Types, fphttpclient, opensslsockets, ssockets, resolve, sockets,
+  URIParser,
   PhosphorValue, PhosphorErrors, PhosphorRegistry;
 
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
@@ -104,6 +108,7 @@ function HttpFetch(const AMethod, AUrl, ABody: String;
   AConnectMs: Integer = 5000): String;
 var
   addrs: TStringDynArray;
+  uri: TURI;
   host, body: String;
   i: Integer;
   connected: Boolean;
@@ -162,11 +167,16 @@ begin
   end
   else
   begin
-    host := ParseURI(AUrl).Host;
-    if (host = '') or IsIPv4Literal(host) then
+    uri := ParseURI(AUrl);
+    host := uri.Host;
+    if (host = '') or IsIPv4Literal(host) or (LowerCase(uri.Protocol) = 'https') then
     begin
+      { Dial the URL's host as written. For https this is deliberate: pinning a
+        resolved IP would make the TLS layer see an IP for SNI and certificate
+        hostname verification instead of the real name, breaking the handshake --
+        the fallback is reconciled with TLS in a later step (docs/roadmap-net.md). }
       SetLength(addrs, 1);
-      addrs[0] := '';                 // dial the URL's host as written
+      addrs[0] := '';
     end
     else
     begin

@@ -43,3 +43,4 @@
 49_on_error
 15_breakpoint_degrade
 14_handle_registry
+19_language_contract

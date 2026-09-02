@@ -10,13 +10,24 @@ root="$(dirname "$here")"
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 
+# A -vewn build must be clean: capture it and FAIL on any warning/note, never pipe it
+# to /dev/null. A note can hide in a host package the engine suite never compiles.
+strict_build() {   # $1 = label; $2.. = the fpc command
+  local label="$1"; shift
+  local log; log="$(mktemp)"
+  "$@" >"$log" 2>&1
+  local issues; issues="$(grep -iE 'warning|note:|error|fatal' "$log" | grep -viE 'Compiling|Linking')"
+  rm -f "$log"
+  [ -z "$issues" ] || { echo "$label build NOT clean:"; echo "$issues"; exit 1; }
+}
+
 bin="$root/bin"; cpu="$("$FPC" -iTP)"; units="$bin/pkg-units/${cpu}-linux"
 exe="$bin/phosphorpkgtest"
 mkdir -p "$units"; rm -f "$exe"
-"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+strict_build phosphorpkgtest "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -Fu"$root/host/packages" \
   -FU"$units" -FE"$bin" -o"$exe" \
-  "$root/host/packages/phosphorpkgtest.lpr" >/dev/null
+  "$root/host/packages/phosphorpkgtest.lpr"
 [ -x "$exe" ] || { echo "phosphorpkgtest did not build"; exit 1; }
 echo "package runner built: $exe"
 
@@ -24,10 +35,10 @@ echo "package runner built: $exe"
 # (phosphorhttptest) that stands the server up. Plain HTTP needs no external library.
 httpunits="$bin/http-units/${cpu}-linux"; httpexe="$bin/phosphorhttptest"
 mkdir -p "$httpunits"; rm -f "$httpexe"
-"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+strict_build phosphorhttptest "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -Fu"$root/host/packages" \
   -FU"$httpunits" -FE"$bin" -o"$httpexe" \
-  "$root/host/packages/phosphorhttptest.lpr" >/dev/null
+  "$root/host/packages/phosphorhttptest.lpr"
 [ -x "$httpexe" ] || { echo "phosphorhttptest did not build"; exit 1; }
 echo "http runner built:    $httpexe"; echo
 

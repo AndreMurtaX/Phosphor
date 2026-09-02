@@ -127,6 +127,16 @@ So:
   guarded out.
 - Never let a test hang the suite: any interactive/terminal/network call must have a
   non-interactive fast path (empty/0), proven with `< /dev/null` and a `timeout`.
+- **Every build script must SURFACE the `-vewn` output and FAIL on any warning/note** —
+  never pipe the build to `/dev/null` and check only that the binary exists. A note can
+  hide in a **host package** (e.g. a CRT unit) that the engine's own suite build never
+  compiles, and it will not surface until someone reads a raw Linux build. The package
+  and console-host build scripts enforce this (`strict_build` / `Assert-CleanBuild`);
+  the check greps `warning|note:|error|fatal` minus `Compiling|Linking`. "Green on the
+  suite" is not "clean everywhere" — run the package + console builds too, per OS.
+- **`fpRead` (BaseUnix) is marked `inline` and FPC often declines to inline it**, which
+  `-vewn` reports as a note. Call **`FileRead`** (SysUtils) instead — a plain function
+  wrapping the same read — so the note stays inside the RTL, not your unit.
 
 ## 5. Gauntlet discipline (builder vs critic)
 
@@ -149,6 +159,16 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · hardening · a latent note the process hid.** Round 2's builder flagged
+  a `FpRead not inlined` note on the *Linux* build of `PhosphorCrtLib` — pre-existing,
+  from the keyboard-input work, and it had escaped every prior "green" run. Root cause
+  was a **verification gap, not just the note**: `test-packages.{ps1,sh}` and `build.sh`
+  piped the `-vewn` build to `/dev/null` and only checked the binary existed, so a note
+  in a host package (which the engine suite never compiles) was invisible. Fixed both:
+  `fpRead`→`FileRead` (note gone), and the build scripts now capture the build and FAIL
+  on any warning/note (§4). This is the retrospective doing its job — the gauntlet's own
+  discipline surfaced a problem the earlier phases missed, and the fix is a sharper
+  process, not just a patched line.
 - **2026-09-02 · round 2 · `15_breakpoint_degrade` (TRACE + BREAKPOINT degrade
   headlessly).** Green both OSes, faithful 5-assert port, no human needed. Added
   `opTrace=40`/`opBreakpoint=41` (append-only, `VerifyOpcodeNumbering` extended),

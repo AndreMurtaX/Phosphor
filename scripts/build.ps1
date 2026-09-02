@@ -112,8 +112,17 @@ $args = @(
     "-o$exe",
     $lpr
 )
-& $fpcExe @args
+$blog = & $fpcExe @args 2>&1
 $compileExit = $LASTEXITCODE
+$blog | ForEach-Object { Write-Host $_ }
+
+# A -vewn build must be clean: FAIL on any warning/note (host packages included), not
+# just a missing binary. A note can hide in a package the engine suite never compiles.
+$issues = $blog | Where-Object { "$_" -match '(?i)warning|note:|error|fatal' -and "$_" -notmatch 'Compiling|Linking' }
+if ($issues) {
+    Write-Error "build NOT clean -- warnings/notes above; the zero-note bar is not met"
+    exit 1
+}
 
 # --- 3. Trust nothing: verify the artifact, do not believe the exit code ------
 if (-not (Test-Path $exe)) {

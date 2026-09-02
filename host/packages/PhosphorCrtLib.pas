@@ -337,7 +337,10 @@ end;
 function ReadByte: String;
 var c: Char;
 begin
-  if fpRead(StdInputHandle, c, 1) = 1 then Result := c else Result := '';
+  { FileRead (SysUtils), not fpRead: fpRead is `inline` and FPC declines to inline it
+    here, which -vewn reports as a note. FileRead is a plain function wrapping the same
+    read, so the RTL owns that call and our unit stays note-clean. }
+  if FileRead(StdInputHandle, c, 1) = 1 then Result := c else Result := '';
 end;
 
 function KbdKeyPressed: Boolean;

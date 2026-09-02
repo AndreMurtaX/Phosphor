@@ -31,11 +31,18 @@ $exe      = Join-Path $binDir 'phosphorpkgtest.exe'
 New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
-& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+# A -vewn build must be clean: capture it and FAIL on any warning/note, never discard
+# it. A note can hide in a host package the engine suite never compiles.
+function Assert-CleanBuild([object[]] $Log, [string] $Label) {
+    $issues = $Log | Where-Object { "$_" -match '(?i)warning|note:|error|fatal' -and "$_" -notmatch 'Compiling|Linking' }
+    if ($issues) { $issues | ForEach-Object { Write-Host $_ -ForegroundColor Red }; throw "$Label build NOT clean" }
+}
+$blog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
     "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
     "-Fu$(Join-Path $root 'tests')" "-Fu$(Join-Path $root 'host\packages')" `
     "-FU$unitsDir" "-FE$binDir" "-o$exe" `
-    (Join-Path $root 'host\packages\phosphorpkgtest.lpr') | Out-Null
+    (Join-Path $root 'host\packages\phosphorpkgtest.lpr') 2>&1
+Assert-CleanBuild $blog 'phosphorpkgtest'
 if (-not (Test-Path $exe)) { throw "phosphorpkgtest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "package runner built: $exe" -ForegroundColor DarkGray
 
@@ -45,11 +52,12 @@ $httpUnits = Join-Path $binDir 'http-units\x86_64-win64'
 $httpExe   = Join-Path $binDir 'phosphorhttptest.exe'
 New-Item -ItemType Directory -Force $httpUnits | Out-Null
 if (Test-Path $httpExe) { Remove-Item $httpExe -Force }
-& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+$blog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
     "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
     "-Fu$(Join-Path $root 'tests')" "-Fu$(Join-Path $root 'host\packages')" `
     "-FU$httpUnits" "-FE$binDir" "-o$httpExe" `
-    (Join-Path $root 'host\packages\phosphorhttptest.lpr') | Out-Null
+    (Join-Path $root 'host\packages\phosphorhttptest.lpr') 2>&1
+Assert-CleanBuild $blog 'phosphorhttptest'
 if (-not (Test-Path $httpExe)) { throw "phosphorhttptest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "http runner built:    $httpExe" -ForegroundColor DarkGray
 Write-Host ''

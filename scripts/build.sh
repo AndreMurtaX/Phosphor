@@ -40,10 +40,17 @@ mkdir -p "$units"
 rm -f "$exe"
 
 echo "compiler: $FPC"
+buildlog="$(mktemp)"
 "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/host/packages" \
   -FU"$units" -FE"$bin" -o"$exe" \
-  "$root/host/console/phosphor.lpr"
+  "$root/host/console/phosphor.lpr" >"$buildlog" 2>&1
+cat "$buildlog"
+
+# --- a -vewn build must be clean: FAIL on any warning/note (host packages too) ---
+issues="$(grep -iE 'warning|note:|error|fatal' "$buildlog" | grep -viE 'Compiling|Linking')"
+rm -f "$buildlog"
+[ -z "$issues" ] || { echo "build NOT clean (warnings/notes above)"; exit 1; }
 
 # --- trust the artifact, not the exit code -----------------------------------
 [ -x "$exe" ] || { echo "no binary produced; build failed"; exit 1; }

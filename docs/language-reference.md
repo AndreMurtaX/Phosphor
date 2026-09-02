@@ -415,6 +415,42 @@ x=10 y=20
 To turn a number into a string explicitly (e.g. to concatenate with `+`), use
 `str$(n)` or the locale-invariant `stri$(n)`.
 
+### PRINT USING — formatted output
+
+`print using <format$>; <value>[; <value>…]` fills the format's fields with the
+values. Numeric fields use `#` for digit positions, `.` for the decimal point, `,`
+for thousands grouping, a leading `+` or `$$` (floating dollar) or `**` (asterisk
+fill), and a trailing `+`/`-`; a value too wide for its field gets a leading `%`.
+String fields are `&` (the whole string), `!` (its first character), and `\…\` (a
+fixed-width field). The format repeats while values remain.
+
+```basic
+println using "###.##"; 3.14159        ' "  3.14"
+println using "$$#,###.##"; 1250.5     ' "$1,250.50"
+println using "<#> "; 1; 2; 3          ' "<1> <2> <3> "  (format reused)
+```
+
+Because string literals use backslash escapes, a `\…\` field is written with
+doubled backslashes: `println using "[\\  \\]"; "hi"` prints `[hi  ]`.
+
+---
+
+## Console input
+
+`input` reads typed values from the console; `line input` reads a whole line. `input`
+prints a `"? "` prompt — a string prompt with `;` keeps it, with `,` drops it — and
+coerces each comma-separated field to its variable's type.
+
+```basic
+input "Your name"; who$          ' prints "Your name? ", reads a line
+input "Age", years%              ' prints "Age" (no "? "), reads a number
+input a, b                       ' prints "? ", reads "3, 4" -> a=3, b=4
+line input note$                 ' reads the whole next line verbatim
+```
+
+`input$(k)` reads exactly `k` characters. A headless host with no console reads
+these as empty. (For reading from a *file*, see the `#`-channel forms under Files.)
+
 ---
 
 ## DATA / READ / RESTORE
@@ -445,9 +481,11 @@ println c            ' 11
 
 ## Files
 
-There is no `#`-channel file I/O. Whole-file text and paths are handled by library
-functions that **return** success/failure instead of raising: a write answers `1`
-on success (`0` on failure), and a read of a missing file answers `""`.
+Phosphor offers **two** ways to work with files, and you can mix them.
+
+**1. Whole-file library functions** — return success/failure instead of raising: a
+write answers `1` on success (`0` on failure), and a read of a missing file answers
+`""`.
 
 ```basic
 ok = file_writealltext("note.txt", "saved by Phosphor")
@@ -463,6 +501,33 @@ read back: saved by Phosphor
 
 Related helpers include `file_exists`, `savetext$`/`opentext$`, and the `dir_*` /
 `path_*` families (path helpers accept both `/` and `\` on every platform).
+
+**2. Classic `#`-numbered channels** — `OPEN` a file on a channel number, read or
+write it, then `CLOSE`. `#` is a *file number* (never a variable suffix).
+
+```basic
+open "log.txt" for output as #1      ' output | input | append
+println #1, "first line"
+println #1, 42; ","; "gamma"         ' ';' joins, ',' tabs, println adds a newline
+close #1
+
+open "log.txt" for input as #1
+while not eof(1)
+  line input #1, line$                ' a whole line
+  println line$
+wend
+close #1
+
+open "log.txt" for input as #1
+line input #1, skip$
+input #1, n%, word$                   ' comma-separated fields, coerced to each type
+println n%; " / "; word$
+close #1
+```
+
+Channel functions: `eof(n)` (True past the end), `lof(n)` (byte length), `loc(n)`
+(cursor), and `input$(k, #n)` (read exactly `k` characters). `close` with no number
+closes every open channel. `open … for append` adds to an existing file.
 
 ---
 

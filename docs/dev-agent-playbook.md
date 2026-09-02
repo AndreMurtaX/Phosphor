@@ -133,6 +133,12 @@ So:
   guarded out.
 - Never let a test hang the suite: any interactive/terminal/network call must have a
   non-interactive fast path (empty/0), proven with `< /dev/null` and a `timeout`.
+- **Not every assert has a message overload.** `assert_int` is `:%%` only (no `:%%$`);
+  passing a 3rd message arg raises `no function assert_int:%%$` and halts the file. When
+  citing a doc/reason on such an assert, put it in a `rem` above, not a 3rd argument.
+- **A backslash in a string literal is an escape** (`"\2"` is a rejected unknown escape,
+  `"\\"` collapses to one backslash) — keep backslashes out of assertion messages, or
+  double them. This bites file paths and cited expressions in `msg$`.
 - **Every build script must SURFACE the `-vewn` output and FAIL on any warning/note** —
   never pipe the build to `/dev/null` and check only that the binary exists. A note can
   hide in a **host package** (e.g. a CRT unit) that the engine's own suite build never
@@ -165,6 +171,16 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 7 · `16_doc_examples` (documentation-vs-reality regression).**
+  Green both OSes, 35 asserts, no human needed. A "not a port": harvested Phosphor's
+  own doc claims (the arithmetic rules in `decisions.md`/`roadmap.md`, cited by line)
+  plus curated built-in examples over the functions Phosphor actually ships, every
+  value confirmed by RUNNING it. Combing all docs found **no page that lies** — a
+  checked negative, not a skip. Divergences pinned for the right reason (`mid$`
+  base-1 → "Hel" not "ell"; `instr` 1-based; `string$(3,65)`→"AAA" by code vs
+  `mulstring$("ab",3)`→"ababab", the repeat the reference's broken doc actually meant).
+  Test-authoring traps folded into §4 (`assert_int` has no message overload; a
+  backslash in a message is an escape).
 - **2026-09-02 · round 6 · `17_host_services` (the host-agnostic design, executed).**
   Green both OSes, 7 asserts, no human needed. Added a nil-by-default host seam
   (`THostServices` record: `ProcessMessages`/`HandleMessage`/`ClipboardCopy`/

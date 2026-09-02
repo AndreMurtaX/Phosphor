@@ -189,6 +189,36 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 9 · full SQLite statement API (oracle 34).** Green both OSes,
+  `tests/packages/07_sqlite_full` 64 asserts (mirrors 34), no human needed. Rewrote
+  `PhosphorSqliteLib` from the SQLdb simple API onto the **raw sqlite3 C API** via
+  FPC's dynamic binding (`SQLite3Dyn`): open/exec/scalar/query kept working AND the
+  full surface added (prepare→step→reset→finalize, per-parameter bind, per-column
+  type/value, a JSON row/table bridge, transactions, introspection, changes/lastid,
+  escape/quote, error code+msg+strerror, backup/vacuum) — ONE API on one driver, no
+  two half-APIs. Five things worth folding into §3/§2:
+  (1) **The dynamic binding is the library-gate, for free.** `TryInitializeSqlite('')`
+  returns `-1` **without raising** when `libsqlite3`/`sqlite3.dll` is absent, so a
+  module-init `GReady := TryInitializeSqlite('') > 0` gates every function and the
+  package still BUILDS everywhere (no link-time dep). **Do NOT `ReleaseSQLite` at
+  finalization:** this unit finalizes before `PhosphorHandles` (it `uses` it), so
+  unloading the library first would leave a lingering db's destructor calling
+  `sqlite3_close` through a dangling pointer. Leave it loaded; the OS reclaims it.
+  (2) **SQLite's own index bases are split** — bind parameters are 1-based, result
+  columns 0-based. Phosphor presents a **uniform 1-based** surface (binds pass the
+  index straight through, columns subtract 1), consistent with strings/arrays/JSON;
+  the see-check-fail proved a wrong base misses, not a fudged constant.
+  (3) **No cursor may outlive its connection.** A statement is a handle too; the db
+  owns a child list and its destructor `FreeHandle`s each child (finalizing the
+  `sqlite3_stmt` AND nilling its registry slot), so a stale statement id is refused
+  by `IsHandle`, never dereferenced. Each child removes itself from the list on free.
+  (4) **Bridge, don't duplicate (round 5 again).** `PhosphorJsonLib` grew two
+  interface functions — `JsonRegisterNode`/`JsonNodeFromHandle` — so the sqlite
+  package builds/reads JSON rows that `json_*` reads back, one wrapper and one owner,
+  boundary untouched (both are engine-side, pure fpjson).
+  (5) A nested `{...}` inside a `{ }` doc comment is FPC's **"Comment level 2 found"**
+  warning, and the note-strict build FAILS on it — keep braces out of brace-comments
+  (a JSON shape `{name,type}` in prose becomes `(name,type)`).
 - **2026-09-02 · round 8 · archive + gzip packages (oracle 23; completes 11's gzip).**
   Green both OSes, `tests/packages/06_archive` 42 asserts (matches 23), no human needed.
   Extended `PhosphorZipLib` to a handle-based create/add/list/extract API (FPC `Zipper`),

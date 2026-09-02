@@ -5,6 +5,9 @@
 # 05_crt exercises the console-control (CRT) package -- ANSI escape sequences.
 # 06_archive exercises zip (handle create/add/list/extract), gzip (string+file
 # round-trips, size/ratio) and base64 file encode/decode; all ship with FPC.
+# 07_sqlite_full is conditional (same runtime-library gate as 02_sqlite): the full
+# statement-level surface -- prepared statements, binding, a cursor with column
+# metadata, transactions, JSON row/table introspection, changes/lastid, errors.
 00_base64
 01_zip
 02_sqlite
@@ -12,3 +15,4 @@
 04_https
 05_crt
 06_archive
+07_sqlite_full

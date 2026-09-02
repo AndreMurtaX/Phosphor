@@ -24,6 +24,16 @@ uses
 
 procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
 
+{ Bridge for a sibling library (e.g. the opt-in SQLite package) that needs to
+  build or read JSON handles WITHOUT duplicating the wrapper. JsonRegisterNode
+  wraps an fpjson node as a handle with the same ownership rule json_object@
+  uses (Owns=True frees the node on ResetHandles; False borrows a node owned by
+  another tree). JsonNodeFromHandle validates a handle id and hands back its
+  node. One wrapper, one owner -- exactly the pattern IoLib/StrListLib share for
+  their byte-buffer type. }
+function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean): Int64;
+function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
+
 implementation
 
 type
@@ -41,13 +51,27 @@ begin
   inherited Destroy;
 end;
 
-function RegJson(N: TJSONData; AOwns: Boolean): TValue;
+function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean): Int64;
 var w: TPhosphorJson;
 begin
   w := TPhosphorJson.Create;
-  w.Node := N;
+  w.Node := ANode;
   w.Owns := AOwns;
-  Result := ValHandle(RegisterHandle(w));
+  Result := RegisterHandle(w);
+end;
+
+function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
+var o: TObject;
+begin
+  ANode := nil;
+  o := HandleObj(AHandleId);
+  Result := o is TPhosphorJson;
+  if Result then ANode := TPhosphorJson(o).Node;
+end;
+
+function RegJson(N: TJSONData; AOwns: Boolean): TValue;
+begin
+  Result := ValHandle(JsonRegisterNode(N, AOwns));
 end;
 
 function GetNode(const V: TValue; out N: TJSONData; out Err: TPhosphorError): Boolean;

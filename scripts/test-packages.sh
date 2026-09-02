@@ -49,7 +49,14 @@ allok=0
 
 # A package needing an external runtime library is skipped where it is absent.
 sqlite_avail=0
-ldconfig -p 2>/dev/null | grep -qi 'libsqlite3\.so' && sqlite_avail=1
+# ldconfig's cache can come back momentarily empty in a fresh non-interactive shell,
+# which would falsely SKIP (and hide a sqlite failure). Back it with a direct file
+# probe so the gate is deterministic: present means present.
+if ldconfig -p 2>/dev/null | grep -qi 'libsqlite3\.so' \
+   || ls /usr/lib/*/libsqlite3.so* /usr/lib/libsqlite3.so* /lib/*/libsqlite3.so* \
+         /usr/local/lib/libsqlite3.so* 2>/dev/null | grep -q .; then
+  sqlite_avail=1
+fi
 
 for name in $manifest; do
   case "$name" in

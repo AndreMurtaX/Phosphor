@@ -3,9 +3,12 @@
 # 03_http runs against a local server the runner (phosphorhttptest) stands up.
 # 04_https is conditional: run only where the OpenSSL runtime can be loaded.
 # 05_crt exercises the console-control (CRT) package -- ANSI escape sequences.
+# 06_archive exercises zip (handle create/add/list/extract), gzip (string+file
+# round-trips, size/ratio) and base64 file encode/decode; all ship with FPC.
 00_base64
 01_zip
 02_sqlite
 03_http
 04_https
 05_crt
+06_archive

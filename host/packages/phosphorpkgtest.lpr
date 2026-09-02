@@ -17,7 +17,7 @@ program phosphorpkgtest;
 uses
   SysUtils, Classes,
   PhosphorEngine, PhosphorTestLib,
-  PhosphorBase64Lib, PhosphorZipLib, PhosphorSqliteLib, PhosphorCrtLib;
+  PhosphorBase64Lib, PhosphorZipLib, PhosphorGzipLib, PhosphorSqliteLib, PhosphorCrtLib;
 
 function ReadSource(const APath: String): String;
 var fs: TFileStream; len: Int64;
@@ -66,6 +66,7 @@ begin
     RegisterTestFuncs(eng.Registry);
     RegisterBase64Funcs(eng.Registry);
     RegisterZipFuncs(eng.Registry);
+    RegisterGzipFuncs(eng.Registry);
     RegisterSqliteFuncs(eng.Registry);
     RegisterCrtFuncs(eng.Registry);
     ResetTestState;

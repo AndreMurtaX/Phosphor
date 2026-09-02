@@ -193,5 +193,8 @@ n = http_headercount(junk@)
 assert_eq(n, 0, "an invented client answers nothing")
 assert_true(http_error(), "and says so")
 
+test_case("http/ca bundle path")
+assert_eq(http_ca_file$("/etc/ssl/certs/ca.pem"), "/etc/ssl/certs/ca.pem", "http_ca_file$ records and returns the CA bundle path")
+
 http_free(c@)
 http_free(bare@)

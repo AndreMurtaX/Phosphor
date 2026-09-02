@@ -202,6 +202,38 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 13 · byte-level file work.** A user question ("how would I work
+  with a file byte by byte?") turned into the round's biggest find. **The rule this
+  produced, and it is the most important one here: WHEN YOU FIND A BUG CLASS, SWEEP FOR
+  EVERY INSTANCE IN THE SAME COMMIT — do not fix the two you tripped over.** Round 12
+  fixed the `{$codepage UTF8}` byte-concat trap in `hex_decode$`, then a scan found it
+  in `http_urldecode$`. That scan was not exhaustive enough: this round found FOUR more
+  live instances — `ChanLine` (`line input #`), `NextFieldStr` (`input #`),
+  `strings_delimitedtext`, and `http_htmlencode$`/`htmldecode$` (the `url_` half of that
+  very unit had been fixed while the `html_` half was missed, in the same file). Two of
+  them were in code I had written the same day. The grep that finds them all is
+  `:= .* \+ (Chr|S\[|Buf\[|buf\[)` over every accumulation loop, not just the ones named
+  "decode". Verified before/after on the bytes `41 80 FF 42`: readers returned
+  `41 3f 3f 42`, now `41 80 FF 42`.
+  Other lessons folded in:
+  - **A "byte-exact" storage layer is not a byte-capable language.** Phosphor's strings,
+    files and `#` channels all carried bytes correctly, yet nothing could ADDRESS a byte:
+    `len` counts codepoints, `chr$` ENCODES (so `chr$(200)` is two bytes and no lone byte
+    ≥ 128 was constructible), and `asc` answers 0 for all 64 bytes `80..BF`. Added
+    `bytelen`/`byteat`/`bytestr$`/`bytemid$` to the ENGINE — deliberately not a package,
+    because the only byte-exact accessor had been the hex codec in an opt-in package,
+    leaving the embedding host (Phosphor's headline use case) with no byte access at all.
+    Rule: when a capability exists only in `host/packages`, ask whether the embed host
+    needs it.
+  - **Free functions must type-check their handle.** `strings_free` called `FreeHandle`
+    with no class test, so `strings_free(a@)` on an array silently destroyed it while
+    `arr_free` next door checked. Any `*_free` gets the same audit.
+  - **Preallocate every byte builder.** `hex_encode$` was quadratic (64 MB ≈ 37 s) while
+    its own `hex_decode$` sibling preallocated — the fix pattern was already in the file.
+  - **An empirical workflow beats reading.** Six scenarios each PROVEN by running code,
+    every claim attacked by two verifiers, refuted 6/6 headline claims (e.g. `input$(k,#n)`
+    is byte-exact but is NOT streaming — `open for input` slurps the whole file). Reading
+    the source alone would have shipped the streaming claim.
 - **2026-09-02 · round 12 · scope-completion audit (standard-BASIC commands + library
   review).** A strict re-audit against the founding brief (`prompt-inicial.md`, not the
   oracle) found the standard-BASIC command set unbuilt despite "oracle complete". Built

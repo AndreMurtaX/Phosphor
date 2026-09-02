@@ -117,6 +117,24 @@ So:
   `ContentStream`, not `AResponse.Content`, or byte-exact breaks across OSes.
 - Libraries with a shared unit path clash on the program `.ppu` only, not the engine
   `.ppu`s — separate `-FU` unit dirs per runner is safest.
+- **`{$codepage UTF8}` CORRUPTS binary string LITERALS — a landmine.** Every Phosphor
+  unit sets `{$codepage UTF8}`, which re-encodes a non-ASCII byte literal in source to
+  its multi-byte UTF-8 form: `#$FF` becomes `C3 BF`, `#$8B` becomes two bytes. So a
+  binary header, magic number, or CRC written as a *literal* is silently wrong, and a
+  round-trip decompresses/parses to garbage or `""`. Build binary bytes at RUNTIME with
+  `Chr($8B)` (a single raw byte); runtime `Chr()`, stream writes, and `PInt64`/`PByte`
+  casts are unaffected — only source literals are poisoned. When bytes must be exact
+  (gzip/zlib headers, .pbc magic, protocol framing), assemble them with `Chr()`/a stream,
+  never `#$xx`/`'…'` literals.
+- **gzip in memory:** FPC's `TGZFileStream` is file-only. For in-memory gzip use
+  paszlib `zstream` with the skip-header form — `Tcompressionstream.Create(level, dst,
+  True)` / `Tdecompressionstream.Create(src, True)` give raw DEFLATE (negative
+  windowBits); wrap it yourself with the 10-byte gzip header + CRC32 + ISIZE trailer.
+- **`TUnZipper.Files` is a STICKY filter** across calls: `UnZipFiles(list)` leaves the
+  list in `FFiles`, and a later `UnZipAllFiles` then treats a non-empty `FFiles` as
+  "only these" — a reused reader silently extracts just the last filter. `UZ.Files.Clear`
+  before `UnZipAllFiles`. (And a predicate returns 1/0, not a Pascal bool — `assert_true`
+  carries a message only on its `:n$` overload; there is no `assert_*:?$`.)
 - **`MSYS2_ARG_CONV_EXCL='*'`** when calling native tools whose args start with `/`
   (e.g. `openssl req -subj '/CN=...'`) so Git-Bash doesn't mangle them. Use `cygpath -m`
   for a Windows path with forward slashes that FPC will read.
@@ -171,6 +189,18 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 8 · archive + gzip packages (oracle 23; completes 11's gzip).**
+  Green both OSes, `tests/packages/06_archive` 42 asserts (matches 23), no human needed.
+  Extended `PhosphorZipLib` to a handle-based create/add/list/extract API (FPC `Zipper`),
+  added a new `PhosphorGzipLib` (real RFC-1952 gzip over paszlib `zstream`), extended
+  `PhosphorBase64Lib` with file + url-safe variants — all ship with FPC, so no
+  library-gate. Because these are external-facing they are opt-in HOST packages tested
+  via `phosphorpkgtest`, not the engine suite — and gzip closing 11's gzip half means no
+  separate `11_*` file is needed (regex → 31, base64 → 00_base64). Three FPC traps folded
+  into §3, one of them a real landmine: **`{$codepage UTF8}` silently corrupts binary
+  byte LITERALS** (a gzip header written as `#$8B…` decompressed to `""` until it was
+  built from `Chr()` at runtime). Also: paszlib's in-memory gzip is the `zstream`
+  skip-header form, and `TUnZipper.Files` is a sticky cross-call filter.
 - **2026-09-02 · round 7 · `16_doc_examples` (documentation-vs-reality regression).**
   Green both OSes, 35 asserts, no human needed. A "not a port": harvested Phosphor's
   own doc claims (the arithmetic rules in `decisions.md`/`roadmap.md`, cited by line)

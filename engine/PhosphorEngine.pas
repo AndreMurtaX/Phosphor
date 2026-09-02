@@ -38,6 +38,7 @@ type
   private
     FRegistry: TPhosphorRegistry;
     FOnOutput: TPhosphorOutputProc;
+    FOnBreakpoint: TPhosphorBreakpointProc;
     FErrorLine: Integer;
     FErrorMessage: String;
     FLastError: TPhosphorError;
@@ -72,6 +73,10 @@ type
     procedure Finish;
     property Registry: TPhosphorRegistry read FRegistry;
     property OnOutput: TPhosphorOutputProc read FOnOutput write FOnOutput;
+    { The BREAKPOINT seam. Nil by default: with none installed (a headless host),
+      BREAKPOINT reports nothing and continues. A host that wants a debug pause
+      assigns a report-only callback here -- the engine never blocks on it. }
+    property OnBreakpoint: TPhosphorBreakpointProc read FOnBreakpoint write FOnBreakpoint;
     property ErrorLine: Integer read FErrorLine;
     property ErrorMessage: String read FErrorMessage;
     property LastError: TPhosphorError read FLastError;
@@ -107,6 +112,7 @@ begin
   RegisterCallFuncs(FRegistry);
   RegisterErrFuncs(FRegistry);
   FOnOutput := nil;
+  FOnBreakpoint := nil;
   FErrorLine := 0;
   FErrorMessage := '';
   FLastError := NoError;
@@ -148,6 +154,7 @@ procedure TPhosphorEngine.ConfigureVM(AVM: TPhosphorVM);
 begin
   AVM.Registry := FRegistry;
   AVM.OnOutput := FOnOutput;
+  AVM.OnBreakpoint := FOnBreakpoint;
   AVM.MaxSteps := FMaxSteps;
   AVM.MaxOutputBytes := FMaxOutputBytes;
   AVM.TimeoutMs := FTimeoutMs;

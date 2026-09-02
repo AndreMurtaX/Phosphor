@@ -149,6 +149,20 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 2 · `15_breakpoint_degrade` (TRACE + BREAKPOINT degrade
+  headlessly).** Green both OSes, faithful 5-assert port, no human needed. Added
+  `opTrace=40`/`opBreakpoint=41` (append-only, `VerifyOpcodeNumbering` extended),
+  the two statement keywords, and a nil-by-default `OnBreakpoint` host seam wired
+  like `OnOutput`. Core property proven: BREAKPOINT is report-and-continue, never
+  a wait — with no seam installed it is a pure stack-balancing no-op, so a headless
+  run cannot deadlock. Two traps folded in: (1) a procedural type whose parameter
+  is `array of TValue` (`TPhosphorBreakpointProc`) must be declared AFTER `TValue`
+  in the same `type` block — Pascal forbids the forward reference, unlike a pointer
+  or class type; (2) the degrade seam stays engine-side as a `procedure-of-object`,
+  so the boundary check passes untouched — a debug pause is a host concern, and the
+  engine only ever *reports*. New statement keywords go in BOTH `ParseStatement`
+  dispatch AND `IsReservedWord` (so `breakpoint:`/`trace:` are never read as a
+  label), matching the hard-keyword pattern of `print`/`read`/`data`.
 - **2026-09-02 · round 1 · `44_syntax_compound_arrays` (multi-dim array bracket).**
   Green both OSes, faithful 31-assert port, critic passed blind. No human needed — the
   builder scoped and shipped it from the spec. Lessons folded into §2: `ValAdd`

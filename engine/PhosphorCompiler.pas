@@ -111,6 +111,8 @@ type
     procedure ParseRepeat;
     procedure ParseFor;
     procedure ParseSelect;
+    procedure ParseTrace;         // trace <expr>
+    procedure ParseBreakpoint;    // breakpoint <msg> [, <expr>]*
     procedure ParseStatement;
   public
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
@@ -250,6 +252,7 @@ begin
     'gosub', 'goto', 'break', 'continue', 'end',
     'let', 'const', 'data', 'read', 'restore',
     'print', 'println', 'dim',
+    'trace', 'breakpoint',
     'and', 'or', 'not', 'mod', 'true', 'false':
       Result := True;
   else
@@ -1065,6 +1068,47 @@ begin
     FProg.Patch(endFixups[i], endTarget);
 end;
 
+{ trace <expr> -- turn tracing on (a non-zero value) or off (0). The value is any
+  expression; the VM sets its trace flag from it (opTrace pops one value). }
+procedure TPhosphorCompiler.ParseTrace;
+var ln: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // 'trace'
+  if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) or (FLex.Cur.Kind = tkColon) then
+  begin Fail('''trace'' needs a value (0 turns tracing off)', ln); Exit; end;
+  ParseExpr;
+  if FFailed then Exit;
+  FProg.Emit(opTrace, 0, 0, ln);
+end;
+
+{ breakpoint <msg-expr> [, <expr>]* -- a debug breakpoint carrying a message and
+  zero or more operand VALUES. The message is pushed first, then each operand
+  expression (its value, not a reference), and opBreakpoint(N) records the operand
+  count. At run time it pops them all and continues: with tracing off it is a pure
+  no-op, and with tracing on but no host confirm-callback (a headless host) it
+  reports the frame and carries on. It never parks the VM. Because operands are
+  passed by value, the source variables are left untouched. }
+procedure TPhosphorCompiler.ParseBreakpoint;
+var ln, nops: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // 'breakpoint'
+  if (FLex.Cur.Kind = tkEOL) or (FLex.Cur.Kind = tkEOF) or (FLex.Cur.Kind = tkColon) then
+  begin Fail('''breakpoint'' needs a message', ln); Exit; end;
+  ParseExpr;      // the message
+  if FFailed then Exit;
+  nops := 0;
+  while (not FFailed) and (FLex.Cur.Kind = tkComma) do
+  begin
+    FLex.Advance;
+    ParseExpr;    // an operand: its value is pushed
+    Inc(nops);
+  end;
+  if FFailed then Exit;
+  FProg.Emit(opBreakpoint, nops, 0, ln);
+end;
+
 procedure TPhosphorCompiler.ParseStatement;
 var
   t: TToken;
@@ -1087,6 +1131,8 @@ begin
     if t.StrVal = 'repeat' then begin ParseRepeat; Exit; end;
     if t.StrVal = 'for' then begin ParseFor; Exit; end;
     if t.StrVal = 'select' then begin ParseSelect; Exit; end;
+    if t.StrVal = 'trace' then begin ParseTrace; Exit; end;
+    if t.StrVal = 'breakpoint' then begin ParseBreakpoint; Exit; end;
     if t.StrVal = 'break' then
     begin
       FLex.Advance;

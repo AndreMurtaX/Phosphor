@@ -41,3 +41,4 @@
 47_on_goto_gosub
 48_callback
 49_on_error
+15_breakpoint_degrade

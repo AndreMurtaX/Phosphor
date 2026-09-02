@@ -57,6 +57,16 @@ type
     Bl: Boolean;    // vkBool
   end;
 
+  { The BREAKPOINT seam, declared alongside OnOutput for the same reason (the VM
+    and the engine facade share it without a circular dependency). A host that
+    wants to pause installs one; the VM calls it (message, source line, and the
+    operand values the breakpoint carried) ONLY when tracing is on. It is nil by
+    default -- a headless host installs none -- so BREAKPOINT then reports nothing
+    and simply continues. The seam MUST NOT block: the engine treats it as a
+    report, never a wait, so no confirm-answer is returned. }
+  TPhosphorBreakpointProc = procedure(const AMessage: String; ALine: Integer;
+                                      const AOperands: array of TValue) of object;
+
   TCmpOp = (coEQ, coNE, coLT, coLE, coGT, coGE);
 
   { A variable's declared type, fixed by its name suffix (the suffix is part of

@@ -58,6 +58,9 @@ type
     FSteps: Int64;
     FOutputBytes: Int64;
     FStartTick: QWord;
+    // Debug tracing, set by the TRACE statement (opTrace). BREAKPOINT reports the
+    // frame through OnBreakpoint only while this is on; off, it is a pure no-op.
+    FTrace: Boolean;
     procedure Push(const V: TValue);
     function Pop: TValue;
     { The fetch-decode-execute loop. Runs from AStartPC until the program halts
@@ -68,6 +71,11 @@ type
     function ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
   public
     OnOutput: TPhosphorOutputProc;
+    { The BREAKPOINT seam, nil by default (a headless host installs none). The VM
+      calls it -- and only while tracing is on -- to REPORT a breakpoint's frame,
+      then continues unconditionally. It must never block; see the opBreakpoint
+      handler. }
+    OnBreakpoint: TPhosphorBreakpointProc;
     Registry: TPhosphorRegistry;
     LastError: TPhosphorError;
     ErrorLine: Integer;
@@ -152,6 +160,7 @@ begin
   FSteps := 0;
   FOutputBytes := 0;
   FStartTick := GetTickCount64;
+  FTrace := False;
   SetLength(FVars, AProg.VarCount);
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
@@ -168,6 +177,7 @@ var
   kinds: array of TValueKind;
   res: TResolvedFunc;
   lt: TVarType;
+  bpOps: array of TValue;   // a BREAKPOINT's popped operand values
 
   { A runtime error. Returns True if an ON ERROR handler took it (pc now points at
     the handler; the caller should Continue), False to abort (LastError set; the
@@ -255,6 +265,7 @@ var
 begin
   args := nil;
   kinds := nil;
+  bpOps := nil;
   pc := AStartPC;
   while pc < FProg.Count do
   begin
@@ -355,6 +366,29 @@ begin
           dupBase := FSP - ins.A;
           for i := 0 to ins.A - 1 do
             Push(FStack[dupBase + i]);
+        end;
+      opTrace:
+        begin
+          // Turn tracing on (a non-zero value) or off (0). A non-numeric value
+          // reads as 0 through AsDouble, so it turns tracing off.
+          v := Pop;
+          FTrace := (AsDouble(v) <> 0);
+        end;
+      opBreakpoint:
+        begin
+          // Pop the ins.A operand values (reverse of the push order) and then the
+          // message. Report-and-continue: the host seam is invoked ONLY when
+          // tracing is on AND a callback is installed -- a headless host installs
+          // none, so BREAKPOINT then does nothing but balance the stack. It never
+          // parks the VM, and it never writes back, so every operand VARIABLE the
+          // source passed is left untouched (only copies of their values were
+          // pushed).
+          SetLength(bpOps, ins.A);
+          for i := ins.A - 1 downto 0 do
+            bpOps[i] := Pop;
+          v := Pop;   // the message
+          if FTrace and Assigned(OnBreakpoint) then
+            OnBreakpoint(ValToStr(v), ins.Line, bpOps);
         end;
       opStmt:
         begin

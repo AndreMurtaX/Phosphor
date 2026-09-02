@@ -69,7 +69,10 @@ type
     opStmt       = 36, // marks a statement boundary (records a clean resume point)
     opSetErrHandler = 37, // A = handler pc, or -1 to disable (on error goto 0)
     opResume     = 38, // A = 0 retry the failing statement, 1 continue at the next
-    opDupN       = 39  // duplicate the top A stack values (for a@[i,j,..] op= x)
+    opDupN       = 39, // duplicate the top A stack values (for a@[i,j,..] op= x)
+    opTrace      = 40, // pop 1 value; VM's trace flag := (value <> 0)
+    opBreakpoint = 41  // A = operand count; pop A operand values + the message,
+                       //   report-and-continue (never blocks; see PhosphorVM)
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -231,7 +234,7 @@ begin
     (Ord(opLoadLocal) = 30) and (Ord(opStoreLocal) = 31) and (Ord(opRetFunc) = 32) and
     (Ord(opReadData) = 33) and (Ord(opRestore) = 34) and (Ord(opDup2) = 35) and
     (Ord(opStmt) = 36) and (Ord(opSetErrHandler) = 37) and (Ord(opResume) = 38) and
-    (Ord(opDupN) = 39);
+    (Ord(opDupN) = 39) and (Ord(opTrace) = 40) and (Ord(opBreakpoint) = 41);
 end;
 
 end.

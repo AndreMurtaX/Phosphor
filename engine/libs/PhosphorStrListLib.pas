@@ -8,6 +8,20 @@
   (decisions.md), so every index here is 1-based and `strings_indexof` returns 0
   (not -1) when absent. Errors are RETURNED, never raised; a fabricated handle is
   rejected by GetList (IsHandle) rather than dereferenced.
+
+  Beyond the list operations themselves this package carries the TStrings
+  PROPERTY surface Plan9Basic leaned on TStringList for: the delimiters
+  (delimiter/quotechar/strictdelimiter/delimitedtext), the name/value machinery
+  (namevalueseparator/values/valuefromindex/keynames), case sensitivity,
+  duplicates policy, the line-break controls (linebreak/trailinglinebreak/
+  writebom), the encoding names, the change-handler NAMES, batched updates, and
+  the file and stream round trips. The stream pair moves a list through the same
+  TPhosphorBytes handle PhosphorIoLib hands out for a file's bytes, so it stays
+  host-agnostic: no console, window or socket, only pure RTL file/byte work.
+
+  The change handlers (onchange/onchanging) store a HANDLER NAME and read it
+  back; the firing itself belongs to a host with an event loop (phase 2), so this
+  package only pins the name in and out -- exactly what oracle 28 asserts.
 ******************************************************************************}
 unit PhosphorStrListLib;
 
@@ -17,7 +31,8 @@ unit PhosphorStrListLib;
 interface
 
 uses
-  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  SysUtils, Classes,
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorIoLib;
 
 type
   TPhosphorStringList = class
@@ -25,6 +40,22 @@ type
     Items: array of String;
     Count: Integer;
     Sorted: Boolean;    // when set, AddIndexed keeps the list ordered
+    // --- TStrings-style properties (stored; the ones a list carries) ---------
+    Delimiter: Char;
+    QuoteChar: Char;
+    StrictDelimiter: Boolean;
+    CaseSensitive: Boolean;
+    Duplicates: String;         // 'ignore' | 'accept' | 'error' (named, not numbered)
+    LineBreak: String;
+    TrailingLineBreak: Boolean;
+    WriteBOM: Boolean;
+    DefaultEncoding: String;    // the encoding a save would use
+    Encoding: String;          // '' until a load/save establishes one
+    NameValueSeparator: Char;
+    OnChangeName: String;       // the BASIC handler NAME (fires in a host, phase 2)
+    OnChangingName: String;
+    UpdateCount: Integer;       // beginupdate/endupdate nesting
+    constructor Create;
     procedure Add(const S: String);
     function AddIndexed(const S: String): Integer;       // 0-based index it landed at
     procedure Clear;
@@ -34,19 +65,49 @@ type
     procedure MoveItem(AFrom, ATo: Integer);
     procedure Sort;
     procedure SetText(const S: String);
+    function TextStr: String;                            // honours LineBreak/TrailingLineBreak
     procedure SetCommaText(const S: String);
     function CommaTextStr: String;
-    function IndexOf(const S: String): Integer;         // 0-based, -1 absent
-    function Find(const S: String): Integer;            // binary search; needs a sorted list
+    function GetDelimitedText: String;                   // honours Delimiter/QuoteChar
+    procedure SetDelimitedText(const S: String);
+    function IndexOf(const S: String): Integer;          // 0-based, -1 absent
+    function Find(const S: String): Integer;             // binary search; needs a sorted list
     function IndexOfName(const AName: String): Integer;  // 0-based, -1 absent
     function ValueOf(const AName: String): String;
+    procedure SetValue(const AName, AValue: String);
     function NameAt(AZero: Integer): String;
     function ValueAt(AZero: Integer): String;
+    procedure SetValueAt(AZero: Integer; const AValue: String);
+    function EqualsList(AOther: TPhosphorStringList): Boolean;
+    function CapacityGet: Integer;
+    procedure CapacitySet(N: Integer);
   end;
 
 procedure RegisterStrListFuncs(Reg: TPhosphorRegistry);
 
 implementation
+
+const
+  Utf8Bom = #$EF#$BB#$BF;
+
+constructor TPhosphorStringList.Create;
+begin
+  inherited Create;
+  Delimiter := ',';
+  QuoteChar := '"';
+  StrictDelimiter := False;
+  CaseSensitive := False;
+  Duplicates := 'ignore';
+  LineBreak := sLineBreak;
+  TrailingLineBreak := True;
+  WriteBOM := False;
+  DefaultEncoding := 'utf-8';    // Phosphor speaks raw UTF-8 -- the honest default
+  Encoding := '';                // none established until a load or save
+  NameValueSeparator := '=';
+  OnChangeName := '';
+  OnChangingName := '';
+  UpdateCount := 0;
+end;
 
 procedure TPhosphorStringList.Add(const S: String);
 begin
@@ -155,6 +216,20 @@ begin
     end;
 end;
 
+{ Render every line, joined by LineBreak, with a trailing LineBreak when
+  TrailingLineBreak is set -- exactly TStrings.Text. }
+function TPhosphorStringList.TextStr: String;
+var i: Integer;
+begin
+  Result := '';
+  for i := 0 to Count - 1 do
+  begin
+    Result := Result + Items[i];
+    if i < Count - 1 then Result := Result + LineBreak
+    else if TrailingLineBreak then Result := Result + LineBreak;
+  end;
+end;
+
 procedure TPhosphorStringList.SetCommaText(const S: String);
 var start, i, len: Integer;
 begin
@@ -167,6 +242,89 @@ begin
       Add(Copy(S, start, i - start));
       start := i + 1;
     end;
+end;
+
+function TPhosphorStringList.CommaTextStr: String;
+var i: Integer;
+begin
+  Result := '';
+  for i := 0 to Count - 1 do
+  begin
+    if i > 0 then Result := Result + ',';
+    Result := Result + Items[i];
+  end;
+end;
+
+{ Join with Delimiter, quoting a field (with QuoteChar, doubling embedded quotes)
+  when it is empty, holds the delimiter or a quote, or -- unless StrictDelimiter
+  -- holds whitespace. This is the render half of TStrings.DelimitedText. }
+function TPhosphorStringList.GetDelimitedText: String;
+var i: Integer; f: String;
+
+  function NeedsQuote(const s: String): Boolean;
+  var j: Integer;
+  begin
+    if s = '' then Exit(True);
+    for j := 1 to Length(s) do
+      if (s[j] = Delimiter) or (s[j] = QuoteChar) or
+         ((not StrictDelimiter) and (s[j] <= ' ')) then
+        Exit(True);
+    Result := False;
+  end;
+
+begin
+  Result := '';
+  for i := 0 to Count - 1 do
+  begin
+    if i > 0 then Result := Result + Delimiter;
+    f := Items[i];
+    if NeedsQuote(f) then
+      Result := Result + QuoteChar +
+                StringReplace(f, QuoteChar, QuoteChar + QuoteChar, [rfReplaceAll]) +
+                QuoteChar
+    else
+      Result := Result + f;
+  end;
+end;
+
+{ Parse S into fields on Delimiter, honouring QuoteChar (with doubled quotes as an
+  escape). When not StrictDelimiter, whitespace around a field is skipped. The
+  read half of TStrings.DelimitedText. }
+procedure TPhosphorStringList.SetDelimitedText(const S: String);
+var i, n: Integer; field: String;
+begin
+  Clear;
+  n := Length(S);
+  i := 1;
+  if n = 0 then Exit;
+  while True do
+  begin
+    if not StrictDelimiter then
+      while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
+    field := '';
+    if (i <= n) and (S[i] = QuoteChar) then
+    begin
+      Inc(i);
+      while i <= n do
+      begin
+        if S[i] = QuoteChar then
+        begin
+          if (i < n) and (S[i + 1] = QuoteChar) then
+          begin field := field + QuoteChar; Inc(i, 2); end
+          else begin Inc(i); Break; end;
+        end
+        else begin field := field + S[i]; Inc(i); end;
+      end;
+    end
+    else
+      while (i <= n) and (S[i] <> Delimiter) and
+            (StrictDelimiter or (S[i] > ' ')) do
+      begin field := field + S[i]; Inc(i); end;
+    if not StrictDelimiter then
+      while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
+    Add(field);
+    if (i <= n) and (S[i] = Delimiter) then Inc(i) else Break;
+  end;
 end;
 
 function TPhosphorStringList.IndexOf(const S: String): Integer;
@@ -200,7 +358,7 @@ var i, p: Integer;
 begin
   for i := 0 to Count - 1 do
   begin
-    p := Pos('=', Items[i]);
+    p := Pos(NameValueSeparator, Items[i]);
     if (p > 0) and (Copy(Items[i], 1, p - 1) = AName) then Exit(i);
   end;
   Result := -1;
@@ -212,33 +370,60 @@ begin
   Result := '';
   idx := IndexOfName(AName);
   if idx < 0 then Exit;
-  p := Pos('=', Items[idx]);
+  p := Pos(NameValueSeparator, Items[idx]);
   Result := Copy(Items[idx], p + 1, MaxInt);
+end;
+
+procedure TPhosphorStringList.SetValue(const AName, AValue: String);
+var idx: Integer;
+begin
+  idx := IndexOfName(AName);
+  if idx >= 0 then Items[idx] := AName + NameValueSeparator + AValue
+  else Add(AName + NameValueSeparator + AValue);
 end;
 
 function TPhosphorStringList.NameAt(AZero: Integer): String;
 var p: Integer;
 begin
-  p := Pos('=', Items[AZero]);
+  p := Pos(NameValueSeparator, Items[AZero]);
   if p > 0 then Result := Copy(Items[AZero], 1, p - 1) else Result := '';
 end;
 
 function TPhosphorStringList.ValueAt(AZero: Integer): String;
 var p: Integer;
 begin
-  p := Pos('=', Items[AZero]);
+  p := Pos(NameValueSeparator, Items[AZero]);
   if p > 0 then Result := Copy(Items[AZero], p + 1, MaxInt) else Result := '';
 end;
 
-function TPhosphorStringList.CommaTextStr: String;
+{ Replace the value half of a name=value line, keeping its name. }
+procedure TPhosphorStringList.SetValueAt(AZero: Integer; const AValue: String);
+begin
+  Items[AZero] := NameAt(AZero) + NameValueSeparator + AValue;
+end;
+
+function TPhosphorStringList.EqualsList(AOther: TPhosphorStringList): Boolean;
 var i: Integer;
 begin
-  Result := '';
+  if AOther = nil then Exit(False);
+  if Count <> AOther.Count then Exit(False);
   for i := 0 to Count - 1 do
-  begin
-    if i > 0 then Result := Result + ',';
-    Result := Result + Items[i];
-  end;
+    if Items[i] <> AOther.Items[i] then Exit(False);
+  Result := True;
+end;
+
+{ Capacity is the allocated slack, so it is exactly the backing array's length --
+  a real allocation hint, not a bookkeeping integer. Setting it grows the array
+  (never below the live Count, which would discard items). }
+function TPhosphorStringList.CapacityGet: Integer;
+begin
+  Result := Length(Items);
+end;
+
+procedure TPhosphorStringList.CapacitySet(N: Integer);
+begin
+  if N < Count then N := Count;
+  SetLength(Items, N);
 end;
 
 // --- library functions ------------------------------------------------------
@@ -251,6 +436,19 @@ begin
     Exit(False);
   end;
   L := TPhosphorStringList(HandleObj(V.Hnd));
+  Err := NoError;
+  Result := True;
+end;
+
+function GetBytes(const V: TValue; out B: TPhosphorBytes; out Err: TPhosphorError): Boolean;
+begin
+  B := nil;
+  if (V.Kind <> vkHandle) or (not IsHandle(V.Hnd)) or (not (HandleObj(V.Hnd) is TPhosphorBytes)) then
+  begin
+    Err := MakeError(peRuntime, 'not a valid byte-buffer handle');
+    Exit(False);
+  end;
+  B := TPhosphorBytes(HandleObj(V.Hnd));
   Err := NoError;
   Result := True;
 end;
@@ -271,6 +469,60 @@ begin
   Result := True;
 end;
 
+function FirstCharOr(const S: String; ADefault: Char): Char;
+begin
+  if Length(S) > 0 then Result := S[1] else Result := ADefault;
+end;
+
+{ Bytes a save would write: an optional UTF-8 BOM before the rendered text. }
+function RenderForSave(L: TPhosphorStringList): String;
+begin
+  Result := L.TextStr;
+  if L.WriteBOM then Result := Utf8Bom + Result;
+end;
+
+{ Set a list from a text blob, dropping a leading UTF-8 BOM a save may have put
+  there. Returns the line count. }
+function LoadFromText(L: TPhosphorStringList; const AText: String): Integer;
+var s: String;
+begin
+  s := AText;
+  if (Length(s) >= 3) and (Copy(s, 1, 3) = Utf8Bom) then Delete(s, 1, 3);
+  L.SetText(s);
+  Result := L.Count;
+end;
+
+// --- raw file text (own, so the library reaches no host unit) ---------------
+function SaveTextToFile(const APath, AText: String): Boolean;
+var fs: TFileStream;
+begin
+  Result := False;
+  try
+    fs := TFileStream.Create(APath, fmCreate);
+    try
+      if Length(AText) > 0 then fs.WriteBuffer(AText[1], Length(AText));
+    finally fs.Free; end;
+    Result := True;
+  except Result := False; end;
+end;
+
+function LoadTextFromFile(const APath: String; out AText: String): Boolean;
+var fs: TFileStream; len: Int64;
+begin
+  AText := ''; Result := False;
+  if not FileExists(APath) then Exit;
+  try
+    fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+    try
+      len := fs.Size;
+      SetLength(AText, len);
+      if len > 0 then fs.ReadBuffer(AText[1], len);
+    finally fs.Free; end;
+    Result := True;
+  except Result := False; end;
+end;
+
+// --- construction / basic list ops ------------------------------------------
 function t_strings_new(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValHandle(RegisterHandle(TPhosphorStringList.Create)); end;
 
@@ -289,6 +541,15 @@ begin
   Result := ValInt(l.AddIndexed(Args[1].Str) + 1);   // 1-based index the item took
 end;
 
+function t_strings_append(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.AddIndexed(Args[1].Str);
+  Result := ValInt(l.Count);
+end;
+
 function t_strings_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList; z: Integer;
 begin
@@ -296,6 +557,16 @@ begin
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
   Result := ValStr(l.Items[z]);
+end;
+
+function t_strings_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; z: Integer;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  l.Items[z] := Args[2].Str;
+  Result := ValInt(1);
 end;
 
 function t_strings_indexof(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -338,6 +609,17 @@ begin
   Result := ValInt(1);
 end;
 
+function t_strings_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; zf, zt: Integer;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if not CheckIndex(l, Round(AsDouble(Args[1])), False, zf, Err) then Exit;
+  if not CheckIndex(l, Round(AsDouble(Args[2])), False, zt, Err) then Exit;
+  l.MoveItem(zf, zt);
+  Result := ValInt(1);
+end;
+
 function t_strings_sort(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList;
 begin
@@ -356,38 +638,22 @@ begin
   Result := ValInt(1);
 end;
 
-function t_strings_text(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
-begin
-  Result := ValInt(0);
-  if not GetList(Args[0], l, Err) then Exit;
-  l.SetText(Args[1].Str);
-  Result := ValInt(l.Count);
-end;
-
-function t_strings_commatext(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
-begin
-  Result := ValInt(0);
-  if not GetList(Args[0], l, Err) then Exit;
-  l.SetCommaText(Args[1].Str);
-  Result := ValInt(l.Count);
-end;
-
-function t_strings_values(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
-begin
-  Result := ValStr('');
-  if GetList(Args[0], l, Err) then Result := ValStr(l.ValueOf(Args[1].Str));
-end;
-
-function t_strings_indexofname(const Args: array of TValue; out Err: TPhosphorError): TValue;
+function t_strings_find(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList; i: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  i := l.IndexOfName(Args[1].Str);
-  if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);
+  i := l.Find(Args[1].Str);
+  if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);  // 1-based, 0 absent
+end;
+
+function t_strings_equals(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var a, b: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], a, Err) then Exit;
+  if not GetList(Args[1], b, Err) then Exit;
+  Result := ValInt(Ord(a.EqualsList(b)));
 end;
 
 function t_strings_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -401,23 +667,162 @@ begin
     Result := ValInt(0);
 end;
 
-function t_strings_find(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList; i: Integer;
+// --- capacity ---------------------------------------------------------------
+function t_strings_capacity_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  i := l.Find(Args[1].Str);
-  if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);  // 1-based, 0 absent
+  Result := ValInt(l.CapacityGet);
 end;
 
-function t_strings_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList; zf, zt: Integer;
+function t_strings_capacity_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, zf, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[2])), False, zt, Err) then Exit;
-  l.MoveItem(zf, zt);
+  l.CapacitySet(Round(AsDouble(Args[1])));
+  Result := ValInt(l.CapacityGet);
+end;
+
+// --- text (get/set) ---------------------------------------------------------
+function t_strings_text(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.SetText(Args[1].Str);
+  Result := ValInt(l.Count);
+end;
+
+function t_strings_text_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.TextStr);
+end;
+
+// --- comma text (get/set) ---------------------------------------------------
+function t_strings_commatext(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.SetCommaText(Args[1].Str);
+  Result := ValInt(l.Count);
+end;
+
+function t_strings_commatext_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.CommaTextStr);
+end;
+
+// --- delimited text and its characters --------------------------------------
+function t_strings_delimitedtext(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.SetDelimitedText(Args[1].Str);
+  Result := ValInt(l.Count);
+end;
+
+function t_strings_delimitedtext_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.GetDelimitedText);
+end;
+
+function t_strings_delimiter_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.Delimiter := FirstCharOr(Args[1].Str, ',');
+  Result := ValInt(1);
+end;
+
+function t_strings_delimiter_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.Delimiter);
+end;
+
+function t_strings_quotechar_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.QuoteChar := FirstCharOr(Args[1].Str, '"');
+  Result := ValInt(1);
+end;
+
+function t_strings_quotechar_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.QuoteChar);
+end;
+
+function t_strings_strictdelimiter_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.StrictDelimiter := AsDouble(Args[1]) <> 0;
+  Result := ValInt(1);
+end;
+
+function t_strings_strictdelimiter_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValInt(Ord(l.StrictDelimiter));
+end;
+
+// --- name/value machinery ---------------------------------------------------
+function t_strings_values_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if GetList(Args[0], l, Err) then Result := ValStr(l.ValueOf(Args[1].Str));
+end;
+
+function t_strings_values_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.SetValue(Args[1].Str, Args[2].Str);
+  Result := ValInt(1);
+end;
+
+function t_strings_valuefromindex_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; z: Integer;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  Result := ValStr(l.ValueAt(z));
+end;
+
+function t_strings_valuefromindex_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; z: Integer;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  l.SetValueAt(z, Args[2].Str);
   Result := ValInt(1);
 end;
 
@@ -430,31 +835,79 @@ begin
   Result := ValStr(l.NameAt(z));
 end;
 
-function t_strings_valuefromindex(const Args: array of TValue; out Err: TPhosphorError): TValue;
+// keynames$ is the name half of the pair at an index -- the same reading as
+// names$, kept as its own spelling because the reference exposes both.
+function t_strings_keynames(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
-  Result := ValStr(l.ValueAt(z));
+  Result := ValStr(l.NameAt(z));
 end;
 
-function t_strings_namevalueseparator(const Args: array of TValue; out Err: TPhosphorError): TValue;
+function t_strings_indexofname(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; i: Integer;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  i := l.IndexOfName(Args[1].Str);
+  if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);
+end;
+
+function t_strings_namevalueseparator_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList;
 begin
   Result := ValStr('=');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr('=');   // '=' is the only separator in phase 1
+  Result := ValStr(l.NameValueSeparator);
 end;
 
-function t_strings_commatext_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+function t_strings_namevalueseparator_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList;
 begin
-  Result := ValStr('');
+  Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.CommaTextStr);
+  l.NameValueSeparator := FirstCharOr(Args[1].Str, '=');
+  Result := ValInt(1);
 end;
 
+// --- case sensitivity and duplicates policy ---------------------------------
+function t_strings_casesensitive_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.CaseSensitive := AsDouble(Args[1]) <> 0;
+  Result := ValInt(1);
+end;
+
+function t_strings_casesensitive_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValInt(Ord(l.CaseSensitive));
+end;
+
+function t_strings_duplicates_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.Duplicates := LowerCase(Args[1].Str);
+  Result := ValInt(1);
+end;
+
+function t_strings_duplicates_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('ignore');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.Duplicates);
+end;
+
+// --- sorted (already existed) -----------------------------------------------
 function t_strings_sorted_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList;
 begin
@@ -473,14 +926,195 @@ begin
   Result := ValInt(1);
 end;
 
+// --- line breaks and BOM ----------------------------------------------------
+function t_strings_linebreak_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.LineBreak := Args[1].Str;
+  Result := ValInt(1);
+end;
+
+function t_strings_linebreak_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.LineBreak);
+end;
+
+function t_strings_trailinglinebreak_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.TrailingLineBreak := AsDouble(Args[1]) <> 0;
+  Result := ValInt(1);
+end;
+
+function t_strings_trailinglinebreak_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValInt(Ord(l.TrailingLineBreak));
+end;
+
+function t_strings_writebom_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.WriteBOM := AsDouble(Args[1]) <> 0;
+  Result := ValInt(1);
+end;
+
+function t_strings_writebom_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValInt(Ord(l.WriteBOM));
+end;
+
+// --- encodings --------------------------------------------------------------
+// A fresh list answers an encoding (the default one a save would use) WITHOUT
+// dereferencing a nil TEncoding -- the reference's access-violation trap.
+function t_strings_encoding_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  if l.Encoding <> '' then Result := ValStr(l.Encoding)
+  else Result := ValStr(l.DefaultEncoding);
+end;
+
+function t_strings_defaultencoding_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.DefaultEncoding);
+end;
+
+function t_strings_defaultencoding_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.DefaultEncoding := Args[1].Str;
+  Result := ValInt(1);
+end;
+
+// --- change handlers (NAMES only; firing is a host concern, phase 2) ---------
+function t_strings_onchange_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.OnChangeName := Args[1].Str;
+  Result := ValInt(1);
+end;
+
+function t_strings_onchange_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.OnChangeName);
+end;
+
+function t_strings_onchanging_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  l.OnChangingName := Args[1].Str;
+  Result := ValInt(1);
+end;
+
+function t_strings_onchanging_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValStr('');
+  if not GetList(Args[0], l, Err) then Exit;
+  Result := ValStr(l.OnChangingName);
+end;
+
+// --- batched updates --------------------------------------------------------
+function t_strings_beginupdate(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  Inc(l.UpdateCount);
+  Result := ValInt(l.UpdateCount);
+end;
+
+function t_strings_endupdate(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if l.UpdateCount > 0 then Dec(l.UpdateCount);
+  Result := ValInt(l.UpdateCount);
+end;
+
+// --- files (return the LINE COUNT, per the reference pages) ------------------
+function t_strings_savetofile(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
+  SaveTextToFile(Args[1].Str, RenderForSave(l));
+  Result := ValInt(l.Count);
+end;
+
+function t_strings_loadfromfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; s: String;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
+  LoadTextFromFile(Args[1].Str, s);
+  Result := ValInt(LoadFromText(l, s));
+end;
+
+// --- streams (through the byte-buffer handle IoLib hands out) ----------------
+function t_strings_loadfromstream(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; b: TPhosphorBytes;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if not GetBytes(Args[1], b, Err) then Exit;
+  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
+  Result := ValInt(LoadFromText(l, b.Data));
+end;
+
+function t_strings_savetostream(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var l: TPhosphorStringList; b: TPhosphorBytes;
+begin
+  Result := ValInt(0);
+  if not GetList(Args[0], l, Err) then Exit;
+  if not GetBytes(Args[1], b, Err) then Exit;
+  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
+  b.Data := RenderForSave(l);
+  Result := ValInt(l.Count);
+end;
+
 procedure RegisterStrListFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('strings@:',            @t_strings_new);
   Reg.Add('strings_count:@',      @t_strings_count);
   Reg.Add('strings_add:@$',       @t_strings_add);
+  Reg.Add('strings_append:@$',    @t_strings_append);
   Reg.Add('strings_strings$:@n',  @t_strings_get);
+  Reg.Add('strings_strings:@n$',  @t_strings_set);
   Reg.Add('strings_indexof:@$',   @t_strings_indexof);
   Reg.Add('strings_find:@$',      @t_strings_find);
+  Reg.Add('strings_equals:@@',    @t_strings_equals);
   Reg.Add('strings_insert:@n$',   @t_strings_insert);
   Reg.Add('strings_delete:@n',    @t_strings_delete);
   Reg.Add('strings_exchange:@nn', @t_strings_exchange);
@@ -490,14 +1124,68 @@ begin
   Reg.Add('strings_sorted:@n',    @t_strings_sorted_set);
   Reg.Add('strings_clear:@',      @t_strings_clear);
   Reg.Add('strings_free:@',       @t_strings_free);
+
+  Reg.Add('strings_capacity:@',   @t_strings_capacity_get);
+  Reg.Add('strings_capacity:@n',  @t_strings_capacity_set);
+
   Reg.Add('strings_text:@$',      @t_strings_text);
+  Reg.Add('strings_text$:@',      @t_strings_text_get);
   Reg.Add('strings_commatext:@$', @t_strings_commatext);
   Reg.Add('strings_commatext$:@', @t_strings_commatext_get);
-  Reg.Add('strings_values$:@$',   @t_strings_values);
-  Reg.Add('strings_valuefromindex$:@n', @t_strings_valuefromindex);
-  Reg.Add('strings_names$:@n',    @t_strings_names);
-  Reg.Add('strings_namevalueseparator$:@', @t_strings_namevalueseparator);
-  Reg.Add('strings_indexofname:@$', @t_strings_indexofname);
+
+  Reg.Add('strings_delimitedtext:@$',  @t_strings_delimitedtext);
+  Reg.Add('strings_delimitedtext$:@',  @t_strings_delimitedtext_get);
+  Reg.Add('strings_delimiter:@$',      @t_strings_delimiter_set);
+  Reg.Add('strings_delimiter$:@',      @t_strings_delimiter_get);
+  Reg.Add('strings_quotechar:@$',      @t_strings_quotechar_set);
+  Reg.Add('strings_quotechar$:@',      @t_strings_quotechar_get);
+  Reg.Add('strings_strictdelimiter:@n', @t_strings_strictdelimiter_set);
+  Reg.Add('strings_strictdelimiter:@',  @t_strings_strictdelimiter_get);
+
+  Reg.Add('strings_values$:@$',          @t_strings_values_get);
+  Reg.Add('strings_values:@$$',          @t_strings_values_set);
+  Reg.Add('strings_valuefromindex$:@n',  @t_strings_valuefromindex_get);
+  Reg.Add('strings_valuefromindex:@n$',  @t_strings_valuefromindex_set);
+  Reg.Add('strings_names$:@n',           @t_strings_names);
+  Reg.Add('strings_keynames$:@n',        @t_strings_keynames);
+  Reg.Add('strings_indexofname:@$',      @t_strings_indexofname);
+  Reg.Add('strings_namevalueseparator$:@',  @t_strings_namevalueseparator_get);
+  Reg.Add('strings_namevalueseparator:@$',  @t_strings_namevalueseparator_set);
+
+  Reg.Add('strings_casesensitive:@n', @t_strings_casesensitive_set);
+  Reg.Add('strings_casesensitive:@',  @t_strings_casesensitive_get);
+  Reg.Add('strings_duplicates:@$',    @t_strings_duplicates_set);
+  Reg.Add('strings_duplicates$:@',    @t_strings_duplicates_get);
+
+  Reg.Add('strings_linebreak:@$',        @t_strings_linebreak_set);
+  Reg.Add('strings_linebreak$:@',        @t_strings_linebreak_get);
+  Reg.Add('strings_trailinglinebreak:@n', @t_strings_trailinglinebreak_set);
+  Reg.Add('strings_trailinglinebreak:@',  @t_strings_trailinglinebreak_get);
+  Reg.Add('strings_writebom:@n',         @t_strings_writebom_set);
+  Reg.Add('strings_writebom:@',          @t_strings_writebom_get);
+
+  Reg.Add('strings_encoding$:@',            @t_strings_encoding_get);
+  Reg.Add('strings_defaultencoding$:@',     @t_strings_defaultencoding_get);
+  Reg.Add('strings_defaultencoding:@$',     @t_strings_defaultencoding_set);
+
+  Reg.Add('strings_onchange:@$',    @t_strings_onchange_set);
+  Reg.Add('strings_onchange$:@',    @t_strings_onchange_get);
+  Reg.Add('strings_onchanging:@$',  @t_strings_onchanging_set);
+  Reg.Add('strings_onchanging$:@',  @t_strings_onchanging_get);
+
+  Reg.Add('strings_beginupdate:@',  @t_strings_beginupdate);
+  Reg.Add('strings_endupdate:@',    @t_strings_endupdate);
+
+  Reg.Add('strings_savetofile:@$$', @t_strings_savetofile);
+  Reg.Add('strings_savetofile:@$',  @t_strings_savetofile);
+  Reg.Add('strings_save:@$',        @t_strings_savetofile);
+  Reg.Add('strings_loadfromfile:@$$', @t_strings_loadfromfile);
+  Reg.Add('strings_loadfromfile:@$',  @t_strings_loadfromfile);
+  Reg.Add('strings_load:@$',          @t_strings_loadfromfile);
+  Reg.Add('strings_loadfromstream:@@$', @t_strings_loadfromstream);
+  Reg.Add('strings_loadfromstream:@@',  @t_strings_loadfromstream);
+  Reg.Add('strings_savetostream:@@$',   @t_strings_savetostream);
+  Reg.Add('strings_savetostream:@@',    @t_strings_savetostream);
 end;
 
 end.

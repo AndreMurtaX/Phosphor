@@ -21,15 +21,17 @@ uses
   SysUtils, Classes,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
 
-procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
-
-implementation
-
 type
-  { A raw byte buffer as a handle object, for file_readallbytes@/writeallbytes. }
+  { A raw byte buffer as a handle object, for file_readallbytes@/writeallbytes.
+    Public so a sibling lib (PhosphorStrListLib's stream load/save) can move a
+    string list through the SAME handle IoLib hands out for a file's bytes. }
   TPhosphorBytes = class
     Data: String;
   end;
+
+procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
+
+implementation
 
 var
   GIoError: Integer;   // last IO error code; ioerror()/iostrerror$() read it

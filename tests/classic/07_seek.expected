@@ -1,0 +1,12 @@
+lof         8
+loc at open 1
+loc seek 5  5
+bytes 5,6   50 60
+loc after   7
+seek loc noop 7
+byte 1 again 10
+patched 3   199 size 8
+neighbours  20 40
+grown       9 last 111
+stream lines 4000
+last line   line 4000 padding-padding-padding

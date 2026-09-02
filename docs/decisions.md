@@ -92,6 +92,24 @@ already exists.
 > file work can be done either way. `while … wend` is accepted as well as `endwhile`.
 > [language-reference.md](language-reference.md) documents the full surface.
 
+### File channels: streamed, live, positionable
+
+A channel keeps its `TFileStream` open and reads through a sliding 64 KB window, so
+`open … for input` never loads the file: memory is bounded by the window and the
+longest line, not by the file size, and opening a 200 MB file to read four bytes
+takes milliseconds. It follows that `lof(n)` is the file's **live** size and a
+channel is a live view rather than a snapshot.
+
+`OPEN … FOR BINARY` is the fourth mode: read/write and positionable. `seek #n, p`
+moves the cursor and `loc(n)` reports it — both **1-based**, like every other index
+in the language, so `seek #n, loc(n)` is a no-op. `input$` reads at the cursor and
+`print #` overwrites at it, which is how a large file is patched without rewriting.
+Seeking past the end grows the file.
+
+Deliberately NOT built: the classic `FIELD` / fixed-length-record `GET`/`PUT` model.
+Byte-addressed `SEEK` plus `input$`/`print #` covers the same ground without the
+record-buffer machinery, and Phosphor is not a port.
+
 ### PRINT USING format language
 
 A classic subset. Numeric fields: `#` digit positions, `.` decimals, `,` grouping, a

@@ -22,6 +22,8 @@ const
   { Classic file-I/O channel numbers run 1..MaxChannel (#0 is not used). The cap
     keeps the channel table a fixed, cheap array; classic BASICs cap far lower. }
   MaxChannel = 255;
+  { Bytes pulled from disk per window refill on a streamed read. }
+  ChanChunk = 65536;
 
 type
   { One activation of a user function: its local frame (parameters first, then
@@ -32,17 +34,25 @@ type
     ReturnAddr: Integer;
   end;
 
-  { An open file channel for classic I/O (OPEN ... AS #n). INPUT mode reads the
-    whole file into Buf once and walks a 1-based cursor over it (so INPUT#, LINE
-    INPUT#, EOF and LOC are cheap and need no re-seeking); OUTPUT/APPEND write
-    straight through Stream and flush on CLOSE. }
-  TChannelMode = (cmInput, cmOutput, cmAppend);
+  { An open file channel for classic I/O (OPEN ... AS #n).
+
+    Every mode keeps its TFileStream open, so a channel is a live view of the file,
+    not a snapshot, and a file far larger than RAM can be read. INPUT and BINARY
+    read through a sliding WINDOW: Buf holds only the bytes read ahead and not yet
+    consumed (Pos is the 1-based cursor into it, BufStart the file offset of Buf[1]),
+    so the logical file cursor is BufStart + Pos - 1 and memory is bounded by the
+    read chunk and the longest line -- never by the file size.
+
+    BINARY is read/write and positionable: SEEK moves the cursor, INPUT$ reads at it
+    and PRINT # overwrites at it. OUTPUT/APPEND stay write-only and append-only. }
+  TChannelMode = (cmInput, cmOutput, cmAppend, cmBinary);
   TFileChannel = record
     Open: Boolean;
     Mode: TChannelMode;
-    Stream: TFileStream;   // OUTPUT / APPEND
-    Buf: String;           // INPUT: the whole file
-    Pos: Integer;          // INPUT: 1-based read cursor into Buf
+    Stream: TFileStream;
+    Buf: RawByteString;    // INPUT/BINARY: the read-ahead window, byte-exact
+    Pos: Integer;          // 1-based cursor into Buf
+    BufStart: Int64;       // file offset of Buf[1]
   end;
 
   TPhosphorVM = class
@@ -95,6 +105,13 @@ type
     // the opcode handlers can route a failure through Fault (ON ERROR-catchable).
     function ChanOpen(ANum, AMode: Integer; const APath: String): TPhosphorError;
     function ChanClose(ANum: Integer): TPhosphorError;
+    // Window management for the streaming readers. ChanMore pulls one more chunk
+    // from disk (False at end of file); ChanEnsure guarantees ANeed unconsumed
+    // bytes if the file has them; ChanCursor is the logical file offset.
+    function ChanMore(ANum: Integer): Boolean;
+    function ChanEnsure(ANum, ANeed: Integer): Boolean;
+    function ChanCursor(ANum: Integer): Int64;
+    function ChanSeek(ANum: Integer; APos: Int64): TPhosphorError;
     function ChanWrite(ANum: Integer; const S: String): TPhosphorError;
     function ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
     function ChanLine(ANum: Integer; out S: String): TPhosphorError;
@@ -400,8 +417,6 @@ end;
 function TPhosphorVM.ChanOpen(ANum, AMode: Integer; const APath: String): TPhosphorError;
 var
   fmode: TChannelMode;
-  ss: TStringStream;
-  fs: TFileStream;
 begin
   Result := NoError;
   if not ValidChannel(ANum) then
@@ -412,44 +427,107 @@ begin
     0: fmode := cmInput;
     1: fmode := cmOutput;
     2: fmode := cmAppend;
+    3: fmode := cmBinary;
   else
     Exit(MakeError(peRuntime, 'bad OPEN mode'));
   end;
+  // Reset the slot field by field -- FillChar over a record holding a managed
+  // string would zero the reference without releasing it.
+  FChannels[ANum].Stream := nil;
+  FChannels[ANum].Buf := '';
+  FChannels[ANum].Pos := 1;
+  FChannels[ANum].BufStart := 0;
+  FChannels[ANum].Mode := fmode;
   try
-    FillChar(FChannels[ANum], SizeOf(FChannels[ANum]), 0);
-    FChannels[ANum].Mode := fmode;
-    if fmode = cmInput then
-    begin
-      if not FileExists(APath) then
-        Exit(MakeError(peRuntime, 'cannot open "' + APath + '" for input: no such file'));
-      ss := TStringStream.Create('');
-      fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
-      try
-        ss.CopyFrom(fs, 0);
-      finally
-        fs.Free;
-      end;
-      FChannels[ANum].Buf := ss.DataString;
-      ss.Free;
-      FChannels[ANum].Pos := 1;
-      FChannels[ANum].Stream := nil;
-    end
-    else if fmode = cmOutput then
-      FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate)
-    else // append
-    begin
-      if FileExists(APath) then
-      begin
-        FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenReadWrite or fmShareDenyWrite);
-        FChannels[ANum].Stream.Seek(0, soEnd);
-      end
-      else
+    case fmode of
+      cmInput:
+        begin
+          if not FileExists(APath) then
+            Exit(MakeError(peRuntime, 'cannot open "' + APath + '" for input: no such file'));
+          // Streamed, not slurped: the file stays open and is read a window at a
+          // time, so a file larger than memory is still readable.
+          FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+        end;
+      cmOutput:
         FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+      cmAppend:
+        begin
+          if FileExists(APath) then
+          begin
+            FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenReadWrite or fmShareDenyWrite);
+            FChannels[ANum].Stream.Seek(0, soEnd);
+          end
+          else
+            FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+        end;
+      cmBinary:
+        begin
+          // Read/write and positionable; created empty if it does not exist yet.
+          if FileExists(APath) then
+            FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenReadWrite or fmShareDenyWrite)
+          else
+            FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+        end;
     end;
     FChannels[ANum].Open := True;
   except
     on E: Exception do
       Result := MakeError(peRuntime, 'cannot open "' + APath + '": ' + E.Message);
+  end;
+end;
+
+{ Pull one more chunk from disk into the window. False at end of file. }
+function TPhosphorVM.ChanMore(ANum: Integer): Boolean;
+var chunk: RawByteString; got: Integer;
+begin
+  Result := False;
+  if FChannels[ANum].Stream = nil then Exit;
+  // Drop what has already been consumed before growing, so the window stays small.
+  if FChannels[ANum].Pos > 1 then
+  begin
+    Inc(FChannels[ANum].BufStart, FChannels[ANum].Pos - 1);
+    Delete(FChannels[ANum].Buf, 1, FChannels[ANum].Pos - 1);
+    FChannels[ANum].Pos := 1;
+  end;
+  SetLength(chunk, ChanChunk);
+  got := FChannels[ANum].Stream.Read(chunk[1], ChanChunk);
+  if got <= 0 then Exit;
+  SetLength(chunk, got);
+  FChannels[ANum].Buf := FChannels[ANum].Buf + chunk;
+  Result := True;
+end;
+
+{ True once ANeed unconsumed bytes are in the window (or the file ran out). }
+function TPhosphorVM.ChanEnsure(ANum, ANeed: Integer): Boolean;
+begin
+  while (Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1) < ANeed do
+    if not ChanMore(ANum) then Break;
+  Result := (Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1) >= ANeed;
+end;
+
+{ The logical file offset of the next byte to be read (0-based). }
+function TPhosphorVM.ChanCursor(ANum: Integer): Int64;
+begin
+  Result := FChannels[ANum].BufStart + FChannels[ANum].Pos - 1;
+end;
+
+{ Move the read/write cursor. APos is 1-BASED, like every other index in the
+  language: seek #n, 1 is the first byte, and `seek #n, loc(n)` is a no-op. }
+function TPhosphorVM.ChanSeek(ANum: Integer; APos: Int64): TPhosphorError;
+begin
+  if not (ValidChannel(ANum) and FChannels[ANum].Open) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  if APos < 1 then
+    Exit(MakeError(peRuntime, 'seek: position must be 1 or more'));
+  Result := NoError;
+  try
+    FChannels[ANum].Stream.Position := APos - 1;
+    FChannels[ANum].Buf := '';
+    FChannels[ANum].Pos := 1;
+    FChannels[ANum].BufStart := APos - 1;
+  except
+    on E: Exception do
+      Result := MakeError(peRuntime, 'seek failed: ' + E.Message);
   end;
 end;
 
@@ -473,61 +551,91 @@ begin
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if FChannels[ANum].Mode = cmInput then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is open for input, not output'));
-  if Length(S) > 0 then
+  if Length(S) = 0 then Exit;
+  if FChannels[ANum].Mode = cmBinary then
+  begin
+    // Overwrite AT THE CURSOR. Reads buffer ahead, so the stream position may sit
+    // past it; put the stream back on the logical cursor, write, then drop the
+    // stale window and let the cursor follow the write.
+    FChannels[ANum].Stream.Position := ChanCursor(ANum);
     FChannels[ANum].Stream.WriteBuffer(S[1], Length(S));
+    FChannels[ANum].Buf := '';
+    FChannels[ANum].Pos := 1;
+    FChannels[ANum].BufStart := FChannels[ANum].Stream.Position;
+    Exit;
+  end;
+  FChannels[ANum].Stream.WriteBuffer(S[1], Length(S));
 end;
 
 function TPhosphorVM.ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
-var field: String;
+var field: String; i: Integer; found: Boolean;
 begin
   V := Default(TValue);
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
-  if FChannels[ANum].Mode <> cmInput then
+  if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
+  // Read ahead until the window holds a field terminator (or the file ends), so a
+  // field is never cut short at a chunk boundary.
+  repeat
+    found := False;
+    for i := FChannels[ANum].Pos to Length(FChannels[ANum].Buf) do
+      if (FChannels[ANum].Buf[i] = ',') or (FChannels[ANum].Buf[i] = ' ') or
+         (FChannels[ANum].Buf[i] = #9) or (FChannels[ANum].Buf[i] = #13) or
+         (FChannels[ANum].Buf[i] = #10) then begin found := True; Break; end;
+    if found then Break;
+  until not ChanMore(ANum);
   field := NextFieldStr(FChannels[ANum].Buf, FChannels[ANum].Pos, True);
   Result := CoerceField(field, ATypeCode, V);
 end;
 
 function TPhosphorVM.ChanLine(ANum: Integer; out S: String): TPhosphorError;
-var buf: String; p, n, start: Integer;
+var p, n, start: Integer; found: Boolean;
 begin
   S := '';
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
-  if FChannels[ANum].Mode <> cmInput then
+  if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
   Result := NoError;
-  buf := FChannels[ANum].Buf;
-  n := Length(buf);
+  // Read ahead until the window holds a line terminator (or the file ends), so a
+  // line spanning a chunk boundary still comes back whole.
+  repeat
+    found := False;
+    for p := FChannels[ANum].Pos to Length(FChannels[ANum].Buf) do
+      if (FChannels[ANum].Buf[p] = #10) or (FChannels[ANum].Buf[p] = #13) then
+        begin found := True; Break; end;
+    if found then Break;
+  until not ChanMore(ANum);
+  n := Length(FChannels[ANum].Buf);
   p := FChannels[ANum].Pos;
   start := p;
   // Scan to the terminator, then take the run with ONE Copy. Appending byte by
-  // byte (S := S + buf[p]) re-encodes any byte >= 128 through the UTF-8 codepage
-  // and lands it as '?', silently destroying binary and Latin-1 data.
-  while (p <= n) and (buf[p] <> #10) and (buf[p] <> #13) do Inc(p);
-  S := Copy(buf, start, p - start);
+  // byte re-encodes any byte >= 128 through the UTF-8 codepage and lands it as
+  // '?', silently destroying binary and Latin-1 data.
+  while (p <= n) and (FChannels[ANum].Buf[p] <> #10) and (FChannels[ANum].Buf[p] <> #13) do Inc(p);
+  S := Copy(FChannels[ANum].Buf, start, p - start);
   // step over the line terminator (CR, LF, or CRLF)
-  if (p <= n) and (buf[p] = #13) then Inc(p);
-  if (p <= n) and (buf[p] = #10) then Inc(p);
+  if (p <= n) and (FChannels[ANum].Buf[p] = #13) then Inc(p);
+  if (p <= n) and (FChannels[ANum].Buf[p] = #10) then Inc(p);
   FChannels[ANum].Pos := p;
 end;
 
 function TPhosphorVM.ChanChars(ANum, ACount: Integer; out S: String): TPhosphorError;
-var buf: String; avail: Integer;
+var avail: Integer;
 begin
   S := '';
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
-  if FChannels[ANum].Mode <> cmInput then
+  if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
   Result := NoError;
   if ACount <= 0 then Exit;
-  buf := FChannels[ANum].Buf;
-  avail := Length(buf) - FChannels[ANum].Pos + 1;
+  ChanEnsure(ANum, ACount);                  // pull what the request needs
+  avail := Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1;
   if avail <= 0 then Exit;
-  if ACount > avail then ACount := avail;
-  S := Copy(buf, FChannels[ANum].Pos, ACount);
+  if ACount > avail then ACount := avail;     // a short read at end of file
+  S := Copy(FChannels[ANum].Buf, FChannels[ANum].Pos, ACount);
   Inc(FChannels[ANum].Pos, ACount);
 end;
 
@@ -536,10 +644,10 @@ begin
   B := True;
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
-  if FChannels[ANum].Mode <> cmInput then
-    Exit(MakeError(peRuntime, 'eof() needs a file open for input'));
+  if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
+    Exit(MakeError(peRuntime, 'eof() needs a file open for input or binary'));
   Result := NoError;
-  B := FChannels[ANum].Pos > Length(FChannels[ANum].Buf);
+  B := not ChanEnsure(ANum, 1);   // nothing buffered AND nothing left on disk
 end;
 
 function TPhosphorVM.ChanLof(ANum: Integer; out N: Int64): TPhosphorError;
@@ -548,10 +656,7 @@ begin
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   Result := NoError;
-  if FChannels[ANum].Mode = cmInput then
-    N := Length(FChannels[ANum].Buf)
-  else
-    N := FChannels[ANum].Stream.Size;
+  N := FChannels[ANum].Stream.Size;   // live size, every mode
 end;
 
 function TPhosphorVM.ChanLoc(ANum: Integer; out N: Int64): TPhosphorError;
@@ -560,10 +665,12 @@ begin
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   Result := NoError;
-  if FChannels[ANum].Mode = cmInput then
-    N := FChannels[ANum].Pos - 1     // bytes consumed so far
+  // 1-BASED, like every other position in the language: the number of the next
+  // byte to be read or written, so `seek #n, loc(n)` changes nothing.
+  if FChannels[ANum].Mode in [cmInput, cmBinary] then
+    N := ChanCursor(ANum) + 1           // the logical cursor, not the read-ahead
   else
-    N := FChannels[ANum].Stream.Position;
+    N := FChannels[ANum].Stream.Position + 1;
 end;
 
 // --- PRINT USING formatter ---------------------------------------------------
@@ -1231,6 +1338,13 @@ begin
           e := ChanLoc(SafeI32(a), nTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValInt(nTmp));
+        end;
+      opSeekFile:
+        begin
+          a := Pop;   // the 1-based position (pushed last)
+          b := Pop;   // the channel number (pushed first)
+          e := ChanSeek(SafeI32(b), SafeI32(a));
+          if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
       // --- formatted output ----------------------------------------------------
       opPrintUsing:

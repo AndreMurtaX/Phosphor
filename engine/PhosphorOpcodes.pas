@@ -90,7 +90,8 @@ type
     opLofFile    = 53, // pop channel#: push the file length in bytes (int)
     opLocFile    = 54, // pop channel#: push the 1-based read/write cursor (int)
     // --- formatted output ----------------------------------------------------
-    opPrintUsing = 55  // A = value count; pop A values + the format$: emit formatted
+    opPrintUsing = 55, // A = value count; pop A values + the format$: emit formatted
+    opSeekFile   = 56  // pop position (1-based), pop channel#: move the file cursor
   );
 
   { STORED: Op, A, B, Line. DERIVED: none yet (the call target is resolved
@@ -257,7 +258,7 @@ begin
     (Ord(opInputChars) = 45) and (Ord(opOpenFile) = 46) and (Ord(opCloseFile) = 47) and
     (Ord(opPrintFile) = 48) and (Ord(opFileField) = 49) and (Ord(opFileLine) = 50) and
     (Ord(opFileChars) = 51) and (Ord(opEofFile) = 52) and (Ord(opLofFile) = 53) and
-    (Ord(opLocFile) = 54) and (Ord(opPrintUsing) = 55);
+    (Ord(opLocFile) = 54) and (Ord(opPrintUsing) = 55) and (Ord(opSeekFile) = 56);
 end;
 
 end.

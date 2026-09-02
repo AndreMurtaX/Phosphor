@@ -116,6 +116,7 @@ type
     procedure ParseInput(AIsLine: Boolean);  // input / line input (console or #file)
     procedure ParseOpen;          // open <path> for input|output|append as #n
     procedure ParseClose;         // close [#n [, #n]...]  (bare = close all)
+    procedure ParseSeek;          // seek #n, <1-based position>
     procedure ParseSwap;          // swap <lvalue>, <lvalue>
     procedure ParsePrintFile(AAddNewline: Boolean);   // print #n [, item[; item...]]
     procedure ParsePrintUsing(AAddNewline: Boolean);  // print using fmt$; args
@@ -1261,12 +1262,13 @@ begin
   if not ((FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'for')) then
   begin Fail('OPEN needs ''for''', FLex.Cur.Line); Exit; end;
   FLex.Advance;
-  if FLex.Cur.Kind <> tkIdent then begin Fail('OPEN mode must be input, output or append', FLex.Cur.Line); Exit; end;
+  if FLex.Cur.Kind <> tkIdent then begin Fail('OPEN mode must be input, output, append or binary', FLex.Cur.Line); Exit; end;
   modeStr := FLex.Cur.StrVal;
   if modeStr = 'input' then modeCode := 0
   else if modeStr = 'output' then modeCode := 1
   else if modeStr = 'append' then modeCode := 2
-  else begin Fail('OPEN mode must be input, output or append', FLex.Cur.Line); Exit; end;
+  else if modeStr = 'binary' then modeCode := 3   // read/write, positionable
+  else begin Fail('OPEN mode must be input, output, append or binary', FLex.Cur.Line); Exit; end;
   FLex.Advance;   // the mode
   if not ((FLex.Cur.Kind = tkIdent) and (FLex.Cur.StrVal = 'as')) then
   begin Fail('OPEN needs ''as''', FLex.Cur.Line); Exit; end;
@@ -1292,6 +1294,23 @@ begin
     FProg.Emit(opCloseFile, 0, 0, ln);
     if FLex.Cur.Kind = tkComma then FLex.Advance else Break;
   until FFailed;
+end;
+
+{ SEEK #n, p -- move a channel's read/write cursor to the 1-based byte position p.
+  Pairs with loc(n), which reports it, so `seek #n, loc(n)` changes nothing. }
+procedure TPhosphorCompiler.ParseSeek;
+var ln: Integer;
+begin
+  ln := FLex.Cur.Line;
+  FLex.Advance;   // 'seek'
+  if FLex.Cur.Kind = tkHash then FLex.Advance;   // optional '#'
+  ParseExpr;      // the file number (pushed first)
+  if FFailed then Exit;
+  Expect(tkComma, '","');
+  if FFailed then Exit;
+  ParseExpr;      // the position (pushed second)
+  if FFailed then Exit;
+  FProg.Emit(opSeekFile, 0, 0, ln);
 end;
 
 { PRINT #n [, item[(;|,) item]...] -- writes items to a file channel (';' adjacent,
@@ -1619,6 +1638,9 @@ begin
     if (t.StrVal = 'close') and
        not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
     begin ParseClose; Exit; end;
+    // `seek #n, p` -- move a channel cursor; contextual, so `seek = 5` is a variable.
+    if (t.StrVal = 'seek') and (FLex.Peek.Kind in [tkHash, tkInt, tkIdent, tkLParen]) then
+    begin ParseSeek; Exit; end;
     // `swap <var>, <var>` (scalars or @-array elements).
     if (t.StrVal = 'swap') and
        not (FLex.Peek.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then

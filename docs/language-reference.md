@@ -525,9 +525,31 @@ println n%; " / "; word$
 close #1
 ```
 
-Channel functions: `eof(n)` (True past the end), `lof(n)` (byte length), `loc(n)`
-(cursor), and `input$(k, #n)` (read exactly `k` **bytes**). `close` with no number
-closes every open channel. `open … for append` adds to an existing file.
+Channel functions: `eof(n)` (True past the end), `lof(n)` (the file's **live** byte
+length), `loc(n)` (the 1-based position of the next byte), and `input$(k, #n)` (read
+exactly `k` **bytes**). `close` with no number closes every open channel.
+`open … for append` adds to an existing file.
+
+**Reading is streamed.** `open … for input` does *not* load the file — it reads a
+window at a time, so a file far larger than memory is fine and opening one is
+instant regardless of its size.
+
+**`open … for binary` is read/write and positionable.** `seek #n, p` moves the
+cursor to the 1-based byte `p`; `input$` reads there and `print #` overwrites there.
+This is how you patch a large file without rewriting it. Seeking past the end grows
+the file.
+
+```basic
+open "data.bin" for binary as #1
+seek #1, 3
+print #1, bytestr$(199)        ' overwrite byte 3 in place; nothing else moves
+seek #1, 1
+first$ = input$(2, #1)         ' and read from anywhere, forwards or backwards
+println loc(1)                 ' 3 -- the next byte to be read
+close #1
+```
+
+`seek #n, loc(n)` changes nothing, which makes the pair easy to reason about.
 
 ---
 

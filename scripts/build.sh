@@ -48,7 +48,12 @@ buildlog="$(mktemp)"
 cat "$buildlog"
 
 # --- a -vewn build must be clean: FAIL on any warning/note (host packages too) ---
-issues="$(grep -iE 'warning|note:|error|fatal' "$buildlog" | grep -viE 'Compiling|Linking')"
+# The trailing '|| true' matters under 'set -euo pipefail': a CLEAN log has no
+# matches, so the grep pipeline exits non-zero, and without the guard that
+# non-zero would abort the script (via set -e) on the very success it is meant
+# to confirm -- exit 1 on a clean build. With the guard, 'issues' captures the
+# (possibly empty) matches and the '[ -z ]' below is what decides clean vs dirty.
+issues="$(grep -iE 'warning|note:|error|fatal' "$buildlog" | grep -viE 'Compiling|Linking' || true)"
 rm -f "$buildlog"
 [ -z "$issues" ] || { echo "build NOT clean (warnings/notes above)"; exit 1; }
 

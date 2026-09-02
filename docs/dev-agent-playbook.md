@@ -165,6 +165,47 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 5 · `28_strlist` (StrListLib property surface) + a build.sh
+  clean-build bug.** Green both OSes, faithful 63-assert adaptation, no human needed.
+  Extended `PhosphorStrListLib` with ~40 `strings_*` functions covering everything the
+  oracle exercised that was a *property* rather than a list op: capacity, the text
+  getter, append, the delimiters (delimiter/quotechar/strictdelimiter/delimitedtext),
+  the name/value setters (values-by-name, valuefromindex-by-index, keynames, a settable
+  namevalueseparator), case sensitivity, the named duplicates policy, equals, batched
+  begin/endupdate, the line-break controls, the encoding names, the file+stream round
+  trips, and the change-handler NAMES. Two decisions worth keeping: (1) **onchange/
+  onchanging store a name and read it back — no VM seam.** The oracle only asserts the
+  name goes in and comes back ("the firing belongs to a host with an engine"), so a
+  stored string is the whole job; `AddHost`/`CallUserFunc` would have been gold-plating
+  the seam a phase-2 event loop will add. Read what the oracle actually asserts before
+  reaching for the re-entrant path. (2) **The stream pair needs IoLib's byte-buffer
+  type, so expose it, don't duplicate it.** `file_readallbytes@` hands back a
+  `TPhosphorBytes` that was private to `PhosphorIoLib`'s implementation; `is TPhosphorBytes`
+  needs the real type, so it moved to IoLib's *interface* and `PhosphorStrListLib` now
+  `uses PhosphorIoLib`. Two sibling engine libs sharing a handle type is fine and keeps
+  the boundary check green (pure RTL file/byte work, no host unit). The base adaptation
+  followed round 4's template: every index +1, `strings_find` answers 0 (not −1) when
+  absent, and — the new wrinkle — **`instr` is 1-based/0-absent in Phosphor, so a
+  reference "does it contain X" written as `instr(...) + 1` drops the `+1`** (the offset
+  existed only because Plan9Basic's `instr` was 0-based/−1-absent). The see-check-fail
+  was decisive and free: a base-0 index isn't a soft miss here, it's a HARD runtime
+  error (`string list index 0 out of bounds 1..2`) that halts the file — so a green
+  `passed: 63` is itself proof every index landed base-1.
+  **The trap (a real needed-a-fix):** running `scripts/build.sh` on the VM per the
+  "run the console builds too, per OS" rule, it exited 1 on a **clean** build without
+  printing `built:`. Root cause was `set -euo pipefail` + `issues="$(grep … | grep …)"`:
+  a clean log has no matches, the grep pipeline exits non-zero, and `set -e` treats that
+  failing command substitution in an assignment as fatal — so build.sh could NEVER exit
+  0 on the clean build it exists to confirm. It had gone unseen because the Linux
+  console build is only reached by this rule (the suite's VM verify is `test-suite.sh`),
+  and `test-packages.sh`'s copy survives only because its package logs happen to carry a
+  matching line. Fix: guard the substitution with `|| true` so `issues` captures the
+  (possibly empty) text and the existing `[ -z "$issues" ]` decides clean-vs-dirty
+  (verified both branches: clean→exit 0, a planted Note→"build NOT clean"→exit 1).
+  **Rule:** in a `set -e` script, a `var="$(pipeline)"` whose pipeline may legitimately
+  match nothing MUST end `|| true`, or a success reads as a failure. And "green on the
+  suite" still is not "the console build is clean on this OS" — run it, and make sure it
+  can actually report success.
 - **2026-09-02 · round 4 · `19_language_contract` (functional-equivalence adaptation).**
   Green both OSes, 16 asserts, no human needed — the first *adaptation* rather than a
   byte-exact port. Plan9Basic indexes strings from 0; Phosphor from 1 (a deliberate

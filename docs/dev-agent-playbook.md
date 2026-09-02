@@ -157,11 +157,13 @@ So:
 - **A backslash in a string literal is an escape** (`"\2"` is a rejected unknown escape,
   `"\\"` collapses to one backslash) — keep backslashes out of assertion messages, or
   double them. This bites file paths and cited expressions in `msg$`.
-- **A library-gate must be DETERMINISTIC.** `ldconfig -p` can momentarily return nothing
-  in a fresh non-interactive shell, which falsely SKIPs and hides the failure the gate is
-  meant to guard. Back it with a direct file probe (`ls …/libX.so*`) so "present means
-  present" every run — a SKIP must mean the library is genuinely absent, never that a
-  cache was cold.
+- **A library-gate must be DETERMINISTIC — and beware `cmd | grep -q` under
+  `pipefail`.** `grep -q` exits at the first match and SIGPIPEs the upstream, so
+  `ldconfig -p | grep -q libX` reads **non-zero even when it matched** (same class as
+  the `set -e` + empty-pipeline trap): an intermittent, maddening false SKIP that hides
+  the very failure the gate guards. Capture into a var and test it (`x="$(cmd)"; case
+  "$x" in *libX*) …`), and back it with a direct file check (`for f in …/libX.so*; do
+  [ -e "$f" ] && …`). Never gate a test on a `cmd | grep -q` pipeline.
 - **Every build script must SURFACE the `-vewn` output and FAIL on any warning/note** —
   never pipe the build to `/dev/null` and check only that the binary exists. A note can
   hide in a **host package** (e.g. a CRT unit) that the engine's own suite build never

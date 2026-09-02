@@ -49,13 +49,18 @@ allok=0
 
 # A package needing an external runtime library is skipped where it is absent.
 sqlite_avail=0
-# ldconfig's cache can come back momentarily empty in a fresh non-interactive shell,
-# which would falsely SKIP (and hide a sqlite failure). Back it with a direct file
-# probe so the gate is deterministic: present means present.
-if ldconfig -p 2>/dev/null | grep -qi 'libsqlite3\.so' \
-   || ls /usr/lib/*/libsqlite3.so* /usr/lib/libsqlite3.so* /lib/*/libsqlite3.so* \
-         /usr/local/lib/libsqlite3.so* 2>/dev/null | grep -q .; then
-  sqlite_avail=1
+# Deterministic gate, NO `cmd | grep -q` (under `set -o pipefail`, grep -q exits at the
+# first match and SIGPIPEs the upstream, so the pipeline reads non-zero even ON a match
+# -- an intermittent false SKIP). Capture ldconfig into a var and test it, then fall
+# back to a direct file check: present means present, every run.
+ldout="$(ldconfig -p 2>/dev/null || true)"
+case "$ldout" in *libsqlite3.so*) sqlite_avail=1 ;; esac
+if [ "$sqlite_avail" -eq 0 ]; then
+  for f in /usr/lib/x86_64-linux-gnu/libsqlite3.so* /lib/x86_64-linux-gnu/libsqlite3.so* \
+           /usr/lib/libsqlite3.so* /lib/libsqlite3.so* /usr/local/lib/libsqlite3.so* \
+           /usr/lib64/libsqlite3.so* /lib64/libsqlite3.so*; do
+    [ -e "$f" ] && { sqlite_avail=1; break; }
+  done
 fi
 
 for name in $manifest; do

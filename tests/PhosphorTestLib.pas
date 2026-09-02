@@ -16,6 +16,17 @@
                                        proving overflow is a catchable result and
                                        not a silent promotion.
 
+  Also the HANDLE-REGISTRY probes (probe_new_a@/probe_new_b@/probe_is_handle/
+  probe_is_a/probe_is_b/probe_free/probe_count). They live HERE, on the runner
+  side, because they are throwaway stand-ins for the real GUI objects (which need
+  a form + a message loop and cannot run headless). Each is backed by a trivial
+  TProbeA/TProbeB registered in the engine's handle registry, so a library can
+  validate/discriminate/revoke a BASIC handle WITHOUT dereferencing a fabricated
+  address -- reusing IsHandle/HandleObj/FreeHandle, the same path that already
+  rejects fabricated array/dict/stringlist handles. The live count is tracked
+  runner-side (the registry keeps no live total), incremented on register and
+  decremented only when a live probe is actually freed.
+
   This is host/test tooling, not engine code.
 ******************************************************************************}
 unit PhosphorTestLib;
@@ -26,7 +37,8 @@ unit PhosphorTestLib;
 interface
 
 uses
-  SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorRegistry,
+  PhosphorHandles;
 
 var
   AssertsPassed: Integer = 0;
@@ -39,8 +51,17 @@ procedure ResetTestState;
 
 implementation
 
+type
+  { Two distinct throwaway classes registered in the handle registry, so a probe
+    handle can be discriminated by class (is-this-handle-a-TProbeA) exactly the
+    way a real GUI library discriminates a button from a label. They carry no
+    state -- their identity is the whole point. }
+  TProbeA = class end;
+  TProbeB = class end;
+
 var
   InvFS: TFormatSettings;
+  ProbeLiveCount: Integer = 0;  // live probe instances the runner has registered
 
 function NumStr(const V: Double): String;
 begin
@@ -213,6 +234,73 @@ begin
   Result := ValInt(Ord(ok));
 end;
 
+// --- handle-registry probes -------------------------------------------------
+// A live probe handle is a real registry id; a fabricated one (pointer@(n)) is
+// not, and IsHandle tells them apart WITHOUT dereferencing the address.
+
+function t_probe_new_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValHandle(RegisterHandle(TProbeA.Create));
+  Inc(ProbeLiveCount);
+end;
+
+function t_probe_new_b(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValHandle(RegisterHandle(TProbeB.Create));
+  Inc(ProbeLiveCount);
+end;
+
+// Live registry id of ANY kind -> a handle; a fabricated/stale/nil id is not.
+function t_probe_is_handle(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValInt(Ord((Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd)));
+end;
+
+// Class discrimination: a live handle reports ONLY its own class. This is the
+// check that stops a wrong-class handle from writing through the wrong vtable.
+function t_probe_is_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValInt(Ord((Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd)
+                       and (HandleObj(Args[0].Hnd) is TProbeA)));
+end;
+
+function t_probe_is_b(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValInt(Ord((Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd)
+                       and (HandleObj(Args[0].Hnd) is TProbeB)));
+end;
+
+// Revoke: free a live probe handle (1) and invalidate its id; a fabricated or
+// already-stale handle is refused (0), never followed.
+function t_probe_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var ok: Boolean; obj: TObject;
+begin
+  Err := NoError;
+  ok := False;
+  if (Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd) then
+  begin
+    obj := HandleObj(Args[0].Hnd);
+    ok := (obj is TProbeA) or (obj is TProbeB);
+  end;
+  if ok then
+  begin
+    FreeHandle(Args[0].Hnd);
+    Dec(ProbeLiveCount);
+  end;
+  Result := ValInt(Ord(ok));
+end;
+
+function t_probe_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValInt(ProbeLiveCount);
+end;
+
 procedure RegisterTestFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('test_case:$', @t_test_case);
@@ -234,6 +322,14 @@ begin
 
   Reg.Add('assert_int:%%',            @t_assert_int);
   Reg.Add('assert_add_overflows:%%',  @t_assert_add_overflows);
+
+  Reg.Add('probe_new_a@:',   @t_probe_new_a);
+  Reg.Add('probe_new_b@:',   @t_probe_new_b);
+  Reg.Add('probe_is_handle:@', @t_probe_is_handle);
+  Reg.Add('probe_is_a:@',    @t_probe_is_a);
+  Reg.Add('probe_is_b:@',    @t_probe_is_b);
+  Reg.Add('probe_free:@',    @t_probe_free);
+  Reg.Add('probe_count:',    @t_probe_count);
 end;
 
 procedure ResetTestState;
@@ -241,6 +337,7 @@ begin
   AssertsPassed := 0;
   AssertsFailed := 0;
   CurrentCase := '';
+  ProbeLiveCount := 0;
   if Assigned(Failures) then Failures.Clear;
 end;
 

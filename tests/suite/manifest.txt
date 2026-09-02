@@ -42,3 +42,4 @@
 48_callback
 49_on_error
 15_breakpoint_degrade
+14_handle_registry

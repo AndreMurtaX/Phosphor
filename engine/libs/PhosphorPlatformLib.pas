@@ -27,12 +27,6 @@ procedure RegisterPlatformFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
-type
-  { A registered handle with a real class name, so classname$ has something to
-    read back for probe_new_a@ (the test's stand-in for a host object). }
-  TPhosphorProbe = class
-  end;
-
 // --- platform identity ------------------------------------------------------
 function t_os_name(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -176,16 +170,6 @@ begin
   Result := ValInt(0);
 end;
 
-// --- StdLib: the probe (a registered stand-in object) -----------------------
-function t_probe_new_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValHandle(RegisterHandle(TPhosphorProbe.Create)); end;
-function t_probe_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin
-  Err := NoError;
-  if Args[0].Kind = vkHandle then FreeHandle(Args[0].Hnd);
-  Result := ValInt(1);
-end;
-
 // --- StdLib: process-wide format settings by name ---------------------------
 function t_formatsettings_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -244,8 +228,6 @@ begin
   Reg.Add('sign:n',             @t_sign);
   Reg.Add('isnull:$',           @t_isnull);
   Reg.Add('pause:n',            @t_pause);
-  Reg.Add('probe_new_a@:',      @t_probe_new_a);
-  Reg.Add('probe_free:@',       @t_probe_free);
   Reg.Add('formatsettings$:$',  @t_formatsettings_get);
   Reg.Add('formatsettings:$$',  @t_formatsettings_set);
 end;

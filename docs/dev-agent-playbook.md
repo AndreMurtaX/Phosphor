@@ -135,6 +135,12 @@ So:
   "only these" — a reused reader silently extracts just the last filter. `UZ.Files.Clear`
   before `UnZipAllFiles`. (And a predicate returns 1/0, not a Pascal bool — `assert_true`
   carries a message only on its `:n$` overload; there is no `assert_*:?$`.)
+- **objfpc mode has NO `case`-of-string.** `case s of 'amp': …` does not compile; use an
+  `if/else-if` chain over the (lowercased) string. Bites entity/keyword decoders.
+- **A name/value bag needs TWO parallel `TStringList`s, not `Values[]`.** `TStringList`
+  deletes the entry when you set `Values[name] := ''`, so an empty value silently drops
+  the key — wrong for HTTP headers/params. Keep a names list + a values list yourself
+  (case-insensitive match for header names), so an empty value is a real stored value.
 - **`MSYS2_ARG_CONV_EXCL='*'`** when calling native tools whose args start with `/`
   (e.g. `openssl req -subj '/CN=...'`) so Git-Bash doesn't mangle them. Use `cygpath -m`
   for a Windows path with forward slashes that FPC will read.
@@ -196,6 +202,16 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 10 · HTTP offline config surface (oracle 32).** Green both OSes,
+  `tests/packages/08_http_offline` 68 asserts, no human needed, no library-gate (plain
+  config needs no runtime lib). Extended `PhosphorHttpLib` with a client-config handle
+  (`http_client@`) + a form handle + ~60 setters/getters/encoders, validated through
+  `PhosphorHandles` like every package (a fabricated id is `nil is T…` = refused). Kept
+  `http_get$`/`post$`, the multi-address fallback, and TLS verification working. Two
+  traps → §3: objfpc has no `case`-of-string (if/else-if chain for the HTML-entity
+  decoder), and a name/value bag must be parallel `TStringList`s because `Values[]:=''`
+  deletes the key. url-encoding via runtime `IntToHex` sidesteps the round-8 codepage
+  landmine, as predicted.
 - **2026-09-02 · round 9 · full SQLite statement API (oracle 34).** Green both OSes,
   `tests/packages/07_sqlite_full` 64 asserts (mirrors 34), no human needed. Rewrote
   `PhosphorSqliteLib` from the SQLdb simple API onto the **raw sqlite3 C API** via

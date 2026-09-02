@@ -93,9 +93,13 @@ trust-all.
   present → run `04_https` byte-exact, absent → **SKIP** with the honest message.
   `test-packages.{ps1,sh}` gained the probe and route the `*https*` test to
   `phosphorhttptest`.
-- **Gate — MET (Windows).** Full suite green: `00_base64`/`01_zip`/`03_http`/`04_https`
-  PASS, `02_sqlite` SKIP, `-B -vewn` clean. Linux VM cross-check to follow in this same
-  step.
+- **Gate — MET, both OSes.** Full suite green on Windows (`00_base64`/`01_zip`/
+  `03_http`/`04_https` PASS, `02_sqlite` SKIP) and on the Linux VM (all five PASS);
+  `-B -vewn` clean. Two Unix-only gotchas fixed along the way: an aborted TLS handshake
+  raised **SIGPIPE** (default action kills the process → exit 141) until the runner
+  ignored it, and FPC 3.2.2's in-process cert generation is **broken on OpenSSL 3**, so
+  the server loads a **checked-in self-signed fixture** (`tls_test_cert.pem`) instead of
+  generating one.
 
 ### Step 3 — reconcile the multi-address fallback with TLS (refinement)
 

@@ -82,6 +82,15 @@ no error handling at all. Fixing this is a founding goal, not a later addition.
 `SWAP`; `RANDOMIZE`; `max()` and `min()`. `DEF FN` stays out — `function`
 already exists.
 
+> **STATUS (2026-09-02, oracle-complete milestone) — this is the INTENDED set, not a
+> statement of what is built.** `RANDOMIZE` and `max()`/`min()` are in. As of now,
+> **`PRINT USING`, the classic `#` file I/O (`OPEN … AS #1`, `PRINT #`, `INPUT #`,
+> `LINE INPUT #`, `CLOSE #`), and the `INPUT` statement are NOT implemented** — file
+> work is done with the Io library functions (`file_writealltext`, `file_readalltext$`,
+> `savetext$`, `opentext$`, the `dir_*`/`path_*` families). The current, verified
+> language surface is documented in [language-reference.md](language-reference.md),
+> which is the authority for what actually runs.
+
 ## Rules carried over from Plan9Basic
 
 - **Two-word block terminators are accepted as equivalents of the one-word
@@ -108,6 +117,12 @@ Settled when the phase-1 [roadmap](roadmap.md) surfaced them as freeze-now forks
   statement `:`.
 - **String-literal escape is a doubled quote** — `""` inside a literal yields one
   `"`. There is no escape character; `\` is exclusively integer division.
+  > **SUPERSEDED (2026-09-02, oracle import):** a backslash escape set was added to
+  > string literals after all — `\n \t \r \0 \a \b \f \v \\ \"` — because the imported
+  > oracle programs rely on it (`tests/suite/46_string_escapes.bas` is the authority).
+  > The doubled `""` still works, and `\"` reaches the same quote. Outside a string
+  > literal `\` remains integer division. Consequence for users: a Windows path in a
+  > literal must double its backslashes (`"C:\\dir"`) or use forward slashes.
 - **`s$[[n]]` character indexing is base-1 by codepoint** (not by byte). The
   string library decodes UTF-8 to index; raw-byte slicing stays for I/O only.
 - **`bool` has its own signature type-code `?`** and does not widen to numeric

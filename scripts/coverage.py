@@ -31,7 +31,7 @@ SUGAR_BACKED = {
 # Functions registered under computed names (a loop over a Names[] array) that the
 # literal-string scan cannot see. Kept explicit so the enumeration stays complete.
 COMPUTED = {
-    'PhosphorCallLib.pas': ['callfunc', 'callfunc$', 'callfunc@'],
+    'PhosphorCallLib.pas': ['callfunc', 'callfunc%', 'callfunc$', 'callfunc@', 'callfunc?'],
 }
 
 def registered_names(path):

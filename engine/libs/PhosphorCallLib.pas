@@ -12,10 +12,12 @@
     callfunc(name$)          call name$ with no arguments
     callfunc(name$, x)       call name$ with one argument (any kind)
 
-  The suffix on the call ($ / @ / none) is chosen to read as the callee's return
-  type; every spelling runs the same primitive, and the value that comes back is
-  whatever the routine returned (its kind is checked where it is finally stored,
-  like any other value). The routine runs over the caller's globals and handles,
+  The suffix on the call (none / % / $ / @ / ?) is chosen to read as the callee's
+  return type -- one spelling for each of the five value kinds, so a caller writes
+  `n% = callfunc%(...)` or `ok? = callfunc?(...)` and it reads right. Every spelling
+  runs the same primitive, and the value that comes back is whatever the routine
+  returned (its kind is checked where it is finally stored, like any other value).
+  The routine runs over the caller's globals and handles,
   so it can read and change shared state -- an event handler bumping a counter is
   the canonical use.
 
@@ -52,8 +54,9 @@ end;
 
 procedure RegisterCallFuncs(Reg: TPhosphorRegistry);
 const
-  { The three return-suffix spellings a call site may use; all share one impl. }
-  Names: array[0..2] of String = ('callfunc', 'callfunc$', 'callfunc@');
+  { One return-suffix spelling per value kind (none / % / $ / @ / ?); all share one
+    impl -- the suffix only tells the caller's reader (and the compiler) the kind. }
+  Names: array[0..4] of String = ('callfunc', 'callfunc%', 'callfunc$', 'callfunc@', 'callfunc?');
   { The one argument may be any of the five kinds. }
   ArgCodes: array[0..4] of Char = ('n', '%', '$', '@', '?');
 var

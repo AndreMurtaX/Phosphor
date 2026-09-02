@@ -48,6 +48,13 @@ rem A routine can be called as a statement; its return value is discarded.
 callfunc("bump")
 assert_eq(counter, 4, "the effect still happened")
 
+test_case("callfunc/one spelling per return kind")
+rem callfunc% reads an int% back and callfunc? a bool -- the % and ? spellings
+rem complete the set (none / % / $ / @ / ?), one per value kind.
+assert_eq(callfunc%("triple%", 7), 21, "callfunc% returns an int result")
+assert_true(callfunc?("positive?", 5))
+assert_false(callfunc?("positive?", 0 - 5))
+
 function dbl(n)
   return n * 2
 endfunction
@@ -76,4 +83,12 @@ endfunction
 
 function identity@(h@)
   return h@
+endfunction
+
+function triple%(n)
+  return n * 3
+endfunction
+
+function positive?(n)
+  return n > 0
 endfunction

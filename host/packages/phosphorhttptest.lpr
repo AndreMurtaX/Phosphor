@@ -25,7 +25,7 @@ program phosphorhttptest;
 {$codepage UTF8}
 
 uses
-  {$IFDEF UNIX}cthreads,{$ENDIF}
+  {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib;
@@ -168,6 +168,14 @@ var
   path: String;
   rc, i, waited: Integer;
 begin
+  {$IFDEF UNIX}
+  { When a client aborts the TLS handshake (e.g. our verification refuses the
+    self-signed cert), the server thread writes to a closed socket -> SIGPIPE, whose
+    default action KILLS the process (exit 141). Ignore it so the write just fails;
+    Windows has no SIGPIPE, hence this is Unix-only and 04_https passed there already. }
+  fpSignal(SIGPIPE, SignalHandler(SIG_IGN));
+  {$ENDIF}
+
   { --openssl-check : report (via exit code) whether the OpenSSL runtime can be loaded
     here, so the suite can library-gate the https test exactly on what this runner can
     do (exit 0 = available). }

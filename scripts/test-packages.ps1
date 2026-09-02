@@ -69,6 +69,14 @@ foreach ($name in $manifest) {
         Write-Host ("SKIP  {0}  (SQLite runtime library not found)" -f $name) -ForegroundColor Yellow
         continue
     }
+    # The https test needs the OpenSSL runtime; the runner reports whether it can load it.
+    if ($name -like '*https*') {
+        & $httpExe '--openssl-check' *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ("SKIP  {0}  (OpenSSL runtime not available)" -f $name) -ForegroundColor Yellow
+            continue
+        }
+    }
     $bas = Join-Path $pkg "$name.bas"
     $exp = [System.IO.File]::ReadAllBytes((Join-Path $pkg "$name.expected"))
     $out = Join-Path $tmp 'phosphorpkgtest.out'

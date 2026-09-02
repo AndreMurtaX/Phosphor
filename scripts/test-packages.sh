@@ -44,7 +44,11 @@ for name in $manifest; do
   case "$name" in
     *sqlite*) [ "$sqlite_avail" -eq 1 ] || { echo "SKIP  $name  (SQLite runtime library not found)"; continue; } ;;
   esac
-  # The http test needs the server-standing runner; everything else uses the plain one.
+  # The https test needs the OpenSSL runtime; the runner reports whether it can load it.
+  case "$name" in
+    *https*) "$httpexe" --openssl-check >/dev/null 2>&1 || { echo "SKIP  $name  (OpenSSL runtime not available)"; continue; } ;;
+  esac
+  # The http/https tests need the server-standing runner; everything else the plain one.
   case "$name" in *http*) runner="$httpexe" ;; *) runner="$exe" ;; esac
   "$runner" "$pkg/$name.bas" > "$out" 2> "$err"; code=$?
   if [ "$code" -eq 0 ] && cmp -s "$out" "$pkg/$name.expected"; then

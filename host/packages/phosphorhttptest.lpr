@@ -26,24 +26,30 @@ program phosphorhttptest;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs,
+  SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib;
 
 const
-  SRV_PORT = 18099;
+  SRV_PORT     = 18099;
+  SRV_PORT_TLS = 18443;
 
 var
   BaseURL: String;
+  BaseURLHttps: String;
 
 { ---- the local test server -------------------------------------------------}
 
 type
-  { TFPHttpServer keeps the bind Address protected; republish it so we can pin the
-    server to loopback only (the fallback test needs a genuinely dead 127.0.0.x). }
+  { TFPHttpServer keeps Address (bind interface), UseSSL, and CertificateData
+    protected; republish them so we can pin the server to loopback only (the fallback
+    test needs a genuinely dead 127.0.0.x) and stand a second server up over TLS with
+    an auto-generated self-signed certificate (the https test). }
   TBoundHttpServer = class(TFPHTTPServer)
   published
     property Address;
+    property UseSSL;
+    property CertificateData;
   end;
 
   { The server runs in its own thread, and that same object carries the request
@@ -106,6 +112,13 @@ begin
   Result := ValStr(BaseURL);
 end;
 
+{ server_url_https$() -> the base URL of the local TLS server (self-signed cert). }
+function f_server_url_https(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  Result := ValStr(BaseURLHttps);
+end;
+
 { Test-only: GET url$ but FORCE the candidate connect addresses (comma-separated),
   so the package's multi-address fallback can be proven deterministically -- no DNS,
   no real network. e.g. http_get_via$(url$, "127.0.0.9,127.0.0.1") must skip the dead
@@ -150,11 +163,17 @@ end;
 
 var
   eng: TPhosphorEngine;
-  srv: TBoundHttpServer;
-  th: TServerThread;
+  srv, srvTls: TBoundHttpServer;
+  th, thTls: TServerThread;
   path: String;
   rc, i, waited: Integer;
 begin
+  { --openssl-check : report (via exit code) whether the OpenSSL runtime can be loaded
+    here, so the suite can library-gate the https test exactly on what this runner can
+    do (exit 0 = available). }
+  if ParamStr(1) = '--openssl-check' then
+    Halt(Ord(not InitSSLInterface));
+
   if ParamCount < 1 then
   begin
     Writeln(StdErr, 'usage: phosphorhttptest <file.bas>');
@@ -167,7 +186,8 @@ begin
     Halt(2);
   end;
 
-  BaseURL := 'http://127.0.0.1:' + IntToStr(SRV_PORT);
+  BaseURL      := 'http://127.0.0.1:' + IntToStr(SRV_PORT);
+  BaseURLHttps := 'https://127.0.0.1:' + IntToStr(SRV_PORT_TLS);
 
   { Stand up the local server in a background thread. Bind loopback ONLY, so that a
     127.0.0.x address other than .1 is genuinely dead -- the fallback test relies on
@@ -182,9 +202,25 @@ begin
   th.FreeOnTerminate := False;
   th.Start;
 
-  { Wait for the socket to be listening before the test fires requests. }
+  { A second server over TLS, same routes, with an auto-generated self-signed
+    certificate (UseSSL + empty CertificateData). The https test proves both that
+    verification refuses this untrusted cert by default and that TLS works once
+    verification is explicitly relaxed. }
+  srvTls := TBoundHttpServer.Create(nil);
+  srvTls.Address := '127.0.0.1';
+  srvTls.Port := SRV_PORT_TLS;
+  srvTls.Threaded := True;
+  srvTls.UseSSL := True;
+  thTls := TServerThread.Create(True);
+  thTls.Srv := srvTls;
+  srvTls.OnRequest := @thTls.HandleRequest;
+  thTls.FreeOnTerminate := False;
+  thTls.Start;
+
+  { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
-  while (not srv.Active) and (waited < 3000) do begin Sleep(20); Inc(waited, 20); end;
+  while ((not srv.Active) or (not srvTls.Active)) and (waited < 3000) do
+    begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 
   { --serve: keep the server up so it can be inspected (curl) by hand. }
@@ -200,6 +236,7 @@ begin
     RegisterTestFuncs(eng.Registry);
     RegisterHttpFuncs(eng.Registry);
     eng.Registry.Add('server_url$:', @f_server_url);
+    eng.Registry.Add('server_url_https$:', @f_server_url_https);
     eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
     ResetTestState;
     rc := eng.Run(ReadSource(path));

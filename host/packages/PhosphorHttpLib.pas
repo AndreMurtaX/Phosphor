@@ -14,11 +14,25 @@
     http_get$(url$)          GET url$, return the response body
     http_status(url$)        GET url$, return the HTTP status code (0 on failure)
     http_post$(url$, body$)  POST body$ to url$, return the response body
+    http_verify_peer(on%)    turn https certificate verification on (default) / off
+    http_ca_file$(path$)     use a specific CA bundle for verification
 
   Contract: http_get$/http_post$ return the response body for ANY status (the body of
   an error response too -- pair with http_status when the code matters). http_status
   returns the code for any response, and 0 only when the request could not complete.
   Nothing here raises: a 404 is an answer the BASIC program inspects, not an exception.
+
+  HTTPS CERTIFICATE VERIFICATION. FPC's OpenSSL handler ships INSECURE: it accepts any
+  certificate (expired, self-signed, wrong host) -- TLS that encrypts but does not
+  authenticate. We turn that around: verification is ON by default (SSL_VERIFY_PEER
+  plus the system CA bundle, auto-located at startup), so an expired, self-signed, or
+  untrusted-CA certificate makes the connection FAIL rather than silently succeed. A
+  box with no CA bundle in a standard place (e.g. Windows) fails closed until
+  http_ca_file$() supplies one -- secure by default, never a blanket trust-all. A
+  script that genuinely means to talk to a self-signed dev server opts out explicitly
+  with http_verify_peer(0). (Known gap: this validates the certificate CHAIN, not yet
+  the hostname -- a cert valid for another host would still pass; hostname
+  verification is the next refinement.)
 
   MULTI-ADDRESS FALLBACK. FPC 3.2.2's socket layer (TInetSocket) resolves a host to
   the FIRST of its A records and connects only to that one -- if that single IP is
@@ -38,8 +52,8 @@ unit PhosphorHttpLib;
 interface
 
 uses
-  SysUtils, Classes, Types, fphttpclient, opensslsockets, openssl, ssockets, resolve,
-  sockets, URIParser,
+  SysUtils, Classes, Types, fphttpclient, opensslsockets, openssl, ssockets,
+  sslsockets, sslbase, resolve, sockets, URIParser,
   PhosphorValue, PhosphorErrors, PhosphorRegistry;
 
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
@@ -54,16 +68,27 @@ function HttpFetch(const AMethod, AUrl, ABody: String;
 
 implementation
 
+var
+  { HTTPS security posture (see the unit header). Verification is ON by default;
+    gCAFile is the CA bundle chain verification checks against, auto-located at
+    startup. A host/script relaxes verification with http_verify_peer(0) or points at
+    a different bundle with http_ca_file$(). }
+  gVerifyPeer: Boolean = True;
+  gCAFile: String = '';
+
 type
   { TFPHTTPClient derives BOTH the connect target and the Host: header from the request
     URI. Overriding ConnectToServer lets us dial one chosen IP while SendRequest keeps
-    building Host: from the original URI -- the seam the fallback needs. }
+    building Host: from the original URI -- the seam the fallback needs. GetSocketHandler
+    is the second seam: it is where the TLS handler is born, so it is where we turn on
+    certificate verification and hand it the CA bundle. }
   TPinnedClient = class(TFPHTTPClient)
   public
     ConnectIP: String;
   protected
     procedure ConnectToServer(const AHost: String; APort: Integer;
       UseSSL: Boolean = False); override;
+    function GetSocketHandler(const UseSSL: Boolean): TSocketHandler; override;
   end;
 
 procedure TPinnedClient.ConnectToServer(const AHost: String; APort: Integer;
@@ -73,6 +98,21 @@ begin
     inherited ConnectToServer(ConnectIP, APort, UseSSL)
   else
     inherited ConnectToServer(AHost, APort, UseSSL);
+end;
+
+function TPinnedClient.GetSocketHandler(const UseSSL: Boolean): TSocketHandler;
+begin
+  Result := inherited GetSocketHandler(UseSSL);   // the registered OpenSSL handler
+  if UseSSL and (Result is TSSLSocketHandler) then
+  begin
+    { VerifyPeerCert => SSL_VERIFY_PEER, and CertCA.FileName is LoadVerifyLocations'd
+      into the context (see opensslsockets InitContext/InitSslKeys). Together that
+      makes SSL_connect FAIL on an expired, self-signed, or untrusted-CA certificate,
+      instead of FPC's default of accepting anything. }
+    TSSLSocketHandler(Result).VerifyPeerCert := gVerifyPeer;
+    if gVerifyPeer and (gCAFile <> '') then
+      TSSLSocketHandler(Result).CertificateData.CertCA.FileName := gCAFile;
+  end;
 end;
 
 { A dotted-quad literal is used as-is; a name is resolved. Same "first byte zero =>
@@ -223,11 +263,53 @@ begin
   Result := ValStr(HttpFetch('POST', Args[0].Str, Args[1].Str, [], status));
 end;
 
+{ http_verify_peer(on%) -- turn https certificate verification on (default) or off.
+  Off is a deliberate, explicit choice for a self-signed dev server; it is never the
+  default. Returns the value it set. }
+function f_http_verify_peer(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  gVerifyPeer := AsDouble(Args[0]) <> 0;
+  Result := ValInt(Ord(gVerifyPeer));
+end;
+
+{ http_ca_file$(path$) -- point verification at a specific CA bundle (PEM). Mainly for
+  platforms without a system bundle in a standard place (e.g. Windows). Returns path$. }
+function f_http_ca_file(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError;
+  gCAFile := Args[0].Str;
+  Result := ValStr(gCAFile);
+end;
+
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
 begin
-  Reg.Add('http_get$:$',     @f_http_get);
-  Reg.Add('http_status:$',   @f_http_status);
-  Reg.Add('http_post$:$$',   @f_http_post);
+  Reg.Add('http_get$:$',       @f_http_get);
+  Reg.Add('http_status:$',     @f_http_status);
+  Reg.Add('http_post$:$$',     @f_http_post);
+  Reg.Add('http_verify_peer:n', @f_http_verify_peer);
+  Reg.Add('http_ca_file$:$',   @f_http_ca_file);
+end;
+
+{ The first CA bundle found in the usual places, or '' if none. On a box with no
+  system bundle (e.g. Windows), verification stays on but has nothing to trust, so
+  https fails closed until http_ca_file$() supplies one or http_verify_peer(0) opts
+  out -- deliberately secure-by-default rather than silently trusting everything. }
+function LocateCABundle: String;
+const
+  CANDIDATES: array[1..5] of String = (
+    '/etc/ssl/certs/ca-certificates.crt',   // Debian, Ubuntu
+    '/etc/pki/tls/certs/ca-bundle.crt',     // RHEL, Fedora, CentOS
+    '/etc/ssl/ca-bundle.pem',               // openSUSE
+    '/etc/ssl/cert.pem',                    // Alpine, some BSD
+    '/usr/local/share/certs/ca-root-nss.crt'); // FreeBSD
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := Low(CANDIDATES) to High(CANDIDATES) do
+    if FileExists(CANDIDATES[i]) then
+      Exit(CANDIDATES[i]);
 end;
 
 initialization
@@ -241,5 +323,6 @@ initialization
     through to '.3'. Windows loads by DLL name, not this list, so this is Unix-only. }
   openssl.DLLVersions[High(openssl.DLLVersions)] := '.3';
   {$ENDIF}
+  gCAFile := LocateCABundle;
 
 end.

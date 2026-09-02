@@ -54,45 +54,48 @@ selects TLS.
   trust configuration (the client accepts it as-is), and shipping HTTPS is not "done"
   until verification is addressed (Step 1b).
 
-### Step 1b — certificate verification (the security gap Step 1 surfaced)
+### Step 1b — certificate verification  *(DONE 2026-09-01)*
 
 **Decision (owner):** a shipping HTTP client must **verify certificates by default** —
 silently accepting a forged, expired, or wrong-host certificate defeats the point of
-TLS. This is an improve-on-the-reference item, not optional polish. Turn on peer
-verification on the OpenSSL socket handler and give it a CA trust source per OS
-(Linux: the system bundle, e.g. `/etc/ssl/certs`; Windows: the system store or a
-bundled `cacert.pem`, since there is no standard bundle file). Keep an explicit,
-per-request opt-out for deliberately-insecure cases (a self-signed dev server) — off
-by default, never a blanket trust-all.
+TLS. Done: `PhosphorHttpLib` overrides `GetSocketHandler` (the seam where the TLS
+handler is born) to set `VerifyPeerCert` and hand it a CA bundle, auto-located at
+startup from the usual Unix paths (`/etc/ssl/certs/ca-certificates.crt`, …). With
+`SSL_VERIFY_PEER` plus a loaded CA store, `SSL_connect` itself fails on an expired,
+self-signed, or untrusted-CA certificate. `http_verify_peer(0)` is the explicit,
+per-request opt-out (for a self-signed dev server); `http_ca_file$(path$)` points at
+a specific bundle. A box with no system bundle (Windows) fails **closed** — https
+refused until a bundle is supplied or verification is opted out — never a silent
+trust-all.
 
-- **Gate:** the badssl probe inverts — `expired`/`self-signed`/`wrong.host` now fail
-  (status 0 / no body) while `example.com` and other well-formed certs still return
-  200; on both OSes. Deterministic proof rides Step 2 (the local self-signed server,
-  reached with verification explicitly relaxed for that one test).
-- **Risk:** cross-platform CA location is the real work; if a clean Windows trust
-  source proves fiddly, a vendored `cacert.pem` is the fallback, refreshed as data.
+- **Gate — MET.** With a real CA bundle the badssl probe inverts as intended:
+  `example.com` → 200 (valid cert accepted), `expired`/`self-signed` → 0 (refused).
+  Deterministic proof is Step 2.
+- **Known gap, recorded:** this validates the certificate **chain**, not the
+  **hostname** — `wrong.host.badssl.com` (a valid cert for another name) still returns
+  200. Hostname verification (an `OnVerifyCertificate` `X509_check_host`, or setting
+  the verify host param) is the next refinement; chain validation is the bulk of the
+  MITM protection and lands first.
 
-### Step 2 — the permanent test: a local TLS server, library-gated
+### Step 2 — the permanent test: a local TLS server, library-gated  *(DONE 2026-09-01)*
 
-Stand up a TLS server on loopback in the test runner (extend `phosphorhttptest`, or a
-sibling `phosphorhttpstest`) and drive real HTTPS requests at it — no external
-network, deterministic, byte-exact.
+`phosphorhttptest` now stands up a **second server over TLS** on loopback
+(`127.0.0.1:18443`), same routes, with an **auto-generated self-signed certificate**
+(`UseSSL` + empty `CertificateData` → the handler self-signs) — no cert files, no
+`openssl` CLI. `server_url_https$()` hands the test its URL.
 
-- **Self-signed certificate.** Prefer generating it in-process (FPC's X.509 API) so
-  the test needs no files and no `openssl` CLI; fall back to a checked-in throwaway
-  cert/key pair under `tests/packages/` only if in-process generation proves fiddly.
-  The cert is a test fixture, never a real credential.
-- **Client trusts the test cert.** Point the client's verification at the test cert
-  (or disable verification *for this local test only*, via the socket-handler seam) so
-  a self-signed loopback cert is accepted deliberately — never a blanket "trust
-  everything" in the shipping package.
-- **Library-gate.** Detect OpenSSL at runtime (as `sqlite` detects `libsqlite3`):
-  present on the Linux VM → run `04_https` byte-exact; absent on this Windows box (no
-  `libssl`/`libcrypto` DLLs) → **SKIP** with the honest message, never a fake pass.
-  `test-packages.{ps1,sh}` gain the probe + the `*https*` route to its runner.
-- **Gate:** `tests/packages/04_https` (GET body, status codes, POST echo — mirrors
-  `03_http`) byte-exact where OpenSSL is present; SKIP where absent; `-B -vewn` clean;
-  the other three packages still green; committed and cross-verified on the VM.
+- **`tests/packages/04_https` (7 asserts)** proves BOTH halves with no external
+  network: with verification on (default) the self-signed cert is **refused**
+  (status 0, empty body); after `http_verify_peer(0)` the same server answers GET
+  body / `/json` / POST-echo over TLS; re-enabling verification refuses it again.
+- **Library-gate.** The runner's `--openssl-check` mode reports (via exit code)
+  whether it can load OpenSSL, so the suite gates on exactly what the runner can do:
+  present → run `04_https` byte-exact, absent → **SKIP** with the honest message.
+  `test-packages.{ps1,sh}` gained the probe and route the `*https*` test to
+  `phosphorhttptest`.
+- **Gate — MET (Windows).** Full suite green: `00_base64`/`01_zip`/`03_http`/`04_https`
+  PASS, `02_sqlite` SKIP, `-B -vewn` clean. Linux VM cross-check to follow in this same
+  step.
 
 ### Step 3 — reconcile the multi-address fallback with TLS (refinement)
 

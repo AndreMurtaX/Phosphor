@@ -165,6 +165,20 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 6 · `17_host_services` (the host-agnostic design, executed).**
+  Green both OSes, 7 asserts, no human needed. Added a nil-by-default host seam
+  (`THostServices` record: `ProcessMessages`/`HandleMessage`/`ClipboardCopy`/
+  `ClipboardPaste`) modeled on round 2's `OnBreakpoint`, plus a new engine lib
+  `PhosphorHostLib` (`processmessages`/`handlemessage`/`copytext$`/`pastetext$`/
+  `strerror`). Every function guards `if Assigned(vm.HostServices.X)` and returns the
+  empty answer (0/"") otherwise — asking an absent service can never fault on a nil
+  method, which is the whole point of the file. Two patterns worth reusing: (1) group
+  related host callbacks into ONE zero-initialized **record** field (not N separate
+  `of-object` fields) — it reads as "a bundle of services a host fills in", keeps
+  `ConfigureVM` a single assignment, and the phase-2 GUI event loop will install into
+  the same record; (2) a script-visible error uses the `ioerror`/`valcode` pattern — a
+  module-level code set on failure and read back by `strerror()`, so a missing service
+  is a value the program can branch on, never an exception.
 - **2026-09-02 · round 5 · `28_strlist` (StrListLib property surface) + a build.sh
   clean-build bug.** Green both OSes, faithful 63-assert adaptation, no human needed.
   Extended `PhosphorStrListLib` with ~40 `strings_*` functions covering everything the

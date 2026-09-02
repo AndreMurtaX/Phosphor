@@ -76,6 +76,12 @@ type
       then continues unconditionally. It must never block; see the opBreakpoint
       handler. }
     OnBreakpoint: TPhosphorBreakpointProc;
+    { The host-services seam, all-nil by default (a headless host installs none).
+      Library functions ask the host for an event pump or the clipboard through
+      it; with a field unset they get the empty answer, never a fault. Wired like
+      OnOutput/OnBreakpoint -- the engine only ever offers the seam, the platform
+      work belongs to a host. }
+    HostServices: THostServices;
     Registry: TPhosphorRegistry;
     LastError: TPhosphorError;
     ErrorLine: Integer;

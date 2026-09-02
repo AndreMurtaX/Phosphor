@@ -26,7 +26,7 @@ uses
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
   PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorConfigLib,
-  PhosphorSysLib, PhosphorPlatformLib, PhosphorCallLib, PhosphorErrLib;
+  PhosphorSysLib, PhosphorPlatformLib, PhosphorCallLib, PhosphorErrLib, PhosphorHostLib;
 
 const
   PhosphorVersion = '0.0.1';
@@ -39,6 +39,7 @@ type
     FRegistry: TPhosphorRegistry;
     FOnOutput: TPhosphorOutputProc;
     FOnBreakpoint: TPhosphorBreakpointProc;
+    FHostServices: THostServices;
     FErrorLine: Integer;
     FErrorMessage: String;
     FLastError: TPhosphorError;
@@ -77,6 +78,11 @@ type
       BREAKPOINT reports nothing and continues. A host that wants a debug pause
       assigns a report-only callback here -- the engine never blocks on it. }
     property OnBreakpoint: TPhosphorBreakpointProc read FOnBreakpoint write FOnBreakpoint;
+    { The host-services seam. Empty by default (a headless host installs none), so
+      processmessages/handlemessage answer 0 and copytext$/pastetext$ answer "".
+      A GUI host assigns the pump and clipboard methods it can provide; the engine
+      never blocks and never faults on a field left nil. }
+    property HostServices: THostServices read FHostServices write FHostServices;
     property ErrorLine: Integer read FErrorLine;
     property ErrorMessage: String read FErrorMessage;
     property LastError: TPhosphorError read FLastError;
@@ -111,8 +117,10 @@ begin
   RegisterPlatformFuncs(FRegistry);
   RegisterCallFuncs(FRegistry);
   RegisterErrFuncs(FRegistry);
+  RegisterHostFuncs(FRegistry);
   FOnOutput := nil;
   FOnBreakpoint := nil;
+  FHostServices := Default(THostServices);
   FErrorLine := 0;
   FErrorMessage := '';
   FLastError := NoError;
@@ -155,6 +163,7 @@ begin
   AVM.Registry := FRegistry;
   AVM.OnOutput := FOnOutput;
   AVM.OnBreakpoint := FOnBreakpoint;
+  AVM.HostServices := FHostServices;
   AVM.MaxSteps := FMaxSteps;
   AVM.MaxOutputBytes := FMaxOutputBytes;
   AVM.TimeoutMs := FTimeoutMs;

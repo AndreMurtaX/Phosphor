@@ -67,6 +67,33 @@ type
   TPhosphorBreakpointProc = procedure(const AMessage: String; ALine: Integer;
                                       const AOperands: array of TValue) of object;
 
+  { The host-services seam: platform facilities the ENGINE asks the HOST for,
+    instead of reaching into a windowing framework for them. Declared here (beside
+    OnOutput/OnBreakpoint) so the VM and the engine facade share it without a
+    circular dependency. Each field is a method a host installs; all are nil by
+    default, so a headless runner leaves them empty and every function that
+    consults them returns its EMPTY answer -- empty is a real answer, not a fault.
+    The guard is always `if Assigned(seam) then seam(...) else <empty>`, so asking
+    an absent service can never be an access violation on a nil call.
+
+      ProcessMessages / HandleMessage  pump a host's event loop; each returns 1
+                                       when a host actually pumped, 0 where there
+                                       is no loop to pump.
+      ClipboardCopy    stores AText on the host clipboard, returning whether it
+                       could (False => no clipboard service).
+      ClipboardPaste   reads the host clipboard back into AText, returning whether
+                       a service answered (False => none). }
+  TPhosphorPumpFunc = function: Integer of object;
+  TPhosphorClipboardCopyFunc = function(const AText: String): Boolean of object;
+  TPhosphorClipboardPasteFunc = function(out AText: String): Boolean of object;
+
+  THostServices = record
+    ProcessMessages: TPhosphorPumpFunc;
+    HandleMessage: TPhosphorPumpFunc;
+    ClipboardCopy: TPhosphorClipboardCopyFunc;
+    ClipboardPaste: TPhosphorClipboardPasteFunc;
+  end;
+
   TCmpOp = (coEQ, coNE, coLT, coLE, coGT, coGE);
 
   { A variable's declared type, fixed by its name suffix (the suffix is part of

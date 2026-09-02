@@ -45,3 +45,4 @@
 14_handle_registry
 19_language_contract
 28_strlist
+17_host_services

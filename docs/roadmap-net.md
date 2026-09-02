@@ -35,10 +35,18 @@ which would feed the TLS layer an IP for SNI/verification — reconciled in Step
 `PhosphorHttpLib` keeps the same three functions; the URL scheme, not a new API,
 selects TLS.
 
-- **Gate — MET.** Reality spot-check: `http_status("https://example.com/")` → 200,
-  `http_get$` → a real 559-byte body, on **Windows** (OpenSSL DLLs loaded from the
-  toolchain) and to be cross-checked on the Linux VM. Plain http is unaffected (full
-  package suite still green, `03_http` byte-exact).
+- **Gate — MET, both OSes.** Reality spot-check: `http_status("https://example.com/")`
+  → 200, `http_get$` → a real 559-byte body, on **Windows** (OpenSSL 1.1 DLLs from the
+  toolchain) **and the Linux VM**. Plain http is unaffected (full package suite still
+  green, `03_http` byte-exact).
+- **Cross-platform OpenSSL loading — a real gotcha, fixed.** The VM ships only OpenSSL
+  **3** (`libssl.so.3`), and FPC 3.2.2's loader never tries the `.so.3` soname (its
+  list stops at `.1.1`/`.1.0.x`/`.0.9.x`), so https loaded on Windows but failed on the
+  VM with a bare status 0 even though `curl` there does https and the library is
+  installed. OpenSSL 3 kept the 1.1 API this client uses, so `PhosphorHttpLib`'s
+  initialization teaches the loader the `.3` soname (claims the oldest dead slot of
+  `openssl.DLLVersions`; Unix-only, Windows loads by DLL name). https then works on the
+  VM too.
 - **Unknown — RESOLVED, and it matters.** FPC's default OpenSSL handler does **NOT
   verify** the peer certificate: `expired`, `self-signed`, and `wrong.host`
   `badssl.com` *all* returned 200. So TLS here encrypts but does not authenticate —

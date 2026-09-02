@@ -448,7 +448,7 @@ input a, b                       ' prints "? ", reads "3, 4" -> a=3, b=4
 line input note$                 ' reads the whole next line verbatim
 ```
 
-`input$(k)` reads exactly `k` characters. A headless host with no console reads
+`input$(k)` reads exactly `k` **bytes**. A headless host with no console reads
 these as empty. (For reading from a *file*, see the `#`-channel forms under Files.)
 
 ---
@@ -526,8 +526,43 @@ close #1
 ```
 
 Channel functions: `eof(n)` (True past the end), `lof(n)` (byte length), `loc(n)`
-(cursor), and `input$(k, #n)` (read exactly `k` characters). `close` with no number
+(cursor), and `input$(k, #n)` (read exactly `k` **bytes**). `close` with no number
 closes every open channel. `open … for append` adds to an existing file.
+
+---
+
+## Working with bytes (binary files)
+
+A string carries all 256 byte values intact, so it doubles as a byte buffer — but
+the ordinary string functions count UTF-8 **characters**, which is right for text
+and wrong for binary. Use the byte family instead:
+
+| function | what it gives you |
+| --- | --- |
+| `bytelen(s$)` | how many **bytes** the string holds |
+| `byteat(s$, i)` | the value `0..255` of byte `i` (1-based) |
+| `bytestr$(v)` | a **one-byte** string holding `v` — the byte constructor |
+| `bytemid$(s$, i, n)` | `n` bytes starting at byte `i` (clamped, never raises) |
+
+`file_readalltext$` and `file_writealltext` are raw whole-file byte primitives
+despite the "text" in their names: no BOM, no newline translation, no transcoding.
+`input$(k, #n)` reads `k` bytes and `lof(n)` is a byte count, so the `#` channels
+are byte-exact too.
+
+```basic
+rem build three bytes, write them, read them back, change one
+b$ = bytestr$(0) + bytestr$(128) + bytestr$(255)
+ok = file_writealltext("out.bin", b$)
+r$ = file_readalltext$("out.bin")
+println bytelen(r$); " bytes, second is "; byteat(r$, 2)      ' 3 bytes, second is 128
+p$ = bytemid$(r$, 1, 1) + bytestr$(64) + bytemid$(r$, 3, bytelen(r$) - 2)
+```
+
+**Two traps.** `len` counts characters, not bytes — `len("café")` is `4` while
+`bytelen("café")` is `5`. And `chr$` *encodes* a codepoint: `chr$(200)` is **two**
+bytes, so it can never produce a single byte ≥ 128 — that is what `bytestr$` is for.
+
+See [examples/binary_file.bas](../examples/binary_file.bas) for a complete program.
 
 ---
 

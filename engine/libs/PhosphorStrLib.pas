@@ -571,8 +571,93 @@ end;
 function f_valcode(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValInt(GValCode); end;
 
+{ ---- BYTE primitives -------------------------------------------------------
+  Everything else in this unit counts UTF-8 CODEPOINTS: len/mid$/left$/right$ and
+  s$[[n]] address characters, and chr$ ENCODES a codepoint (chr$(255) is the two
+  bytes C3 BF). That is right for text and wrong for binary -- and a string$ is in
+  fact a length-counted BYTE container that carries all 256 values intact.
+
+  These four are the byte-domain counterparts, so binary data can be addressed
+  directly instead of through a hex codec in an opt-in package:
+
+    bytelen(s$)          how many BYTES the string holds
+    byteat(s$, i)        the value 0..255 of byte i (1-based)
+    bytestr$(v)          a ONE-BYTE string holding v -- the byte constructor that
+                         chr$ cannot be, because chr$ would UTF-8-encode it
+    bytemid$(s$, i, n)   n bytes starting at byte i (clamped, never raises)
+
+  They live in the ENGINE, not a package, so an embedding host has byte access too. }
+
+{ A crash-proof Double -> Int32 for index/count arguments: NaN and out-of-range
+  values never reach Round (which would raise); they clamp. }
+function ArgI32(const V: TValue): Integer;
+var d: Double;
+begin
+  d := AsDouble(V);
+  if d <> d then Result := 0                       // NaN
+  else if d >= 2147483647.0 then Result := High(Integer)
+  else if d <= -2147483648.0 then Result := Low(Integer)
+  else Result := Round(d);
+end;
+
+function f_bytelen(const A: array of TValue; out E: TPhosphorError): TValue;
+begin
+  E := NoError;
+  Result := ValInt(Length(A[0].Str));
+end;
+
+function f_byteat(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i: Integer;
+begin
+  E := NoError;
+  Result := ValInt(0);
+  s := A[0].Str;
+  i := ArgI32(A[1]);
+  if (i < 1) or (i > Length(s)) then
+    E := MakeError(peRuntime, 'byteat: byte ' + IntToStr(i) +
+         ' is outside 1..' + IntToStr(Length(s)))
+  else
+    Result := ValInt(Ord(s[i]));
+end;
+
+function f_bytestr(const A: array of TValue; out E: TPhosphorError): TValue;
+var v: Integer; r: RawByteString;
+begin
+  E := NoError;
+  Result := ValStr('');
+  v := ArgI32(A[0]);
+  if (v < 0) or (v > 255) then
+  begin
+    E := MakeError(peRuntime, 'bytestr$: ' + IntToStr(v) + ' is not a byte value (0..255)');
+    Exit;
+  end;
+  // An indexed write into a RawByteString stores the raw byte; building it by
+  // concatenation would re-encode a value >= 128 through the UTF-8 codepage.
+  SetLength(r, 1);
+  r[1] := Chr(v);
+  Result := ValStr(r);
+end;
+
+function f_bytemid(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; i, n, avail: Integer;
+begin
+  E := NoError;
+  s := A[0].Str;
+  i := ArgI32(A[1]);
+  n := ArgI32(A[2]);
+  if i < 1 then i := 1;
+  if (n <= 0) or (i > Length(s)) then begin Result := ValStr(''); Exit; end;
+  avail := Length(s) - i + 1;
+  if n > avail then n := avail;
+  Result := ValStr(Copy(s, i, n));   // Copy is byte-indexed: the run comes over verbatim
+end;
+
 procedure RegisterStrFuncs(Reg: TPhosphorRegistry);
 begin
+  Reg.Add('bytelen:$', @f_bytelen);
+  Reg.Add('byteat:$n', @f_byteat);
+  Reg.Add('bytestr$:n', @f_bytestr);
+  Reg.Add('bytemid$:$nn', @f_bytemid);
   Reg.Add('ucase$:$', @f_ucase);
   Reg.Add('lcase$:$', @f_lcase);
   Reg.Add('len:$', @f_len);

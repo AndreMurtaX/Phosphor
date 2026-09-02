@@ -188,12 +188,22 @@ begin
 end;
 
 function f_hex_encode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var s, r: String; i: Integer;
+const
+  HEXD: array[0..15] of Char = ('0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f');
+var s: String; r: RawByteString; i, b: Integer;
 begin
   Err := NoError;
   s := Args[0].Str;
-  r := '';
-  for i := 1 to Length(s) do r := r + LowerCase(IntToHex(Ord(s[i]), 2));
+  // Preallocate and write by index, like hex_decode$. The old `r := r + ...` in a
+  // loop reallocated on every byte, making this quadratic: 4 MB cost 0.4 s but
+  // 64 MB cost ~37 s. Now it is linear.
+  SetLength(r, Length(s) * 2);
+  for i := 1 to Length(s) do
+  begin
+    b := Ord(s[i]);
+    r[i * 2 - 1] := HEXD[b shr 4];
+    r[i * 2]     := HEXD[b and $0F];
+  end;
   Result := ValStr(r);
 end;
 

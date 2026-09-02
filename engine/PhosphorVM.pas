@@ -219,13 +219,20 @@ end;
   quote reads a quoted string, with "" meaning a literal quote. }
 function NextFieldStr(const Buf: String; var Pos: Integer; AFileMode: Boolean): String;
 var
-  n: Integer;
+  n, k: Integer;
+  r: RawByteString;
 begin
   Result := '';
   n := Length(Buf);
   if AFileMode then
     while (Pos <= n) and ((Buf[Pos] = ' ') or (Buf[Pos] = #9) or
                           (Buf[Pos] = #13) or (Buf[Pos] = #10)) do Inc(Pos);
+  // The field is built by INDEXED writes into a RawByteString (its length can
+  // never exceed the rest of the buffer). Appending byte by byte to a String
+  // re-encodes any byte >= 128 through the UTF-8 codepage and lands it as '?',
+  // which silently destroyed binary and Latin-1 fields.
+  if n - Pos + 1 > 0 then SetLength(r, n - Pos + 1) else SetLength(r, 0);
+  k := 0;
   if (Pos <= n) and (Buf[Pos] = '"') then
   begin
     Inc(Pos);   // opening quote
@@ -234,12 +241,12 @@ begin
       if Buf[Pos] = '"' then
       begin
         if (Pos < n) and (Buf[Pos + 1] = '"') then
-          begin Result := Result + '"'; Inc(Pos, 2); end   // "" -> a literal quote
+          begin Inc(k); r[k] := '"'; Inc(Pos, 2); end      // "" -> a literal quote
         else
           begin Inc(Pos); Break; end;                       // closing quote
       end
       else
-        begin Result := Result + Buf[Pos]; Inc(Pos); end;
+        begin Inc(k); r[k] := Buf[Pos]; Inc(Pos); end;
     end;
   end
   else
@@ -249,13 +256,14 @@ begin
       if Buf[Pos] = ',' then Break;
       if AFileMode and ((Buf[Pos] = ' ') or (Buf[Pos] = #9) or
                         (Buf[Pos] = #13) or (Buf[Pos] = #10)) then Break;
-      Result := Result + Buf[Pos];
+      Inc(k); r[k] := Buf[Pos];
       Inc(Pos);
     end;
     if not AFileMode then
-      while (Length(Result) > 0) and (Result[Length(Result)] = ' ') do
-        SetLength(Result, Length(Result) - 1);
+      while (k > 0) and (r[k] = ' ') do Dec(k);   // trim trailing blanks
   end;
+  SetLength(r, k);
+  Result := r;
   // consume a single trailing separator comma (skip blanks before it in file mode)
   if AFileMode then
     while (Pos <= n) and ((Buf[Pos] = ' ') or (Buf[Pos] = #9) or
@@ -482,7 +490,7 @@ begin
 end;
 
 function TPhosphorVM.ChanLine(ANum: Integer; out S: String): TPhosphorError;
-var buf: String; p, n: Integer;
+var buf: String; p, n, start: Integer;
 begin
   S := '';
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
@@ -493,11 +501,12 @@ begin
   buf := FChannels[ANum].Buf;
   n := Length(buf);
   p := FChannels[ANum].Pos;
-  while (p <= n) and (buf[p] <> #10) and (buf[p] <> #13) do
-  begin
-    S := S + buf[p];
-    Inc(p);
-  end;
+  start := p;
+  // Scan to the terminator, then take the run with ONE Copy. Appending byte by
+  // byte (S := S + buf[p]) re-encodes any byte >= 128 through the UTF-8 codepage
+  // and lands it as '?', silently destroying binary and Latin-1 data.
+  while (p <= n) and (buf[p] <> #10) and (buf[p] <> #13) do Inc(p);
+  S := Copy(buf, start, p - start);
   // step over the line terminator (CR, LF, or CRLF)
   if (p <= n) and (buf[p] = #13) then Inc(p);
   if (p <= n) and (buf[p] = #10) then Inc(p);

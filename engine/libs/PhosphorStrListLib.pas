@@ -293,7 +293,7 @@ end;
   escape). When not StrictDelimiter, whitespace around a field is skipped. The
   read half of TStrings.DelimitedText. }
 procedure TPhosphorStringList.SetDelimitedText(const S: String);
-var i, n: Integer; field: String;
+var i, n, fk: Integer; field: String; fb: RawByteString;
 begin
   Clear;
   n := Length(S);
@@ -303,7 +303,12 @@ begin
   begin
     if not StrictDelimiter then
       while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
-    field := '';
+    // Build each field by INDEXED writes into a RawByteString (it can never be
+    // longer than the rest of the input). Appending byte by byte re-encodes any
+    // byte >= 128 through the UTF-8 codepage and lands it as '?' -- this splitter
+    // corrupted high bytes while its commatext sibling, which uses Copy, did not.
+    if n - i + 1 > 0 then SetLength(fb, n - i + 1) else SetLength(fb, 0);
+    fk := 0;
     if (i <= n) and (S[i] = QuoteChar) then
     begin
       Inc(i);
@@ -312,16 +317,18 @@ begin
         if S[i] = QuoteChar then
         begin
           if (i < n) and (S[i + 1] = QuoteChar) then
-          begin field := field + QuoteChar; Inc(i, 2); end
+          begin Inc(fk); fb[fk] := QuoteChar; Inc(i, 2); end
           else begin Inc(i); Break; end;
         end
-        else begin field := field + S[i]; Inc(i); end;
+        else begin Inc(fk); fb[fk] := S[i]; Inc(i); end;
       end;
     end
     else
       while (i <= n) and (S[i] <> Delimiter) and
             (StrictDelimiter or (S[i] > ' ')) do
-      begin field := field + S[i]; Inc(i); end;
+      begin Inc(fk); fb[fk] := S[i]; Inc(i); end;
+    SetLength(fb, fk);
+    field := fb;
     if not StrictDelimiter then
       while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
     Add(field);
@@ -659,14 +666,19 @@ begin
 end;
 
 function t_strings_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var o: TObject;
 begin
   // Lenient by design: a stale/invalid handle is reported as 0, never an error,
   // so a program can free defensively and free-twice is answered rather than raised.
+  // But it frees only what it owns -- a string list, or the byte buffer it can load
+  // from and save to. It used to free ANY handle, so a mistyped strings_free(a@)
+  // silently destroyed an array, dict or index (arr_free type-checks; this did not).
   Err := NoError;
-  if (Args[0].Kind = vkHandle) and FreeHandle(Args[0].Hnd) then
-    Result := ValInt(1)
-  else
-    Result := ValInt(0);
+  Result := ValInt(0);
+  if (Args[0].Kind <> vkHandle) or (not IsHandle(Args[0].Hnd)) then Exit;
+  o := HandleObj(Args[0].Hnd);
+  if not ((o is TPhosphorStringList) or (o is TPhosphorBytes)) then Exit;
+  if FreeHandle(Args[0].Hnd) then Result := ValInt(1);
 end;
 
 // --- capacity ---------------------------------------------------------------

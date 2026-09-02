@@ -1,0 +1,15 @@
+bytelen      4
+byteat 1..4  0 65 128 255
+bytemid 3,2  128 255
+bytemid clamp 2 0
+bytestr vs chr 1 2
+cafe len/bytelen 4 5
+file size    4
+roundtrip    true
+every byte   1
+input$ bytes 128 255
+line input # 128 255
+input #      128 255
+patched      9 size 4
+free refuses 0 array kept 7
+cleaned      1

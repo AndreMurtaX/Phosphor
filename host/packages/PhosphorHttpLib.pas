@@ -629,30 +629,42 @@ end;
 
 { Escape the five markup-significant characters. '&' MUST be first so it does not
   re-escape the ampersands the others introduce. }
-function DoHtmlEncode(const S: String): String;
-var i: Integer; ch: Char;
+{ Append S's bytes into raw buffer R at K (bytes written so far). Indexed writes
+  keep a byte >= 128 intact; `R := R + S` re-encodes it through the UTF-8 codepage. }
+procedure RawAppend(var R: RawByteString; var K: Integer; const S: String);
+var j: Integer;
 begin
-  Result := '';
+  for j := 1 to Length(S) do begin Inc(K); R[K] := S[j]; end;
+end;
+
+function DoHtmlEncode(const S: String): String;
+var i, k: Integer; ch: Char; r: RawByteString;
+begin
+  SetLength(r, Length(S) * 6);   // worst case: every character becomes '&quot;'
+  k := 0;
   for i := 1 to Length(S) do
   begin
     ch := S[i];
     case ch of
-      '&': Result := Result + '&amp;';
-      '<': Result := Result + '&lt;';
-      '>': Result := Result + '&gt;';
-      '"': Result := Result + '&quot;';
-      '''': Result := Result + '&#39;';
+      '&': RawAppend(r, k, '&amp;');
+      '<': RawAppend(r, k, '&lt;');
+      '>': RawAppend(r, k, '&gt;');
+      '"': RawAppend(r, k, '&quot;');
+      '''': RawAppend(r, k, '&#39;');
     else
-      Result := Result + ch;
+      begin Inc(k); r[k] := ch; end;
     end;
   end;
+  SetLength(r, k);
+  Result := r;
 end;
 
 { Reverse the five named/numeric entities above; an unknown entity is left verbatim. }
 function DoHtmlDecode(const S: String): String;
-var i, semi: Integer; ent, low: String;
+var i, semi, k: Integer; ent, low: String; r: RawByteString;
 begin
-  Result := '';
+  SetLength(r, Length(S));   // decoding never lengthens the text
+  k := 0;
   i := 1;
   while i <= Length(S) do
   begin
@@ -663,19 +675,21 @@ begin
       begin
         ent := Copy(S, i, semi - i + 1);   // includes the '&' and the ';'
         low := LowerCase(ent);
-        if low = '&amp;' then Result := Result + '&'
-        else if low = '&lt;' then Result := Result + '<'
-        else if low = '&gt;' then Result := Result + '>'
-        else if low = '&quot;' then Result := Result + '"'
-        else if (low = '&apos;') or (low = '&#39;') or (low = '&#039;') then Result := Result + ''''
-        else Result := Result + ent;       // unknown entity: leave it as it was
+        if low = '&amp;' then begin Inc(k); r[k] := '&'; end
+        else if low = '&lt;' then begin Inc(k); r[k] := '<'; end
+        else if low = '&gt;' then begin Inc(k); r[k] := '>'; end
+        else if low = '&quot;' then begin Inc(k); r[k] := '"'; end
+        else if (low = '&apos;') or (low = '&#39;') or (low = '&#039;') then begin Inc(k); r[k] := ''''; end
+        else RawAppend(r, k, ent);         // unknown entity: leave it as it was
         i := semi + 1;
         Continue;
       end;
     end;
-    Result := Result + S[i];
+    Inc(k); r[k] := S[i];
     Inc(i);
   end;
+  SetLength(r, k);
+  Result := r;
 end;
 
 { ---- client lifecycle ------------------------------------------------------ }

@@ -50,6 +50,10 @@ type
     FTimeoutMs: Int64;
     FVM: TPhosphorVM;       // the live VM in the prepared (embedding) mode
     FProg: TProgram;        // its compiled program
+    FReplVM: TPhosphorVM;   // the live VM of a REPL session
+    FReplProg: TProgram;    // the session's compiled program (all lines so far)
+    FReplSource: String;    // every line accepted so far
+    FReplPC: Integer;       // first instruction of the NEXT line
     function CompileSource(const ASource: String; out AProg: TProgram): Boolean;
     procedure ConfigureVM(AVM: TPhosphorVM);
   public
@@ -74,6 +78,23 @@ type
     function CallFunction(const AName: String; const Args: array of TValue): TValue;
     { Discard the prepared VM and its handles. Called by Destroy. }
     procedure Finish;
+    { REPL SESSION. ReplRun compiles the whole session so far plus ALine and executes
+      only the instructions the new line added, over the state the previous lines
+      built -- so `a = 10` on one line and `println a` on the next work, and a
+      function defined earlier stays callable.
+
+      Why recompiling is safe: the compiler allocates a global's index on the name's
+      FIRST appearance, so appending source only appends names and every earlier
+      index is unchanged; likewise instructions are emitted in order, so the earlier
+      ones keep their positions and are simply not re-executed.
+
+      Returns 0, or the 1-based line of the error (ErrorMessage explains it). A line
+      that fails to COMPILE is rejected and the session is left untouched, so the
+      next line sees the same state; a line that compiles but faults at run time is
+      kept (its instructions are part of the program) and is not re-run.
+      ReplReset starts over. }
+    function ReplRun(const ALine: String): Integer;
+    procedure ReplReset;
     property Registry: TPhosphorRegistry read FRegistry;
     property OnOutput: TPhosphorOutputProc read FOnOutput write FOnOutput;
     { The INPUT seam. Nil by default: a headless host installs none, and INPUT /
@@ -137,11 +158,16 @@ begin
   FTimeoutMs := 0;
   FVM := nil;
   FProg := nil;
+  FReplVM := nil;
+  FReplProg := nil;
+  FReplSource := '';
+  FReplPC := 0;
 end;
 
 destructor TPhosphorEngine.Destroy;
 begin
   Finish;
+  ReplReset;
   FRegistry.Free;
   inherited Destroy;
 end;
@@ -303,6 +329,63 @@ begin
     FProg.Free;
     FProg := nil;
   end;
+end;
+
+procedure TPhosphorEngine.ReplReset;
+begin
+  if FReplVM <> nil then
+  begin
+    FReplVM.Free;
+    FReplVM := nil;
+    ResetHandles;
+  end;
+  if FReplProg <> nil then
+  begin
+    FReplProg.Free;
+    FReplProg := nil;
+  end;
+  FReplSource := '';
+  FReplPC := 0;
+end;
+
+function TPhosphorEngine.ReplRun(const ALine: String): Integer;
+var
+  cand: String;
+  prog, old: TProgram;
+  startPC: Integer;
+begin
+  FErrorLine := 0;
+  FErrorMessage := '';
+  FLastError := NoError;
+  cand := FReplSource + ALine + #10;
+  // A line that does not compile never joins the session.
+  if not CompileSource(cand, prog) then Exit(FErrorLine);
+
+  if FReplVM = nil then
+  begin
+    Finish;         // a session and a prepared script do not share a VM
+    ResetHandles;
+    FReplVM := TPhosphorVM.Create;
+    ConfigureVM(FReplVM);
+  end;
+
+  startPC := FReplPC;
+  old := FReplProg;
+  FReplProg := prog;                 // the VM runs the NEW program from here on
+  FReplSource := cand;
+  FReplPC := prog.Count;
+  Result := 0;
+  if not FReplVM.RunFrom(prog, startPC) then
+  begin
+    FLastError := FReplVM.LastError;
+    FErrorMessage := FReplVM.LastError.Message;
+    FErrorLine := FReplVM.ErrorLine;
+    if FErrorLine = 0 then FErrorLine := 1;
+    Result := FErrorLine;
+  end;
+  // Safe only now: the VM no longer refers to the previous program, and every value
+  // that came out of its constant pool is reference-counted in the globals.
+  if old <> nil then old.Free;
 end;
 
 end.

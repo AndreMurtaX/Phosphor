@@ -159,6 +159,11 @@ type
     constructor Create;
     destructor Destroy; override;   // closes any file channels left open
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)
+    { Run AProg from AStartPC over the CURRENT globals, handles and open channels,
+      instead of a clean slate -- the REPL session path. FVars grows to AProg.VarCount
+      keeping every existing value, so a variable set by an earlier line survives, and
+      user functions defined earlier stay callable because AProg still carries them. }
+    function RunFrom(AProg: TProgram; AStartPC: Integer): Boolean;
     { Call a BASIC user function by name, re-entrantly, over the SAME globals and
       handles as the running program. This is the host callback seam: an event
       dispatcher (or the callfunc primitive) runs a BASIC routine and gets its
@@ -883,6 +888,33 @@ begin
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
   Result := ExecFrom(0, -1);
+end;
+
+function TPhosphorVM.RunFrom(AProg: TProgram; AStartPC: Integer): Boolean;
+var
+  i, had: Integer;
+begin
+  FProg := AProg;
+  LastError := NoError;
+  ErrorLine := 0;
+  // A fresh expression/call stack per line; everything else -- globals, handles,
+  // open file channels, the DATA cursor, an installed ON ERROR handler -- persists,
+  // which is the whole point of a session.
+  FSP := 0;
+  FCSP := 0;
+  FFrameSP := 0;
+  had := Length(FVars);
+  if AProg.VarCount > had then
+  begin
+    SetLength(FVars, AProg.VarCount);
+    for i := had to AProg.VarCount - 1 do
+      FVars[i] := DefaultValue(AProg.VarTypes[i]);
+  end;
+  // Each line gets its own execution budget.
+  FSteps := 0;
+  FOutputBytes := 0;
+  FStartTick := GetTickCount64;
+  Result := ExecFrom(AStartPC, -1);
 end;
 
 function TPhosphorVM.ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;

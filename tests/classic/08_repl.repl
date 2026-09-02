@@ -1,0 +1,14 @@
+let a = 10
+println a
+let br? = 2 = 2
+println br?
+let a% = 10.5
+println using "##.##"; a%
+function dbl(n)
+  return n * 2
+endfunction
+println dbl(21)
+if a > 3 then
+println "big"
+endif
+println a + 1

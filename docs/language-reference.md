@@ -32,7 +32,9 @@ bin\phosphor.exe hello.bas
 Hello, Phosphor!
 ```
 
-`phosphor.exe <file.bas>` runs a program; `phosphor.exe` alone opens a small REPL.
+`phosphor.exe <file.bas>` runs a program; `phosphor.exe` alone opens an interactive
+REPL where variables and functions persist from line to line, and a multi-line
+block (an `if`, a loop, a `function`) waits for its terminator before running.
 You can also `phosphor compile file.bas out.pbc` (bytecode) or
 `phosphor pack file.bas app.exe` (a standalone executable).
 

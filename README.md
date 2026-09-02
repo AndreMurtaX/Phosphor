@@ -48,7 +48,7 @@ bin\phosphor.exe run hello.bas
 phosphor run  <file.bas>            run a program
 phosphor compile <in.bas> <out.pbc> compile to portable .pbc bytecode
 phosphor pack <in.bas> <out>        build a standalone self-extracting executable
-phosphor                            a line-at-a-time REPL
+phosphor                            an interactive REPL (state persists)
 phosphor --version | --help | --diag
 ```
 

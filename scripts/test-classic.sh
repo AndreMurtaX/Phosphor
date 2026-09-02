@@ -17,15 +17,23 @@ tmp="$(mktemp -d)"
 prove="${1:-}"
 allok=1
 
-run_one() {  # bas inpath expected label
+run_one() {  # file inpath expected label
   local bas="$1" inp="$2" expected="$3" label="$4"
   local out="$tmp/classic.out"
   rm -f "$out"
-  if [ -n "$inp" ]; then
-    "$exe" run "$bas" --out "$out" < "$inp" 2>/dev/null
-  else
-    "$exe" run "$bas" --out "$out" < /dev/null 2>/dev/null
-  fi
+  case "$bas" in
+    *.repl)
+      # A REPL session: the file is what the user types; stdout is the transcript.
+      "$exe" < "$bas" > "$out" 2>/dev/null
+      ;;
+    *)
+      if [ -n "$inp" ]; then
+        "$exe" run "$bas" --out "$out" < "$inp" 2>/dev/null
+      else
+        "$exe" run "$bas" --out "$out" < /dev/null 2>/dev/null
+      fi
+      ;;
+  esac
   local code=$?
   if cmp -s "$out" "$expected" && [ "$code" -eq 0 ]; then
     echo "PASS  $label  ($(wc -c < "$out" | tr -d ' ') B)"
@@ -41,8 +49,8 @@ run_one() {  # bas inpath expected label
 }
 
 if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
-  first="$(ls "$dir"/*.bas | sort | head -1)"
-  base="$(basename "$first" .bas)"
+  first="$(ls "$dir"/*.bas "$dir"/*.repl 2>/dev/null | sort | head -1)"
+  base="$(basename "${first%.*}")"
   bad="$tmp/bad.expected"
   cp "$dir/$base.expected" "$bad"
   printf 'X' | dd of="$bad" bs=1 seek=0 count=1 conv=notrunc 2>/dev/null
@@ -54,8 +62,9 @@ if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
     echo "ProveFailure: mismatch correctly detected"
   fi
 else
-  for bas in "$dir"/*.bas; do
-    base="$(basename "$bas" .bas)"
+  for bas in "$dir"/*.bas "$dir"/*.repl; do
+    [ -e "$bas" ] || continue
+    base="$(basename "${bas%.*}")"
     inp=""; [ -f "$dir/$base.in" ] && inp="$dir/$base.in"
     run_one "$bas" "$inp" "$dir/$base.expected" "$base" || allok=0
   done

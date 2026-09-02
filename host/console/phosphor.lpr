@@ -442,11 +442,24 @@ begin
   end;
 end;
 
+{ True when a compile error means "the block is not finished yet" rather than "this
+  is wrong" -- the compiler's own terminator messages. The REPL then keeps reading
+  instead of rejecting the line, so a multi-line IF, loop or FUNCTION can be typed. }
+function IsUnterminatedBlock(const AMsg: String): Boolean;
+begin
+  Result := (AMsg = 'expected ''endif''') or
+            (AMsg = 'expected ''endwhile'' or ''wend''') or
+            (AMsg = 'expected ''endfunction''') or
+            (AMsg = 'expected ''endselect''') or
+            (AMsg = 'expected ''loop''') or
+            (AMsg = 'expected ''until''');
+end;
+
 function Repl: Integer;
 var
   host: TConsoleHost;
   eng: TPhosphorEngine;
-  line: String;
+  line, pending: String;
 begin
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create;
@@ -455,17 +468,29 @@ begin
     eng.OnInput := @host.ReadLine;
     RegisterAllPackages(eng.Registry);
     host.Output('Phosphor BASIC ' + PhosphorVersion +
-                ' -- REPL. Each line runs as its own program. Ctrl+Z then Enter to quit.'#10);
+                ' -- REPL. Variables and functions persist across lines.'#10 +
+                'Type a multi-line block and it waits for the terminator. ' +
+                'Ctrl+Z then Enter to quit.'#10);
+    pending := '';
     while True do
     begin
-      host.Output('phosphor> ');
+      if pending = '' then host.Output('phosphor> ') else host.Output('     ...> ');
       if not host.ReadLine(line) then
       begin
         host.Output(#10);
         Break;
       end;
-      if eng.Run(line) <> 0 then
+      if pending <> '' then line := pending + #10 + line;
+      if eng.ReplRun(line) <> 0 then
+      begin
+        if IsUnterminatedBlock(eng.ErrorMessage) then
+        begin
+          pending := line;              // not wrong, just unfinished -- read on
+          Continue;
+        end;
         Writeln(StdErr, 'error: ', eng.ErrorMessage);
+      end;
+      pending := '';
     end;
     Result := 0;
   finally

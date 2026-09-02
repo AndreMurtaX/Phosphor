@@ -8,6 +8,11 @@
 # 07_sqlite_full is conditional (same runtime-library gate as 02_sqlite): the full
 # statement-level surface -- prepared statements, binding, a cursor with column
 # metadata, transactions, JSON row/table introspection, changes/lastid, errors.
+# 08_http_offline is the HTTP client's OFFLINE half: a client-config accumulator
+# (base url, headers, params, cookies, auth, proxy, behaviour flags), a multipart
+# form (fields + files + url-encoded render) and the pure url/html encoders. No
+# network: it routes to phosphorhttptest (the name has "http") and ignores the
+# standing server. Plain-HTTP config needs no external library, so it runs everywhere.
 00_base64
 01_zip
 02_sqlite
@@ -16,3 +21,4 @@
 05_crt
 06_archive
 07_sqlite_full
+08_http_offline

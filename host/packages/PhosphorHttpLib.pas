@@ -38,8 +38,8 @@ unit PhosphorHttpLib;
 interface
 
 uses
-  SysUtils, Classes, Types, fphttpclient, opensslsockets, ssockets, resolve, sockets,
-  URIParser,
+  SysUtils, Classes, Types, fphttpclient, opensslsockets, openssl, ssockets, resolve,
+  sockets, URIParser,
   PhosphorValue, PhosphorErrors, PhosphorRegistry;
 
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
@@ -229,5 +229,17 @@ begin
   Reg.Add('http_status:$',   @f_http_status);
   Reg.Add('http_post$:$$',   @f_http_post);
 end;
+
+initialization
+  {$IFDEF UNIX}
+  { FPC 3.2.2's OpenSSL loader predates OpenSSL 3 -- its Unix soname list (openssl.pp
+    DLLVersions) tries libssl.so, .1.1, .1.0.x, .0.9.x, but never .so.3. On a box that
+    ships ONLY OpenSSL 3 (e.g. current Debian/Ubuntu -- no 1.1), https then fails to
+    load the library at all. OpenSSL 3 kept the 1.1 API this client uses, so teach the
+    loader the '.3' soname by claiming the oldest, effectively-dead slot. The list is
+    tried in order, so real 1.1 boxes still match '.1.1' first; only a 3-only box falls
+    through to '.3'. Windows loads by DLL name, not this list, so this is Unix-only. }
+  openssl.DLLVersions[High(openssl.DLLVersions)] := '.3';
+  {$ENDIF}
 
 end.

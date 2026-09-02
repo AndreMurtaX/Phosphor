@@ -160,7 +160,7 @@ end;
 
 function TPhosphorVM.ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
 var
-  pc, i, argc, ufi, savedRet: Integer;
+  pc, i, argc, ufi, savedRet, dupBase: Integer;
   ins: TInstr;
   a, b, r, v: TValue;
   e: TPhosphorError;
@@ -346,6 +346,15 @@ begin
           b := FStack[FSP - 1];
           Push(a);
           Push(b);
+        end;
+      opDupN:
+        begin
+          // Duplicate the top ins.A values in order. base is fixed before the
+          // pushes so a stack reallocation inside Push cannot disturb the source
+          // slots (they sit below the original top and keep their copied values).
+          dupBase := FSP - ins.A;
+          for i := 0 to ins.A - 1 do
+            Push(FStack[dupBase + i]);
         end;
       opStmt:
         begin

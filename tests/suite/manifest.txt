@@ -19,6 +19,7 @@
 38_syntax_compound
 42_syntax_elseif
 43_syntax_const
+44_syntax_compound_arrays
 37_syntax_return
 35_print_paths
 36_string_append

@@ -438,7 +438,7 @@ begin
 end;
 
 procedure TPhosphorCompiler.ParsePrimary;
-var t: TToken;
+var t: TToken; nidx: Integer;
 begin
   if FFailed then Exit;
   FBool := False;
@@ -476,10 +476,18 @@ begin
           begin
             if VarTypeOf(t.StrVal) = vtHandle then
             begin
+              // a@[i]  or  a@[i, j, ...] -- N comma-separated indices, one call.
               FLex.Advance;
               ParseExpr;
+              nidx := 1;
+              while (not FFailed) and (FLex.Cur.Kind = tkComma) do
+              begin
+                FLex.Advance;
+                ParseExpr;
+                Inc(nidx);
+              end;
               Expect(tkRBracket, ''']''');
-              FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
+              FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, t.Line);
             end
             else if VarTypeOf(t.StrVal) = vtString then
             begin
@@ -1065,6 +1073,7 @@ var
   cval: TValue;
   neg: Boolean;
   k: TTokenKind;
+  nidx: Integer;
 begin
   // Mark the statement boundary so a caught error can resume from a clean point.
   FProg.Emit(opStmt, 0, 0, FLex.Cur.Line);
@@ -1201,34 +1210,44 @@ begin
       Exit;
     end;
     if t.StrVal = 'restore' then begin FLex.Advance; FProg.Emit(opRestore, 0, 0, t.Line); Exit; end;
-    // indexed handle: a@[i] = <expr>  (set), or a@[i] alone (expression stmt)
+    // indexed handle: a@[i,...] = <expr> (set), a@[i,...] op= <expr> (compound),
+    // or a@[i,...] alone (expression stmt). N comma-separated indices are allowed.
     if (VarTypeOf(t.StrVal) = vtHandle) and (FLex.Peek.Kind = tkLBracket) then
     begin
       EmitLoadVar(t.StrVal, t.Line);   // the handle
       FLex.Advance;                    // the name
       FLex.Advance;                    // '['
-      ParseExpr;                       // the index
+      ParseExpr;                       // the first index
+      nidx := 1;
+      while (not FFailed) and (FLex.Cur.Kind = tkComma) do
+      begin
+        FLex.Advance;
+        ParseExpr;                     // a further index
+        Inc(nidx);
+      end;
       Expect(tkRBracket, ''']''');
       if FFailed then Exit;
       if FLex.Cur.Kind = tkEQ then
       begin
         FLex.Advance;
         ParseExpr;                     // the value
-        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 3, t.Line);
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 1 + nidx + 1, t.Line);
       end
       else if FLex.Cur.Kind in [tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq] then
       begin
-        // a@[i] op= x  ==  a@[i] = a@[i] op x, index evaluated once
+        // a@[i,...] op= x  ==  a@[i,...] = a@[i,...] op x, indices evaluated once.
+        // opDupN copies the handle and all N indices so arr_get (read) and arr_set
+        // (write) both see them without re-emitting the index expressions.
         k := FLex.Cur.Kind;
         FLex.Advance;
-        FProg.Emit(opDup2, 0, 0, t.Line);                                    // [h,i,h,i]
-        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);  // [h,i,elem]
-        ParseExpr;                                                            // [h,i,elem,rhs]
-        FProg.Emit(CompoundOp(k), 0, 0, t.Line);                             // [h,i,newval]
-        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 3, t.Line);
+        FProg.Emit(opDupN, 1 + nidx, 0, t.Line);                                     // [h,i..,h,i..]
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, t.Line);   // [h,i..,elem]
+        ParseExpr;                                                                    // [h,i..,elem,rhs]
+        FProg.Emit(CompoundOp(k), 0, 0, t.Line);                                     // [h,i..,newval]
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 1 + nidx + 1, t.Line);
       end
       else
-        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 2, t.Line);
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, t.Line);
       FProg.Emit(opPop, 0, 0, t.Line);  // statement: discard the call result
       Exit;
     end;

@@ -276,10 +276,22 @@ begin
   Reg.Add('parr_set@:@n@',   @t_arr_set);
   Reg.Add('parr_get@:@n',    @t_arr_get);
 
-  Reg.Add('arr_get:@n',  @t_arr_get);
-  Reg.Add('arr_set:@nn', @t_arr_set);
-  Reg.Add('arr_set:@n$', @t_arr_set);
-  Reg.Add('arr_set:@n@', @t_arr_set);
+  // Generic bracket sugar a@[i, ...]. One index (existing) plus the 2- and
+  // 3-index forms the multi-dimensional bracket emits. The impls are variadic and
+  // read the array's own kind, so every arity/value-kind shares t_arr_get/t_arr_set.
+  Reg.Add('arr_get:@n',   @t_arr_get);   // one index
+  Reg.Add('arr_get:@nn',  @t_arr_get);   // two indices
+  Reg.Add('arr_get:@nnn', @t_arr_get);   // three indices
+
+  Reg.Add('arr_set:@nn',  @t_arr_set);   // 1 index, numeric value
+  Reg.Add('arr_set:@n$',  @t_arr_set);   // 1 index, string value
+  Reg.Add('arr_set:@n@',  @t_arr_set);   // 1 index, handle value
+  Reg.Add('arr_set:@nnn', @t_arr_set);   // 2 indices, numeric value
+  Reg.Add('arr_set:@nn$', @t_arr_set);   // 2 indices, string value
+  Reg.Add('arr_set:@nn@', @t_arr_set);   // 2 indices, handle value
+  Reg.Add('arr_set:@nnnn',@t_arr_set);   // 3 indices, numeric value
+  Reg.Add('arr_set:@nnn$',@t_arr_set);   // 3 indices, string value
+  Reg.Add('arr_set:@nnn@',@t_arr_set);   // 3 indices, handle value
 
   Reg.Add('pointer@:n', @t_pointer);   // fabricate a handle (for negative tests)
   Reg.Add('arr_free:@', @t_arr_free);

@@ -28,3 +28,9 @@ assert_eq(bg$(3), e$ + "[43m", "yellow background")
 test_case("crt/composition (what a program actually emits)")
 line$ = at$(5, 20) + color$(9) + bold$() + "READY" + reset$()
 assert_eq(line$, e$ + "[5;20H" + e$ + "[91m" + e$ + "[1mREADY" + e$ + "[0m", "position + bright bold + text + reset composes")
+
+rem The non-blocking key functions must answer "no key" (and never block) when there
+rem is nothing waiting -- which is always the case under the headless test harness.
+test_case("crt/key input is non-blocking when idle")
+assert_eq(inkey$(), "", "inkey$ is empty when no key is waiting")
+assert_eq(keypressed(), 0, "keypressed() is 0 when no key is waiting")

@@ -151,7 +151,7 @@ third host + `docs/embedding.md`), and deployable (the `.pbc` on-disk bytecode a
 the self-extracting `pack`). External integrations (sqlite/http/zip/base64) remain
 opt-in host packages for whenever they are wanted; the engine stays dependency-free.
 
-**Parallel / optional — integration libraries as opt-in host packages.** *Started
+**Parallel / optional — integration libraries as opt-in host packages.** *CLOSED
 (2026-09-01).* Each is an **opt-in package under `host/packages/`** that a host
 registers if it wants it, exactly like the GUI libs — the engine stays
 dependency-free and the boundary check keeps passing. **Landed:** `PhosphorBase64Lib`
@@ -182,6 +182,18 @@ HTTP**S** helper, and IPv6 endpoints (FPC's socket layer is IPv4-only, so reachi
 AAAA host would need a hand-rolled `AF_INET6` connect) -- both kept out until they can
 be tested against reality, not stubbed. These are breadth, not a gate; they land any
 time.
+
+**Closure (2026-09-01).** Four packages shipped and are verified against reality on
+both operating systems — `base64`, `zip`, and the multi-address-fallback `http` run
+byte-exact on Windows and the Linux VM; `sqlite` runs byte-exact where its runtime
+library is present (the VM) and is skipped where it is absent (this Windows box), the
+same honest library-gate the GUI suite uses for a display. The engine never learned
+any of them exist. The two deferrals are recorded, not stubbed, and the next one has a
+plan of record: **[roadmap-net.md](roadmap-net.md)** — HTTPS chosen over IPv6, with
+the reasoning and the step-by-step. This frame (a package + its own runner + a
+byte-exact `tests/packages` file, library-gated when it needs a runtime dep, with its
+own server-standing runner when it must be tested against a live peer) is the template
+every future integration follows.
 
 ## Rejected approaches (the traps the reasoning refuted)
 

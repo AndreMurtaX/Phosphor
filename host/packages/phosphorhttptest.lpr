@@ -165,7 +165,7 @@ var
   eng: TPhosphorEngine;
   srv, srvTls: TBoundHttpServer;
   th, thTls: TServerThread;
-  path: String;
+  path, certDir: String;
   rc, i, waited: Integer;
 begin
   {$IFDEF UNIX}
@@ -210,15 +210,25 @@ begin
   th.FreeOnTerminate := False;
   th.Start;
 
-  { A second server over TLS, same routes, with an auto-generated self-signed
-    certificate (UseSSL + empty CertificateData). The https test proves both that
-    verification refuses this untrusted cert by default and that TLS works once
-    verification is explicitly relaxed. }
+  { A second server over TLS, same routes, using a checked-in self-signed test
+    certificate (tls_test_cert.pem / _key.pem, alongside the .bas). We load a fixture
+    rather than auto-generating one at runtime: FPC 3.2.2's in-process X.509 generation
+    uses OpenSSL APIs that OpenSSL 3 changed, so the auto-signed path silently produced
+    no working cert on the OpenSSL-3 VM (the handshake then failed even with
+    verification off). The fixture is a throwaway test credential, never a real one.
+    The https test proves both that verification refuses this untrusted cert by default
+    and that TLS works once verification is explicitly relaxed. }
   srvTls := TBoundHttpServer.Create(nil);
   srvTls.Address := '127.0.0.1';
   srvTls.Port := SRV_PORT_TLS;
   srvTls.Threaded := True;
   srvTls.UseSSL := True;
+  certDir := ExtractFilePath(ExpandFileName(path));
+  if FileExists(certDir + 'tls_test_cert.pem') then
+  begin
+    srvTls.CertificateData.Certificate.FileName := certDir + 'tls_test_cert.pem';
+    srvTls.CertificateData.PrivateKey.FileName  := certDir + 'tls_test_key.pem';
+  end;
   thTls := TServerThread.Create(True);
   thTls.Srv := srvTls;
   srvTls.OnRequest := @thTls.HandleRequest;

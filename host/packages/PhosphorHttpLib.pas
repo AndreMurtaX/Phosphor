@@ -593,9 +593,15 @@ end;
   else literal. %2B therefore comes back as '+', keeping it distinct from an encoded
   space on the round trip. }
 function DoUrlDecode(const S: String): String;
-var i, h1, h2: Integer; ch: Char;
+var i, h1, h2, n: Integer; ch: Char; r: RawByteString;
 begin
-  Result := '';
+  // Build the bytes by INDEXED assignment into a RawByteString (output is never
+  // longer than the input, so Length(S) is a safe upper bound). Concatenating
+  // `Result + Chr(b)` under {$codepage UTF8} re-encodes a %XX byte >= 128 into its
+  // multi-byte UTF-8 form (or '?'), which corrupted every percent-encoded non-ASCII
+  // byte -- the same trap hex_decode$ and the gzip header avoid the same way.
+  SetLength(r, Length(S));
+  n := 0;
   i := 1;
   while i <= Length(S) do
   begin
@@ -603,20 +609,22 @@ begin
     if (ch = '%') and (i + 2 <= Length(S)) and
        HexNibble(S[i + 1], h1) and HexNibble(S[i + 2], h2) then
     begin
-      Result := Result + Chr(h1 * 16 + h2);
+      Inc(n); r[n] := Chr(h1 * 16 + h2);
       Inc(i, 3);
     end
     else if ch = '+' then
     begin
-      Result := Result + ' ';
+      Inc(n); r[n] := ' ';
       Inc(i);
     end
     else
     begin
-      Result := Result + ch;
+      Inc(n); r[n] := ch;
       Inc(i);
     end;
   end;
+  SetLength(r, n);
+  Result := r;
 end;
 
 { Escape the five markup-significant characters. '&' MUST be first so it does not

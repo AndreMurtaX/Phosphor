@@ -174,6 +174,8 @@ assert_eq(http_urldecode$("a%20b"), "a b", "http_urldecode$ puts it back")
 assert_eq(http_urldecode$("a+b"), "a b", "and still reads the form spelling, so old data keeps working")
 assert_eq(http_urldecode$("a%2Bb"), "a+b", "while %2B stays a plus")
 assert_eq(http_urldecode$(http_urlencode$("a=b&c")), "a=b&c", "and the pair round-trips")
+assert_eq(http_urldecode$("%C3%A9"), chr$(233), "http_urldecode$ is byte-exact: %C3%A9 are the UTF-8 bytes of é (was corrupted to '?')")
+assert_eq(http_urldecode$(http_urlencode$(chr$(233))), chr$(233), "a non-ASCII byte survives the url round trip")
 
 assert_eq(http_htmlencode$("<b>"), "&lt;b&gt;", "http_htmlencode$ escapes markup")
 assert_eq(http_htmldecode$("&lt;b&gt;"), "<b>", "http_htmldecode$ puts it back")

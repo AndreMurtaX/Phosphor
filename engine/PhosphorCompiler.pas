@@ -220,6 +220,14 @@ end;
 procedure TPhosphorCompiler.EmitStoreVar(const AName: String; ALine: Integer);
 var li: Integer;
 begin
+  // A name declared `const' is a fixed value, not a slot -- writing to it (by
+  // '=', a compound op, READ, or a FOR variable) is a compile error, so a const
+  // and a like-named variable can never quietly coexist.
+  if ConstIndex(AName) >= 0 then
+  begin
+    Fail('cannot assign to constant ' + AName, ALine);
+    Exit;
+  end;
   li := LocalIndex(AName);
   if li >= 0 then FProg.Emit(opStoreLocal, li, 0, ALine)
   else FProg.Emit(opStoreVar, VarIndex(AName), 0, ALine);
@@ -1346,6 +1354,13 @@ begin
         Fail('const value must be a number or a string literal', FLex.Cur.Line); Exit;
       end;
       FLex.Advance;
+      // The value is a single literal, not an expression: anything other than
+      // the end of the statement here (e.g. `const N = 2 + 3`) is rejected for
+      // its own reason rather than a bare "expected end of line".
+      if not (FLex.Cur.Kind in [tkEOL, tkEOF, tkColon]) then
+      begin
+        Fail('const value must be a single number or string literal, not an expression', FLex.Cur.Line); Exit;
+      end;
       if FConstCount = Length(FConstNames) then
       begin
         SetLength(FConstNames, (FConstCount + 1) * 2);
@@ -1378,6 +1393,12 @@ begin
           if FLex.Cur.Kind <> tkIdent then begin Fail('expected a variable name', FLex.Cur.Line); Exit; end;
           VarIndex(FLex.Cur.StrVal);
           FLex.Advance;
+        end;
+        // `let a, b` declares names only; a value at the end (`let a, b = 5`) is
+        // ambiguous (which name gets it?) and rejected for its own reason.
+        if (not FFailed) and (FLex.Cur.Kind = tkEQ) then
+        begin
+          Fail('a ''let'' list declares names only; assign to one name at a time', t.Line); Exit;
         end;
       end;
       Exit;

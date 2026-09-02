@@ -306,13 +306,21 @@ var
   n: Int64;
 begin
   R := Default(TValue);
-  // '+' is also concatenation: if EITHER side is a string, the other is coerced
-  // to its text (a number via its str$ form) and the two are joined.
-  if (A.Kind = vkString) or (B.Kind = vkString) then
+  // The kind of a '+' is decided by its LEFT operand -- the same rule the parser
+  // uses for the first token of an expression. A string on the left makes '+'
+  // concatenation: the right side is coerced to its text (a number via its str$
+  // form) and the two are joined. A number on the left makes '+' arithmetic, so
+  // a string on the RIGHT is a type mismatch, not a silent concatenation -- the
+  // reverse of a working `"text" + n` (see tests/suite/41_syntax_string_plus_number).
+  if A.Kind = vkString then
   begin
     R := ValStr(ValToStr(A) + ValToStr(B));
     Exit(NoError);
   end;
+  if B.Kind = vkString then
+    Exit(MakeError(peTypeMismatch,
+      'cannot add text to a number; a ''+'' that begins with a number is ' +
+      'arithmetic -- put the text first, or convert with str$'));
   Result := NumericPair(A, B, '+');
   if IsError(Result) then Exit;
   if BothInt(A, B) then

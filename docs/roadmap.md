@@ -1,5 +1,16 @@
 # Phosphor BASIC — phase-1 roadmap (adversarially vetted)
 
+> **STATUS 2026-09-02 — the FULL Plan9Basic oracle is met, not just the phase-1 subset.**
+> Every in-scope `tests/suite` file (00–44, the four external-dep deferrals 23/32/33/34
+> included) has a Phosphor equivalent that is byte-exact green on Windows AND the Linux
+> VM; the negative suite is 02–19 (Plan9Basic parity), all rejecting for their own
+> diagnostic; nine opt-in packages are green. Out of scope by nature (Delphi/FMX): the
+> `tests/gui` corpus (answered via Lazarus LCL in phase 2), the `Demos` games, and
+> `18_examples_catalog` (Plan9Basic's own website plumbing). This was reached by an
+> autonomous builder+critic **gauntlet loop** (see [dev-agent-playbook.md](dev-agent-playbook.md),
+> whose retrospective log is the round-by-round record) — 12 rounds, no human fix. The
+> phase-1 plan below is kept as the historical record of how the engine was founded.
+
 How this was produced: three proposers argued opposed philosophies (oracle-first,
 types-first, risk/irreversibility-first); four adversarial judges tried to refute
 them (sequencing feasibility, cost-of-deferral, oracle convergence, reference-

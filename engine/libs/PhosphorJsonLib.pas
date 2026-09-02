@@ -129,15 +129,39 @@ begin
   O.Add(K, V);
 end;
 
+{ Read any node as a number without ever raising. A number is exact; a bool is
+  0/1; a numeric string is parsed (else 0); null / object / array read as 0. (The
+  old code called AsFloat on every non-number, which raised EConvertError on a
+  non-numeric string and crashed the program -- a reader must return a value.) }
 function NumVal(N: TJSONData): TValue;
+var d: Double; fs: TFormatSettings;
 begin
-  if N.JSONType = jtNumber then
-  begin
-    if TJSONNumber(N).NumberType = ntInteger then Result := ValInt(N.AsInt64)
-    else Result := ValDouble(N.AsFloat);
-  end
+  case N.JSONType of
+    jtNumber:
+      if TJSONNumber(N).NumberType = ntInteger then Result := ValInt(N.AsInt64)
+      else Result := ValDouble(N.AsFloat);
+    jtBoolean:
+      if N.AsBoolean then Result := ValInt(1) else Result := ValInt(0);
+    jtString:
+      begin
+        fs := DefaultFormatSettings;
+        fs.DecimalSeparator := '.';
+        fs.ThousandSeparator := #0;
+        if TryStrToFloat(N.AsString, d, fs) then Result := ValDouble(d)
+        else Result := ValInt(0);
+      end;
   else
-    Result := ValDouble(N.AsFloat);
+    Result := ValInt(0);   // jtNull / jtObject / jtArray
+  end;
+end;
+
+{ Read any node as a string without raising: null is "", an object/array is its
+  compact JSON text, everything else its AsString. }
+function StrVal(N: TJSONData): String;
+begin
+  if (N = nil) or (N.JSONType = jtNull) then Result := ''
+  else if N.JSONType in [jtObject, jtArray] then Result := N.AsJSON
+  else Result := N.AsString;
 end;
 
 // --- constructors -----------------------------------------------------------
@@ -160,6 +184,14 @@ begin
       Err := MakeError(peRuntime, 'invalid json: ' + E.Message);
       Exit;
     end;
+  end;
+  if d = nil then
+  begin
+    // GetJSON returns nil (without raising) for empty/whitespace-only input. Report
+    // it as an invalid-json error instead of wrapping a nil node in a live handle
+    // that would fault the moment it is used.
+    Err := MakeError(peRuntime, 'invalid json: empty or whitespace-only input');
+    Exit;
   end;
   Err := NoError;
   Result := RegJson(d, True);
@@ -216,7 +248,7 @@ begin
   Result := ValStr('');
   if not GetObj(Args[0], o, Err) then Exit;
   m := o.Find(Args[1].Str);
-  if m <> nil then Result := ValStr(m.AsString)
+  if m <> nil then Result := ValStr(StrVal(m))
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_getb(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -300,7 +332,7 @@ begin
   Result := ValStr('');
   if not GetArr(Args[0], a, Err) then Exit;
   z := Round(AsDouble(Args[1])) - 1;
-  if (z >= 0) and (z < a.Count) then Result := ValStr(a.Items[z].AsString)
+  if (z >= 0) and (z < a.Count) then Result := ValStr(StrVal(a.Items[z]))
   else if Length(Args) >= 3 then Result := Args[2]
   else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
     [z + 1, a.Count]));
@@ -363,7 +395,7 @@ var root, n: TJSONData;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], root, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := ValStr(n.AsString)
+  if NavPath(root, Args[1].Str, n) then Result := ValStr(StrVal(n))
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_pathn(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -412,7 +444,7 @@ function t_json_value_s(const Args: array of TValue; out Err: TPhosphorError): T
 var n: TJSONData;
 begin
   Result := ValStr('');
-  if GetNode(Args[0], n, Err) then Result := ValStr(n.AsString);
+  if GetNode(Args[0], n, Err) then Result := ValStr(StrVal(n));
 end;
 
 // --- type predicates and code -----------------------------------------------

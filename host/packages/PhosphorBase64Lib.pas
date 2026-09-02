@@ -198,19 +198,28 @@ begin
 end;
 
 function f_hex_decode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var s, r: String; i, hi, lo: Integer;
+var s: String; r: RawByteString; i, hi, lo, n: Integer;
 begin
   Err := NoError;
   s := Args[0].Str;
-  r := '';
+  // Build the bytes into a RawByteString by INDEXED assignment, exactly as the gzip
+  // header does. Concatenating `r := r + Chr(b)` under {$codepage UTF8} re-encodes a
+  // byte >= 128 into its multi-byte UTF-8 form (or '?'), which is why hex_decode$
+  // used to corrupt every non-ASCII byte while its encode half stayed byte-exact.
+  // Chr() written to r[n] stores the raw byte, and ValStr of a RawByteString keeps
+  // it (the same path base64/gzip/zip use).
+  SetLength(r, Length(s) div 2);
+  n := 0;
   i := 1;
   while i + 1 <= Length(s) do
   begin
     hi := HexVal(s[i]); lo := HexVal(s[i + 1]);
     if (hi < 0) or (lo < 0) then Break;   // stop at the first non-hex pair
-    r := r + Chr(hi * 16 + lo);
+    Inc(n);
+    r[n] := Chr(hi * 16 + lo);
     Inc(i, 2);
   end;
+  SetLength(r, n);
   Result := ValStr(r);
 end;
 

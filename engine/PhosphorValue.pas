@@ -145,6 +145,12 @@ function DefaultValue(T: TVarType): TValue;
 // (e.g. a Double rounded into an int% slot).
 function CanStore(T: TVarType; const V: TValue; out Coerced: TValue): Boolean;
 
+// True if D can be rounded/truncated into an Int64 without FPC's Round/Trunc/Floor
+// raising EInvalidOp. NaN and +/-Inf answer False (their comparisons are all False),
+// so a caller guards a Double->Int64 conversion with this and reports overflow as a
+// catchable error instead of crashing the process.
+function InI64Range(const D: Double): Boolean;
+
 // Checked Int64 primitives (exposed so libraries can test overflow-as-error) -
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
 function TrySubI64(const A, B: Int64; out R: Int64): Boolean;
@@ -228,6 +234,14 @@ begin
   else
     Result := '';
   end;
+end;
+
+function InI64Range(const D: Double): Boolean;
+begin
+  // 2^63 (= 9223372036854775808) and -2^63 are both exactly representable as a
+  // Double; a value strictly inside [-2^63, 2^63) rounds to an Int64 safely. NaN
+  // and Inf fail both comparisons, so they answer False.
+  Result := (D >= -9223372036854775808.0) and (D < 9223372036854775808.0);
 end;
 
 // --- checked Int64 primitives ----------------------------------------------

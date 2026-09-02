@@ -186,18 +186,25 @@ begin
   end;
 end;
 
+{ The UTF-8 encoding of a codepoint. Used by both chr$ and string$ so a character
+  above U+007F is emitted as its real multi-byte sequence, never a single masked
+  byte (which would be invalid UTF-8). }
+function CpUtf8(c: Integer): String;
+begin
+  if c < 0 then c := 0;
+  if c < $80 then Result := Chr(c and $FF)
+  else if c < $800 then
+    Result := Chr($C0 or (c shr 6)) + Chr($80 or (c and $3F))
+  else if c < $10000 then
+    Result := Chr($E0 or (c shr 12)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F))
+  else
+    Result := Chr($F0 or (c shr 18)) + Chr($80 or ((c shr 12) and $3F)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F));
+end;
+
 function f_chr(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: Integer;
 begin
   E := NoError;
-  c := Round(AsDouble(A[0]));
-  if c < $80 then Result := ValStr(Chr(c and $FF))
-  else if c < $800 then
-    Result := ValStr(Chr($C0 or (c shr 6)) + Chr($80 or (c and $3F)))
-  else if c < $10000 then
-    Result := ValStr(Chr($E0 or (c shr 12)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F)))
-  else
-    Result := ValStr(Chr($F0 or (c shr 18)) + Chr($80 or ((c shr 12) and $3F)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F)));
+  Result := ValStr(CpUtf8(Round(AsDouble(A[0]))));
 end;
 
 function ToRadix(V: Int64; Base: Integer): String;
@@ -239,8 +246,15 @@ function f_space(const A: array of TValue; out E: TPhosphorError): TValue;
 var n: Integer;
 begin E := NoError; n := Round(AsDouble(A[0])); if n < 0 then n := 0; Result := ValStr(StringOfChar(' ', n)); end;
 function f_string(const A: array of TValue; out E: TPhosphorError): TValue;
-var n: Integer;
-begin E := NoError; n := Round(AsDouble(A[0])); if n < 0 then n := 0; Result := ValStr(StringOfChar(Chr(Round(AsDouble(A[1])) and $FF), n)); end;
+var n, i: Integer; ch, r: String;
+begin
+  E := NoError;
+  n := Round(AsDouble(A[0])); if n < 0 then n := 0;
+  ch := CpUtf8(Round(AsDouble(A[1])));   // the character's full UTF-8 encoding
+  r := '';
+  for i := 1 to n do r := r + ch;
+  Result := ValStr(r);
+end;
 function f_mulstring(const A: array of TValue; out E: TPhosphorError): TValue;
 var n, i: Integer; r: String;
 begin

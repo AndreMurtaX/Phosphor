@@ -295,7 +295,11 @@ begin
         fs.ThousandSeparator := #0;
         if TryStrToFloat(AField, dv, fs) then
         begin
-          if ATypeCode = 2 then V := ValInt(Round(dv))
+          if ATypeCode = 2 then
+          begin
+            if InI64Range(dv) then V := ValInt(Round(dv))
+            else Result := MakeError(peRuntime, '"' + AField + '" is out of integer range');
+          end
           else V := ValDouble(dv);
         end
         else
@@ -311,6 +315,21 @@ begin
   else
     Result := MakeError(peTypeMismatch, 'cannot read input into this variable');
   end;
+end;
+
+{ A crash-proof Double -> Int32 for the classic-I/O opcodes (file numbers, byte
+  counts). Out-of-range or NaN values never reach Round (which would raise): a huge
+  magnitude clamps to the Int32 extreme -- for a file number that lands outside
+  1..MaxChannel so the channel op reports "out of range", and for a byte count it
+  simply means "as many as there are". }
+function SafeI32(const V: TValue): Integer;
+var d: Double;
+begin
+  d := AsDouble(V);
+  if d <> d then Result := 0                        // NaN
+  else if d >= 2147483647.0 then Result := High(Integer)
+  else if d <= -2147483648.0 then Result := Low(Integer)
+  else Result := Round(d);
 end;
 
 // --- console INPUT -----------------------------------------------------------
@@ -1094,10 +1113,23 @@ begin
               'no function ' + SignatureOf(FProg.Consts.Get(ins.A).Str, args))) then Continue else Exit(False);
           end;
           e := NoError;
-          if res.IsHost then
-            r := res.HostFunc(Self, args, e)
-          else
-            r := res.Func(args, e);
+          // The safety net: a library function must never crash the interpreter.
+          // Any Pascal exception it raises (e.g. an out-of-range Double->Int64 in a
+          // conversion or index argument) is converted to a CATCHABLE engine error,
+          // upholding "errors are values, the program keeps running" even for a
+          // fault a library forgot to guard.
+          try
+            if res.IsHost then
+              r := res.HostFunc(Self, args, e)
+            else
+              r := res.Func(args, e);
+          except
+            on ex: Exception do
+            begin
+              r := Default(TValue);
+              e := MakeError(peRuntime, ex.Message);
+            end;
+          end;
           if IsError(e) then
           begin
             if Fault(e) then Continue else Exit(False);
@@ -1120,14 +1152,14 @@ begin
       opInputChars:
         begin
           a := Pop;   // count
-          Push(ValStr(InputChars(Round(AsDouble(a)))));
+          Push(ValStr(InputChars(SafeI32(a))));
         end;
       // --- classic file I/O ----------------------------------------------------
       opOpenFile:
         begin
           a := Pop;   // channel number (pushed last)
           b := Pop;   // path (pushed first)
-          e := ChanOpen(Round(AsDouble(a)), ins.A, ValToStr(b));
+          e := ChanOpen(SafeI32(a), ins.A, ValToStr(b));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
       opCloseFile:
@@ -1137,7 +1169,7 @@ begin
           else
           begin
             a := Pop;
-            e := ChanClose(Round(AsDouble(a)));
+            e := ChanClose(SafeI32(a));
             if IsError(e) then if Fault(e) then Continue else Exit(False);
           end;
         end;
@@ -1145,20 +1177,20 @@ begin
         begin
           v := Pop;   // the value (pushed last)
           a := Pop;   // channel number (pushed first)
-          e := ChanWrite(Round(AsDouble(a)), ValToStr(v));
+          e := ChanWrite(SafeI32(a), ValToStr(v));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
       opFileField:
         begin
           a := Pop;   // channel number
-          e := ChanField(Round(AsDouble(a)), ins.A, v);
+          e := ChanField(SafeI32(a), ins.A, v);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(v);
         end;
       opFileLine:
         begin
           a := Pop;
-          e := ChanLine(Round(AsDouble(a)), sTmp);
+          e := ChanLine(SafeI32(a), sTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValStr(sTmp));
         end;
@@ -1166,28 +1198,28 @@ begin
         begin
           a := Pop;   // channel number (pushed last, on top)
           b := Pop;   // count (pushed first)
-          e := ChanChars(Round(AsDouble(a)), Round(AsDouble(b)), sTmp);
+          e := ChanChars(SafeI32(a), SafeI32(b), sTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValStr(sTmp));
         end;
       opEofFile:
         begin
           a := Pop;
-          e := ChanEof(Round(AsDouble(a)), bTmp);
+          e := ChanEof(SafeI32(a), bTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValBool(bTmp));
         end;
       opLofFile:
         begin
           a := Pop;
-          e := ChanLof(Round(AsDouble(a)), nTmp);
+          e := ChanLof(SafeI32(a), nTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValInt(nTmp));
         end;
       opLocFile:
         begin
           a := Pop;
-          e := ChanLoc(Round(AsDouble(a)), nTmp);
+          e := ChanLoc(SafeI32(a), nTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValInt(nTmp));
         end;

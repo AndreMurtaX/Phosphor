@@ -199,6 +199,7 @@ var
   line: String;
 begin
   Clear;
+  if S = '' then Exit;   // empty text is an empty list, not one empty line
   len := Length(S);
   start := 1;
   for i := 1 to len + 1 do
@@ -234,6 +235,7 @@ procedure TPhosphorStringList.SetCommaText(const S: String);
 var start, i, len: Integer;
 begin
   Clear;
+  if S = '' then Exit;   // empty text is an empty list (matches delimited/Delphi)
   len := Length(S);
   start := 1;
   for i := 1 to len + 1 do

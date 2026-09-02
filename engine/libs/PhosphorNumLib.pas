@@ -39,16 +39,29 @@ function f_min(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Min(AsDouble(Args[0]), AsDouble(Args[1]))); end;
 function f_max(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Max(AsDouble(Args[0]), AsDouble(Args[1]))); end;
+// round/fix/cint/int convert a Double to an Int64. A magnitude past Int64 range
+// (or NaN/Inf) would make Round/Trunc/Floor raise, so it is reported as a catchable
+// overflow -- overflow is an error value here, never a crash.
+function ToIntError(const V: String): TPhosphorError; inline;
+begin Result := MakeError(peIntOverflow, 'number too large to convert to an integer (' + V + ')'); end;
 function f_round(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Round(N(Args))); end;
+var d: Double;
+begin d := N(Args); if InI64Range(d) then begin Err := NoError; Result := ValInt(Round(d)); end
+  else begin Err := ToIntError('round'); Result := ValInt(0); end; end;
 function f_fix(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Trunc(N(Args))); end;   // toward zero
+var d: Double;
+begin d := N(Args); if InI64Range(d) then begin Err := NoError; Result := ValInt(Trunc(d)); end   // toward zero
+  else begin Err := ToIntError('fix'); Result := ValInt(0); end; end;
 function f_cint(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Trunc(N(Args))); end;
+var d: Double;
+begin d := N(Args); if InI64Range(d) then begin Err := NoError; Result := ValInt(Trunc(d)); end
+  else begin Err := ToIntError('cint'); Result := ValInt(0); end; end;
 function f_frac(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Frac(N(Args))); end;
 function f_int(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Floor(N(Args))); end;   // BASIC INT: floor
+var d: Double;
+begin d := N(Args); if InI64Range(d) then begin Err := NoError; Result := ValInt(Floor(d)); end   // BASIC INT: floor
+  else begin Err := ToIntError('int'); Result := ValInt(0); end; end;
 
 function f_log10(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError; Result := ValDouble(Log10(N(Args))); end;

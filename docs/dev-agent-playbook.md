@@ -202,6 +202,30 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 14 · streamed channels + random access.** Closed the two limits
+  round 13 reported honestly instead of hiding: `open … for input` slurped the whole
+  file, and there was no way to reach a byte at a known offset. A channel now streams
+  through a sliding 64 KB window and `OPEN … FOR BINARY` + `SEEK` give random access.
+  Lessons:
+  - **Report a limit precisely and it becomes the next work item.** Round 13's honest
+    "no streaming, no random access" list was the whole design brief for this round.
+    Measure the limit, too: "a 200 MB file peaked at 417 MB" is what made the fix
+    obviously worth doing, and "39 ms to open 200 MB and read 4 bytes" is what proved
+    it landed.
+  - **A buffered reader must pull until it holds a TERMINATOR, not a fixed count.** The
+    line and field readers refill the window until a terminator is present (or EOF),
+    otherwise a line straddling a chunk boundary silently comes back truncated — the
+    classic buffered-IO bug. Pinned with a 4000-line file well past the window.
+  - **When an existing function contradicts a frozen language rule, fix it while you
+    are there.** `loc()` returned a 0-based byte count in a language whose own charter
+    says BASE 1 IN EVERYTHING. Nothing depended on it, so it became 1-based and now
+    pairs cleanly with the new `seek` (`seek #n, loc(n)` is a no-op). Grep for
+    dependents first; if there are none, the inconsistency is free to remove.
+  - **`FillChar` over a record holding a managed string leaks it.** The channel slot
+    reset had this latent bug; fields are now assigned individually.
+  - **Say what you deliberately did NOT build, and why.** Classic `FIELD`/`GET`/`PUT`
+    fixed records were skipped because byte-addressed SEEK covers the same ground —
+    recorded in decisions.md so the omission reads as a choice, not an oversight.
 - **2026-09-02 · round 13 · byte-level file work.** A user question ("how would I work
   with a file byte by byte?") turned into the round's biggest find. **The rule this
   produced, and it is the most important one here: WHEN YOU FIND A BUG CLASS, SWEEP FOR

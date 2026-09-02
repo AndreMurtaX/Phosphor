@@ -17,7 +17,7 @@ program phosphorpkgtest;
 uses
   SysUtils, Classes,
   PhosphorEngine, PhosphorTestLib,
-  PhosphorBase64Lib, PhosphorZipLib, PhosphorSqliteLib;
+  PhosphorBase64Lib, PhosphorZipLib, PhosphorSqliteLib, PhosphorCrtLib;
 
 function ReadSource(const APath: String): String;
 var fs: TFileStream; len: Int64;
@@ -67,6 +67,7 @@ begin
     RegisterBase64Funcs(eng.Registry);
     RegisterZipFuncs(eng.Registry);
     RegisterSqliteFuncs(eng.Registry);
+    RegisterCrtFuncs(eng.Registry);
     ResetTestState;
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

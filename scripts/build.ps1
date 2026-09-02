@@ -106,6 +106,7 @@ $args = @(
     "-T$TargetOS",
     "-Fu$engineDir",
     "-Fu$(Join-Path $engineDir 'libs')",
+    "-Fu$(Join-Path $root 'host\packages')",
     "-FU$unitsDir",
     "-FE$binDir",
     "-o$exe",

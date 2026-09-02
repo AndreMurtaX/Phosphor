@@ -41,7 +41,8 @@ rm -f "$exe"
 
 echo "compiler: $FPC"
 "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
-  -Fu"$root/engine" -Fu"$root/engine/libs" -FU"$units" -FE"$bin" -o"$exe" \
+  -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/host/packages" \
+  -FU"$units" -FE"$bin" -o"$exe" \
   "$root/host/console/phosphor.lpr"
 
 # --- trust the artifact, not the exit code -----------------------------------

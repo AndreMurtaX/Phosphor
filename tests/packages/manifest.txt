@@ -2,8 +2,10 @@
 # 02_sqlite is conditional: run only where the SQLite runtime library is present.
 # 03_http runs against a local server the runner (phosphorhttptest) stands up.
 # 04_https is conditional: run only where the OpenSSL runtime can be loaded.
+# 05_crt exercises the console-control (CRT) package -- ANSI escape sequences.
 00_base64
 01_zip
 02_sqlite
 03_http
 04_https
+05_crt

@@ -34,7 +34,8 @@ program phosphor;
 uses
   {$IFDEF WINDOWS}Windows,{$ENDIF}
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
-  SysUtils, Classes, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes, PhosphorBytecode;
+  SysUtils, Classes, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes, PhosphorBytecode,
+  PhosphorCrtLib;   // this host opts into the CRT console-control package
 
 type
   { The whole host side of the boundary: give the engine somewhere to put its
@@ -259,6 +260,7 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
+    RegisterCrtFuncs(eng.Registry);
     if IsBytecode(APath) then
     begin
       // a precompiled .pbc: run it without the lexer/compiler
@@ -410,6 +412,7 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
+    RegisterCrtFuncs(eng.Registry);
     line := eng.RunBytecode(APayload);
     if line <> 0 then begin Writeln(StdErr, Format('phosphor: %d: %s', [line, eng.ErrorMessage])); Exit(1); end;
     Result := 0;
@@ -428,6 +431,7 @@ begin
   eng := TPhosphorEngine.Create;
   try
     eng.OnOutput := @host.Output;
+    RegisterCrtFuncs(eng.Registry);
     host.Output('Phosphor BASIC ' + PhosphorVersion +
                 ' -- skeleton REPL (PRINT/PRINTLN only). Ctrl+Z then Enter to quit.'#10);
     while True do

@@ -123,6 +123,49 @@ def main():
         rc = 1
     else:
         print("every registered function is in the reference.")
+
+    # --- the guided tour's name table -----------------------------------------
+    # language-reference.md carries a "standard library" map whose last column
+    # names a few functions per area. Seven of them did not exist -- config@,
+    # getenv$, dateadd and friends -- so a reader who copied one out of the table
+    # got "unknown function" at run time. The names in that column are explicitly
+    # function names, which makes them checkable; the rest of the prose is not.
+    lang = os.path.join(ROOT, 'docs', 'language-reference.md')
+    try:
+        rows = open(lang, encoding='utf-8', errors='ignore').read().splitlines()
+    except OSError:
+        return rc
+    missing = []
+    inmap = False
+    for line in rows:
+        # only the map itself, found by its own header -- an operator table has the
+        # same shape and its cells are not function names
+        if line.replace(' ', '').startswith('|Area|Whatyouget|Afewnames|'):
+            inmap = True
+            continue
+        if inmap and not line.strip().startswith('|'):
+            inmap = False
+        if not inmap or line.count('|') < 4:
+            continue
+        cols = [c.strip() for c in line.strip().strip('|').split('|')]
+        if len(cols) != 3 or not cols[2].startswith('`'):
+            continue
+        for m in re.finditer(r'`([a-z_][a-z_0-9]*[$@]?)`', cols[2]):
+            nm = m.group(1)
+            if nm.endswith('_*') or nm in all_names:
+                continue
+            # a family shown as a prefix, e.g. path_* -- accept if anything matches
+            if any(x.startswith(nm) for x in all_names):
+                continue
+            missing.append((nm, cols[0]))
+    print()
+    if missing:
+        print("NAMED IN THE LIBRARY MAP BUT NOT REGISTERED:")
+        for nm, area in missing:
+            print(f"  {nm}  (row: {area})")
+        rc = 1
+    else:
+        print("every name in the library map is a real function.")
     return rc
 
 if __name__ == '__main__':

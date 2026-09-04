@@ -656,10 +656,10 @@ the full catalog of every function is in
 | String lists | growable text lists | `strings@` `strings_add` `strings_text$` |
 | JSON | parse / build / query | `json_parse@` `json_object@` `json_get@` |
 | Files & paths | whole-file text, path ops | `file_writealltext` `file_readalltext$` `path_*` |
-| Date & time | dates as numbers, arithmetic | `now` `today` `dateadd` `format$` |
-| Regex | pattern match / extract (pattern-first) | `regex_match` `regex_find$` |
-| Config (INI) | read/write settings files | `config@` `config_getstr$` `config_setint` |
-| System | args, dirs, env, colours | `getenv$` `mkdir` `tempdir$` |
+| Date & time | dates as numbers, arithmetic | `now` `today` `incday` `formatdatetime$` |
+| Regex | pattern match / extract (pattern-first) | `regex_find$` `regex_groups@` |
+| Config (INI) | read/write settings files | `cfg_open@` `cfg_get$` `cfg_setn@` |
+| System | args, dirs, env, colours | `environ$` `mkdir` `temppath$` |
 | Platform | OS name / version / arch | `os_name$` `os_platform$` `os_check` |
 | Errors | the ON ERROR face | `err` `errmsg$` `erl` `error` |
 | Indirect call | call a user function by name | `callfunc` |
@@ -724,8 +724,6 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
   positions. There is no index `0`; an absent `instr` match returns `0` to mean
   "not found".
 - **`next` takes no variable.** Write `next`, not `next i`.
-- **No `input`, no `print using`, no `do … loop until`, no `#` file channels.** Use
-  the library functions shown above instead.
 - **Undeclared names inside a function are globals.** List scratch variables after
   `local` so they don't leak.
 - **`sqr` is square root.** For x², write `x * x` or `x ^ 2`.

@@ -382,7 +382,15 @@ begin
   Result := ValInt(0);
   d := nil;
   try
-    d := GetJSON(Args[0].Str);
+    // UseUTF8 = FALSE, and the name is the opposite of what it does for us. True
+    // asks the parser to DECODE the text through the platform's string type, which
+    // on a system whose default code page is not set (Linux here, CP 0) turns the
+    // UTF-8 pair C3 A9 into the single byte E9 -- measured. False passes the bytes
+    // through untouched, which is byte-exact on BOTH platforms:
+    //     Linux   GetJSON(t)        -> 63 61 66 E9        (4 bytes, lossy)
+    //             GetJSON(t, False) -> 63 61 66 C3 A9
+    //     Windows both               -> 63 61 66 C3 A9
+    d := GetJSON(Args[0].Str, False);
   except
     on E: Exception do
     begin

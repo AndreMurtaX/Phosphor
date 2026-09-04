@@ -455,6 +455,41 @@ begin
             (AMsg = 'expected ''until''');
 end;
 
+{ `phosphor --gui <file.bas>` hands over to phosphorgui, the COMPLETE runner (engine
+  + every package + the LCL GUI libraries). It is a separate binary on purpose.
+
+  Why a `--gui` flag cannot simply load the LCL in-process: on Linux the gtk2
+  widgetset connects to the X display in the `Interfaces` unit's INITIALIZATION
+  section -- before main runs. Measured on the project VM: an LCL-linked binary that
+  never calls Application.Initialize still prints "cannot open display" and exits 1
+  when no display is reachable, while the same binary runs fine (exit 0) with
+  DISPLAY set to a live session. Linking is a compile-time decision, so no runtime
+  flag can undo it.
+
+  A display is often absent exactly where the console host is needed -- CI, a
+  container, a headless server, and every plain `ssh` session (including the one this
+  project's own Linux test runs arrive on, where DISPLAY is empty). Keeping the LCL
+  out of THIS binary is what lets `phosphor run`, the REPL and the byte-exact tests
+  work there. On Windows the win32 widgetset needs no display, so the split costs
+  nothing; it is kept on both platforms so the two behave alike.
+
+  Compiling needs neither host: the compiler is host-agnostic, so
+  `phosphor compile <gui-app.bas> <out.pbc>` already works for GUI programs. }
+function RunGui(const APath: String): Integer;
+var gui: String;
+begin
+  gui := ExtractFilePath(SelfExePath()) + 'phosphorgui' +
+         {$IFDEF WINDOWS}'.exe'{$ELSE}''{$ENDIF};
+  if not FileExists(gui) then
+  begin
+    Writeln(StdErr, 'phosphor: --gui needs phosphorgui beside this binary:');
+    Writeln(StdErr, '  ', gui);
+    Writeln(StdErr, '  build it with scripts/build-gui.ps1 (Windows) or scripts/build-gui.sh (Linux)');
+    Exit(2);
+  end;
+  Result := ExecuteProcess(gui, [APath]);
+end;
+
 function Repl: Integer;
 var
   host: TConsoleHost;
@@ -522,6 +557,7 @@ end;
 var
   i, code: Integer;
   arg, filePath, outPath: String;
+  guiMode: Boolean;
   payload: TBytesStream;
 begin
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
@@ -556,6 +592,7 @@ begin
 
   filePath := '';
   outPath := '';
+  guiMode := False;
   i := 1;
   while i <= ParamCount do
   begin
@@ -570,6 +607,7 @@ begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor compile <in.bas> <out.pbc>');
       Writeln('       phosphor pack <in.bas> <out>   (standalone executable)');
+      Writeln('       phosphor --gui <file.bas>     run a GUI program (via phosphorgui)');
       Writeln('       phosphor            (REPL)');
       Writeln('       phosphor --diag     (console/UTF-8 self-check)');
       Writeln('       phosphor --version');
@@ -577,6 +615,8 @@ begin
     end
     else if arg = '--diag' then
       Halt(Diag())
+    else if arg = '--gui' then
+      guiMode := True
     else if arg = 'run' then
       { optional verb; ignore }
     else if arg = '--out' then
@@ -597,6 +637,16 @@ begin
       Halt(2);
     end;
     Inc(i);
+  end;
+
+  if guiMode then
+  begin
+    if filePath = '' then
+    begin
+      Writeln(StdErr, 'phosphor: --gui needs a file to run');
+      Halt(2);
+    end;
+    Halt(RunGui(filePath));
   end;
 
   if filePath <> '' then

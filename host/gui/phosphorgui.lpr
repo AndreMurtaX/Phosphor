@@ -24,7 +24,11 @@ uses
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
   PhosphorImageLib, PhosphorGridLib, PhosphorTreeListLib, PhosphorCanvasLib,
-  PhosphorDialogLib, PhosphorMiscLib;
+  PhosphorDialogLib, PhosphorMiscLib,
+  // ...and every non-GUI package as well, so this binary is the COMPLETE runner:
+  // engine + all libraries + the GUI. `phosphor --gui` hands over to it.
+  PhosphorCrtLib, PhosphorBase64Lib, PhosphorZipLib, PhosphorGzipLib,
+  PhosphorHttpLib, PhosphorSqliteLib;
 
 type
   { The host side of the output seam: PRINT/PRINTLN text goes to stdout as raw
@@ -99,6 +103,13 @@ begin
     RegisterCanvasFuncs(eng.Registry);
     RegisterDialogFuncs(eng.Registry);
     RegisterMiscFuncs(eng.Registry);
+    // the same package set the console host registers
+    RegisterCrtFuncs(eng.Registry);
+    RegisterBase64Funcs(eng.Registry);
+    RegisterZipFuncs(eng.Registry);
+    RegisterGzipFuncs(eng.Registry);
+    RegisterHttpFuncs(eng.Registry);
+    RegisterSqliteFuncs(eng.Registry);
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin

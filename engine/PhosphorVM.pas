@@ -685,15 +685,26 @@ end;
 // the next literal character. Values fill fields left to right; if values remain
 // after the format ends and it held at least one field, the format repeats.
 function GroupThousands(const Digits: String): String;
-var i, c: Integer;
+var i, c, w: Integer;
 begin
-  Result := '';
+  // Sized up front and filled from the right. The old shape prepended one CHAR at a
+  // time, which is both the codepage hazard and quadratic; digits are ASCII so
+  // nothing was corrupted, but the rule against concatenating a Char is absolute
+  // here so that the check enforcing it needs no exceptions.
+  if Digits = '' then Exit('');
+  w := Length(Digits) + (Length(Digits) - 1) div 3;
+  SetLength(Result, w);
   c := 0;
   for i := Length(Digits) downto 1 do
   begin
-    Result := Digits[i] + Result;
+    Result[w] := Digits[i];
+    Dec(w);
     Inc(c);
-    if (c mod 3 = 0) and (i > 1) then Result := ',' + Result;
+    if (c mod 3 = 0) and (i > 1) then
+    begin
+      Result[w] := ',';
+      Dec(w);
+    end;
   end;
 end;
 
@@ -812,7 +823,9 @@ begin
     else if Fmt[i] = '!' then
     begin
       sv := ValFieldStr(NextVal());
-      if Length(sv) > 0 then Result := Result + sv[1] else Result := Result + ' ';
+      // Copy(), not sv[1]: a Char carries this unit's codepage into the
+      // concatenation and destroys any byte >= 128. A one-character SLICE does not.
+      if Length(sv) > 0 then Result := Result + Copy(sv, 1, 1) else Result := Result + ' ';
       fieldSeen := True;
       Inc(i);
     end
@@ -832,16 +845,16 @@ begin
         i := j + 1;
       end
       else
-        begin Result := Result + Fmt[i]; Inc(i); end;   // an unpaired '\' is literal
+        begin Result := Result + Copy(Fmt, i, 1); Inc(i); end;   // an unpaired '\' is literal
     end
     else if (Fmt[i] = '_') and (i < n) then
     begin
-      Result := Result + Fmt[i + 1];   // '_' escapes the next character literally
+      Result := Result + Copy(Fmt, i + 1, 1);   // '_' escapes the next character literally
       Inc(i, 2);
     end
     else
     begin
-      Result := Result + Fmt[i];
+      Result := Result + Copy(Fmt, i, 1);
       Inc(i);
     end;
     // reached the end with values to spare and fields to reuse: repeat the format

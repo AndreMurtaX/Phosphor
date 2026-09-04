@@ -93,6 +93,33 @@ for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits
   if [ "$pcode" -eq 0 ]; then echo "PASS  probe: $name  ($psum)"; else echo "FAIL  probe: $name  ($psum)"; allok=1; fi
 done
 
+# --- source-level gates -------------------------------------------------------
+# Two invariants no compiler can check and no golden happens to cover:
+#   check-codepage.py  no Char is concatenated into a code-page string (bytes >= 128
+#                      are silently destroyed; the class has been swept three times)
+#   coverage.py        every registered built-in is exercised by a test AND listed in
+#                      the function reference
+# They are run HERE, in the acceptance gate, rather than in the build: building
+# should not need Python, but passing the suite should mean the invariants hold.
+# A missing interpreter is a FAILURE, not a skip -- a gate that quietly does not run
+# is worse than no gate, because it reads as a pass.
+echo
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "$PY" ]; then
+  echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
+else
+  for gate in check-codepage.py coverage.py; do
+    [ -f "$here/$gate" ] || continue
+    if gout="$("$PY" "$here/$gate" 2>&1)"; then
+      echo "PASS  gate: $gate"
+    else
+      echo "FAIL  gate: $gate"
+      echo "$gout" | sed 's/^/         /'
+      allok=1
+    fi
+  done
+fi
+
 echo
 if [ "$allok" -eq 0 ]; then echo "SUITE OK"; else echo "SUITE FAILED"; fi
 exit "$allok"

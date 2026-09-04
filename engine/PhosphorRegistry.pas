@@ -186,9 +186,14 @@ begin
         codes[intPos[j]] := 'n'
       else
         codes[intPos[j]] := '%';
-    key := lname + ':';
+    // Built by index rather than by appending each Char: no code page can touch it,
+    // and this is the innermost loop of overload resolution -- one allocation
+    // instead of one per argument.
+    SetLength(key, Length(lname) + 1 + n);
+    for i := 1 to Length(lname) do key[i] := lname[i];
+    key[Length(lname) + 1] := ':';
     for i := 0 to n - 1 do
-      key := key + codes[i];
+      key[Length(lname) + 2 + i] := codes[i];
     idx := IndexOfKey(key);
     if idx >= 0 then
     begin

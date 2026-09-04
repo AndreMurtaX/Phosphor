@@ -571,7 +571,7 @@ begin
     if ((ch >= 'A') and (ch <= 'Z')) or ((ch >= 'a') and (ch <= 'z')) or
        ((ch >= '0') and (ch <= '9')) or (ch = '-') or (ch = '_') or
        (ch = '.') or (ch = '~') then
-      Result := Result + ch
+      Result := Result + Copy(S, i, 1)      // a slice, never the Char itself
     else
       Result := Result + '%' + IntToHex(Ord(ch), 2);
   end;

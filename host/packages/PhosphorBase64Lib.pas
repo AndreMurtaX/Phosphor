@@ -142,7 +142,7 @@ begin
   Result := False;
   s := '';
   for i := 1 to Length(AText) do
-    if (AText[i] <> #13) and (AText[i] <> #10) then s := s + AText[i];
+    if (AText[i] <> #13) and (AText[i] <> #10) then s := s + Copy(AText, i, 1);
   if (s = '') or ((Length(s) mod 4) <> 0) then Exit;
   pad := 0;
   for i := 1 to Length(s) do

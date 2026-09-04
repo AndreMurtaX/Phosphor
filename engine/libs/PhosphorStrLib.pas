@@ -396,36 +396,44 @@ end;
 function SignI(c: Integer): Integer; inline;
 begin if c < 0 then Result := -1 else if c > 0 then Result := 1 else Result := 0; end;
 
+{ proper$ and swapcase$ are BYTE-wise ASCII case operations -- alcase$/aucase$ are
+  the Unicode-aware pair. Both used to build their answer with `r := r + c` where c
+  is a Char, which under this unit's UTF8 codepage re-encodes every byte >= 128:
+  proper$("cafe" with an e-acute) came back as "Caf??", two bytes destroyed per
+  accented letter, silently, with no error anywhere.
+
+  They now COPY the input and edit ASCII letters in place. Nothing else is touched,
+  which is both the correct behaviour and, structurally, the reason the bug cannot
+  come back here: there is no concatenation left to get wrong. }
 function f_proper(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, r: String; i: Integer; atStart: Boolean; c: Char;
+var r: String; i: Integer; atStart: Boolean; c: Char;
 begin
-  E := NoError(); s := s0(A); r := ''; atStart := True;
-  for i := 1 to Length(s) do
+  E := NoError(); r := s0(A); atStart := True;
+  for i := 1 to Length(r) do
   begin
-    c := s[i];
+    c := r[i];
     if (c = ' ') or (c = #9) or (c = #10) or (c = #13) then
-    begin r := r + c; atStart := True; end
+      atStart := True
     else
     begin
       if atStart then
-      begin if (c >= 'a') and (c <= 'z') then c := Chr(Ord(c) - 32); end
-      else if (c >= 'A') and (c <= 'Z') then c := Chr(Ord(c) + 32);
-      r := r + c; atStart := False;
+      begin if (c >= 'a') and (c <= 'z') then r[i] := Chr(Ord(c) - 32); end
+      else if (c >= 'A') and (c <= 'Z') then r[i] := Chr(Ord(c) + 32);
+      atStart := False;
     end;
   end;
   Result := ValStr(r);
 end;
 
 function f_swapcase(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, r: String; i: Integer; c: Char;
+var r: String; i: Integer; c: Char;
 begin
-  E := NoError(); s := s0(A); r := '';
-  for i := 1 to Length(s) do
+  E := NoError(); r := s0(A);
+  for i := 1 to Length(r) do
   begin
-    c := s[i];
-    if (c >= 'a') and (c <= 'z') then c := Chr(Ord(c) - 32)
-    else if (c >= 'A') and (c <= 'Z') then c := Chr(Ord(c) + 32);
-    r := r + c;
+    c := r[i];
+    if (c >= 'a') and (c <= 'z') then r[i] := Chr(Ord(c) - 32)
+    else if (c >= 'A') and (c <= 'Z') then r[i] := Chr(Ord(c) + 32);
   end;
   Result := ValStr(r);
 end;

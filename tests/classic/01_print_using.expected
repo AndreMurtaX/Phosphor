@@ -10,3 +10,6 @@ h
 [worl]
 <1> <2> <3> 
   5|end
+á  7 é
+fmt bytes 8
+café:  42

@@ -75,7 +75,7 @@ var i, cnt: Integer; cur: String;
 begin
   Result := 0; cnt := 0; cur := '';
   for i := 1 to Length(S) + 1 do
-    if (i <= Length(S)) and (S[i] >= '0') and (S[i] <= '9') then cur := cur + S[i]
+    if (i <= Length(S)) and (S[i] >= '0') and (S[i] <= '9') then cur := cur + Copy(S, i, 1)
     else if cur <> '' then
     begin
       Inc(cnt);

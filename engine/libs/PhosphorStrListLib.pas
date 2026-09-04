@@ -274,16 +274,22 @@ var i: Integer; f: String;
     Result := False;
   end;
 
+var
+  dl, q: String;
 begin
+  // Delimiter and QuoteChar are Chars, and every use of them here -- appended, and
+  // handed to StringReplace -- converted them through this unit's code page, so a
+  // non-ASCII delimiter came out as '?' and the delimitedtext round trip broke.
+  // Taken as one-character STRINGS once, they travel as bytes.
+  dl := StringOfChar(Delimiter, 1);
+  q := StringOfChar(QuoteChar, 1);
   Result := '';
   for i := 0 to Count - 1 do
   begin
-    if i > 0 then Result := Result + Delimiter;
+    if i > 0 then Result := Result + dl;
     f := Items[i];
     if NeedsQuote(f) then
-      Result := Result + QuoteChar +
-                StringReplace(f, QuoteChar, QuoteChar + QuoteChar, [rfReplaceAll]) +
-                QuoteChar
+      Result := Result + q + StringReplace(f, q, q + q, [rfReplaceAll]) + q
     else
       Result := Result + f;
   end;

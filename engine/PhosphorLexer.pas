@@ -303,7 +303,7 @@ begin
             '\': s := s + '\';
             '"': s := s + '"';
           else
-            FErr := 'unknown escape sequence ''\' + FSrc[FPos + 1] + '''';
+            FErr := 'unknown escape sequence ''\' + Copy(FSrc, FPos + 1, 1) + '''';
             FErrLine := startLine;
             Exit(False);
           end;

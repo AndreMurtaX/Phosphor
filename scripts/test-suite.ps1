@@ -174,6 +174,37 @@ else {
     }
 }
 
+# --- source-level gates -------------------------------------------------------
+# Two invariants no compiler can check and no golden happens to cover:
+#   check-codepage.py  no Char is concatenated into a code-page string (bytes >= 128
+#                      are silently destroyed; the class has been swept three times)
+#   coverage.py        every registered built-in is exercised by a test AND listed in
+#                      the function reference
+# They are run HERE, in the acceptance gate, rather than in the build: building
+# should not need Python, but passing the suite should mean the invariants hold.
+# A missing interpreter is a FAILURE, not a skip -- a gate that quietly does not run
+# is worse than no gate, because it reads as a pass.
+Write-Host ''
+$py = (Get-Command python -ErrorAction SilentlyContinue)
+if (-not $py) { $py = (Get-Command python3 -ErrorAction SilentlyContinue) }
+if (-not $py) {
+    Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
+    $allOk = $false
+} else {
+    foreach ($gate in @('check-codepage.py', 'coverage.py')) {
+        $gp = Join-Path $here $gate
+        if (-not (Test-Path $gp)) { continue }
+        $gout = & $py.Source $gp 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host ("PASS  gate: {0}" -f $gate) -ForegroundColor Green
+        } else {
+            Write-Host ("FAIL  gate: {0}" -f $gate) -ForegroundColor Red
+            $gout | ForEach-Object { Write-Host ("         {0}" -f $_) -ForegroundColor DarkGray }
+            $allOk = $false
+        }
+    }
+}
+
 Write-Host ''
 if ($allOk) { Write-Host 'SUITE OK' -ForegroundColor Green; exit 0 }
 else { Write-Host 'SUITE FAILED' -ForegroundColor Red; exit 1 }

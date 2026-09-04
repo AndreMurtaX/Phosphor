@@ -261,7 +261,11 @@ begin
     if ARec.Event.KeyEvent.UnicodeChar <> #0 then
       Result := UTF8Encode(WideString(ARec.Event.KeyEvent.UnicodeChar))
     else                                   // arrow / function key: chr$(0) + VK code
-      Result := #0 + Chr(Byte(ARec.Event.KeyEvent.wVirtualKeyCode));
+      // Built by index, not by concatenation: a virtual-key code >= 128 (F-keys and
+      // the OEM range) would otherwise be re-encoded and the key misreported.
+      SetLength(Result, 2);
+      Result[1] := #0;
+      Result[2] := Chr(Byte(ARec.Event.KeyEvent.wVirtualKeyCode));
   end;
 end;
 

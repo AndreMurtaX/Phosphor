@@ -206,6 +206,16 @@ Rules, in order of how easily they are got wrong:
 - **`fpRead` (BaseUnix) is marked `inline` and FPC often declines to inline it**, which
   `-vewn` reports as a note. Call **`FileRead`** (SysUtils) instead — a plain function
   wrapping the same read — so the note stays inside the RTL, not your unit.
+- **A completeness claim in prose is a promise; make it a check.** `function-reference.md`
+  called itself the complete catalog and had drifted 14 functions behind the registry —
+  eight of them for months, unnoticed, because nothing compared the two. Prose cannot
+  fail a build. `scripts/coverage.py` now enumerates every `Reg.Add`/`AddHost` name and
+  exits non-zero if one is missing from the reference, exactly as it already did for
+  tests. The same rule applies to any invariant a comment asserts: if reordering,
+  renaming or deleting something would break it *silently*, the check belongs in a
+  script. `build-gui.{ps1,sh}` verify `PhosphorDisplayGuard` precedes `Interfaces` in
+  the `uses` clause for that reason — that order is the only thing making the guard
+  work, and violating it still compiles and still passes on Windows.
 
 ## 5. Gauntlet discipline (builder vs critic)
 
@@ -228,6 +238,25 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-04 · round 18 · asked whether the docs covered the new work; they did not.**
+  The honest answer needed an audit, not an assertion. Enumerating the registry against
+  `function-reference.md` found **14 undocumented built-ins** — six from the last two
+  rounds (the byte primitives, `callfunc%`, `callfunc?`) and **eight that had never been
+  listed at all** (the `dir_*`/`file_*` timestamp pairs), plus three stale section
+  counts. The README's `scripts/` row named three of seven scripts, and nothing recorded
+  the display guard's exit code 3 or that `phosphorgui` accepts a `.pbc`.
+  - **The lesson is not the 14 entries — it is that the drift was invisible.** A
+    document that calls itself complete has no way to fail. So the reference is now
+    gated by `coverage.py` alongside the test gate (§4): remove one entry → `UNDOCUMENTED:
+    bytelen`, exit 1; restore it → 659/659, exit 0. Seen failing before being trusted.
+  - Same reasoning applied one step further. Documenting the guard's load-order
+    invariant in `architecture.md` was still only a promise, and a uses-clause reorder
+    fails in the nastiest way available: compiles clean, green on Windows, silently
+    unguarded on Linux. Both `build-gui` scripts now check the order and refuse to
+    compile — proven both OSes with the lines swapped (exit 1) and restored (exit 0).
+  - Rule of thumb this produced: **when you write a comment saying "must stay X", ask
+    what fails if someone changes it. If the answer is "nothing, until much later",
+    write the check in the same commit as the comment.**
 - **2026-09-02 · round 17 · the complete runner, and a measurement stated too broadly.**
   Asked for one binary carrying every library including the graphical ones. Findings:
   compiling already covered everything (`CompileFile` touches the registry zero times);

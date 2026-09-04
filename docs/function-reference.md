@@ -55,7 +55,7 @@ absent.
 
 # Engine libraries (always available)
 
-## Str — strings (63 functions)
+## Str — strings (64 functions)
 
 Case, length, codepoint-aware slicing, trimming, search, replace, radix and
 number conversion, padding/justification, word and line splitting, predicates and
@@ -77,7 +77,7 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 
 | function | description |
 | --- | --- |
-| `len(s$) → num` | number of codepoints |
+| `len(s$) → num` | number of codepoints — **not** bytes; see the byte family below |
 | `left$(s$, n) → str` | first `n` codepoints |
 | `right$(s$, n) → str` | last `n` codepoints |
 | `mid$(s$, start [, len]) → str` | substring from 1-based `start`; to the end when `len` is omitted |
@@ -156,6 +156,19 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 | `isspace(s$) → num` | every character is whitespace |
 | `islower(s$) → num` | has a lowercase letter and no uppercase |
 | `isupper(s$) → num` | has an uppercase letter and no lowercase |
+
+### Bytes
+
+Everything above counts UTF-8 **codepoints**, and `chr$` *encodes* one (`chr$(200)` is
+two bytes). These four work in the byte domain, so binary data can be addressed
+directly. A `string$` carries all 256 byte values intact.
+
+| function | description |
+| --- | --- |
+| `bytelen(s$) → num` | number of **bytes** (`len` counts codepoints) |
+| `byteat(s$, i) → num` | value `0..255` of byte `i`, 1-based; error outside the string |
+| `bytestr$(v) → str` | a **one-byte** string holding `v` — the byte constructor `chr$` cannot be |
+| `bytemid$(s$, i, n) → str` | `n` bytes starting at byte `i`, clamped, never raises |
 
 ## Num — numeric (35 functions)
 
@@ -590,7 +603,7 @@ rejected.
 | `cfg_clear@(c@) → handle` | clear the whole config |
 | `cfg_autosave@(c@, on) → handle` | turn autosave on/off |
 
-## Io — files, directories, paths (67 registry entries)
+## Io — files, directories, paths (58 names / 67 registry entries)
 
 Whole-file text I/O that preserves bytes exactly (no BOM, no newline translation)
 plus an IOUtils-style surface. Path helpers are pure string operations that accept
@@ -612,6 +625,14 @@ a read of a missing file answers `""`) and recorded in `ioerror()`.
 | `file_move(src$, dst$) → num` | rename/move a file |
 | `file_createempty(path$) → num` | create an empty file |
 | `file_getsize(path$) → num` | file size in bytes |
+| `file_getlastwritetime(path$) → num` | last-modified time |
+| `file_setlastwritetime(path$, t) → num` | set the last-modified time |
+| `file_getlastaccesstime(path$) → num` | last-access time |
+| `file_setlastaccesstime(path$, t) → num` | set the last-access time |
+| `dir_getlastwritetime(path$) → num` | a directory's last-modified time |
+| `dir_setlastwritetime(path$, t) → num` | set it |
+| `dir_getlastaccesstime(path$) → num` | a directory's last-access time |
+| `dir_setlastaccesstime(path$, t) → num` | set it |
 | `file_readallbytes@(path$) → handle` | read a file into a byte-buffer handle |
 | `file_writeallbytes(path$, bytes@) → num` | write a byte-buffer handle to a file |
 
@@ -760,7 +781,7 @@ catchable runtime error.
 | `err_clear() → num` | reset the caught-error state |
 | `error(msg$) → num` | fail the current statement with a catchable runtime error carrying `msg$` |
 
-## Call — indirect calls (`callfunc`, 3 names / 18 registry entries)
+## Call — indirect calls (`callfunc`, 5 names / 30 registry entries)
 
 Calls a BASIC **user function** chosen at run time by name — the language face of
 the engine's re-entrant host-callback seam. The routine runs over the caller's
@@ -772,6 +793,8 @@ type; all spellings run the same primitive. An unknown name is a runtime error.
 | `callfunc(name$) → num` | call a user function by name with no argument |
 | `callfunc(name$, arg) → num` | call with one argument of any kind |
 | `callfunc$(name$ [, arg]) → str` | same, when the callee returns a string |
+| `callfunc%(name$ [, arg]) → int` | same, when the callee returns an int |
+| `callfunc?(name$ [, arg]) → bool` | same, when the callee returns a bool |
 | `callfunc@(name$ [, arg]) → handle` | same, when the callee returns a handle |
 
 ## Rag — local retrieval index (14 functions)

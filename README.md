@@ -62,8 +62,19 @@ to it, so one command reaches everything.
 The LCL cannot simply be loaded on demand: on Linux the gtk2 widgetset opens the X
 display in a unit *initialization* section, before `main`, so a binary that merely links
 it exits with `cannot open display` wherever none is reachable — a runtime flag cannot
-undo a link-time decision. **Compiling needs neither host**: the compiler is
-host-agnostic, so `phosphor compile <gui-app.bas> <out.pbc>` already works.
+undo a link-time decision.
+
+Both binaries therefore check for a session first and say so plainly instead of letting
+gtk print its bare warning: with neither `DISPLAY` nor `WAYLAND_DISPLAY` set they
+explain the problem, suggest `DISPLAY=:0 phosphor --gui …` or `phosphor run …`, and exit
+with code **3** (distinct from `1` program error and `2` usage, so a script can tell them
+apart). `phosphorgui` manages this by listing a guard unit *before* `Interfaces`, which
+puts its initialization ahead of the widgetset's. Windows needs no display, so the guard
+is Unix-only.
+
+**Compiling needs neither host**: the compiler is host-agnostic, so `phosphor compile
+<gui-app.bas> <out.pbc>` already works — and both runners accept either a `.bas` or the
+`.pbc` it produces.
 
 `phosphor` (the console host) is the develop-compile-run tool. There is no dedicated
 IDE — write `.bas` in any editor and run it. For a GUI program, `phosphorgui
@@ -104,7 +115,7 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | the byte-exact oracle suite, negatives, classic tests, packages. |
 | `examples/`      | runnable example programs.                                       |
-| `scripts/`       | `build.{ps1,sh}`, `test-suite.{ps1,sh}`, `test-packages.{ps1,sh}`.|
+| `scripts/`       | `build`, `build-gui`, `test-suite`, `test-packages`, `test-classic` (`.ps1`/`.sh`), `coverage.py`.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

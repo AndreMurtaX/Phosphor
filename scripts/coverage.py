@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test-coverage report for the Phosphor libraries.
+"""Coverage report for the Phosphor libraries: tests AND documentation.
 
 Enumerates every built-in function registered in engine/libs and host/packages
 (the authoritative source is each `Reg.Add('name:sig', ...)` / `Reg.AddHost(...)`
@@ -12,6 +12,11 @@ A handful of built-ins are reached only through SYNTAX SUGAR, never by name -- a
 and a `[...]`/`{...}` literal to the json_*val@/json_*null@/json_array@/json_object@
 builders. Those are exercised by every test that uses the sugar, so they are listed
 in SUGAR_BACKED and counted as covered.
+
+It also checks that every built-in appears in docs/function-reference.md, which calls
+itself the complete catalog. That claim went stale silently once: eight dir_*/file_*
+timestamp functions had never been listed, and four byte primitives plus two callfunc
+spellings were added without it. A gate is cheaper than a promise.
 
 Usage:  python scripts/coverage.py [--list]      (--list prints uncovered names)
 """
@@ -85,13 +90,40 @@ def main():
     print(f"{'TOTAL':<26}{total:>5}{covered:>9}{total-covered:>5}")
     print(f"\ncoverage: {covered}/{total} = {pct}%  "
           f"({len(SUGAR_BACKED)} sugar-backed counted as covered)")
+    rc = 0
     if uncovered_all:
-        print("\nUNCOVERED:")
+        print()
+        print("UNTESTED:")
         for lib, n in uncovered_all:
             print(f"  {lib}: {n}")
-        return 1
-    print("every registered function is exercised by a test.")
-    return 0
+        rc = 1
+    else:
+        print("every registered function is exercised by a test.")
+
+    # --- documentation gate ----------------------------------------------------
+    # The reference calls itself the complete catalog; hold it to that.
+    ref = os.path.join(ROOT, 'docs', 'function-reference.md')
+    try:
+        doc = open(ref, encoding='utf-8', errors='ignore').read().lower()
+    except OSError:
+        print()
+        print("function-reference.md not found -- gate skipped")
+        return rc
+    all_names = set()
+    for lib in libs:
+        all_names |= registered_names(lib)
+    undocumented = sorted(n for n in all_names if n not in doc)
+    print()
+    print(f"documented: {len(all_names) - len(undocumented)}/{len(all_names)}"
+          f" in docs/function-reference.md")
+    if undocumented:
+        print("UNDOCUMENTED:")
+        for n in undocumented:
+            print(f"  {n}")
+        rc = 1
+    else:
+        print("every registered function is in the reference.")
+    return rc
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -206,6 +206,28 @@ Rules, in order of how easily they are got wrong:
 - **`fpRead` (BaseUnix) is marked `inline` and FPC often declines to inline it**, which
   `-vewn` reports as a note. Call **`FileRead`** (SysUtils) instead — a plain function
   wrapping the same read — so the note stays inside the RTL, not your unit.
+- **GREEN SUITES PROVE THE ABSENCE OF REGRESSION, NOT THE PRESENCE OF CORRECTNESS.**
+  With 659/659 functions covered and every golden byte-exact on both OSes, an
+  adversarial hunt (12 finder agents over disjoint slice x failure-mode pairs, every
+  finding put to three independent refuters, 74 candidates -> 69 confirmed) found
+  defects the suites could not see, including ones that killed the process: ordinary
+  arithmetic raising a hardware trap `on error` could not catch, an archive entry
+  writing outside its destination, a handler silently corrupting the arithmetic it
+  returned to. The suites were not weak; they were answering a different question.
+  When a subsystem is "done", the next useful move is to attack it, not to extend it.
+- **Fix the CLASS, and when a class recurs, write the CHECK.** Each of these rounds
+  fixed a root rather than a list: one finiteness invariant instead of seven
+  arithmetic patches, one saturating narrowing primitive instead of 131 conversion
+  sites, one overlap-preserving rule instead of seven ON ERROR symptoms. And a class
+  that has already been swept twice does not need a third sweep, it needs
+  `scripts/check-codepage.py`: the check found ELEVEN sites where the hunt had
+  reported five.
+- **A blanket replace is only as good as the audit of what it replaced.** Replacing
+  `Round(AsDouble(x))` with the saturating `ArgI32(x)` at 131 sites was right at 128
+  of them and WRONG at three, where the callee wanted a value rather than an index --
+  hex$ started answering in 32 bits. The call sites were indistinguishable; only the
+  callees' types told them apart. After any mechanical sweep, re-run the original
+  reproductions against the FIXED build rather than assuming uniformity.
 - **A completeness claim in prose is a promise; make it a check.** `function-reference.md`
   called itself the complete catalog and had drifted 14 functions behind the registry —
   eight of them for months, unnoticed, because nothing compared the two. Prose cannot
@@ -238,6 +260,34 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-04 · round 19 · an adversarial hunt on a project that looked finished.**
+  Every suite green, byte-exact on both OSes, 659/659 documented and tested. Twelve
+  finders over disjoint slice x lens pairs, three refuters per finding: **69 confirmed
+  defects**, thirteen of them critical. Reproduced every headline one by hand before
+  acting -- all of them stood. Fixed so far, by class, each with regression tests and
+  both OSes verified: hardware traps escaping the VM (`10.0^200 * 10.0^200` exited
+  217 and `on error` could not see it); the codepage char-concat class for the third
+  time, now with a check; 131 unchecked narrowings (`dict_key(d@, 4294967297)`
+  truncated to 1 and walked past the bounds test one line below it); zip-slip and
+  packages freeing handles they did not own; and ON ERROR across re-entrant calls.
+  - **The ON ERROR round is the one worth reading.** Seven confirmed defects, four
+    roots. The deepest: a handler runs at the level it was INSTALLED at while
+    `resume` returns to the level the failing STATEMENT ran at, and everything
+    between belonged to the pending resume -- so the handler ran directly on top of
+    it and `1000 + risky(0)` came back as 12. The engine had no bug in any single
+    line; it had two different meanings for "where we are".
+  - **Fixing one defect can expose another that was masked.** Making a nested fault
+    propagate OUTWARD (root 2) immediately produced an infinite loop, because the
+    statement boundary lived in FIELDS and every statement run by a nested call had
+    been overwriting the outer activation's resume point all along. Nobody could see
+    it while faults were mishandled locally. Budget for this: after a structural
+    fix, re-run the reproductions expecting NEW failures, not just the old ones gone.
+  - **My own mechanical sweep introduced a regression** (hex$ in 32 bits), found by
+    re-running the hunt's reproductions against the fixed build. Rule in section 4.
+  - **Seeing it fail found a hole in the CHECK, not the code.** The first
+    check-codepage.py anchored to the start of a line, so reintroducing `if c then
+    r := r + c` did not trip it. A check you have not watched fail is a check you
+    have not written.
 - **2026-09-04 · round 18 · asked whether the docs covered the new work; they did not.**
   The honest answer needed an audit, not an assertion. Enumerating the registry against
   `function-reference.md` found **14 undocumented built-ins** — six from the last two

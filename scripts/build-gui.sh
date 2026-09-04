@@ -23,6 +23,18 @@ done
 [ -n "$lcl" ] || { echo "LCL gtk2 units not found (install lazarus/lcl-gtk2)"; exit 1; }
 lazroot="${lcl%/lcl/units/*}"
 
+# The display guard works ONLY because its unit initialization runs before the
+# widgetset's, and unit initialization runs in `uses` order. Reordering the clause
+# leaves a binary that still compiles and still passes on Windows, and silently stops
+# guarding here -- so check the order rather than trust it.
+lpr="$root/host/gui/phosphorgui.lpr"
+gline="$(grep -niE '^[[:space:]]*PhosphorDisplayGuard[[:space:]]*,' "$lpr" | head -1 | cut -d: -f1)"
+iline="$(grep -niE '^[[:space:]]*Interfaces[[:space:]]*,' "$lpr" | head -1 | cut -d: -f1)"
+[ -n "$gline" ] && [ -n "$iline" ] || {
+  echo "phosphorgui.lpr: PhosphorDisplayGuard and Interfaces must both be in uses"; exit 1; }
+[ "$gline" -lt "$iline" ] || {
+  echo "phosphorgui.lpr: PhosphorDisplayGuard must be listed BEFORE Interfaces (see docs/architecture.md)"; exit 1; }
+
 bin="$root/bin"; units="$bin/gui-units/${cpu}-linux"; exe="$bin/phosphorgui"
 mkdir -p "$units"; rm -f "$exe"
 log="$("$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \

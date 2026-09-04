@@ -46,6 +46,20 @@ $exe      = Join-Path $binDir 'phosphorgui.exe'
 New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
+# The display guard works ONLY because its unit initialization runs before the
+# widgetset's, and unit initialization runs in `uses` order. Reordering the clause
+# leaves a binary that still compiles and still passes on Windows, and silently
+# stops guarding on Linux -- so check the order here rather than trust it.
+$lpr = Get-Content (Join-Path $root 'host\gui\phosphorgui.lpr') -Raw
+$g = [regex]::Match($lpr, '(?im)^\s*PhosphorDisplayGuard\s*,')
+$i = [regex]::Match($lpr, '(?im)^\s*Interfaces\s*,')
+if (-not $g.Success -or -not $i.Success) {
+    Write-Error 'phosphorgui.lpr: PhosphorDisplayGuard and Interfaces must both be in uses'; exit 1
+}
+if ($g.Index -gt $i.Index) {
+    Write-Error 'phosphorgui.lpr: PhosphorDisplayGuard must be listed BEFORE Interfaces (see docs/architecture.md)'; exit 1
+}
+
 Write-Host "compiler: $fpcExe"
 $blog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" -dLCL -dLCLwin32 `
     "-Fu$(Join-Path $lcl 'win32')" "-Fu$lcl" `

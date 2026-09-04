@@ -37,7 +37,7 @@
     </Target>
     <SearchPaths>
       <IncludeFiles Value="$(ProjOutDir)"/>
-      <OtherUnitFiles Value="../../engine;../../engine/libs"/>
+      <OtherUnitFiles Value="../../engine;../../engine/libs;../../host/packages"/>
       <UnitOutputDirectory Value="../../bin/units/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
     <Parsing>

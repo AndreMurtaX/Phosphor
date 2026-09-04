@@ -101,3 +101,23 @@ after_dt2:
 on error goto 0
 assert_eq(caught%, 1, "year 0 is refused")
 assert_eq(weeksinayear(2024), 52, "and a real year answers")
+
+test_case("registry/an absurdly wide call is refused at once, not searched for")
+rem Overload resolution enumerates 2^k combinations of int-widening, which is
+rem nothing for the six-argument signatures this registry holds and 33 million for a
+rem call with 25 integer arguments -- inside ONE opcode, so the step budget never
+rem got a chance to stop it. Nothing is registered that wide, so nothing can match:
+rem the widest registered arity turns that into an O(1) answer.
+wide% = 0
+on error goto hw
+z = no_such_function_at_all(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25)
+goto after_wide
+hw:
+wide% = 1
+resume next
+after_wide:
+on error goto 0
+assert_eq(wide%, 1, "reported as an unknown function")
+assert_eq(err(), 4, "with the unknown-function code")
+assert_eq(max(3, 7), 7, "and ordinary resolution still works")
+assert_eq(instr("hello", "l", 2), 3, "including the widened-int overloads")

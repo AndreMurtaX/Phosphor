@@ -61,6 +61,7 @@ type
     FFuncs: array of TPhosphorFunc;
     FHostFuncs: array of TPhosphorHostFunc;
     FIsHost: array of Boolean;
+    FMaxArity: Integer;   // the widest arity anything is registered under
     FCount: Integer;
     function IndexOfKey(const AKey: String): Integer;
     function EnsureSlot(const AKey: String): Integer;
@@ -90,6 +91,8 @@ end;
 { Return the index of AKey (a lowercase signature), creating an empty slot if it
   is new. The three parallel arrays grow together. }
 function TPhosphorRegistry.EnsureSlot(const AKey: String): Integer;
+var
+  i: Integer;
 begin
   Result := IndexOfKey(AKey);
   if Result >= 0 then Exit;
@@ -101,6 +104,14 @@ begin
     SetLength(FIsHost, (FCount + 1) * 2);
   end;
   FKeys[FCount] := AKey;
+  // The widest arity anything is registered under. Resolve enumerates 2^k
+  // combinations of int-widening, which is nothing for the six-argument signatures
+  // this registry actually holds and 33 million for a call with 25 integer
+  // arguments -- inside ONE opcode, so the step budget never got a chance to stop
+  // it. A call wider than anything registered cannot match, and knowing the widest
+  // makes that an O(1) answer instead of an exhaustive search for nothing.
+  i := Pos(':', AKey);
+  if (i > 0) and (Length(AKey) - i > FMaxArity) then FMaxArity := Length(AKey) - i;
   Result := FCount;
   Inc(FCount);
 end;
@@ -162,6 +173,9 @@ begin
   codes := nil;
   lname := LowerCase(AName);
   n := Length(AKinds);
+  // Nothing is registered this wide, so nothing can match: say so now rather than
+  // walking 2^k widening combinations to reach the same conclusion.
+  if n > FMaxArity then Exit;
 
   // Positions of int arguments (the only ones that may widen).
   SetLength(intPos, 0);

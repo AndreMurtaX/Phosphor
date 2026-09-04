@@ -58,3 +58,23 @@ ok% = file_delete(path_combine$(dd$, "ab.txt"))
 ok% = file_delete(path_combine$(dd$, "B.txt"))
 ok% = file_delete(path_combine$(dd$, "e.txt"))
 ok% = dir_delete(dd$)
+
+rem --- a file open for reading can still be opened for writing -----------------
+rem fmCreate alone takes an exclusive share on Windows and nothing at all on Linux,
+rem so this errored on one platform and worked on the other.
+sf$ = path_combine$(temppath$(), "phosphor_share.txt")
+ok% = file_writealltext(sf$, "content")
+open sf$ for input as #1
+shared% = 1
+on error goto noshare
+open sf$ for output as #4
+goto after_share
+noshare:
+shared% = 0
+resume next
+after_share:
+on error goto 0
+println "share  "; shared%
+close #1
+close #4
+ok% = file_delete(sf$)

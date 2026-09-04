@@ -480,7 +480,12 @@ begin
           FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
         end;
       cmOutput:
-        FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+        // fmCreate ALONE takes an exclusive share on Windows and nothing at all on
+        // Linux, so `open f$ for input as #1 : open f$ for output as #4` errored on
+        // one platform and worked on the other. Denying other WRITERS while still
+        // letting readers in matches what an output channel means, and makes the
+        // two platforms answer the same.
+        FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate or fmShareDenyWrite);
       cmAppend:
         begin
           if FileExists(APath) then
@@ -489,7 +494,7 @@ begin
             FChannels[ANum].Stream.Seek(0, soEnd);
           end
           else
-            FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+            FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate or fmShareDenyWrite);
         end;
       cmBinary:
         begin
@@ -497,7 +502,7 @@ begin
           if FileExists(APath) then
             FChannels[ANum].Stream := TFileStream.Create(APath, fmOpenReadWrite or fmShareDenyWrite)
           else
-            FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate);
+            FChannels[ANum].Stream := TFileStream.Create(APath, fmCreate or fmShareDenyWrite);
         end;
     end;
     FChannels[ANum].Open := True;

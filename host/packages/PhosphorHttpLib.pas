@@ -759,7 +759,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.ConnectTimeout := Round(AsDouble(Args[1])); Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.ConnectTimeout := ArgI32(Args[1]); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -768,7 +768,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.ResponseTimeout := Round(AsDouble(Args[1])); Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.ResponseTimeout := ArgI32(Args[1]); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -957,7 +957,7 @@ begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin
-    c.ProxyHost := Args[1].Str; c.ProxyPort := Round(AsDouble(Args[2]));
+    c.ProxyHost := Args[1].Str; c.ProxyPort := ArgI32(Args[2]);
     Result := ValInt(1); gHttpErr := HTTP_OK;
   end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1065,7 +1065,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.MaxRedirects := Round(AsDouble(Args[1])); Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.MaxRedirects := ArgI32(Args[1]); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -1222,7 +1222,7 @@ function f_http_strerror(const Args: array of TValue; out Err: TPhosphorError): 
 var code: Integer;
 begin
   Err := NoError();
-  code := Round(AsDouble(Args[0]));
+  code := ArgI32(Args[0]);
   case code of
     HTTP_OK:      Result := ValStr('no error');
     HTTP_EHANDLE: Result := ValStr('invalid handle');

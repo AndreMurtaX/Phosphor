@@ -65,7 +65,7 @@ end;
 
 function NArg(const V: TValue): Integer;
 begin
-  Result := Round(AsDouble(V));
+  Result := ArgI32(V);
 end;
 
 { ANSI SGR code for a colour index: 0..7 -> normal, 8..15 -> bright; anything else is

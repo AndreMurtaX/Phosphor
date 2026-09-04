@@ -570,7 +570,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   Result := ValStr(l.Items[z]);
 end;
 
@@ -579,7 +579,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   l.Items[z] := Args[2].Str;
   Result := ValInt(1);
 end;
@@ -598,7 +598,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), True, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), True, z, Err) then Exit;
   l.InsertAt(z, Args[2].Str);
   Result := ValInt(l.Count);
 end;
@@ -608,7 +608,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   l.DeleteAt(z);
   Result := ValInt(l.Count);
 end;
@@ -618,8 +618,8 @@ var l: TPhosphorStringList; za, zb: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, za, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[2])), False, zb, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, za, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[2]), False, zb, Err) then Exit;
   l.Exchange(za, zb);
   Result := ValInt(1);
 end;
@@ -629,8 +629,8 @@ var l: TPhosphorStringList; zf, zt: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, zf, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[2])), False, zt, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, zf, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[2]), False, zt, Err) then Exit;
   l.MoveItem(zf, zt);
   Result := ValInt(1);
 end;
@@ -701,7 +701,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.CapacitySet(Round(AsDouble(Args[1])));
+  l.CapacitySet(ArgI32(Args[1]));
   Result := ValInt(l.CapacityGet());
 end;
 
@@ -832,7 +832,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   Result := ValStr(l.ValueAt(z));
 end;
 
@@ -841,7 +841,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   l.SetValueAt(z, Args[2].Str);
   Result := ValInt(1);
 end;
@@ -851,7 +851,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   Result := ValStr(l.NameAt(z));
 end;
 
@@ -862,7 +862,7 @@ var l: TPhosphorStringList; z: Integer;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  if not CheckIndex(l, Round(AsDouble(Args[1])), False, z, Err) then Exit;
+  if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
   Result := ValStr(l.NameAt(z));
 end;
 

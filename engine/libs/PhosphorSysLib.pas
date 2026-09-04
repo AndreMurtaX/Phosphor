@@ -38,7 +38,7 @@ const
 function t_paramcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValInt(ParamCount); end;
 function t_paramstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(ParamStr(Round(AsDouble(Args[0])))); end;
+begin Err := NoError(); Result := ValStr(ParamStr(ArgI32(Args[0]))); end;
 
 // --- separators -------------------------------------------------------------
 function t_dirseparator(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -109,7 +109,7 @@ function t_colortostr(const Args: array of TValue; out Err: TPhosphorError): TVa
 var n, i: Integer;
 begin
   Err := NoError();
-  n := Round(AsDouble(Args[0]));
+  n := ArgI32(Args[0]);
   for i := 0 to High(ColorVals) do
     if ColorVals[i] = n then begin Result := ValStr(ColorNames[i]); Exit; end;
   Result := ValStr('$' + IntToHex(n, 6));

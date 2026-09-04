@@ -27,8 +27,8 @@ implementation
 
 function D0(const A: array of TValue): TDateTime; begin Result := AsDouble(A[0]); end;
 function D1(const A: array of TValue): TDateTime; begin Result := AsDouble(A[1]); end;
-function I0(const A: array of TValue): Integer; begin Result := Round(AsDouble(A[0])); end;
-function I1(const A: array of TValue): Integer; begin Result := Round(AsDouble(A[1])); end;
+function I0(const A: array of TValue): Integer; begin Result := ArgI32(A[0]); end;
+function I1(const A: array of TValue): Integer; begin Result := ArgI32(A[1]); end;
 
 // --- decomposition ----------------------------------------------------------
 function t_yearof(const A: array of TValue; out E: TPhosphorError): TValue;

@@ -117,11 +117,11 @@ var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TComboBox); if s <> 
 function f_combo_count(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TComboBox); if s <> nil then Result := ValInt(s.Count) else Result := ValInt(0); end;
 function f_combo_item(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: TStrings; n: Integer; begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TComboBox); if s <> nil then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
+var s: TStrings; n: Integer; begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TComboBox); if s <> nil then begin n := ArgI32(A[1]); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
 function f_combo_clear(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TComboBox); if s <> nil then s.Clear; Result := A[0]; end;
 function f_combo_index_set(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; IndexSet(A[0].Hnd, TComboBox, Round(AsDouble(A[1]))); Result := A[0]; end;
+begin E := NoError; IndexSet(A[0].Hnd, TComboBox, ArgI32(A[1])); Result := A[0]; end;
 function f_combo_index_get(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValInt(IndexGet(A[0].Hnd, TComboBox)); end;
 function f_combo_text(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -137,11 +137,11 @@ var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TListBox); if s <> n
 function f_list_count(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TListBox); if s <> nil then Result := ValInt(s.Count) else Result := ValInt(0); end;
 function f_list_item(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: TStrings; n: Integer; begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TListBox); if s <> nil then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
+var s: TStrings; n: Integer; begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TListBox); if s <> nil then begin n := ArgI32(A[1]); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
 function f_list_clear(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TListBox); if s <> nil then s.Clear; Result := A[0]; end;
 function f_list_index_set(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; IndexSet(A[0].Hnd, TListBox, Round(AsDouble(A[1]))); Result := A[0]; end;
+begin E := NoError; IndexSet(A[0].Hnd, TListBox, ArgI32(A[1])); Result := A[0]; end;
 function f_list_index_get(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValInt(IndexGet(A[0].Hnd, TListBox)); end;
 function f_list_selected(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -178,19 +178,19 @@ function f_clb_item(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; n: Integer;
 begin
   E := NoError; Result := ValStr('');
-  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValStr(TCheckListBox(c).Items[n-1]); end;
+  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := ArgI32(A[1]); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValStr(TCheckListBox(c).Items[n-1]); end;
 end;
 function f_clb_checked_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; n: Integer;
 begin
   E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then TCheckListBox(c).Checked[n-1] := ArgOn(A[2]) else GGuiError := 1; end;
+  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := ArgI32(A[1]); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then TCheckListBox(c).Checked[n-1] := ArgOn(A[2]) else GGuiError := 1; end;
 end;
 function f_clb_checked_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; n: Integer;
 begin
   E := NoError; Result := ValInt(0);
-  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := Round(AsDouble(A[1])); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValInt(Ord(TCheckListBox(c).Checked[n-1])); end;
+  if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := ArgI32(A[1]); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValInt(Ord(TCheckListBox(c).Checked[n-1])); end;
 end;
 
 procedure RegisterChoiceFuncs(Reg: TPhosphorRegistry);

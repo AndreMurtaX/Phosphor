@@ -45,7 +45,7 @@ begin
 end;
 
 function I(const V: TValue): Integer;
-begin Result := Round(AsDouble(V)); end;
+begin Result := ArgI32(V); end;
 
 // --- bitmap surface ---------------------------------------------------------
 function f_bitmap(const A: array of TValue; out E: TPhosphorError): TValue;

@@ -923,7 +923,7 @@ var r: TPhosphorRag;
 begin
   Err := NoError();
   if AsRag(Args[0], r) then
-    Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, Round(AsDouble(Args[2]))), False, False))
+    Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, ArgI32(Args[2])), False, False))
   else Result := ValStr('');
 end;
 

@@ -60,8 +60,8 @@ begin
   if Length(Args) >= 1 then frm.Caption := Args[0].Str;
   if Length(Args) >= 3 then
   begin
-    frm.Width := Round(AsDouble(Args[1]));
-    frm.Height := Round(AsDouble(Args[2]));
+    frm.Width := ArgI32(Args[1]);
+    frm.Height := ArgI32(Args[2]);
   end;
   Result := ValHandle(GuiRegister(frm, True));   // a form owns its tree
 end;
@@ -86,7 +86,7 @@ function f_form_width_set(const Args: array of TValue; out Err: TPhosphorError):
 var c: TComponent;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Width := Round(AsDouble(Args[1]));
+  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Width := ArgI32(Args[1]);
   Result := Args[0];
 end;
 
@@ -102,7 +102,7 @@ function f_form_height_set(const Args: array of TValue; out Err: TPhosphorError)
 var c: TComponent;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Height := Round(AsDouble(Args[1]));
+  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Height := ArgI32(Args[1]);
   Result := Args[0];
 end;
 

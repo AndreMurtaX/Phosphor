@@ -64,7 +64,7 @@ var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TPageControl, c) the
 function f_pagecount(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TPageControl, c) then Result := ValInt(TPageControl(c).PageCount) else Result := ValInt(0); end;
 function f_pageindex_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TPageControl, c) then TPageControl(c).ActivePageIndex := Round(AsDouble(A[1])) - 1; Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TPageControl, c) then TPageControl(c).ActivePageIndex := ArgI32(A[1]) - 1; Result := A[0]; end;
 function f_pageindex_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TPageControl, c) then Result := ValInt(TPageControl(c).ActivePageIndex + 1) else Result := ValInt(0); end;
 
@@ -91,11 +91,11 @@ var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TSplitter, c) then R
 function f_bevel(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TBevel, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
 function f_bevel_shape_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then begin n := Round(AsDouble(A[1])); if (n >= Ord(Low(TBevelShape))) and (n <= Ord(High(TBevelShape))) then TBevel(c).Shape := TBevelShape(n); end; Result := A[0]; end;
+var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then begin n := ArgI32(A[1]); if (n >= Ord(Low(TBevelShape))) and (n <= Ord(High(TBevelShape))) then TBevel(c).Shape := TBevelShape(n); end; Result := A[0]; end;
 function f_bevel_shape_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then Result := ValInt(Ord(TBevel(c).Shape)) else Result := ValInt(0); end;
 function f_bevel_style_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then begin n := Round(AsDouble(A[1])); if (n >= Ord(Low(TBevelStyle))) and (n <= Ord(High(TBevelStyle))) then TBevel(c).Style := TBevelStyle(n); end; Result := A[0]; end;
+var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then begin n := ArgI32(A[1]); if (n >= Ord(Low(TBevelStyle))) and (n <= Ord(High(TBevelStyle))) then TBevel(c).Style := TBevelStyle(n); end; Result := A[0]; end;
 function f_bevel_style_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then Result := ValInt(Ord(TBevel(c).Style)) else Result := ValInt(0); end;
 

@@ -122,16 +122,30 @@ function DoDim(AKind: TArrayKind; const Args: array of TValue; out Err: TPhospho
 var
   dims: array of Int64;
   i: Integer;
+  total: Int64;
 begin
   Err := NoError();
   Result := ValHandle(0);
   SetLength(dims, Length(Args));
+  total := 1;
   for i := 0 to High(Args) do
   begin
-    dims[i] := Round(AsDouble(Args[i]));
+    // ArgI64, not ArgI32: a dimension is declared Int64, and silently CAPPING a
+    // dimension at 2^31-1 would make ubound report a size the caller never asked
+    // for. Too large is rejected below, not quietly shrunk.
+    dims[i] := ArgI64(Args[i]);
     if dims[i] < 1 then
     begin
       Err := MakeError(peRuntime, 'array dimension must be >= 1');
+      Exit;
+    end;
+    // The product decides how many slots are ALLOCATED while each dimension decides
+    // what ubound REPORTS. If the product wraps, the two disagree and every index in
+    // the gap writes outside the allocation -- so the multiplication is checked.
+    if not TryMulI64(total, dims[i], total) then
+    begin
+      Err := MakeError(peIntOverflow,
+        'array is too large: the dimensions multiply out beyond the integer range');
       Exit;
     end;
   end;
@@ -157,7 +171,7 @@ begin
   if not GetArr(Args[0], a, Err) then Exit;
   SetLength(idx, Length(Args) - 2);
   for i := 1 to High(Args) - 1 do
-    idx[i - 1] := Round(AsDouble(Args[i]));
+    idx[i - 1] := ArgI32(Args[i]);
   Err := a.FlatIndex(idx, flat);
   if IsError(Err) then Exit;
   a.Data[flat] := Args[High(Args)];
@@ -176,7 +190,7 @@ begin
   if not GetArr(Args[0], a, Err) then Exit;
   SetLength(idx, Length(Args) - 1);
   for i := 1 to High(Args) do
-    idx[i - 1] := Round(AsDouble(Args[i]));
+    idx[i - 1] := ArgI32(Args[i]);
   Err := a.FlatIndex(idx, flat);
   if IsError(Err) then Exit;
   Result := a.Data[flat];
@@ -201,7 +215,7 @@ var a: TPhosphorArray; d: Integer;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  d := Round(AsDouble(Args[1]));
+  d := ArgI32(Args[1]);
   if (d < 1) or (d > Length(a.Dims)) then
   begin
     Err := MakeError(peRuntime, 'ubound: no such dimension');
@@ -237,7 +251,7 @@ end;
 function t_pointer(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  Result := ValHandle(Round(AsDouble(Args[0])));
+  Result := ValHandle(ArgI64(Args[0]));
 end;
 
 function t_arr_free(const Args: array of TValue; out Err: TPhosphorError): TValue;

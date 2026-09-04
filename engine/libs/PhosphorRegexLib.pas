@@ -93,7 +93,7 @@ var r: TRegExpr; n: Integer;
 begin
   Result := ValStr('');
   Err := NoError();
-  n := Round(AsDouble(Args[2]));   // group number, 0 = whole match
+  n := ArgI32(Args[2]);   // group number, 0 = whole match
   r := TRegExpr.Create();
   try
     try

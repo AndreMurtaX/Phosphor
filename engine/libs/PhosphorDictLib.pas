@@ -209,7 +209,7 @@ var d: TPhosphorDict; i: Integer;
 begin
   Result := ValStr('');
   if not GetDict(Args[0], d, Err) then Exit;
-  i := Round(AsDouble(Args[1])) - 1;
+  i := ArgI32(Args[1]) - 1;
   if (i < 0) or (i >= d.Count) then
   begin
     Err := MakeError(peRuntime, Format('dict index %d out of bounds 1..%d', [i + 1, d.Count]));

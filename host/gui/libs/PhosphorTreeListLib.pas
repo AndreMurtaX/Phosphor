@@ -111,7 +111,7 @@ begin
   E := NoError; Result := ValStr('');
   if GuiResolveObj(A[0].Hnd, TListItem, o) then
   begin
-    n := Round(AsDouble(A[1]));   // 1-based
+    n := ArgI32(A[1]);   // 1-based
     if (n >= 1) and (n <= TListItem(o).SubItems.Count) then Result := ValStr(TListItem(o).SubItems[n-1]);
   end;
 end;

@@ -158,6 +158,14 @@ function InI64Range(const D: Double): Boolean;
 // value, and it killed the interpreter from five separate sites before this existed.
 function TryD2I(const D: Double; out I: Int64): Boolean;
 
+// Narrow a value that came FROM A PROGRAM into an index, a count or a size.
+// SATURATING, never wrapping and never raising: an argument too large clamps to the
+// type's limit, so the bounds check that follows rejects it instead of being handed
+// a wrapped-around value that looks valid. NaN answers 0.
+// Use these, never `ArgI32(v)`, on anything a program supplied.
+function ArgI32(const V: TValue): Integer;
+function ArgI64(const V: TValue): Int64;
+
 // Checked Int64 primitives (exposed so libraries can test overflow-as-error) -
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
 function TrySubI64(const A, B: Int64; out R: Int64): Boolean;
@@ -181,6 +189,26 @@ begin
   I := 0;
   Result := InI64Range(D);
   if Result then I := Round(D);
+end;
+
+function ArgI64(const V: TValue): Int64;
+var d: Double;
+begin
+  if V.Kind = vkInt then Exit(V.Int);     // exact: no trip through Double
+  d := AsDouble(V);
+  if d <> d then Result := 0                                  // NaN
+  else if d >= 9223372036854775808.0 then Result := High(Int64)
+  else if d <= -9223372036854775808.0 then Result := Low(Int64)
+  else Result := Round(d);
+end;
+
+function ArgI32(const V: TValue): Integer;
+var i: Int64;
+begin
+  i := ArgI64(V);
+  if i > High(Integer) then Result := High(Integer)
+  else if i < Low(Integer) then Result := Low(Integer)
+  else Result := Integer(i);
 end;
 
 { THE FINITENESS GATE. Every double-producing operator returns through here.

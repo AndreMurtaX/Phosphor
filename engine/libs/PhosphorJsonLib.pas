@@ -320,7 +320,7 @@ var a: TJSONArray; z: Integer;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  z := Round(AsDouble(Args[1])) - 1;
+  z := ArgI32(Args[1]) - 1;
   if (z >= 0) and (z < a.Count) then Result := NumVal(a.Items[z])
   else if Length(Args) >= 3 then Result := Args[2]
   else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
@@ -331,7 +331,7 @@ var a: TJSONArray; z: Integer;
 begin
   Result := ValStr('');
   if not GetArr(Args[0], a, Err) then Exit;
-  z := Round(AsDouble(Args[1])) - 1;
+  z := ArgI32(Args[1]) - 1;
   if (z >= 0) and (z < a.Count) then Result := ValStr(StrVal(a.Items[z]))
   else if Length(Args) >= 3 then Result := Args[2]
   else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
@@ -521,7 +521,7 @@ var a: TJSONArray; z: Integer;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  z := Round(AsDouble(Args[1])) - 1;
+  z := ArgI32(Args[1]) - 1;
   if (z >= 0) and (z < a.Count) and (a.Items[z].JSONType = jtBoolean) then
     Result := ValInt(Ord(a.Items[z].AsBoolean));
 end;
@@ -530,7 +530,7 @@ var a: TJSONArray; z: Integer;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  z := Round(AsDouble(Args[1])) - 1;
+  z := ArgI32(Args[1]) - 1;
   if (z < 0) or (z >= a.Count) then
   begin
     Err := MakeError(peRuntime, 'json array index out of bounds');
@@ -545,7 +545,7 @@ var a: TJSONArray; z: Integer;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  z := Round(AsDouble(Args[1])) - 1;
+  z := ArgI32(Args[1]) - 1;
   if (z >= 0) and (z < a.Count) then a.Delete(z);
   Result := Args[0];
 end;
@@ -617,7 +617,7 @@ begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
   if Length(Args) >= 2 then
-    Result := ValStr(n.FormatJSON(DefaultFormat, Round(AsDouble(Args[1]))))
+    Result := ValStr(n.FormatJSON(DefaultFormat, ArgI32(Args[1])))
   else
     Result := ValStr(n.FormatJSON());
 end;

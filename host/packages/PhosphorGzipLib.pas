@@ -245,7 +245,7 @@ function f_gzip_compress_lvl(const Args: array of TValue; out Err: TPhosphorErro
 begin
   Err := NoError();
   try
-    Result := ValStr(GzipWrap(Args[0].Str, Round(AsDouble(Args[1]))));
+    Result := ValStr(GzipWrap(Args[0].Str, ArgI32(Args[1])));
     GzipErr := 0;
   except
     Result := ValStr('');
@@ -299,7 +299,7 @@ function f_gzip_compressfile_lvl(const Args: array of TValue; out Err: TPhosphor
 begin
   Err := NoError();
   try
-    if DoCompressFile(Args[0].Str, Args[1].Str, Round(AsDouble(Args[2]))) then
+    if DoCompressFile(Args[0].Str, Args[1].Str, ArgI32(Args[2])) then
     begin Result := ValInt(1); GzipErr := 0; end
     else begin Result := ValInt(0); GzipErr := 1; end;
   except

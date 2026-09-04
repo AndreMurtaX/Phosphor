@@ -64,7 +64,7 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFileDialog, c) t
 function f_initialdir_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFileDialog, c) then Result := ValStr(TFileDialog(c).InitialDir) else Result := ValStr(''); end;
 function f_colordialog_color_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorDialog, c) then TColorDialog(c).Color := TColor(Round(AsDouble(A[1]))); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorDialog, c) then TColorDialog(c).Color := TColor(ArgI32(A[1])); Result := A[0]; end;
 function f_colordialog_color_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorDialog, c) then Result := ValInt(TColorDialog(c).Color) else Result := ValInt(0); end;
 

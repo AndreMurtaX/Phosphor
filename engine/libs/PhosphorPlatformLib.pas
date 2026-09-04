@@ -123,8 +123,8 @@ function t_os_check(const Args: array of TValue; out Err: TPhosphorError): TValu
 var b: Integer;
 begin
   Err := NoError();
-  if Length(Args) >= 3 then b := Round(AsDouble(Args[2])) else b := 0;
-  Result := ValInt(Ord(OsAtLeast(Round(AsDouble(Args[0])), Round(AsDouble(Args[1])), b)));
+  if Length(Args) >= 3 then b := ArgI32(Args[2]) else b := 0;
+  Result := ValInt(Ord(OsAtLeast(ArgI32(Args[0]), ArgI32(Args[1]), b)));
 end;
 
 // --- StdLib: pointer round-trips --------------------------------------------
@@ -162,10 +162,17 @@ begin
   Result := ValInt(Ord((Length(s) = 1) and (s[1] = #0)));
 end;
 function t_pause(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var ms: Integer;
+var secs: Double; ms: Integer;
 begin
   Err := NoError();
-  ms := Round(AsDouble(Args[0]) * 1000);
+  // Scaled BEFORE narrowing, and compared before rounding: Round() of a Double
+  // outside Int64 range raises, so pause(1e30) used to fault rather than sleep.
+  // The ceiling is High(Integer) milliseconds -- about 24 days, which is already
+  // indistinguishable from "forever" for a script.
+  secs := AsDouble(Args[0]);
+  if (secs <> secs) or (secs <= 0) then ms := 0
+  else if secs >= High(Integer) / 1000.0 then ms := High(Integer)
+  else ms := Round(secs * 1000);
   if ms > 0 then Sleep(ms);
   Result := ValInt(0);
 end;

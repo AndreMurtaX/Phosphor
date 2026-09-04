@@ -67,7 +67,7 @@ var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TEdit, c) th
 function f_edit_readonly_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TEdit, c) then Result := ValInt(Ord(TEdit(c).ReadOnly)) else Result := ValInt(0); end;
 function f_edit_maxlength_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TEdit, c) then TEdit(c).MaxLength := Round(AsDouble(Args[1])); Result := Args[0]; end;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TEdit, c) then TEdit(c).MaxLength := ArgI32(Args[1]); Result := Args[0]; end;
 function f_edit_maxlength_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TEdit, c) then Result := ValInt(TEdit(c).MaxLength) else Result := ValInt(0); end;
 function f_edit_selectall(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -107,7 +107,7 @@ begin
   Err := NoError; Result := ValStr('');
   if GuiResolve(Args[0].Hnd, TMemo, c) then
   begin
-    n := Round(AsDouble(Args[1]));   // 1-based
+    n := ArgI32(Args[1]);   // 1-based
     if (n >= 1) and (n <= TMemo(c).Lines.Count) then Result := ValStr(TMemo(c).Lines[n - 1]);
   end;
 end;
@@ -138,13 +138,13 @@ begin
   Result := ValHandle(GuiRegister(s, False));
 end;
 function f_spin_value_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).Value := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).Value := ArgI32(A[1]); Result := A[0]; end;
 function f_spin_value_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then Result := ValInt(TSpinEdit(c).Value) else Result := ValInt(0); end;
 function f_spin_min_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).MinValue := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).MinValue := ArgI32(A[1]); Result := A[0]; end;
 function f_spin_max_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).MaxValue := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).MaxValue := ArgI32(A[1]); Result := A[0]; end;
 function f_spin_onchange(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TSpinEdit, c) then TSpinEdit(c).OnChange := GuiNotifyHandler(AVM, c, 'onchange', A[1].Str, A[0].Hnd); end;
 
@@ -162,7 +162,7 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c
 function f_fspin_value_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c) then Result := ValDouble(TFloatSpinEdit(c).Value) else Result := ValDouble(0); end;
 function f_fspin_decimals_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c) then TFloatSpinEdit(c).DecimalPlaces := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TFloatSpinEdit, c) then TFloatSpinEdit(c).DecimalPlaces := ArgI32(A[1]); Result := A[0]; end;
 
 // --- mask edit --------------------------------------------------------------
 function f_maskedit(const A: array of TValue; out E: TPhosphorError): TValue;

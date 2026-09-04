@@ -48,7 +48,7 @@ begin
 end;
 
 function f_interval_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).Interval := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).Interval := ArgI32(A[1]); Result := A[0]; end;
 function f_interval_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then Result := ValInt(TTimer(c).Interval) else Result := ValInt(0); end;
 function f_enabled_set(const A: array of TValue; out E: TPhosphorError): TValue;

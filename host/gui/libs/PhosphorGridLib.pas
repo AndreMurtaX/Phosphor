@@ -37,15 +37,15 @@ begin
 end;
 
 function f_colcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).ColCount := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).ColCount := ArgI32(A[1]); Result := A[0]; end;
 function f_colcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).ColCount) else Result := ValInt(0); end;
 function f_rowcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).RowCount := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).RowCount := ArgI32(A[1]); Result := A[0]; end;
 function f_rowcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).RowCount) else Result := ValInt(0); end;
 function f_fixedrows_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).FixedRows := Round(AsDouble(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).FixedRows := ArgI32(A[1]); Result := A[0]; end;
 function f_fixedrows_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).FixedRows) else Result := ValInt(0); end;
 
@@ -54,8 +54,8 @@ var c: TComponent; col, row: Integer;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TStringGrid, c) then Exit;
-  col := Round(AsDouble(A[1])) - 1;   // 1-based -> 0-based
-  row := Round(AsDouble(A[2])) - 1;
+  col := ArgI32(A[1]) - 1;   // 1-based -> 0-based
+  row := ArgI32(A[2]) - 1;
   if (col >= 0) and (col < TStringGrid(c).ColCount) and (row >= 0) and (row < TStringGrid(c).RowCount) then
     TStringGrid(c).Cells[col, row] := A[3].Str
   else
@@ -66,8 +66,8 @@ var c: TComponent; col, row: Integer;
 begin
   E := NoError; Result := ValStr('');
   if not GuiResolve(A[0].Hnd, TStringGrid, c) then Exit;
-  col := Round(AsDouble(A[1])) - 1;
-  row := Round(AsDouble(A[2])) - 1;
+  col := ArgI32(A[1]) - 1;
+  row := ArgI32(A[2]) - 1;
   if (col >= 0) and (col < TStringGrid(c).ColCount) and (row >= 0) and (row < TStringGrid(c).RowCount) then
     Result := ValStr(TStringGrid(c).Cells[col, row])
   else

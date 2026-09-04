@@ -92,10 +92,13 @@ begin Err := NoError(); Result := ValDouble(RadToDeg(N(Args))); end;
 function f_randomize(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Randomize; Result := ValInt(0); end;
 function f_rnd_n(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var hi: Integer;
+var hi: Int64;
 begin
   Err := NoError();
-  hi := Round(N(Args));
+  // Int64 throughout. The bound used to be narrowed to a 32-bit Integer, so
+  // rnd(3000000000) wrapped to a NEGATIVE bound, was clamped to 1, and returned 0
+  // every single time -- a random generator that silently stopped being random.
+  hi := ArgI64(Args[0]);
   if hi < 1 then hi := 1;
   Result := ValInt(Random(hi));    // 0 .. hi-1
 end;

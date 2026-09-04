@@ -46,7 +46,7 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCalendar, c) the
 function f_colorbutton(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TColorButton, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
 function f_cbtn_color_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorButton, c) then TColorButton(c).ButtonColor := TColor(Round(AsDouble(A[1]))); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorButton, c) then TColorButton(c).ButtonColor := TColor(ArgI32(A[1])); Result := A[0]; end;
 function f_cbtn_color_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorButton, c) then Result := ValInt(TColorButton(c).ButtonColor) else Result := ValInt(0); end;
 

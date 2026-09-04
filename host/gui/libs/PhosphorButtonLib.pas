@@ -113,11 +113,11 @@ var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton
 function f_sb_caption_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then Result := ValStr(TSpeedButton(c).Caption) else Result := ValStr(''); end;
 function f_sb_down_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).Down := Round(AsDouble(Args[1])) <> 0; Result := Args[0]; end;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).Down := ArgI32(Args[1]) <> 0; Result := Args[0]; end;
 function f_sb_down_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then Result := ValInt(Ord(TSpeedButton(c).Down)) else Result := ValInt(0); end;
 function f_sb_groupindex_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).GroupIndex := Round(AsDouble(Args[1])); Result := Args[0]; end;
+var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).GroupIndex := ArgI32(Args[1]); Result := Args[0]; end;
 function f_sb_click(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).Click; Result := Args[0]; end;
 function f_sb_onclick(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;

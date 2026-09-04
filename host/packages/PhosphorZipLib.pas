@@ -291,7 +291,7 @@ begin
     try
       uz.FileName := Args[0].Str;
       uz.Examine;
-      n := Round(AsDouble(Args[1]));   // 1-based
+      n := ArgI32(Args[1]);   // 1-based
       if (n >= 1) and (n <= uz.Entries.Count) then Result := ValStr(uz.Entries[n - 1].ArchiveFileName);
     finally
       uz.Free;

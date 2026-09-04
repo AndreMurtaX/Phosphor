@@ -617,7 +617,7 @@ begin
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   v := Args[2].Str;
-  sqlite3_bind_text(s.StmtPtr, Round(AsDouble(Args[1])), PAnsiChar(v), Length(v),
+  sqlite3_bind_text(s.StmtPtr, ArgI32(Args[1]), PAnsiChar(v), Length(v),
     sqlite3_destructor_type(SQLITE_TRANSIENT));
   Result := ValInt(1);
 end;
@@ -628,7 +628,7 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  p := Round(AsDouble(Args[1]));
+  p := ArgI32(Args[1]);
   if Args[2].Kind = vkInt then
     sqlite3_bind_int64(s.StmtPtr, p, Args[2].Int)
   else
@@ -642,7 +642,7 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  sqlite3_bind_null(s.StmtPtr, Round(AsDouble(Args[1])));
+  sqlite3_bind_null(s.StmtPtr, ArgI32(Args[1]));
   Result := ValInt(1);
 end;
 
@@ -680,7 +680,7 @@ begin
   Err := NoError();
   Result := ValStr('');
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  c := Round(AsDouble(Args[1])) - 1;
+  c := ArgI32(Args[1]) - 1;
   if (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ValStr(PtrStr(sqlite3_column_name(s.StmtPtr, c)));
 end;
@@ -701,7 +701,7 @@ begin
   Err := NoError();
   Result := ValInt(SQLITE_NULL);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  c := Round(AsDouble(Args[1])) - 1;
+  c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ValInt(sqlite3_column_type(s.StmtPtr, c));
 end;
@@ -709,7 +709,7 @@ end;
 function f_coltypename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  case Round(AsDouble(Args[0])) of
+  case ArgI32(Args[0]) of
     SQLITE_INTEGER: Result := ValStr('integer');
     SQLITE_FLOAT:   Result := ValStr('float');
     SQLITE_TEXT:    Result := ValStr('text');
@@ -727,7 +727,7 @@ begin
   Err := NoError();
   Result := ValStr('');
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  c := Round(AsDouble(Args[1])) - 1;
+  c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ValStr(PtrStr(sqlite3_column_text(s.StmtPtr, c)));
 end;
@@ -738,7 +738,7 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  c := Round(AsDouble(Args[1])) - 1;
+  c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ColNum(s, c);
 end;
@@ -769,7 +769,7 @@ begin
   Err := NoError();
   Result := ValInt(1);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  c := Round(AsDouble(Args[1])) - 1;
+  c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ValInt(Ord(sqlite3_column_type(s.StmtPtr, c) = SQLITE_NULL));
 end;
@@ -791,7 +791,7 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  c := Round(AsDouble(Args[1])) - 1;
+  c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ValInt(Ord(sqlite3_column_type(s.StmtPtr, c) = SQLITE_BLOB));
 end;
@@ -940,7 +940,7 @@ begin Err := NoError(); Result := ValStr(GLastMsg); end;
 function f_strerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if GReady then Result := ValStr(PtrStr(sqlite3_errstr(Round(AsDouble(Args[0])))))
+  if GReady then Result := ValStr(PtrStr(sqlite3_errstr(ArgI32(Args[0]))))
   else Result := ValStr('');
 end;
 

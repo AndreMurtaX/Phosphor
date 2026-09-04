@@ -228,6 +228,24 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 17 · the complete runner, and a measurement stated too broadly.**
+  Asked for one binary carrying every library including the graphical ones. Findings:
+  compiling already covered everything (`CompileFile` touches the registry zero times);
+  a `--gui` flag cannot load the LCL in-process because gtk2 binds the X display in a
+  unit INITIALIZATION section, before `main` — a runtime flag cannot undo a link-time
+  decision. Answer: `phosphorgui` registers every package too (complete runner) and
+  `phosphor --gui` hands over to it. Also added the build scripts the GUI *application*
+  never had — only `phosphorguitest` was buildable from `scripts/`.
+  - **The lesson is about how I reported the measurement.** My probe ran `env -u
+    DISPLAY` and I presented "an LCL-linked binary dies on Linux" as if it were a
+    property of the platform. The owner pushed back — he had a live GTK session on that
+    very VM — and he was right: with `DISPLAY=:0` and the session's Xwayland cookie the
+    same binary runs fine, exit 0. The true statement is narrower and more useful: it
+    must not DEPEND on a display, because a plain ssh session (how this project's own
+    Linux verification arrives), CI and containers have none. **State what the
+    experiment actually held constant; a deliberately hostile environment proves a
+    conditional, not an absolute** — and correct the code comments, not just the chat
+    reply, because the comment is what the next reader inherits.
 - **2026-09-02 · round 16 · the empty-parens convention, and a half-enforced rule.**
   The owner proposed marking parameterless CALL sites with `()` so a call cannot be
   misread as a variable. Adopted and swept wholesale (1445 sites, 39 files); the rule

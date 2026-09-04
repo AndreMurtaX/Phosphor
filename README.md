@@ -48,9 +48,22 @@ bin\phosphor.exe run hello.bas
 phosphor run  <file.bas>            run a program
 phosphor compile <in.bas> <out.pbc> compile to portable .pbc bytecode
 phosphor pack <in.bas> <out>        build a standalone self-extracting executable
+phosphor --gui <file.bas>           run a GUI program (hands over to phosphorgui)
 phosphor                            an interactive REPL (state persists)
 phosphor --version | --help | --diag
 ```
+
+Two binaries ship, and the split is deliberate. `phosphor` is the headless host —
+engine plus every non-GUI package — and works over a pipe, in CI and on a server with
+no display. `phosphorgui` (built by `scripts/build-gui.ps1` / `.sh`) is the **complete**
+runner: the same packages *plus* the 321 LCL GUI functions. `phosphor --gui` hands over
+to it, so one command reaches everything.
+
+The LCL cannot simply be loaded on demand: on Linux the gtk2 widgetset opens the X
+display in a unit *initialization* section, before `main`, so a binary that merely links
+it exits with `cannot open display` wherever none is reachable — a runtime flag cannot
+undo a link-time decision. **Compiling needs neither host**: the compiler is
+host-agnostic, so `phosphor compile <gui-app.bas> <out.pbc>` already works.
 
 `phosphor` (the console host) is the develop-compile-run tool. There is no dedicated
 IDE — write `.bas` in any editor and run it. For a GUI program, `phosphorgui

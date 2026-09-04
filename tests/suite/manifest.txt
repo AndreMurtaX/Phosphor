@@ -53,3 +53,4 @@
 52_codepage
 53_bounds
 54_onerror_reentrancy
+55_json_bytes_handles

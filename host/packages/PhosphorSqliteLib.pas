@@ -532,7 +532,9 @@ begin
     'name NOT LIKE ''sqlite_%'' ORDER BY name', st) then
   begin
     while sqlite3_step(st) = SQLITE_ROW do
-      arr.Add(PtrStr(sqlite3_column_text(st, 0)));
+      // Add(TJSONData): the plain-string array overload re-encodes any byte >= $80,
+      // so a table holding accented text came back mojibake.
+      arr.Add(TJSONString.Create(PtrStr(sqlite3_column_text(st, 0))));
     sqlite3_finalize(st);
   end;
   Result := ValHandle(JsonRegisterNode(arr, True));

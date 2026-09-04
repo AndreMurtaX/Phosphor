@@ -548,6 +548,14 @@ function TPhosphorVM.ChanSeek(ANum: Integer; APos: Int64): TPhosphorError;
 begin
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
+  // Every other channel primitive checks the mode; this one did not, so SEEK
+  // repositioned an APPEND channel and the next PRINT # overwrote in place. An
+  // append-only log lost its first bytes, silently, with exit code 0. OUTPUT and
+  // APPEND are write-only and append-only by contract (see the mode table above);
+  // BINARY is read/write and positionable, and positioning a read is harmless.
+  if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
+    Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) +
+      ' is not open for random access (only INPUT and BINARY can seek)'));
   if APos < 1 then
     Exit(MakeError(peRuntime, 'seek: position must be 1 or more'));
   Result := NoError();
@@ -565,7 +573,11 @@ end;
 function TPhosphorVM.ChanClose(ANum: Integer): TPhosphorError;
 begin
   Result := NoError();
-  if ANum < 0 then begin CloseAllChannels(); Exit; end;
+  // No sentinel here any more. `ANum < 0 means close everything` was an internal
+  // convention that a USER-supplied number could reach: `close #n%` with n% gone
+  // negative closed every open channel and reported success, so a program that
+  // computes its channel numbers lost every file it was midway through writing.
+  // The bare CLOSE calls CloseAllChannels directly instead.
   if not ValidChannel(ANum) then
     Exit(MakeError(peRuntime, 'file number #' + IntToStr(ANum) + ' is out of range'));
   if not FChannels[ANum].Open then Exit;   // closing an unopened channel is a no-op
@@ -1480,7 +1492,7 @@ begin
       opCloseFile:
         begin
           if ins.A = 1 then
-            ChanClose(-1)                 // CLOSE with no argument: close every channel
+            CloseAllChannels()            // CLOSE with no argument: close every channel
           else
           begin
             a := Pop();
@@ -1542,7 +1554,12 @@ begin
         begin
           a := Pop();   // the 1-based position (pushed last)
           b := Pop();   // the channel number (pushed first)
-          e := ChanSeek(SafeI32(b), SafeI32(a));
+          // ArgI64 for the POSITION. Narrowing it to 32 bits clamped every offset
+          // past 2 GB to 2147483647, so two different positions in a large file
+          // collapsed onto one and `seek #1, lof(1) + 1` landed a gigabyte inside
+          // the file instead of at its end. The channel NUMBER stays 32-bit -- it
+          // is an index into a 255-entry table.
+          e := ChanSeek(SafeI32(b), ArgI64(a));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
       // --- formatted output ----------------------------------------------------

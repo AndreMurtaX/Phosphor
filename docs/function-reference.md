@@ -279,6 +279,15 @@ Maps keyed by string, as handles, in insertion order. Three value kinds: numeric
 
 ## Json — JSON values (66 registry entries)
 
+**Bytes.** A JSON string value carries bytes: what goes in comes out, and what
+`json_stringify$` writes parses back identical. Phosphor renders its own JSON text
+rather than using fpjson's serializer, which re-encodes every byte `>= 0x80`.
+
+**One limit, on KEYS only.** fpjson keeps member *names* in a hash whose key type
+passes through the system code page. Setting and getting by the same non-ASCII key is
+symmetric and works everywhere; writing such a key out to text and reading it back
+does not round trip where the system code page is not UTF-8. Values are unaffected.
+
 A JSON value is a handle over an fpjson node. Constructors own their tree;
 `json_get@`/`json_item@`/`json_path@` hand back non-owning views onto a child.
 Array access is **1-based**. Object readers with a 3rd argument return it as a

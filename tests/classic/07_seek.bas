@@ -59,3 +59,48 @@ close #3
 println "stream lines "; n%
 println "last line   "; last$
 ok% = file_delete(g$)
+
+rem --- guards: a channel op must not silently do something else ---------------
+rem Each of these was found by an adversarial hunt and reproduced with the shipped
+rem binary. None of them errored; they quietly did the wrong thing.
+g$ = path_combine$(temppath$(), "phosphor_seek_guard.txt")
+
+rem SEEK on an APPEND channel turned append-only into overwrite and ate the log.
+ok% = file_writealltext(g$, "AAAAAAAAAA")
+open g$ for append as #5
+caught% = 0
+on error goto gseek
+seek #5, 1
+goto after_gseek
+gseek:
+caught% = 1
+resume next
+after_gseek:
+on error goto 0
+print #5, "ZZZ"
+close #5
+println "seek on append "; caught%; " log kept "; left$(file_readalltext$(g$), 10)
+
+rem CLOSE with a negative number hit an internal "close everything" sentinel.
+open g$ for input as #6
+open g$ for input as #7
+n% = 0 - 1
+caught% = 0
+on error goto gclose
+close #n%
+goto after_gclose
+gclose:
+caught% = 1
+resume next
+after_gclose:
+on error goto 0
+println "close #-1      "; caught%; " still open "; eof(6) = false
+close #6
+close #7
+
+rem SEEK past 2 GB was clamped to 2147483647, so two positions collapsed onto one.
+open g$ for binary as #8
+seek #8, 5000000000
+println "seek past 2GB  "; loc(8)
+close #8
+ok% = file_delete(g$)

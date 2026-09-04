@@ -194,11 +194,28 @@ begin
   Result := ValInt(Ord(ok));
 end;
 
+{ Byte-for-byte string equality.
+
+  `A = B` on two AnsiStrings is CODE-PAGE AWARE: when the operands' dynamic code
+  pages differ, FPC converts one before comparing, and the conversion can change
+  the bytes. Two strings holding the identical five bytes 99 97 102 195 169 then
+  compared unequal -- while the VM's own `=`, which compares bytes, called them
+  equal. An assertion that disagrees with the language it is testing is worse than
+  no assertion. }
+function SameBytes(const A, B: String): Boolean;
+var i: Integer;
+begin
+  Result := Length(A) = Length(B);
+  if not Result then Exit;
+  for i := 1 to Length(A) do
+    if A[i] <> B[i] then Exit(False);
+end;
+
 function t_assert_eq_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
   Err := NoError();
-  ok := Args[0].Str = Args[1].Str;
+  ok := SameBytes(Args[0].Str, Args[1].Str);
   Check(ok, '', 'expected "' + Args[1].Str + '", got "' + Args[0].Str + '"');
   Result := ValInt(Ord(ok));
 end;
@@ -207,7 +224,7 @@ function t_assert_eq_str_msg(const Args: array of TValue; out Err: TPhosphorErro
 var ok: Boolean;
 begin
   Err := NoError();
-  ok := Args[0].Str = Args[1].Str;
+  ok := SameBytes(Args[0].Str, Args[1].Str);
   Check(ok, Args[2].Str, 'expected "' + Args[1].Str + '", got "' + Args[0].Str + '"');
   Result := ValInt(Ord(ok));
 end;

@@ -27,6 +27,13 @@ function IsHandle(AId: Int64): Boolean;
 function FreeHandle(AId: Int64): Boolean;   // free one object, invalidate its id
 procedure ResetHandles;
 
+{ Enumeration, for a library that must find every handle pointing INTO something it
+  is about to destroy. The JSON package uses it: replacing a member frees the node
+  a borrowed child handle still points at, and that handle has to be told. Ids are
+  1-based and dense, so 1..HandleCount covers the table; a freed slot answers nil. }
+function HandleCount: Integer;
+function HandleAt(AId: Int64): TObject;
+
 implementation
 
 var
@@ -45,6 +52,16 @@ end;
 function IsHandle(AId: Int64): Boolean;
 begin
   Result := (AId >= 1) and (AId <= GCount) and (GObjs[AId - 1] <> nil);
+end;
+
+function HandleCount: Integer;
+begin
+  Result := GCount;
+end;
+
+function HandleAt(AId: Int64): TObject;
+begin
+  if (AId >= 1) and (AId <= GCount) then Result := GObjs[AId - 1] else Result := nil;
 end;
 
 function HandleObj(AId: Int64): TObject;

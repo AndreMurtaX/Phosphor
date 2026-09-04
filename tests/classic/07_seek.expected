@@ -10,3 +10,6 @@ neighbours  20 40
 grown       9 last 111
 stream lines 4000
 last line   line 4000 padding-padding-padding
+seek on append 1 log kept AAAAAAAAAA
+close #-1      1 still open true
+seek past 2GB  5000000000

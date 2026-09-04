@@ -24,6 +24,11 @@ uses
 
 procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
 
+{ Byte-exact JSON text for a node -- see the long note above the implementation.
+  Exported because a sibling library that builds fpjson trees (the RAG index, the
+  SQLite package) must not fall back on AsJSON, which re-encodes every byte >= $80. }
+function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
+
 { Bridge for a sibling library (e.g. the opt-in SQLite package) that needs to
   build or read JSON handles WITHOUT duplicating the wrapper. JsonRegisterNode
   wraps an fpjson node as a handle with the same ownership rule json_object@
@@ -83,6 +88,12 @@ begin
     Exit(False);
   end;
   N := TPhosphorJson(HandleObj(V.Hnd)).Node;
+  if N = nil then
+  begin
+    Err := MakeError(peRuntime,
+      'this json handle is stale: the value it borrowed was replaced or removed');
+    Exit(False);
+  end;
   Err := NoError();
   Result := True;
 end;
@@ -121,11 +132,72 @@ begin
   else Result := TJSONFloatNumber.Create(d);
 end;
 
+{ A borrowed handle points at a node its parent owns. Replacing or removing that
+  member FREES the node, and the borrowed handle was left pointing into freed
+  memory -- reading it was an access violation, and writing through it corrupted
+  the heap:
+
+      o@ = json_object@()
+      json_sets@(o@, "a", "first")
+      c@ = json_get@(o@, "a")      ' borrows the child
+      json_sets@(o@, "a", "second") ' frees what c@ points at
+      json_value$(c@)               ' -> access violation
+
+  Before any node is freed, every borrowed handle pointing at it OR AT ANYTHING
+  INSIDE IT is emptied, so the read that follows is a clean "stale handle" error
+  instead of a crash. Owned handles are left alone: they hold their own trees. }
+function NodeContains(ARoot, ATarget: TJSONData): Boolean;
+var i: Integer;
+begin
+  if (ARoot = nil) or (ATarget = nil) then Exit(False);
+  if ARoot = ATarget then Exit(True);
+  Result := False;
+  if ARoot.JSONType in [jtObject, jtArray] then
+    for i := 0 to ARoot.Count - 1 do
+      if NodeContains(ARoot.Items[i], ATarget) then Exit(True);
+end;
+
+procedure InvalidateBorrowed(ANode: TJSONData);
+var
+  i: Int64;
+  o: TObject;
+  w: TPhosphorJson;
+begin
+  if ANode = nil then Exit;
+  for i := 1 to HandleCount do
+  begin
+    o := HandleAt(i);
+    if not (o is TPhosphorJson) then Continue;
+    w := TPhosphorJson(o);
+    if (not w.Owns) and NodeContains(ANode, w.Node) then
+      w.Node := nil;
+  end;
+end;
+
+{ Look a member up by name WITHOUT fpjson's Find.
+
+  Find compares names in a way that misses a non-ASCII name entirely: for a key
+  stored byte-exactly (Names[i] reads it back unchanged) Find returns nil while
+  IndexOfName finds it at 0. A member that can be written and never read is not a
+  member, so every lookup here goes through IndexOfName. }
+function FindMember(O: TJSONObject; const AName: String): TJSONData;
+var idx: Integer;
+begin
+  Result := nil;
+  if O = nil then Exit;
+  idx := O.IndexOfName(AName);
+  if idx >= 0 then Result := O.Items[idx];
+end;
+
 procedure SetMember(O: TJSONObject; const K: String; V: TJSONData);
 var idx: Integer;
 begin
   idx := O.IndexOfName(K);
-  if idx >= 0 then O.Delete(idx);
+  if idx >= 0 then
+  begin
+    InvalidateBorrowed(O.Items[idx]);
+    O.Delete(idx);
+  end;
   O.Add(K, V);
 end;
 
@@ -155,12 +227,145 @@ begin
   end;
 end;
 
+{ ------------------------------------------------------------------------------
+  JSON TEXT, BYTE-EXACT.
+
+  fpjson's own serializer is not. StringToJSONString -- the only escaper it
+  exposes, and the one every AsJSON/FormatJSON path goes through -- returns SEVEN
+  bytes for the five-byte string "cafe" with an acute e: the UTF-8 pair C3 A9
+  comes back as C3 83 C2 A9, each byte re-encoded as though it were a separate
+  Latin-1 character. Measured directly against fcl-json 3.2.2:
+
+      TJSONString.Create(s).AsString  ->  63 61 66 C3 A9      (correct)
+      TJSONString.Create(s).AsJSON    ->  22 63 61 66 C3 83 C2 A9 22
+
+  So the tree HELD the right bytes and only rendering broke them, which is why a
+  json_gets$ round trip looked fine while the text written to a file was mojibake.
+
+  Only strings and structure are assembled here. Numbers, booleans and null keep
+  fpjson's own rendering: they are ASCII, so they cannot be damaged, and borrowing
+  them keeps this byte-identical to the previous output for every ASCII document
+  -- including fpjson's spacing, which is preserved deliberately. Fixing the
+  corruption is this change; restyling the output is not.
+  ------------------------------------------------------------------------------ }
+
+{ The escapes JSON requires, and no others. Every byte >= $80 passes through
+  untouched: UTF-8 in, the same UTF-8 out. Built by appending SLICES, never a
+  Char (see scripts/check-codepage.py). }
+function JsonEscape(const S: String): String;
+var
+  i, runStart: Integer;
+  c: Char;
+begin
+  Result := '';
+  runStart := 1;
+  for i := 1 to Length(S) do
+  begin
+    c := S[i];
+    if (c = '"') or (c = '\') or (c < #32) then
+    begin
+      if i > runStart then Result := Result + Copy(S, runStart, i - runStart);
+      case c of
+        '"':  Result := Result + '\"';
+        '\':  Result := Result + '\\';
+        #8:   Result := Result + '\b';
+        #9:   Result := Result + '\t';
+        #10:  Result := Result + '\n';
+        #12:  Result := Result + '\f';
+        #13:  Result := Result + '\r';
+      else
+        Result := Result + '\u' + LowerCase(IntToHex(Ord(c), 4));
+      end;
+      runStart := i + 1;
+    end;
+  end;
+  if Length(S) >= runStart then
+    Result := Result + Copy(S, runStart, Length(S) - runStart + 1);
+end;
+
+function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
+var
+  i: Integer;
+  pad, padIn, sep: String;
+  o: TJSONObject;
+  a: TJSONArray;
+begin
+  if N = nil then Exit('null');
+  case N.JSONType of
+    jtString:
+      Result := '"' + JsonEscape(TJSONString(N).AsString) + '"';
+    jtObject:
+      begin
+        o := TJSONObject(N);
+        if o.Count = 0 then Exit('{}');            // inline, in both modes
+        if APretty then
+        begin
+          pad := StringOfChar(' ', AIndent * (ALevel + 1));
+          padIn := StringOfChar(' ', AIndent * ALevel);
+          Result := '{' + #10;
+          sep := '';
+          for i := 0 to o.Count - 1 do
+          begin
+            Result := Result + sep + pad + '"' + JsonEscape(o.Names[i]) + '" : ' +
+                      JsonText(o.Items[i], True, AIndent, ALevel + 1);
+            sep := ',' + #10;
+          end;
+          Result := Result + #10 + padIn + '}';
+        end
+        else
+        begin
+          Result := '{ ';
+          for i := 0 to o.Count - 1 do
+          begin
+            if i > 0 then Result := Result + ', ';
+            Result := Result + '"' + JsonEscape(o.Names[i]) + '" : ' +
+                      JsonText(o.Items[i], False, AIndent, 0);
+          end;
+          Result := Result + ' }';
+        end;
+      end;
+    jtArray:
+      begin
+        a := TJSONArray(N);
+        if APretty then
+        begin
+          padIn := StringOfChar(' ', AIndent * ALevel);
+          if a.Count = 0 then Exit('[' + #10 + padIn + ']');
+          pad := StringOfChar(' ', AIndent * (ALevel + 1));
+          Result := '[' + #10;
+          sep := '';
+          for i := 0 to a.Count - 1 do
+          begin
+            Result := Result + sep + pad + JsonText(a.Items[i], True, AIndent, ALevel + 1);
+            sep := ',' + #10;
+          end;
+          Result := Result + #10 + padIn + ']';
+        end
+        else
+        begin
+          if a.Count = 0 then Exit('[]');
+          Result := '[';
+          for i := 0 to a.Count - 1 do
+          begin
+            if i > 0 then Result := Result + ', ';
+            Result := Result + JsonText(a.Items[i], False, AIndent, 0);
+          end;
+          Result := Result + ']';
+        end;
+      end;
+  else
+    // numbers, booleans, null: ASCII, so fpjson's own rendering is safe here and
+    // keeps the output identical to what it has always been.
+    Result := N.AsJSON;
+  end;
+end;
+
 { Read any node as a string without raising: null is "", an object/array is its
   compact JSON text, everything else its AsString. }
 function StrVal(N: TJSONData): String;
 begin
   if (N = nil) or (N.JSONType = jtNull) then Result := ''
-  else if N.JSONType in [jtObject, jtArray] then Result := N.AsJSON
+  else if N.JSONType in [jtObject, jtArray] then Result := JsonText(N, False, 2, 0)
   else Result := N.AsString;
 end;
 
@@ -228,7 +433,11 @@ begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
   idx := o.IndexOfName(Args[1].Str);
-  if idx >= 0 then o.Delete(idx);
+  if idx >= 0 then
+  begin
+    InvalidateBorrowed(o.Items[idx]);
+    o.Delete(idx);
+  end;
   Result := Args[0];
 end;
 
@@ -238,7 +447,7 @@ var o: TJSONObject; m: TJSONData;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  m := o.Find(Args[1].Str);
+  m := FindMember(o, Args[1].Str);
   if m <> nil then Result := NumVal(m)
   else if Length(Args) >= 3 then Result := Args[2];
 end;
@@ -247,7 +456,7 @@ var o: TJSONObject; m: TJSONData;
 begin
   Result := ValStr('');
   if not GetObj(Args[0], o, Err) then Exit;
-  m := o.Find(Args[1].Str);
+  m := FindMember(o, Args[1].Str);
   if m <> nil then Result := ValStr(StrVal(m))
   else if Length(Args) >= 3 then Result := Args[2];
 end;
@@ -256,7 +465,7 @@ var o: TJSONObject; m: TJSONData;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  m := o.Find(Args[1].Str);
+  m := FindMember(o, Args[1].Str);
   if (m <> nil) and (m.JSONType = jtBoolean) then Result := ValInt(Ord(m.AsBoolean));
 end;
 function t_json_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -264,7 +473,7 @@ var o: TJSONObject; m: TJSONData;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  m := o.Find(Args[1].Str);
+  m := FindMember(o, Args[1].Str);
   if m = nil then
   begin
     Err := MakeError(peRuntime, 'no such json member');
@@ -303,7 +512,10 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  a.Add(Args[1].Str);
+  // Add(TJSONData), not Add(String). The String overload re-encodes a byte >= $80
+  // on the way in -- measured: a five-byte value became seven -- while handing it
+  // an explicitly built node stores exactly what it was given.
+  a.Add(TJSONString.Create(Args[1].Str));
   Result := Args[0];
 end;
 function t_json_len(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -413,7 +625,7 @@ var n: TJSONData;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
-  Result := ValStr(n.AsJSON);
+  Result := ValStr(JsonText(n, False, 2, 0));
 end;
 
 // --- scalar constructors (each scalar is a handle too) ----------------------
@@ -432,13 +644,12 @@ var n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], n, Err) then Exit;
-  case n.JSONType of
-    jtBoolean: Result := ValInt(Ord(n.AsBoolean));
-    jtNumber:  Result := NumVal(n);
-    jtNull:    Result := ValInt(0);
-  else
-    Result := ValDouble(n.AsFloat);
-  end;
+  // NumVal for every type. The old `else Result := ValDouble(n.AsFloat)` reached
+  // AsFloat on a string, object or array, and EConvertError escaped the library:
+  // json_value(json_string@("hello")) aborted the program with the RTL's own
+  // "Invalid float value : hello". NumVal already reads a numeric string, answers
+  // 0 for anything else, and cannot raise -- which is what a READER must do.
+  Result := NumVal(n);
 end;
 function t_json_value_s(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var n: TJSONData;
@@ -546,7 +757,11 @@ begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
   z := ArgI32(Args[1]) - 1;
-  if (z >= 0) and (z < a.Count) then a.Delete(z);
+  if (z >= 0) and (z < a.Count) then
+  begin
+    InvalidateBorrowed(a.Items[z]);
+    a.Delete(z);
+  end;
   Result := Args[0];
 end;
 function t_json_pop(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -554,7 +769,11 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  if a.Count > 0 then a.Delete(a.Count - 1);
+  if a.Count > 0 then
+  begin
+    InvalidateBorrowed(a.Items[a.Count - 1]);
+    a.Delete(a.Count - 1);
+  end;
   Result := Args[0];
 end;
 
@@ -565,7 +784,12 @@ begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
   arr := TJSONArray.Create();
-  for i := 0 to o.Count - 1 do arr.Add(o.Names[i]);
+  // Add(TJSONData), like every other array store here. The plain-string overload
+  // re-encoded each name, which happened to CANCEL the loss fpjson's name hash
+  // introduces on a Windows code page -- and therefore produced the wrong answer
+  // where the code page is UTF-8 and nothing was lost in the first place. Two bugs
+  // agreeing on one platform is not a behaviour worth keeping.
+  for i := 0 to o.Count - 1 do arr.Add(TJSONString.Create(o.Names[i]));
   Result := RegJson(arr, True);   // a new owned array
 end;
 
@@ -617,9 +841,9 @@ begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
   if Length(Args) >= 2 then
-    Result := ValStr(n.FormatJSON(DefaultFormat, ArgI32(Args[1])))
+    Result := ValStr(JsonText(n, True, ArgI32(Args[1]), 0))
   else
-    Result := ValStr(n.FormatJSON());
+    Result := ValStr(JsonText(n, True, 2, 0));
 end;
 function t_pnttonum(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin

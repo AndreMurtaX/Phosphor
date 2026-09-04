@@ -35,7 +35,7 @@ interface
 
 uses
   SysUtils, Classes, StrUtils, fpjson,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib;
 
 procedure RegisterRagFuncs(Reg: TPhosphorRegistry);
 
@@ -787,16 +787,19 @@ begin
     obj.Add('query', an.Query);
     obj.Add('intent', an.Intent);
     obj.Add('is_followup', an.IsFollowUp);
+    // TJSONArray.Add(String) is the one fpjson overload that re-encodes a byte
+    // >= $80 on the way in (measured: five bytes stored as seven). The object's
+    // two-argument Add is byte-exact and is left as it is.
     kw := TJSONArray.Create();
-    for i := 0 to High(an.Keywords) do kw.Add(an.Keywords[i]);
+    for i := 0 to High(an.Keywords) do kw.Add(TJSONString.Create(an.Keywords[i]));
     obj.Add('keywords', kw);
     fn := TJSONArray.Create();
-    for i := 0 to High(an.FunctionNames) do fn.Add(an.FunctionNames[i]);
+    for i := 0 to High(an.FunctionNames) do fn.Add(TJSONString.Create(an.FunctionNames[i]));
     obj.Add('function_names', fn);
     hint := TJSONArray.Create();
-    for i := 0 to High(an.LibraryHints) do hint.Add(an.LibraryHints[i]);
+    for i := 0 to High(an.LibraryHints) do hint.Add(TJSONString.Create(an.LibraryHints[i]));
     obj.Add('library_hints', hint);
-    Result := obj.AsJSON;
+    Result := JsonText(obj, False, 2, 0);
   finally
     obj.Free;
   end;
@@ -948,7 +951,7 @@ begin
       obj.Add('content', results[i].Content);
       arr.Add(obj);
     end;
-    Result := ValStr(arr.AsJSON);
+    Result := ValStr(JsonText(arr, False, 2, 0));
   finally
     arr.Free;
   end;

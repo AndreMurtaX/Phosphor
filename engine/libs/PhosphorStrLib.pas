@@ -215,26 +215,42 @@ end;
 
 function ToRadix(V: Int64; Base: Integer): String;
 const digits = '0123456789ABCDEF';
-var neg: Boolean;
+var neg: Boolean; m: QWord; buf: array[0..64] of Char; n: Integer;
 begin
   if V = 0 then Exit('0');
   neg := V < 0;
-  if neg then V := -V;
-  Result := '';
-  while V > 0 do
+  // The MAGNITUDE is taken in QWord. `V := -V` cannot represent the negation of
+  // Low(Int64), so the loop below never ran for it and hex$ returned a bare "-"
+  // -- a minus sign with no digits, reported as a clean success.
+  if neg then m := QWord(-(V + 1)) + 1 else m := QWord(V);
+  n := 0;
+  while m > 0 do
   begin
-    Result := digits[(V mod Base) + 1] + Result;
-    V := V div Base;
+    buf[n] := digits[(m mod QWord(Base)) + 1];
+    Inc(n);
+    m := m div QWord(Base);
   end;
-  if neg then Result := '-' + Result;
+  // Filled back to front into a sized string: no Char is concatenated (see
+  // scripts/check-codepage.py) and no string is rebuilt once per digit.
+  if neg then
+  begin
+    SetLength(Result, n + 1);
+    Result[1] := '-';
+    while n > 0 do begin Result[Length(Result) - n + 1] := buf[n - 1]; Dec(n); end;
+  end
+  else
+  begin
+    SetLength(Result, n);
+    while n > 0 do begin Result[Length(Result) - n + 1] := buf[n - 1]; Dec(n); end;
+  end;
 end;
 
 function f_hex(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(ToRadix(ArgI32(A[0]), 16)); end;
+begin E := NoError(); Result := ValStr(ToRadix(ArgI64(A[0]), 16)); end;
 function f_bin(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(ToRadix(ArgI32(A[0]), 2)); end;
+begin E := NoError(); Result := ValStr(ToRadix(ArgI64(A[0]), 2)); end;
 function f_oct(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(ToRadix(ArgI32(A[0]), 8)); end;
+begin E := NoError(); Result := ValStr(ToRadix(ArgI64(A[0]), 8)); end;
 
 function f_val(const A: array of TValue; out E: TPhosphorError): TValue;
 var d: Double; code: Integer; s: String;

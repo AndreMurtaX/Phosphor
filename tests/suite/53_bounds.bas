@@ -74,3 +74,19 @@ assert_eq(len(space$(5)), 5, "and an ordinary one is itself")
 rem NOT tested here: space$(10 ^ 30). It no longer raises, but the saturated width
 rem then asks for a 2 GB string, and a test that allocates 2 GB to prove a bounds
 rem fix is a worse test than none. The clamping is covered by left$/right$ above.
+
+test_case("str/hex$, bin$ and oct$ carry a full Int64")
+rem Two defects met here. The narrowing sweep above briefly gave these three a
+rem 32-bit argument -- they take a VALUE, not an index -- and ToRadix negated its
+rem input to take the magnitude, which cannot represent -2^63, so hex$ of the
+rem smallest Int64 returned a bare "-": a minus sign, no digits, reported as success.
+lo% = -9223372036854775807
+lo% = lo% - 1
+assert_eq(hex$(lo%), "-8000000000000000", "sixteen digits, not eight and not none")
+assert_eq(len(bin$(lo%)), 65, "a sign and sixty-four bits")
+assert_eq(hex$(9223372036854775807), "7FFFFFFFFFFFFFFF", "and the other end of the range")
+assert_eq(hex$(1099511627776), "10000000000", "a value well past 32 bits")
+assert_eq(hex$(255), "FF", "ordinary values are unchanged")
+assert_eq(bin$(255), "11111111", "in every base")
+assert_eq(oct$(255), "377", "including octal")
+assert_eq(hex$(0), "0", "and zero is still zero")

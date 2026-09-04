@@ -228,6 +228,24 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-02 · round 16 · the empty-parens convention, and a half-enforced rule.**
+  The owner proposed marking parameterless CALL sites with `()` so a call cannot be
+  misread as a variable. Adopted and swept wholesale (1445 sites, 39 files); the rule
+  itself is §2b. Two lessons, and the second matters more than the convention:
+  - **The sweep broke on exactly the ambiguity the convention exists to remove.** A
+    global name list wrote `var ... bestPop, pop(), idx ...` because `pop` is a local
+    Integer in one unit and a method in another. A purely lexical transform cannot see
+    scope — so scope it per FILE (exclude every identifier that file declares left of a
+    `:`), and lean on the compiler: `@Foo()` and a parenthesised `property` both fail
+    LOUDLY, which is what makes such a sweep safe to attempt at all. Measure before
+    committing to a sweep: the first estimate was "some dozens", the truth was 1778.
+  - **A discipline enforced by only ONE of the two runners is half a discipline.**
+    `-ProveFailure` existed in test-suite.ps1 and had never existed in test-suite.sh, so
+    on Linux the oracle suite could not prove it was able to fail. It went unnoticed for
+    every previous round because the Windows run always covered it — and surfaced only
+    when the VM was the half being checked. Rule: when a verification gate is added to a
+    `.ps1`, add it to the `.sh` in the same commit, and periodically diff the two
+    runner families for capabilities that exist on one side only.
 - **2026-09-02 · round 15 · a stateful REPL.** The owner typed six lines at the prompt
   and found `let br? = 2 = 2` / `println br?` printing `false`. The LANGUAGE was right
   (one program prints `true`); the REPL ran every line as its own program, so each

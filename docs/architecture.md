@@ -111,6 +111,35 @@ minefield otherwise.
    self-extracting deployment stub (its format is already frozen in
    [decisions.md](decisions.md)). See [roadmap-phase3.md](roadmap-phase3.md).
 
+## The GUI host and the display guard
+
+Two host binaries ship because the LCL cannot be loaded on demand. On Linux the
+gtk2 widgetset opens the X display from a unit *initialization* section, before
+`main` runs — so a binary that merely **links** the LCL dies with gtk's bare
+`cannot open display` wherever no session is reachable, and no runtime flag can
+undo that. The headless `phosphor` therefore does not link it; `phosphorgui`
+does, and `phosphor --gui` hands over.
+
+That same load order is what makes the guard work, and it is fragile enough to
+state plainly:
+
+> `PhosphorDisplayGuard` **must stay first in `phosphorgui.lpr`'s `uses`
+> clause**, ahead of `Interfaces`. Unit initialization runs in `uses` order, so
+> first means *before the widgetset touches the display*. Move it and the guard
+> still compiles, still passes its tests on Windows, and silently stops working
+> on Linux.
+
+The guard checks `DISPLAY` and `WAYLAND_DISPLAY` (either is enough), and when
+both are empty it explains the situation, points at `DISPLAY=:0 phosphor --gui
+<file>` and at `phosphor run <file>`, and halts with **exit code 3** — separate
+from `1` (program error) and `2` (usage) so a script can tell "no display" from
+"your program failed". `phosphor --gui` runs the same check inline before it
+execs, so the message is identical whichever binary the user reached for. On
+Windows there is no display to miss, so the whole guard is `{$IFDEF UNIX}`.
+
+A `DISPLAY` that is *set but broken* still fails inside gtk; the guard is aimed
+at the common, confusing case — an ssh session, a service, a container.
+
 ## Linux
 
 Desktop means Windows **and** Linux, but this machine can build only Windows
@@ -141,8 +170,12 @@ Two supported ways to get a Linux binary, in order of preference:
 
   ```
   bash scripts/build.sh          # build the console host
+  bash scripts/build-gui.sh      # build phosphorgui (needs the LCL; see below)
   bash scripts/test.sh           # skeleton smoke test (byte-exact golden)
   bash scripts/test-suite.sh     # the oracle suite + negatives
+  bash scripts/test-classic.sh   # the standard-BASIC command set + the REPL
+  bash scripts/test-packages.sh  # the opt-in host packages
+  python3 scripts/coverage.py    # every built-in is tested AND documented
   ```
 
   These are the Unix counterparts of the `.ps1` scripts (same boundary check,

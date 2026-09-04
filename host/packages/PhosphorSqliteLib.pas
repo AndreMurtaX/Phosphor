@@ -142,6 +142,12 @@ type
     HandleId: Int64;
     OnRow: Boolean;      // the most recent step landed on a row
     Stepped: Boolean;    // step has been called at least once
+    { The declared type of each column AS THE ROW ARRIVED. sqlite3_column_type
+      reports the CURRENT representation, and reading a column as text converts it
+      in place -- so sqlite_coltype answered BLOB before a sqlite_getstr$ and TEXT
+      after it, for the same row, with no step in between. Captured once per row so
+      the answer depends on the data rather than on the order the program asked. }
+    RowTypes: array of Integer;
     constructor Create(AOwner: TSqliteDb; AStmt: psqlite3_stmt);
     destructor Destroy; override;
   end;
@@ -202,6 +208,24 @@ end;
 function PtrStr(P: PAnsiChar): String;
 begin
   if P = nil then Result := '' else Result := P;
+end;
+
+{ A column's text, all of it.
+
+  PtrStr treats the pointer as a C string and stops at the first NUL, so a text or
+  blob column holding an embedded zero came back TRUNCATED: `length(b)` reported 4
+  for x'41004243' while every reader here returned 1 byte. SQLite says how many
+  bytes there are; ask it. (PtrStr stays for the genuinely NUL-terminated things --
+  an error message, a column name.) }
+function ColStr(AStmt: psqlite3_stmt; ACol: Integer): String;
+var p: PAnsiChar; n: Integer;
+begin
+  p := PAnsiChar(sqlite3_column_text(AStmt, ACol));
+  if p = nil then Exit('');
+  n := sqlite3_column_bytes(AStmt, ACol);
+  if n <= 0 then Exit('');
+  SetLength(Result, n);
+  Move(p^, Result[1], n);
 end;
 
 function GetDb(AId: Int64; out ADb: TSqliteDb): Boolean;
@@ -269,13 +293,21 @@ end;
 
 { Step, tracking the on-row / stepped state. Returns 1 for a row, 0 otherwise. }
 function DoStep(AStmt: TSqliteStmt): Integer;
-var rc: Integer;
+var rc, i: Integer;
 begin
   AStmt.Stepped := True;
   rc := sqlite3_step(AStmt.StmtPtr);
+  SetLength(AStmt.RowTypes, 0);
   if rc = SQLITE_ROW then
   begin
     AStmt.OnRow := True;
+    // The types are captured HERE, the moment the row arrives. Reading a column as
+    // text converts it in place, so asking afterwards reports the conversion's type
+    // rather than the row's -- sqlite_isblob answered 1 before a sqlite_getstr$ and
+    // 0 after it, for the same row, with no step in between.
+    SetLength(AStmt.RowTypes, sqlite3_column_count(AStmt.StmtPtr));
+    for i := 0 to High(AStmt.RowTypes) do
+      AStmt.RowTypes[i] := sqlite3_column_type(AStmt.StmtPtr, i);
     Result := 1;
   end
   else
@@ -359,7 +391,7 @@ begin
       SQLITE_FLOAT:   Result.Add(nm, sqlite3_column_double(AStmt.StmtPtr, i));
       SQLITE_NULL:    Result.Add(nm, TJSONNull.Create());
     else
-      Result.Add(nm, PtrStr(sqlite3_column_text(AStmt.StmtPtr, i)));
+      Result.Add(nm, ColStr(AStmt.StmtPtr, i));
     end;
   end;
 end;
@@ -444,7 +476,7 @@ begin
   Result := ValStr('');
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
-  if sqlite3_step(st) = SQLITE_ROW then Result := ValStr(PtrStr(sqlite3_column_text(st, 0)));
+  if sqlite3_step(st) = SQLITE_ROW then Result := ValStr(ColStr(st, 0));
   sqlite3_finalize(st);
 end;
 
@@ -474,7 +506,7 @@ begin
     for i := 0 to cnt - 1 do
     begin
       if i > 0 then row := row + #9;
-      row := row + PtrStr(sqlite3_column_text(st, i));
+      row := row + ColStr(st, i);
     end;
     r := r + row + #10;
   end;
@@ -534,7 +566,7 @@ begin
     while sqlite3_step(st) = SQLITE_ROW do
       // Add(TJSONData): the plain-string array overload re-encodes any byte >= $80,
       // so a table holding accented text came back mojibake.
-      arr.Add(TJSONString.Create(PtrStr(sqlite3_column_text(st, 0))));
+      arr.Add(TJSONString.Create(ColStr(st, 0)));
     sqlite3_finalize(st);
   end;
   Result := ValHandle(JsonRegisterNode(arr, True));
@@ -552,8 +584,8 @@ begin
     while sqlite3_step(st) = SQLITE_ROW do
     begin
       o := TJSONObject.Create();
-      o.Add('name', PtrStr(sqlite3_column_text(st, 1)));
-      o.Add('type', PtrStr(sqlite3_column_text(st, 2)));
+      o.Add('name', ColStr(st, 1));
+      o.Add('type', ColStr(st, 2));
       o.Add('notnull', sqlite3_column_int64(st, 3));
       o.Add('pk', sqlite3_column_int64(st, 5));
       arr.Add(o);
@@ -713,7 +745,8 @@ begin
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
-    Result := ValInt(sqlite3_column_type(s.StmtPtr, c));
+    if (c >= 0) and (c <= High(s.RowTypes)) then Result := ValInt(s.RowTypes[c])
+    else Result := ValInt(sqlite3_column_type(s.StmtPtr, c));
 end;
 
 function f_coltypename(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -739,7 +772,7 @@ begin
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
-    Result := ValStr(PtrStr(sqlite3_column_text(s.StmtPtr, c)));
+    Result := ValStr(ColStr(s.StmtPtr, c));
 end;
 
 function f_getnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -760,7 +793,7 @@ begin
   Result := ValStr('');
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := FindCol(s, Args[1].Str);
-  if s.OnRow and (c >= 0) then Result := ValStr(PtrStr(sqlite3_column_text(s.StmtPtr, c)));
+  if s.OnRow and (c >= 0) then Result := ValStr(ColStr(s.StmtPtr, c));
 end;
 
 function f_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -803,7 +836,9 @@ begin
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
-    Result := ValInt(Ord(sqlite3_column_type(s.StmtPtr, c) = SQLITE_BLOB));
+    if (c >= 0) and (c <= High(s.RowTypes)) then
+      Result := ValInt(Ord(s.RowTypes[c] = SQLITE_BLOB))
+    else Result := ValInt(Ord(sqlite3_column_type(s.StmtPtr, c) = SQLITE_BLOB));
 end;
 
 // --- rows as JSON -----------------------------------------------------------

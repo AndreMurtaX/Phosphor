@@ -235,3 +235,29 @@ sqlite_close(d@)
 assert_false(sqlite_isopen(d@), "sqlite_close closes it")
 
 file_delete(db$)
+
+test_case("sqlite/a column with an embedded NUL comes back whole")
+rem The readers treated the column pointer as a C string and stopped at the first
+rem NUL, so a text or blob column holding a zero byte was silently TRUNCATED:
+rem length(b) reported 4 while every reader returned 1 byte.
+sqlite_exec(db@, "create table nulls(b blob)")
+sqlite_exec(db@, "insert into nulls values(x'41004243')")
+assert_eq(sqlite_scalar(db@, "select length(b) from nulls"), 4, "SQLite says four bytes")
+nb$ = sqlite_scalar$(db@, "select b from nulls")
+assert_eq(bytelen(nb$), 4, "and four bytes is what comes back")
+assert_eq(byteat(nb$, 1), 65, "A")
+assert_eq(byteat(nb$, 2), 0, "the embedded NUL")
+assert_eq(byteat(nb$, 3), 66, "B")
+assert_eq(byteat(nb$, 4), 67, "C")
+
+test_case("sqlite/a column's type is the ROW's, not the last read's")
+rem sqlite3_column_type reports the CURRENT representation, and reading a column as
+rem text converts it in place -- so the same row answered BLOB before a getstr$ and
+rem TEXT after it, with no step in between. The types are captured at step now.
+c@ = sqlite_prepare@(db@, "select b from nulls")
+assert_eq(sqlite_step(c@), 1, "one row")
+assert_eq(sqlite_isblob(c@, 1), 1, "it is a blob")
+junk$ = sqlite_getstr$(c@, 1)
+assert_eq(sqlite_isblob(c@, 1), 1, "and it still is, after being read as text")
+assert_eq(sqlite_coltype(c@, 1), 4, "the type code has not moved either")
+sqlite_finalize(c@)

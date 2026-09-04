@@ -130,6 +130,89 @@ begin
   for i := 0 to AProg.DataCount - 1 do WVal(AStream, AProg.DataPool[i]);
 end;
 
+
+const
+  { A ceiling on any count read from a file, applied BEFORE allocating for it. No
+    real program has ten million of anything, and a corrupt length field otherwise
+    asks the loader for an absurd allocation before anything can check it. }
+  MaxSaneCount = 10000000;
+
+{ ------------------------------------------------------------------------------
+  A .pbc IS UNTRUSTED INPUT.
+
+  The header was checked -- magic, format version, opcode-set size -- and then
+  every count and every operand in the body was believed. A file whose header is
+  intact and whose body is not is exactly what a truncated download, a bad disk or
+  a deliberately edited file looks like, and it drove the interpreter out of
+  bounds: changing one opPushConst operand to 0x01000000 was enough for an access
+  violation, because the constant pool is indexed without a check at run time.
+
+  Everything the VM will index is therefore verified HERE, once, before the
+  program runs: a constant index against the pool, a variable index against the
+  variable table, a jump target against the instruction count, a function entry
+  against the same. What cannot be checked statically -- a local slot, which
+  depends on the frame -- is at least checked for a negative.
+
+  The alternative was bounds-checking every index in the dispatch loop, which
+  would cost every program a little to protect against a file almost no program
+  loads. Validating once, at the boundary, costs the load and nothing after it.
+  ------------------------------------------------------------------------------ }
+function ValidateProgram(AProg: TProgram; out AErr: String): Boolean;
+var
+  i: Integer;
+  ins: TInstr;
+
+  function Bad(const AWhat: String; AIndex, ALimit: Integer): Boolean;
+  begin
+    AErr := Format('corrupt .pbc: instruction %d has %s %d, outside 0..%d',
+                   [i, AWhat, AIndex, ALimit - 1]);
+    Result := False;
+  end;
+
+begin
+  AErr := '';
+  Result := False;
+  if AProg.VarCount < 0 then
+  begin AErr := 'corrupt .pbc: negative variable count'; Exit; end;
+  if Length(AProg.VarTypes) <> AProg.VarCount then
+  begin AErr := 'corrupt .pbc: the variable table does not match its count'; Exit; end;
+
+  for i := 0 to AProg.Count - 1 do
+  begin
+    ins := AProg.Instr(i);
+    case ins.Op of
+      opPushConst, opCall:
+        if (ins.A < 0) or (ins.A >= AProg.Consts.Count) then
+          Exit(Bad('constant index', ins.A, AProg.Consts.Count));
+      opLoadVar, opStoreVar:
+        if (ins.A < 0) or (ins.A >= AProg.VarCount) then
+          Exit(Bad('variable index', ins.A, AProg.VarCount));
+      opJump, opJumpIfFalse, opGosub:
+        if (ins.A < 0) or (ins.A > AProg.Count) then
+          Exit(Bad('jump target', ins.A, AProg.Count + 1));
+      opSetErrHandler:
+        // -1 disables the handler; anything else is a pc
+        if (ins.A < -1) or (ins.A > AProg.Count) then
+          Exit(Bad('handler target', ins.A, AProg.Count + 1));
+      opLoadLocal, opStoreLocal, opDupN, opBreakpoint, opPrintUsing:
+        if ins.A < 0 then
+          Exit(Bad('operand', ins.A, 0));
+    end;
+    if ins.Op = opCall then
+      if ins.B < 0 then
+        Exit(Bad('argument count', ins.B, 0));
+  end;
+
+  for i := 0 to AProg.UserFuncCount - 1 do
+    if (AProg.UserFuncs[i].Entry < 0) or (AProg.UserFuncs[i].Entry > AProg.Count) then
+    begin
+      AErr := Format('corrupt .pbc: function %d starts at %d, outside the program',
+                     [i, AProg.UserFuncs[i].Entry]);
+      Exit;
+    end;
+  Result := True;
+end;
+
 function ReadProgram(AStream: TStream; out AProg: TProgram; out AErr: String): Boolean;
 var
   magic: array[0..2] of Char;
@@ -139,6 +222,7 @@ var
   a, b, ln: LongInt;
   fname: String;
   entry, pcount: LongInt;
+  raw: Byte;
   lts: array of TVarType;
   rt: TVarType;
 begin
@@ -159,21 +243,58 @@ begin
     AProg := TProgram.Create();
 
     vc := RI32(AStream);
+    if (vc < 0) or (vc > MaxSaneCount) then
+    begin
+      AErr := Format('corrupt .pbc: variable count %d', [vc]);
+      AProg.Free; AProg := nil; Exit(False);
+    end;
     AProg.VarCount := vc;
     SetLength(AProg.VarTypes, vc);
-    for i := 0 to vc - 1 do AProg.VarTypes[i] := TVarType(RU8(AStream));
+    for i := 0 to vc - 1 do
+    begin
+      raw := RU8(AStream);
+      if raw > Ord(High(TVarType)) then
+      begin
+        AErr := Format('corrupt .pbc: variable %d has type %d, and this build knows 0..%d',
+                       [i, raw, Ord(High(TVarType))]);
+        AProg.Free; AProg := nil; Exit(False);
+      end;
+      AProg.VarTypes[i] := TVarType(raw);
+    end;
 
     n := RI32(AStream);
+    if (n < 0) or (n > MaxSaneCount) then
+    begin
+      AErr := Format('corrupt .pbc: a section claims %d entries', [n]);
+      AProg.Free; AProg := nil; Exit(False);
+    end;
     for i := 0 to n - 1 do
     begin
-      op := TOpcode(RU8(AStream)); a := RI32(AStream); b := RI32(AStream); ln := RI32(AStream);
+      raw := RU8(AStream);
+      if raw > Ord(High(TOpcode)) then
+      begin
+        AErr := Format('corrupt .pbc: instruction %d has opcode %d, and this build ' +
+                       'knows 0..%d', [i, raw, Ord(High(TOpcode))]);
+        AProg.Free; AProg := nil; Exit(False);
+      end;
+      op := TOpcode(raw); a := RI32(AStream); b := RI32(AStream); ln := RI32(AStream);
       AProg.Emit(op, a, b, ln);
     end;
 
     n := RI32(AStream);
+    if (n < 0) or (n > MaxSaneCount) then
+    begin
+      AErr := Format('corrupt .pbc: a section claims %d entries', [n]);
+      AProg.Free; AProg := nil; Exit(False);
+    end;
     for i := 0 to n - 1 do AProg.Consts.Add(RVal(AStream));
 
     n := RI32(AStream);
+    if (n < 0) or (n > MaxSaneCount) then
+    begin
+      AErr := Format('corrupt .pbc: a section claims %d entries', [n]);
+      AProg.Free; AProg := nil; Exit(False);
+    end;
     for i := 0 to n - 1 do
     begin
       fname := RStr(AStream);
@@ -187,8 +308,18 @@ begin
     end;
 
     n := RI32(AStream);
+    if (n < 0) or (n > MaxSaneCount) then
+    begin
+      AErr := Format('corrupt .pbc: a section claims %d entries', [n]);
+      AProg.Free; AProg := nil; Exit(False);
+    end;
     for i := 0 to n - 1 do AProg.AddData(RVal(AStream));
 
+    // Everything the VM will index, checked once, before it runs.
+    if not ValidateProgram(AProg, AErr) then
+    begin
+      AProg.Free; AProg := nil; Exit(False);
+    end;
     Result := True;
   except
     on E: Exception do

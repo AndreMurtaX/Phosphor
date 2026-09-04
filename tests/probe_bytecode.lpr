@@ -120,6 +120,59 @@ begin
   end;
 end;
 
+{ Corrupt the INSTRUCTION SECTION and assert the load is refused.
+
+  AMode 0 replaces the first instruction's opcode with one this build does not
+  have; AMode 1 finds the first opPushConst and points its operand far past the
+  constant pool -- the exact edit that used to be an access violation, because the
+  pool is indexed without a check while running.
+
+  The bytes are COPIED OUT, mutated, and handed back as a fresh stream: writing
+  through TBytesStream.Bytes did not stick here, and a test whose sabotage silently
+  fails is a test that passes for the wrong reason. Finding the right INSTRUCTION
+  matters for the same reason -- the first one is an opStmt, whose operand no
+  validator has any business checking. }
+procedure CheckBodyRefusal(const AName, ASource: String; AMode: Integer);
+var
+  src, bad: TBytesStream; buf: TBytes; msg, dummy: String;
+  rc, vc, first, n, k, o: Integer;
+begin
+  src := CompileToBytes(ASource);
+  if src = nil then begin Report(False, AName + ' (compiled)'); Exit; end;
+  try
+    SetLength(buf, src.Size);
+    src.Position := 0;
+    if src.Size > 0 then src.ReadBuffer(buf[0], src.Size);
+  finally
+    src.Free;
+  end;
+  // magic(3) version(1) opcodeset(1) varcount(4) vartypes(vc) instrcount(4)
+  vc := PLongInt(@buf[5])^;
+  n := PLongInt(@buf[5 + 4 + vc])^;
+  first := 5 + 4 + vc + 4;              // each instruction: op(1) A(4) B(4) line(4)
+  if AMode = 0 then
+    buf[first] := 200                    // an opcode this build does not have
+  else
+  begin
+    for k := 0 to n - 1 do
+    begin
+      o := first + k * 13;
+      if buf[o] = Ord(opPushConst) then
+      begin
+        PLongInt(@buf[o + 1])^ := 16777216;
+        Break;
+      end;
+    end;
+  end;
+  bad := TBytesStream.Create(buf);
+  try
+    dummy := RunBytes(bad, rc, msg);
+    Report((rc <> 0) and (Length(msg) > 0) and (dummy = ''), AName);
+  finally
+    bad.Free;
+  end;
+end;
+
 const
   Rich =
     'data 10, 20, 30'                                          + #10 +
@@ -142,6 +195,15 @@ begin
   // The header is 3 magic bytes, then version (index 3), then the opcode-set byte.
   CheckRefusal('refuse: a wrong version byte',  Simple, 3, 99);
   CheckRefusal('refuse: a bad magic byte',      Simple, 0, Ord('X'));
+
+  // THE BODY, not only the header. A file whose header is intact and whose body is
+  // not is what a truncated download or an edited file looks like, and every count
+  // and operand past the header used to be believed: one changed opPushConst
+  // operand was an access violation, because the constant pool is indexed without a
+  // check while running. These corrupt the FIRST INSTRUCTION's opcode byte and its
+  // A operand, at offsets computed from the format rather than guessed.
+  CheckBodyRefusal('refuse: an opcode this build does not have', Simple, 0);
+  CheckBodyRefusal('refuse: a constant index past the pool', Simple, 1);
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

@@ -78,6 +78,6 @@ initialization
   GCount := 0;
 
 finalization
-  ResetHandles;
+  ResetHandles();
 
 end.

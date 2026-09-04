@@ -38,7 +38,7 @@ var
   rc: Integer;
   hitLimit: Boolean;
 begin
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     eng.MaxSteps := ASteps;
     eng.MaxOutputBytes := AOutput;

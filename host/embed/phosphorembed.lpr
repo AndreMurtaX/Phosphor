@@ -27,7 +27,7 @@ uses
 // signature 'name:codes' -- here no arguments, returning a number.
 function host_discount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValDouble(0.10);
 end;
 
@@ -65,7 +65,7 @@ var
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
 
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     // 2. Register the host's own function into the engine.
     eng.Registry.Add('host_discount:', @host_discount);

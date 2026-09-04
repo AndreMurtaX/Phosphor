@@ -77,24 +77,24 @@ end;
 
 function t_file_writealltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, Args[1].Str)));
 end;
 function t_file_readalltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
-  Err := NoError;
+  Err := NoError();
   if ReadAllBytes(Args[0].Str, s) then GIoError := 0 else GIoError := 2;  // 2 ~ not found
   Result := ValStr(s);
 end;
 function t_file_exists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(FileExists(Args[0].Str)));
 end;
 function t_file_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(DeleteFile(Args[0].Str)));
 end;
 
@@ -102,14 +102,14 @@ end;
 // which is what the whole engine already speaks.
 function t_savetext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   WriteAllBytes(Args[0].Str, Args[2].Str);
   Result := ValStr(Args[0].Str);
 end;
 function t_opentext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
-  Err := NoError;
+  Err := NoError();
   ReadAllBytes(Args[0].Str, s);
   Result := ValStr(s);
 end;
@@ -134,13 +134,13 @@ end;
 function t_path_getfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String;
 begin
-  Err := NoError; p := Args[0].Str;
+  Err := NoError(); p := Args[0].Str;
   Result := ValStr(Copy(p, LastSep(p) + 1, MaxInt));
 end;
 function t_path_getextension(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep, dot: Integer;
 begin
-  Err := NoError; p := Args[0].Str;
+  Err := NoError(); p := Args[0].Str;
   sep := LastSep(p);
   dot := LastDotAfter(p, sep);
   if dot > 0 then Result := ValStr(Copy(p, dot, MaxInt)) else Result := ValStr('');
@@ -148,7 +148,7 @@ end;
 function t_path_getfilenamenoext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p, fn: String; sep, dot: Integer;
 begin
-  Err := NoError; p := Args[0].Str;
+  Err := NoError(); p := Args[0].Str;
   sep := LastSep(p);
   fn := Copy(p, sep + 1, MaxInt);
   dot := LastDotAfter(p, sep);
@@ -157,7 +157,7 @@ end;
 function t_path_changeextension(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p, ext: String; sep, dot: Integer;
 begin
-  Err := NoError; p := Args[0].Str; ext := Args[1].Str;
+  Err := NoError(); p := Args[0].Str; ext := Args[1].Str;
   sep := LastSep(p);
   dot := LastDotAfter(p, sep);
   if dot > 0 then Result := ValStr(Copy(p, 1, dot - 1) + ext) else Result := ValStr(p + ext);
@@ -168,13 +168,13 @@ end;
 function t_extractfilepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String;
 begin
-  Err := NoError; p := Args[0].Str;
+  Err := NoError(); p := Args[0].Str;
   Result := ValStr(Copy(p, 1, LastSep(p)));
 end;
 
 function t_dir_exists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(DirectoryExists(Args[0].Str)));
 end;
 
@@ -239,10 +239,10 @@ function ListToStr(const ADir, APattern: String; AFiles, ADirs, ARecursive: Bool
 var l: TStringList; i: Integer;
 begin
   Result := '';
-  l := TStringList.Create;
+  l := TStringList.Create();
   try
     CollectEntries(ADir, APattern, AFiles, ADirs, ARecursive, l);
-    l.Sort;
+    l.Sort();
     for i := 0 to l.Count - 1 do
     begin
       if i > 0 then Result := Result + #10;
@@ -323,12 +323,12 @@ begin i := StrToInt64Def(S, 0); Result := PDouble(@i)^; end;
 
 // --- directory functions ----------------------------------------------------
 function t_dir_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; ForceDirectories(Args[0].Str); Result := ValInt(1); end;
+begin Err := NoError(); ForceDirectories(Args[0].Str); Result := ValInt(1); end;
 function t_dir_isempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(ListToStr(Args[0].Str, '*', True, True, False) = '')); end;
+begin Err := NoError(); Result := ValInt(Ord(ListToStr(Args[0].Str, '*', True, True, False) = '')); end;
 function t_dir_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if (Length(Args) >= 2) and (AsDouble(Args[1]) <> 0) then DeleteTree(Args[0].Str)
   else RemoveDir(Args[0].Str);
   Result := ValInt(1);
@@ -336,7 +336,7 @@ end;
 function t_dir_getfiles(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var pat: String; rec: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   if Length(Args) >= 2 then pat := Args[1].Str else pat := '*';
   rec := (Length(Args) >= 3) and (AsDouble(Args[2]) <> 0);
   Result := ValStr(ListToStr(Args[0].Str, pat, True, False, rec));
@@ -344,7 +344,7 @@ end;
 function t_dir_getdirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var pat: String; rec: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   if Length(Args) >= 2 then pat := Args[1].Str else pat := '*';
   rec := (Length(Args) >= 3) and (AsDouble(Args[2]) <> 0);
   Result := ValStr(ListToStr(Args[0].Str, pat, False, True, rec));
@@ -352,45 +352,45 @@ end;
 function t_dir_getentries(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var pat: String;
 begin
-  Err := NoError;
+  Err := NoError();
   if Length(Args) >= 2 then pat := Args[1].Str else pat := '*';
   Result := ValStr(ListToStr(Args[0].Str, pat, True, True, False));
 end;
 function t_dir_getparent(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep: Integer;
 begin
-  Err := NoError; p := Args[0].Str;
+  Err := NoError(); p := Args[0].Str;
   if (p <> '') and ((p[Length(p)] = '/') or (p[Length(p)] = '\')) then SetLength(p, Length(p) - 1);
   sep := LastSepIdx(p);
   if sep > 0 then Result := ValStr(Copy(p, 1, sep - 1)) else Result := ValStr('');
 end;
 function t_dir_isrelativepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(not IsRooted(Args[0].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(not IsRooted(Args[0].Str))); end;
 function t_dir_getcurrent(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GetCurrentDir); end;
+begin Err := NoError(); Result := ValStr(GetCurrentDir); end;
 function t_dir_setcurrent(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; SetCurrentDir(Args[0].Str); Result := ValInt(1); end;
+begin Err := NoError(); SetCurrentDir(Args[0].Str); Result := ValInt(1); end;
 function t_dir_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(CopyTree(Args[0].Str, Args[1].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(CopyTree(Args[0].Str, Args[1].Str))); end;
 function t_dir_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str))); end;
 
 // --- file copy/move/content -------------------------------------------------
 function t_file_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if (Length(Args) >= 3) and (AsDouble(Args[2]) = 0) and FileExists(Args[1].Str) then
   begin Result := ValInt(0); Exit; end;   // no overwrite, target exists
   Result := ValInt(Ord(CopyFileBytes(Args[0].Str, Args[1].Str)));
 end;
 function t_file_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str))); end;
 function t_file_createempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(WriteAllBytes(Args[0].Str, ''))); end;
+begin Err := NoError(); Result := ValInt(Ord(WriteAllBytes(Args[0].Str, ''))); end;
 function t_file_getsize(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var fs: TFileStream;
 begin
-  Err := NoError; Result := ValInt(0);
+  Err := NoError(); Result := ValInt(0);
   try
     fs := TFileStream.Create(Args[0].Str, fmOpenRead or fmShareDenyNone);
     try Result := ValInt(fs.Size); finally fs.Free; end;
@@ -399,7 +399,7 @@ end;
 function t_file_appendalltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
-  Err := NoError;
+  Err := NoError();
   ReadAllBytes(Args[0].Str, s);
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, s + Args[1].Str)));
 end;
@@ -408,15 +408,15 @@ end;
 function t_file_readallbytes(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var b: TPhosphorBytes;
 begin
-  Err := NoError;
-  b := TPhosphorBytes.Create;
+  Err := NoError();
+  b := TPhosphorBytes.Create();
   ReadAllBytes(Args[0].Str, b.Data);
   Result := ValHandle(RegisterHandle(b));
 end;
 function t_file_writeallbytes(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   // A bogus handle writes nothing (0) rather than obeying.
-  Err := NoError;
+  Err := NoError();
   if (Args[1].Kind = vkHandle) and IsHandle(Args[1].Hnd) and (HandleObj(Args[1].Hnd) is TPhosphorBytes) then
     Result := ValInt(Ord(WriteAllBytes(Args[0].Str, TPhosphorBytes(HandleObj(Args[1].Hnd)).Data)))
   else
@@ -425,59 +425,59 @@ end;
 
 // --- timestamps: files are real (FileSetDate/FileAge); dirs are in-process --
 function t_file_settime(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; FileSetDate(Args[0].Str, DateTimeToFileDate(AsDouble(Args[1]))); Result := ValInt(1); end;
+begin Err := NoError(); FileSetDate(Args[0].Str, DateTimeToFileDate(AsDouble(Args[1]))); Result := ValInt(1); end;
 function t_file_gettime(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var age: LongInt;
 begin
-  Err := NoError; age := FileAge(Args[0].Str);
+  Err := NoError(); age := FileAge(Args[0].Str);
   if age > 0 then Result := ValDouble(FileDateToDateTime(age)) else Result := ValInt(0);
 end;
 function DirTimeKey(AKind: Char; const APath: String): String;
 begin Result := AKind + APath; end;
 function t_dir_settime_c(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; GDirTimes.Values[DirTimeKey('c', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
+begin Err := NoError(); GDirTimes.Values[DirTimeKey('c', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
 function t_dir_settime_w(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; GDirTimes.Values[DirTimeKey('w', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
+begin Err := NoError(); GDirTimes.Values[DirTimeKey('w', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
 function t_dir_settime_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; GDirTimes.Values[DirTimeKey('a', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
+begin Err := NoError(); GDirTimes.Values[DirTimeKey('a', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
 function t_dir_gettime_c(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('c', Args[0].Str)])); end;
+begin Err := NoError(); Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('c', Args[0].Str)])); end;
 function t_dir_gettime_w(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('w', Args[0].Str)])); end;
+begin Err := NoError(); Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('w', Args[0].Str)])); end;
 function t_dir_gettime_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('a', Args[0].Str)])); end;
+begin Err := NoError(); Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('a', Args[0].Str)])); end;
 
 // --- path extras ------------------------------------------------------------
 function t_path_combine(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if Length(Args) >= 3 then Result := ValStr(Combine2(Combine2(Args[0].Str, Args[1].Str), Args[2].Str))
   else Result := ValStr(Combine2(Args[0].Str, Args[1].Str));
 end;
 function t_path_getdirectoryname(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep: Integer;
 begin
-  Err := NoError; p := Args[0].Str; sep := LastSepIdx(p);
+  Err := NoError(); p := Args[0].Str; sep := LastSepIdx(p);
   if sep > 0 then Result := ValStr(Copy(p, 1, sep - 1)) else Result := ValStr('');
 end;
 function t_path_hasextension(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep, dot, i: Integer;
 begin
-  Err := NoError; p := Args[0].Str; sep := LastSepIdx(p); dot := 0;
+  Err := NoError(); p := Args[0].Str; sep := LastSepIdx(p); dot := 0;
   for i := Length(p) downto sep + 1 do
     if p[i] = '.' then begin dot := i; Break; end;
   Result := ValInt(Ord(dot > 0));
 end;
 function t_path_getfullpath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(ExpandFileName(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(ExpandFileName(Args[0].Str)); end;
 function t_path_ispathrooted(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(IsRooted(Args[0].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(IsRooted(Args[0].Str))); end;
 function t_path_isrelativepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(not IsRooted(Args[0].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(not IsRooted(Args[0].Str))); end;
 function t_path_getpathroot(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String;
 begin
-  Err := NoError; p := Args[0].Str;
+  Err := NoError(); p := Args[0].Str;
   if (Length(p) >= 2) and (p[2] = ':') then Result := ValStr(Copy(p, 1, 2) + '\')
   else if (p <> '') and ((p[1] = '/') or (p[1] = '\')) then Result := ValStr(p[1])
   else Result := ValStr('');
@@ -485,7 +485,7 @@ end;
 function t_path_matchespattern(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var cs: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   cs := (Length(Args) >= 3) and (AsDouble(Args[2]) <> 0);   // 2-arg form is lenient
   Result := ValInt(Ord(MatchGlob(Args[0].Str, Args[1].Str, cs)));
 end;
@@ -501,16 +501,16 @@ begin
   end;
 end;
 function t_path_hasvalidpathchars(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(HasValidChars(Args[0].Str, False))); end;
+begin Err := NoError(); Result := ValInt(Ord(HasValidChars(Args[0].Str, False))); end;
 function t_path_hasvalidfilenamechars(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(HasValidChars(Args[0].Str, True))); end;
+begin Err := NoError(); Result := ValInt(Ord(HasValidChars(Args[0].Str, True))); end;
 
 // --- io errors --------------------------------------------------------------
 function t_ioerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(GIoError); end;
+begin Err := NoError(); Result := ValInt(GIoError); end;
 function t_iostrerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if GIoError = 0 then Result := ValStr('No error') else Result := ValStr(SysErrorMessage(GIoError));
 end;
 
@@ -589,7 +589,7 @@ begin
 end;
 
 initialization
-  GDirTimes := TStringList.Create;
+  GDirTimes := TStringList.Create();
 
 finalization
   GDirTimes.Free;

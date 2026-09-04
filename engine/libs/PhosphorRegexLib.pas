@@ -28,8 +28,8 @@ function t_regex_find(const Args: array of TValue; out Err: TPhosphorError): TVa
 var r: TRegExpr;
 begin
   Result := ValStr('');
-  Err := NoError;
-  r := TRegExpr.Create;
+  Err := NoError();
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -44,8 +44,8 @@ function t_regex_findpos(const Args: array of TValue; out Err: TPhosphorError): 
 var r: TRegExpr;
 begin
   Result := ValInt(0);
-  Err := NoError;
-  r := TRegExpr.Create;
+  Err := NoError();
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -60,8 +60,8 @@ function t_regex_findlen(const Args: array of TValue; out Err: TPhosphorError): 
 var r: TRegExpr;
 begin
   Result := ValInt(0);
-  Err := NoError;
-  r := TRegExpr.Create;
+  Err := NoError();
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -76,8 +76,8 @@ function t_regex_groupcount(const Args: array of TValue; out Err: TPhosphorError
 var r: TRegExpr;
 begin
   Result := ValInt(0);
-  Err := NoError;
-  r := TRegExpr.Create;
+  Err := NoError();
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -92,9 +92,9 @@ function t_regex_group(const Args: array of TValue; out Err: TPhosphorError): TV
 var r: TRegExpr; n: Integer;
 begin
   Result := ValStr('');
-  Err := NoError;
+  Err := NoError();
   n := Round(AsDouble(Args[2]));   // group number, 0 = whole match
-  r := TRegExpr.Create;
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -110,9 +110,9 @@ function t_regex_findall(const Args: array of TValue; out Err: TPhosphorError): 
 var r: TRegExpr; sl: TPhosphorStringList;
 begin
   Result := ValInt(0);
-  Err := NoError;
-  sl := TPhosphorStringList.Create;
-  r := TRegExpr.Create;
+  Err := NoError();
+  sl := TPhosphorStringList.Create();
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -131,9 +131,9 @@ function t_regex_groups(const Args: array of TValue; out Err: TPhosphorError): T
 var r: TRegExpr; sl: TPhosphorStringList; i: Integer;
 begin
   Result := ValInt(0);
-  Err := NoError;
-  sl := TPhosphorStringList.Create;
-  r := TRegExpr.Create;
+  Err := NoError();
+  sl := TPhosphorStringList.Create();
+  r := TRegExpr.Create();
   try
     try
       r.Expression := Args[0].Str;
@@ -152,10 +152,10 @@ function t_regex_split(const Args: array of TValue; out Err: TPhosphorError): TV
 var r: TRegExpr; sl: TPhosphorStringList; tmp: TStringList; i: Integer;
 begin
   Result := ValInt(0);
-  Err := NoError;
-  sl := TPhosphorStringList.Create;
-  r := TRegExpr.Create;
-  tmp := TStringList.Create;
+  Err := NoError();
+  sl := TPhosphorStringList.Create();
+  r := TRegExpr.Create();
+  tmp := TStringList.Create();
   try
     try
       r.Expression := Args[0].Str;

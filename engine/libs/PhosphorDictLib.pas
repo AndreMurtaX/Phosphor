@@ -40,7 +40,7 @@ implementation
 
 constructor TPhosphorDict.Create(AKind: TArrayKind);
 begin
-  inherited Create;
+  inherited Create();
   Kind := AKind;
   Count := 0;
 end;
@@ -110,7 +110,7 @@ begin
     Exit(False);
   end;
   D := TPhosphorDict(HandleObj(V.Hnd));
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -120,11 +120,11 @@ begin
 end;
 
 function t_dict_new(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := MakeDict(akNumeric); end;
+begin Err := NoError(); Result := MakeDict(akNumeric); end;
 function t_sdict_new(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := MakeDict(akString); end;
+begin Err := NoError(); Result := MakeDict(akString); end;
 function t_pdict_new(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := MakeDict(akPointer); end;
+begin Err := NoError(); Result := MakeDict(akPointer); end;
 
 // (handle, key$, value) -> value; returns the dict handle so it reads as a
 // constructor-style call site too.
@@ -192,7 +192,7 @@ var d: TPhosphorDict;
 begin
   Result := ValInt(0);
   if not GetDict(Args[0], d, Err) then Exit;
-  d.Clear;
+  d.Clear();
   Result := ValInt(1);
 end;
 
@@ -200,7 +200,7 @@ function t_dict_typename(const Args: array of TValue; out Err: TPhosphorError): 
 var d: TPhosphorDict;
 begin
   Result := ValStr('');
-  if GetDict(Args[0], d, Err) then Result := ValStr(d.TypeName);
+  if GetDict(Args[0], d, Err) then Result := ValStr(d.TypeName());
 end;
 
 // key at a 1-based position (insertion order)

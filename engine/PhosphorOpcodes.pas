@@ -167,15 +167,15 @@ end;
 
 constructor TProgram.Create;
 begin
-  inherited Create;
-  Consts := TConstPool.Create;
+  inherited Create();
+  Consts := TConstPool.Create();
   FCount := 0;
 end;
 
 destructor TProgram.Destroy;
 begin
   Consts.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 function TProgram.Emit(Op: TOpcode; A, B, Line: Integer): Integer;

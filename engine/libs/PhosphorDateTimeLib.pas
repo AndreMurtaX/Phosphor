@@ -32,90 +32,90 @@ function I1(const A: array of TValue): Integer; begin Result := Round(AsDouble(A
 
 // --- decomposition ----------------------------------------------------------
 function t_yearof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(YearOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(YearOf(D0(A))); end;
 function t_monthof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MonthOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(MonthOf(D0(A))); end;
 function t_dayof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DayOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(DayOf(D0(A))); end;
 function t_dayofthemonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DayOfTheMonth(D0(A))); end;
+begin E := NoError(); Result := ValInt(DayOfTheMonth(D0(A))); end;
 function t_monthoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MonthOfTheYear(D0(A))); end;
+begin E := NoError(); Result := ValInt(MonthOfTheYear(D0(A))); end;
 function t_dayoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DayOfTheYear(D0(A))); end;
+begin E := NoError(); Result := ValInt(DayOfTheYear(D0(A))); end;
 
 // --- week-day: two bases ----------------------------------------------------
 function t_dayofweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DayOfWeek(D0(A))); end;         // Sunday = 1
+begin E := NoError(); Result := ValInt(DayOfWeek(D0(A))); end;         // Sunday = 1
 function t_dayoftheweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DayOfTheWeek(D0(A))); end;      // ISO: Monday = 1
+begin E := NoError(); Result := ValInt(DayOfTheWeek(D0(A))); end;      // ISO: Monday = 1
 
 // --- leap years and month lengths -------------------------------------------
 function t_isinleapyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(Ord(IsInLeapYear(D0(A)))); end;
+begin E := NoError(); Result := ValInt(Ord(IsInLeapYear(D0(A)))); end;
 function t_daysinayear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DaysInAYear(I0(A))); end;
+begin E := NoError(); Result := ValInt(DaysInAYear(I0(A))); end;
 function t_daysinmonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DaysInMonth(D0(A))); end;
+begin E := NoError(); Result := ValInt(DaysInMonth(D0(A))); end;
 function t_daysinamonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DaysInAMonth(I0(A), I1(A))); end;
+begin E := NoError(); Result := ValInt(DaysInAMonth(I0(A), I1(A))); end;
 
 // --- time-of-day ------------------------------------------------------------
 function t_hourof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(HourOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(HourOf(D0(A))); end;
 function t_minuteof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MinuteOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(MinuteOf(D0(A))); end;
 function t_secondof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(SecondOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(SecondOf(D0(A))); end;
 // FPC's DateUtils has no IsAM/IsPM; the clock half is decided by the hour.
 function t_isam(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(Ord(HourOf(D0(A)) < 12)); end;
+begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) < 12)); end;
 function t_ispm(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(Ord(HourOf(D0(A)) >= 12)); end;
+begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) >= 12)); end;
 function t_issameday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(Ord(IsSameDay(D0(A), D1(A)))); end;
+begin E := NoError(); Result := ValInt(Ord(IsSameDay(D0(A), D1(A)))); end;
 
 // --- weeks ------------------------------------------------------------------
 function t_weekoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(WeekOfTheYear(D0(A))); end;
+begin E := NoError(); Result := ValInt(WeekOfTheYear(D0(A))); end;
 function t_weekof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(WeekOfTheYear(D0(A))); end;     // answers the same
+begin E := NoError(); Result := ValInt(WeekOfTheYear(D0(A))); end;     // answers the same
 function t_weekofthemonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(WeekOfTheMonth(D0(A))); end;
+begin E := NoError(); Result := ValInt(WeekOfTheMonth(D0(A))); end;
 function t_weeksinayear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(WeeksInAYear(I0(A))); end;
+begin E := NoError(); Result := ValInt(WeeksInAYear(I0(A))); end;
 
 // --- incrementing -----------------------------------------------------------
 function t_incday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncDay(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(IncDay(D0(A), I1(A))); end;
 function t_incweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncWeek(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(IncWeek(D0(A), I1(A))); end;
 function t_incyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncYear(D0(A), I1(A))); end; // clamps a leap day to the 28th
+begin E := NoError(); Result := ValDouble(IncYear(D0(A), I1(A))); end; // clamps a leap day to the 28th
 
 // --- distances --------------------------------------------------------------
 function t_daysbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DaysBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(DaysBetween(D0(A), D1(A))); end;
 function t_dayspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(DaySpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DaySpan(D0(A), D1(A))); end;
 function t_hoursbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(HoursBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(HoursBetween(D0(A), D1(A))); end;
 function t_minutesbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MinutesBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(MinutesBetween(D0(A), D1(A))); end;
 function t_secondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(SecondsBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(SecondsBetween(D0(A), D1(A))); end;
 
 // --- the clock (no arguments) -----------------------------------------------
 function t_now(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Now); end;
+begin E := NoError(); Result := ValDouble(Now); end;
 function t_today(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Date); end;
+begin E := NoError(); Result := ValDouble(Date); end;
 function t_tomorrow(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Tomorrow); end;
+begin E := NoError(); Result := ValDouble(Tomorrow); end;
 function t_yesterday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Yesterday); end;
+begin E := NoError(); Result := ValDouble(Yesterday); end;
 function t_istoday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(Ord(IsToday(D0(A)))); end;
+begin E := NoError(); Result := ValInt(Ord(IsToday(D0(A)))); end;
 
 // --- ISO 8601 rendering and parsing -----------------------------------------
 // Phosphor's date strings are ISO 8601 (yyyy-mm-dd, hh:nn:ss), fixed rather than
@@ -126,19 +126,19 @@ var
   ISOFS: TFormatSettings;
 
 function t_datetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(DateToStr(D0(A), ISOFS)); end;
+begin E := NoError(); Result := ValStr(DateToStr(D0(A), ISOFS)); end;
 function t_timetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(TimeToStr(D0(A), ISOFS)); end;
+begin E := NoError(); Result := ValStr(TimeToStr(D0(A), ISOFS)); end;
 function t_datetimetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(DateTimeToStr(D0(A), ISOFS)); end;
+begin E := NoError(); Result := ValStr(DateTimeToStr(D0(A), ISOFS)); end;
 function t_date_s(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(DateToStr(Date, ISOFS)); end;
+begin E := NoError(); Result := ValStr(DateToStr(Date, ISOFS)); end;
 function t_time_s(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(TimeToStr(Time, ISOFS)); end;
+begin E := NoError(); Result := ValStr(TimeToStr(Time, ISOFS)); end;
 function t_datetime_s(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(DateTimeToStr(Now, ISOFS)); end;
+begin E := NoError(); Result := ValStr(DateTimeToStr(Now, ISOFS)); end;
 function t_formatdatetime(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValStr(FormatDateTime(A[0].Str, AsDouble(A[1]), ISOFS)); end;
+begin E := NoError(); Result := ValStr(FormatDateTime(A[0].Str, AsDouble(A[1]), ISOFS)); end;
 
 function t_strtodate(const A: array of TValue; out E: TPhosphorError): TValue;
 var d: TDateTime;
@@ -146,7 +146,7 @@ begin
   Result := ValInt(0);
   try d := StrToDate(A[0].Str, ISOFS);
   except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid date: ' + Ex.Message); Exit; end; end;
-  E := NoError; Result := ValDouble(d);
+  E := NoError(); Result := ValDouble(d);
 end;
 function t_strtotime(const A: array of TValue; out E: TPhosphorError): TValue;
 var d: TDateTime;
@@ -154,7 +154,7 @@ begin
   Result := ValInt(0);
   try d := StrToTime(A[0].Str, ISOFS);
   except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid time: ' + Ex.Message); Exit; end; end;
-  E := NoError; Result := ValDouble(d);
+  E := NoError(); Result := ValDouble(d);
 end;
 function t_strtodatetime(const A: array of TValue; out E: TPhosphorError): TValue;
 var d: TDateTime;
@@ -162,61 +162,61 @@ begin
   Result := ValInt(0);
   try d := StrToDateTime(A[0].Str, ISOFS);
   except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid datetime: ' + Ex.Message); Exit; end; end;
-  E := NoError; Result := ValDouble(d);
+  E := NoError(); Result := ValDouble(d);
 end;
 
 // --- the clock (no arguments) -----------------------------------------------
 function t_date(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Date); end;
+begin E := NoError(); Result := ValDouble(Date); end;
 function t_time(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Time); end;
+begin E := NoError(); Result := ValDouble(Time); end;
 function t_gettime(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(Now); end;
+begin E := NoError(); Result := ValDouble(Now); end;
 
 // --- finer increments -------------------------------------------------------
 function t_inchour(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncHour(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(IncHour(D0(A), I1(A))); end;
 function t_incminute(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncMinute(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(IncMinute(D0(A), I1(A))); end;
 function t_incsecond(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncSecond(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(IncSecond(D0(A), I1(A))); end;
 function t_incmillisecond(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(IncMilliSecond(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(IncMilliSecond(D0(A), I1(A))); end;
 
 // --- year lengths taking a date ---------------------------------------------
 function t_daysinyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(DaysInYear(D0(A))); end;
+begin E := NoError(); Result := ValInt(DaysInYear(D0(A))); end;
 function t_weeksinyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(WeeksInYear(D0(A))); end;
+begin E := NoError(); Result := ValInt(WeeksInYear(D0(A))); end;
 
 // --- more distances ---------------------------------------------------------
 function t_weeksbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(WeeksBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(WeeksBetween(D0(A), D1(A))); end;
 function t_monthsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MonthsBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(MonthsBetween(D0(A), D1(A))); end;
 function t_yearsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(YearsBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(YearsBetween(D0(A), D1(A))); end;
 function t_millisecondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MilliSecondsBetween(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValInt(MilliSecondsBetween(D0(A), D1(A))); end;
 
 // --- spans (fractional distances) -------------------------------------------
 function t_hourspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(HourSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(HourSpan(D0(A), D1(A))); end;
 function t_minutespan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(MinuteSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(MinuteSpan(D0(A), D1(A))); end;
 function t_secondspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(SecondSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(SecondSpan(D0(A), D1(A))); end;
 function t_millisecondspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(MilliSecondSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(MilliSecondSpan(D0(A), D1(A))); end;
 function t_weekspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(WeekSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(WeekSpan(D0(A), D1(A))); end;
 function t_monthspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(MonthSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(MonthSpan(D0(A), D1(A))); end;
 function t_yearspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValDouble(YearSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(YearSpan(D0(A), D1(A))); end;
 
 function t_millisecondof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(MilliSecondOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(MilliSecondOf(D0(A))); end;
 
 procedure RegisterDateTimeFuncs(Reg: TPhosphorRegistry);
 begin

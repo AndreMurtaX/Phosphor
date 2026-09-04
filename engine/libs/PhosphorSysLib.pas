@@ -36,31 +36,31 @@ const
 
 // --- process arguments ------------------------------------------------------
 function t_paramcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(ParamCount); end;
+begin Err := NoError(); Result := ValInt(ParamCount); end;
 function t_paramstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(ParamStr(Round(AsDouble(Args[0])))); end;
+begin Err := NoError(); Result := ValStr(ParamStr(Round(AsDouble(Args[0])))); end;
 
 // --- separators -------------------------------------------------------------
 function t_dirseparator(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(PathDelim); end;
+begin Err := NoError(); Result := ValStr(PathDelim); end;
 function t_pathseparator(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(PathSep); end;
+begin Err := NoError(); Result := ValStr(PathSep); end;
 function t_altseparator(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   {$IFDEF WINDOWS} Result := ValStr('/'); {$ELSE} Result := ValStr(''); {$ENDIF}
 end;
 
 // --- known and optional paths -----------------------------------------------
 function t_temppath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GetTempDir(False)); end;
+begin Err := NoError(); Result := ValStr(GetTempDir(False)); end;
 function t_homepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GetUserDir); end;
+begin Err := NoError(); Result := ValStr(GetUserDir); end;
 function t_documentspath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(IncludeTrailingPathDelimiter(GetUserDir) + 'Documents' + PathDelim); end;
+begin Err := NoError(); Result := ValStr(IncludeTrailingPathDelimiter(GetUserDir) + 'Documents' + PathDelim); end;
 // Answered but empty on desktop by design (the tests only require they return).
 function t_emptypath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(''); end;
+begin Err := NoError(); Result := ValStr(''); end;
 
 // --- generated names --------------------------------------------------------
 function GuidHex(WithSeparators: Boolean): String;
@@ -73,29 +73,29 @@ begin
   else Result := StringReplace(s, '-', '', [rfReplaceAll]);
 end;
 function t_tempfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GetTempFileName); end;
+begin Err := NoError(); Result := ValStr(GetTempFileName); end;
 function t_randomfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GuidHex(False)); end;
+begin Err := NoError(); Result := ValStr(GuidHex(False)); end;
 function t_guidfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GuidHex(AsDouble(Args[0]) <> 0)); end;
+begin Err := NoError(); Result := ValStr(GuidHex(AsDouble(Args[0]) <> 0)); end;
 
 // --- directories, files -----------------------------------------------------
 function t_mkdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; CreateDir(Args[0].Str); Result := ValInt(1); end;
+begin Err := NoError(); CreateDir(Args[0].Str); Result := ValInt(1); end;
 function t_rmdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; RemoveDir(Args[0].Str); Result := ValInt(1); end;
+begin Err := NoError(); RemoveDir(Args[0].Str); Result := ValInt(1); end;
 function t_forcedirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(ForceDirectories(Args[0].Str))); end;
+begin Err := NoError(); Result := ValInt(Ord(ForceDirectories(Args[0].Str))); end;
 function t_chdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; SetCurrentDir(Args[0].Str); Result := ValInt(1); end;
+begin Err := NoError(); SetCurrentDir(Args[0].Str); Result := ValInt(1); end;
 function t_fileexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0))); end;
+begin Err := NoError(); Result := ValInt(Ord(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0))); end;
 function t_kill(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; DeleteFile(Args[0].Str); Result := ValInt(1); end;
+begin Err := NoError(); DeleteFile(Args[0].Str); Result := ValInt(1); end;
 
 // --- environment ------------------------------------------------------------
 function t_environ(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GetEnvironmentVariable(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(GetEnvironmentVariable(Args[0].Str)); end;
 
 // --- colours ----------------------------------------------------------------
 function ColorOf(const AName: String): Integer;
@@ -108,16 +108,16 @@ end;
 function t_colortostr(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var n, i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   n := Round(AsDouble(Args[0]));
   for i := 0 to High(ColorVals) do
     if ColorVals[i] = n then begin Result := ValStr(ColorNames[i]); Exit; end;
   Result := ValStr('$' + IntToHex(n, 6));
 end;
 function t_color(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(ColorOf(Args[0].Str)); end;
+begin Err := NoError(); Result := ValInt(ColorOf(Args[0].Str)); end;
 function t_alphacolor(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Int64(ColorOf(Args[0].Str)) or $FF000000); end;   // opaque alpha
+begin Err := NoError(); Result := ValInt(Int64(ColorOf(Args[0].Str)) or $FF000000); end;   // opaque alpha
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 const

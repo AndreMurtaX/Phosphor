@@ -156,7 +156,7 @@ begin
     if maxop <> Ord(High(TOpcode)) then
     begin AErr := Format('this .pbc was built for a different opcode set (%d vs %d) -- recompile it', [maxop, Ord(High(TOpcode))]); Exit; end;
 
-    AProg := TProgram.Create;
+    AProg := TProgram.Create();
 
     vc := RI32(AStream);
     AProg.VarCount := vc;

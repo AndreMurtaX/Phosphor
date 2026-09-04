@@ -77,7 +77,7 @@ begin
 
   Application.Initialize;   // bring up the widgetset before any form is built
 
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     RegisterTestFuncs(eng.Registry);
     RegisterGuiCoreFuncs(eng.Registry);
@@ -97,17 +97,17 @@ begin
     RegisterCanvasFuncs(eng.Registry);
     RegisterDialogFuncs(eng.Registry);
     RegisterMiscFuncs(eng.Registry);
-    ResetTestState;
+    ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin
       Writeln(StdErr, Format('phosphorguitest: %s:%d: %s', [path, eng.ErrorLine, eng.ErrorMessage]));
-      WriteSummary;
+      WriteSummary();
       Halt(2);
     end;
     for i := 0 to Failures.Count - 1 do
       Writeln(StdErr, '  FAIL ', Failures[i]);
-    WriteSummary;
+    WriteSummary();
     if AssertsFailed = 0 then Halt(0) else Halt(1);
   finally
     eng.Free;

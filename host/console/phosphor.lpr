@@ -70,7 +70,7 @@ var
   mode: DWORD;
 {$ENDIF}
 begin
-  inherited Create;
+  inherited Create();
   FOutFile := nil;
   if AOutPath <> '' then
     FOutFile := TFileStream.Create(AOutPath, fmCreate);
@@ -87,7 +87,7 @@ end;
 destructor TConsoleHost.Destroy;
 begin
   FOutFile.Free; // nil-safe
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 function TConsoleHost.StdoutIsConsole: Boolean;
@@ -227,7 +227,7 @@ begin
     Writeln(StdErr, 'phosphor: file not found: ', AInPath);
     Exit(2);
   end;
-  comp := TPhosphorCompiler.Create;
+  comp := TPhosphorCompiler.Create();
   try
     if not comp.Compile(ReadSource(AInPath), prog) then
     begin
@@ -276,7 +276,7 @@ begin
     Exit(2);
   end;
   host := TConsoleHost.Create(AOutPath);
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -354,7 +354,7 @@ var
   off: Int64;
 begin
   if not FileExists(AInBas) then begin Writeln(StdErr, 'phosphor: file not found: ', AInBas); Exit(2); end;
-  comp := TPhosphorCompiler.Create;
+  comp := TPhosphorCompiler.Create();
   try
     if not comp.Compile(ReadSource(AInBas), prog) then
     begin
@@ -365,11 +365,11 @@ begin
     comp.Free;
   end;
 
-  payload := TBytesStream.Create;
+  payload := TBytesStream.Create();
   try
     WriteProgram(payload, prog);
     prog.Free;
-    src := TFileStream.Create(SelfExePath, fmOpenRead or fmShareDenyNone);
+    src := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
     dst := TFileStream.Create(AOutExe, fmCreate);
     try
       dst.CopyFrom(src, 0);                 // the whole stub binary
@@ -400,7 +400,7 @@ begin
   Result := False;
   APayload := nil;
   try
-    fs := TFileStream.Create(SelfExePath, fmOpenRead or fmShareDenyNone);
+    fs := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
   except
     Exit;   // cannot read our own file -> just be the CLI
   end;
@@ -411,7 +411,7 @@ begin
     off := RLE64(fs); siz := RLE64(fs); ck := RLE32(fs); fs.ReadBuffer(magic[0], 8);
     if magic <> PACK_MAGIC then Exit;                          // a bare stub -> CLI
     if (off < 0) or (siz <= 0) or (off + siz > total - PACK_TRAILER) then Exit;
-    APayload := TBytesStream.Create;
+    APayload := TBytesStream.Create();
     APayload.Size := siz;
     fs.Position := off;
     fs.ReadBuffer(APayload.Memory^, siz);
@@ -429,7 +429,7 @@ function RunEmbedded(APayload: TBytesStream): Integer;
 var host: TConsoleHost; eng: TPhosphorEngine; line: Integer;
 begin
   host := TConsoleHost.Create('');
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -462,7 +462,7 @@ var
   line, pending: String;
 begin
   host := TConsoleHost.Create('');
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -509,8 +509,8 @@ var
 begin
   host := TConsoleHost.Create('');
   try
-    Writeln(StdErr, 'stdout is console: ', host.StdoutIsConsole);
-    Writeln(StdErr, 'stdin  is console: ', host.StdinIsConsole);
+    Writeln(StdErr, 'stdout is console: ', host.StdoutIsConsole());
+    Writeln(StdErr, 'stdin  is console: ', host.StdinIsConsole());
     Flush(StdErr);
     host.Output('UTF-8 check: Olá — café — açúcar — ☕ — π ≈ 3.14159'#10);
     Result := 0;
@@ -576,7 +576,7 @@ begin
       Halt(0);
     end
     else if arg = '--diag' then
-      Halt(Diag)
+      Halt(Diag())
     else if arg = 'run' then
       { optional verb; ignore }
     else if arg = '--out' then
@@ -602,5 +602,5 @@ begin
   if filePath <> '' then
     Halt(RunFile(filePath, outPath))
   else
-    Halt(Repl);
+    Halt(Repl());
 end.

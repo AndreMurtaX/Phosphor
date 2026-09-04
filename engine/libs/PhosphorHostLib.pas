@@ -59,7 +59,7 @@ var
 function h_processmessages(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 var vm: TPhosphorVM;
 begin
-  Err := NoError;
+  Err := NoError();
   vm := TPhosphorVM(AVM);
   if Assigned(vm.HostServices.ProcessMessages) then
     Result := ValInt(vm.HostServices.ProcessMessages())
@@ -71,7 +71,7 @@ end;
 function h_handlemessage(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 var vm: TPhosphorVM;
 begin
-  Err := NoError;
+  Err := NoError();
   vm := TPhosphorVM(AVM);
   if Assigned(vm.HostServices.HandleMessage) then
     Result := ValInt(vm.HostServices.HandleMessage())
@@ -86,7 +86,7 @@ end;
 function h_copytext(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 var vm: TPhosphorVM;
 begin
-  Err := NoError;
+  Err := NoError();
   vm := TPhosphorVM(AVM);
   if Assigned(vm.HostServices.ClipboardCopy) and vm.HostServices.ClipboardCopy(Args[0].Str) then
   begin
@@ -105,7 +105,7 @@ end;
 function h_pastetext(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 var vm: TPhosphorVM; s: String;
 begin
-  Err := NoError;
+  Err := NoError();
   vm := TPhosphorVM(AVM);
   s := '';
   if Assigned(vm.HostServices.ClipboardPaste) and vm.HostServices.ClipboardPaste(s) then
@@ -124,7 +124,7 @@ end;
   reads the module-level last-error the clipboard functions leave behind. }
 function h_strerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(GStrError);
 end;
 

@@ -148,10 +148,10 @@ type
 
 constructor TSqliteDb.Create(ADb: psqlite3; const APath: String);
 begin
-  inherited Create;
+  inherited Create();
   DbPtr := ADb;
   Path := APath;
-  Children := TFPList.Create;
+  Children := TFPList.Create();
 end;
 
 destructor TSqliteDb.Destroy;
@@ -173,12 +173,12 @@ begin
     sqlite3_close(DbPtr);   // every statement is finalized, so this cannot be BUSY
     DbPtr := nil;
   end;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 constructor TSqliteStmt.Create(AOwner: TSqliteDb; AStmt: psqlite3_stmt);
 begin
-  inherited Create;
+  inherited Create();
   Owner := AOwner;
   StmtPtr := AStmt;
   OnRow := False;
@@ -195,7 +195,7 @@ begin
   end;
   if (Owner <> nil) and (Owner.Children <> nil) then
     Owner.Children.Remove(Self);
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 // --- helpers ----------------------------------------------------------------
@@ -348,7 +348,7 @@ end;
 function BuildRowObject(AStmt: TSqliteStmt): TJSONObject;
 var i, cnt: Integer; nm: String;
 begin
-  Result := TJSONObject.Create;
+  Result := TJSONObject.Create();
   if not AStmt.OnRow then Exit;
   cnt := sqlite3_column_count(AStmt.StmtPtr);
   for i := 0 to cnt - 1 do
@@ -357,7 +357,7 @@ begin
     case sqlite3_column_type(AStmt.StmtPtr, i) of
       SQLITE_INTEGER: Result.Add(nm, sqlite3_column_int64(AStmt.StmtPtr, i));
       SQLITE_FLOAT:   Result.Add(nm, sqlite3_column_double(AStmt.StmtPtr, i));
-      SQLITE_NULL:    Result.Add(nm, TJSONNull.Create);
+      SQLITE_NULL:    Result.Add(nm, TJSONNull.Create());
     else
       Result.Add(nm, PtrStr(sqlite3_column_text(AStmt.StmtPtr, i)));
     end;
@@ -386,38 +386,38 @@ end;
 
 // --- connection -------------------------------------------------------------
 function f_available(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(Ord(GReady)); end;
+begin Err := NoError(); Result := ValInt(Ord(GReady)); end;
 
 function f_open_mem(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := OpenDatabase(':memory:'); end;
+begin Err := NoError(); Result := OpenDatabase(':memory:'); end;
 
 function f_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := OpenDatabase(Args[0].Str); end;
+begin Err := NoError(); Result := OpenDatabase(Args[0].Str); end;
 
 function f_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(FreeHandle(Args[0].Hnd)));   // the destructor closes the db
 end;
 
 function f_isopen(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(GetDb(Args[0].Hnd, db)));
 end;
 
 function f_path(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if GetDb(Args[0].Hnd, db) then Result := ValStr(db.Path);
 end;
 
 function f_version(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if GReady then Result := ValStr(PtrStr(sqlite3_libversion())) else Result := ValStr('');
 end;
 
@@ -425,7 +425,7 @@ end;
 function f_exec(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   Result := ValInt(Ord(ExecSql(db, Args[1].Str)));
@@ -434,7 +434,7 @@ end;
 function f_scalar_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
@@ -445,7 +445,7 @@ end;
 function f_scalar_num(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValDouble(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
@@ -456,7 +456,7 @@ end;
 function f_query_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt; r, row: String; i, cnt: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
@@ -480,7 +480,7 @@ end;
 function f_changes(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(sqlite3_changes(db.DbPtr));
 end;
@@ -488,7 +488,7 @@ end;
 function f_totalchanges(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(sqlite3_total_changes(db.DbPtr));
 end;
@@ -496,7 +496,7 @@ end;
 function f_lastid(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(sqlite3_last_insert_rowid(db.DbPtr));
 end;
@@ -505,7 +505,7 @@ end;
 function f_tableexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt; nm: String;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, 'SELECT 1 FROM sqlite_master WHERE type=''table'' AND name=?', st) then Exit;
@@ -518,10 +518,10 @@ end;
 function f_tables(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt; arr: TJSONArray;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
-  arr := TJSONArray.Create;
+  arr := TJSONArray.Create();
   if PrepareStmt(db, 'SELECT name FROM sqlite_master WHERE type=''table'' AND ' +
     'name NOT LIKE ''sqlite_%'' ORDER BY name', st) then
   begin
@@ -535,15 +535,15 @@ end;
 function f_columns(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt; arr: TJSONArray; o: TJSONObject;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
-  arr := TJSONArray.Create;
+  arr := TJSONArray.Create();
   if PrepareStmt(db, 'PRAGMA table_info(' + QuoteIdent(Args[1].Str) + ')', st) then
   begin
     while sqlite3_step(st) = SQLITE_ROW do
     begin
-      o := TJSONObject.Create;
+      o := TJSONObject.Create();
       o.Add('name', PtrStr(sqlite3_column_text(st, 1)));
       o.Add('type', PtrStr(sqlite3_column_text(st, 2)));
       o.Add('notnull', sqlite3_column_int64(st, 3));
@@ -559,7 +559,7 @@ end;
 function f_prepare(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; st: psqlite3_stmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if PrepareStmt(db, Args[1].Str, st) then Result := RegisterStmt(db, st);
@@ -568,7 +568,7 @@ end;
 function f_step(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetStmt(Args[0].Hnd, s) then Result := ValInt(DoStep(s));
 end;
@@ -576,7 +576,7 @@ end;
 function f_eof(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(1);
   if GetStmt(Args[0].Hnd, s) then Result := ValInt(Ord(not s.OnRow));
 end;
@@ -584,7 +584,7 @@ end;
 function f_reset(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   sqlite3_reset(s.StmtPtr);
@@ -596,7 +596,7 @@ end;
 function f_clearbind(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   sqlite3_clear_bindings(s.StmtPtr);
@@ -605,7 +605,7 @@ end;
 
 function f_finalize(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(FreeHandle(Args[0].Hnd)));   // frees + revokes the statement id
 end;
 
@@ -613,7 +613,7 @@ end;
 function f_bindstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; v: String;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   v := Args[2].Str;
@@ -625,7 +625,7 @@ end;
 function f_bindnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; p: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   p := Round(AsDouble(Args[1]));
@@ -639,7 +639,7 @@ end;
 function f_bindnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   sqlite3_bind_null(s.StmtPtr, Round(AsDouble(Args[1])));
@@ -649,7 +649,7 @@ end;
 function f_bindjson(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; node: TJSONData; obj: TJSONObject; i, p: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   if not JsonNodeFromHandle(Args[1].Hnd, node) then Exit;
@@ -669,7 +669,7 @@ end;
 function f_colcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetStmt(Args[0].Hnd, s) then Result := ValInt(sqlite3_column_count(s.StmtPtr));
 end;
@@ -677,7 +677,7 @@ end;
 function f_colname(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := Round(AsDouble(Args[1])) - 1;
@@ -688,7 +688,7 @@ end;
 function f_colindex(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);   // 0 = not found (1-based indices start at 1)
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := FindCol(s, Args[1].Str);
@@ -698,7 +698,7 @@ end;
 function f_coltype(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(SQLITE_NULL);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := Round(AsDouble(Args[1])) - 1;
@@ -708,7 +708,7 @@ end;
 
 function f_coltypename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   case Round(AsDouble(Args[0])) of
     SQLITE_INTEGER: Result := ValStr('integer');
     SQLITE_FLOAT:   Result := ValStr('float');
@@ -724,7 +724,7 @@ end;
 function f_getstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := Round(AsDouble(Args[1])) - 1;
@@ -735,7 +735,7 @@ end;
 function f_getnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := Round(AsDouble(Args[1])) - 1;
@@ -746,7 +746,7 @@ end;
 function f_gets(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := FindCol(s, Args[1].Str);
@@ -756,7 +756,7 @@ end;
 function f_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := FindCol(s, Args[1].Str);
@@ -766,7 +766,7 @@ end;
 function f_isnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(1);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := Round(AsDouble(Args[1])) - 1;
@@ -777,7 +777,7 @@ end;
 function f_isn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(1);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := FindCol(s, Args[1].Str);
@@ -788,7 +788,7 @@ end;
 function f_isblob(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; c: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := Round(AsDouble(Args[1])) - 1;
@@ -800,7 +800,7 @@ end;
 function f_row(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   Result := ValHandle(JsonRegisterNode(BuildRowObject(s), True));
@@ -809,7 +809,7 @@ end;
 function f_fetchone(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   DoStep(s);   // advance, then hand back the new current row (empty object at end)
@@ -819,10 +819,10 @@ end;
 function f_fetchall(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt; arr: TJSONArray;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  arr := TJSONArray.Create;
+  arr := TJSONArray.Create();
   if not s.Stepped then DoStep(s);   // a fresh cursor: land on the first row
   while s.OnRow do
   begin
@@ -837,7 +837,7 @@ function f_insertjson(const Args: array of TValue; out Err: TPhosphorError): TVa
 var db: TSqliteDb; node: TJSONData; obj: TJSONObject; st: psqlite3_stmt;
     cols, vals, sql: String; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not JsonNodeFromHandle(Args[2].Hnd, node) then Exit;
@@ -865,7 +865,7 @@ function f_updatejson(const Args: array of TValue; out Err: TPhosphorError): TVa
 var db: TSqliteDb; node: TJSONData; obj: TJSONObject; st: psqlite3_stmt;
     sets, sql, where: String; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not JsonNodeFromHandle(Args[2].Hnd, node) then Exit;
@@ -893,7 +893,7 @@ end;
 function f_begin(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'BEGIN')));
 end;
@@ -901,7 +901,7 @@ end;
 function f_commit(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'COMMIT')));
 end;
@@ -909,7 +909,7 @@ end;
 function f_rollback(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'ROLLBACK')));
 end;
@@ -917,7 +917,7 @@ end;
 function f_intrans(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then
     Result := ValInt(Ord(sqlite3_get_autocommit(db.DbPtr) = 0));
@@ -925,33 +925,33 @@ end;
 
 // --- text helpers -----------------------------------------------------------
 function f_escape(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(EscapeSql(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(EscapeSql(Args[0].Str)); end;
 
 function f_quote(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr('''' + EscapeSql(Args[0].Str) + ''''); end;
+begin Err := NoError(); Result := ValStr('''' + EscapeSql(Args[0].Str) + ''''); end;
 
 // --- errors -----------------------------------------------------------------
 function f_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(GLastErr); end;
+begin Err := NoError(); Result := ValInt(GLastErr); end;
 
 function f_errormsg(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(GLastMsg); end;
+begin Err := NoError(); Result := ValStr(GLastMsg); end;
 
 function f_strerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if GReady then Result := ValStr(PtrStr(sqlite3_errstr(Round(AsDouble(Args[0])))))
   else Result := ValStr('');
 end;
 
 function f_clearerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; GLastErr := 0; GLastMsg := ''; Result := ValInt(0); end;
+begin Err := NoError(); GLastErr := 0; GLastMsg := ''; Result := ValInt(0); end;
 
 // --- maintenance ------------------------------------------------------------
 function f_backup(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   // VACUUM INTO writes a fresh, self-contained copy of the whole database.
@@ -961,7 +961,7 @@ end;
 function f_vacuum(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'VACUUM')));
 end;

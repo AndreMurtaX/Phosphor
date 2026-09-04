@@ -37,16 +37,16 @@ procedure RegisterErrFuncs(Reg: TPhosphorRegistry);
 implementation
 
 function f_err(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(TPhosphorVM(AVM).ErrCode); end;
+begin Err := NoError(); Result := ValInt(TPhosphorVM(AVM).ErrCode); end;
 
 function f_errmsg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(TPhosphorVM(AVM).ErrMessage); end;
+begin Err := NoError(); Result := ValStr(TPhosphorVM(AVM).ErrMessage); end;
 
 function f_erl(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(TPhosphorVM(AVM).ErrLine); end;
+begin Err := NoError(); Result := ValInt(TPhosphorVM(AVM).ErrLine); end;
 
 function f_err_clear(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; TPhosphorVM(AVM).ClearError; Result := ValInt(0); end;
+begin Err := NoError(); TPhosphorVM(AVM).ClearError(); Result := ValInt(0); end;
 
 { error(msg$) -- raise a catchable runtime error. Returning it from a registered
   function is exactly how a library reports failure, so the VM faults on it. }

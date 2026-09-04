@@ -61,7 +61,7 @@ begin
     Halt(2);
   end;
 
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     RegisterTestFuncs(eng.Registry);
     RegisterBase64Funcs(eng.Registry);
@@ -69,17 +69,17 @@ begin
     RegisterGzipFuncs(eng.Registry);
     RegisterSqliteFuncs(eng.Registry);
     RegisterCrtFuncs(eng.Registry);
-    ResetTestState;
+    ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin
       Writeln(StdErr, Format('phosphorpkgtest: %s:%d: %s', [path, eng.ErrorLine, eng.ErrorMessage]));
-      WriteSummary;
+      WriteSummary();
       Halt(2);
     end;
     for i := 0 to Failures.Count - 1 do
       Writeln(StdErr, '  FAIL ', Failures[i]);
-    WriteSummary;
+    WriteSummary();
     if AssertsFailed = 0 then Halt(0) else Halt(1);
   finally
     eng.Free;

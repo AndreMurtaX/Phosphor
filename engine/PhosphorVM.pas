@@ -183,10 +183,10 @@ implementation
 
 constructor TPhosphorVM.Create;
 begin
-  inherited Create;
+  inherited Create();
   SetLength(FStack, 64);
   FSP := 0;
-  LastError := NoError;
+  LastError := NoError();
   ErrorLine := 0;
 end;
 
@@ -211,8 +211,8 @@ end;
 
 destructor TPhosphorVM.Destroy;
 begin
-  CloseAllChannels;
-  inherited Destroy;
+  CloseAllChannels();
+  inherited Destroy();
 end;
 
 procedure TPhosphorVM.CloseAllChannels;
@@ -303,7 +303,7 @@ var
   fs: TFormatSettings;
   low: String;
 begin
-  Result := NoError;
+  Result := NoError();
   V := Default(TValue);
   case ATypeCode of
     1: V := ValStr(AField);
@@ -382,7 +382,7 @@ begin
     for i := FCharPos to Length(FCharBuf) do
       if FCharBuf[i] = #10 then begin nl := i; Break; end;
     if nl > 0 then Break;
-    if not PullLine then Break;
+    if not PullLine() then Break;
   end;
   if (nl = 0) and (FCharPos > Length(FCharBuf)) then
   begin
@@ -411,7 +411,7 @@ begin
   Result := '';
   if ACount <= 0 then Exit;
   while (Length(FCharBuf) - FCharPos + 1) < ACount do
-    if not PullLine then Break;   // EOF: hand back whatever is buffered
+    if not PullLine() then Break;   // EOF: hand back whatever is buffered
   if FCharPos > Length(FCharBuf) then Exit;
   Result := Copy(FCharBuf, FCharPos, ACount);
   Inc(FCharPos, Length(Result));
@@ -423,7 +423,7 @@ function TPhosphorVM.ChanOpen(ANum, AMode: Integer; const APath: String): TPhosp
 var
   fmode: TChannelMode;
 begin
-  Result := NoError;
+  Result := NoError();
   if not ValidChannel(ANum) then
     Exit(MakeError(peRuntime, 'file number #' + IntToStr(ANum) + ' is out of range (1..' + IntToStr(MaxChannel) + ')'));
   if FChannels[ANum].Open then
@@ -524,7 +524,7 @@ begin
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if APos < 1 then
     Exit(MakeError(peRuntime, 'seek: position must be 1 or more'));
-  Result := NoError;
+  Result := NoError();
   try
     FChannels[ANum].Stream.Position := APos - 1;
     FChannels[ANum].Buf := '';
@@ -538,8 +538,8 @@ end;
 
 function TPhosphorVM.ChanClose(ANum: Integer): TPhosphorError;
 begin
-  Result := NoError;
-  if ANum < 0 then begin CloseAllChannels; Exit; end;
+  Result := NoError();
+  if ANum < 0 then begin CloseAllChannels(); Exit; end;
   if not ValidChannel(ANum) then
     Exit(MakeError(peRuntime, 'file number #' + IntToStr(ANum) + ' is out of range'));
   if not FChannels[ANum].Open then Exit;   // closing an unopened channel is a no-op
@@ -551,7 +551,7 @@ end;
 
 function TPhosphorVM.ChanWrite(ANum: Integer; const S: String): TPhosphorError;
 begin
-  Result := NoError;
+  Result := NoError();
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if FChannels[ANum].Mode = cmInput then
@@ -602,7 +602,7 @@ begin
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
-  Result := NoError;
+  Result := NoError();
   // Read ahead until the window holds a line terminator (or the file ends), so a
   // line spanning a chunk boundary still comes back whole.
   repeat
@@ -634,7 +634,7 @@ begin
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
-  Result := NoError;
+  Result := NoError();
   if ACount <= 0 then Exit;
   ChanEnsure(ANum, ACount);                  // pull what the request needs
   avail := Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1;
@@ -651,7 +651,7 @@ begin
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'eof() needs a file open for input or binary'));
-  Result := NoError;
+  Result := NoError();
   B := not ChanEnsure(ANum, 1);   // nothing buffered AND nothing left on disk
 end;
 
@@ -660,7 +660,7 @@ begin
   N := 0;
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
-  Result := NoError;
+  Result := NoError();
   N := FChannels[ANum].Stream.Size;   // live size, every mode
 end;
 
@@ -669,7 +669,7 @@ begin
   N := 0;
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
-  Result := NoError;
+  Result := NoError();
   // 1-BASED, like every other position in the language: the number of the next
   // byte to be read or written, so `seek #n, loc(n)` changes nothing.
   if FChannels[ANum].Mode in [cmInput, cmBinary] then
@@ -799,19 +799,19 @@ begin
       while (j <= n) and (Fmt[j] in ['#', ',', '.']) do Inc(j);
       if (j <= n) and (Fmt[j] in ['+', '-']) then Inc(j);
       spec := Copy(Fmt, i, j - i);
-      Result := Result + FormatNumericField(spec, NextVal);
+      Result := Result + FormatNumericField(spec, NextVal());
       fieldSeen := True;
       i := j;
     end
     else if Fmt[i] = '&' then
     begin
-      Result := Result + ValFieldStr(NextVal);
+      Result := Result + ValFieldStr(NextVal());
       fieldSeen := True;
       Inc(i);
     end
     else if Fmt[i] = '!' then
     begin
-      sv := ValFieldStr(NextVal);
+      sv := ValFieldStr(NextVal());
       if Length(sv) > 0 then Result := Result + sv[1] else Result := Result + ' ';
       fieldSeen := True;
       Inc(i);
@@ -824,7 +824,7 @@ begin
       if j <= n then
       begin
         width := j - i + 1;
-        sv := ValFieldStr(NextVal);
+        sv := ValFieldStr(NextVal());
         if Length(sv) >= width then sv := Copy(sv, 1, width)
         else sv := sv + StringOfChar(' ', width - Length(sv));
         Result := Result + sv;
@@ -868,7 +868,7 @@ begin
   FCSP := 0;
   FFrameSP := 0;
   FDataPtr := 0;
-  LastError := NoError;
+  LastError := NoError();
   ErrorLine := 0;
   FErrHandler := -1;
   FErrHandlerMode := 0;
@@ -881,7 +881,7 @@ begin
   FOutputBytes := 0;
   FStartTick := GetTickCount64;
   FTrace := False;
-  CloseAllChannels;            // no file channel leaks between programs
+  CloseAllChannels();            // no file channel leaks between programs
   FInBuf := ''; FInPos := 1;
   FCharBuf := ''; FCharPos := 1;
   SetLength(FVars, AProg.VarCount);
@@ -895,7 +895,7 @@ var
   i, had: Integer;
 begin
   FProg := AProg;
-  LastError := NoError;
+  LastError := NoError();
   ErrorLine := 0;
   // A fresh expression/call stack per line; everything else -- globals, handles,
   // open file channels, the DATA cursor, an installed ON ERROR handler -- persists,
@@ -1045,38 +1045,38 @@ begin
     case ins.Op of
       opNop: ;
       opPushConst: Push(FProg.Consts.Get(ins.A));
-      opPop: Pop;
+      opPop: Pop();
       opPrint:
         begin
-          v := Pop;
+          v := Pop();
           if not EmitOutput(ValToStr(v)) then Exit(False);
         end;
       opPrintLn:
         begin
-          v := Pop;
+          v := Pop();
           if not EmitOutput(ValToStr(v) + #10) then Exit(False);
         end;
-      opNeg:     begin a := Pop; case Bin(Negate(a, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opAdd:     begin b := Pop; a := Pop; case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opSub:     begin b := Pop; a := Pop; case Bin(ValSub(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opMul:     begin b := Pop; a := Pop; case Bin(ValMul(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opDivReal: begin b := Pop; a := Pop; case Bin(ValDivReal(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opDivInt:  begin b := Pop; a := Pop; case Bin(ValDivInt(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opPow:     begin b := Pop; a := Pop; case Bin(ValPow(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opMod:     begin b := Pop; a := Pop; case Bin(ValMod(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opEQ:      begin b := Pop; a := Pop; case Bin(ValCompare(coEQ, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opNE:      begin b := Pop; a := Pop; case Bin(ValCompare(coNE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opLT:      begin b := Pop; a := Pop; case Bin(ValCompare(coLT, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opLE:      begin b := Pop; a := Pop; case Bin(ValCompare(coLE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opGT:      begin b := Pop; a := Pop; case Bin(ValCompare(coGT, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opGE:      begin b := Pop; a := Pop; case Bin(ValCompare(coGE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opAnd:     begin b := Pop; a := Pop; case Bin(ValAnd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opOr:      begin b := Pop; a := Pop; case Bin(ValOr(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opNot:     begin a := Pop; case Bin(ValNot(a, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opNeg:     begin a := Pop(); case Bin(Negate(a, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opAdd:     begin b := Pop(); a := Pop(); case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opSub:     begin b := Pop(); a := Pop(); case Bin(ValSub(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opMul:     begin b := Pop(); a := Pop(); case Bin(ValMul(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opDivReal: begin b := Pop(); a := Pop(); case Bin(ValDivReal(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opDivInt:  begin b := Pop(); a := Pop(); case Bin(ValDivInt(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opPow:     begin b := Pop(); a := Pop(); case Bin(ValPow(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opMod:     begin b := Pop(); a := Pop(); case Bin(ValMod(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opEQ:      begin b := Pop(); a := Pop(); case Bin(ValCompare(coEQ, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opNE:      begin b := Pop(); a := Pop(); case Bin(ValCompare(coNE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opLT:      begin b := Pop(); a := Pop(); case Bin(ValCompare(coLT, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opLE:      begin b := Pop(); a := Pop(); case Bin(ValCompare(coLE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opGT:      begin b := Pop(); a := Pop(); case Bin(ValCompare(coGT, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opGE:      begin b := Pop(); a := Pop(); case Bin(ValCompare(coGE, a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opAnd:     begin b := Pop(); a := Pop(); case Bin(ValAnd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opOr:      begin b := Pop(); a := Pop(); case Bin(ValOr(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opNot:     begin a := Pop(); case Bin(ValNot(a, r), r) of 1: Continue; 2: Exit(False); end; end;
       opLoadVar: Push(FVars[ins.A]);
       opStoreVar:
         begin
-          v := Pop;
+          v := Pop();
           if CanStore(FProg.VarTypes[ins.A], v, r) then
             FVars[ins.A] := r
           else
@@ -1085,7 +1085,7 @@ begin
         end;
       opJumpIfFalse:
         begin
-          v := Pop;
+          v := Pop();
           if v.Kind <> vkBool then
             if Fault(MakeError(peTypeMismatch, 'condition is not a boolean')) then Continue else Exit(False);
           if not v.Bl then
@@ -1129,7 +1129,7 @@ begin
         begin
           // Turn tracing on (a non-zero value) or off (0). A non-numeric value
           // reads as 0 through AsDouble, so it turns tracing off.
-          v := Pop;
+          v := Pop();
           FTrace := (AsDouble(v) <> 0);
         end;
       opBreakpoint:
@@ -1143,8 +1143,8 @@ begin
           // pushed).
           SetLength(bpOps, ins.A);
           for i := ins.A - 1 downto 0 do
-            bpOps[i] := Pop;
-          v := Pop;   // the message
+            bpOps[i] := Pop();
+          v := Pop();   // the message
           if FTrace and Assigned(OnBreakpoint) then
             OnBreakpoint(ValToStr(v), ins.Line, bpOps);
         end;
@@ -1207,7 +1207,7 @@ begin
       opLoadLocal: Push(FFrames[FFrameSP - 1].Locals[ins.A]);
       opStoreLocal:
         begin
-          v := Pop;
+          v := Pop();
           lt := FProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].LocalTypes[ins.A];
           if CanStore(lt, v, r) then
             FFrames[FFrameSP - 1].Locals[ins.A] := r
@@ -1238,7 +1238,7 @@ begin
               SetLength(FFrames, (FFrameSP + 1) * 2);
             SetLength(FFrames[FFrameSP].Locals, Length(FProg.UserFuncs[ufi].LocalTypes));
             for i := argc - 1 downto 0 do
-              FFrames[FFrameSP].Locals[i] := Pop;
+              FFrames[FFrameSP].Locals[i] := Pop();
             for i := argc to High(FProg.UserFuncs[ufi].LocalTypes) do
               FFrames[FFrameSP].Locals[i] := DefaultValue(FProg.UserFuncs[ufi].LocalTypes[i]);
             FFrames[FFrameSP].FuncIndex := ufi;
@@ -1251,7 +1251,7 @@ begin
           SetLength(args, argc);
           SetLength(kinds, argc);
           for i := argc - 1 downto 0 do
-            args[i] := Pop;
+            args[i] := Pop();
           for i := 0 to argc - 1 do
             kinds[i] := args[i].Kind;
           res := Registry.Resolve(FProg.Consts.Get(ins.A).Str, kinds);
@@ -1260,7 +1260,7 @@ begin
             if Fault(MakeError(peUnknownFunction,
               'no function ' + SignatureOf(FProg.Consts.Get(ins.A).Str, args))) then Continue else Exit(False);
           end;
-          e := NoError;
+          e := NoError();
           // The safety net: a library function must never crash the interpreter.
           // Any Pascal exception it raises (e.g. an out-of-range Double->Int64 in a
           // conversion or index argument) is converted to a CATCHABLE engine error,
@@ -1285,7 +1285,7 @@ begin
           Push(r);
         end;
       // --- classic console input -----------------------------------------------
-      opInputLine: ReadInputLine;   // fill the input buffer; EOF just leaves it empty
+      opInputLine: ReadInputLine();   // fill the input buffer; EOF just leaves it empty
       opInputField:
         begin
           e := InputField(ins.A, v);
@@ -1299,14 +1299,14 @@ begin
         end;
       opInputChars:
         begin
-          a := Pop;   // count
+          a := Pop();   // count
           Push(ValStr(InputChars(SafeI32(a))));
         end;
       // --- classic file I/O ----------------------------------------------------
       opOpenFile:
         begin
-          a := Pop;   // channel number (pushed last)
-          b := Pop;   // path (pushed first)
+          a := Pop();   // channel number (pushed last)
+          b := Pop();   // path (pushed first)
           e := ChanOpen(SafeI32(a), ins.A, ValToStr(b));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
@@ -1316,65 +1316,65 @@ begin
             ChanClose(-1)                 // CLOSE with no argument: close every channel
           else
           begin
-            a := Pop;
+            a := Pop();
             e := ChanClose(SafeI32(a));
             if IsError(e) then if Fault(e) then Continue else Exit(False);
           end;
         end;
       opPrintFile:
         begin
-          v := Pop;   // the value (pushed last)
-          a := Pop;   // channel number (pushed first)
+          v := Pop();   // the value (pushed last)
+          a := Pop();   // channel number (pushed first)
           e := ChanWrite(SafeI32(a), ValToStr(v));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
       opFileField:
         begin
-          a := Pop;   // channel number
+          a := Pop();   // channel number
           e := ChanField(SafeI32(a), ins.A, v);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(v);
         end;
       opFileLine:
         begin
-          a := Pop;
+          a := Pop();
           e := ChanLine(SafeI32(a), sTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValStr(sTmp));
         end;
       opFileChars:
         begin
-          a := Pop;   // channel number (pushed last, on top)
-          b := Pop;   // count (pushed first)
+          a := Pop();   // channel number (pushed last, on top)
+          b := Pop();   // count (pushed first)
           e := ChanChars(SafeI32(a), SafeI32(b), sTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValStr(sTmp));
         end;
       opEofFile:
         begin
-          a := Pop;
+          a := Pop();
           e := ChanEof(SafeI32(a), bTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValBool(bTmp));
         end;
       opLofFile:
         begin
-          a := Pop;
+          a := Pop();
           e := ChanLof(SafeI32(a), nTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValInt(nTmp));
         end;
       opLocFile:
         begin
-          a := Pop;
+          a := Pop();
           e := ChanLoc(SafeI32(a), nTmp);
           if IsError(e) then if Fault(e) then Continue else Exit(False);
           Push(ValInt(nTmp));
         end;
       opSeekFile:
         begin
-          a := Pop;   // the 1-based position (pushed last)
-          b := Pop;   // the channel number (pushed first)
+          a := Pop();   // the 1-based position (pushed last)
+          b := Pop();   // the channel number (pushed first)
           e := ChanSeek(SafeI32(b), SafeI32(a));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
@@ -1382,8 +1382,8 @@ begin
       opPrintUsing:
         begin
           SetLength(usingVals, ins.A);
-          for i := ins.A - 1 downto 0 do usingVals[i] := Pop;
-          v := Pop;   // the format string (pushed first)
+          for i := ins.A - 1 downto 0 do usingVals[i] := Pop();
+          v := Pop();   // the format string (pushed first)
           if not EmitOutput(FormatUsing(ValToStr(v), usingVals)) then Exit(False);
         end;
     else
@@ -1407,7 +1407,7 @@ var
   ufi, i, saved: Integer;
 begin
   Result := Default(TValue);
-  Err := NoError;
+  Err := NoError();
   if FProg = nil then
   begin
     Err := MakeError(peRuntime, 'no program is running');
@@ -1436,7 +1436,7 @@ begin
   FFrames[FFrameSP].ReturnAddr := -1;   // unused: ExecFrom stops by frame level
   Inc(FFrameSP);
   if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
-    Result := Pop        // the routine's return value
+    Result := Pop()        // the routine's return value
   else
   begin
     Err := LastError;

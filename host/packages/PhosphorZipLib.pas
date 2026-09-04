@@ -83,9 +83,9 @@ type
 
 constructor TZipWriter.Create(const APath: String);
 begin
-  Z := TZipper.Create;
+  Z := TZipper.Create();
   Z.FileName := APath;
-  Owned := TList.Create;
+  Owned := TList.Create();
 end;
 
 destructor TZipWriter.Destroy;
@@ -95,7 +95,7 @@ begin
     TObject(Owned[i]).Free;
   Owned.Free;
   Z.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 procedure TZipWriter.AddFile(const ADisk, AArchive: String);
@@ -106,7 +106,7 @@ end;
 procedure TZipWriter.AddStr(const AContent, AArchive: String);
 var ms: TMemoryStream;
 begin
-  ms := TMemoryStream.Create;
+  ms := TMemoryStream.Create();
   if Length(AContent) > 0 then ms.WriteBuffer(AContent[1], Length(AContent));
   ms.Position := 0;
   Owned.Add(ms);
@@ -123,7 +123,7 @@ end;
 
 constructor TZipReader.Create(const APath: String);
 begin
-  UZ := TUnZipper.Create;
+  UZ := TUnZipper.Create();
   UZ.FileName := APath;
   UZ.Examine;              // populates Entries; raises on a missing/corrupt file
   FScratch := nil;
@@ -133,7 +133,7 @@ destructor TZipReader.Destroy;
 begin
   FScratch.Free;
   UZ.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 function TZipReader.IndexOf(const AName: String): Integer;
@@ -147,7 +147,7 @@ end;
 
 procedure TZipReader.DoCreateStream(Sender: TObject; var AStream: TStream; AItem: TFullZipFileEntry);
 begin
-  FScratch := TMemoryStream.Create;
+  FScratch := TMemoryStream.Create();
   AStream := FScratch;
 end;
 
@@ -163,7 +163,7 @@ begin
   Result := False;
   AData := '';
   FScratch := nil;
-  sl := TStringList.Create;
+  sl := TStringList.Create();
   try
     sl.Add(AName);
     UZ.OnCreateStream := @DoCreateStream;
@@ -211,10 +211,10 @@ end;
 function f_zip_compress(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var z: TZipper; sr: TSearchRec; base: String;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   try
-    z := TZipper.Create;
+    z := TZipper.Create();
     try
       z.FileName := Args[0].Str;
       base := IncludeTrailingPathDelimiter(Args[1].Str);
@@ -242,10 +242,10 @@ end;
 function f_unzip_extract(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var uz: TUnZipper;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   try
-    uz := TUnZipper.Create;
+    uz := TUnZipper.Create();
     try
       uz.FileName := Args[0].Str;
       uz.OutputPath := Args[1].Str;
@@ -265,10 +265,10 @@ end;
 function f_unzip_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var uz: TUnZipper;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   try
-    uz := TUnZipper.Create;
+    uz := TUnZipper.Create();
     try
       uz.FileName := Args[0].Str;
       uz.Examine;
@@ -284,10 +284,10 @@ end;
 function f_unzip_entry(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var uz: TUnZipper; n: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   try
-    uz := TUnZipper.Create;
+    uz := TUnZipper.Create();
     try
       uz.FileName := Args[0].Str;
       uz.Examine;
@@ -304,7 +304,7 @@ end;
 // --- handle-based create/add/close ------------------------------------------
 function f_zip_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     Result := ValHandle(RegisterHandle(TZipWriter.Create(Args[0].Str)));
     ZipErr := 0;
@@ -317,7 +317,7 @@ end;
 function f_zip_addfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var w: TZipWriter;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetWriter(Args[0].Hnd, w) then begin ZipErr := 1; Exit; end;
   try
@@ -333,7 +333,7 @@ end;
 function f_zip_addstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var w: TZipWriter;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetWriter(Args[0].Hnd, w) then begin ZipErr := 1; Exit; end;
   try
@@ -349,12 +349,12 @@ end;
 function f_zip_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var w: TZipWriter; r: TZipReader;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   try
     if GetWriter(Args[0].Hnd, w) then
     begin
-      w.Save;                        // flush the archive to disk before releasing
+      w.Save();                        // flush the archive to disk before releasing
       FreeHandle(Args[0].Hnd);
       Result := ValInt(1);
       ZipErr := 0;
@@ -376,7 +376,7 @@ end;
 // --- handle-based open/inspect/extract --------------------------------------
 function f_zip_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     Result := ValHandle(RegisterHandle(TZipReader.Create(Args[0].Str)));
     ZipErr := 0;
@@ -389,7 +389,7 @@ end;
 function f_zip_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TZipReader;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetReader(Args[0].Hnd, r) then Result := ValInt(r.UZ.Entries.Count)
   else begin Result := ValInt(0); ZipErr := 1; end;
 end;
@@ -399,7 +399,7 @@ var r: TZipReader;
 begin
   // 1/0, not a bool: assert_true/assert_false carry a message only on the
   // numeric overload (:n$), and there is no assert_*:?$ to catch a bool + msg.
-  Err := NoError;
+  Err := NoError();
   if GetReader(Args[0].Hnd, r) then Result := ValInt(Ord(r.IndexOf(Args[1].Str) >= 0))
   else begin Result := ValInt(0); ZipErr := 1; end;
 end;
@@ -407,7 +407,7 @@ end;
 function f_zip_read(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TZipReader; data: String;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
   try
@@ -423,7 +423,7 @@ end;
 function f_zip_entrysize(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TZipReader; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
   i := r.IndexOf(Args[1].Str);
@@ -434,7 +434,7 @@ end;
 function f_zip_list(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TZipReader; s: String; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
   s := '';
@@ -449,10 +449,10 @@ end;
 function f_zip_extract(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TZipReader; sl: TStringList;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
-  sl := TStringList.Create;
+  sl := TStringList.Create();
   try
     try
       sl.Add(Args[1].Str);
@@ -472,11 +472,11 @@ end;
 function f_zip_extractall(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TZipReader;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
   try
-    r.UZ.Files.Clear;               // a prior single-entry op left a filter behind;
+    r.UZ.Files.Clear();               // a prior single-entry op left a filter behind;
     r.UZ.OutputPath := Args[1].Str; // an empty list means "every file"
     r.UZ.UnZipAllFiles;
     Result := ValInt(1);
@@ -490,10 +490,10 @@ end;
 function f_zip_quick(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var z: TZipper;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   try
-    z := TZipper.Create;
+    z := TZipper.Create();
     try
       z.FileName := Args[1].Str;
       // Store the bare file name; FPC's ExtractFileName splits on both '/' and
@@ -514,7 +514,7 @@ end;
 
 function f_zip_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(ZipErr);
 end;
 

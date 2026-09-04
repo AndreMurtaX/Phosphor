@@ -48,7 +48,7 @@ var
   total: Int64;
   def: TValue;
 begin
-  inherited Create;
+  inherited Create();
   Kind := AKind;
   SetLength(Dims, Length(ADims));
   total := 1;
@@ -101,7 +101,7 @@ begin
         [AIdx[d], Dims[d], d + 1])));
     AFlat := AFlat * Dims[d] + (AIdx[d] - 1);
   end;
-  Result := NoError;
+  Result := NoError();
 end;
 
 // --- library functions ------------------------------------------------------
@@ -114,7 +114,7 @@ begin
     Exit(False);
   end;
   A := TPhosphorArray(HandleObj(V.Hnd));
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -123,7 +123,7 @@ var
   dims: array of Int64;
   i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(0);
   SetLength(dims, Length(Args));
   for i := 0 to High(Args) do
@@ -214,7 +214,7 @@ function t_arraysize(const Args: array of TValue; out Err: TPhosphorError): TVal
 var a: TPhosphorArray;
 begin
   Result := ValInt(0);
-  if GetArr(Args[0], a, Err) then Result := ValInt(a.TotalSize);
+  if GetArr(Args[0], a, Err) then Result := ValInt(a.TotalSize());
 end;
 
 function t_arraytype(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -228,7 +228,7 @@ function t_arraytypename(const Args: array of TValue; out Err: TPhosphorError): 
 var a: TPhosphorArray;
 begin
   Result := ValStr('');
-  if GetArr(Args[0], a, Err) then Result := ValStr(a.TypeName);
+  if GetArr(Args[0], a, Err) then Result := ValStr(a.TypeName());
 end;
 
 // Fabricates a raw handle value from an integer id. Used to test that libraries
@@ -236,7 +236,7 @@ end;
 // function rejects it (IsHandle is false) instead of dereferencing it.
 function t_pointer(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(Round(AsDouble(Args[0])));
 end;
 

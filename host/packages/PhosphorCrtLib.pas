@@ -88,127 +88,127 @@ end;
 
 function f_cls(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr(Csi('2J') + Csi('H'));   // clear all, cursor home
 end;
 
 function f_clreol(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('K'));
+  Err := NoError(); Result := ValStr(Csi('K'));
 end;
 
 function f_clreos(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('J'));
+  Err := NoError(); Result := ValStr(Csi('J'));
 end;
 
 { ---- cursor ---------------------------------------------------------------- }
 
 function f_home(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('H'));
+  Err := NoError(); Result := ValStr(Csi('H'));
 end;
 
 function f_at(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;   // row;col are 1-based, like ANSI and like Phosphor's own indices
+  Err := NoError();   // row;col are 1-based, like ANSI and like Phosphor's own indices
   Result := ValStr(Csi(IntToStr(NArg(Args[0])) + ';' + IntToStr(NArg(Args[1])) + 'H'));
 end;
 
 function f_moveup(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'A'));
+  Err := NoError(); Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'A'));
 end;
 
 function f_movedown(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'B'));
+  Err := NoError(); Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'B'));
 end;
 
 function f_moveright(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'C'));
+  Err := NoError(); Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'C'));
 end;
 
 function f_moveleft(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'D'));
+  Err := NoError(); Result := ValStr(Csi(IntToStr(NArg(Args[0])) + 'D'));
 end;
 
 function f_hidecursor(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('?25l'));
+  Err := NoError(); Result := ValStr(Csi('?25l'));
 end;
 
 function f_showcursor(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('?25h'));
+  Err := NoError(); Result := ValStr(Csi('?25h'));
 end;
 
 function f_savepos(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(ESC + '7');
+  Err := NoError(); Result := ValStr(ESC + '7');
 end;
 
 function f_restorepos(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(ESC + '8');
+  Err := NoError(); Result := ValStr(ESC + '8');
 end;
 
 { ---- attributes ------------------------------------------------------------ }
 
 function f_reset(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('0m'));
+  Err := NoError(); Result := ValStr(Csi('0m'));
 end;
 
 function f_bold(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('1m'));
+  Err := NoError(); Result := ValStr(Csi('1m'));
 end;
 
 function f_faint(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('2m'));
+  Err := NoError(); Result := ValStr(Csi('2m'));
 end;
 
 function f_italic(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('3m'));
+  Err := NoError(); Result := ValStr(Csi('3m'));
 end;
 
 function f_underline(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('4m'));
+  Err := NoError(); Result := ValStr(Csi('4m'));
 end;
 
 function f_blink(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('5m'));
+  Err := NoError(); Result := ValStr(Csi('5m'));
 end;
 
 function f_inverse(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi('7m'));
+  Err := NoError(); Result := ValStr(Csi('7m'));
 end;
 
 { ---- colour ---------------------------------------------------------------- }
 
 function f_color1(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi(IntToStr(FgCode(NArg(Args[0]))) + 'm'));
+  Err := NoError(); Result := ValStr(Csi(IntToStr(FgCode(NArg(Args[0]))) + 'm'));
 end;
 
 function f_color2(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr(Csi(IntToStr(FgCode(NArg(Args[0]))) + ';' +
                        IntToStr(BgCode(NArg(Args[1]))) + 'm'));
 end;
 
 function f_bg(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError; Result := ValStr(Csi(IntToStr(BgCode(NArg(Args[0]))) + 'm'));
+  Err := NoError(); Result := ValStr(Csi(IntToStr(BgCode(NArg(Args[0]))) + 'm'));
 end;
 
 { ---- keyboard input (raw mode; no crt unit) -------------------------------- }
@@ -345,51 +345,51 @@ end;
 
 function KbdKeyPressed: Boolean;
 begin
-  Result := ByteWaiting;
+  Result := ByteWaiting();
 end;
 
 function KbdRead(ABlock: Boolean): String;
 begin
   Result := '';
-  if (not ABlock) and (not ByteWaiting) then Exit;
-  Result := ReadByte;
+  if (not ABlock) and (not ByteWaiting()) then Exit;
+  Result := ReadByte();
   { an ESC begins a multi-byte sequence (arrows, F-keys); if the rest is already in
     the buffer, take it too so the caller gets the whole key in one call. }
   if Result = #27 then
-    while ByteWaiting do Result := Result + ReadByte;
+    while ByteWaiting() do Result := Result + ReadByte();
 end;
 {$ENDIF}
 
 function f_inkey(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  if not StdinIsInteractive then Exit(ValStr(''));
-  KbdEnterRaw;
+  Err := NoError();
+  if not StdinIsInteractive() then Exit(ValStr(''));
+  KbdEnterRaw();
   Result := ValStr(KbdRead(False));
 end;
 
 function f_getkey(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  if not StdinIsInteractive then Exit(ValStr(''));   // no terminal -> nothing to wait for
-  KbdEnterRaw;
+  Err := NoError();
+  if not StdinIsInteractive() then Exit(ValStr(''));   // no terminal -> nothing to wait for
+  KbdEnterRaw();
   Result := ValStr(KbdRead(True));
 end;
 
 function f_keypressed(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  if not StdinIsInteractive then Exit(ValInt(0));
-  KbdEnterRaw;
-  Result := ValInt(Ord(KbdKeyPressed));
+  Err := NoError();
+  if not StdinIsInteractive() then Exit(ValInt(0));
+  KbdEnterRaw();
+  Result := ValInt(Ord(KbdKeyPressed()));
 end;
 
 { crt_done() -- put the terminal back the way it was (undo raw mode). A backstop also
   runs at unit finalization, but interactive programs should call this before exit. }
 function f_crt_done(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  KbdRestore;
+  Err := NoError();
+  KbdRestore();
   Result := ValStr('');
 end;
 
@@ -406,7 +406,7 @@ var
   h: THandle;
   mode: DWORD;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   h := GetStdHandle(STD_OUTPUT_HANDLE);
   if (h <> INVALID_HANDLE_VALUE) and GetConsoleMode(h, mode) then
@@ -415,7 +415,7 @@ begin
 end;
 {$ELSE}
 begin
-  Err := NoError; Result := ValInt(1);   // ANSI already understood
+  Err := NoError(); Result := ValInt(1);   // ANSI already understood
 end;
 {$ENDIF}
 
@@ -453,6 +453,6 @@ end;
 
 finalization
   { Never leave the user's terminal in raw mode, even if the program forgot crt_done. }
-  KbdRestore;
+  KbdRestore();
 
 end.

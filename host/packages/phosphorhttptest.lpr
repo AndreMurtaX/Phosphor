@@ -108,14 +108,14 @@ end;
 
 function f_server_url(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr(BaseURL);
 end;
 
 { server_url_https$() -> the base URL of the local TLS server (self-signed cert). }
 function f_server_url_https(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr(BaseURLHttps);
 end;
 
@@ -127,7 +127,7 @@ end;
 function f_http_get_via(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var addrs: TStringDynArray; status: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   addrs := SplitString(Args[1].Str, ',');
   { Short connect timeout: a dead loopback alias times out (rather than refusing) on
     Windows, and we don't want the fallback proof to wait seconds for that. }
@@ -249,24 +249,24 @@ begin
     Halt(0);
   end;
 
-  eng := TPhosphorEngine.Create;
+  eng := TPhosphorEngine.Create();
   try
     RegisterTestFuncs(eng.Registry);
     RegisterHttpFuncs(eng.Registry);
     eng.Registry.Add('server_url$:', @f_server_url);
     eng.Registry.Add('server_url_https$:', @f_server_url_https);
     eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
-    ResetTestState;
+    ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin
       Writeln(StdErr, Format('phosphorhttptest: %s:%d: %s', [path, eng.ErrorLine, eng.ErrorMessage]));
-      WriteSummary;
+      WriteSummary();
       Halt(2);
     end;
     for i := 0 to Failures.Count - 1 do
       Writeln(StdErr, '  FAIL ', Failures[i]);
-    WriteSummary;
+    WriteSummary();
     if AssertsFailed = 0 then Halt(0) else Halt(1);
   finally
     eng.Free;

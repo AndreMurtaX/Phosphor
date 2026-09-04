@@ -49,13 +49,13 @@ var
   prog: TProgram;
 begin
   Result := nil;
-  comp := TPhosphorCompiler.Create;
+  comp := TPhosphorCompiler.Create();
   try
     if not comp.Compile(ASource, prog) then Exit;
   finally
     comp.Free;
   end;
-  Result := TBytesStream.Create;
+  Result := TBytesStream.Create();
   WriteProgram(Result, prog);
   prog.Free;
   Result.Position := 0;
@@ -64,8 +64,8 @@ end;
 function RunSource(const ASource: String): String;
 var eng: TPhosphorEngine; col: TCollector;
 begin
-  eng := TPhosphorEngine.Create;
-  col := TCollector.Create;
+  eng := TPhosphorEngine.Create();
+  col := TCollector.Create();
   try
     eng.OnOutput := @col.Output;
     eng.Run(ASource);
@@ -78,8 +78,8 @@ end;
 function RunBytes(AStream: TStream; out ARc: Integer; out AMsg: String): String;
 var eng: TPhosphorEngine; col: TCollector;
 begin
-  eng := TPhosphorEngine.Create;
-  col := TCollector.Create;
+  eng := TPhosphorEngine.Create();
+  col := TCollector.Create();
   try
     eng.OnOutput := @col.Output;
     AStream.Position := 0;

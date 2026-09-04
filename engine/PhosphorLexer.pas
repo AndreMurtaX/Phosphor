@@ -88,7 +88,7 @@ end;
 
 constructor TLexer.Create(const ASource: String);
 begin
-  inherited Create;
+  inherited Create();
   FSrc := ASource;
   FPos := 1;
   FLine := 1;
@@ -96,7 +96,7 @@ begin
   FIndex := 0;
   FErr := '';
   FErrLine := 0;
-  Tokenize;
+  Tokenize();
 end;
 
 procedure TLexer.Push(const T: TToken);
@@ -387,7 +387,7 @@ begin
 
   PushSimple(tkEOL, FLine);   // terminate the last statement
   PushSimple(tkEOF, FLine);
-  MergeCompoundKeywords;
+  MergeCompoundKeywords();
   Result := True;
 end;
 

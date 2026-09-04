@@ -44,7 +44,7 @@ type
 
 constructor TPhosphorConfig.Create(const APath: String; AAuto: Boolean);
 begin
-  inherited Create;
+  inherited Create();
   FileName := APath;
   Ini := TMemIniFile.Create(APath);   // reads the file if it exists
   Modified := False;
@@ -59,7 +59,7 @@ begin
   // way a config reaches disk.
   Ini.Rename('', False);
   Ini.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 procedure TPhosphorConfig.Save;
@@ -71,7 +71,7 @@ end;
 procedure TPhosphorConfig.Touch;
 begin
   Modified := True;
-  if AutoSave then Save;
+  if AutoSave then Save();
 end;
 
 procedure TPhosphorConfig.Reload;
@@ -93,7 +93,7 @@ begin
     Exit(False);
   end;
   C := TPhosphorConfig(HandleObj(V.Hnd));
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -115,9 +115,9 @@ end;
 
 // --- constructors and handle info -------------------------------------------
 function t_cfg_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValHandle(RegisterHandle(TPhosphorConfig.Create(Args[0].Str, False))); end;
+begin Err := NoError(); Result := ValHandle(RegisterHandle(TPhosphorConfig.Create(Args[0].Str, False))); end;
 function t_cfg_open_auto(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValHandle(RegisterHandle(TPhosphorConfig.Create(Args[0].Str, True))); end;
+begin Err := NoError(); Result := ValHandle(RegisterHandle(TPhosphorConfig.Create(Args[0].Str, True))); end;
 function t_cfg_filename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
 begin
@@ -127,7 +127,7 @@ end;
 function t_cfg_path(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: String;
 begin
-  Err := NoError;
+  Err := NoError();
   d := GetAppConfigDir(False);
   if d = '' then d := GetTempDir;
   Result := ValStr(d);
@@ -140,7 +140,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, Args[3].Str);
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig; sec: String;
@@ -156,7 +156,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, Args[2].Str);
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_gets(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -170,7 +170,7 @@ end;
 procedure WriteNum(c: TPhosphorConfig; const Sec, Key: String; V: Double);
 begin
   c.Ini.WriteString(Sec, Key, FloatToStr(V, InvFS));
-  c.Touch;
+  c.Touch();
 end;
 function ReadNum(c: TPhosphorConfig; const Sec, Key: String; const Def: TValue): TValue;
 begin
@@ -222,7 +222,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, IntToStr(Ord(AsDouble(Args[3]) <> 0)));
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_getb(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -237,7 +237,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, IntToStr(Ord(AsDouble(Args[2]) <> 0)));
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_getbs(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -274,7 +274,7 @@ var c: TPhosphorConfig; l: TStringList;
 begin
   Result := ValInt(0);
   if not GetConfig(Args[0], c, Err) then Exit;
-  l := TStringList.Create;
+  l := TStringList.Create();
   try
     c.Ini.ReadSection(Args[1].Str, l);
     Result := ValInt(l.Count);
@@ -287,7 +287,7 @@ var c: TPhosphorConfig; l: TStringList;
 begin
   Result := ValInt(0);
   if not GetConfig(Args[0], c, Err) then Exit;
-  l := TStringList.Create;
+  l := TStringList.Create();
   try
     c.Ini.ReadSections(l);
     Result := ValInt(l.Count);
@@ -302,7 +302,7 @@ var c: TPhosphorConfig; l: TStringList;
 begin
   Result := ValStr('');
   if not GetConfig(Args[0], c, Err) then Exit;
-  l := TStringList.Create;
+  l := TStringList.Create();
   try
     c.Ini.ReadSections(l);
     Result := ValStr(JoinList(l));
@@ -315,7 +315,7 @@ var c: TPhosphorConfig; l: TStringList;
 begin
   Result := ValStr('');
   if not GetConfig(Args[0], c, Err) then Exit;
-  l := TStringList.Create;
+  l := TStringList.Create();
   try
     c.Ini.ReadSection(Args[1].Str, l);
     Result := ValStr(JoinList(l));
@@ -337,7 +337,7 @@ var c: TPhosphorConfig;
 begin
   Result := ValInt(0);
   if not GetConfig(Args[0], c, Err) then Exit;
-  c.Save;
+  c.Save();
   Result := ValInt(1);
 end;
 function t_cfg_reload(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -345,7 +345,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  c.Reload;
+  c.Reload();
 end;
 
 // --- deletion ---------------------------------------------------------------
@@ -355,7 +355,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.DeleteKey(SecName(Args[1].Str), Args[2].Str);
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_deletekey(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -363,7 +363,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.DeleteKey('General', Args[1].Str);
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_section_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -371,15 +371,15 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.EraseSection(Args[1].Str);
-  c.Touch;
+  c.Touch();
 end;
 function t_cfg_clear(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  c.Ini.Clear;
-  c.Touch;
+  c.Ini.Clear();
+  c.Touch();
 end;
 
 // --- autosave ---------------------------------------------------------------

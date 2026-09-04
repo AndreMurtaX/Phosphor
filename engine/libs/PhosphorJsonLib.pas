@@ -48,13 +48,13 @@ type
 destructor TPhosphorJson.Destroy;
 begin
   if Owns and (Node <> nil) then Node.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean): Int64;
 var w: TPhosphorJson;
 begin
-  w := TPhosphorJson.Create;
+  w := TPhosphorJson.Create();
   w.Node := ANode;
   w.Owns := AOwns;
   Result := RegisterHandle(w);
@@ -83,7 +83,7 @@ begin
     Exit(False);
   end;
   N := TPhosphorJson(HandleObj(V.Hnd)).Node;
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -166,10 +166,10 @@ end;
 
 // --- constructors -----------------------------------------------------------
 function t_json_object(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := RegJson(TJSONObject.Create, True); end;
+begin Err := NoError(); Result := RegJson(TJSONObject.Create(), True); end;
 
 function t_json_array(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := RegJson(TJSONArray.Create, True); end;
+begin Err := NoError(); Result := RegJson(TJSONArray.Create(), True); end;
 
 function t_json_parse(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: TJSONData;
@@ -193,7 +193,7 @@ begin
     Err := MakeError(peRuntime, 'invalid json: empty or whitespace-only input');
     Exit;
   end;
-  Err := NoError;
+  Err := NoError();
   Result := RegJson(d, True);
 end;
 
@@ -418,13 +418,13 @@ end;
 
 // --- scalar constructors (each scalar is a handle too) ----------------------
 function t_json_null(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := RegJson(TJSONNull.Create, True); end;
+begin Err := NoError(); Result := RegJson(TJSONNull.Create(), True); end;
 function t_json_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := RegJson(TJSONBoolean.Create(AsDouble(Args[0]) <> 0), True); end;
+begin Err := NoError(); Result := RegJson(TJSONBoolean.Create(AsDouble(Args[0]) <> 0), True); end;
 function t_json_number(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := RegJson(NumNode(AsDouble(Args[0])), True); end;
+begin Err := NoError(); Result := RegJson(NumNode(AsDouble(Args[0])), True); end;
 function t_json_string(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := RegJson(TJSONString.Create(Args[0].Str), True); end;
+begin Err := NoError(); Result := RegJson(TJSONString.Create(Args[0].Str), True); end;
 
 // --- scalar readers ---------------------------------------------------------
 function t_json_value(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -475,7 +475,7 @@ var o: TJSONObject;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  SetMember(o, Args[1].Str, TJSONNull.Create);
+  SetMember(o, Args[1].Str, TJSONNull.Create());
   Result := Args[0];
 end;
 function t_json_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -502,7 +502,7 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  a.Add(TJSONNull.Create);
+  a.Add(TJSONNull.Create());
   Result := Args[0];
 end;
 function t_json_push(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -564,7 +564,7 @@ var o: TJSONObject; arr: TJSONArray; i: Integer;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  arr := TJSONArray.Create;
+  arr := TJSONArray.Create();
   for i := 0 to o.Count - 1 do arr.Add(o.Names[i]);
   Result := RegJson(arr, True);   // a new owned array
 end;
@@ -623,7 +623,7 @@ begin
 end;
 function t_pnttonum(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if Args[0].Kind = vkHandle then Result := ValInt(Args[0].Hnd) else Result := ValInt(0);
 end;
 
@@ -633,7 +633,7 @@ end;
 // container handle, so it stays on the stack between insertions.
 function ValueToNode(const V: TValue; out Err: TPhosphorError): TJSONData;
 begin
-  Err := NoError;
+  Err := NoError();
   case V.Kind of
     vkInt, vkDouble: Result := NumNode(AsDouble(V));
     vkString:        Result := TJSONString.Create(V.Str);
@@ -647,7 +647,7 @@ begin
         Result := nil;
       end;
   else
-    Result := TJSONNull.Create;
+    Result := TJSONNull.Create();
   end;
 end;
 function t_json_pushval(const Args: array of TValue; out Err: TPhosphorError): TValue;

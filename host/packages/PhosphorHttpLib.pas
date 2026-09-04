@@ -274,14 +274,14 @@ end;
 function f_http_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var status: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr(HttpFetch('GET', Args[0].Str, '', [], status));
 end;
 
 function f_http_status(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var status: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   HttpFetch('GET', Args[0].Str, '', [], status);
   Result := ValInt(status);
 end;
@@ -289,7 +289,7 @@ end;
 function f_http_post(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var status: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValStr(HttpFetch('POST', Args[0].Str, Args[1].Str, [], status));
 end;
 
@@ -298,7 +298,7 @@ end;
   default. Returns the value it set. }
 function f_http_verify_peer(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   gVerifyPeer := AsDouble(Args[0]) <> 0;
   Result := ValInt(Ord(gVerifyPeer));
 end;
@@ -307,7 +307,7 @@ end;
   platforms without a system bundle in a standard place (e.g. Windows). Returns path$. }
 function f_http_ca_file(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   gCAFile := Args[0].Str;
   Result := ValStr(gCAFile);
 end;
@@ -399,16 +399,16 @@ type
 
 constructor TKVBag.Create(ACaseSensitive: Boolean);
 begin
-  FNames := TStringList.Create;
+  FNames := TStringList.Create();
   FNames.CaseSensitive := ACaseSensitive;   // IndexOf honours this in FPC
-  FVals := TStringList.Create;
+  FVals := TStringList.Create();
 end;
 
 destructor TKVBag.Destroy;
 begin
   FNames.Free;
   FVals.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 procedure TKVBag.SetVal(const AName, AValue: String);
@@ -445,8 +445,8 @@ end;
 
 procedure TKVBag.Clear;
 begin
-  FNames.Clear;
-  FVals.Clear;
+  FNames.Clear();
+  FVals.Clear();
 end;
 
 function TKVBag.Count: Integer;
@@ -472,7 +472,7 @@ begin
   Params  := TKVBag.Create(True);
   Cookies := TKVBag.Create(True);
   BaseUrl := ABaseUrl;
-  ResetToFactory;                    // leaves BaseUrl intact
+  ResetToFactory();                    // leaves BaseUrl intact
 end;
 
 destructor TPhosphorHttpClient.Destroy;
@@ -480,14 +480,14 @@ begin
   Headers.Free;
   Params.Free;
   Cookies.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 procedure TPhosphorHttpClient.ResetToFactory;
 begin
-  Headers.Clear;
-  Params.Clear;
-  Cookies.Clear;
+  Headers.Clear();
+  Params.Clear();
+  Cookies.Clear();
   ConnectTimeout := 0;
   ResponseTimeout := 0;
   UserAgent := '';
@@ -510,21 +510,21 @@ end;
 constructor TPhosphorHttpForm.Create;
 begin
   Fields := TKVBag.Create(True);
-  Files := TFPList.Create;
+  Files := TFPList.Create();
 end;
 
 destructor TPhosphorHttpForm.Destroy;
 begin
-  ClearAll;
+  ClearAll();
   Fields.Free;
   Files.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 procedure TPhosphorHttpForm.AddFile(const AField, APath, AFileName, AContentType: String);
 var ff: TFormFile;
 begin
-  ff := TFormFile.Create;
+  ff := TFormFile.Create();
   ff.FieldName := AField;
   ff.Path := APath;
   ff.FileName := AFileName;
@@ -535,10 +535,10 @@ end;
 procedure TPhosphorHttpForm.ClearAll;
 var i: Integer;
 begin
-  Fields.Clear;
+  Fields.Clear();
   for i := 0 to Files.Count - 1 do
     TObject(Files[i]).Free;
-  Files.Clear;
+  Files.Clear();
 end;
 
 { ---- handle resolution ----------------------------------------------------- }
@@ -695,14 +695,14 @@ end;
 { ---- client lifecycle ------------------------------------------------------ }
 function f_http_client(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(RegisterHandle(TPhosphorHttpClient.Create('')));
   gHttpErr := HTTP_OK;
 end;
 
 function f_http_client_url(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValHandle(RegisterHandle(TPhosphorHttpClient.Create(Args[0].Str)));
   gHttpErr := HTTP_OK;
 end;
@@ -710,7 +710,7 @@ end;
 function f_http_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin FreeHandle(Args[0].Hnd); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -719,9 +719,9 @@ end;
 function f_http_reset(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.ResetToFactory; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.ResetToFactory(); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -729,7 +729,7 @@ end;
 function f_http_baseurl_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.BaseUrl); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -738,7 +738,7 @@ end;
 function f_http_baseurl_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.BaseUrl := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -748,7 +748,7 @@ end;
 function f_http_timeout_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(c.ConnectTimeout); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -757,7 +757,7 @@ end;
 function f_http_timeout_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.ConnectTimeout := Round(AsDouble(Args[1])); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -766,7 +766,7 @@ end;
 function f_http_responsetimeout_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.ResponseTimeout := Round(AsDouble(Args[1])); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -776,7 +776,7 @@ end;
 function f_http_headercount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(c.Headers.Count); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -785,7 +785,7 @@ end;
 function f_http_header_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.Headers.SetVal(Args[1].Str, Args[2].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -794,7 +794,7 @@ end;
 function f_http_header_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.Headers.GetVal(Args[1].Str)); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -803,7 +803,7 @@ end;
 function f_http_headerremove(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(Ord(c.Headers.RemoveName(Args[1].Str))); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -812,9 +812,9 @@ end;
 function f_http_headerclear(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.Headers.Clear; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.Headers.Clear(); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -822,7 +822,7 @@ end;
 function f_http_paramcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(c.Params.Count); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -831,7 +831,7 @@ end;
 function f_http_param_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.Params.SetVal(Args[1].Str, Args[2].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -840,7 +840,7 @@ end;
 function f_http_param_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.Params.GetVal(Args[1].Str)); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -849,7 +849,7 @@ end;
 function f_http_paramremove(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(Ord(c.Params.RemoveName(Args[1].Str))); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -858,9 +858,9 @@ end;
 function f_http_paramclear(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.Params.Clear; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.Params.Clear(); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -868,7 +868,7 @@ end;
 function f_http_cookiecount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(c.Cookies.Count); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -877,7 +877,7 @@ end;
 function f_http_cookie_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.Cookies.SetVal(Args[1].Str, Args[2].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -886,7 +886,7 @@ end;
 function f_http_cookie_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.Cookies.GetVal(Args[1].Str)); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -895,7 +895,7 @@ end;
 function f_http_cookieremove(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(Ord(c.Cookies.RemoveName(Args[1].Str))); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -904,9 +904,9 @@ end;
 function f_http_cookieclear(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.Cookies.Clear; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin c.Cookies.Clear(); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -914,7 +914,7 @@ end;
 function f_http_basicauth(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin
     c.AuthHeader := 'Basic ' + EncodeStringBase64(Args[1].Str + ':' + Args[2].Str);
@@ -926,7 +926,7 @@ end;
 function f_http_bearerauth(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.AuthHeader := 'Bearer ' + Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -935,7 +935,7 @@ end;
 function f_http_customauth(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.AuthHeader := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -944,7 +944,7 @@ end;
 function f_http_clearauth(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.AuthHeader := ''; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -954,7 +954,7 @@ end;
 function f_http_proxy(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin
     c.ProxyHost := Args[1].Str; c.ProxyPort := Round(AsDouble(Args[2]));
@@ -966,7 +966,7 @@ end;
 function f_http_proxyauth(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin
     c.ProxyUser := Args[1].Str; c.ProxyPass := Args[2].Str;
@@ -978,7 +978,7 @@ end;
 function f_http_clearproxy(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin
     c.ProxyHost := ''; c.ProxyPort := 0; c.ProxyUser := ''; c.ProxyPass := '';
@@ -991,7 +991,7 @@ end;
 function f_http_useragent_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.UserAgent := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1000,7 +1000,7 @@ end;
 function f_http_useragent_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.UserAgent); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -1009,7 +1009,7 @@ end;
 function f_http_contenttype_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.ContentType := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1018,7 +1018,7 @@ end;
 function f_http_contenttype_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.ContentType); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -1027,7 +1027,7 @@ end;
 function f_http_accept_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.Accept := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1036,7 +1036,7 @@ end;
 function f_http_accept_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValStr(c.Accept); gHttpErr := HTTP_OK; end
   else begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; end;
@@ -1045,7 +1045,7 @@ end;
 function f_http_followredirects_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.FollowRedirects := AsDouble(Args[1]) <> 0; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1054,7 +1054,7 @@ end;
 function f_http_followredirects_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(Ord(c.FollowRedirects)); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1063,7 +1063,7 @@ end;
 function f_http_maxredirects_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.MaxRedirects := Round(AsDouble(Args[1])); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1072,7 +1072,7 @@ end;
 function f_http_maxredirects_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(c.MaxRedirects); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1081,7 +1081,7 @@ end;
 function f_http_validatessl_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin c.ValidateSSL := AsDouble(Args[1]) <> 0; Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1090,7 +1090,7 @@ end;
 function f_http_validatessl_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetClient(Args[0].Hnd, c) then
   begin Result := ValInt(Ord(c.ValidateSSL)); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1099,15 +1099,15 @@ end;
 { ---- forms ----------------------------------------------------------------- }
 function f_http_form(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  Result := ValHandle(RegisterHandle(TPhosphorHttpForm.Create));
+  Err := NoError();
+  Result := ValHandle(RegisterHandle(TPhosphorHttpForm.Create()));
   gHttpErr := HTTP_OK;
 end;
 
 function f_http_formfieldcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin Result := ValInt(f.Fields.Count); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1116,7 +1116,7 @@ end;
 function f_http_formfilecount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin Result := ValInt(f.Files.Count); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1125,7 +1125,7 @@ end;
 function f_http_formfield(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin f.Fields.SetVal(Args[1].Str, Args[2].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1136,7 +1136,7 @@ end;
 function f_http_formurlencoded(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm; s: String; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   if not GetForm(Args[0].Hnd, f) then
   begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; Exit; end;
   s := '';
@@ -1152,7 +1152,7 @@ end;
 function f_http_formfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin
     { The name it is sent under defaults to the disk file's own name. }
@@ -1165,7 +1165,7 @@ end;
 function f_http_formfilenamed(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin f.AddFile(Args[1].Str, Args[2].Str, Args[3].Str, ''); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1174,7 +1174,7 @@ end;
 function f_http_formfiletype(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin f.AddFile(Args[1].Str, Args[2].Str, Args[3].Str, Args[4].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1183,16 +1183,16 @@ end;
 function f_http_formclear(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
-  begin f.ClearAll; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin f.ClearAll(); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
 function f_http_formfree(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var f: TPhosphorHttpForm;
 begin
-  Err := NoError;
+  Err := NoError();
   if GetForm(Args[0].Hnd, f) then
   begin FreeHandle(Args[0].Hnd); Result := ValInt(1); gHttpErr := HTTP_OK; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -1200,28 +1200,28 @@ end;
 
 { ---- pure encoders (BASIC entry points) ------------------------------------ }
 function f_http_urlencode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(DoUrlEncode(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(DoUrlEncode(Args[0].Str)); end;
 
 function f_http_urldecode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(DoUrlDecode(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(DoUrlDecode(Args[0].Str)); end;
 
 function f_http_htmlencode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(DoHtmlEncode(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(DoHtmlEncode(Args[0].Str)); end;
 
 function f_http_htmldecode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(DoHtmlDecode(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(DoHtmlDecode(Args[0].Str)); end;
 
 { ---- error accessors ------------------------------------------------------- }
 function f_http_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(gHttpErr); end;
+begin Err := NoError(); Result := ValInt(gHttpErr); end;
 
 function f_http_clearerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; gHttpErr := HTTP_OK; Result := ValInt(0); end;
+begin Err := NoError(); gHttpErr := HTTP_OK; Result := ValInt(0); end;
 
 function f_http_strerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var code: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   code := Round(AsDouble(Args[0]));
   case code of
     HTTP_OK:      Result := ValStr('no error');
@@ -1346,6 +1346,6 @@ initialization
     through to '.3'. Windows loads by DLL name, not this list, so this is Unix-only. }
   openssl.DLLVersions[High(openssl.DLLVersions)] := '.3';
   {$ENDIF}
-  gCAFile := LocateCABundle;
+  gCAFile := LocateCABundle();
 
 end.

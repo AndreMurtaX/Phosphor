@@ -30,7 +30,7 @@ implementation
 // --- platform identity ------------------------------------------------------
 function t_os_name(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   {$IFDEF WINDOWS}
     Result := ValStr('Windows');
   {$ELSE}
@@ -46,9 +46,9 @@ begin
   {$ENDIF}
 end;
 function t_os_platform(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr({$I %FPCTARGETOS%}); end;
+begin Err := NoError(); Result := ValStr({$I %FPCTARGETOS%}); end;
 function t_os_architecture(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr({$I %FPCTARGETCPU%}); end;
+begin Err := NoError(); Result := ValStr({$I %FPCTARGETCPU%}); end;
 
 // --- platform version -------------------------------------------------------
 // FPC 3.2.2 has no TOSVersion. Windows exposes Win32MajorVersion&c through
@@ -102,15 +102,15 @@ begin
 end;
 
 function t_os_major(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(GMaj); end;
+begin Err := NoError(); Result := ValInt(GMaj); end;
 function t_os_minor(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(GMin); end;
+begin Err := NoError(); Result := ValInt(GMin); end;
 function t_os_build(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(GBld); end;
+begin Err := NoError(); Result := ValInt(GBld); end;
 function t_os_spmajor(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(0); end;   // service packs not tracked
+begin Err := NoError(); Result := ValInt(0); end;   // service packs not tracked
 function t_os_spminor(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValInt(0); end;
+begin Err := NoError(); Result := ValInt(0); end;
 
 // running system >= (major, minor, build)?
 function OsAtLeast(AMajor, AMinor, ABuild: Integer): Boolean;
@@ -122,7 +122,7 @@ end;
 function t_os_check(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var b: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   if Length(Args) >= 3 then b := Round(AsDouble(Args[2])) else b := 0;
   Result := ValInt(Ord(OsAtLeast(Round(AsDouble(Args[0])), Round(AsDouble(Args[1])), b)));
 end;
@@ -130,19 +130,19 @@ end;
 // --- StdLib: pointer round-trips --------------------------------------------
 function t_number(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if Args[0].Kind = vkHandle then Result := ValInt(Args[0].Hnd) else Result := ValInt(0);
 end;
 function t_isassigned(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord((Args[0].Kind = vkHandle) and (Args[0].Hnd <> 0)));
 end;
 function t_classname(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   // Consult the registry BEFORE dereferencing: a fabricated address answers ""
   // instead of reading whatever happens to live there.
-  Err := NoError;
+  Err := NoError();
   Result := ValStr('');
   if (Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd) then
     Result := ValStr(HandleObj(Args[0].Hnd).ClassName);
@@ -152,19 +152,19 @@ end;
 function t_sign(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: Double;
 begin
-  Err := NoError; d := AsDouble(Args[0]);
+  Err := NoError(); d := AsDouble(Args[0]);
   if d < 0 then Result := ValInt(-1) else if d > 0 then Result := ValInt(1) else Result := ValInt(0);
 end;
 function t_isnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
-  Err := NoError; s := Args[0].Str;
+  Err := NoError(); s := Args[0].Str;
   Result := ValInt(Ord((Length(s) = 1) and (s[1] = #0)));
 end;
 function t_pause(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ms: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   ms := Round(AsDouble(Args[0]) * 1000);
   if ms > 0 then Sleep(ms);
   Result := ValInt(0);
@@ -173,7 +173,7 @@ end;
 // --- StdLib: process-wide format settings by name ---------------------------
 function t_formatsettings_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   case LowerCase(Args[0].Str) of
     'dateseparator':     Result := ValStr(DefaultFormatSettings.DateSeparator);
     'timeseparator':     Result := ValStr(DefaultFormatSettings.TimeSeparator);
@@ -191,7 +191,7 @@ end;
 function t_formatsettings_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var v: String; c: Char;
 begin
-  Err := NoError;
+  Err := NoError();
   v := Args[1].Str;
   if v <> '' then c := v[1] else c := #0;
   case LowerCase(Args[0].Str) of
@@ -233,6 +233,6 @@ begin
 end;
 
 initialization
-  InitOsVersion;
+  InitOsVersion();
 
 end.

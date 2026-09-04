@@ -297,7 +297,7 @@ end;
 function NumericPair(const A, B: TValue; const Op: String): TPhosphorError; inline;
 begin
   if IsNumeric(A) and IsNumeric(B) then
-    Result := NoError
+    Result := NoError()
   else
     Result := MakeError(peTypeMismatch,
       Op + ' needs numbers, got ' + KindName(A.Kind) + ' and ' + KindName(B.Kind));
@@ -320,7 +320,7 @@ begin
   else
     Exit(MakeError(peTypeMismatch, 'unary minus needs a number, got ' + KindName(A.Kind)));
   end;
-  Result := NoError;
+  Result := NoError();
 end;
 
 function ValAdd(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -337,7 +337,7 @@ begin
   if A.Kind = vkString then
   begin
     R := ValStr(ValToStr(A) + ValToStr(B));
-    Exit(NoError);
+    Exit(NoError());
   end;
   if B.Kind = vkString then
     Exit(MakeError(peTypeMismatch,
@@ -371,7 +371,7 @@ begin
     k := Length(A.Str) - Round(AsDouble(B));
     if k < 0 then k := 0;
     R := ValStr(Copy(A.Str, 1, k));
-    Exit(NoError);
+    Exit(NoError());
   end;
   Result := NumericPair(A, B, '-');
   if IsError(Result) then Exit;
@@ -503,7 +503,7 @@ begin
     eq := False;
   end;
   R := ValBool(eq);
-  Result := NoError;
+  Result := NoError();
 end;
 
 function BothBool(const A, B: TValue): Boolean; inline;
@@ -517,7 +517,7 @@ begin
   if not BothBool(A, B) then
     Exit(MakeError(peTypeMismatch, '''and'' needs booleans'));
   R := ValBool(A.Bl and B.Bl);
-  Result := NoError;
+  Result := NoError();
 end;
 
 function ValOr(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -526,7 +526,7 @@ begin
   if not BothBool(A, B) then
     Exit(MakeError(peTypeMismatch, '''or'' needs booleans'));
   R := ValBool(A.Bl or B.Bl);
-  Result := NoError;
+  Result := NoError();
 end;
 
 function ValNot(const A: TValue; out R: TValue): TPhosphorError;
@@ -535,7 +535,7 @@ begin
   if A.Kind <> vkBool then
     Exit(MakeError(peTypeMismatch, '''not'' needs a boolean'));
   R := ValBool(not A.Bl);
-  Result := NoError;
+  Result := NoError();
 end;
 
 function VarTypeOf(const AName: String): TVarType;

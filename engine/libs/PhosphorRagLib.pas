@@ -223,7 +223,7 @@ end;
 
 constructor TPhosphorRag.Create(const ABasePath: String);
 begin
-  inherited Create;
+  inherited Create();
   FBasePath := ABasePath;
   FMaxTokens := RAG_DEFAULT_MAX_TOKENS;
   SetLength(FDocs, 0);
@@ -324,7 +324,7 @@ end;
 function TPhosphorRag.FunctionCount: Integer;
 var i, j: Integer; seen: TStringList;
 begin
-  seen := TStringList.Create;
+  seen := TStringList.Create();
   try
     seen.Sorted := True;
     seen.Duplicates := dupIgnore;
@@ -575,7 +575,7 @@ var lines: TStrArr; i, curTokens: Integer; line, tl, head, tail: String;
     inEssential: Boolean; sb: TStringList;
 begin
   lines := SplitLinesLF(AContent);
-  sb := TStringList.Create;
+  sb := TStringList.Create();
   try
     curTokens := 0;
     inEssential := True;
@@ -782,18 +782,18 @@ function TPhosphorRag.AnalyzeJson(const AQuery: String): String;
 var an: TRagAnalysis; obj: TJSONObject; kw, fn, hint: TJSONArray; i: Integer;
 begin
   an := AnalyzeQuery(AQuery);
-  obj := TJSONObject.Create;
+  obj := TJSONObject.Create();
   try
     obj.Add('query', an.Query);
     obj.Add('intent', an.Intent);
     obj.Add('is_followup', an.IsFollowUp);
-    kw := TJSONArray.Create;
+    kw := TJSONArray.Create();
     for i := 0 to High(an.Keywords) do kw.Add(an.Keywords[i]);
     obj.Add('keywords', kw);
-    fn := TJSONArray.Create;
+    fn := TJSONArray.Create();
     for i := 0 to High(an.FunctionNames) do fn.Add(an.FunctionNames[i]);
     obj.Add('function_names', fn);
-    hint := TJSONArray.Create;
+    hint := TJSONArray.Create();
     for i := 0 to High(an.LibraryHints) do hint.Add(an.LibraryHints[i]);
     obj.Add('library_hints', hint);
     Result := obj.AsJSON;
@@ -806,8 +806,8 @@ function TPhosphorRag.Summary: String;
 var i, funcCount, tagCount: Integer; seenF, seenT: TStringList; nl: String;
 begin
   nl := #10;
-  seenF := TStringList.Create;
-  seenT := TStringList.Create;
+  seenF := TStringList.Create();
+  seenT := TStringList.Create();
   try
     seenF.Sorted := True; seenF.Duplicates := dupIgnore; seenF.CaseSensitive := False;
     seenT.Sorted := True; seenT.Duplicates := dupIgnore; seenT.CaseSensitive := False;
@@ -865,7 +865,7 @@ end;
 function t_rag_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   GRagError := 0;
   r := TPhosphorRag.Create(Args[0].Str);
   Result := ValHandle(RegisterHandle(r));
@@ -873,7 +873,7 @@ end;
 
 function t_rag_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   if (Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd) and (HandleObj(Args[0].Hnd) is TPhosphorRag) then
   begin
     FreeHandle(Args[0].Hnd);
@@ -890,29 +890,29 @@ end;
 function t_rag_rebuild(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
-  if AsRag(Args[0], r) then r.Rebuild;
+  Err := NoError();
+  if AsRag(Args[0], r) then r.Rebuild();
   Result := Args[0];   // return the handle so calls can chain
 end;
 
 function t_rag_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
-  if AsRag(Args[0], r) then Result := ValInt(r.DocumentCount) else Result := ValInt(0);
+  Err := NoError();
+  if AsRag(Args[0], r) then Result := ValInt(r.DocumentCount()) else Result := ValInt(0);
 end;
 
 function t_rag_funccount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
-  if AsRag(Args[0], r) then Result := ValInt(r.FunctionCount) else Result := ValInt(0);
+  Err := NoError();
+  if AsRag(Args[0], r) then Result := ValInt(r.FunctionCount()) else Result := ValInt(0);
 end;
 
 function t_rag_retrieve(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then
     Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, 0), False, True))
   else Result := ValStr('');
@@ -921,7 +921,7 @@ end;
 function t_rag_retrieve_budget(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then
     Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, Round(AsDouble(Args[2]))), False, False))
   else Result := ValStr('');
@@ -930,15 +930,15 @@ end;
 function t_rag_retrieve_json(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag; results: TRagResultArr; arr: TJSONArray; obj: TJSONObject; i: Integer; doc: TRagDoc;
 begin
-  Err := NoError;
+  Err := NoError();
   if not AsRag(Args[0], r) then begin Result := ValStr('[]'); Exit; end;
   results := r.RetrieveList(Args[1].Str, 0);
-  arr := TJSONArray.Create;
+  arr := TJSONArray.Create();
   try
     for i := 0 to High(results) do
     begin
       doc := r.FDocs[results[i].DocIdx];
-      obj := TJSONObject.Create;
+      obj := TJSONObject.Create();
       obj.Add('id', doc.Id);
       obj.Add('title', doc.Title);
       obj.Add('category', doc.Category);
@@ -957,7 +957,7 @@ end;
 function t_rag_doc(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag; found: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then Result := ValStr(r.GetDocument(Args[1].Str, found))
   else Result := ValStr('Error: invalid RAG handle');
 end;
@@ -965,7 +965,7 @@ end;
 function t_rag_functions(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then Result := ValStr(RenderResults(r, r.FindByFunctions(Args[1].Str), False, False))
   else Result := ValStr('');
 end;
@@ -973,7 +973,7 @@ end;
 function t_rag_tags(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then Result := ValStr(RenderResults(r, r.FindByTags(Args[1].Str), True, False))
   else Result := ValStr('');
 end;
@@ -981,20 +981,20 @@ end;
 function t_rag_analyze(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then Result := ValStr(r.AnalyzeJson(Args[1].Str)) else Result := ValStr('');
 end;
 
 function t_rag_summary(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
-  Err := NoError;
+  Err := NoError();
   if AsRag(Args[0], r) then Result := ValStr(r.Summary) else Result := ValStr('');
 end;
 
 function t_rag_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(GRagError);
 end;
 

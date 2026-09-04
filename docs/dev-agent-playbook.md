@@ -93,6 +93,32 @@ So:
   value). A 4th+ index is one registry line per arity — the variadic impls
   (`t_arr_get`/`t_arr_set`) already handle any arity; only the signature strings gate it.
 
+## 2b. Pascal style: empty parens mark a CALL
+
+**A parameterless call site carries `()`; a declaration does not.** Pascal lets a
+parameterless function call look exactly like a variable read — `a := Pop;` mutates the
+stack, `t := FLex.Cur;` is a function, not a field — so the parens are what tell a
+reader that something *happens*. This is a deliberate divergence from the FPC/Lazarus
+RTL idiom, adopted for this codebase.
+
+```pascal
+a := Pop();            v := FLex.Cur();      Tokenize();      inherited Create();
+function Pop: TValue;  { NO parens on the declaration or the impl header }
+cb := @host.Output;    { NEVER on an @ reference -- it would call, not take the address }
+```
+
+Rules, in order of how easily they are got wrong:
+- **Never after `@`.** `@Foo()` is a compile error (`Variable identifier expected`) —
+  loud, not silent, which is what makes a sweep safe to attempt at all.
+- **Never on a declaration or implementation header**, and never on a `property`
+  (a property cannot take parens; `Count` here is a property, not a function).
+- **A name that is a local variable in one unit and a routine in another** (`pop`,
+  `cur`, `ok`) must be judged PER FILE — a global name list will parenthesise a
+  variable declaration and break the build. Exclude, per file, every identifier that
+  file declares on the left of a `:` in a var/param/field list.
+- Applied wholesale in one sweep (1445 sites, 39 files) rather than gradually: partial
+  adoption is worse than either convention applied consistently.
+
 ## 3. FPC / Lazarus reality (specific traps, already paid for)
 
 - **Windows `-Fu` paths need backslashes**; forward-slash unit paths fail. Bash loops

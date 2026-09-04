@@ -78,8 +78,8 @@ begin
 
   Application.Initialize;
 
-  con := TGuiConsole.Create;
-  eng := TPhosphorEngine.Create;
+  con := TGuiConsole.Create();
+  eng := TPhosphorEngine.Create();
   try
     eng.OnOutput := @con.Output;
     RegisterGuiCoreFuncs(eng.Registry);

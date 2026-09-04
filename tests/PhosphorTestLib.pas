@@ -94,7 +94,7 @@ end;
 
 procedure Check(Ok: Boolean; const Msg, Generated: String);
 begin
-  if Ok then RecordPass
+  if Ok then RecordPass()
   else if Msg <> '' then RecordFail(Msg + ' -- ' + Generated)
   else RecordFail(Generated);
 end;
@@ -102,7 +102,7 @@ end;
 // --- bound functions --------------------------------------------------------
 function t_test_case(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   CurrentCase := Args[0].Str;
   Result := ValInt(1);
 end;
@@ -110,7 +110,7 @@ end;
 function t_assert_true(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := AsDouble(Args[0]) <> 0;
   Check(ok, '', 'expected true, got false');
   Result := ValInt(Ord(ok));
@@ -119,7 +119,7 @@ end;
 function t_assert_true_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := AsDouble(Args[0]) <> 0;
   Check(ok, Args[1].Str, 'expected true, got false');
   Result := ValInt(Ord(ok));
@@ -127,7 +127,7 @@ end;
 
 function t_assert_true_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Check(Args[0].Bl, '', 'expected true, got false');
   Result := ValInt(Ord(Args[0].Bl));
 end;
@@ -135,7 +135,7 @@ end;
 function t_assert_false(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := AsDouble(Args[0]) = 0;
   Check(ok, '', 'expected false, got true');
   Result := ValInt(Ord(ok));
@@ -144,7 +144,7 @@ end;
 function t_assert_false_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := AsDouble(Args[0]) = 0;
   Check(ok, Args[1].Str, 'expected false, got true');
   Result := ValInt(Ord(ok));
@@ -152,7 +152,7 @@ end;
 
 function t_assert_false_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Check(not Args[0].Bl, '', 'expected false, got true');
   Result := ValInt(Ord(not Args[0].Bl));
 end;
@@ -160,7 +160,7 @@ end;
 function t_assert_eq_num(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := NumEquals(AsDouble(Args[0]), AsDouble(Args[1]));
   Check(ok, '', 'expected ' + NumStr(AsDouble(Args[1])) + ', got ' + NumStr(AsDouble(Args[0])));
   Result := ValInt(Ord(ok));
@@ -169,7 +169,7 @@ end;
 function t_assert_eq_num_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := NumEquals(AsDouble(Args[0]), AsDouble(Args[1]));
   Check(ok, Args[2].Str, 'expected ' + NumStr(AsDouble(Args[1])) + ', got ' + NumStr(AsDouble(Args[0])));
   Result := ValInt(Ord(ok));
@@ -178,7 +178,7 @@ end;
 function t_assert_eq_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := Args[0].Str = Args[1].Str;
   Check(ok, '', 'expected "' + Args[1].Str + '", got "' + Args[0].Str + '"');
   Result := ValInt(Ord(ok));
@@ -187,7 +187,7 @@ end;
 function t_assert_eq_str_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := Args[0].Str = Args[1].Str;
   Check(ok, Args[2].Str, 'expected "' + Args[1].Str + '", got "' + Args[0].Str + '"');
   Result := ValInt(Ord(ok));
@@ -196,7 +196,7 @@ end;
 function t_assert_near(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := Abs(AsDouble(Args[0]) - AsDouble(Args[1])) <= Abs(AsDouble(Args[2]));
   Check(ok, '', 'expected ' + NumStr(AsDouble(Args[1])) + ' +/- ' + NumStr(AsDouble(Args[2])) +
                ', got ' + NumStr(AsDouble(Args[0])));
@@ -206,7 +206,7 @@ end;
 function t_assert_near_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := Abs(AsDouble(Args[0]) - AsDouble(Args[1])) <= Abs(AsDouble(Args[2]));
   Check(ok, Args[3].Str, 'expected ' + NumStr(AsDouble(Args[1])) + ' +/- ' + NumStr(AsDouble(Args[2])) +
                          ', got ' + NumStr(AsDouble(Args[0])));
@@ -217,7 +217,7 @@ end;
 function t_assert_int(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := Args[0].Int = Args[1].Int;
   Check(ok, '', 'expected int ' + IntToStr(Args[1].Int) + ', got ' + IntToStr(Args[0].Int));
   Result := ValInt(Ord(ok));
@@ -228,7 +228,7 @@ end;
 function t_assert_add_overflows(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: Int64; ok: Boolean;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := not TryAddI64(Args[0].Int, Args[1].Int, r);
   Check(ok, '', 'expected overflow for ' + IntToStr(Args[0].Int) + ' + ' + IntToStr(Args[1].Int));
   Result := ValInt(Ord(ok));
@@ -240,22 +240,22 @@ end;
 
 function t_probe_new_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  Result := ValHandle(RegisterHandle(TProbeA.Create));
+  Err := NoError();
+  Result := ValHandle(RegisterHandle(TProbeA.Create()));
   Inc(ProbeLiveCount);
 end;
 
 function t_probe_new_b(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
-  Result := ValHandle(RegisterHandle(TProbeB.Create));
+  Err := NoError();
+  Result := ValHandle(RegisterHandle(TProbeB.Create()));
   Inc(ProbeLiveCount);
 end;
 
 // Live registry id of ANY kind -> a handle; a fabricated/stale/nil id is not.
 function t_probe_is_handle(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord((Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd)));
 end;
 
@@ -263,14 +263,14 @@ end;
 // check that stops a wrong-class handle from writing through the wrong vtable.
 function t_probe_is_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord((Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd)
                        and (HandleObj(Args[0].Hnd) is TProbeA)));
 end;
 
 function t_probe_is_b(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord((Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd)
                        and (HandleObj(Args[0].Hnd) is TProbeB)));
 end;
@@ -280,7 +280,7 @@ end;
 function t_probe_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean; obj: TObject;
 begin
-  Err := NoError;
+  Err := NoError();
   ok := False;
   if (Args[0].Kind = vkHandle) and IsHandle(Args[0].Hnd) then
   begin
@@ -297,7 +297,7 @@ end;
 
 function t_probe_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(ProbeLiveCount);
 end;
 
@@ -338,11 +338,11 @@ begin
   AssertsFailed := 0;
   CurrentCase := '';
   ProbeLiveCount := 0;
-  if Assigned(Failures) then Failures.Clear;
+  if Assigned(Failures) then Failures.Clear();
 end;
 
 initialization
-  Failures := TStringList.Create;
+  Failures := TStringList.Create();
   InvFS := DefaultFormatSettings;
   InvFS.DecimalSeparator := '.';
   InvFS.ThousandSeparator := #0;

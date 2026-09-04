@@ -39,16 +39,16 @@ var
   B64Err: Integer = 0;   // 0 = the last base64 op was clean; 1 = it failed
 
 function f_b64_encode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(EncodeStringBase64(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(EncodeStringBase64(Args[0].Str)); end;
 
 function f_b64_decode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValStr(DecodeStringBase64(Args[0].Str)); end;
+begin Err := NoError(); Result := ValStr(DecodeStringBase64(Args[0].Str)); end;
 
 // --- URL-safe base64 (RFC 4648 section 5: '-'/'_', padding stripped) --------
 function f_b64_urlencode(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   s := EncodeStringBase64(Args[0].Str);
   for i := 1 to Length(s) do
     case s[i] of
@@ -63,7 +63,7 @@ end;
 function f_b64_urldecode(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String; i: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   s := Args[0].Str;
   for i := 1 to Length(s) do
     case s[i] of
@@ -114,7 +114,7 @@ end;
 function f_b64_encodefile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var raw: RawByteString;
 begin
-  Err := NoError;
+  Err := NoError();
   if LoadFileStr(Args[0].Str, raw) then
   begin Result := ValStr(EncodeStringBase64(raw)); B64Err := 0; end
   else begin Result := ValStr(''); B64Err := 1; end;
@@ -122,7 +122,7 @@ end;
 
 function f_b64_decodefile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     if SaveFileStr(Args[1].Str, DecodeStringBase64(Args[0].Str)) then
     begin Result := ValInt(1); B64Err := 0; end
@@ -165,13 +165,13 @@ end;
 
 function f_b64_valid(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Ord(IsValidBase64(Args[0].Str)));
 end;
 
 function f_b64_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(B64Err);
 end;
 
@@ -192,7 +192,7 @@ const
   HEXD: array[0..15] of Char = ('0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f');
 var s: String; r: RawByteString; i, b: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   s := Args[0].Str;
   // Preallocate and write by index, like hex_decode$. The old `r := r + ...` in a
   // loop reallocated on every byte, making this quadratic: 4 MB cost 0.4 s but
@@ -210,7 +210,7 @@ end;
 function f_hex_decode(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String; r: RawByteString; i, hi, lo, n: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   s := Args[0].Str;
   // Build the bytes into a RawByteString by INDEXED assignment, exactly as the gzip
   // header does. Concatenating `r := r + Chr(b)` under {$codepage UTF8} re-encodes a

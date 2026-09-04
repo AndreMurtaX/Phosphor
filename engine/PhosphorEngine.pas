@@ -125,11 +125,11 @@ implementation
 
 constructor TPhosphorEngine.Create;
 begin
-  inherited Create;
+  inherited Create();
   // Fire loudly if an opcode was renumbered -- a silent bytecode-format break.
-  if not VerifyOpcodeNumbering then
+  if not VerifyOpcodeNumbering() then
     raise EPhosphorInternal.Create('opcode numbering is corrupt (see PhosphorOpcodes)');
-  FRegistry := TPhosphorRegistry.Create;
+  FRegistry := TPhosphorRegistry.Create();
   RegisterArrayFuncs(FRegistry);   // built-in library packages (engine/libs)
   RegisterDictFuncs(FRegistry);
   RegisterStrListFuncs(FRegistry);
@@ -152,7 +152,7 @@ begin
   FHostServices := Default(THostServices);
   FErrorLine := 0;
   FErrorMessage := '';
-  FLastError := NoError;
+  FLastError := NoError();
   FMaxSteps := 0;
   FMaxOutputBytes := 0;
   FTimeoutMs := 0;
@@ -166,10 +166,10 @@ end;
 
 destructor TPhosphorEngine.Destroy;
 begin
-  Finish;
-  ReplReset;
+  Finish();
+  ReplReset();
   FRegistry.Free;
-  inherited Destroy;
+  inherited Destroy();
 end;
 
 { Compile ASource; on failure fill the engine error state and return False. }
@@ -177,7 +177,7 @@ function TPhosphorEngine.CompileSource(const ASource: String; out AProg: TProgra
 var
   comp: TPhosphorCompiler;
 begin
-  comp := TPhosphorCompiler.Create;
+  comp := TPhosphorCompiler.Create();
   try
     Result := comp.Compile(ASource, AProg);
     if not Result then
@@ -211,13 +211,13 @@ var
 begin
   FErrorLine := 0;
   FErrorMessage := '';
-  FLastError := NoError;
-  Finish;         // a one-shot run discards any prepared state
-  ResetHandles;   // no handles leak between programs
+  FLastError := NoError();
+  Finish();         // a one-shot run discards any prepared state
+  ResetHandles();   // no handles leak between programs
 
   if not CompileSource(ASource, prog) then Exit(FErrorLine);
 
-  vm := TPhosphorVM.Create;
+  vm := TPhosphorVM.Create();
   try
     ConfigureVM(vm);
     if not vm.Run(prog) then
@@ -243,9 +243,9 @@ var
 begin
   FErrorLine := 0;
   FErrorMessage := '';
-  FLastError := NoError;
-  Finish;
-  ResetHandles;
+  FLastError := NoError();
+  Finish();
+  ResetHandles();
 
   if not ReadProgram(AStream, prog, err) then
   begin
@@ -255,7 +255,7 @@ begin
     Exit(1);
   end;
 
-  vm := TPhosphorVM.Create;
+  vm := TPhosphorVM.Create();
   try
     ConfigureVM(vm);
     if not vm.Run(prog) then
@@ -277,13 +277,13 @@ function TPhosphorEngine.Prepare(const ASource: String): Integer;
 begin
   FErrorLine := 0;
   FErrorMessage := '';
-  FLastError := NoError;
-  Finish;         // discard a previous preparation
-  ResetHandles;
+  FLastError := NoError();
+  Finish();         // discard a previous preparation
+  ResetHandles();
 
   if not CompileSource(ASource, FProg) then Exit(FErrorLine);
 
-  FVM := TPhosphorVM.Create;
+  FVM := TPhosphorVM.Create();
   ConfigureVM(FVM);
   if not FVM.Run(FProg) then   // run the top level once; the VM stays alive after
   begin
@@ -291,7 +291,7 @@ begin
     FErrorMessage := FVM.LastError.Message;
     FErrorLine := FVM.ErrorLine;
     if FErrorLine = 0 then FErrorLine := 1;
-    Finish;
+    Finish();
     Exit(FErrorLine);
   end;
   Result := 0;
@@ -300,7 +300,7 @@ end;
 function TPhosphorEngine.CallFunction(const AName: String; const Args: array of TValue): TValue;
 begin
   FErrorMessage := '';
-  FLastError := NoError;
+  FLastError := NoError();
   FErrorLine := 0;
   if FVM = nil then
   begin
@@ -322,7 +322,7 @@ begin
   begin
     FVM.Free;
     FVM := nil;
-    ResetHandles;   // the prepared program's handles go with it
+    ResetHandles();   // the prepared program's handles go with it
   end;
   if FProg <> nil then
   begin
@@ -337,7 +337,7 @@ begin
   begin
     FReplVM.Free;
     FReplVM := nil;
-    ResetHandles;
+    ResetHandles();
   end;
   if FReplProg <> nil then
   begin
@@ -356,16 +356,16 @@ var
 begin
   FErrorLine := 0;
   FErrorMessage := '';
-  FLastError := NoError;
+  FLastError := NoError();
   cand := FReplSource + ALine + #10;
   // A line that does not compile never joins the session.
   if not CompileSource(cand, prog) then Exit(FErrorLine);
 
   if FReplVM = nil then
   begin
-    Finish;         // a session and a prepared script do not share a VM
-    ResetHandles;
-    FReplVM := TPhosphorVM.Create;
+    Finish();         // a session and a prepared script do not share a VM
+    ResetHandles();
+    FReplVM := TPhosphorVM.Create();
     ConfigureVM(FReplVM);
   end;
 

@@ -82,7 +82,7 @@ function RawDeflate(const Src: RawByteString; ALevel: Integer): RawByteString;
 var mem: TMemoryStream; cs: Tcompressionstream;
 begin
   Result := '';
-  mem := TMemoryStream.Create;
+  mem := TMemoryStream.Create();
   try
     cs := Tcompressionstream.Create(LevelOf(ALevel), mem, True);
     try
@@ -105,8 +105,8 @@ function RawInflate(const Src: RawByteString): RawByteString;
 var inp, outs: TMemoryStream; ds: Tdecompressionstream; buf: array[0..65535] of Byte; n: LongInt;
 begin
   Result := '';
-  inp := TMemoryStream.Create;
-  outs := TMemoryStream.Create;
+  inp := TMemoryStream.Create();
+  outs := TMemoryStream.Create();
   try
     if Length(Src) > 0 then inp.WriteBuffer(Src[1], Length(Src));
     inp.Position := 0;
@@ -231,7 +231,7 @@ end;
 // --- bound functions --------------------------------------------------------
 function f_gzip_compress(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     Result := ValStr(GzipWrap(Args[0].Str, 6));
     GzipErr := 0;
@@ -243,7 +243,7 @@ end;
 
 function f_gzip_compress_lvl(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     Result := ValStr(GzipWrap(Args[0].Str, Round(AsDouble(Args[1]))));
     GzipErr := 0;
@@ -256,7 +256,7 @@ end;
 function f_gzip_decompress(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var body, plain: RawByteString;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     if GzipUnwrap(Args[0].Str, body) then
     begin
@@ -285,7 +285,7 @@ end;
 
 function f_gzip_compressfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     if DoCompressFile(Args[0].Str, Args[1].Str, 6) then
     begin Result := ValInt(1); GzipErr := 0; end
@@ -297,7 +297,7 @@ end;
 
 function f_gzip_compressfile_lvl(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     if DoCompressFile(Args[0].Str, Args[1].Str, Round(AsDouble(Args[2]))) then
     begin Result := ValInt(1); GzipErr := 0; end
@@ -310,7 +310,7 @@ end;
 function f_gzip_decompressfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var raw, body: RawByteString;
 begin
-  Err := NoError;
+  Err := NoError();
   try
     if LoadFileStr(Args[0].Str, raw) and GzipUnwrap(raw, body) and
        SaveFileStr(Args[1].Str, RawInflate(body)) then
@@ -323,20 +323,20 @@ end;
 
 function f_gzip_size(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Length(Args[0].Str));
 end;
 
 function f_gzip_csize(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(Length(Args[0].Str));
 end;
 
 function f_gzip_ratio(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var orig: Integer;
 begin
-  Err := NoError;
+  Err := NoError();
   orig := Length(Args[0].Str);
   if orig = 0 then Result := ValDouble(0)
   else Result := ValDouble(Length(Args[1].Str) / orig);
@@ -344,7 +344,7 @@ end;
 
 function f_gzip_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(GzipErr);
 end;
 
@@ -363,6 +363,6 @@ begin
 end;
 
 initialization
-  BuildCrc32Table;
+  BuildCrc32Table();
 
 end.

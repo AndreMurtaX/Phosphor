@@ -92,7 +92,7 @@ const
 
 constructor TPhosphorStringList.Create;
 begin
-  inherited Create;
+  inherited Create();
   Delimiter := ',';
   QuoteChar := '"';
   StrictDelimiter := False;
@@ -198,7 +198,7 @@ var
   start, i, len: Integer;
   line: String;
 begin
-  Clear;
+  Clear();
   if S = '' then Exit;   // empty text is an empty list, not one empty line
   len := Length(S);
   start := 1;
@@ -234,7 +234,7 @@ end;
 procedure TPhosphorStringList.SetCommaText(const S: String);
 var start, i, len: Integer;
 begin
-  Clear;
+  Clear();
   if S = '' then Exit;   // empty text is an empty list (matches delimited/Delphi)
   len := Length(S);
   start := 1;
@@ -295,7 +295,7 @@ end;
 procedure TPhosphorStringList.SetDelimitedText(const S: String);
 var i, n, fk: Integer; field: String; fb: RawByteString;
 begin
-  Clear;
+  Clear();
   n := Length(S);
   i := 1;
   if n = 0 then Exit;
@@ -445,7 +445,7 @@ begin
     Exit(False);
   end;
   L := TPhosphorStringList(HandleObj(V.Hnd));
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -458,7 +458,7 @@ begin
     Exit(False);
   end;
   B := TPhosphorBytes(HandleObj(V.Hnd));
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -474,7 +474,7 @@ begin
       [AOneBased, hi]));
     Exit(False);
   end;
-  Err := NoError;
+  Err := NoError();
   Result := True;
 end;
 
@@ -486,7 +486,7 @@ end;
 { Bytes a save would write: an optional UTF-8 BOM before the rendered text. }
 function RenderForSave(L: TPhosphorStringList): String;
 begin
-  Result := L.TextStr;
+  Result := L.TextStr();
   if L.WriteBOM then Result := Utf8Bom + Result;
 end;
 
@@ -533,7 +533,7 @@ end;
 
 // --- construction / basic list ops ------------------------------------------
 function t_strings_new(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError; Result := ValHandle(RegisterHandle(TPhosphorStringList.Create)); end;
+begin Err := NoError(); Result := ValHandle(RegisterHandle(TPhosphorStringList.Create())); end;
 
 function t_strings_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList;
@@ -634,7 +634,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.Sort;
+  l.Sort();
   Result := ValInt(1);
 end;
 
@@ -643,7 +643,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.Clear;
+  l.Clear();
   Result := ValInt(1);
 end;
 
@@ -673,7 +673,7 @@ begin
   // But it frees only what it owns -- a string list, or the byte buffer it can load
   // from and save to. It used to free ANY handle, so a mistyped strings_free(a@)
   // silently destroyed an array, dict or index (arr_free type-checks; this did not).
-  Err := NoError;
+  Err := NoError();
   Result := ValInt(0);
   if (Args[0].Kind <> vkHandle) or (not IsHandle(Args[0].Hnd)) then Exit;
   o := HandleObj(Args[0].Hnd);
@@ -687,7 +687,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValInt(l.CapacityGet);
+  Result := ValInt(l.CapacityGet());
 end;
 
 function t_strings_capacity_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -696,7 +696,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   l.CapacitySet(Round(AsDouble(Args[1])));
-  Result := ValInt(l.CapacityGet);
+  Result := ValInt(l.CapacityGet());
 end;
 
 // --- text (get/set) ---------------------------------------------------------
@@ -714,7 +714,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.TextStr);
+  Result := ValStr(l.TextStr());
 end;
 
 // --- comma text (get/set) ---------------------------------------------------
@@ -732,7 +732,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.CommaTextStr);
+  Result := ValStr(l.CommaTextStr());
 end;
 
 // --- delimited text and its characters --------------------------------------
@@ -750,7 +750,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.GetDelimitedText);
+  Result := ValStr(l.GetDelimitedText());
 end;
 
 function t_strings_delimiter_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -936,7 +936,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   l.Sorted := AsDouble(Args[1]) <> 0;
-  if l.Sorted then l.Sort;   // enabling it orders whatever is already there
+  if l.Sorted then l.Sort();   // enabling it orders whatever is already there
   Result := ValInt(1);
 end;
 

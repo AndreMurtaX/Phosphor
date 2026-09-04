@@ -112,6 +112,12 @@ begin
   FVM.CallUserFunc(FHandler, [ValHandle(FSenderId)], err);
   if IsError(err) then
     GGuiError := 2;   // a handler that failed is recorded, not raised
+  // A handler that says END means the program is over. The engine now records that
+  // instead of quietly ending only the handler's own activation, so the window it
+  // was clicked in has to go too -- otherwise `end` in a click handler is a
+  // statement that does nothing, which is a worse answer than the bug it replaced.
+  if FVM.Halted then
+    Application.Terminate;
 end;
 
 function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;

@@ -52,3 +52,4 @@
 51_arith_faults
 52_codepage
 53_bounds
+54_onerror_reentrancy

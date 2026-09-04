@@ -24,6 +24,11 @@ const
   MaxChannel = 255;
   { Bytes pulled from disk per window refill on a streamed read. }
   ChanChunk = 65536;
+  { How deeply a callback may re-enter the interpreter. CallUserFunc (callfunc, a
+    GUI event, an `on error call` handler) re-enters ExecFrom with a NATIVE call, so
+    each level costs process stack rather than heap. Ordinary BASIC recursion is a
+    jump inside one interpreter loop and is NOT bounded by this. }
+  MaxCallDepth = 256;
 
 type
   { One activation of a user function: its local frame (parameters first, then
@@ -78,8 +83,25 @@ type
     FErrCode: Integer;              // last caught error: code / message / line
     FErrMsg: String;
     FErrLine: Integer;
-    FStmtPC, FStmtSP, FStmtFrameSP: Integer;          // current statement boundary
     FErrStmtPC, FErrStmtSP, FErrStmtFrameSP: Integer; // the failing statement, for resume
+    // THE OVERLAP. A handler runs at the level it was INSTALLED at, but `resume`
+    // returns to the level the failing STATEMENT ran at, and the second is deeper
+    // whenever the fault happened inside a call made mid-expression. Everything
+    // between the two -- the caller's half-evaluated operands, and every activation
+    // frame down to the faulting one -- is still needed by the pending resume and
+    // was sitting in exactly the slots the handler then wrote into. It is copied
+    // aside on the fault and put back on the resume.
+    FErrSaveStack: array of TValue;
+    FErrSaveFrames: array of TCallFrame;
+    FErrSaveValid: Boolean;
+    // END must end the PROGRAM. Inside a re-entrant call (callfunc, a GUI event, an
+    // `on error call` handler) opHalt only left that activation, and its caller read
+    // the exit as an ordinary return.
+    FHalted: Boolean;
+    // Re-entrant depth. Ordinary recursion is a jump within one interpreter loop and
+    // costs heap; CallUserFunc re-enters ExecFrom with a NATIVE call, so recursion
+    // through callfunc costs process stack and used to end in a segfault.
+    FCallDepth: Integer;
     // Execution limits (set from the engine before Run; 0 = unlimited). Counters
     // are reset per Run. A limit is FATAL -- it aborts with peLimit and cannot be
     // caught by ON ERROR, so a script cannot escape its own ceiling.
@@ -173,6 +195,10 @@ type
                           out Err: TPhosphorError): TValue;
     { The last error caught by an ON ERROR handler -- what err()/errmsg$()/erl()
       read. Set on each fault; persists until the next fault. }
+    { True once the program has run END. A host that re-enters the VM (a GUI event
+      bridge, a callback) must check this after the call and stop: END means the
+      PROGRAM is over, not just the routine that said it. }
+    property Halted: Boolean read FHalted;
     property ErrCode: Integer read FErrCode;
     property ErrMessage: String read FErrMsg;
     property ErrLine: Integer read FErrLine;
@@ -905,8 +931,10 @@ begin
   FErrHandlerMode := 0;
   FErrHandlerFuncIdx := 0;
   FInHandler := False;
+  FErrSaveValid := False;
+  FHalted := False;
+  FCallDepth := 0;
   FErrCode := 0; FErrMsg := ''; FErrLine := 0;
-  FStmtPC := 0; FStmtSP := 0; FStmtFrameSP := 0;
   FErrStmtPC := 0; FErrStmtSP := 0; FErrStmtFrameSP := 0;
   FSteps := 0;
   FOutputBytes := 0;
@@ -971,27 +999,92 @@ var
   kinds: array of TValueKind;
   res: TResolvedFunc;
   lt: TVarType;
+  // This activation's clean statement boundary -- a LOCAL, not a field: a
+  // re-entrant call runs its own statements and must not move the resume point of
+  // the activation that is waiting for it.
+  stmtPC, stmtSP, stmtFrameSP: Integer;
   bpOps: array of TValue;   // a BREAKPOINT's popped operand values
   usingVals: array of TValue;   // a PRINT USING statement's popped values
   sTmp: String;             // scratch for the classic-I/O handlers
   bTmp: Boolean;
   nTmp: Int64;
 
+  { Put back what the handler ran on top of, and stand at the failing statement's
+    level again. Without this the resume re-exposed slots the handler had since
+    written into: an enclosing `1000 + risky(0)` came back as 7 + 5 because the
+    handler's own `zz = 7` had landed in the slot holding the 1000, and a handler
+    that called a function overwrote the faulting frame, so returning from the
+    resumed body jumped back into the handler. }
+  procedure RestoreOverlap;
+  var i, j: Integer;
+  begin
+    if FErrSaveValid then
+    begin
+      for i := 0 to High(FErrSaveStack) do
+        FStack[FErrHandlerSP + i] := FErrSaveStack[i];
+      for i := 0 to High(FErrSaveFrames) do
+      begin
+        FFrames[FErrHandlerFrameSP + i].FuncIndex := FErrSaveFrames[i].FuncIndex;
+        FFrames[FErrHandlerFrameSP + i].ReturnAddr := FErrSaveFrames[i].ReturnAddr;
+        SetLength(FFrames[FErrHandlerFrameSP + i].Locals, Length(FErrSaveFrames[i].Locals));
+        for j := 0 to High(FErrSaveFrames[i].Locals) do
+          FFrames[FErrHandlerFrameSP + i].Locals[j] := FErrSaveFrames[i].Locals[j];
+      end;
+      FErrSaveValid := False;
+    end;
+    FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;
+  end;
+
   { A runtime error. Returns True if an ON ERROR handler took it (pc now points at
     the handler; the caller should Continue), False to abort (LastError set; the
     caller should Exit(False)). The handler runs at the stack/frame level it was
-    installed at; the failing statement is remembered for resume. }
+    installed at; the failing statement is remembered for resume.
+
+    TWO RULES THIS ACTIVATION MUST RESPECT.
+
+    (1) It may only run a handler that BELONGS to it. AStopFrameSP is this
+        activation's floor, so a handler installed at or below that floor was
+        installed by an OUTER ExecFrom that is still live on the Pascal stack.
+        Running it here used to execute the rest of the program inside the nested
+        loop -- which then fell off the end, returned "success" to CallUserFunc, and
+        let the caller run everything a second time. The fault is returned instead,
+        and the outer activation handles it where its own state is intact.
+
+    (2) It must not destroy what the resume needs. See FErrSaveStack. }
   function Fault(const AErr: TPhosphorError): Boolean;
   var
     callErr: TPhosphorError;
     callRet: TValue;
+    i, j, n: Integer;
   begin
     FErrCode := Ord(AErr.Code);
     FErrMsg := AErr.Message;
     FErrLine := ins.Line;
-    if (FErrHandler >= 0) and (not FInHandler) then
+    if (FErrHandler >= 0) and (not FInHandler) and
+       (FErrHandlerFrameSP > AStopFrameSP) then
     begin
-      FErrStmtPC := FStmtPC; FErrStmtSP := FStmtSP; FErrStmtFrameSP := FStmtFrameSP;
+      FErrStmtPC := stmtPC; FErrStmtSP := stmtSP; FErrStmtFrameSP := stmtFrameSP;
+      // Copy the overlap aside BEFORE unwinding onto it.
+      n := FErrStmtSP - FErrHandlerSP;
+      if n < 0 then n := 0;
+      SetLength(FErrSaveStack, n);
+      for i := 0 to n - 1 do
+        FErrSaveStack[i] := FStack[FErrHandlerSP + i];
+      n := FErrStmtFrameSP - FErrHandlerFrameSP;
+      if n < 0 then n := 0;
+      SetLength(FErrSaveFrames, n);
+      for i := 0 to n - 1 do
+      begin
+        FErrSaveFrames[i].FuncIndex := FFrames[FErrHandlerFrameSP + i].FuncIndex;
+        FErrSaveFrames[i].ReturnAddr := FFrames[FErrHandlerFrameSP + i].ReturnAddr;
+        // The locals are copied ELEMENT BY ELEMENT: assigning the dynamic array
+        // would only share a reference, and an element write through the other
+        // name would then reach right into the copy.
+        SetLength(FErrSaveFrames[i].Locals, Length(FFrames[FErrHandlerFrameSP + i].Locals));
+        for j := 0 to High(FFrames[FErrHandlerFrameSP + i].Locals) do
+          FErrSaveFrames[i].Locals[j] := FFrames[FErrHandlerFrameSP + i].Locals[j];
+      end;
+      FErrSaveValid := True;
       FSP := FErrHandlerSP; FFrameSP := FErrHandlerFrameSP;
       if FErrHandlerMode = 1 then
       begin
@@ -1005,11 +1098,12 @@ var
         begin
           LastError := callErr; ErrorLine := FErrLine; Exit(False);
         end;
+        if FHalted then Exit(True);          // the handler said END: end the program
         if (callRet.Kind in [vkInt, vkDouble]) and (AsDouble(callRet) <> 0) then
         begin
           LastError := AErr; ErrorLine := FErrLine; Exit(False);   // handler said: abort
         end;
-        FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;             // resume next
+        RestoreOverlap();                                           // resume next
         pc := FErrStmtPC + 1;
         while (pc < FProg.Count) and (FProg.Instr(pc).Op <> opStmt) do Inc(pc);
         Result := True;
@@ -1069,6 +1163,7 @@ begin
   bTmp := False;
   nTmp := 0;
   pc := AStartPC;
+  stmtPC := AStartPC; stmtSP := FSP; stmtFrameSP := FFrameSP;
   while pc < FProg.Count do
   begin
     ins := FProg.Instr(pc);
@@ -1200,7 +1295,7 @@ begin
       opStmt:
         begin
           // Mark this clean statement boundary; a fault resumes from here.
-          FStmtPC := pc; FStmtSP := FSP; FStmtFrameSP := FFrameSP;
+          stmtPC := pc; stmtSP := FSP; stmtFrameSP := FFrameSP;
         end;
       opSetErrHandler:
         begin
@@ -1224,7 +1319,7 @@ begin
             Exit(False);
           end;
           FInHandler := False;
-          FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;
+          RestoreOverlap();
           if ins.A = 1 then
           begin
             // resume next: continue at the statement after the one that failed
@@ -1235,7 +1330,15 @@ begin
             pc := FErrStmtPC;   // resume: retry the failing statement
           Continue;
         end;
-      opHalt: Exit(True);
+      opHalt:
+        begin
+          // Flagged, not just returned. A re-entrant activation's Exit(True) reads
+          // to CallUserFunc as "the routine returned a value", so a BASIC click
+          // handler that says `end` used to pop the CALLER's pending operand as its
+          // return value and leak the frame it had pushed.
+          FHalted := True;
+          Exit(True);
+        end;
       opGosub:
         begin
           if FCSP = Length(FCallStack) then
@@ -1340,6 +1443,7 @@ begin
           // results too: exp(1000) overflows to +Inf inside the RTL, and pushing
           // that would put a value into the program that no later operator could
           // handle. It reports here instead, at the call that produced it.
+          if FHalted then Exit(True);   // a callback ran END
           if (r.Kind = vkDouble) and (IsNan(r.Num) or IsInfinite(r.Num)) then
           begin
             if Fault(MakeError(peIntOverflow, FProg.Consts.Get(ins.A).Str +
@@ -1487,6 +1591,18 @@ begin
   // body re-entrantly until it returns to this frame level. The stack, globals
   // and handle registry are shared with the running program on purpose: a callback
   // sees and mutates the same state, exactly like an in-line GOSUB would.
+  // Bounded. Each re-entry is a NATIVE Pascal call, so recursion through callfunc
+  // spends process stack: 20000 levels used to raise EStackOverflow deep inside the
+  // interpreter, leave FFrameSP thousands deep because no unwinding ran, and then
+  // segfault while the ON ERROR handler tried to resume into abandoned frames. An
+  // ordinary recursive BASIC function is unaffected -- opCall is a jump inside one
+  // interpreter loop and costs only heap.
+  if FCallDepth >= MaxCallDepth then
+  begin
+    Err := MakeError(peRuntime, 'call nesting too deep: ' + AName +
+      ' is more than ' + IntToStr(MaxCallDepth) + ' re-entrant calls in');
+    Exit;
+  end;
   saved := FFrameSP;
   if FFrameSP = Length(FFrames) then
     SetLength(FFrames, (FFrameSP + 1) * 2);
@@ -1498,12 +1614,27 @@ begin
   FFrames[FFrameSP].FuncIndex := ufi;
   FFrames[FFrameSP].ReturnAddr := -1;   // unused: ExecFrom stops by frame level
   Inc(FFrameSP);
-  if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
-    Result := Pop()        // the routine's return value
-  else
-  begin
-    Err := LastError;
-    FFrameSP := saved;   // unwind on failure
+  Inc(FCallDepth);
+  try
+    if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
+    begin
+      // A HALT is not a return. opRetFunc never ran, so there is no return value on
+      // the stack, and popping one takes whatever the caller had pushed and still
+      // needs.
+      if FHalted then
+        Result := Default(TValue)
+      else
+        Result := Pop();   // the routine's return value
+    end
+    else
+      Err := LastError;
+  finally
+    // On EVERY exit -- returned, faulted, or unwound by an exception raised deeper
+    // in -- the frame level goes back to where it was. Only the failure branch used
+    // to do this, so anything that escaped as a Pascal exception left the frame
+    // stack permanently deeper than the program believed.
+    Dec(FCallDepth);
+    FFrameSP := saved;
   end;
 end;
 

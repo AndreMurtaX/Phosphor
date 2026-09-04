@@ -98,7 +98,13 @@ begin
   StrictDelimiter := False;
   CaseSensitive := False;
   Duplicates := 'ignore';
-  LineBreak := sLineBreak;
+  // LF, not sLineBreak. Taking the platform's ending made strings_text$ and
+  // strings_savetofile produce different BYTES on Windows and Linux for the same
+  // list -- 10 characters against 8 for two short items. The engine already emits
+  // LF for PRINTLN and every golden in the tree is stored with LF; a list had no
+  // business disagreeing with both. A program that wants CRLF asks for it with
+  // strings_linebreak.
+  LineBreak := #10;
   TrailingLineBreak := True;
   WriteBOM := False;
   DefaultEncoding := 'utf-8';    // Phosphor speaks raw UTF-8 -- the honest default

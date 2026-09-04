@@ -1,0 +1,14 @@
+mmm    Jun
+mmmm   June
+ddd    Sat
+dddd   Saturday
+iso    2024-06-15
+text   8
+break  1
+crlf   10
+  B.txt
+  a-b.txt
+  ab.txt
+  e.txt
+ioerr  file not found
+bytes  true

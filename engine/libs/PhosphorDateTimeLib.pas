@@ -337,5 +337,31 @@ initialization
   ISOFS.LongDateFormat := 'yyyy-mm-dd';
   ISOFS.ShortTimeFormat := 'hh:nn:ss';
   ISOFS.LongTimeFormat := 'hh:nn:ss';
+  // The separators and patterns were pinned; the NAME ARRAYS were not, so they
+  // still came from DefaultFormatSettings -- the machine's locale. formatdatetime$
+  // with mmm/mmmm/ddd/dddd answered "junho" here, "June" on an en-US box and "Jun"
+  // under a C locale, for the same date. Pinned to English, which is what the ISO
+  // formats around them already assume.
+  ISOFS.ShortMonthNames[1] := 'Jan';  ISOFS.LongMonthNames[1] := 'January';
+  ISOFS.ShortMonthNames[2] := 'Feb';  ISOFS.LongMonthNames[2] := 'February';
+  ISOFS.ShortMonthNames[3] := 'Mar';  ISOFS.LongMonthNames[3] := 'March';
+  ISOFS.ShortMonthNames[4] := 'Apr';  ISOFS.LongMonthNames[4] := 'April';
+  ISOFS.ShortMonthNames[5] := 'May';  ISOFS.LongMonthNames[5] := 'May';
+  ISOFS.ShortMonthNames[6] := 'Jun';  ISOFS.LongMonthNames[6] := 'June';
+  ISOFS.ShortMonthNames[7] := 'Jul';  ISOFS.LongMonthNames[7] := 'July';
+  ISOFS.ShortMonthNames[8] := 'Aug';  ISOFS.LongMonthNames[8] := 'August';
+  ISOFS.ShortMonthNames[9] := 'Sep';  ISOFS.LongMonthNames[9] := 'September';
+  ISOFS.ShortMonthNames[10] := 'Oct'; ISOFS.LongMonthNames[10] := 'October';
+  ISOFS.ShortMonthNames[11] := 'Nov'; ISOFS.LongMonthNames[11] := 'November';
+  ISOFS.ShortMonthNames[12] := 'Dec'; ISOFS.LongMonthNames[12] := 'December';
+  ISOFS.ShortDayNames[1] := 'Sun'; ISOFS.LongDayNames[1] := 'Sunday';
+  ISOFS.ShortDayNames[2] := 'Mon'; ISOFS.LongDayNames[2] := 'Monday';
+  ISOFS.ShortDayNames[3] := 'Tue'; ISOFS.LongDayNames[3] := 'Tuesday';
+  ISOFS.ShortDayNames[4] := 'Wed'; ISOFS.LongDayNames[4] := 'Wednesday';
+  ISOFS.ShortDayNames[5] := 'Thu'; ISOFS.LongDayNames[5] := 'Thursday';
+  ISOFS.ShortDayNames[6] := 'Fri'; ISOFS.LongDayNames[6] := 'Friday';
+  ISOFS.ShortDayNames[7] := 'Sat'; ISOFS.LongDayNames[7] := 'Saturday';
+  ISOFS.DecimalSeparator := '.';
+  ISOFS.ThousandSeparator := #0;
 
 end.

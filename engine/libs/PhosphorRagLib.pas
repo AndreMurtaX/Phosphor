@@ -41,6 +41,11 @@ procedure RegisterRagFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
+var
+  { Invariant settings for anything this index RENDERS -- see the score above. }
+  RagFS: TFormatSettings;
+
+
 const
   RAG_DEFAULT_MAX_TOKENS = 6000;
   RAG_CHARS_PER_TOKEN    = 4;
@@ -857,7 +862,11 @@ begin
     doc := ARag.FDocs[AResults[i].DocIdx];
     if Result <> '' then Result := Result + #10 + #10;
     if AWithScore then
-      title := Format('### %s (score: %.1f)', [doc.Title, AResults[i].Score])
+      // RagFS, not the machine's settings: the score went through
+      // DefaultFormatSettings, so the same index answered "score: 3.0" on one
+      // machine and "score: 3,0" on another, and a caller parsing it back got a
+      // different number or none.
+      title := Format('### %s (score: %.1f)', [doc.Title, AResults[i].Score], RagFS)
     else
       title := '### ' + doc.Title;
     Result := Result + title + #10 + AResults[i].Content;
@@ -1021,5 +1030,8 @@ end;
 
 initialization
   GRagError := 0;
+  RagFS := DefaultFormatSettings;
+  RagFS.DecimalSeparator := '.';
+  RagFS.ThousandSeparator := #0;
 
 end.

@@ -186,6 +186,13 @@ var
   GDirTimes: TStringList;   // dir timestamps kept in-process (FileAge can't read a dir)
 
 // --- glob matcher (own, so case handling is identical on every platform) ----
+{ Byte-wise, case-sensitive comparison for a directory listing: the same order on
+  every platform. See the note at the call site. }
+function CompareEntryBytes(AList: TStringList; AIndex1, AIndex2: Integer): Integer;
+begin
+  Result := CompareStr(AList[AIndex1], AList[AIndex2]);
+end;
+
 function MatchGlob(const AName, APattern: String; ACaseSensitive: Boolean): Boolean;
 var n, p: String;
   function M(ni, pi: Integer): Boolean;
@@ -242,7 +249,13 @@ begin
   l := TStringList.Create();
   try
     CollectEntries(ADir, APattern, AFiles, ADirs, ARecursive, l);
-    l.Sort();
+    // Sorted by BYTES, not by the machine's collation. TStringList.Sort compares
+    // with AnsiCompareText, which orders "a-b.txt" and "ab.txt" one way under a
+    // Windows locale and the other way under a C locale -- so the same directory
+    // listed in a different order on each platform, and any golden over a listing
+    // was platform-dependent. A byte order is arbitrary but it is the SAME
+    // arbitrary order everywhere.
+    l.CustomSort(@CompareEntryBytes);
     for i := 0 to l.Count - 1 do
     begin
       if i > 0 then Result := Result + #10;
@@ -508,10 +521,45 @@ begin Err := NoError(); Result := ValInt(Ord(HasValidChars(Args[0].Str, True)));
 // --- io errors --------------------------------------------------------------
 function t_ioerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValInt(GIoError); end;
+{ The text for an I/O error code, the same on every machine.
+
+  SysErrorMessage hands back the OPERATING SYSTEM's message, in the machine's
+  language and its ANSI code page: on a pt-BR Windows this returned "O sistema nao
+  pode encontrar o arquivo especificado." with a bare 0xE3 byte in it -- not UTF-8,
+  so a program that printed it emitted invalid text, and a golden over it could not
+  hold on two machines. The codes below are the ones a BASIC program actually meets;
+  anything else is named by number rather than guessed at. }
+function IoErrorText(ACode: Integer): String;
+begin
+  case ACode of
+    0:   Result := 'No error';
+    1:   Result := 'invalid function';
+    2:   Result := 'file not found';
+    3:   Result := 'path not found';
+    4:   Result := 'too many open files';
+    5:   Result := 'access denied';
+    6:   Result := 'invalid file handle';
+    15:  Result := 'invalid drive';
+    16:  Result := 'cannot remove the current directory';
+    17:  Result := 'not on the same device';
+    18:  Result := 'no more files';
+    19:  Result := 'the medium is write-protected';
+    32:  Result := 'the file is in use by another process';
+    38:  Result := 'unexpected end of file';
+    39:  Result := 'the disk is full';
+    87:  Result := 'invalid parameter';
+    101: Result := 'the directory is not empty';
+    112: Result := 'not enough space on the disk';
+    183: Result := 'the file already exists';
+  else
+    Result := 'I/O error ' + IntToStr(ACode);
+  end;
+end;
+
 function t_iostrerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if GIoError = 0 then Result := ValStr('No error') else Result := ValStr(SysErrorMessage(GIoError));
+  Result := ValStr(IoErrorText(GIoError));
 end;
 
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);

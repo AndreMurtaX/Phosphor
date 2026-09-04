@@ -214,8 +214,14 @@ begin
 end;
 
 // --- whole-archive functions (unchanged) ------------------------------------
+{ Byte-wise, case-sensitive: the same order on every filesystem. }
+function CompareNameBytes(AList: TStringList; A, B: Integer): Integer;
+begin
+  Result := CompareStr(AList[A], AList[B]);
+end;
+
 function f_zip_compress(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var z: TZipper; sr: TSearchRec; base: String;
+var z: TZipper; sr: TSearchRec; base: String; names: TStringList; i: Integer;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -224,14 +230,26 @@ begin
     try
       z.FileName := Args[0].Str;
       base := IncludeTrailingPathDelimiter(Args[1].Str);
-      if FindFirst(base + '*', faAnyFile, sr) = 0 then
+      // Collected, SORTED, then added. Entries went in in raw directory-enumeration
+      // order, which NTFS and ext4 do not agree on, so the same folder produced
+      // archives whose entries were in a different order on each platform -- and
+      // unzip_entry$(z$, 1) answered a different file. A byte order is arbitrary,
+      // but it is the same arbitrary order everywhere.
+      names := TStringList.Create();
       try
-        repeat
-          if (sr.Attr and faDirectory) = 0 then
-            z.Entries.AddFileEntry(base + sr.Name, sr.Name);
-        until FindNext(sr) <> 0;
+        if FindFirst(base + '*', faAnyFile, sr) = 0 then
+        try
+          repeat
+            if (sr.Attr and faDirectory) = 0 then names.Add(sr.Name);
+          until FindNext(sr) <> 0;
+        finally
+          FindClose(sr);
+        end;
+        names.CustomSort(@CompareNameBytes);
+        for i := 0 to names.Count - 1 do
+          z.Entries.AddFileEntry(base + names[i], names[i]);
       finally
-        FindClose(sr);
+        names.Free;
       end;
       z.ZipAllFiles;
       Result := ValInt(1);

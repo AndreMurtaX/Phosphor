@@ -16,6 +16,9 @@ program phosphorgui;
 {$codepage UTF8}
 
 uses
+  // FIRST on purpose: units initialise in this order, and the guard must speak
+  // before the gtk2 widgetset opens the display in its own initialization.
+  PhosphorDisplayGuard,
   Interfaces,   // the LCL widgetset for this platform
   Forms,
   SysUtils, Classes,
@@ -62,11 +65,29 @@ begin
     Delete(Result, 1, 3);
 end;
 
+{ A file is bytecode if it starts with the .pbc magic. }
+function IsBytecode(const APath: String): Boolean;
+var fs: TFileStream; buf: array[0..2] of Char;
+begin
+  Result := False;
+  fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+  try
+    if fs.Size >= 3 then
+    begin
+      fs.ReadBuffer(buf[0], 3);
+      Result := (buf[0] = 'P') and (buf[1] = 'B') and (buf[2] = 'C');
+    end;
+  finally
+    fs.Free;
+  end;
+end;
+
 var
   eng: TPhosphorEngine;
   con: TGuiConsole;
   path: String;
   rc: Integer;
+  fs: TFileStream;
 begin
   if ParamCount < 1 then
   begin
@@ -110,7 +131,15 @@ begin
     RegisterGzipFuncs(eng.Registry);
     RegisterHttpFuncs(eng.Registry);
     RegisterSqliteFuncs(eng.Registry);
-    rc := eng.Run(ReadSource(path));
+    // Accept a compiled .pbc as well as source: the complete runner should run
+    // whatever `phosphor compile` produced, GUI programs included.
+    if IsBytecode(path) then
+    begin
+      fs := TFileStream.Create(path, fmOpenRead or fmShareDenyNone);
+      try rc := eng.RunBytecode(fs); finally fs.Free; end;
+    end
+    else
+      rc := eng.Run(ReadSource(path));
     if rc <> 0 then
     begin
       Writeln(StdErr, Format('phosphorgui: %s:%d: %s', [path, eng.ErrorLine, eng.ErrorMessage]));

@@ -478,6 +478,26 @@ end;
 function RunGui(const APath: String): Integer;
 var gui: String;
 begin
+  {$IFDEF UNIX}
+  // Check for a session BEFORE spawning the GUI binary: on Linux gtk2 opens the
+  // display in a unit initialization, so launching it without one produces a bare
+  // "cannot open display" that names neither Phosphor nor the remedy. (phosphorgui
+  // carries the same guard for when it is invoked directly; this one saves the
+  // process launch and keeps the message identical.) Windows needs no display.
+  if (GetEnvironmentVariable('DISPLAY') = '') and
+     (GetEnvironmentVariable('WAYLAND_DISPLAY') = '') then
+  begin
+    Writeln(StdErr, 'phosphor: --gui needs a graphical session, and neither DISPLAY');
+    Writeln(StdErr, '  nor WAYLAND_DISPLAY is set here (a plain ssh session, a service');
+    Writeln(StdErr, '  or a container usually has none).');
+    Writeln(StdErr, '');
+    Writeln(StdErr, '  Run it from a desktop session, or point it at one:');
+    Writeln(StdErr, '      DISPLAY=:0 phosphor --gui ' + APath);
+    Writeln(StdErr, '  A console program needs no display:');
+    Writeln(StdErr, '      phosphor run ' + APath);
+    Exit(3);
+  end;
+  {$ENDIF}
   gui := ExtractFilePath(SelfExePath()) + 'phosphorgui' +
          {$IFDEF WINDOWS}'.exe'{$ELSE}''{$ENDIF};
   if not FileExists(gui) then

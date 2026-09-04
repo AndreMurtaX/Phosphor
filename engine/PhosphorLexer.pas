@@ -163,7 +163,7 @@ end;
 
 function TLexer.Tokenize: Boolean;
 var
-  n, len, startLine, runStart: Integer;
+  n, len, startLine, runStart, ex: Integer;
   c, c2: Char;
   T: TToken;
   s: String;
@@ -210,6 +210,22 @@ begin
         Inc(FPos); // '.'
         while (FPos <= len) and IsDigit(FSrc[FPos]) do Inc(FPos);
       end;
+      // Exponent notation. It is not decoration: ValToStr PRINTS this form, so
+      // without it the language could emit `1E200` and then refuse to read its own
+      // output back -- `println 1E200` was a syntax error while `val("1E200")`
+      // worked. Only consumed when a digit actually follows (optionally after a
+      // sign), so an identifier butted against a number is still two tokens.
+      if (FPos <= len) and ((FSrc[FPos] = 'e') or (FSrc[FPos] = 'E')) then
+      begin
+        ex := FPos + 1;
+        if (ex <= len) and ((FSrc[ex] = '+') or (FSrc[ex] = '-')) then Inc(ex);
+        if (ex <= len) and IsDigit(FSrc[ex]) then
+        begin
+          hasDot := True;                      // an exponent makes it a double
+          FPos := ex;
+          while (FPos <= len) and IsDigit(FSrc[FPos]) do Inc(FPos);
+        end;
+      end;
       s := Copy(FSrc, n, FPos - n);
       T := Default(TToken);
       T.Line := startLine;
@@ -221,7 +237,16 @@ begin
       else
       begin
         T.Kind := tkDouble;
-        T.DblVal := StrToFloat(s, LexFS);
+        // TRY, not StrToFloat. An unguarded conversion raised EConvertError out of
+        // the lexer and killed the process on a literal FPC cannot represent -- a
+        // 400-digit integer pasted into a source file was enough. A number the
+        // machine cannot hold is a source error, and the user gets told which one.
+        if not TryStrToFloat(s, T.DblVal, LexFS) then
+        begin
+          FErr := 'the number ' + s + ' is out of range';
+          FErrLine := startLine;
+          Exit(False);
+        end;
       end;
       Push(T);
       Continue;

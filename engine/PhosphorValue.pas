@@ -141,15 +141,22 @@ function ValNot(const A: TValue; out R: TValue): TPhosphorError;
 function VarTypeOf(const AName: String): TVarType;
 function VarTypeName(T: TVarType): String;
 function DefaultValue(T: TVarType): TValue;
-// True if V may be stored into a variable of type T; Coerced is what to store
-// (e.g. a Double rounded into an int% slot).
-function CanStore(T: TVarType; const V: TValue; out Coerced: TValue): Boolean;
+// NoError if V may be stored into a variable of type T; Coerced is what to store
+// (e.g. a Double rounded into an int% slot). It returns the ERROR rather than a
+// bare False because the two ways a store can fail need different words: a wrong
+// kind is a type mismatch, and a Double too large for an int% is an overflow.
+function StoreCheck(T: TVarType; const V: TValue; out Coerced: TValue): TPhosphorError;
 
 // True if D can be rounded/truncated into an Int64 without FPC's Round/Trunc/Floor
 // raising EInvalidOp. NaN and +/-Inf answer False (their comparisons are all False),
 // so a caller guards a Double->Int64 conversion with this and reports overflow as a
 // catchable error instead of crashing the process.
 function InI64Range(const D: Double): Boolean;
+// Round D into an Int64, answering False instead of raising when it does not fit.
+// USE THIS, never a bare Round/Trunc, on any Double that came from a program: an
+// out-of-range Round raises EInvalidOp, which is a hardware trap and not an error
+// value, and it killed the interpreter from five separate sites before this existed.
+function TryD2I(const D: Double; out I: Int64): Boolean;
 
 // Checked Int64 primitives (exposed so libraries can test overflow-as-error) -
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
@@ -167,6 +174,42 @@ begin
   Result := Default(TValue);
   Result.Kind := vkDouble;
   Result.Num := X;
+end;
+
+function TryD2I(const D: Double; out I: Int64): Boolean;
+begin
+  I := 0;
+  Result := InI64Range(D);
+  if Result then I := Round(D);
+end;
+
+{ THE FINITENESS GATE. Every double-producing operator returns through here.
+
+  IEEE-754 answers an overflow with Infinity and an undefined form with NaN.
+  Phosphor answers with a CATCHABLE ERROR instead, for the same reason integer
+  overflow is an error rather than a silent promotion (decisions.md): a value the
+  program cannot represent should stop the program, not travel through it. The
+  consequence is an invariant the rest of the engine can rely on --
+
+      no TValue ever holds a non-finite Double.
+
+  which is what makes it safe to leave the invalid-operation trap unmasked while
+  a program runs: Inf and NaN cannot enter the value space, so they cannot reach
+  a later operation and raise there. }
+function FiniteD(const AOp: String; const X: Double; out R: TValue): TPhosphorError;
+begin
+  if IsNan(X) then
+  begin
+    R := Default(TValue);
+    Exit(MakeError(peRuntime, AOp + ' has no numeric result'));
+  end;
+  if IsInfinite(X) then
+  begin
+    R := Default(TValue);
+    Exit(MakeError(peIntOverflow, 'floating point overflow in ' + AOp));
+  end;
+  R := ValDouble(X);
+  Result := NoError();
 end;
 
 function ValInt(const X: Int64): TValue;
@@ -316,7 +359,7 @@ begin
       else
         Exit(MakeError(peIntOverflow, 'integer overflow negating ' + IntToStr(A.Int)));
     vkDouble:
-      R := ValDouble(-A.Num);
+      Exit(FiniteD('unary minus', -A.Num, R));
   else
     Exit(MakeError(peTypeMismatch, 'unary minus needs a number, got ' + KindName(A.Kind)));
   end;
@@ -354,13 +397,14 @@ begin
         'integer overflow: ' + IntToStr(A.Int) + ' + ' + IntToStr(B.Int)));
   end
   else
-    R := ValDouble(AsDouble(A) + AsDouble(B));
+    Exit(FiniteD('+', AsDouble(A) + AsDouble(B), R));
 end;
 
 function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
   k: Integer;
+  d: Double;
 begin
   R := Default(TValue);
   // 'string - n' truncates the last n characters (the string keeps the rest).
@@ -368,8 +412,12 @@ begin
   begin
     if not IsNumeric(B) then
       Exit(MakeError(peTypeMismatch, 'cannot subtract ' + KindName(B.Kind) + ' from a string'));
-    k := Length(A.Str) - Round(AsDouble(B));
-    if k < 0 then k := 0;
+    // Compare BEFORE narrowing. Round(1e30) raises EInvalidOp, and "remove more
+    // characters than the string has" is a clamp, not an error.
+    d := AsDouble(B);
+    if d >= Length(A.Str) then k := 0
+    else if d <= 0 then k := Length(A.Str)
+    else k := Length(A.Str) - Round(d);
     R := ValStr(Copy(A.Str, 1, k));
     Exit(NoError());
   end;
@@ -384,7 +432,7 @@ begin
         'integer overflow: ' + IntToStr(A.Int) + ' - ' + IntToStr(B.Int)));
   end
   else
-    R := ValDouble(AsDouble(A) - AsDouble(B));
+    Exit(FiniteD('-', AsDouble(A) - AsDouble(B), R));
 end;
 
 function ValMul(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -403,7 +451,7 @@ begin
         'integer overflow: ' + IntToStr(A.Int) + ' * ' + IntToStr(B.Int)));
   end
   else
-    R := ValDouble(AsDouble(A) * AsDouble(B));
+    Exit(FiniteD('*', AsDouble(A) * AsDouble(B), R));
 end;
 
 function ValDivReal(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -414,7 +462,7 @@ begin
   if AsDouble(B) = 0 then
     Exit(MakeError(peDivByZero, 'division by zero'));
   // The slash is ALWAYS real division: int / int is a double.
-  R := ValDouble(AsDouble(A) / AsDouble(B));
+  Exit(FiniteD('/', AsDouble(A) / AsDouble(B), R));
 end;
 
 function ValDivInt(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -424,8 +472,12 @@ begin
   R := Default(TValue);
   Result := NumericPair(A, B, '\');
   if IsError(Result) then Exit;
-  if A.Kind = vkInt then ai := A.Int else ai := Round(A.Num);
-  if B.Kind = vkInt then bi := B.Int else bi := Round(B.Num);
+  if A.Kind = vkInt then ai := A.Int
+  else if not TryD2I(A.Num, ai) then
+    Exit(MakeError(peIntOverflow, ValToStr(A) + ' is out of integer range'));
+  if B.Kind = vkInt then bi := B.Int
+  else if not TryD2I(B.Num, bi) then
+    Exit(MakeError(peIntOverflow, ValToStr(B) + ' is out of integer range'));
   if bi = 0 then
     Exit(MakeError(peDivByZero, 'integer division by zero'));
   if (ai = Low(Int64)) and (bi = -1) then
@@ -437,6 +489,7 @@ end;
 function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   ai, bi: Int64;
+  q: Double;
 begin
   R := Default(TValue);
   Result := NumericPair(A, B, 'mod');
@@ -445,16 +498,26 @@ begin
   begin
     if B.Int = 0 then
       Exit(MakeError(peDivByZero, 'mod by zero'));
-    R := ValInt(A.Int mod B.Int);
+    // Low(Int64) mod -1 is mathematically 0, but x86 computes the remainder with
+    // the same idiv as the quotient -- and THAT overflows and traps. ValDivInt has
+    // guarded this since it was written; mod never did, so it killed the process.
+    if (A.Int = Low(Int64)) and (B.Int = -1) then
+      R := ValInt(0)
+    else
+      R := ValInt(A.Int mod B.Int);
   end
   else
   begin
     if AsDouble(B) = 0 then
       Exit(MakeError(peDivByZero, 'mod by zero'));
-    ai := Trunc(AsDouble(A) / AsDouble(B));
-    R := ValDouble(AsDouble(A) - ai * AsDouble(B));
-    bi := 0; // silence "unused" on some paths
-    if bi <> 0 then ;
+    // The quotient stays a DOUBLE. Trunc() narrowed it to Int64 and raised
+    // EInvalidOp -- killing the process -- for any pair whose quotient exceeded
+    // Int64 range, e.g. `1e30 mod 2.5`. Int() truncates within Double, so there is
+    // no range to exceed and the remainder is simply computed.
+    q := Int(AsDouble(A) / AsDouble(B));
+    ai := 0; bi := 0; // silence "unused" on some paths
+    if (ai <> 0) or (bi <> 0) then ;
+    Exit(FiniteD('mod', AsDouble(A) - q * AsDouble(B), R));
   end;
 end;
 
@@ -464,7 +527,7 @@ begin
   Result := NumericPair(A, B, '^');
   if IsError(Result) then Exit;
   // '^' is always a double (2 ^ 0.5 is meaningful).
-  R := ValDouble(Power(AsDouble(A), AsDouble(B)));
+  Exit(FiniteD('^', Power(AsDouble(A), AsDouble(B)), R));
 end;
 
 function ValCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError;
@@ -473,7 +536,16 @@ var
   eq: Boolean;
 begin
   R := Default(TValue);
-  if IsNumeric(A) and IsNumeric(B) then
+  if (A.Kind = vkInt) and (B.Kind = vkInt) then
+  begin
+    // Compare Int64s AS Int64s. Widening both to Double loses the low bits above
+    // 2^53, which made two distinct int% values compare EQUAL while their
+    // difference still correctly came out as 1.
+    if A.Int < B.Int then c := -1
+    else if A.Int > B.Int then c := 1
+    else c := 0;
+  end
+  else if IsNumeric(A) and IsNumeric(B) then
   begin
     if AsDouble(A) < AsDouble(B) then c := -1
     else if AsDouble(A) > AsDouble(B) then c := 1
@@ -579,24 +651,40 @@ begin
   end;
 end;
 
-function CanStore(T: TVarType; const V: TValue; out Coerced: TValue): Boolean;
+function StoreCheck(T: TVarType; const V: TValue; out Coerced: TValue): TPhosphorError;
+var
+  i: Int64;
+  ok: Boolean;
 begin
   Coerced := V;
+  Result := NoError();
   case T of
-    vtNumber: Result := (V.Kind = vkInt) or (V.Kind = vkDouble);
+    vtNumber: ok := (V.Kind = vkInt) or (V.Kind = vkDouble);
     vtInt:
       begin
-        if V.Kind = vkInt then Result := True
-        else if V.Kind = vkDouble then begin Coerced := ValInt(Round(V.Num)); Result := True; end
-        else Result := False;
+        ok := True;
+        if V.Kind = vkDouble then
+        begin
+          // A bare Round here raised EInvalidOp and killed the process for every
+          // Double outside Int64 range: `n% = 10 ^ 300` was a hard abort, exit 217.
+          if TryD2I(V.Num, i) then
+            Coerced := ValInt(i)
+          else
+            Exit(MakeError(peIntOverflow,
+              ValToStr(V) + ' is out of range for an int% variable'));
+        end
+        else
+          ok := V.Kind = vkInt;
       end;
-    vtString: Result := V.Kind = vkString;
-    vtHandle: Result := V.Kind = vkHandle;
-    vtBool:   Result := V.Kind = vkBool;
-    vtAny:    Result := True;
+    vtString: ok := V.Kind = vkString;
+    vtHandle: ok := V.Kind = vkHandle;
+    vtBool:   ok := V.Kind = vkBool;
+    vtAny:    ok := True;
   else
-    Result := False;
+    ok := False;
   end;
+  if not ok then
+    Result := MakeError(peTypeMismatch, 'kind mismatch');   // the caller words it
 end;
 
 initialization

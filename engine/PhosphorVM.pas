@@ -16,7 +16,7 @@ unit PhosphorVM;
 interface
 
 uses
-  SysUtils, Classes, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry;
+  SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry;
 
 const
   { Classic file-I/O channel numbers run 1..MaxChannel (#0 is not used). The cap
@@ -859,9 +859,27 @@ begin
     Result := Result + TPhosphorRegistry.CodeOf(AArgs[i].Kind);
 end;
 
+{ Arithmetic must not be able to kill the interpreter.
+
+  FPC leaves the IEEE overflow trap UNMASKED, so an ordinary `x = x * 1.5` in a
+  loop eventually raises a hardware EOverflow -- which is not an exception the
+  engine can turn into an error value, because it unwinds straight past ExecFrom
+  and out of the host. `10.0 ^ 200 * 10.0 ^ 200` aborted the process with exit
+  217, and `on error goto` could not see it.
+
+  Masking exOverflow makes that multiplication produce +Inf instead, which
+  FiniteD then reports as a catchable Phosphor error at the operator that
+  produced it. INVALID-OPERATION AND DIVIDE-BY-ZERO STAY UNMASKED on purpose: the
+  finiteness invariant means Inf and NaN never enter the value space, so those
+  traps should be unreachable -- and if one ever does fire, it should fire loudly
+  rather than silently returning a wrong number.
+
+  The mask is restored on the way out: the engine is embeddable, and a host's FPU
+  configuration is the host's business, not ours. }
 function TPhosphorVM.Run(AProg: TProgram): Boolean;
 var
   i: Integer;
+  savedMask: TFPUExceptionMask;
 begin
   FProg := AProg;
   FSP := 0;
@@ -887,12 +905,19 @@ begin
   SetLength(FVars, AProg.VarCount);
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
-  Result := ExecFrom(0, -1);
+  savedMask := GetExceptionMask();
+  SetExceptionMask(savedMask + [exOverflow, exUnderflow, exPrecision, exDenormalized]);
+  try
+    Result := ExecFrom(0, -1);
+  finally
+    SetExceptionMask(savedMask);
+  end;
 end;
 
 function TPhosphorVM.RunFrom(AProg: TProgram; AStartPC: Integer): Boolean;
 var
   i, had: Integer;
+  savedMask: TFPUExceptionMask;
 begin
   FProg := AProg;
   LastError := NoError();
@@ -914,7 +939,13 @@ begin
   FSteps := 0;
   FOutputBytes := 0;
   FStartTick := GetTickCount64;
-  Result := ExecFrom(AStartPC, -1);
+  savedMask := GetExceptionMask();
+  SetExceptionMask(savedMask + [exOverflow, exUnderflow, exPrecision, exDenormalized]);
+  try
+    Result := ExecFrom(AStartPC, -1);
+  finally
+    SetExceptionMask(savedMask);
+  end;
 end;
 
 function TPhosphorVM.ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
@@ -1077,11 +1108,16 @@ begin
       opStoreVar:
         begin
           v := Pop();
-          if CanStore(FProg.VarTypes[ins.A], v, r) then
+          e := StoreCheck(FProg.VarTypes[ins.A], v, r);
+          if not IsError(e) then
             FVars[ins.A] := r
           else
-            if Fault(MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
-              ' into ' + VarTypeName(FProg.VarTypes[ins.A]) + ' variable')) then Continue else Exit(False);
+          begin
+            if e.Code = peTypeMismatch then
+              e := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
+                ' into ' + VarTypeName(FProg.VarTypes[ins.A]) + ' variable');
+            if Fault(e) then Continue else Exit(False);
+          end;
         end;
       opJumpIfFalse:
         begin
@@ -1209,11 +1245,16 @@ begin
         begin
           v := Pop();
           lt := FProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].LocalTypes[ins.A];
-          if CanStore(lt, v, r) then
+          e := StoreCheck(lt, v, r);
+          if not IsError(e) then
             FFrames[FFrameSP - 1].Locals[ins.A] := r
           else
-            if Fault(MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
-              ' into ' + VarTypeName(lt) + ' local')) then Continue else Exit(False);
+          begin
+            if e.Code = peTypeMismatch then
+              e := MakeError(peTypeMismatch, 'cannot store ' + KindName(v.Kind) +
+                ' into ' + VarTypeName(lt) + ' local');
+            if Fault(e) then Continue else Exit(False);
+          end;
         end;
       opRetFunc:
         begin
@@ -1281,6 +1322,15 @@ begin
           if IsError(e) then
           begin
             if Fault(e) then Continue else Exit(False);
+          end;
+          // The finiteness invariant (PhosphorValue, FiniteD) covers library
+          // results too: exp(1000) overflows to +Inf inside the RTL, and pushing
+          // that would put a value into the program that no later operator could
+          // handle. It reports here instead, at the call that produced it.
+          if (r.Kind = vkDouble) and (IsNan(r.Num) or IsInfinite(r.Num)) then
+          begin
+            if Fault(MakeError(peIntOverflow, FProg.Consts.Get(ins.A).Str +
+              ' has no finite result for those arguments')) then Continue else Exit(False);
           end;
           Push(r);
         end;

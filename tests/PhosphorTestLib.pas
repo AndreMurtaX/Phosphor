@@ -132,6 +132,18 @@ begin
   Result := ValInt(Ord(Args[0].Bl));
 end;
 
+// The bool-with-a-message form. Every other assertion had one; this one did not,
+// so `assert_true(a% > b%, "why")` -- the natural way to write a comparison -- was
+// a "no function assert_true:?$" error, and the test had to be reworded around the
+// harness. A gap in the harness costs more than a gap in a library: it silently
+// shapes what tests get written.
+function t_assert_true_bool_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Check(Args[0].Bl, Args[1].Str, 'expected true, got false');
+  Result := ValInt(Ord(Args[0].Bl));
+end;
+
 function t_assert_false(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var ok: Boolean;
 begin
@@ -154,6 +166,13 @@ function t_assert_false_bool(const Args: array of TValue; out Err: TPhosphorErro
 begin
   Err := NoError();
   Check(not Args[0].Bl, '', 'expected false, got true');
+  Result := ValInt(Ord(not Args[0].Bl));
+end;
+
+function t_assert_false_bool_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Check(not Args[0].Bl, Args[1].Str, 'expected false, got true');
   Result := ValInt(Ord(not Args[0].Bl));
 end;
 
@@ -308,9 +327,11 @@ begin
   Reg.Add('assert_true:n',   @t_assert_true);
   Reg.Add('assert_true:n$',  @t_assert_true_msg);
   Reg.Add('assert_true:?',   @t_assert_true_bool);
+  Reg.Add('assert_true:?$',  @t_assert_true_bool_msg);
   Reg.Add('assert_false:n',  @t_assert_false);
   Reg.Add('assert_false:n$', @t_assert_false_msg);
   Reg.Add('assert_false:?',  @t_assert_false_bool);
+  Reg.Add('assert_false:?$', @t_assert_false_bool_msg);
 
   Reg.Add('assert_eq:nn',    @t_assert_eq_num);
   Reg.Add('assert_eq:nn$',   @t_assert_eq_num_msg);

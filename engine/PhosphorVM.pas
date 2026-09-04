@@ -611,21 +611,38 @@ begin
 end;
 
 function TPhosphorVM.ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
-var field: String; i: Integer; found: Boolean;
+var field: String; i, j, n: Integer; found: Boolean;
 begin
   V := Default(TValue);
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
-  // Read ahead until the window holds a field terminator (or the file ends), so a
-  // field is never cut short at a chunk boundary.
+  // Read ahead until the window holds THE WHOLE FIELD (or the file ends).
   repeat
     found := False;
-    for i := FChannels[ANum].Pos to Length(FChannels[ANum].Buf) do
-      if (FChannels[ANum].Buf[i] = ',') or (FChannels[ANum].Buf[i] = ' ') or
-         (FChannels[ANum].Buf[i] = #9) or (FChannels[ANum].Buf[i] = #13) or
-         (FChannels[ANum].Buf[i] = #10) then begin found := True; Break; end;
+    n := Length(FChannels[ANum].Buf);
+    // Where the field really begins: after the blanks NextFieldStr will skip.
+    // Looking for a terminator from the cursor found those blanks and stopped.
+    i := FChannels[ANum].Pos;
+    while (i <= n) and ((FChannels[ANum].Buf[i] = ' ') or (FChannels[ANum].Buf[i] = #9) or
+                        (FChannels[ANum].Buf[i] = #13) or (FChannels[ANum].Buf[i] = #10)) do
+      Inc(i);
+    if i <= n then
+      if FChannels[ANum].Buf[i] = '"' then
+      begin
+        // a quoted field ends at its closing quote; "" is an escaped one
+        j := i + 1;
+        while j <= n do
+          if FChannels[ANum].Buf[j] <> '"' then Inc(j)
+          else if (j < n) and (FChannels[ANum].Buf[j + 1] = '"') then Inc(j, 2)
+          else begin found := True; Break; end;
+      end
+      else
+        for j := i to n do
+          if (FChannels[ANum].Buf[j] = ',') or (FChannels[ANum].Buf[j] = ' ') or
+             (FChannels[ANum].Buf[j] = #9) or (FChannels[ANum].Buf[j] = #13) or
+             (FChannels[ANum].Buf[j] = #10) then begin found := True; Break; end;
     if found then Break;
   until not ChanMore(ANum);
   field := NextFieldStr(FChannels[ANum].Buf, FChannels[ANum].Pos, True);
@@ -658,8 +675,23 @@ begin
   // '?', silently destroying binary and Latin-1 data.
   while (p <= n) and (FChannels[ANum].Buf[p] <> #10) and (FChannels[ANum].Buf[p] <> #13) do Inc(p);
   S := Copy(FChannels[ANum].Buf, start, p - start);
-  // step over the line terminator (CR, LF, or CRLF)
-  if (p <= n) and (FChannels[ANum].Buf[p] = #13) then Inc(p);
+  // Step over the line terminator (CR, LF, or CRLF). If the CR was the last byte
+  // the window held, the LF has not been read yet: commit the position, pull the
+  // next chunk, and look again. Without this the pair was split, the LF began the
+  // next read, and a two-line file came back as three.
+  if (p <= n) and (FChannels[ANum].Buf[p] = #13) then
+  begin
+    Inc(p);
+    if p > n then
+    begin
+      FChannels[ANum].Pos := p;
+      if ChanMore(ANum) then
+      begin
+        p := FChannels[ANum].Pos;
+        n := Length(FChannels[ANum].Buf);
+      end;
+    end;
+  end;
   if (p <= n) and (FChannels[ANum].Buf[p] = #10) then Inc(p);
   FChannels[ANum].Pos := p;
 end;

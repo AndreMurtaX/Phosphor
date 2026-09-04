@@ -1,0 +1,8 @@
+first field  a
+second field 70000
+intact       true
+quoted len   70005
+quoted head  lead 
+line 1 len 65535
+line 2 len 1
+line count   2

@@ -36,6 +36,25 @@ suite="$root/tests/suite"; neg="$root/tests/negative"
 manifest="$(grep -vE '^[[:space:]]*#' "$suite/manifest.txt" | tr '\n' ' ')"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
+prove="${1:-}"
+
+# --prove: corrupt ONE expected value so an assertion must fail, then confirm the
+# byte comparison catches it. The harness is seen failing before it is trusted --
+# the same discipline test-suite.ps1 applies, which Linux was missing entirely.
+if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
+  bad="$(mktemp)"
+  sed 's/assert_eq(2 + 3, 5)/assert_eq(2 + 3, 6)/' "$suite/00_harness.bas" > "$bad"
+  echo "ProveFailure: one expected value corrupted"
+  "$exe" "$bad" > "$out" 2> "$err"; code=$?
+  if [ "$code" -eq 0 ] && cmp -s "$out" "$suite/00_harness.expected"; then
+    echo "ProveFailure: NOT detected -- the check is broken"; allok=1
+  else
+    echo "ProveFailure: mismatch correctly detected"
+  fi
+  rm -f "$bad"
+  echo
+  if [ "$allok" -eq 0 ]; then echo "SUITE OK"; exit 0; else echo "SUITE FAILED"; exit 1; fi
+fi
 
 for name in $manifest; do
   "$exe" "$suite/$name.bas" > "$out" 2> "$err"; code=$?

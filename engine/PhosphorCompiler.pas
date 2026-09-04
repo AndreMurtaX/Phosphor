@@ -106,6 +106,8 @@ type
     procedure ParseCondition;
     procedure ParseBlockUntil(const ATerms: array of String);
     procedure ParseIf;
+    procedure ParseSignedPrimary;
+    procedure ParseInlineStatements;
     procedure ParseWhile;
     procedure ParseDo;
     procedure ParseRepeat;
@@ -272,6 +274,12 @@ begin
     'let', 'const', 'data', 'read', 'restore',
     'print', 'println', 'dim',
     'trace', 'breakpoint',
+    // The classic I/O and standard-BASIC statements, added with them and never
+    // added HERE -- which is why `close : rem done` became a label named "close"
+    // and the file was never closed. Only words that can BEGIN a statement belong
+    // in this list: `as`, `output` and `using` appear inside one and can still be
+    // used as label names without ambiguity.
+    'input', 'open', 'close', 'seek', 'swap', 'line', 'on', 'resume',
     'and', 'or', 'not', 'mod', 'true', 'false':
       Result := True;
   else
@@ -292,6 +300,17 @@ begin
   FLex.Advance(); // 'function'
   if FLex.Cur().Kind <> tkIdent then begin Fail('expected a function name', FLex.Cur().Line); Exit; end;
   funcName := FLex.Cur().StrVal;
+  // eof/lof/loc/input$ are parsed as special forms because they take a #channel.
+  // A function with one of those names used to compile cleanly and then never be
+  // called: every call site was rewritten into the file opcode instead. Silently
+  // unreachable code is worse than a rejected name.
+  if (funcName = 'eof') or (funcName = 'lof') or (funcName = 'loc') or
+     (funcName = 'input$') then
+  begin
+    Fail('"' + funcName + '" is a file function built into the language and ' +
+         'cannot be redefined', FLex.Cur().Line);
+    Exit;
+  end;
   retType := VarTypeOf(funcName);
   FLex.Advance();
   Expect(tkLParen, '''(''');
@@ -747,16 +766,37 @@ begin
     FProg.Emit(opNeg, 0, 0, ln); FBool := False;
   end
   else if FLex.Cur().Kind = tkPlus then begin FLex.Advance(); ParseUnary(); end
+  else ParsePower();
+end;
+
+{ An exponent: any number of leading signs, then a primary. Deliberately NOT the
+  full unary rule -- see ParsePower. }
+procedure TPhosphorCompiler.ParseSignedPrimary;
+var ln: Integer;
+begin
+  if FLex.Cur().Kind = tkMinus then
+  begin
+    ln := FLex.Cur().Line; FLex.Advance(); ParseSignedPrimary();
+    FProg.Emit(opNeg, 0, 0, ln); FBool := False;
+  end
+  else if FLex.Cur().Kind = tkPlus then begin FLex.Advance(); ParseSignedPrimary(); end
   else ParsePrimary();
 end;
 
 procedure TPhosphorCompiler.ParsePower;
 var ln: Integer;
 begin
-  ParseUnary();
+  // The BASE is a primary, not a unary: that is what puts '-' OUTSIDE the power, so
+  // -2 ^ 2 is -(2 ^ 2) = -4 rather than (-2) ^ 2 = 4.
+  //
+  // The EXPONENT is a SIGNED PRIMARY, not a full unary. `2 ^ -1` must parse, but
+  // recursing all the way back into the unary rule would also make '^' right-
+  // associative and quietly turn 2 ^ 3 ^ 2 from 64 into 512. BASIC reads a power
+  // chain left to right; this change is about the minus sign and nothing else.
+  ParsePrimary();
   while (not FFailed) and (FLex.Cur().Kind = tkCaret) do
   begin
-    ln := FLex.Cur().Line; FLex.Advance(); ParseUnary();
+    ln := FLex.Cur().Line; FLex.Advance(); ParseSignedPrimary();
     FProg.Emit(opPow, 0, 0, ln); FBool := False;
   end;
 end;
@@ -764,10 +804,10 @@ end;
 procedure TPhosphorCompiler.ParseMultiplicative;
 var k: TTokenKind; ln: Integer;
 begin
-  ParsePower();
+  ParseUnary();
   while (not FFailed) and (FLex.Cur().Kind in [tkStar, tkSlash, tkBackslash, tkMod]) do
   begin
-    k := FLex.Cur().Kind; ln := FLex.Cur().Line; FLex.Advance(); ParsePower();
+    k := FLex.Cur().Kind; ln := FLex.Cur().Line; FLex.Advance(); ParseUnary();
     case k of
       tkStar:      FProg.Emit(opMul, 0, 0, ln);
       tkSlash:     FProg.Emit(opDivReal, 0, 0, ln);
@@ -923,20 +963,36 @@ begin
   end
   else
   begin
-    // inline IF [ELSE]
+    // inline IF [ELSE]. THE WHOLE REST OF THE LINE is guarded, not just the first
+    // statement: `if c then a : b` runs neither when c is false. Parsing one
+    // statement left b outside the jump, so it ran every time.
     jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
-    ParseStatement();
+    ParseInlineStatements();
     if FFailed then Exit;
     if IsKeyword('else') then
     begin
       FLex.Advance();
       jEnd := FProg.Emit(opJump, 0, 0, ln);
       FProg.Patch(jFalse, FProg.Count);
-      ParseStatement();
+      ParseInlineStatements();
       if not FFailed then FProg.Patch(jEnd, FProg.Count);
     end
     else
       FProg.Patch(jFalse, FProg.Count);
+  end;
+end;
+
+{ The statements an inline IF (or its ELSE) governs: everything up to the end of
+  the line, or up to an ELSE, with ':' between them. }
+procedure TPhosphorCompiler.ParseInlineStatements;
+begin
+  ParseStatement();
+  while (not FFailed) and (FLex.Cur().Kind = tkColon) do
+  begin
+    FLex.Advance();
+    if FLex.Cur().Kind in [tkEOL, tkEOF] then Break;
+    if IsKeyword('else') then Break;
+    ParseStatement();
   end;
 end;
 

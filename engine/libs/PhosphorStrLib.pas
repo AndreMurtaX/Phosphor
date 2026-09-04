@@ -349,12 +349,42 @@ function f_wordcount(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(Length(SplitBy(s0(A), A[1].Str))); end;
 
 // instr family: 1-based position, 0 when absent.
+{ Byte offset -> codepoint position, both 1-based. A byte inside a multi-byte
+  character answers the position of the character containing it. 0 stays 0, which
+  is how every search here says "absent". }
+function ByteToCp(const S: String; AByte: Integer): Integer;
+var st: TInt64DynArray; i: Integer;
+begin
+  if AByte <= 0 then Exit(0);
+  st := CpStarts(S);
+  for i := 0 to High(st) - 1 do
+    if (st[i] <= AByte) and (AByte < st[i + 1]) then Exit(i + 1);
+  Result := Length(st);   // past the end: the sentinel position
+end;
+
+{ Codepoint position -> byte offset, 1-based, clamped to the string. }
+function CpToByte(const S: String; ACp: Integer): Integer;
+var st: TInt64DynArray;
+begin
+  if ACp <= 1 then Exit(1);
+  st := CpStarts(S);
+  if ACp > Length(st) then Exit(Length(S) + 1);
+  Result := st[ACp - 1];
+end;
+
 function f_instr2(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Pos(A[1].Str, s0(A))); end;
+begin E := NoError(); Result := ValInt(ByteToCp(s0(A), Pos(A[1].Str, s0(A)))); end;
 function f_instr3(const A: array of TValue; out E: TPhosphorError): TValue;
 var start: Integer;
-begin E := NoError(); start := ArgI32(A[2]); if start < 1 then start := 1;
-  Result := ValInt(PosEx(A[1].Str, s0(A), start)); end;
+begin
+  E := NoError();
+  start := ArgI32(A[2]); if start < 1 then start := 1;
+  // The start is a CODEPOINT position, like every other index in the language, so
+  // it is translated into a byte offset for the search and the answer translated
+  // back. Both halves have to move together or the two would disagree.
+  Result := ValInt(ByteToCp(s0(A),
+    PosEx(A[1].Str, s0(A), CpToByte(s0(A), start))));
+end;
 function f_instrrev(const A: array of TValue; out E: TPhosphorError): TValue;
 var t, sub: String; p, last: Integer;
 begin
@@ -364,7 +394,7 @@ begin
     p := PosEx(sub, t, 1);
     while p > 0 do begin last := p; p := PosEx(sub, t, p + 1); end;
   end;
-  Result := ValInt(last);
+  Result := ValInt(ByteToCp(t, last));
 end;
 
 // helpers behind the s$[n] / s$[[n]] index sugar

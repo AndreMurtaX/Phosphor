@@ -395,8 +395,14 @@ function f_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := OpenDatabase(Args[0].Str); end;
 
 function f_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var db: TSqliteDb;
 begin
   Err := NoError();
+  // TYPE-CHECKED before freeing. This used to free whatever the handle named, so
+  // sqlite_close(o@) on a JSON object returned 1 and destroyed it -- a
+  // use-after-free waiting for the next read of o@. Lenient about a stale handle
+  // (0, like every other free), strict about freeing something it does not own.
+  if not GetDb(Args[0].Hnd, db) then Exit(ValInt(0));
   Result := ValInt(Ord(FreeHandle(Args[0].Hnd)));   // the destructor closes the db
 end;
 
@@ -604,8 +610,10 @@ begin
 end;
 
 function f_finalize(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var st: TSqliteStmt;
 begin
   Err := NoError();
+  if not GetStmt(Args[0].Hnd, st) then Exit(ValInt(0));   // frees only a statement
   Result := ValInt(Ord(FreeHandle(Args[0].Hnd)));   // frees + revokes the statement id
 end;
 

@@ -239,6 +239,50 @@ begin
   end;
 end;
 
+// --- extraction safety ------------------------------------------------------
+{ An entry name decides where a byte lands on disk, and it comes from whoever built
+  the archive. `../../../../etc/x` escapes the destination directory entirely -- the
+  "zip slip" -- and so do an absolute path and a Windows drive letter.
+
+  Rejected: an empty name, a name starting with '/' or '\', a name whose second
+  character is ':' (a drive), and any name with a '..' PATH SEGMENT. A '..' inside a
+  file name ("my..notes.txt") is fine and is not what this looks for. }
+function SafeEntryName(const AName: String): Boolean;
+var
+  norm: String;
+  i, segStart: Integer;
+
+  function SegmentIsDotDot(AFrom, ATo: Integer): Boolean;
+  begin
+    Result := (ATo - AFrom = 2) and (norm[AFrom] = '.') and (norm[AFrom + 1] = '.');
+  end;
+
+begin
+  Result := False;
+  if AName = '' then Exit;
+  norm := StringReplace(AName, '\', '/', [rfReplaceAll]);
+  if norm[1] = '/' then Exit;                                   // absolute
+  if (Length(norm) >= 2) and (norm[2] = ':') then Exit;         // drive letter
+  segStart := 1;
+  for i := 1 to Length(norm) + 1 do
+    if (i = Length(norm) + 1) or (norm[i] = '/') then
+    begin
+      if SegmentIsDotDot(segStart, i) then Exit;
+      segStart := i + 1;
+    end;
+  Result := True;
+end;
+
+{ True when every entry in an examined unzipper is safe to write. }
+function ArchiveIsSafe(AUz: TUnZipper): Boolean;
+var i: Integer;
+begin
+  Result := True;
+  for i := 0 to AUz.Entries.Count - 1 do
+    if not SafeEntryName(AUz.Entries[i].ArchiveFileName) then
+      Exit(False);
+end;
+
 function f_unzip_extract(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var uz: TUnZipper;
 begin
@@ -250,6 +294,13 @@ begin
       uz.FileName := Args[0].Str;
       uz.OutputPath := Args[1].Str;
       uz.Examine;
+      if not ArchiveIsSafe(uz) then
+      begin
+        ZipErr := 1;
+        Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
+          'destination directory (a leading /, a drive letter, or a ".." segment)');
+        Exit;
+      end;
       uz.UnZipAllFiles;
       Result := ValInt(1);
       ZipErr := 0;
@@ -456,6 +507,13 @@ begin
   try
     try
       sl.Add(Args[1].Str);
+      if not ArchiveIsSafe(r.UZ) then
+      begin
+        ZipErr := 1;
+        Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
+          'destination directory');
+        Exit;
+      end;
       r.UZ.OutputPath := Args[2].Str;
       r.UZ.UnZipFiles(sl);
       Result := ValInt(1);
@@ -476,6 +534,13 @@ begin
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
   try
+    if not ArchiveIsSafe(r.UZ) then
+    begin
+      ZipErr := 1;
+      Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
+        'destination directory');
+      Exit;
+    end;
     r.UZ.Files.Clear();               // a prior single-entry op left a filter behind;
     r.UZ.OutputPath := Args[1].Str; // an empty list means "every file"
     r.UZ.UnZipAllFiles;

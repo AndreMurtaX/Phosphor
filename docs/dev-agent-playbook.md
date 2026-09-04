@@ -206,6 +206,25 @@ Rules, in order of how easily they are got wrong:
 - **`fpRead` (BaseUnix) is marked `inline` and FPC often declines to inline it**, which
   `-vewn` reports as a note. Call **`FileRead`** (SysUtils) instead — a plain function
   wrapping the same read — so the note stays inside the RTL, not your unit.
+- **A TEST THAT FAILS FOR THE WRONG REASON IS NOT A CONFIRMATION.** Three times this
+  round a new test failed against the old build and looked like proof, and was not:
+  it used a handle the file had already closed (SQLite), it passed the value in the
+  wrong parameter and corrupted an opcode that was valid (the .pbc probe), and it
+  looped forever because `resume` retries the failing statement and nothing in the
+  handler changed. Read the failure MESSAGE, not just the exit code -- "byteat: byte
+  1 is outside 1..0" is a different fact from "byte 2 is outside 1..1", and only the
+  second one is the bug you are fixing.
+- **A SANITY CHECK CAN SILENTLY FAIL TO SABOTAGE.** The .pbc probe wrote through
+  `TBytesStream.Bytes` and the byte read back afterwards was not the one written, so
+  the "corrupted" file was intact and the test passed for nothing. When a test's
+  whole value is that it broke something, ASSERT THAT IT BROKE -- read the mutation
+  back before running it.
+- **MEASURE THE LIBRARY, DO NOT REASON ABOUT IT.** Two full rounds of reasoning about
+  where fcl-json loses bytes were wrong. A twenty-line Pascal probe dumping hex
+  answered it in one run: TJSONString.Create is exact, AsJSON is not, and of the
+  several Add overloads exactly one corrupts. The same probe run on the OTHER machine
+  found that `GetJSON(text)` is lossy on Linux and exact on Windows, and that the fix
+  is its second argument. Neither fact was derivable from reading the source.
 - **GREEN SUITES PROVE THE ABSENCE OF REGRESSION, NOT THE PRESENCE OF CORRECTNESS.**
   With 659/659 functions covered and every golden byte-exact on both OSes, an
   adversarial hunt (12 finder agents over disjoint slice x failure-mode pairs, every
@@ -260,6 +279,38 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-04 · round 20 · all 69 findings closed, and what the closing cost.**
+  Fourteen commits, each one class at a time, each verified on both OSes before the
+  next began: hardware traps escaping the VM; the codepage char-concat class (third
+  sweep, now with a check that found ELEVEN sites where the hunt reported five); 131
+  unchecked narrowings; zip-slip and packages freeing handles they did not own; ON
+  ERROR across re-entrant calls; JSON that could not carry a byte; the 64 KB channel
+  window showing through; an unvalidated .pbc; six libraries answering in the RTL's
+  words instead of their own; four language semantics that were quietly wrong; nine
+  places where the machine's locale reached the program; and a FOR bound that lived
+  in a global. 152 new assertions across seven suite files, three classic goldens, a
+  package file, a negative and two probe cases.
+  - **The last critical was found by counting, not by testing.** After the twelfth
+    commit I listed the hunt's 69 findings against what had been fixed and one
+    CRITICAL had no commit against it: a FOR loop's bound in a hidden global, so a
+    function recursing from inside its own loop rewrote its own limit and f(3)
+    answered 3 instead of 15. Nothing had failed; it simply had not been done. KEEP
+    THE LIST AND TICK IT OFF -- momentum is not coverage.
+  - **Fixing that one exposed a second defect beneath it**, exactly as round 19's
+    rule warned: the compiler registers a function before parsing its body, so the
+    local-type table missed anything the body added, and the new slot read a garbage
+    type and then segfaulted. Second time this round that a structural fix uncovered
+    something older than itself.
+  - **Two fixes had to be argued down to their real scope.** The power-precedence fix
+    would have flipped '^' from left- to right-associative as a side effect (2^3^2:
+    64 into 512) -- caught by testing the chain, not just the sign. And the JSON key
+    limitation is fcl-json's hash, not Phosphor's: it is DOCUMENTED, and the test
+    asserts what is true on both platforms, because a platform-dependent golden would
+    have been worse than saying so.
+  - **One accidental correctness was removed on purpose.** json_keys@ was right on
+    Windows only because two bugs cancelled -- a lossy name hash and a re-encoding
+    Add overload. Fixing one alone would have broken it; fixing the mechanism made it
+    honest on both. Two bugs agreeing on one platform is not a behaviour to keep.
 - **2026-09-04 · round 19 · an adversarial hunt on a project that looked finished.**
   Every suite green, byte-exact on both OSes, 659/659 documented and tested. Twelve
   finders over disjoint slice x lens pairs, three refuters per finding: **69 confirmed

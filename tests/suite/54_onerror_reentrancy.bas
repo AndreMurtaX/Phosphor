@@ -135,3 +135,41 @@ function oops(code, msg$)
   handled% = 1
   return 0
 endfunction
+
+test_case("for/a loop's upper bound belongs to the activation, not the program")
+rem The bound was evaluated once into a hidden GLOBAL, so a function that recursed
+rem from inside its own loop had the inner call rewrite the outer loop's limit: the
+rem outer loop stopped after one pass. f(2) answered 2 and f(3) answered 3.
+assert_eq(recsum(1), 1, "one level")
+assert_eq(recsum(2), 4, "two iterations, each adding 1 + recsum(1)")
+assert_eq(recsum(3), 15, "and the same shape one level deeper")
+assert_eq(nested(4), 16, "a nested loop in a function is unaffected")
+assert_eq(downrec(2), 5, "and so is a negative step")
+
+function recsum(n) local i, s
+  s = 0
+  for i = 1 to n
+    s = s + 1
+    if n > 1 then s = s + recsum(n - 1)
+  next
+  return s
+endfunction
+
+function nested(n) local i, j, s
+  s = 0
+  for i = 1 to n
+    for j = 1 to n
+      s = s + 1
+    next
+  next
+  return s
+endfunction
+
+function downrec(n) local i, s
+  s = 0
+  for i = n to 1 step -1
+    s = s + i
+    if n > 1 then s = s + downrec(n - 1)
+  next
+  return s
+endfunction

@@ -289,7 +289,7 @@ end;
 
 procedure TPhosphorCompiler.ParseFunction;
 var
-  ln, entry, jOver, paramCount, i: Integer;
+  ln, entry, jOver, paramCount, i, ufIdx: Integer;
   funcName: String;
   retType: TVarType;
   ltypes: array of TVarType;
@@ -346,10 +346,18 @@ begin
   entry := FProg.Count;
   SetLength(ltypes, FLocalCount);
   for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];
-  FProg.AddUserFunc(funcName, entry, paramCount, ltypes, retType);
+  ufIdx := FProg.AddUserFunc(funcName, entry, paramCount, ltypes, retType);
 
   ParseBlockUntil(['endfunction']);
   if FFailed then Exit;
+  // The body can ADD locals -- a FOR bound is one -- and the type table was taken
+  // before the body was parsed, so those slots were missing from it. The frame is
+  // sized from this table, so an index past its end read a garbage type ("cannot
+  // store int into ? local") and then walked off the frame. Rewritten with what the
+  // body actually needs.
+  SetLength(ltypes, FLocalCount);
+  for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];
+  FProg.SetUserFuncLocals(ufIdx, ltypes);
   // fall-through default return
   FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(retType)), 0, ln);
   FProg.Emit(opRetFunc, 0, 0, ln);
@@ -1070,7 +1078,8 @@ var
   step: TValue;
   down: Boolean;
   neg: Boolean;
-  vname: String;
+  endIsLocal: Boolean;
+  vname, endName: String;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'for'
@@ -1083,9 +1092,22 @@ begin
   EmitStoreVar(vname, ln);
   if not IsKeyword('to') then begin Fail('expected ''to''', FLex.Cur().Line); Exit; end;
   FLex.Advance();
-  endVar := NewHiddenVar(vtNumber);
+  // The bound lives where the loop lives: a LOCAL slot inside a function, so a
+  // recursive call gets its own, and a hidden global at top level, where nothing
+  // can re-enter to overwrite it. See the note above this procedure.
+  endIsLocal := FInFunction;
+  if endIsLocal then
+  begin
+    endName := '__for' + IntToStr(FHidden);
+    Inc(FHidden);
+    AddLocal(endName);
+    endVar := LocalIndex(endName);
+  end
+  else
+    endVar := NewHiddenVar(vtNumber);
   ParseExpr();                                     // end value
-  FProg.Emit(opStoreVar, endVar, 0, ln);
+  if endIsLocal then FProg.Emit(opStoreLocal, endVar, 0, ln)
+  else FProg.Emit(opStoreVar, endVar, 0, ln);
 
   // STEP: optional numeric literal (possibly negative); default +1
   step := ValInt(1);
@@ -1113,7 +1135,8 @@ begin
   PushLoop();
   condStart := FProg.Count;
   EmitLoadVar(vname, ln);
-  FProg.Emit(opLoadVar, endVar, 0, ln);
+  if endIsLocal then FProg.Emit(opLoadLocal, endVar, 0, ln)
+  else FProg.Emit(opLoadVar, endVar, 0, ln);
   if down then FProg.Emit(opGE, 0, 0, ln) else FProg.Emit(opLE, 0, 0, ln);
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
   ParseBlockUntil(['next']);

@@ -143,6 +143,10 @@ type
     function AddUserFunc(const AName: String; AEntry, AParamCount: Integer;
                          const ALocalTypes: array of TVarType; ARetType: TVarType): Integer;
     function FindUserFunc(const AName: String; AArgCount: Integer): Integer;
+    { Replace a function's local-type table. The compiler registers a function
+      BEFORE parsing its body -- recursion needs the name to exist -- and the body
+      can add locals the table did not have. }
+    procedure SetUserFuncLocals(AIndex: Integer; const ALocalTypes: array of TVarType);
     procedure AddData(const V: TValue);
     property Count: Integer read FCount;
   end;
@@ -215,6 +219,14 @@ begin
   UserFuncs[UserFuncCount].RetType := ARetType;
   Result := UserFuncCount;
   Inc(UserFuncCount);
+end;
+
+procedure TProgram.SetUserFuncLocals(AIndex: Integer; const ALocalTypes: array of TVarType);
+var i: Integer;
+begin
+  if (AIndex < 0) or (AIndex >= UserFuncCount) then Exit;
+  SetLength(UserFuncs[AIndex].LocalTypes, Length(ALocalTypes));
+  for i := 0 to High(ALocalTypes) do UserFuncs[AIndex].LocalTypes[i] := ALocalTypes[i];
 end;
 
 function TProgram.FindUserFunc(const AName: String; AArgCount: Integer): Integer;

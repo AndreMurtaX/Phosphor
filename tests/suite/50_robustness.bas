@@ -43,3 +43,61 @@ assert_eq(badjson%, 1, "json_parse of empty input reports an error")
 test_case("strings/empty text is an empty list, not one empty line")
 l@ = strings@()
 assert_eq(strings_text(l@, ""), 0, "setting empty text yields count 0")
+
+test_case("num/an out-of-domain argument is the LIBRARY's error, not the RTL's")
+rem acos(2) used to escape as FPC's own "Invalid floating point operation", which
+rem the VM's net reported without naming the function or the value. A caller could
+rem not tell which call in a line had gone wrong.
+caught% = 0
+on error goto dom1
+x = acos(2)
+goto after_dom1
+dom1:
+caught% = 1
+resume next
+after_dom1:
+on error goto 0
+assert_eq(caught%, 1, "acos(2) is an error")
+assert_true(instr(errmsg$(), "acos") > 0, "and the message names the function")
+assert_true(instr(errmsg$(), "domain") > 0, "and says what is wrong")
+
+caught% = 0
+on error goto dom2
+y = ln(0)
+goto after_dom2
+dom2:
+caught% = 1
+resume next
+after_dom2:
+on error goto 0
+assert_eq(caught%, 1, "ln(0) too")
+assert_near(asin(0.5), 0.5235987756, 0.000001, "and the in-domain cases are unchanged")
+assert_near(ln(1), 0, 0.000001, "ln(1) is still 0")
+
+test_case("datetime/a month or year outside its range is refused, not guessed")
+rem daysinamonth(2024, 13) indexed the RTL's month table out of bounds and answered
+rem 65450 as a clean success -- err() was 0 and the program carried on with it.
+caught% = 0
+on error goto dt1
+d% = daysinamonth(2024, 13)
+goto after_dt1
+dt1:
+caught% = 1
+resume next
+after_dt1:
+on error goto 0
+assert_eq(caught%, 1, "month 13 is an error rather than a number")
+assert_eq(daysinamonth(2024, 2), 29, "and February 2024 still has 29 days")
+assert_eq(daysinamonth(2023, 2), 28, "and 2023 has 28")
+
+caught% = 0
+on error goto dt2
+w% = weeksinayear(0)
+goto after_dt2
+dt2:
+caught% = 1
+resume next
+after_dt2:
+on error goto 0
+assert_eq(caught%, 1, "year 0 is refused")
+assert_eq(weeksinayear(2024), 52, "and a real year answers")

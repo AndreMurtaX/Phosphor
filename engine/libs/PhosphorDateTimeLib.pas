@@ -53,12 +53,43 @@ begin E := NoError(); Result := ValInt(DayOfTheWeek(D0(A))); end;      // ISO: M
 // --- leap years and month lengths -------------------------------------------
 function t_isinleapyear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(Ord(IsInLeapYear(D0(A)))); end;
+{ A year or a month that came from the program, checked before it reaches
+  DateUtils. DaysInAMonth(2024, 13) indexed the RTL's month table OUT OF BOUNDS and
+  returned 65450 as a clean success; WeeksInAYear(0) raised EConvertError with the
+  RTL's own words. Both are now the library's error, with the value in it. }
+function YearOk(const AFn: String; Y: Integer; out E: TPhosphorError): Boolean;
+begin
+  Result := (Y >= 1) and (Y <= 9999);
+  if not Result then
+    E := MakeError(peRuntime, AFn + ': ' + IntToStr(Y) + ' is not a year in 1..9999')
+  else
+    E := NoError();
+end;
+
+function MonthOk(const AFn: String; M: Integer; out E: TPhosphorError): Boolean;
+begin
+  Result := (M >= 1) and (M <= 12);
+  if not Result then
+    E := MakeError(peRuntime, AFn + ': ' + IntToStr(M) + ' is not a month in 1..12')
+  else
+    E := NoError();
+end;
+
 function t_daysinayear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DaysInAYear(I0(A))); end;
+begin
+  Result := ValInt(0);
+  if not YearOk('daysinayear', I0(A), E) then Exit;
+  Result := ValInt(DaysInAYear(I0(A)));
+end;
 function t_daysinmonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(DaysInMonth(D0(A))); end;
 function t_daysinamonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DaysInAMonth(I0(A), I1(A))); end;
+begin
+  Result := ValInt(0);
+  if not YearOk('daysinamonth', I0(A), E) then Exit;
+  if not MonthOk('daysinamonth', I1(A), E) then Exit;
+  Result := ValInt(DaysInAMonth(I0(A), I1(A)));
+end;
 
 // --- time-of-day ------------------------------------------------------------
 function t_hourof(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -83,7 +114,11 @@ begin E := NoError(); Result := ValInt(WeekOfTheYear(D0(A))); end;     // answer
 function t_weekofthemonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(WeekOfTheMonth(D0(A))); end;
 function t_weeksinayear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(WeeksInAYear(I0(A))); end;
+begin
+  Result := ValInt(0);
+  if not YearOk('weeksinayear', I0(A), E) then Exit;
+  Result := ValInt(WeeksInAYear(I0(A)));
+end;
 
 // --- incrementing -----------------------------------------------------------
 function t_incday(const A: array of TValue; out E: TPhosphorError): TValue;

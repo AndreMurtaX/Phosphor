@@ -63,12 +63,37 @@ var d: Double;
 begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Floor(d)); end   // BASIC INT: floor
   else begin Err := ToIntError('int'); Result := ValInt(0); end; end;
 
+{ A domain error, in the library's own words. ln(0), acos(2) and friends raised
+  the RTL's own exception -- "Invalid floating point operation" -- which the VM's
+  net turned into a generic runtime error naming neither the function nor the
+  argument. A reader of the message could not tell which call went wrong. }
+function DomainError(const AFn, ANeeds: String; V: Double): TPhosphorError;
+begin
+  Result := MakeError(peRuntime,
+    AFn + ': ' + FloatToStr(V) + ' is outside the domain (needs ' + ANeeds + ')');
+end;
+
 function f_log10(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(Log10(N(Args))); end;
+var d: Double;
+begin
+  d := N(Args);
+  if not (d > 0) then begin Err := DomainError('log10', 'a positive number', d); Result := ValDouble(0); Exit; end;
+  Err := NoError(); Result := ValDouble(Log10(d));
+end;
 function f_log2(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(Log2(N(Args))); end;
+var d: Double;
+begin
+  d := N(Args);
+  if not (d > 0) then begin Err := DomainError('log2', 'a positive number', d); Result := ValDouble(0); Exit; end;
+  Err := NoError(); Result := ValDouble(Log2(d));
+end;
 function f_ln(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(Ln(N(Args))); end;
+var d: Double;
+begin
+  d := N(Args);
+  if not (d > 0) then begin Err := DomainError('ln', 'a positive number', d); Result := ValDouble(0); Exit; end;
+  Err := NoError(); Result := ValDouble(Ln(d));
+end;
 function f_exp(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValDouble(Exp(N(Args))); end;
 
@@ -79,9 +104,19 @@ begin Err := NoError(); Result := ValDouble(Cos(N(Args))); end;
 function f_tan(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValDouble(Tan(N(Args))); end;
 function f_asin(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(ArcSin(N(Args))); end;
+var d: Double;
+begin
+  d := N(Args);
+  if not ((d >= -1) and (d <= 1)) then begin Err := DomainError('asin', '-1 .. 1', d); Result := ValDouble(0); Exit; end;
+  Err := NoError(); Result := ValDouble(ArcSin(d));
+end;
 function f_acos(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(ArcCos(N(Args))); end;
+var d: Double;
+begin
+  d := N(Args);
+  if not ((d >= -1) and (d <= 1)) then begin Err := DomainError('acos', '-1 .. 1', d); Result := ValDouble(0); Exit; end;
+  Err := NoError(); Result := ValDouble(ArcCos(d));
+end;
 function f_atan(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValDouble(ArcTan(N(Args))); end;
 function f_degtorad(const Args: array of TValue; out Err: TPhosphorError): TValue;

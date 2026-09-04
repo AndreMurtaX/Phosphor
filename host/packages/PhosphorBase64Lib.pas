@@ -42,7 +42,19 @@ function f_b64_encode(const Args: array of TValue; out Err: TPhosphorError): TVa
 begin Err := NoError(); Result := ValStr(EncodeStringBase64(Args[0].Str)); end;
 
 function f_b64_decode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(DecodeStringBase64(Args[0].Str)); end;
+begin
+  // The unit's own contract is "returned, never raised", and this was the one path
+  // that broke it: base64_decode$("!!!!") let an EStreamError out of the RTL and
+  // ended the program. The failure is recorded where base64_error() can read it.
+  Err := NoError();
+  try
+    Result := ValStr(DecodeStringBase64(Args[0].Str));
+    B64Err := 0;
+  except
+    Result := ValStr('');
+    B64Err := 1;
+  end;
+end;
 
 // --- URL-safe base64 (RFC 4648 section 5: '-'/'_', padding stripped) --------
 function f_b64_urlencode(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -71,7 +83,13 @@ begin
       '_': s[i] := '/';
     end;
   while (Length(s) mod 4) <> 0 do s := s + '=';   // restore padding for the decoder
-  Result := ValStr(DecodeStringBase64(s));
+  try
+    Result := ValStr(DecodeStringBase64(s));
+    B64Err := 0;
+  except
+    Result := ValStr('');
+    B64Err := 1;
+  end;
 end;
 
 // --- whole-file encode / decode (bytes, no text conversion, no BOM) ---------

@@ -100,6 +100,12 @@ end;
 
 procedure TZipWriter.AddFile(const ADisk, AArchive: String);
 begin
+  // Checked HERE, at the call the program can still react to. AddFileEntry only
+  // records a name: a missing file was reported as a successful add and only failed
+  // later, inside zip_close, where it took the whole archive down with it and left
+  // the writer handle leaked. The caller had already been told it worked.
+  if not FileExists(ADisk) then
+    raise EInOutError.Create('zip_addfile: "' + ADisk + '" does not exist');
   Z.Entries.AddFileEntry(ADisk, AArchive);
 end;
 

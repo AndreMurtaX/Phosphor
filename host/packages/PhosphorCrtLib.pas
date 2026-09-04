@@ -394,7 +394,11 @@ function f_crt_done(const Args: array of TValue; out Err: TPhosphorError): TValu
 begin
   Err := NoError();
   KbdRestore();
-  Result := ValStr('');
+  // A NUMBER. The name carries no suffix and the reference says "-> num", but this
+  // returned a string, so `x = crt_done()` failed with "cannot store string into
+  // number variable" -- the documented shutdown call could not have its result
+  // captured the way crt_init's can.
+  Result := ValInt(0);
 end;
 
 { ---- setup ----------------------------------------------------------------- }

@@ -19,7 +19,7 @@ unit PhosphorImageLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, ExtCtrls, Graphics,
+  SysUtils, Classes, Controls, ExtCtrls, ComCtrls, Graphics,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterImageFuncs(Reg: TPhosphorRegistry);
@@ -88,8 +88,93 @@ var c: TComponent; begin
     if TImage(c).Picture.Graphic <> nil then Result := ValInt(Ord(TImage(c).Picture.Graphic.Empty));
 end;
 
+// --- a shared strip of icons ------------------------------------------------
+{ TImageList is a TComponent, not a TControl: nothing shows it, and the controls
+  that use it hold a reference. It is owned by its handle, so freeing the handle
+  frees the list -- which means a program must outlive the controls pointing at it,
+  the same rule any shared resource has. }
+function f_imagelist(const A: array of TValue; out E: TPhosphorError): TValue;
+var il: TImageList;
+begin
+  E := NoError;
+  il := TImageList.Create(nil);
+  if Length(A) >= 2 then
+  begin
+    il.Width := ArgI32(A[0]);
+    il.Height := ArgI32(A[1]);
+  end;
+  Result := ValHandle(GuiRegister(il, True));
+end;
+
+function f_il_count(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TImageList, c) then Result := ValInt(TImageList(c).Count); end;
+
+function f_il_clear(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TImageList, c) then TImageList(c).Clear; end;
+
+{ Add a picture from a file. Answers the 1-based index it took, the shape
+  strings_add settled on -- a mutator returns information, not a flag. 0 means the
+  file could not be read, with gui_error set. }
+function f_il_addfile(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; bm: TBitmap; pic: TPicture;
+begin
+  E := NoError; Result := ValInt(0);
+  if not GuiResolve(A[0].Hnd, TImageList, c) then Exit;
+  if not FileExists(A[1].Str) then begin GGuiError := 1; Exit; end;
+  pic := TPicture.Create;
+  try
+    try
+      pic.LoadFromFile(A[1].Str);
+    except
+      // A file that is not an image is an ANSWER, not an exception crossing into
+      // BASIC -- the phase-1 contract, which this package honours like the rest.
+      on E2: Exception do begin GGuiError := 1; Exit; end;
+    end;
+    bm := TBitmap.Create;
+    try
+      bm.Assign(pic.Graphic);
+      TImageList(c).Add(bm, nil);
+      Result := ValInt(TImageList(c).Count);   // the index it took, base-1
+    finally bm.Free; end;
+  finally pic.Free; end;
+end;
+
+{ Add an existing bitmap@ instead of a file. }
+function f_il_addbitmap(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; o: TObject;
+begin
+  E := NoError; Result := ValInt(0);
+  if not GuiResolve(A[0].Hnd, TImageList, c) then Exit;
+  if not GuiResolveObj(A[1].Hnd, TBitmap, o) then Exit;
+  TImageList(c).Add(TBitmap(o), nil);
+  Result := ValInt(TImageList(c).Count);
+end;
+
+{ Point a control at the list. Images is object-typed, so control_set@ cannot do
+  it; the three LCL controls that have such a property are handled by name. }
+function f_il_attach(const A: array of TValue; out E: TPhosphorError): TValue;
+var lc, c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TImageList, lc) then Exit;
+  if not GuiResolve(A[1].Hnd, TComponent, c) then Exit;
+  if c is TToolBar then TToolBar(c).Images := TImageList(lc)
+  else if c is TTreeView then TTreeView(c).Images := TImageList(lc)
+  else if c is TListView then TListView(c).SmallImages := TImageList(lc)
+  else GGuiError := 1;   // nothing else here takes an image list
+end;
+
 procedure RegisterImageFuncs(Reg: TPhosphorRegistry);
 begin
+  Reg.Add('imagelist@:',           @f_imagelist);
+  Reg.Add('imagelist@:nn',         @f_imagelist);
+  Reg.Add('imagelist_count:@',     @f_il_count);
+  Reg.Add('imagelist_clear@:@',    @f_il_clear);
+  Reg.Add('imagelist_addfile:@$',  @f_il_addfile);
+  Reg.Add('imagelist_addbitmap:@@', @f_il_addbitmap);
+  Reg.Add('imagelist_attach@:@@',  @f_il_attach);
   Reg.Add('image@:@', @f_image);
   Reg.Add('image_load@:@$', @f_load);
   Reg.Add('image_stretch@:@n', @f_stretch_set); Reg.Add('image_stretch:@', @f_stretch_get);

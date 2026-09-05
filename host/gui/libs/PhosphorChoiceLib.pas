@@ -26,7 +26,7 @@ unit PhosphorChoiceLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, StdCtrls, CheckLst,
+  SysUtils, Classes, Controls, StdCtrls, CheckLst, ExtCtrls,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterChoiceFuncs(Reg: TPhosphorRegistry);
@@ -59,7 +59,9 @@ begin
   Result := nil;
   if not GuiResolve(AId, AClass, c) then Exit;
   if c is TComboBox then Result := TComboBox(c).Items
-  else if c is TListBox then Result := TListBox(c).Items;
+  else if c is TListBox then Result := TListBox(c).Items
+  else if c is TRadioGroup then Result := TRadioGroup(c).Items
+  else if c is TCheckGroup then Result := TCheckGroup(c).Items;
 end;
 
 function IndexGet(AId: Int64; AClass: TClass): Integer;   // 1-based, 0 = none
@@ -193,6 +195,91 @@ begin
   if GuiResolve(A[0].Hnd, TCheckListBox, c) then begin n := ArgI32(A[1]); if (n >= 1) and (n <= TCheckListBox(c).Items.Count) then Result := ValInt(Ord(TCheckListBox(c).Checked[n-1])); end;
 end;
 
+// --- the two grouped-choice controls ---------------------------------------
+// A bordered, captioned box that owns its buttons: the radio group gives ONE answer
+// (ItemIndex), the check group gives one per item (Checked[i]). Both are what a
+// groupbox@ full of radiobutton@ children only approximates -- the group manages
+// the mutual exclusion and the layout itself.
+function f_radiogroup(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; g: TRadioGroup;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  g := TRadioGroup.Create(pc); g.Parent := TWinControl(pc);
+  if Length(A) >= 2 then g.Caption := A[1].Str;
+  Result := ValHandle(GuiRegister(g, False));
+end;
+function f_checkgroup(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; g: TCheckGroup;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  g := TCheckGroup.Create(pc); g.Parent := TWinControl(pc);
+  if Length(A) >= 2 then g.Caption := A[1].Str;
+  Result := ValHandle(GuiRegister(g, False));
+end;
+
+function f_rg_add(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then s.Add(A[1].Str); Result := A[0]; end;
+function f_rg_count(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then Result := ValInt(s.Count) else Result := ValInt(0); end;
+function f_rg_item(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; n: Integer;
+begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TRadioGroup);
+  if s <> nil then begin n := ArgI32(A[1]); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
+function f_rg_clear(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then s.Clear; Result := A[0]; end;
+// base-1 out, base-1 in; 0 means nothing is chosen, matching ItemIndex's own -1
+function f_rg_index_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TRadioGroup, c) then Result := ValInt(TRadioGroup(c).ItemIndex + 1); end;
+function f_rg_index_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TRadioGroup, c) then TRadioGroup(c).ItemIndex := ArgI32(A[1]) - 1; end;
+function f_rg_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValStr('');
+  if GuiResolve(A[0].Hnd, TRadioGroup, c) then Result := ValStr(TRadioGroup(c).Caption); end;
+function f_rg_caption_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TRadioGroup, c) then TRadioGroup(c).Caption := A[1].Str; end;
+function f_rg_onchange(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TRadioGroup, c) then
+    TRadioGroup(c).OnClick := GuiNotifyHandler(AVM, c, 'onchange', A[1].Str, A[0].Hnd); end;
+
+function f_cg_add(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TCheckGroup); if s <> nil then s.Add(A[1].Str); Result := A[0]; end;
+function f_cg_count(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TCheckGroup); if s <> nil then Result := ValInt(s.Count) else Result := ValInt(0); end;
+function f_cg_item(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; n: Integer;
+begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TCheckGroup);
+  if s <> nil then begin n := ArgI32(A[1]); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
+function f_cg_clear(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TCheckGroup); if s <> nil then s.Clear; Result := A[0]; end;
+function f_cg_checked_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer;
+begin E := NoError; Result := ValInt(0);
+  if not GuiResolve(A[0].Hnd, TCheckGroup, c) then Exit;
+  n := ArgI32(A[1]);
+  if (n >= 1) and (n <= TCheckGroup(c).Items.Count) then
+    Result := ValInt(Ord(TCheckGroup(c).Checked[n-1]))
+  else GGuiError := 1; end;
+function f_cg_checked_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer;
+begin E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TCheckGroup, c) then Exit;
+  n := ArgI32(A[1]);
+  if (n >= 1) and (n <= TCheckGroup(c).Items.Count) then
+    TCheckGroup(c).Checked[n-1] := ArgI32(A[2]) <> 0
+  else GGuiError := 1; end;
+function f_cg_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValStr('');
+  if GuiResolve(A[0].Hnd, TCheckGroup, c) then Result := ValStr(TCheckGroup(c).Caption); end;
+function f_cg_caption_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TCheckGroup, c) then TCheckGroup(c).Caption := A[1].Str; end;
+
 procedure RegisterChoiceFuncs(Reg: TPhosphorRegistry);
 begin
   // togglebox
@@ -201,6 +288,21 @@ begin
   Reg.Add('togglebox_checked@:@n', @f_tg_checked_set); Reg.Add('togglebox_checked:@', @f_tg_checked_get);
   Reg.AddHost('togglebox_onchange@:@$', @f_tg_onchange);
   // check list box
+  Reg.Add('radiogroup@:@',  @f_radiogroup);  Reg.Add('radiogroup@:@$', @f_radiogroup);
+  Reg.Add('radiogroup_add@:@$',      @f_rg_add);
+  Reg.Add('radiogroup_count:@',      @f_rg_count);
+  Reg.Add('radiogroup_item$:@n',     @f_rg_item);
+  Reg.Add('radiogroup_clear@:@',     @f_rg_clear);
+  Reg.Add('radiogroup_itemindex:@',  @f_rg_index_get);   Reg.Add('radiogroup_itemindex@:@n', @f_rg_index_set);
+  Reg.Add('radiogroup_caption$:@',   @f_rg_caption_get); Reg.Add('radiogroup_caption@:@$',   @f_rg_caption_set);
+  Reg.AddHost('radiogroup_onchange@:@$', @f_rg_onchange);
+  Reg.Add('checkgroup@:@',  @f_checkgroup);  Reg.Add('checkgroup@:@$', @f_checkgroup);
+  Reg.Add('checkgroup_add@:@$',      @f_cg_add);
+  Reg.Add('checkgroup_count:@',      @f_cg_count);
+  Reg.Add('checkgroup_item$:@n',     @f_cg_item);
+  Reg.Add('checkgroup_clear@:@',     @f_cg_clear);
+  Reg.Add('checkgroup_checked:@n',   @f_cg_checked_get); Reg.Add('checkgroup_checked@:@nn', @f_cg_checked_set);
+  Reg.Add('checkgroup_caption$:@',   @f_cg_caption_get); Reg.Add('checkgroup_caption@:@$',  @f_cg_caption_set);
   Reg.Add('checklistbox@:@', @f_checklist);
   Reg.Add('checklist_add@:@$', @f_clb_add);   Reg.Add('checklist_count:@', @f_clb_count);
   Reg.Add('checklist_item$:@n', @f_clb_item);

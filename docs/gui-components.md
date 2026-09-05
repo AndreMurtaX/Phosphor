@@ -5,16 +5,21 @@ are grouped into isolated packages, and in what order they were built. This bega
 a study written when increment 3 (form + button + one event) was all that stood; it
 is now also the record of what was built from it.
 
-> **STATUS 2026-09-05 — the plan is built, with named exceptions.** All **17**
-> proposed packages exist under `host/gui/libs/`, registering **311 distinct names**
-> (321 registry entries), covered by 13 byte-exact test files that run headless on
-> Windows and Linux (`scripts/test-gui`). The **Verdict** column below now reads
-> *Built* or *Not built*, measured against the registry rather than intended. Sixteen
-> in-scope items in this document were never built and are marked as such — the
-> largest being the event model: of the eight LCL signatures named under "The event
-> model", **only `TNotifyEvent` has a bridge**, so key, mouse and close events cannot
-> yet be bound. A name marked *Not built* does not exist under any spelling; copying
-> it out of this page gives "unknown function".
+> **STATUS 2026-09-05 — the plan is built.** All **17** proposed packages exist
+> under `host/gui/libs/`, registering **412 distinct names**, covered by 15
+> byte-exact test files that run headless on Windows and Linux (`scripts/test-gui`).
+> The **Verdict** column below is measured against the registry, not intended.
+>
+> An audit against the code on 2026-09-05 found sixteen in-scope items this page
+> named and nobody had built — the largest being seven of the eight event
+> signatures. **All of them have since been built**, in the same day: the full event
+> model, `inputbox$`, `fontdialog@`, `openpicture$`/`savepicture$`, `idletimer@`,
+> `radiogroup@`, `checkgroup@`, `popupmenu@`, `tabcontrol@`, `imagelist@`,
+> `trayicon@`, `paintbox@` with the arc/pie/polygon/polyline primitives, and the
+> backbone helpers `control_parent@`, `control_anchors`, `control_tabstop`,
+> `control_taborder`, plus the `BorderSpacing`/`Constraints` this page claimed were
+> exposed and were not. What remains deliberately unbuilt is listed under
+> **Recommended build order**, with the reason.
 
 Two inputs are crossed:
 
@@ -77,20 +82,21 @@ Every visual LCL control descends from `TControl` / `TWinControl` and shares a
 large published-property set. Rather than repeat it per control, one package
 exposes it generically for **any** control handle:
 
-- **Geometry / state (built):** `control_left/top/width/height`, `control_align`,
-  `control_visible`, `control_enabled`, `control_color`, `control_hint$`,
-  `control_cursor`, `control_tag`, font (`control_fontname$`, `control_fontsize`,
-  `control_fontcolor`, `control_bold/italic/underline`).
-  *Planned but never built as named helpers:* `control_anchors`, `control_tabstop`,
-  `control_taborder`. The **capability is present** through the bridge below —
-  `control_set@(h@, "Anchors", "akLeft,akRight")` and `control_get$(h@, "Anchors")`
-  round-trip, as do `TabStop` and `TabOrder` — only the shorthand names are absent.
-- **Verbs (built):** `control_move@(x,y)`, `control_size@(w,h)`,
+- **Geometry / state:** `control_left/top/width/height`, `control_align`,
+  `control_anchors$`/`control_anchors@`, `control_visible`, `control_enabled`,
+  `control_color`, `control_hint$`, `control_cursor`, `control_tag`,
+  `control_tabstop`, `control_taborder`, `control_spacing`, the four
+  `control_min/maxwidth/height` constraints, and font (`control_fontname$`,
+  `control_fontsize`, `control_fontcolor`, `control_bold/italic/underline`).
+- **Verbs:** `control_move@(x,y)`, `control_size@(w,h)`,
   `control_bounds@(x,y,w,h)`, `control_bringtofront@`, `control_sendtoback@`,
-  `control_setfocus@`, `control_focused`, `control_invalidate@`, `control_free`.
-  *Planned but never built:* `control_parent@` — and unlike the three above it is
-  **not** reachable through the bridge, because `TControl.Parent` is public rather
-  than published, so RTTI cannot see it. A control's parent is fixed at construction.
+  `control_setfocus@`, `control_focused`, `control_invalidate@`,
+  `control_parent@(child@, newparent@)`, `control_free`. `control_parent@` has to be
+  a named helper: `TControl.Parent` is public rather than published, so RTTI — and
+  therefore the bridge — cannot see it.
+- **Events:** the key and mouse binders listed under *The event model* below, plus
+  the synthesisers (`control_keydown@`, `control_mousedown@`, …) that make them
+  reachable without a window manager.
 - **The generic property bridge.** LCL controls carry full published-property
   RTTI, so `control_set@(h@, "PropName", value)` and `control_get(h@, "PropName")`
   / `control_get$(...)` reach **every** published property by name through
@@ -114,21 +120,44 @@ function on_key(sender@, key%, mods$)   rem TKeyEvent: key code + "S C A" modifi
 function on_mouse(sender@, button%, x%, y%, mods$)  rem TMouseEvent: button 0/1/2
 ```
 
-**Only the first of these is built.** The plan named eight LCL event signatures to
-marshal (from `Controls`/`Forms`): `TNotifyEvent`, `TKeyEvent`, `TKeyPressEvent`,
-`TMouseEvent`, `TMouseMoveEvent`, `TMouseWheelEvent`, `TCloseEvent`,
-`TCloseQueryEvent`, each getting a `TGuiEventBridge` variant packing its arguments
-into a `CallUserFunc(name, [...])` call.
+**All eight are built.** Each of the LCL signatures — `TNotifyEvent`, `TKeyEvent`,
+`TKeyPressEvent`, `TMouseEvent`, `TMouseMoveEvent`, `TMouseWheelEvent`,
+`TCloseEvent`, `TCloseQueryEvent` — has a `TGuiEventBridge` variant packing its
+arguments into a `CallUserFunc(name, [...])` call. Modifier keys encode as a short
+string (`"S C A"` = shift/ctrl/alt, joined by spaces) and mouse button as 0/1/2.
 
-Increment 3 built the `TNotifyEvent` variant and **no other has been added since**.
-All 14 registered binders — `button_onclick@`, `edit_onchange@`, `timer_ontimer@`
-and the rest — are `TNotifyEvent`, which carries only the sender. So the two handler
-shapes shown above (`on_key(sender@, key%, mods$)` and
-`on_mouse(sender@, button%, x%, y%, mods$)`) describe an interface that **does not
-exist yet**: a program cannot bind a key press, a mouse click with coordinates, a
-wheel, or a form-close query. This is the largest unbuilt item in this document.
-When the remaining seven are built, modifier keys encode as a short string
-(`"S C A"` = shift/ctrl/alt) and mouse button as 0/1/2, matching the reference.
+Key and mouse events bind on **any control** rather than being repeated per widget:
+
+| binder | handler shape |
+|---|---|
+| `control_onkeydown@` / `control_onkeyup@` | `on_key(sender@, key%, mods$)` |
+| `control_onkeypress@` | `on_press(sender@, ch$)` |
+| `control_onmousedown@` / `control_onmouseup@` | `on_mouse(sender@, button%, x%, y%, mods$)` |
+| `control_onmousemove@` | `on_move(sender@, x%, y%, mods$)` |
+| `control_onmousewheel@` | `on_wheel(sender@, delta%, x%, y%, mods$)` |
+| `form_onclose@` / `form_onclosequery@` | `on_close(sender@)` |
+
+**Two of them read the handler's answer back**, because their LCL signature has a
+`var` parameter whose whole purpose is to let the handler decide: returning the
+boolean `false` from an `OnCloseQuery` handler vetoes the close, and returning `true`
+from a wheel handler consumes the event. **Only an explicit boolean counts** — a
+handler that answers a number, or falls off its end, leaves the default alone,
+because the other choice makes a forgotten `return` into a window that cannot be
+closed. For the same reason `TKeyEvent`'s `var Key` and `TCloseEvent`'s
+`var CloseAction` are deliberately *not* wired to the return value.
+
+`form_onclose@` **chains** rather than replaces: the form's own closer is what makes
+the window's X button end the program, so a program's handler runs first and the
+terminator still runs after.
+
+Events can also be **synthesised** — `control_keydown@`, `control_mousedown@`,
+`control_mousewheel`, … — the way `button_click` already synthesised a click. That
+is what makes the whole surface reachable from a headless suite, and it is what a
+macro or an accessibility path needs anyway.
+
+A handler that answers a bool is named with `?`, and **the name it is bound by
+carries the `?` too**, because the suffix is part of the name:
+`form_onclosequery@(f@, "on_query?")`.
 
 Caveat carried from the reference and confirmed for LCL: **a programmatic change
 does not raise its event** (setting `Value` does not fire `OnChange` the way a user
@@ -152,17 +181,19 @@ tests therefore assert *wiring* (bind + read-back, and `button_click` to fire
 - **Lifetime.** Controls live in the engine handle registry wrapped in
   `TGuiHandle`; only a form owns its tree, so `ResetHandles` frees each tree once
   (increment 3). LCL's `TComponent.FreeNotification` is the native hook to
-  invalidate a child's handle when its parent is freed — **still not wired.** The
-  condition this line set ("as breadth grows") has been met: 17 packages, 311 names,
-  13 test files. Until it is wired, a child handle whose parent form was freed is a
-  stale handle the registry cannot know about.
+  invalidate a child's handle when its parent is freed — **still not wired**, and
+  the one item from the 2026-09-05 audit deliberately left for its own increment,
+  since it changes handle lifetime rather than adding a control. Until it is wired,
+  a child handle whose parent form was freed is a stale handle the registry cannot
+  know about.
 - **Alignment is LCL-native and smaller.** `TAlign` has 7 values
   (`alNone/alTop/alBottom/alLeft/alRight/alClient/alCustom`), not FMX's 20. Phosphor
-  exposes those plus **anchors** (`akLeft/akTop/akRight/akBottom`), through
-  `control_align@` and the property bridge. `BorderSpacing` and `Constraints` are
-  **not** exposed: both are class-typed sub-objects, which the bridge refuses (it
-  reaches ordinals, floats, strings, enums and sets, and records `gui_error` 3 for
-  anything else). Reaching them would need named helpers that do not exist yet.
+  exposes those plus **anchors** (`akLeft/akTop/akRight/akBottom`) through
+  `control_align@` and `control_anchors@/$`. `BorderSpacing` and `Constraints` are
+  class-typed sub-objects, which the property bridge refuses (it reaches ordinals,
+  floats, strings, enums and sets, and records `gui_error` 3 for anything else), so
+  they have named helpers instead: `control_spacing@/`, `control_minwidth@/`,
+  `control_maxwidth@/`, `control_minheight@/`, `control_maxheight@/`.
 
 ## The complete LCL palette — inventory and scope
 
@@ -184,10 +215,10 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 | TListBox | `listbox@` | **Built** — helpers are `list_*` |
 | TGroupBox | `groupbox@` | **Built** |
 | TPanel | `panel@` | **Built** |
-| TRadioGroup / TCheckGroup | `radiogroup@` / `checkgroup@` | **Not built** (was Tier 2). No constructor, so the bridge cannot reach them either. Nearest shipped: `groupbox@` with `radiobutton@` children, or `checklistbox@` |
+| TRadioGroup / TCheckGroup | `radiogroup@` / `checkgroup@` | **Built** — helpers use the full prefix (`radiogroup_itemindex@`, `checkgroup_checked@`), not an abbreviation |
 | TScrollBar | `scrollbar@` | **Built** |
 | TFrame | — | Out (design-time composite; no BASIC analogue) |
-| TMainMenu / TPopupMenu | `mainmenu@` / `menuitem@` | **Built**; `popupmenu@` **not built** (was Tier 2) |
+| TMainMenu / TPopupMenu | `mainmenu@` / `popupmenu@` / `menuitem@` | **Built**. `popupmenu@(ctl@)` creates AND attaches, since `PopupMenu` is object-typed and no bridge reaches it; `popupmenu_attach@` shares one menu with a second control |
 | TActionList | — | Defer (an action/command layer; later) |
 
 ### Additional
@@ -197,18 +228,18 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 | TStaticText | `statictext@` | **Built** |
 | TShape | `shape@` | **Built** (rect/ellipse/circle/roundrect/triangle/star) |
 | TBevel | `bevel@` | **Built** |
-| TPaintBox | `paintbox@` | **Not built** (was Tier 4). What shipped instead is `bitmap@` + nine `canvas_*` primitives drawing onto an off-screen bitmap, shown with `image_setbitmap@` — custom drawing without a live paint event |
+| TPaintBox | `paintbox@` + `canvas_*` | **Built**. The canvas target is now anything with a canvas — a `bitmap@` or a `paintbox@` — so the same drawing calls serve both; `paintbox_onpaint@` draws when the widget is asked to paint |
 | TSplitter | `splitter@` | **Built** |
 | TScrollBox | `scrollbox@` | **Built** |
 | TFlowPanel | `flowpanel@` | Defer |
 | TCheckListBox | `checklistbox@` | **Built** — helpers are `checklist_*` |
-| TStringGrid / TDrawGrid | `stringgrid@` | **Built**. `drawgrid@` **not built** — and now Defer rather than Tier: an owner-drawn grid needs an `OnDrawCell` bridge, which the one-signature event model cannot carry |
+| TStringGrid / TDrawGrid | `stringgrid@` | **Built**. `drawgrid@` **Defer** — an owner-drawn grid needs an `OnDrawCell` bridge, whose signature carries a cell rect and a canvas; that is a drawing protocol, not another event, and `stringgrid@` covers the tabular case |
 | TValueListEditor | `valuelist@` | Defer |
 | TColorBox / TColorListBox | `colorbox@` | Defer |
 | TMaskEdit | `maskedit@` | **Built** |
 | TLabeledEdit | `labelededit@` | Defer |
 | TPairSplitter | `pairsplitter@` | Defer |
-| TControlBar / TTrayIcon | — / `trayicon@` | Defer / **not built** (was Tier 4; untestable in a headless suite) |
+| TControlBar / TTrayIcon | — / `trayicon@` | Defer / **Built** — configured headless (`trayicon_hint@`, `trayicon_show@`); clicking it needs a running message loop, like every other user gesture |
 
 ### Common Controls
 | Component | Phosphor name | Verdict |
@@ -216,7 +247,7 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 | TTrackBar | `trackbar@` | **Built** |
 | TProgressBar | `progressbar@` | **Built** |
 | TPageControl / TTabSheet | `pagecontrol@` / `tabsheet@` | **Built** |
-| TTabControl | `tabcontrol@` | **Not built** (was Tier 3; the layout table never assigned it a package) |
+| TTabControl | `tabcontrol@` | **Built** (in `PhosphorContainerLib`, which the layout table had never assigned it to) |
 | TTreeView | `treeview@` / `treenode@` | **Built** |
 | TListView | `listview@` / `listitem@` | **Built** |
 | TStatusBar | `statusbar@` | **Built** |
@@ -224,18 +255,18 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 | TUpDown | `updown@` | **Built** (same contradiction as TToolBar; it was built) |
 | THeaderControl | — | Defer |
 | TCoolBar | — | Out (niche) |
-| TImageList | `imagelist@` | **Not built** (Tier 4 here, Tier 2 in the package table — the document contradicted itself) |
+| TImageList | `imagelist@` | **Built**. Not a control: `imagelist_attach@` points a `toolbar@`, `treeview@` or `listview@` at it, because `Images` is object-typed |
 
 ### Dialogs (high value, low cost — no form lifecycle to manage)
 | Component | Phosphor name | Verdict |
 |---|---|---|
 | ShowMessage / MessageDlg | `msgbox` / `msgbox_confirm` | **Built** — the yes/no form is spelled `msgbox_confirm`, not `msgbox_yesno` |
-| InputQuery / InputBox | `inputbox$` | **Not built** — the only Tier 1 item in this document with no implementation and no substitute |
+| InputQuery / InputBox | `inputbox$` | **Built** — `inputbox$(prompt$)`, `(prompt$, default$)`, `(title$, prompt$, default$)`. Modal, so interactive-host only. It cannot distinguish cancel from an empty answer; LCL returns the default on cancel |
 | TOpenDialog / TSaveDialog | `openfile$` / `savefile$` | **Built** (also the retained `opendialog@` / `savedialog@` with `dialog_filter@`, `dialog_title@`, `dialog_execute`) |
 | TSelectDirectoryDialog | `selectdir$` | **Built** (also `selectdirdialog@`) |
 | TColorDialog | `colordialog@` | **Built** — as a retained handle, not the one-shot `colordialog` this row promised: `colordialog@()`, `dialog_execute()`, `colordialog_color()` |
-| TFontDialog | `fontdialog@` | **Not built** (was Tier 2). `control_fontname@`/`fontsize@`/`fontcolor@` set a font; they do not ask the user to choose one |
-| TOpenPictureDialog / TSavePictureDialog | `openpicture$` / `savepicture$` | **Not built** (was Tier 3). `openfile$` with an image filter covers most of it, without the preview pane |
+| TFontDialog | `fontdialog@` | **Built** — `fontdialog_fontname@/$`, `fontdialog_fontsize@/`, `fontdialog_fontcolor@/`, executed through the shared `dialog_execute` |
+| TOpenPictureDialog / TSavePictureDialog | `openpicture$` / `savepicture$` | **Built**, with the preview pane `openfile$` does not have |
 | TFindDialog / TReplaceDialog | — | Defer |
 | TCalendarDialog / TCalculatorDialog | `calendardialog` / `calcdialog` | Defer |
 
@@ -255,7 +286,7 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 ### System / Data Controls
 | Component | Verdict |
 |---|---|
-| TTimer / TIdleTimer | `timer@` **built** (needs the message loop, i.e. the interactive host); `idletimer@` **not built** |
+| TTimer / TIdleTimer | `timer@` and `idletimer@` both **built**. Every `timer_*` helper resolves the common base, so the two are interchangeable through the same surface |
 | TAsyncProcess | Defer (a process lib, not GUI) |
 | THTMLHelp… | Out |
 | **TDB\*** (TDBGrid, TDBEdit, TDBNavigator, …, 15 controls) | **Out** — data-aware controls need `Data.DB` and a dataset, the same external-dependency line phase 1 drew for sqlite/http/rag. A future data phase. |
@@ -263,8 +294,8 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 ### FMX-only reference vocabulary → LCL disposition
 | Reference feature | LCL disposition |
 |---|---|
-| Shapes as controls (`rectangle#`/`circle#`/`arc#`/`pie#`/`callout#`/`line#`/`roundrect#`/`ellipse#`) | Partly `shape@` (TShape: rect/ellipse/circle/roundrect/triangle/star); the rest via `bitmap@` + `canvas_*` drawn off-screen and shown with `image_setbitmap@`. `paintbox@` was never built, and `canvas_*` has no arc, pie, polygon or polyline — so arc/pie/callout stay unanswered |
-| `path#` retained vector path | `canvas_*` immediate-mode drawing onto a `bitmap@`; the nine shipped primitives are moveto/lineto/rectangle/fillrect/ellipse/textout plus pen and brush settings — **no** Polyline, Polygon or Arc, and no retained path object |
+| Shapes as controls (`rectangle#`/`circle#`/`arc#`/`pie#`/`callout#`/`line#`/`roundrect#`/`ellipse#`) | `shape@` (TShape: rect/ellipse/circle/roundrect/triangle/star) for a live filled shape; everything else via `canvas_*` on a `bitmap@` or a `paintbox@`, now including `canvas_arc@`, `canvas_pie@`, `canvas_line@`, `canvas_roundrect@`, `canvas_polygon@` and `canvas_polyline@`. Only `callout#` has no answer — it is a speech bubble, drawable but not a primitive |
+| `path#` retained vector path | `canvas_*` immediate-mode drawing onto a `bitmap@` or a `paintbox@`, including Polyline, Polygon, Arc and Pie. Points are written `"x,y x,y x,y"`; angles are in DEGREES, not the LCL's sixteenths. Still no retained path object, by design — that is the scene graph this project does not have |
 | ~64 `effect#` bitmap filters | **Out** — no LCL compositor to filter native widgets |
 | `floatani#`/`colorani#`/`pathani#`/… animations | **Out** now; timer-driven property tweening is the native path, revisit after breadth |
 | per-control `opacity`, `rotation` | **Out** — native widgets don't composite; `TShape`/canvas can rotate drawings, widgets cannot |
@@ -326,21 +357,21 @@ green **headless on Windows and Linux** (the increment-3 harness), the interacti
 host exercised by hand. Deferred throughout, as in phase 1: DB controls
 (`Data.DB`), media, FMX effects/animations, and the niche palette entries.
 
-**All six steps were carried out** — 17 units, 311 names, 13 byte-exact test files
-green on both OSes. What the order did *not* deliver, and what a seventh step would
-be, in the order the gaps cost most:
+**All six steps were carried out**, and a seventh closed the sixteen items an audit
+found named-but-unbuilt: 17 units, **412 names**, 15 byte-exact test files green on
+both OSes.
 
-1. **The other seven event bridges.** Key, mouse, wheel and close events cannot be
-   bound at all. Everything below is small next to this.
-2. **`inputbox$`** — a Tier 1 dialog promised three times in this document, one
-   registration's worth of work, with no substitute.
-3. **`TComponent.FreeNotification`** — the invalidation hook this page said would be
-   wired "as breadth grows". Breadth grew.
-4. **The missing constructors**, cheapest first: `fontdialog@` and `idletimer@`
-   (each mirrors something already shipped), `radiogroup@`/`checkgroup@`,
-   `popupmenu@` (plus a `control_popupmenu@` assignment helper), `tabcontrol@`.
-5. **The named backbone helpers** `control_parent@` (not bridge-reachable) and
-   `control_anchors`/`tabstop`/`taborder` (bridge-reachable today, so shorthand only).
-6. **Nice to have, or to drop:** `imagelist@`, `openpicture$`/`savepicture$`,
-   `trayicon@`, a real `paintbox@` with an `OnPaint` bridge, and `canvas_*` polygon
-   and arc primitives.
+What is still deliberately open, and why:
+
+1. **`TComponent.FreeNotification`.** The invalidation hook this page said would be
+   wired "as breadth grows". Breadth grew, and this is the one audit item held back
+   on purpose: it changes handle LIFETIME rather than adding a control, so it earns
+   its own increment and its own tests for the stale-child case.
+2. **`drawgrid@`.** Reclassified from Tier 3 to Defer. `OnDrawCell` hands the handler
+   a cell rectangle and a canvas to draw into — a drawing protocol, not another
+   event signature — and `stringgrid@` already covers the tabular case.
+3. **The palette entries this document always marked Out or Defer**: DB controls
+   (`Data.DB`), media, FMX effects and animations, `TFrame`, `TActionList`,
+   `TFlowPanel`, `TValueListEditor`, the `TEditButton` family, and the shell views.
+4. **`callout#`** from the FMX vocabulary — a speech bubble. Drawable with the
+   canvas primitives now present, but not a control and not a primitive.

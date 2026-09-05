@@ -18,7 +18,7 @@ unit PhosphorMiscLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, Calendar, Dialogs, Graphics,
+  SysUtils, Classes, Controls, Calendar, Dialogs, ExtCtrls, Graphics,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterMiscFuncs(Reg: TPhosphorRegistry);
@@ -50,8 +50,47 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorButton, c) 
 function f_cbtn_color_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorButton, c) then Result := ValInt(TColorButton(c).ButtonColor) else Result := ValInt(0); end;
 
+// --- the notification area --------------------------------------------------
+{ A tray icon has no parent and is not shown by a form: it lives in the desktop's
+  notification area for as long as its handle does. It needs a running message loop
+  to be clicked, so the headless suite pins its CONFIGURATION -- the same line the
+  dialog package draws for its modal Execute. }
+function f_trayicon(const A: array of TValue; out E: TPhosphorError): TValue;
+var t: TTrayIcon;
+begin
+  E := NoError;
+  t := TTrayIcon.Create(nil);   // no owner: the handle wrapper owns it
+  t.Visible := False;
+  Result := ValHandle(GuiRegister(t, True));
+end;
+function f_ti_hint_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValStr('');
+  if GuiResolve(A[0].Hnd, TTrayIcon, c) then Result := ValStr(TTrayIcon(c).Hint); end;
+function f_ti_hint_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTrayIcon, c) then TTrayIcon(c).Hint := A[1].Str; end;
+function f_ti_visible_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TTrayIcon, c) then Result := ValInt(Ord(TTrayIcon(c).Visible)); end;
+function f_ti_show(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTrayIcon, c) then TTrayIcon(c).Visible := True; end;
+function f_ti_hide(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTrayIcon, c) then TTrayIcon(c).Visible := False; end;
+function f_ti_onclick(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTrayIcon, c) then
+    TTrayIcon(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', A[1].Str, A[0].Hnd); end;
+
 procedure RegisterMiscFuncs(Reg: TPhosphorRegistry);
 begin
+  Reg.Add('trayicon@:',          @f_trayicon);
+  Reg.Add('trayicon_hint$:@',    @f_ti_hint_get);  Reg.Add('trayicon_hint@:@$', @f_ti_hint_set);
+  Reg.Add('trayicon_visible:@',  @f_ti_visible_get);
+  Reg.Add('trayicon_show@:@',    @f_ti_show);
+  Reg.Add('trayicon_hide@:@',    @f_ti_hide);
+  Reg.AddHost('trayicon_onclick@:@$', @f_ti_onclick);
   Reg.Add('calendar@:@', @f_calendar);
   Reg.Add('calendar_date@:@n', @f_cal_date_set); Reg.Add('calendar_date:@', @f_cal_date_get);
   Reg.Add('colorbutton@:@', @f_colorbutton);

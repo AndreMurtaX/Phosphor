@@ -46,6 +46,8 @@ begin
   if not GuiResolve(A[0].Hnd, TComponent, c) then begin Result := ValHandle(0); Exit; end;
   if c is TMainMenu then
     item := TMenuItem.Create(TMainMenu(c))
+  else if c is TPopupMenu then
+    item := TMenuItem.Create(TPopupMenu(c))
   else if c is TMenuItem then
     item := TMenuItem.Create(TMenuItem(c).Owner)
   else
@@ -55,7 +57,8 @@ begin
     Exit;
   end;
   if Length(A) >= 2 then item.Caption := A[1].Str;
-  if c is TMainMenu then TMainMenu(c).Items.Add(item)
+  if c is TPopupMenu then TPopupMenu(c).Items.Add(item)
+  else if c is TMainMenu then TMainMenu(c).Items.Add(item)
   else TMenuItem(c).Add(item);
   Result := ValHandle(GuiRegister(item, False));
 end;
@@ -94,12 +97,37 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStatusBar, c) th
 function f_statusbar_text_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStatusBar, c) then Result := ValStr(TStatusBar(c).SimpleText) else Result := ValStr(''); end;
 
+{ A context menu, created on and attached to the control it belongs to. Attaching
+  is the half a property bridge cannot do: PopupMenu is object-typed, so no
+  set-by-name reaches it, which is why the constructor takes the control. }
+function f_popupmenu(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; pm: TPopupMenu;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TControl, c) then begin Result := ValHandle(0); Exit; end;
+  pm := TPopupMenu.Create(c);
+  TControl(c).PopupMenu := pm;
+  Result := ValHandle(GuiRegister(pm, False));   // owned by the control
+end;
+
+{ Attach an existing popup to another control, so one menu can serve several. }
+function f_popup_attach(const A: array of TValue; out E: TPhosphorError): TValue;
+var pmc, c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TPopupMenu, pmc) then Exit;
+  if not GuiResolve(A[1].Hnd, TControl, c) then Exit;
+  TControl(c).PopupMenu := TPopupMenu(pmc);
+end;
+
 procedure RegisterMenuFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('toolbar@:@', @f_toolbar);
   Reg.Add('statusbar@:@', @f_statusbar);
   Reg.Add('statusbar_text@:@$', @f_statusbar_text_set); Reg.Add('statusbar_text$:@', @f_statusbar_text_get);
   Reg.Add('mainmenu@:@', @f_mainmenu);
+  Reg.Add('popupmenu@:@', @f_popupmenu);
+  Reg.Add('popupmenu_attach@:@@', @f_popup_attach);
   Reg.Add('menuitem@:@',  @f_menuitem);
   Reg.Add('menuitem@:@$', @f_menuitem);
   Reg.Add('menuitem_caption@:@$', @f_mi_caption_set);

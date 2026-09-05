@@ -99,6 +99,44 @@ var c: TComponent; n: Integer; begin E := NoError; if GuiResolve(A[0].Hnd, TBeve
 function f_bevel_style_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TBevel, c) then Result := ValInt(Ord(TBevel(c).Style)) else Result := ValInt(0); end;
 
+{ TTabControl is the flat sibling of TPageControl: one page, a row of tabs, and
+  the program swaps the content itself on tabcontrol_onchange@. pagecontrol@ owns a
+  TTabSheet per tab; this one does not, which is what makes it the right choice when
+  the tabs all show the same controls with different data. }
+function f_tabcontrol(const A: array of TValue; out E: TPhosphorError): TValue;
+var pc: TComponent; t: TTabControl;
+begin
+  E := NoError;
+  if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
+  t := TTabControl.Create(pc); t.Parent := TWinControl(pc);
+  Result := ValHandle(GuiRegister(t, False));
+end;
+function f_tc_add(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTabControl, c) then TTabControl(c).Tabs.Add(A[1].Str); end;
+function f_tc_count(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TTabControl, c) then Result := ValInt(TTabControl(c).Tabs.Count); end;
+function f_tc_tab(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; n: Integer;
+begin E := NoError; Result := ValStr('');
+  if not GuiResolve(A[0].Hnd, TTabControl, c) then Exit;
+  n := ArgI32(A[1]);
+  if (n >= 1) and (n <= TTabControl(c).Tabs.Count) then Result := ValStr(TTabControl(c).Tabs[n-1]); end;
+function f_tc_clear(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTabControl, c) then TTabControl(c).Tabs.Clear; end;
+function f_tc_index_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TTabControl, c) then Result := ValInt(TTabControl(c).TabIndex + 1); end;
+function f_tc_index_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTabControl, c) then TTabControl(c).TabIndex := ArgI32(A[1]) - 1; end;
+function f_tc_onchange(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TTabControl, c) then
+    TTabControl(c).OnChange := GuiNotifyHandler(AVM, c, 'onchange', A[1].Str, A[0].Hnd); end;
+
 procedure RegisterContainerFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('splitter@:@', @f_splitter);
@@ -110,6 +148,14 @@ begin
   Reg.Add('groupbox@:@', @f_groupbox);
   Reg.Add('groupbox_caption@:@$', @f_groupbox_caption_set); Reg.Add('groupbox_caption$:@', @f_groupbox_caption_get);
   Reg.Add('scrollbox@:@', @f_scrollbox);
+  Reg.Add('tabcontrol@:@',        @f_tabcontrol);
+  Reg.Add('tabcontrol_add@:@$',   @f_tc_add);
+  Reg.Add('tabcontrol_count:@',   @f_tc_count);
+  Reg.Add('tabcontrol_tab$:@n',   @f_tc_tab);
+  Reg.Add('tabcontrol_clear@:@',  @f_tc_clear);
+  Reg.Add('tabcontrol_tabindex:@',    @f_tc_index_get);
+  Reg.Add('tabcontrol_tabindex@:@n',  @f_tc_index_set);
+  Reg.AddHost('tabcontrol_onchange@:@$', @f_tc_onchange);
   Reg.Add('pagecontrol@:@', @f_pagecontrol);
   Reg.Add('pagecontrol_pagecount:@', @f_pagecount);
   Reg.Add('pagecontrol_pageindex@:@n', @f_pageindex_set); Reg.Add('pagecontrol_pageindex:@', @f_pageindex_get);

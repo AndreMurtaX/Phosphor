@@ -19,7 +19,16 @@
     msgbox(msg$)  msgbox(msg$, title$)          show a message
     msgbox_confirm(msg$)                         -> 1 yes, 0 no
     openfile$([filter$])   savefile$([filter$])  -> the chosen path, or ""
+    openpicture$([filter$]) savepicture$([filter$])  same, with a preview pane
     selectdir$()                                 -> the chosen folder, or ""
+    inputbox$(prompt$)                           -> what the user typed, or ""
+    inputbox$(prompt$, default$)
+    inputbox$(title$, prompt$, default$)
+
+  A NOTE ON inputbox$. There is no way to tell "cancelled" from "typed nothing":
+  LCL's InputBox answers the default on cancel, so a program that must know uses
+  a default it would never accept, or InputQuery's own shape. Said here because
+  the alternative -- inventing a sentinel string -- would be worse.
 ******************************************************************************}
 unit PhosphorDialogLib;
 
@@ -29,7 +38,7 @@ unit PhosphorDialogLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, Dialogs, Graphics,
+  SysUtils, Classes, Controls, Dialogs, ExtDlgs, Graphics,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterDialogFuncs(Reg: TPhosphorRegistry);
@@ -45,6 +54,30 @@ function f_selectdirdialog(const A: array of TValue; out E: TPhosphorError): TVa
 begin E := NoError; Result := ValHandle(GuiRegister(TSelectDirectoryDialog.Create(nil), True)); end;
 function f_colordialog(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := ValHandle(GuiRegister(TColorDialog.Create(nil), True)); end;
+
+function f_fontdialog(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := ValHandle(GuiRegister(TFontDialog.Create(nil), True)); end;
+
+// --- the font dialog's chosen font -----------------------------------------
+// Read after dialog_execute answers 1; set beforehand to preselect.
+function f_fd_name_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValStr('');
+  if GuiResolve(A[0].Hnd, TFontDialog, c) then Result := ValStr(TFontDialog(c).Font.Name); end;
+function f_fd_name_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TFontDialog, c) then TFontDialog(c).Font.Name := A[1].Str; end;
+function f_fd_size_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TFontDialog, c) then Result := ValInt(TFontDialog(c).Font.Size); end;
+function f_fd_size_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TFontDialog, c) then TFontDialog(c).Font.Size := ArgI32(A[1]); end;
+function f_fd_color_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TFontDialog, c) then Result := ValInt(TFontDialog(c).Font.Color); end;
+function f_fd_color_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TFontDialog, c) then TFontDialog(c).Font.Color := TColor(ArgI32(A[1])); end;
 
 // --- shared configuration (TCommonDialog / TFileDialog) ---------------------
 function f_title_set(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -105,6 +138,48 @@ begin
   try if d.Execute then Result := ValStr(d.FileName); finally d.Free; end;
 end;
 
+// --- one-shot: ask the user for a line of text ------------------------------
+function DoInput(const ATitle, APrompt, ADefault: String): TValue;
+begin
+  Result := ValStr(InputBox(ATitle, APrompt, ADefault));
+end;
+function f_inputbox1(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := DoInput('', A[0].Str, ''); end;
+function f_inputbox2(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := DoInput('', A[0].Str, A[1].Str); end;
+function f_inputbox3(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := DoInput(A[0].Str, A[1].Str, A[2].Str); end;
+
+// --- one-shot: the picture dialogs, which add a preview to a file chooser ---
+function PictureOpen(const AFilter: String): TValue;
+var d: TOpenPictureDialog;
+begin
+  Result := ValStr('');
+  d := TOpenPictureDialog.Create(nil);
+  try
+    if AFilter <> '' then d.Filter := AFilter;
+    if d.Execute then Result := ValStr(d.FileName);
+  finally d.Free; end;
+end;
+function PictureSave(const AFilter: String): TValue;
+var d: TSavePictureDialog;
+begin
+  Result := ValStr('');
+  d := TSavePictureDialog.Create(nil);
+  try
+    if AFilter <> '' then d.Filter := AFilter;
+    if d.Execute then Result := ValStr(d.FileName);
+  finally d.Free; end;
+end;
+function f_openpicture(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := PictureOpen(''); end;
+function f_openpicture_f(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := PictureOpen(A[0].Str); end;
+function f_savepicture(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := PictureSave(''); end;
+function f_savepicture_f(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError; Result := PictureSave(A[0].Str); end;
+
 procedure RegisterDialogFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('opendialog@:', @f_opendialog);
@@ -126,6 +201,15 @@ begin
   Reg.Add('savefile$:', @f_savefile);
   Reg.Add('savefile$:$', @f_savefile_filter);
   Reg.Add('selectdir$:', @f_selectdir);
+  Reg.Add('fontdialog@:', @f_fontdialog);
+  Reg.Add('fontdialog_fontname$:@',  @f_fd_name_get);  Reg.Add('fontdialog_fontname@:@$',  @f_fd_name_set);
+  Reg.Add('fontdialog_fontsize:@',   @f_fd_size_get);  Reg.Add('fontdialog_fontsize@:@n',  @f_fd_size_set);
+  Reg.Add('fontdialog_fontcolor:@',  @f_fd_color_get); Reg.Add('fontdialog_fontcolor@:@n', @f_fd_color_set);
+  Reg.Add('inputbox$:$',    @f_inputbox1);
+  Reg.Add('inputbox$:$$',   @f_inputbox2);
+  Reg.Add('inputbox$:$$$',  @f_inputbox3);
+  Reg.Add('openpicture$:',  @f_openpicture);  Reg.Add('openpicture$:$', @f_openpicture_f);
+  Reg.Add('savepicture$:',  @f_savepicture);  Reg.Add('savepicture$:$', @f_savepicture_f);
 end;
 
 end.

@@ -21,7 +21,7 @@ unit PhosphorTimerLib;
 interface
 
 uses
-  SysUtils, Classes, ExtCtrls,
+  SysUtils, Classes, ExtCtrls, CustomTimer,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterTimerFuncs(Reg: TPhosphorRegistry);
@@ -47,24 +47,39 @@ begin
   Result := ValHandle(GuiRegister(t, True));
 end;
 
+{ TIdleTimer fires when the application goes idle rather than on a clock, which
+  is the shape a background task wants: it yields to the user instead of competing
+  with them. Same helpers as timer@ -- both descend from TCustomTimer, so interval,
+  enabled, start, stop and ontimer all resolve against that. }
+function f_idletimer(const A: array of TValue; out E: TPhosphorError): TValue;
+var t: TIdleTimer;
+begin
+  E := NoError;
+  t := TIdleTimer.Create(nil);   // no owner: the handle wrapper owns it
+  t.Enabled := False;
+  t.AutoEnabled := False;        // explicit, like timer@: a program starts it
+  Result := ValHandle(GuiRegister(t, True));
+end;
+
 function f_interval_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).Interval := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Interval := ArgI32(A[1]); Result := A[0]; end;
 function f_interval_get(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then Result := ValInt(TTimer(c).Interval) else Result := ValInt(0); end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then Result := ValInt(TCustomTimer(c).Interval) else Result := ValInt(0); end;
 function f_enabled_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).Enabled := ArgOn(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Enabled := ArgOn(A[1]); Result := A[0]; end;
 function f_enabled_get(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then Result := ValInt(Ord(TTimer(c).Enabled)) else Result := ValInt(0); end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then Result := ValInt(Ord(TCustomTimer(c).Enabled)) else Result := ValInt(0); end;
 function f_start(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).Enabled := True; Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Enabled := True; Result := A[0]; end;
 function f_stop(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).Enabled := False; Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Enabled := False; Result := A[0]; end;
 function f_ontimer(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TTimer, c) then TTimer(c).OnTimer := GuiNotifyHandler(AVM, c, 'ontimer', A[1].Str, A[0].Hnd); end;
+var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).OnTimer := GuiNotifyHandler(AVM, c, 'ontimer', A[1].Str, A[0].Hnd); end;
 
 procedure RegisterTimerFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('timer@:', @f_timer);
+  Reg.Add('idletimer@:', @f_idletimer);
   Reg.Add('timer_interval@:@n', @f_interval_set); Reg.Add('timer_interval:@', @f_interval_get);
   Reg.Add('timer_enabled@:@n', @f_enabled_set);   Reg.Add('timer_enabled:@', @f_enabled_get);
   Reg.Add('timer_start@:@', @f_start);

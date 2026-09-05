@@ -12,10 +12,19 @@ port:** several language decisions change on purpose — see
 Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact green on
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
 dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
-rules), the negative suite, and nine opt-in host packages. Around **700 built-in
-functions** are registered across the standard libraries. Errors are *values*, not
+rules), the negative suite, and six opt-in host packages (crt, base64, zip, gzip,
+http, sqlite). **682 built-in functions** are registered across the standard
+libraries, every one of them exercised by a test and listed in the reference --
+both held by a gate in the acceptance suite rather than by a promise. Errors are *values*, not
 crashes: a library records its error state and the program keeps running. It is a
 real, working interpreter — not a skeleton.
+
+**Binary work is first-class.** `len` counts characters and `bytelen` counts bytes,
+with `byteat`/`bytestr$`/`bytemid$` to read a string as bytes; `#` channels stream
+through a sliding window and `seek`/`loc` are positionable and 1-based; and a
+**buffer** (`buffer_new@`) is a mutable block of bytes behind a handle -- the same
+handle `file_readallbytes@` returns, so reader, edit and writer compose without a
+conversion step.
 
 **The standard-BASIC command set from the founding brief is built** and covered by
 `tests/classic` (byte-exact, both OSes): the `INPUT` / `LINE INPUT` statements and the

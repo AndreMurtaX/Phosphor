@@ -7,10 +7,14 @@
   OnOutput callback to output, and offers two ways in: run a .bas file, or a
   line-at-a-time REPL.
 
-  Usage:
-    phosphor <file.bas>              run a file, output to stdout
-    phosphor run <file.bas>          same, explicit verb
-    phosphor run <file.bas> --out F  run a file, output bytes to F (used by tests)
+  Usage (kept in step with the --help text below; it listed four of the seven
+  verbs this file implements, so `compile`, `pack` and `--gui` were invisible to
+  anyone reading the source rather than running it):
+    phosphor <file.bas|file.pbc>     run a file, output to stdout
+    phosphor run <file> [--out F]    same, explicit verb; --out writes bytes to F
+    phosphor compile <in.bas> <out.pbc>   compile to portable bytecode
+    phosphor pack <in.bas> <out>     make a standalone executable (stub + payload)
+    phosphor --gui <file.bas>        run a GUI program (hands over to phosphorgui)
     phosphor                         REPL
     phosphor --diag                  print console detection + a known UTF-8 line
     phosphor --version | --help

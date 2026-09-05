@@ -102,14 +102,18 @@ minefield otherwise.
    still never knows it exists. Controls are reached through named helper
    functions plus a generic `TypInfo` bridge for every published property, with
    events bound by name; LCL events are synchronous method pointers on the main
-   thread, so the mobile-era marshalling is simply gone. 20 isolated packages
+   thread, so the mobile-era marshalling is simply gone. 17 isolated packages
    under `host/gui/libs/`, verified byte-exact headless on both OSes. See
    [roadmap-phase2.md](roadmap-phase2.md) and [gui-components.md](gui-components.md).
-3. **Next.** Make it robust and deployable: a catchable language-level error model
-   (`ON ERROR`), execution limits so a host can run untrusted scripts safely, the
-   documented embedding API, and then the on-disk bytecode (`.pbc`) with its
-   self-extracting deployment stub (its format is already frozen in
-   [decisions.md](decisions.md)). See [roadmap-phase3.md](roadmap-phase3.md).
+3. **Done.** Robust and deployable, all five steps: the catchable language-level
+   error model (`ON ERROR` / `resume` / `resume next`, re-entrant across calls),
+   execution limits so a host can run untrusted scripts safely (`MaxSteps` and a
+   call-depth ceiling, 0 = unlimited and zero cost), the documented embedding API
+   with `phosphorembed` as a third consumer, the on-disk bytecode (`.pbc`, validated
+   on load rather than trusted), and the self-extracting deployment stub --
+   `phosphor pack app.bas app.exe` appends a payload to the stub binary, so the same
+   binary is the CLI bare and the application packed. See
+   [roadmap-phase3.md](roadmap-phase3.md), which carries the per-step record.
 
 ## The GUI host and the display guard
 

@@ -166,6 +166,80 @@ def main():
         rc = 1
     else:
         print("every name in the library map is a real function.")
+
+    # --- counts stated in prose ------------------------------------------------
+    # A number in a sentence is as checkable as a name in a table, and it went
+    # stale in exactly the same way: README claimed "nine opt-in host packages"
+    # when there were six, and architecture.md "20 isolated packages under
+    # host/gui/libs/" when there were 17. Both were written true and neither was
+    # ever re-measured -- nothing was watching, so nothing said.
+    #
+    # Only these three claims are checked. Each is unambiguous and each has ONE
+    # mechanical source of truth; the rest of the prose is not checkable and is
+    # not pretended to be. Number words are accepted so a sentence can read like
+    # a sentence. A claim the gate can no longer FIND is also a failure: silently
+    # checking nothing is the failure mode this whole file exists to avoid.
+    WORDS = {'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+             'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+             'eleven': 11, 'twelve': 12}
+
+    def as_int(tok):
+        low = tok.lower()
+        return WORDS[low] if low in WORDS else int(tok)
+
+    def registered_packages(*parts):
+        # One Register*Funcs procedure per package. It appears in the interface
+        # and again in the implementation, so count DISTINCT names.
+        names = set()
+        for f in glob.glob(os.path.join(ROOT, *parts)):
+            txt = open(f, encoding='utf-8', errors='ignore').read()
+            names |= set(re.findall(r'^procedure\s+(Register\w+Funcs)\s*\(',
+                                    txt, re.M))
+        return len(names)
+
+    NUM = r'([0-9]+|[A-Za-z]+)'
+    claims = [
+        ('README.md',
+         NUM + r'\s+built-in\s+functions',
+         len(all_names),
+         'built-in functions'),
+        ('README.md',
+         NUM + r'\s+opt-in host packages',
+         registered_packages('host', 'packages', '*.pas'),
+         'opt-in host packages'),
+        ('docs/architecture.md',
+         NUM + r'\s+isolated packages\s+under `host/gui/libs/`',
+         registered_packages('host', 'gui', 'libs', '*.pas'),
+         'GUI packages under host/gui/libs'),
+    ]
+    print()
+    bad = []
+    for relpath, pat, actual, what in claims:
+        try:
+            txt = open(os.path.join(ROOT, relpath), encoding='utf-8',
+                       errors='ignore').read()
+        except OSError:
+            bad.append(f"{relpath}: not found, so its '{what}' claim is unchecked")
+            continue
+        m = re.search(pat, txt)
+        if m is None:
+            bad.append(f"{relpath}: the '{what}' claim is gone or reworded -- "
+                       f"this gate is no longer checking it")
+            continue
+        try:
+            claimed = as_int(m.group(1))
+        except ValueError:
+            bad.append(f"{relpath}: '{m.group(1)}' is not a number ({what})")
+            continue
+        if claimed != actual:
+            bad.append(f"{relpath}: claims {m.group(1)} {what}, there are {actual}")
+    if bad:
+        print("COUNTS STATED IN PROSE THAT ARE NO LONGER TRUE:")
+        for b in bad:
+            print(f"  {b}")
+        rc = 1
+    else:
+        print("every count stated in prose matches what is registered.")
     return rc
 
 if __name__ == '__main__':

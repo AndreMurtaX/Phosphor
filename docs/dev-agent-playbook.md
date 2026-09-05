@@ -306,6 +306,20 @@ exists so they can next time.
     lines that asserted nothing. `println` belongs to tests/classic, where the whole
     output is the golden; tests/suite asserts. A GREEN RUN WITH A ZERO COUNT IS NOT A
     PASS: read the count, not the exit code.
+  - **Asked "is the documentation updated?" -- and the sweep found five stale
+    claims that had nothing to do with this round's work.** Three were COUNTS
+    nobody was watching: README said "nine opt-in host packages" (six),
+    architecture.md "20 isolated packages under host/gui/libs/" (17), and
+    architecture.md still called phase 3 "**Next**" while roadmap-phase3.md in the
+    same directory said "STEPS 1-5 COMPLETE" -- two pages of the same project
+    contradicting each other. The fifth was the console host's own header comment
+    listing four of the seven verbs it implements, so `compile`, `pack` and `--gui`
+    were invisible to anyone reading the source instead of running `--help`.
+    A NUMBER IN A SENTENCE IS AS CHECKABLE AS A NAME IN A TABLE. coverage.py now
+    gates all three counts against what is actually registered, and refuses to pass
+    when it can no longer FIND a claim -- a gate that silently checks nothing is
+    the failure it exists to prevent. Seen failing on all three before being
+    trusted, by perturbing each claim by one.
   - **One literal could not be written.** `-9223372036854775808` is not expressible:
     the magnitude `2^63` overflows Int64, so the lexer makes it a Double and the
     negation follows. Written as `-9223372036854775807 - 1`, which is exact. Not a

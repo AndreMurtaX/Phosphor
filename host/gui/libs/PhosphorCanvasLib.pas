@@ -67,6 +67,15 @@ begin
     C := TPaintBox(o).Canvas;
     Exit(True);
   end;
+  // Any windowed control that paints itself: a drawgrid@ handed to its own
+  // OnDrawCell handler, a stringgrid@, anything else with a surface. TCustomControl
+  // publishes Canvas, which is exactly the property this resolver is looking for.
+  GGuiError := 0;
+  if GuiResolveObj(AId, TCustomControl, o) then
+  begin
+    C := TCustomControl(o).Canvas;
+    Exit(True);
+  end;
 end;
 
 { The points of a polygon or polyline, written "x,y x,y x,y". Whitespace between

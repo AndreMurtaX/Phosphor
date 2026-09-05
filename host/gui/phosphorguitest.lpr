@@ -62,6 +62,20 @@ var
   eng: TPhosphorEngine;
   path: String;
   rc, i: Integer;
+{ Turns an escaped exception into a reported failure. A class method rather than a
+  free procedure because Application.OnException wants a method pointer. }
+type
+  TGuiTestCrash = class
+    class procedure Report(Sender: TObject; E: Exception);
+  end;
+
+class procedure TGuiTestCrash.Report(Sender: TObject; E: Exception);
+begin
+  Writeln(StdErr, 'phosphorguitest: unhandled ', E.ClassName, ': ', E.Message);
+  Flush(StdErr);
+  Halt(3);   // never a dialog, never a wait
+end;
+
 begin
   if ParamCount < 1 then
   begin
@@ -75,6 +89,11 @@ begin
     Halt(2);
   end;
 
+  // An exception that escapes into the LCL raises its default handler, which is a
+  // MODAL DIALOG -- and a headless suite then waits on it forever. A hang gives no
+  // message, no exit code and no file name; a failure gives all three. This is the
+  // difference between a suite that reports a bad afternoon and one that eats it.
+  Application.OnException := @TGuiTestCrash.Report;
   Application.Initialize;   // bring up the widgetset before any form is built
 
   eng := TPhosphorEngine.Create();

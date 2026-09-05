@@ -44,10 +44,34 @@ type
   { A registry entry for an LCL object. Control is a TObject so a handle can also
     wrap a non-TComponent (a TTreeNode, a TListItem), not only a control. Owns is
     true only for a top-level form (or a timer): its wrapper frees it. A child
-    control, a node or an item is non-owning -- its container frees it. }
-  TGuiHandle = class
+    control, a node or an item is non-owning -- its container frees it.
+
+    It is a TComponent for one reason: so it can receive Notification. A form owns
+    its tree, so freeing the form frees its children, and a handle pointing at one
+    of those children used to be left holding a dangling pointer that GuiResolveObj
+    then dereferenced to ask its class -- an access violation reachable from
+    ordinary BASIC, and a breach of this unit's own rule that a freed handle is
+    ANSWERED, never raised. Watch() asks the control to say when it dies; the
+    reference is dropped and every later use resolves to gui_error 1.
+
+    A handle wrapping a NON-component (a TBitmap, a TTreeNode, a TListItem) cannot
+    be watched: FreeNotification is a TComponent service. Those keep the older,
+    weaker guarantee -- do not free a tree while holding handles to its nodes. }
+  TGuiHandle = class(TComponent)
+  public
+    // EXPLICIT visibility: TComponent is compiled {$M+}, so members with no section
+    // default to PUBLISHED, and a plain TObject field cannot be published.
     Control: TObject;
     Owns: Boolean;
+    { True only when Control WAS a TComponent at registration time, so the
+      destructor never has to ask again. `c is TComponent` reads the object's VMT,
+      which is a DEREFERENCE -- on a TTreeNode already destroyed with its tree that
+      is the very access violation this class exists to prevent. Remembering the
+      answer costs a byte and asks nothing of a dead pointer. }
+    Watched: Boolean;
+    { Arm the death notice, when the wrapped object is able to send one. }
+    procedure Watch;
+    procedure Notification(AComponent: TComponent; Operation: TOperation); override;
     destructor Destroy; override;
   end;
 
@@ -119,6 +143,14 @@ function GuiCloseHandler(AVM: TObject; AControl: TComponent;
 function GuiCloseQueryHandler(AVM: TObject; AControl: TComponent;
   const AEvent, AHandler: String; ASenderId: Int64): TCloseQueryEvent;
 
+{ Call a BASIC routine the way an event bridge does: record a failing handler as
+  error 2, honour END, and answer what the routine returned. Exposed because a
+  package may own an event signature GuiCore must not know about -- Grids'
+  TDrawCellEvent is the first -- and duplicating this would duplicate the two rules
+  that matter. }
+function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
+  const AArgs: array of TValue): TValue;
+
 { The modifier keys as the short string the handler receives: "S", "C", "A", joined
   by spaces in that order, so all three read "S C A" exactly as the plan specified.
   A program tests one with instr(mods$, "C") > 0. }
@@ -128,10 +160,40 @@ procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
-destructor TGuiHandle.Destroy;
+procedure TGuiHandle.Watch;
 begin
-  if Owns and (Control <> nil) then
-    Control.Free;
+  Watched := Control is TComponent;   // asked ONCE, while the pointer is certainly live
+  if Watched then
+    TComponent(Control).FreeNotification(Self);
+end;
+
+procedure TGuiHandle.Notification(AComponent: TComponent; Operation: TOperation);
+begin
+  inherited Notification(AComponent, Operation);
+  // The control this handle names is going away. Drop the reference NOW, while the
+  // pointer is still valid to compare -- after this the handle is stale, which is a
+  // state the resolver already knows how to refuse.
+  if (Operation = opRemove) and (AComponent = Control) then
+    Control := nil;
+end;
+
+destructor TGuiHandle.Destroy;
+var
+  c: TObject;
+begin
+  // Take the reference away from the field FIRST. Freeing the control re-enters
+  // Notification, and finding Control already nil there is what keeps that path
+  // from mattering.
+  c := Control;
+  Control := nil;
+  // Watched, not `c is TComponent`: a non-component handle (a TTreeNode, a
+  // TListItem) may already have died with its container, and testing its class
+  // would dereference it. Where Watched is true and the control has died, the
+  // notification already set Control to nil, so c is nil here and nothing is asked.
+  if Watched and (c <> nil) then
+    TComponent(c).RemoveFreeNotification(Self);
+  if Owns and (c <> nil) then
+    c.Free;
   inherited Destroy;
 end;
 
@@ -142,21 +204,27 @@ begin
   FSenderId := ASenderId;
 end;
 
-function TGuiEventBridge.Call(const AArgs: array of TValue): TValue;
+function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
+  const AArgs: array of TValue): TValue;
 var
   err: TPhosphorError;
 begin
   Result := ValInt(0);
-  if (FVM = nil) or (FHandler = '') then Exit;
-  Result := FVM.CallUserFunc(FHandler, AArgs, err);
+  if (AVM = nil) or (AHandler = '') then Exit;
+  Result := AVM.CallUserFunc(AHandler, AArgs, err);
   if IsError(err) then
     GGuiError := 2;   // a handler that failed is recorded, not raised
   // A handler that says END means the program is over. The engine records that
   // instead of quietly ending only the handler's own activation, so the window it
   // was clicked in has to go too -- otherwise `end` in a click handler is a
   // statement that does nothing, which is a worse answer than the bug it replaced.
-  if FVM.Halted then
+  if AVM.Halted then
     Application.Terminate;
+end;
+
+function TGuiEventBridge.Call(const AArgs: array of TValue): TValue;
+begin
+  Result := GuiCallBack(FVM, FHandler, AArgs);
 end;
 
 procedure TGuiEventBridge.Fire(Sender: TObject);
@@ -246,9 +314,10 @@ function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;
 var
   h: TGuiHandle;
 begin
-  h := TGuiHandle.Create;
+  h := TGuiHandle.Create(nil);   // owned by the phosphor handle registry, not the LCL
   h.Control := AObj;
   h.Owns := AOwns;
+  h.Watch;                       // tell me when you die
   Result := RegisterHandle(h);
 end;
 

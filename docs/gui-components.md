@@ -6,7 +6,7 @@ a study written when increment 3 (form + button + one event) was all that stood;
 is now also the record of what was built from it.
 
 > **STATUS 2026-09-05 — the plan is built.** All **17** proposed packages exist
-> under `host/gui/libs/`, registering **412 distinct names**, covered by 15
+> under `host/gui/libs/`, registering **426 distinct names**, covered by 16
 > byte-exact test files that run headless on Windows and Linux (`scripts/test-gui`).
 > The **Verdict** column below is measured against the registry, not intended.
 >
@@ -180,12 +180,17 @@ tests therefore assert *wiring* (bind + read-back, and `button_click` to fire
   phase-1 contract and the reference's `02_handles` behaviour, already honoured.
 - **Lifetime.** Controls live in the engine handle registry wrapped in
   `TGuiHandle`; only a form owns its tree, so `ResetHandles` frees each tree once
-  (increment 3). LCL's `TComponent.FreeNotification` is the native hook to
-  invalidate a child's handle when its parent is freed — **still not wired**, and
-  the one item from the 2026-09-05 audit deliberately left for its own increment,
-  since it changes handle lifetime rather than adding a control. Until it is wired,
-  a child handle whose parent form was freed is a stale handle the registry cannot
-  know about.
+  (increment 3). LCL's `TComponent.FreeNotification` **is wired**: `TGuiHandle` is a
+  `TComponent` that asks each control it wraps to say when it dies, and drops the
+  reference on `opRemove`, so a child handle whose parent form was freed resolves to
+  `gui_error` 1 like any other stale handle. Before that it held a dangling pointer
+  which the resolver dereferenced to ask its class — an **access violation reachable
+  from ordinary BASIC**, and a breach of this page's own rule that a freed handle is
+  answered rather than raised.
+
+  A handle wrapping a **non-component** — a `bitmap@`, a `treenode@`, a `listitem@` —
+  cannot be watched, because `FreeNotification` is a `TComponent` service. Those keep
+  the weaker guarantee: do not free a tree while holding handles to its nodes.
 - **Alignment is LCL-native and smaller.** `TAlign` has 7 values
   (`alNone/alTop/alBottom/alLeft/alRight/alClient/alCustom`), not FMX's 20. Phosphor
   exposes those plus **anchors** (`akLeft/akTop/akRight/akBottom`) through
@@ -233,7 +238,7 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 | TScrollBox | `scrollbox@` | **Built** |
 | TFlowPanel | `flowpanel@` | Defer |
 | TCheckListBox | `checklistbox@` | **Built** — helpers are `checklist_*` |
-| TStringGrid / TDrawGrid | `stringgrid@` | **Built**. `drawgrid@` **Defer** — an owner-drawn grid needs an `OnDrawCell` bridge, whose signature carries a cell rect and a canvas; that is a drawing protocol, not another event, and `stringgrid@` covers the tabular case |
+| TStringGrid / TDrawGrid | `stringgrid@` / `drawgrid@` | **Built**. `OnDrawCell` is a drawing PROTOCOL rather than another event — the handler gets a cell, a rectangle and a state, and paints into the grid's own canvas — which is why it waited for the canvas target to widen to any control that paints itself. `drawgrid_drawcell@` draws one cell on demand, as `button_click` fires one click |
 | TValueListEditor | `valuelist@` | Defer |
 | TColorBox / TColorListBox | `colorbox@` | Defer |
 | TMaskEdit | `maskedit@` | **Built** |
@@ -361,17 +366,16 @@ host exercised by hand. Deferred throughout, as in phase 1: DB controls
 found named-but-unbuilt: 17 units, **412 names**, 15 byte-exact test files green on
 both OSes.
 
-What is still deliberately open, and why:
+**Every item this document ever named is now built.** The last two — the
+`FreeNotification` lifetime hook and `drawgrid@` — closed together, and each turned
+out to be the other's prerequisite in one direction or another: the grid needed the
+canvas to reach any control that paints itself, and the lifetime hook needed a
+handle that could receive a notification at all.
 
-1. **`TComponent.FreeNotification`.** The invalidation hook this page said would be
-   wired "as breadth grows". Breadth grew, and this is the one audit item held back
-   on purpose: it changes handle LIFETIME rather than adding a control, so it earns
-   its own increment and its own tests for the stale-child case.
-2. **`drawgrid@`.** Reclassified from Tier 3 to Defer. `OnDrawCell` hands the handler
-   a cell rectangle and a canvas to draw into — a drawing protocol, not another
-   event signature — and `stringgrid@` already covers the tabular case.
-3. **The palette entries this document always marked Out or Defer**: DB controls
+What is still open, and why:
+
+1. **The palette entries this document always marked Out or Defer**: DB controls
    (`Data.DB`), media, FMX effects and animations, `TFrame`, `TActionList`,
    `TFlowPanel`, `TValueListEditor`, the `TEditButton` family, and the shell views.
-4. **`callout#`** from the FMX vocabulary — a speech bubble. Drawable with the
+2. **`callout#`** from the FMX vocabulary — a speech bubble. Drawable with the
    canvas primitives now present, but not a control and not a primitive.

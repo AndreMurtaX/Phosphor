@@ -107,6 +107,44 @@ gui_clearerror()
 control_get(b@, "NoSuchProperty")
 assert_true(gui_error(), "an unknown property is recorded, not crashed")
 
+test_case("control/a child handle dies with the parent that owned it")
+rem TComponent.FreeNotification, the hook gui-components.md said would be wired
+rem "as breadth grows". Until it was, a form owned its tree, freeing the form freed
+rem the children, and every handle naming one of those children kept a DANGLING
+rem pointer that GuiResolveObj then dereferenced to ask its class:
+rem
+rem   f2@ = form@() : k@ = button@(f2@) : control_free(f2@) : button_caption$(k@)
+rem   -> Access violation
+rem
+rem That is a use-after-free reachable from ordinary BASIC, and it broke this
+rem package's own rule that a freed handle is ANSWERED, never raised.
+lf@ = form@("lifetime", 200, 100)
+lp@ = panel@(lf@)
+lb@ = button@(lp@)
+button_caption@(lb@, "alive")
+assert_eq(button_caption$(lb@), "alive", "the grandchild answers while the tree stands")
+assert_eq(control_free(lf@), 1, "freeing the form frees the tree")
+gui_clearerror()
+dead$ = button_caption$(lb@)
+assert_true(gui_error(), "the grandchild's handle is now REFUSED, not dereferenced")
+assert_eq(dead$, "", "and answers nothing")
+gui_clearerror()
+assert_eq(control_width(lp@), 0, "the panel between them is stale too")
+assert_true(gui_error(), "and says so")
+
+test_case("control/freeing a child directly invalidates only that child")
+mf@ = form@("second", 200, 100)
+m1@ = button@(mf@)
+m2@ = button@(mf@)
+button_caption@(m2@, "sibling")
+assert_eq(control_free(m1@), 1, "the first child is freed on request")
+gui_clearerror()
+assert_eq(button_caption$(m2@), "sibling", "its sibling is untouched")
+assert_eq(gui_error(), 0, "and records no error")
+gui_clearerror()
+z$ = button_caption$(m1@)
+assert_true(gui_error(), "while the freed one is refused")
+
 test_case("control/free and double-free")
 c2@ = button@(f@)
 assert_eq(control_free(c2@), 1, "the first free succeeds")

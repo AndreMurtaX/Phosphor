@@ -287,6 +287,16 @@ def main():
 
     docfiles = [os.path.join(ROOT, 'README.md')] + \
                sorted(glob.glob(os.path.join(ROOT, 'docs', '*.md')))
+
+    def scannable(txt):
+        # The playbook's retrospective log is DATED HISTORY, and a record of a past
+        # mistake has to be able to name it: the round-23 entry explains that
+        # decisions.md advertised crt_gotoxy/crt_color/crt_clear, which is exactly a
+        # list of names that must not exist. Gating that would forbid writing down
+        # what went wrong. Sections 0-5 above the log are NORMATIVE and stay gated.
+        marker = '## Retrospective log'
+        i = txt.find(marker)
+        return txt if i < 0 else txt[:i]
     ghosts = []
     for df in docfiles:
         try:
@@ -294,7 +304,7 @@ def main():
         except OSError:
             continue
         rel = os.path.relpath(df, ROOT).replace('\\', '/')
-        for lineno, line in enumerate(txt.splitlines(), 1):
+        for lineno, line in enumerate(scannable(txt).splitlines(), 1):
             for m in re.finditer(r'`([a-z][a-z0-9_]*[$@%?]?)\s*\(', line):
                 nm = m.group(1)
                 base = nm.rstrip('?')
@@ -323,7 +333,7 @@ def main():
         except OSError:
             continue
         rel = os.path.relpath(df, ROOT).replace('\\', '/')
-        for lineno, line in enumerate(txt.splitlines(), 1):
+        for lineno, line in enumerate(scannable(txt).splitlines(), 1):
             for m in re.finditer(r'`([a-z][a-z0-9]*_[a-z0-9_]*[$@%?]?)`', line):
                 nm = m.group(1)
                 if nm in every or nm in DELIBERATE or nm in LANGUAGE:

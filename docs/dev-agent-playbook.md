@@ -281,6 +281,33 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-05 · round 25 · the audit's medium and low findings, and what "low" hid.**
+  Thirty-five findings across thirteen documents, filed by the audit as
+  documentation. **Four of them were defects in the CODE**, and the page was the
+  half telling the truth — so the page stayed and the function changed.
+  - **`dir_delete` reported success for work it did not do.** `RemoveDir`'s answer
+    was DISCARDED and the function returned 1 unconditionally: deleting a directory
+    that still held a file answered 1, left it standing, and set no error, so a
+    program had no way at all to learn it had failed. Filed *medium*. Its own
+    sibling `file_delete` already answered `Ord(DeleteFile)` — the outlier was
+    sitting next to the pattern.
+  - **`dict_remove` answered 1 for a key that was never there** — the one question
+    it exists to settle. **`json_stringify$` was documented compact and was not**,
+    while the ARRAY branch of the same renderer already was, so objects were an
+    inconsistency rather than a format. **`unzip_count`/`unzip_entry$` swallowed
+    their exceptions** with `zip_error()` untouched, against their unit's own
+    header — a caller could not tell a corrupt archive from an empty one.
+  - **THE LESSON IS ABOUT SEVERITY, NOT ABOUT DOCS.** An auditor grading a
+    doc-vs-code mismatch sees "the page is wrong" and files it low, because a
+    reader is only misled. But the same mismatch read the other way is "the
+    function is wrong", and then a program silently does the wrong thing. WHEN A
+    PAGE AND A FUNCTION DISAGREE, ASK WHICH ONE IS RIGHT BEFORE ASKING WHICH TO
+    EDIT — three of these four had the better behaviour written down and the worse
+    one shipped.
+  - **The reverse-name gate caught two of this commit's own edits** as they were
+    written: a `http_ok` that does not exist and an `unzip_entry` missing its `$`.
+    A gate earns its keep on the hand that installed it.
+
 - **2026-09-05 · round 24 · the last two GUI items, and four traps in the way.**
   `FreeNotification` and `drawgrid@` — held back as "their own increment" — closed
   together. Neither was hard; getting there was instructive.

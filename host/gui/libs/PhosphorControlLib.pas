@@ -219,6 +219,12 @@ begin
     SetFloatProp(c, pi, ArgNum(A[2]))
   else if (k = tkEnumeration) and (A[2].Kind = vkString) then
     SetEnumProp(c, pi, A[2].Str)              // an enum may be set by its identifier
+  else if (k = tkSet) and (A[2].Kind = vkString) then
+    SetSetProp(c, pi, A[2].Str)               // and a SET by its identifiers: "akLeft,akRight"
+  else if A[2].Kind = vkString then
+    // A string reaching a plain ordinal is not a value to coerce, it is a mistake to
+    // report. It used to become Round(ArgNum(s)) = 0 and be written silently.
+    GGuiError := ERR_NO_PROPERTY
   else if IsOrdKind(k) then
     SetOrdProp(c, pi, ArgOrd(A[2]))
   else
@@ -237,8 +243,13 @@ begin
   if k = tkFloat then
     Result := ValDouble(GetFloatProp(c, pi))
   else if IsOrdKind(k) then
-    Result := ValInt(GetOrdProp(c, pi));
-  // a string property reads through control_get$
+    Result := ValInt(GetOrdProp(c, pi))
+  else
+    // The setter has always recorded this; the getter used to answer 0 in silence,
+    // which a program cannot tell from a property whose value really is 0. A string
+    // property lands here too -- it reads through control_get$, and saying so is
+    // better than handing back a zero it never had.
+    GGuiError := ERR_NO_PROPERTY;
 end;
 
 function f_prop_get_str(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -253,7 +264,13 @@ begin
   if IsStrKind(k) then
     Result := ValStr(GetStrProp(c, pi))
   else if k = tkEnumeration then
-    Result := ValStr(GetEnumProp(c, pi));     // the enum identifier, e.g. "alClient"
+    Result := ValStr(GetEnumProp(c, pi))      // the enum identifier, e.g. "alClient"
+  else if k = tkSet then
+    // Without brackets, so what comes out is exactly what control_set@ takes in and
+    // the pair round-trips: "akLeft,akRight" -> the set -> "akLeft,akRight".
+    Result := ValStr(GetSetProp(c, pi, False))
+  else
+    GGuiError := ERR_NO_PROPERTY;             // same rule as the numeric getter above
 end;
 
 procedure RegisterControlFuncs(Reg: TPhosphorRegistry);

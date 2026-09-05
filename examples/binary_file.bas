@@ -13,6 +13,15 @@ rem and read/write whole files with file_readalltext$ / file_writealltext, which
 rem are raw byte primitives despite the "text" in their names: no BOM, no newline
 rem translation, no transcoding.
 rem
+rem Those READ bytes. To BUILD or EDIT them, use a buffer -- a mutable block of
+rem bytes behind a handle (section 8), which is what file_readallbytes@ already
+rem hands you:
+rem
+rem   buffer_new@(n)          n zero bytes         buffer_len(b@)
+rem   buffer_get(b@, i)       buffer_set(b@, i, v) one byte, 1-based
+rem   buffer_setint(b@, i, w, v[, bigendian?])     a 1/2/4/8-byte integer
+rem   buffer_tostr$(b@)       buffer_fromstr@(s$)  cross over to strings
+rem
 rem Run it with:  phosphor run examples/binary_file.bas
 
 f$ = path_combine$(temppath$(), "phosphor_bytes.bin")
@@ -41,6 +50,9 @@ println "size on disk = "; file_getsize(f$)
 
 rem --- 3. change ONE byte, rebuilding the whole blob --------------------------
 rem Fine for a small file: everything before it, the new byte, everything after.
+rem Note what it costs though -- a string is immutable, so this rebuilds all n
+rem bytes to change one, and doing it in a loop is quadratic. Section 8 does the
+rem same edit in place.
 pos% = 6
 was% = byteat(raw$, pos%)
 new$ = bytemid$(raw$, 1, pos% - 1) + bytestr$(64) + bytemid$(raw$, pos% + 1, bytelen(raw$) - pos%)
@@ -81,5 +93,45 @@ rem on bytes it quietly misleads, and nothing raises an error.
 t$ = "café"
 println "'café': bytelen = "; bytelen(t$); " but len = "; len(t$)
 println "bytestr$(200) is "; bytelen(bytestr$(200)); " byte, chr$(200) is "; bytelen(chr$(200)); " bytes"
+
+rem --- 8. a BUFFER: build and edit bytes in place ----------------------------
+rem A buffer is mutable, so changing a byte costs one byte of work rather than
+rem rebuilding the payload. The same record as section 1, built without a single
+rem string concatenation:
+b@ = buffer_new@(7)
+x% = buffer_set(b@, 1, 80)                  ' "P"
+x% = buffer_set(b@, 2, 66)                  ' "B"
+x% = buffer_set(b@, 3, 1)                   ' version
+x% = buffer_set(b@, 4, 0)
+x% = buffer_set(b@, 5, 128)
+x% = buffer_set(b@, 6, 255)
+sum% = 0
+for i = 1 to 6
+  sum% = (sum% + buffer_get(b@, i)) mod 256
+next
+x% = buffer_set(b@, 7, sum%)
+
+rem the buffer IS the handle file_writeallbytes takes -- no conversion step
+g$ = path_combine$(temppath$(), "phosphor_buffer.bin")
+ok% = file_writeallbytes(g$, b@)
+back@ = file_readallbytes@(g$)
+println "buffer wrote "; buffer_len(back@); " bytes, identical = "; buffer_equal(b@, back@)
+
+rem edit in place: no rebuild, no reread
+x% = buffer_set(back@, 5, 64)
+println "byte 5 now   "; buffer_get(back@, 5); ", byte 6 untouched "; buffer_get(back@, 6)
+
+rem a multi-byte integer, with the byte order stated rather than assumed
+h@ = buffer_new@(4)
+x% = buffer_setint(h@, 1, 4, 305419896)              ' little-endian
+println "LE bytes     "; buffer_get(h@,1); " "; buffer_get(h@,2); " "; buffer_get(h@,3); " "; buffer_get(h@,4)
+x% = buffer_setint(h@, 1, 4, 305419896, true)        ' big-endian
+println "BE bytes     "; buffer_get(h@,1); " "; buffer_get(h@,2); " "; buffer_get(h@,3); " "; buffer_get(h@,4)
+println "reads back   "; buffer_getint(h@, 1, 4, true)
+
+ok% = file_delete(g$)
+x% = buffer_free(b@)
+x% = buffer_free(back@)
+x% = buffer_free(h@)
 
 ok% = file_delete(f$)

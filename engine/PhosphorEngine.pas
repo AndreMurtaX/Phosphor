@@ -25,7 +25,8 @@ uses
   PhosphorCompiler, PhosphorVM, PhosphorHandles, PhosphorBytecode,
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
-  PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorConfigLib,
+  PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorBufferLib,
+  PhosphorConfigLib,
   PhosphorSysLib, PhosphorPlatformLib, PhosphorCallLib, PhosphorErrLib, PhosphorHostLib,
   PhosphorRagLib;
 
@@ -139,6 +140,7 @@ begin
   RegisterDateTimeFuncs(FRegistry);
   RegisterRegexFuncs(FRegistry);
   RegisterIoFuncs(FRegistry);
+  RegisterBufferFuncs(FRegistry);   // the mutable half of byte work; shares Io's TPhosphorBytes
   RegisterConfigFuncs(FRegistry);
   RegisterSysFuncs(FRegistry);
   RegisterPlatformFuncs(FRegistry);

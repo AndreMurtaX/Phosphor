@@ -586,7 +586,37 @@ p$ = bytemid$(r$, 1, 1) + bytestr$(64) + bytemid$(r$, 3, bytelen(r$) - 2)
 `bytelen("café")` is `5`. And `chr$` *encodes* a codepoint: `chr$(200)` is **two**
 bytes, so it can never produce a single byte ≥ 128 — that is what `bytestr$` is for.
 
-See [examples/binary_file.bas](../examples/binary_file.bas) for a complete program.
+### A buffer, when you need to *write* bytes
+
+The byte family above reads bytes out of a string, which is enough to inspect one.
+Writing is where a string fails: strings are immutable, so the `p$ = … + … + …`
+line above rebuilds all `n` bytes to change one, and doing that in a loop is
+quadratic. A **buffer** is a mutable block of bytes behind a handle, so the same
+loop is linear — and it is the *same handle* `file_readallbytes@` hands out, so no
+conversion step sits between the reader, the edit and the writer.
+
+```basic
+b@ = buffer_new@(3)              ' three zero bytes
+x = buffer_set(b@, 2, 128)       ' one byte, in place; returns the byte written
+ok = file_writeallbytes("out.bin", b@)
+
+r@ = file_readallbytes@("out.bin")
+println buffer_len(r@); " bytes, second is "; buffer_get(r@, 2)   ' 3 bytes, second is 128
+x = buffer_set(r@, 2, 64)                                          ' edited, not rebuilt
+
+h@ = buffer_new@(4)
+x = buffer_setint(h@, 1, 4, 305419896, true)   ' four bytes, big-endian, stated not assumed
+println buffer_getint(h@, 1, 4, true)          ' 305419896
+```
+
+Positions are base-1 and byte values are `0..255`, as everywhere else. A position,
+count or value outside its range is a **catchable error** — never a silent clamp,
+because reading past the end of a buffer is a bug worth stopping for. `buffer_free`
+is the one lenient exception, so a program can free defensively. The full list is in
+the [function reference](function-reference.md).
+
+See [examples/binary_file.bas](../examples/binary_file.bas) for a complete program
+that does the same record both ways.
 
 ---
 
@@ -656,6 +686,7 @@ the full catalog of every function is in
 | String lists | growable text lists | `strings@` `strings_add` `strings_text$` |
 | JSON | parse / build / query | `json_parse@` `json_object@` `json_get@` |
 | Files & paths | whole-file text, path ops | `file_writealltext` `file_readalltext$` `path_*` |
+| Byte buffers | build and edit bytes in place | `buffer_new@` `buffer_get` `buffer_setint` `buffer_tostr$` |
 | Date & time | dates as numbers, arithmetic | `now` `today` `incday` `formatdatetime$` |
 | Regex | pattern match / extract (pattern-first) | `regex_find$` `regex_groups@` |
 | Config (INI) | read/write settings files | `cfg_open@` `cfg_get$` `cfg_setn@` |

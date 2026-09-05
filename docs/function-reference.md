@@ -703,6 +703,75 @@ in-process (creation/write/access variants each behave the same underlying way).
 | `ioerror() → num` | the last I/O error code (0 = clean) |
 | `iostrerror$() → str` | the last I/O error as text |
 
+## Buffer — mutable byte buffers (23 names / 29 registry entries)
+
+The founding brief settled binary I/O without introducing a scalar byte type:
+*"binary I/O uses a buffer as a handle (`buf@ = buffer_new(1024)`), pure library,
+zero cost in the parser and in the VM"*. This is that buffer, spelled `buffer_new@`
+because a built-in's return type comes from the suffix on its own name. It adds no
+type: it operates on the **same handle** `file_readallbytes@` already hands out, so
+the two compose without a conversion step.
+
+```basic
+buf@ = file_readallbytes@("in.bin")   ' the existing reader
+buffer_set(buf@, 1, 255)              ' now it is inspectable and mutable
+file_writeallbytes("out.bin", buf@)   ' the existing writer
+```
+
+**Buffer or string?** `bytelen`/`byteat`/`bytestr$`/`bytemid$` (in Str, above) read
+bytes *out of* a string, which is enough to inspect one. Writing is where a string
+fails: strings are immutable, so changing one byte of an `n`-byte payload rebuilds
+all `n`, and a loop over it is quadratic. A buffer is mutable in place, so the same
+loop is linear. Use `bytemid$` to read a string; use a buffer to build one.
+
+Positions are **base-1**, byte values are `0..255`, and every out-of-range position,
+count or value is a **catchable error** — never a silent clamp, because reading past
+the end of a buffer is a bug worth stopping for. The one deliberate exception is
+`buffer_free`, which is lenient (like `strings_free`) so a program can free
+defensively.
+
+Mutators return **information, not a success flag** — failure is already a returned
+error, so "did it work" would always say the same thing. `buffer_set` gives back the
+byte written, the bulk operations give back the byte count, `buffer_resize` the new
+length.
+
+| function | description |
+| --- | --- |
+| `buffer_new@(n) → handle` | `n` zero bytes; `n` up to 1 GiB |
+| `buffer_fromstr@(s$) → handle` | a buffer holding a copy of `s$`'s bytes |
+| `buffer_clone@(b@) → handle` | an independent copy, not a second name for the same bytes |
+| `buffer_free(b@) → num` | `1` if it freed a buffer, `0` otherwise — never an error |
+| `buffer_len(b@) → num` | size in bytes |
+| `buffer_resize(b@, n) → num` | grow (zero-filled) or truncate; returns the new length |
+| `buffer_get(b@, i) → num` | byte `i`, `0..255` |
+| `buffer_set(b@, i, v) → num` | write byte `i`; returns `v` |
+| `buffer_fill(b@, v) → num` | fill the whole buffer; returns the count |
+| `buffer_fillrange(b@, i, n, v) → num` | fill `n` bytes from `i`; returns `n` |
+| `buffer_tostr$(b@) → str` | the bytes as a string |
+| `buffer_slice$(b@, i, n) → str` | `n` bytes from `i`, as a string |
+| `buffer_write(b@, i, s$) → num` | write `s$`'s bytes at `i`; returns the count |
+| `buffer_copy(dst@, di, src@, si, n) → num` | copy `n` bytes; **overlap-safe**, so a buffer can shift onto itself |
+| `buffer_indexof(b@, pat$[, from]) → num` | position of `pat$`, or `0`; an empty pattern is `0` |
+| `buffer_equal(a@, b@) → num` | `1` if same length and same bytes |
+| `buffer_getint(b@, i, w[, bigendian?]) → num` | signed integer, width `w` = 1, 2, 4 or 8 |
+| `buffer_getuint(b@, i, w[, bigendian?]) → num` | unsigned; width 8 has no unsigned form |
+| `buffer_setint(b@, i, w, v[, bigendian?]) → num` | write `v` in `w` bytes; a value that does not fit is an error |
+| `buffer_getdbl(b@, i) → num` | IEEE-754 double, 8 bytes little-endian |
+| `buffer_setdbl(b@, i, v) → num` | write one; returns `v` |
+| `buffer_getsng(b@, i) → num` | IEEE-754 single, 4 bytes little-endian |
+| `buffer_setsng(b@, i, v) → num` | write one; returns the value at single precision |
+
+Byte order is **little-endian unless you ask otherwise**, and the assembly is
+arithmetic (shifts) rather than a copy of a machine word, so a file written on one
+machine reads back identically on another whatever the CPU's own endianness.
+`buffer_setint` accepts both readings of a width — `200` and `-56` both fit one
+byte — and rejects anything outside it, because *integer overflow is a catchable
+error, never a silent truncation* (decisions.md).
+
+Eight bytes carry an `int%` exactly, including values a Double cannot hold:
+`buffer_setint(b@, 1, 8, 9007199254740993)` reads back as that number, not as
+`9007199254740992`.
+
 ## Sys — system, paths, colours (39 functions)
 
 Process arguments, path separators, known directories, generated names, directory

@@ -89,3 +89,20 @@ assert_eq(hex$(255), "FF", "hex$ of 255")
 assert_eq(bin$(10), "1010", "bin$ of 10")
 assert_eq(instr("Hello", "ll"), 3, "instr is 1-based: 'll' starts at position 3 (Plan9Basic base-0 gave 2)")
 assert_eq(instr("Hello", "zz"), 0, "instr returns 0 when absent")
+
+test_case("docs/curated/byte-buffer")
+rem docs/language-reference.md, "A buffer, when you need to write bytes" makes two
+rem self-contained value claims. Both are typed back here rather than trusted, which
+rem is the entire reason this file exists: a documented example that does not run is
+rem the defect Plan9Basic's own 16 was written to catch.
+db@ = buffer_new@(3)
+x = buffer_set(db@, 2, 128)
+dp$ = path_combine$(temppath$(), "phosphor_doc_bytes.bin")
+ok = file_writeallbytes(dp$, db@)
+dr@ = file_readallbytes@(dp$)
+assert_eq(buffer_len(dr@), 3, "the page says '3 bytes'")
+assert_eq(buffer_get(dr@, 2), 128, "and 'second is 128'")
+ok = file_delete(dp$)
+dh@ = buffer_new@(4)
+x = buffer_setint(dh@, 1, 4, 305419896, true)
+assert_eq(buffer_getint(dh@, 1, 4, true), 305419896, "and the big-endian round trip prints 305419896")

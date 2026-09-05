@@ -279,6 +279,39 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-05 · round 21 · the last unbuilt promise: the byte buffer.**
+  `decisions.md` had settled binary I/O in one line since the founding brief -- "no
+  scalar BYTE type; binary I/O uses a buffer-as-handle" -- and the handle existed
+  while the buffer did not. `file_readallbytes@` returned a `TPhosphorBytes` that
+  nothing could look inside: you could carry a file's bytes from a read to a write
+  and no further. 23 names / 29 registry entries close it, and deliberately add NO
+  type -- the package operates on the SAME handle Io already hands out, so reader,
+  edit and writer compose with no conversion step between them.
+  - **The spelling changed and the decision did not.** The brief wrote
+    `buffer_new(1024)`; the rule that a built-in's return type comes from the suffix
+    on its OWN name arrived later, so the constructor had to be `buffer_new@`. The
+    old spelling was still sitting in decisions.md, where a reader copying it out
+    would have got "unknown function" -- the exact defect class the library-map gate
+    was built for, in a file the gate does not read. FIXED THE PAGE, not just the code.
+  - **The aliasing check was the one worth writing.** Pascal strings are
+    reference-counted with copy-on-write. An INDEXED write uniques for you; whether
+    `FillChar`/`Move` on `Data[1]` uniques first is a property of the compiler, not
+    something to reason about. Rather than argue it, the check was SEEN FAILING:
+    replacing `FillChar(b.Data[1], ...)` with `FillChar(PAnsiChar(Pointer(b.Data))^, ...)`
+    turned exactly three assertions red -- filling a clone rewrote the original, and
+    a string the buffer was built from. The real code is correct; the test now proves
+    it stays that way.
+  - **The suite style is not the classic style, and the file was written in the wrong
+    one.** It ran, exited 0, and reported `passed: 0 / failed: 0` -- a golden of two
+    lines that asserted nothing. `println` belongs to tests/classic, where the whole
+    output is the golden; tests/suite asserts. A GREEN RUN WITH A ZERO COUNT IS NOT A
+    PASS: read the count, not the exit code.
+  - **One literal could not be written.** `-9223372036854775808` is not expressible:
+    the magnitude `2^63` overflows Int64, so the lexer makes it a Double and the
+    negation follows. Written as `-9223372036854775807 - 1`, which is exact. Not a
+    defect -- a property of the notation, now pinned by a test so it is not
+    rediscovered as one.
+
 - **2026-09-04 · round 20 · all 69 findings closed, and what the closing cost.**
   Fourteen commits, each one class at a time, each verified on both OSes before the
   next began: hardware traps escaping the VM; the codepage char-concat class (third

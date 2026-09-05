@@ -33,7 +33,12 @@ are case-insensitive.
   it, Plan9Basic's `?>` / `?<` operators (max/min) are gone — replaced by the
   ordinary `max()` and `min()` functions.
 - **No scalar BYTE type.** Binary I/O uses a buffer-as-handle
-  (`buf@ = buffer_new(1024)`): pure library, zero cost in the parser and VM.
+  (`buf@ = buffer_new@(1024)`): pure library, zero cost in the parser and VM.
+  *Built.* The spelling gained its `@` when the later rule settled that a
+  built-in's return type comes from the suffix on its OWN name — as `dim@`,
+  `strings@` and `json_parse@` are spelled. It introduced no type: it operates on
+  the same handle `file_readallbytes@` already returned, so the reader, the buffer
+  and the writer compose without a conversion step.
 
 ## Arithmetic and promotion
 

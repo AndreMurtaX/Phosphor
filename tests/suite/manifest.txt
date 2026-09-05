@@ -55,3 +55,4 @@
 54_onerror_reentrancy
 55_json_bytes_handles
 56_semantics
+57_buffer

@@ -41,6 +41,16 @@ prove="${1:-}"
 # --prove: corrupt ONE expected value so an assertion must fail, then confirm the
 # byte comparison catches it. The harness is seen failing before it is trusted --
 # the same discipline test-suite.ps1 applies, which Linux was missing entirely.
+# An argument this script does not know is an ERROR, not a silent full run. It
+# already cost a false report once: `--prove-failure` (the PowerShell spelling with
+# a dash) fell through to the ordinary suite, which printed SUITE OK, and the run
+# was almost recorded as a ProveFailure that had never happened. A check that can
+# silently not run is worse than no check.
+case "$prove" in
+  ''|--prove|-ProveFailure) ;;
+  *) echo "test-suite.sh: unknown argument '$prove' (use --prove or -ProveFailure)" >&2; exit 2 ;;
+esac
+
 if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
   bad="$(mktemp)"
   sed 's/assert_eq(2 + 3, 5)/assert_eq(2 + 3, 6)/' "$suite/00_harness.bas" > "$bad"

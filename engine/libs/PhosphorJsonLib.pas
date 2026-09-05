@@ -314,14 +314,18 @@ begin
         end
         else
         begin
-          Result := '{ ';
+          // COMPACT, the word the reference uses. It used to emit '{ ', ' : ' and
+          // ' }', while the array branch below was already compact -- so objects
+          // were the inconsistency, not the format. json_pretty$ is the readable
+          // rendering; this one is the one that goes over a wire.
+          Result := '{';
           for i := 0 to o.Count - 1 do
           begin
-            if i > 0 then Result := Result + ', ';
-            Result := Result + '"' + JsonEscape(o.Names[i]) + '" : ' +
+            if i > 0 then Result := Result + ',';
+            Result := Result + '"' + JsonEscape(o.Names[i]) + '":' +
                       JsonText(o.Items[i], False, AIndent, 0);
           end;
-          Result := Result + ' }';
+          Result := Result + '}';
         end;
       end;
     jtArray:

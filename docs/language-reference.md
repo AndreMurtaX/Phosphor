@@ -88,7 +88,9 @@ println count%; " "; price; " "; name$; " "; ready?
 42 19.99 Ada true
 ```
 
-> `#` is **not** a suffix in Phosphor — there is no `#` file-number type. File
+> `#` is **not** a type suffix — no variable is declared with one. It *is* a token:
+a **file number** in the classic I/O statements (`open … as #1`, `print #1`,
+`input #1`, `close #1`), which names a channel rather than holding a value. File
 > work is done through handle functions (see *Files*).
 
 ---
@@ -428,7 +430,7 @@ fixed-width field). The format repeats while values remain.
 
 ```basic
 println using "###.##"; 3.14159        ' "  3.14"
-println using "$$#,###.##"; 1250.5     ' "$1,250.50"
+println using "$$#,###.##"; 1250.5     ' " $1,250.50" -- ten wide, so one pad space
 println using "<#> "; 1; 2; 3          ' "<1> <2> <3> "  (format reused)
 ```
 

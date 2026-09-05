@@ -340,11 +340,25 @@ begin Err := NoError(); ForceDirectories(Args[0].Str); Result := ValInt(1); end;
 function t_dir_isempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValInt(Ord(ListToStr(Args[0].Str, '*', True, True, False) = '')); end;
 function t_dir_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var
+  ok: Boolean;
 begin
   Err := NoError();
-  if (Length(Args) >= 2) and (AsDouble(Args[1]) <> 0) then DeleteTree(Args[0].Str)
-  else RemoveDir(Args[0].Str);
-  Result := ValInt(1);
+  // ANSWER WHAT HAPPENED. Both calls return a result and both used to have it
+  // thrown away, so a dir_delete of a non-empty directory answered 1, left the
+  // directory standing, and set no error -- a program could not tell it had
+  // failed by any means. file_delete next door already answers Ord(DeleteFile).
+  if (Length(Args) >= 2) and (AsDouble(Args[1]) <> 0) then
+  begin
+    // The local tree walker reports nothing, so ask the filesystem the question
+    // the caller actually has: is the directory gone?
+    DeleteTree(Args[0].Str);
+    ok := not DirectoryExists(Args[0].Str);
+  end
+  else
+    ok := RemoveDir(Args[0].Str);
+  if ok then GIoError := 0 else GIoError := 3;   // 3 ~ the operation was refused
+  Result := ValInt(Ord(ok));
 end;
 function t_dir_getfiles(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var pat: String; rec: Boolean;

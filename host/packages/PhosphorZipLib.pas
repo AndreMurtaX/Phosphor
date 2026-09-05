@@ -348,10 +348,15 @@ begin
       uz.FileName := Args[0].Str;
       uz.Examine;
       Result := ValInt(uz.Entries.Count);
+      ZipErr := 0;
     finally
       uz.Free;
     end;
   except
+    // RECORD it. The unit header promises failures reach zip_error(), and these two
+    // swallowed the exception with the slot untouched -- so a caller could not tell
+    // a corrupt archive from an empty one, which is the whole question they ask.
+    ZipErr := 1;
     Result := ValInt(0);
   end;
 end;
@@ -367,11 +372,18 @@ begin
       uz.FileName := Args[0].Str;
       uz.Examine;
       n := ArgI32(Args[1]);   // 1-based
-      if (n >= 1) and (n <= uz.Entries.Count) then Result := ValStr(uz.Entries[n - 1].ArchiveFileName);
+      if (n >= 1) and (n <= uz.Entries.Count) then
+      begin
+        Result := ValStr(uz.Entries[n - 1].ArchiveFileName);
+        ZipErr := 0;
+      end
+      else
+        ZipErr := 1;   // an index outside the archive is a refusal, not an empty name
     finally
       uz.Free;
     end;
   except
+    ZipErr := 1;
     Result := ValStr('');
   end;
 end;

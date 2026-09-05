@@ -34,7 +34,7 @@ Nothing is "done" on a claim. Every increment is proven against a running system
   still pass. The engine stays host-agnostic; host concerns live in `host/`.
 - **No stray files, clean tree.** `git status` shows only intended changes; build
   artifacts stay ignored.
-- **Commit + push as AndreMurtaX**, `Co-Authored-By: Claude Opus 4.8`. Update docs and
+- **Commit + push as AndreMurtaX**, `Co-Authored-By: Claude Opus 5`. Update docs and
   memory. A green-but-uncommitted increment is not shipped.
 
 If any of these cannot be met, you are **blocked** — report the blocker precisely; do

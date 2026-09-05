@@ -146,7 +146,7 @@ UTF-8 everywhere, declared explicitly, settled on day one. See
 
 Settled when the phase-1 [roadmap](roadmap.md) surfaced them as freeze-now forks:
 
-- **Signature separator is `:`** — `Lib.Add('name:signature')`. The registry `:`
+- **Signature separator is `:`** — `Reg.Add('name:signature')`. The registry `:`
   is parsed in Pascal at registration time and never collides with a source-level
   statement `:`.
 - **String-literal escape is a doubled quote** — `""` inside a literal yields one
@@ -289,18 +289,23 @@ Two additions, both host-agnostic:
 1. **Host-aware functions.** Alongside the plain `TPhosphorFunc`, the registry
    accepts a `TPhosphorHostFunc` (via `AddHost`) that also receives the executing
    VM (typed `TObject` to avoid a dependency cycle; the package casts it back).
-   Only functions that must call back into BASIC take this channel; the dozen
-   existing libraries are untouched. "Run a BASIC routine" needs no console, file
-   or window — only the VM already on the stack — so this stays inside the
-   boundary.
+   Any function that needs the executing VM takes this channel, not only the ones
+   that call back into BASIC: `PhosphorErrLib` uses it so `err`/`errmsg$`/`erl`
+   read the VM's own caught-error state, and the GUI event binders use it to hand
+   a bridge the VM it will call through. What it is not is the default — a library
+   needing nothing from the VM registers with plain `Add`, and most do. "Run a
+   BASIC routine" needs no console, file or window — only the VM already on the
+   stack — so this stays inside the boundary.
 2. **`TPhosphorVM.CallUserFunc`.** A public, re-entrant entry that pushes a call
    frame for a named user function and runs the execution loop *bounded to that
    frame*: it stops and hands the return value back the moment the routine
    unwinds to the level it was called at. Globals, handles and the value stack
    are shared with the running program on purpose — a callback sees and mutates
-   the same state, exactly as an in-line GOSUB would. The top-level `Run` is just
-   `CallUserFunc`'s unbounded case (stop-frame `-1`, a level the frame stack never
-   reaches).
+   the same state, exactly as an in-line GOSUB would. `Run` and `CallUserFunc` are
+   SIBLING callers of one private `ExecFrom(AStartPC, AStopFrameSP)`: `Run` passes
+   the unbounded stop-frame `-1`, a level the frame stack never reaches, and
+   `CallUserFunc` passes the frame it must return to. Neither goes through the
+   other.
 
 The language face of this is **`callfunc`** (`engine/libs/PhosphorCallLib`):
 

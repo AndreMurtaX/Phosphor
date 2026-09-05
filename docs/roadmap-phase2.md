@@ -19,7 +19,7 @@ shipped:
 
 - **The host-callback seam** (`Registry.AddHost` / `TPhosphorVM.CallUserFunc`) —
   host-agnostic, proven headless by `callfunc` before any GUI existed.
-- **20 GUI packages** under `host/gui/libs/`, isolated per control family like
+- **17 GUI packages** under `host/gui/libs/`, isolated per control family like
   `engine/libs/` but free to use the LCL: `GuiCore`, `Control` (the shared
   backbone + generic `TypInfo` property bridge), `Form`, `Button`, `Label`, `Edit`,
   `Choice`, `Container`, `Range`, `Menu`, `Timer`, `Image`, `Grid`, `TreeList`,
@@ -96,7 +96,10 @@ conventions (`@` is the handle suffix, base-1, strict boolean):
   the VM at bind time rather than walking the parent chain to find it — the
   reference records that walk as the cause of several dead-event bugs.
 - **Errors, not exceptions**: each library keeps a last-error code
-  (`xxx_error()` / `xxx_clearerror()`); a fabricated, nil or wrong-class handle is
+  — in the event ONE shared slot, `gui_error()` / `gui_clearerror()`, not a pair per
+  package: with one handle registry and one resolver almost every error is "this is
+  not a live control of the expected class", which one slot conveys and seventeen
+  would only repeat; a fabricated, nil or wrong-class handle is
   recorded and answered with an empty value, never raised — matching the phase-1
   contract and the reference's `02_handles` behaviour.
 - **Message loop**: `app_run` / `app_processmessages` / `app_quit`, thin over

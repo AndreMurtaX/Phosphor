@@ -183,6 +183,10 @@ var d: TPhosphorDict;
 begin
   Result := ValInt(0);
   if not GetDict(Args[0], d, Err) then Exit;
+  // Answer whether anything was actually removed. It used to answer 1 for a key
+  // that was never there, which is the one question this call exists to settle --
+  // a mutator returns information, the rule arr_set and strings_add follow.
+  if d.IndexOf(Args[1].Str) < 0 then Exit;   // absent: nothing removed, answer 0
   d.Remove(Args[1].Str);
   Result := ValInt(1);
 end;

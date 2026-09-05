@@ -20,7 +20,7 @@ o@ = json_object@()
 json_sets@(o@, "k", v$)
 assert_eq(json_gets$(o@, "k"), v$, "the tree always held the right bytes")
 t$ = json_stringify$(o@)
-assert_eq(bytelen(t$), 17, "and the TEXT is no longer two bytes longer than it should be")
+assert_eq(bytelen(t$), 13, "and the TEXT is no longer two bytes longer than it should be")
 back@ = json_parse@(t$)
 assert_eq(json_gets$(back@, "k"), v$, "so what is written parses back identical")
 
@@ -46,11 +46,15 @@ json_sets@(k@, v$, "y")
 assert_eq(json_gets$(k@, v$), "y", "and updates the same member rather than adding one")
 assert_eq(json_count(k@), 1, "one member, not two")
 
-test_case("json/the rendered shape is unchanged for ASCII")
+test_case("json/the rendered shape, now genuinely compact")
 s@ = json_object@()
 json_sets@(s@, "s", "txt")
 json_setn@(s@, "n", 42)
-assert_eq(json_stringify$(s@), "{ \"s\" : \"txt\", \"n\" : 42 }", "same text as before")
+rem COMPACT, which is the word the reference has always used. Objects used to
+rem emit "{ ", " : " and " }" while the array branch of the same renderer was
+rem already compact, so objects were the inconsistency rather than the format --
+rem and json_pretty$ is what exists for the readable rendering.
+assert_eq(json_stringify$(s@), "{\"s\":\"txt\",\"n\":42}", "no padding: this is the wire form")
 assert_eq(json_stringify$(json_object@()), "{}", "an empty object")
 assert_eq(json_stringify$(json_array@()), "[]", "and an empty array")
 

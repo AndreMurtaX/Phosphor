@@ -189,3 +189,27 @@ assert_false(dir_exists(cp$), "and the source is gone")
 
 dir_delete(src$, 1)
 dir_delete(mv$, 1)
+
+test_case("io/dir_delete answers what happened, and says so when refused")
+rem It used to DISCARD RemoveDir's answer and return 1 unconditionally: deleting a
+rem directory that still held a file answered 1, left the directory standing, and
+rem set no error -- a program had no way at all to learn it had failed. Its sibling
+rem file_delete already answered Ord(DeleteFile); this was the outlier.
+dd$ = path_combine$(temppath$(), "phosphor_dirdel")
+ok% = dir_create(dd$)
+ok% = file_writealltext(path_combine$(dd$, "inside.txt"), "x")
+assert_eq(dir_delete(dd$), 0, "a non-empty directory is REFUSED, not reported as deleted")
+assert_eq(dir_exists(dd$), 1, "and it is still there, which is what 0 means")
+assert_true(ioerror(), "the refusal is recorded where a program looks for it")
+ok% = file_delete(path_combine$(dd$, "inside.txt"))
+assert_eq(dir_delete(dd$), 1, "emptied, it deletes")
+assert_eq(dir_exists(dd$), 0, "and is gone")
+assert_eq(ioerror(), 0, "with the error cleared")
+
+rem the recursive form answers the same question the same way
+dr$ = path_combine$(temppath$(), "phosphor_dirtree")
+ok% = dir_create(dr$)
+ok% = dir_create(path_combine$(dr$, "sub"))
+ok% = file_writealltext(path_combine$(dr$, "sub/deep.txt"), "y")
+assert_eq(dir_delete(dr$, 1), 1, "recursive delete of a populated tree succeeds")
+assert_eq(dir_exists(dr$), 0, "and the tree is gone")

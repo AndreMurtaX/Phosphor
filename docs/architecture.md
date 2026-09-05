@@ -40,10 +40,14 @@ Phosphor/
     console/              the first consumer: REPL + file runner.
       phosphor.lpr          program; produces the `phosphor` binary.
       phosphor.lpi          Lazarus project file (opens/builds in the IDE).
+    gui/                  the second consumer: 17 LCL packages under libs/, plus
+                          phosphorgui (the interactive host) and phosphorguitest.
+    packages/             the six opt-in packages a host may register.
+    embed/                the third consumer: phosphorembed, which is what the
+                          embedding API is tested through.
   tests/
     skeleton/            day-1 smoke test (hello.bas + golden hello.expected).
-                          The real oracle — Plan9Basic's 45+15 .bas suite —
-                          is imported later, once the interpreter exists.
+    suite/ negative/ classic/ packages/ gui/   the corpora that grew from it.
   scripts/
     build.ps1            authoritative build (drives fpc directly).
     test.ps1            build + run + byte-exact golden compare.
@@ -118,8 +122,9 @@ minefield otherwise.
    [roadmap-phase2.md](roadmap-phase2.md) and [gui-components.md](gui-components.md).
 3. **Done.** Robust and deployable, all five steps: the catchable language-level
    error model (`ON ERROR` / `resume` / `resume next`, re-entrant across calls),
-   execution limits so a host can run untrusted scripts safely (`MaxSteps` and a
-   call-depth ceiling, 0 = unlimited and zero cost), the documented embedding API
+   execution limits so a host can run untrusted scripts safely — `MaxSteps`,
+   `MaxOutputBytes` and `TimeoutMs`, each `0` by default meaning unlimited and
+   costing nothing, plus a fixed call-depth ceiling, the documented embedding API
    with `phosphorembed` as a third consumer, the on-disk bytecode (`.pbc`, validated
    on load rather than trusted), and the self-extracting deployment stub --
    `phosphor pack app.bas app.exe` appends a payload to the stub binary, so the same
@@ -149,7 +154,9 @@ both are empty it explains the situation, points at `DISPLAY=:0 phosphor --gui
 <file>` and at `phosphor run <file>`, and halts with **exit code 3** — separate
 from `1` (program error) and `2` (usage) so a script can tell "no display" from
 "your program failed". `phosphor --gui` runs the same check inline before it
-execs, so the message is identical whichever binary the user reached for. On
+execs, so the user gets a message either way rather than gtk's bare `cannot open
+display`. The two texts are written separately and each names its own binary, so
+they read alike without being byte-identical. On
 Windows there is no display to miss, so the whole guard is `{$IFDEF UNIX}`.
 
 A `DISPLAY` that is *set but broken* still fails inside gtk; the guard is aimed

@@ -1,5 +1,13 @@
 # Prompt inicial — Phosphor BASIC
 
+> **ARQUIVO HISTÓRICO — não são instruções correntes.** Este é o texto que iniciou
+> o projeto, guardado como está. As instruções abaixo descrevem uma pasta vazia e um
+> Plan9Basic recém-congelado; nada disso vale hoje, e o que ficou decidido está em
+> [docs/decisions.md](docs/decisions.md), o que existe em
+> [docs/function-reference.md](docs/function-reference.md), e como trabalhar em
+> [docs/dev-agent-playbook.md](docs/dev-agent-playbook.md). Observações que ele faz
+> sobre o CÓDIGO DE REFERÊNCIA (Plan9Basic) descrevem aquele repositório, não este.
+
 Cole o texto abaixo numa sessão nova, com o Claude Code aberto em
 `C:\Dev\Phosphor`.
 Gerado em 2026-08-31, ao fim da sessão que congelou o Plan9Basic.

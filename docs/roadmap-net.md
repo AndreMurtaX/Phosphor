@@ -2,7 +2,8 @@
 
 The opt-in host packages are closed (see [roadmap-phase3.md](roadmap-phase3.md),
 "Closure"): `base64`, `zip`, `http` (with multi-address fallback), and a
-library-gated `sqlite`, each verified against reality on both operating systems. Two
+library-gated `sqlite`, each verified against reality on both operating systems.
+*(`crt` and `gzip` landed just after this file was last edited, making six.)* Two
 things were deliberately left out of the HTTP client, recorded not stubbed: **HTTPS**
 and **IPv6 endpoints**. This file picks the next one and plans it.
 
@@ -62,8 +63,10 @@ TLS. Done: `PhosphorHttpLib` overrides `GetSocketHandler` (the seam where the TL
 handler is born) to set `VerifyPeerCert` and hand it a CA bundle, auto-located at
 startup from the usual Unix paths (`/etc/ssl/certs/ca-certificates.crt`, …). With
 `SSL_VERIFY_PEER` plus a loaded CA store, `SSL_connect` itself fails on an expired,
-self-signed, or untrusted-CA certificate. `http_verify_peer(0)` is the explicit,
-per-request opt-out (for a self-signed dev server); `http_ca_file$(path$)` points at
+self-signed, or untrusted-CA certificate. `http_verify_peer(0)` is the explicit
+opt-out (for a self-signed dev server) — **process-wide, not per request**: it sets a
+unit-global that stays off until it is set back on, so a program that turns it off
+for one call must turn it on again itself. `http_ca_file$(path$)` points at
 a specific bundle. A box with no system bundle (Windows) fails **closed** — https
 refused until a bundle is supplied or verification is opted out — never a silent
 trust-all.
@@ -80,9 +83,10 @@ trust-all.
 ### Step 2 — the permanent test: a local TLS server, library-gated  *(DONE 2026-09-01)*
 
 `phosphorhttptest` now stands up a **second server over TLS** on loopback
-(`127.0.0.1:18443`), same routes, with an **auto-generated self-signed certificate**
-(`UseSSL` + empty `CertificateData` → the handler self-signs) — no cert files, no
-`openssl` CLI. `server_url_https$()` hands the test its URL.
+(`127.0.0.1:18443`), same routes, with a **checked-in self-signed certificate** —
+`tests/packages/tls_test_cert.pem` and `tls_test_key.pem`, loaded into
+`CertificateData`, so the fixture is the same bytes on every machine and no
+`openssl` CLI is needed at test time. `server_url_https$()` hands the test its URL.
 
 - **`tests/packages/04_https` (7 asserts)** proves BOTH halves with no external
   network: with verification on (default) the self-signed cert is **refused**
@@ -117,9 +121,10 @@ fallback stays an HTTP enhancement — correctness before breadth.
 
 ### Out of scope for this step
 
-Client certificates, custom CA bundles, and proxy-tunnelled TLS (`CONNECT`) — real
-features, but past "the client can fetch an HTTPS URL". Recorded for later, not built
-speculatively.
+Client certificates and proxy-tunnelled TLS (`CONNECT`) — real features, but past
+"the client can fetch an HTTPS URL". Recorded for later, not built speculatively.
+*(A custom CA bundle was on this list and then built: `http_ca_file$(path$)` points
+verification at a specific PEM, as the step above describes.)*
 
 ## IPv6 — deferred (recorded, not dropped)
 

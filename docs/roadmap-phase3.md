@@ -122,7 +122,9 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    involved. **Gate met:** `tests/probe_bytecode` compiles a rich program
    (data/read/func/for/strings) and a simple one to bytecode, runs the bytecode and
    asserts its output is **byte-identical** to running the source, then corrupts the
-   version byte and the magic and asserts each is refused with a message (4 checks;
+   version byte and the magic and asserts each is refused with a message (6 checks
+   today -- two body-corruption cases were added after this line was written, one
+   flipping the first instruction's opcode byte and one its operand;
    `--fail` flips one); auto-run in the suite; `phosphor compile`/run verified
    end-to-end. Byte-exact green on Windows and Linux; the same `.pbc` runs on both
    (Double + endianness fixed). `-B -vewn` clean.
@@ -177,11 +179,14 @@ so one dead IP sinks the request even when the host's other IPs are healthy;
 `"127.0.0.9,127.0.0.1"` must skip the dead address and reach the live one, no DNS or
 real network involved. The `base64`/`zip`/`sqlite` tests run through `phosphorpkgtest`;
 the `http` test through `phosphorhttptest`; all via `scripts/test-packages.{ps1,sh}`
-(`tests/packages/00_base64`, `01_zip`, `02_sqlite`, `03_http`). **Still out:** an
-HTTP**S** helper, and IPv6 endpoints (FPC's socket layer is IPv4-only, so reaching an
-AAAA host would need a hand-rolled `AF_INET6` connect) -- both kept out until they can
-be tested against reality, not stubbed. These are breadth, not a gate; they land any
-time.
+(`tests/packages/00_base64`, `01_zip`, `02_sqlite`, `03_http`).
+
+**Still out when this was written, and since resolved:** HTTPS **shipped** —
+`http_verify_peer`, `http_ca_file$`, the URL scheme selecting TLS, and
+`tests/packages/04_https` driving it against a loopback TLS server. IPv6 is still
+out (FPC's socket layer is IPv4-only, so reaching an AAAA host would need a
+hand-rolled `AF_INET6` connect) and is recorded in
+[roadmap-net.md](roadmap-net.md), not dropped.
 
 **Closure (2026-09-01).** Four packages shipped and are verified against reality on
 both operating systems — `base64`, `zip`, and the multi-address-fallback `http` run
@@ -215,7 +220,23 @@ every future integration follows.
   frozen decisions is that a `.pbc` from a different build is refused *out loud*,
   never executed as the wrong opcodes. Non-negotiable in step 4.
 
-## Open questions — owner decisions
+## Open questions — ALL FOUR ANSWERED (2026-09-01)
+
+> Kept as the record of what was open and how it was settled, because a plan that
+> deletes its questions cannot be audited. Each answer is the section above.
+>
+> 1. **Error-handler surface** → `on error goto` + `err()`/`errmsg$()`/`erl()` +
+>    `resume`/`resume next`, plus `on error call fn`. No `try/catch`.
+> 2. **Which limits ship** → `MaxSteps`, `MaxOutputBytes`, `TimeoutMs`, all **off
+>    by default** (0 = unbounded), so an embedder opts in and pays nothing otherwise.
+> 3. **`.pbc` specifics** → magic `PBC`, version 1, extension `.pbc`, and today's
+>    **late-bound** resolution kept: functions resolve by name against whatever the
+>    loading host registered, which is what lets one file run on hosts with
+>    different packages.
+> 4. **Phase boundary** → deployment stayed inside phase 3; steps 1–5 all shipped
+>    together, so the split was never needed.
+
+### The questions as originally posed
 
 1. **Error-handler surface** — `on error goto` + `err()`/`errmsg$()`/`erl()` +
    `resume`/`resume next`, or a structured `try/catch`? (Lean: `on error goto`.)

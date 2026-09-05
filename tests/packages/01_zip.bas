@@ -30,3 +30,18 @@ assert_eq(file_readalltext$(out$ + "/two.txt"), "second file", "two.txt came bac
 rem clean up the whole tree
 dir_delete(root$, 1)
 assert_false(dir_exists(root$), "and the scratch tree is gone")
+
+test_case("zip/a failure is RECORDED, not just answered")
+rem The unit header promises failures reach zip_error(). unzip_count and
+rem unzip_entry swallowed the exception and answered 0/"" with the slot untouched,
+rem so a caller could not tell a corrupt archive from an empty one -- which is the
+rem only question those two are ever asked.
+bad$ = path_combine$(temppath$(), "phosphor_not_a_zip.zip")
+ok% = file_writealltext(bad$, "this is definitely not a zip archive")
+zc% = unzip_count(bad$)
+assert_eq(zc%, 0, "a corrupt archive counts nothing")
+assert_true(zip_error(), "and SAYS it failed, which is the difference from an empty one")
+ze$ = unzip_entry$(bad$, 1)
+assert_eq(ze$, "", "reading an entry from it answers nothing")
+assert_true(zip_error(), "and records that too")
+ok% = file_delete(bad$)

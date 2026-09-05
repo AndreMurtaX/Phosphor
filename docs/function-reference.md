@@ -48,7 +48,7 @@ and additionally receive the executing VM.
 
 ### Engine built-ins vs opt-in packages
 
-The **engine built-ins are always present** — the sixteen libraries below register
+The **engine built-ins are always present** — the seventeen libraries below register
 themselves when a `TPhosphorEngine` is created, so any host (the console
 `phosphor`, the embedding host, the test runner) has them.
 
@@ -67,7 +67,7 @@ absent.
 
 # Engine libraries (always available)
 
-## Str — strings (64 functions)
+## Str — strings (64 names / 67 registry entries)
 
 Case, length, codepoint-aware slicing, trimming, search, replace, radix and
 number conversion, padding/justification, word and line splitting, predicates and
@@ -283,7 +283,7 @@ Maps keyed by string, as handles, in insertion order. Three value kinds: numeric
 | `dict_count(d@) → num` | number of entries |
 | `dict_haskey(d@, key$) → num` | 1 if the key exists |
 | `dict_exists(d@, key$) → num` | alias of `dict_haskey` |
-| `dict_remove(d@, key$) → num` | remove a key (1 on success) |
+| `dict_remove(d@, key$) → num` | remove a key; answers `1` if it was there, `0` if it was not |
 | `dict_clear@(d@) → num` | remove all entries; answers `1`, not the dict — unlike `dict_set@`, which does answer the dict |
 | `dict_key$(d@, n) → str` | the key at 1-based insertion position `n` |
 | `dict_type(d@) → num` | value-kind code: 0 numeric, 1 string, 2 pointer |
@@ -784,7 +784,7 @@ Eight bytes carry an `int%` exactly, including values a Double cannot hold:
 `buffer_setint(b@, 1, 8, 9007199254740993)` reads back as that number, not as
 `9007199254740992`.
 
-## Sys — system, paths, colours (39 functions)
+## Sys — system, paths, colours (21 functions)
 
 Process arguments, path separators, known directories, generated names, directory
 and file make/remove, environment variables, and a small colour name↔number table.
@@ -1066,7 +1066,7 @@ only when the request could not complete.
 | `http_urldecode$(s$) → str` | percent-decode (`+` → space) |
 | `http_htmlencode$(s$) → str` | escape HTML entities |
 | `http_htmldecode$(s$) → str` | unescape HTML entities |
-| `http_error() → num` | the last HTTP/config error code (0 = clean) |
+| `http_error() → num` | the last **handle** error (0 = clean, 1 = a bad client or form handle). A request never sets it — read `http_status` for the server's answer (0 when the request never reached one) and `http_strerror$` for why |
 | `http_clearerror() → num` | reset the error code |
 | `http_strerror$(code) → str` | the text for an error code |
 
@@ -1096,7 +1096,7 @@ Closing a database finalizes and invalidates every cursor opened on it.
 | `sqlite_exec(db@, sql$) → num` | run a non-query statement (1/0) |
 | `sqlite_scalar$(db@, sql$) → str` | first column of the first row, as text |
 | `sqlite_scalar(db@, sql$) → num` | first column of the first row, as a number |
-| `sqlite_query$(db@, sql$) → str` | all rows: columns tab-joined, rows newline-joined |
+| `sqlite_query$(db@, sql$) → str` | all rows: columns tab-joined, each row newline-**terminated** — the text ends with a newline, and no rows is `""` |
 | `sqlite_changes(db@) → num` | rows the last statement changed |
 | `sqlite_totalchanges(db@) → num` | rows changed this session |
 | `sqlite_lastid(db@) → num` | last inserted row id |
@@ -1220,5 +1220,5 @@ directly; with a non-terminal stdin the input calls return `""`/0 without blocki
 | `inkey$() → str` | non-blocking: a waiting key, or `""` |
 | `getkey$() → str` | block for one key |
 | `keypressed() → num` | 1 if a key is waiting |
-| `crt_init() → num` | put the terminal in raw mode / enable ANSI on Windows |
+| `crt_init() → num` | enable ANSI/VT escape processing so the sequences render (on Windows 10+ it sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING`; elsewhere ANSI already works). It does **not** change line discipline — there is no raw mode here. `1` if VT output is available |
 | `crt_done() → num` | restore the terminal |

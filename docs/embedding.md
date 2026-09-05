@@ -14,6 +14,8 @@ registers a function, prepares a script once, and calls its routines from Pascal
 
 ```pascal
 uses PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorEngine;
+     // ...and PhosphorVM as well, if you register a HOST function (AddHost):
+     // its signature names TPhosphorVM, so the unit has to be visible.
 
 var eng: TPhosphorEngine;
 eng := TPhosphorEngine.Create;    // registers all built-in libraries
@@ -28,7 +30,7 @@ end;
 numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
 `ON ERROR`, ...). You add yours on top.
 
-## Two ways to run
+## Four ways to run
 
 - **One-shot:** `eng.Run(source)` compiles and runs `source` to completion.
   Returns `0`, or the 1-based line of the first error (`eng.ErrorMessage`
@@ -54,6 +56,11 @@ numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
   payload. A stream that is not a valid `.pbc` — wrong magic, unsupported version,
   a mismatched opcode set, or corruption — is refused with a clear message (return
   `1`), never executed as the wrong opcodes.
+
+- **A line at a time (REPL):** `eng.ReplRun(line)` compiles and runs one line
+  against a VM that persists between calls, so variables and routines defined on
+  one line are there on the next; `eng.ReplReset` starts over. This is what the
+  console host's prompt uses, and what an embedder wants for a command box.
 
 ## Registering a host function
 
@@ -154,6 +161,12 @@ ceilings are cumulative over a prepared session (`Prepare` + all its
 `CallFunction`s); re-`Prepare` to reset the counters.
 
 ## Output and input
+
+`OnOutput` takes what the program prints. `OnInput` supplies what it reads — it is
+a `TPhosphorInputProc`, `function(out ALine: String): Boolean`, and answering
+`False` means end of input, which is what makes `input` and `line input` reach a
+host that has no console. Leave it `nil` and a program that asks for input gets an
+empty line.
 
 `eng.OnOutput` is the one output seam: `PRINT`/`PRINTLN` text arrives there as
 UTF-8 bytes (`PRINTLN` includes the trailing LF). Bind it to wherever your host

@@ -122,9 +122,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `host/gui/`      | `phosphorgui`, the LCL GUI host.                                 |
 | `host/embed/`    | an example of embedding the engine.                              |
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
-| `tests/`         | the byte-exact oracle suite, negatives, classic tests, packages. |
+| `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs.                                       |
-| `scripts/`       | `build`, `build-gui`, `test-suite`, `test-packages`, `test-classic` (`.ps1`/`.sh`), `coverage.py`.|
+| `scripts/`       | `build`, `build-gui`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui` (`.ps1`/`.sh`), and the two source gates `coverage.py` and `check-codepage.py`.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

@@ -72,3 +72,14 @@ d@ = dict@()
 p@ = dict_set@(d@, "answer", 42)
 assert_eq(dict_get(d@, "answer"), 42, "dict@() is the constructor")
 assert_eq(dict_count(d@), 1, "and it starts empty")
+
+test_case("dict/remove says whether it removed anything")
+rem It used to answer 1 for a key that was never there, which is the one question
+rem this call exists to settle. A mutator returns INFORMATION -- the rule dict_set@
+rem (answers the dict), arr_set (the value) and strings_add (the index) all follow.
+rd@ = dict@()
+dict_set@(rd@, "here", 1)
+assert_eq(dict_remove(rd@, "here"), 1, "a key that was present")
+assert_eq(dict_remove(rd@, "here"), 0, "the same key a second time")
+assert_eq(dict_remove(rd@, "never"), 0, "a key that was never there")
+assert_eq(dict_count(rd@), 0, "and the dict is empty either way")

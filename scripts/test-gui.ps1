@@ -61,7 +61,16 @@ $tmp = [System.IO.Path]::GetTempPath()
 
 function Run-One([string] $name) {
     $bas = Join-Path $gui "$name.bas"
-    $exp = [System.IO.File]::ReadAllBytes((Join-Path $gui "$name.expected"))
+    $expPath = Join-Path $gui "$name.expected"
+    # A missing golden is a FAILURE to report, not an exception that kills the run
+    # before its summary. Under ErrorActionPreference=Stop, ReadAllBytes on an absent
+    # file ended the script mid-list -- the operator saw a stack trace and never saw
+    # which files had passed, nor GUI SUITE FAILED.
+    if ((-not (Test-Path $bas)) -or (-not (Test-Path $expPath))) {
+        Write-Host ("FAIL  {0}  (missing .bas or .expected)" -f $name) -ForegroundColor Red
+        return $false
+    }
+    $exp = [System.IO.File]::ReadAllBytes($expPath)
     $out = Join-Path $tmp 'phosphorguitest.out'
     $err = Join-Path $tmp 'phosphorguitest.err'
     cmd /c "`"$exe`" `"$bas`" > `"$out`" 2> `"$err`""
@@ -83,6 +92,16 @@ function Run-One([string] $name) {
 }
 
 $allOk = $true
+# The manifest must COVER the directory, the same invariant test-suite.ps1 enforces:
+# a .bas dropped into tests\gui and never listed simply does not run.
+$onDisk = @(Get-ChildItem $gui -Filter *.bas | ForEach-Object { $_.BaseName })
+foreach ($b in $onDisk) {
+    if ($manifest -notcontains $b) {
+        Write-Host ("FAIL  manifest: {0}.bas is in tests\gui but not in manifest.txt -- it never runs" -f $b) -ForegroundColor Red
+        $allOk = $false
+    }
+}
+
 foreach ($name in $manifest) {
     if (-not (Run-One $name)) { $allOk = $false }
 }

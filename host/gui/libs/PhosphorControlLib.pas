@@ -26,8 +26,16 @@ unit PhosphorControlLib;
 interface
 
 uses
-  SysUtils, Classes, TypInfo, Controls, Graphics,
+  SysUtils, Classes, Types, TypInfo, Controls, Graphics,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorGuiCore;
+
+type
+  { The mouse and key events are declared PROTECTED on TControl/TWinControl and
+    published only by descendants, so a plain cast cannot assign them. Deriving a
+    type that is never instantiated is the standard Pascal way to reach a protected
+    member of an instance you already hold. }
+  TControlAccess = class(TControl);
+  TWinControlAccess = class(TWinControl);
 
 procedure RegisterControlFuncs(Reg: TPhosphorRegistry);
 
@@ -194,6 +202,220 @@ begin
   if FreeHandle(A[0].Hnd) then Result := ValInt(1) else begin GGuiError := 1; Result := ValInt(0); end;
 end;
 
+// --- the events every control has ------------------------------------------
+// Key events live on TWinControl (a control must be able to focus to receive one);
+// mouse events live on TControl, so a TLabel or a TShape can carry them too.
+function f_on_keydown(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TWinControl, c) then
+    TWinControlAccess(c).OnKeyDown := GuiKeyHandler(AVM, c, 'onkeydown', A[1].Str, A[0].Hnd);
+end;
+function f_on_keyup(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TWinControl, c) then
+    TWinControlAccess(c).OnKeyUp := GuiKeyHandler(AVM, c, 'onkeyup', A[1].Str, A[0].Hnd);
+end;
+function f_on_keypress(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TWinControl, c) then
+    TWinControlAccess(c).OnKeyPress := GuiKeyPressHandler(AVM, c, 'onkeypress', A[1].Str, A[0].Hnd);
+end;
+function f_on_mousedown(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then
+    TControlAccess(c).OnMouseDown := GuiMouseHandler(AVM, c, 'onmousedown', A[1].Str, A[0].Hnd);
+end;
+function f_on_mouseup(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then
+    TControlAccess(c).OnMouseUp := GuiMouseHandler(AVM, c, 'onmouseup', A[1].Str, A[0].Hnd);
+end;
+function f_on_mousemove(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then
+    TControlAccess(c).OnMouseMove := GuiMouseMoveHandler(AVM, c, 'onmousemove', A[1].Str, A[0].Hnd);
+end;
+function f_on_mousewheel(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then
+    TControlAccess(c).OnMouseWheel := GuiMouseWheelHandler(AVM, c, 'onmousewheel', A[1].Str, A[0].Hnd);
+end;
+
+// --- synthesising an event -------------------------------------------------
+// The modifier string a handler receives, read back the other way: "S C A" (in any
+// order, and any subset) becomes the TShiftState the LCL methods take.
+function ModsOf(const S: String): TShiftState;
+begin
+  Result := [];
+  if Pos('S', S) > 0 then Include(Result, ssShift);
+  if Pos('C', S) > 0 then Include(Result, ssCtrl);
+  if Pos('A', S) > 0 then Include(Result, ssAlt);
+end;
+
+function MouseBtn(AOrd: Int64): TMouseButton;
+begin
+  // 0/1/2 = left/right/middle, the encoding the handler receives.
+  case AOrd of
+    1: Result := mbRight;
+    2: Result := mbMiddle;
+  else Result := mbLeft;
+  end;
+end;
+
+function f_do_keydown(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; k: Word;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
+  k := Word(ArgOrd(A[1]));
+  TWinControlAccess(c).KeyDown(k, ModsOf(A[2].Str));
+end;
+function f_do_keyup(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; k: Word;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
+  k := Word(ArgOrd(A[1]));
+  TWinControlAccess(c).KeyUp(k, ModsOf(A[2].Str));
+end;
+function f_do_keypress(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; ch: Char;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
+  if A[1].Str = '' then Exit;      // nothing to press
+  ch := A[1].Str[1];               // the first BYTE, so this stays byte-exact
+  TWinControlAccess(c).KeyPress(ch);
+end;
+function f_do_mousedown(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  TControlAccess(c).MouseDown(MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
+                              ArgOrd(A[2]), ArgOrd(A[3]));
+end;
+function f_do_mouseup(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  TControlAccess(c).MouseUp(MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
+                            ArgOrd(A[2]), ArgOrd(A[3]));
+end;
+function f_do_mousemove(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  TControlAccess(c).MouseMove(ModsOf(A[3].Str), ArgOrd(A[1]), ArgOrd(A[2]));
+end;
+function f_do_mousewheel(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; pt: TPoint;
+begin
+  E := NoError; Result := ValInt(0);
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  pt.X := ArgOrd(A[2]); pt.Y := ArgOrd(A[3]);
+  // ONE call. DoMouseWheel already answers whether the event was consumed, which is
+  // what the handler's Handled var parameter decided -- so the program reads back
+  // its own answer, and the wheel is not spun twice to find out.
+  Result := ValInt(Ord(TControlAccess(c).DoMouseWheel(ModsOf(A[4].Str), ArgOrd(A[1]), pt)));
+end;
+
+// --- the backbone helpers the plan named and never had ----------------------
+// A control's parent, which the property bridge cannot reach: TControl.Parent is
+// public, not published, so RTTI does not see it.
+function f_parent_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c, pc: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  if not GuiResolve(A[1].Hnd, TWinControl, pc) then Exit;
+  TControl(c).Parent := TWinControl(pc);
+end;
+
+// Anchors is a SET, so it reads and writes as the identifier list the bridge also
+// accepts: "akLeft,akRight". Same text in and out, so the pair round-trips.
+function f_anchors_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; pi: PPropInfo;
+begin
+  E := NoError; Result := ValStr('');
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  pi := GetPropInfo(c, 'Anchors');
+  if pi = nil then begin GGuiError := ERR_NO_PROPERTY; Exit; end;
+  Result := ValStr(GetSetProp(c, pi, False));
+end;
+function f_anchors_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; pi: PPropInfo;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  pi := GetPropInfo(c, 'Anchors');
+  if pi = nil then begin GGuiError := ERR_NO_PROPERTY; Exit; end;
+  SetSetProp(c, pi, A[1].Str);
+end;
+
+function f_tabstop_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TWinControl, c) then Result := ValInt(Ord(TWinControl(c).TabStop)); end;
+function f_tabstop_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TWinControl, c) then TWinControl(c).TabStop := ArgOrd(A[1]) <> 0; end;
+function f_taborder_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TWinControl, c) then Result := ValInt(TWinControl(c).TabOrder); end;
+function f_taborder_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TWinControl, c) then TWinControl(c).TabOrder := ArgOrd(A[1]); end;
+
+// BorderSpacing and Constraints are class-typed sub-objects, which is exactly why
+// the property bridge refuses them. The plan claimed both were exposed; these are
+// the named helpers that make that true.
+function f_spacing_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).BorderSpacing.Around); end;
+function f_spacing_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).BorderSpacing.Around := ArgOrd(A[1]); end;
+function f_minwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MinWidth); end;
+function f_minwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinWidth := ArgOrd(A[1]); end;
+function f_maxwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MaxWidth); end;
+function f_maxwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxWidth := ArgOrd(A[1]); end;
+function f_minheight_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MinHeight); end;
+function f_minheight_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinHeight := ArgOrd(A[1]); end;
+function f_maxheight_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MaxHeight); end;
+function f_maxheight_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxHeight := ArgOrd(A[1]); end;
+
 // --- the generic TypInfo property bridge ------------------------------------
 function IsStrKind(K: TTypeKind): Boolean;
 begin
@@ -305,6 +527,32 @@ begin
   Reg.Add('control_setfocus@:@',     @f_setfocus);
   Reg.Add('control_focused:@',       @f_focused);
   Reg.Add('control_free:@',          @f_free);
+  // anchors, tab chain, spacing and constraints -- the plan's backbone, completed
+  Reg.Add('control_anchors$:@',    @f_anchors_get);   Reg.Add('control_anchors@:@$',   @f_anchors_set);
+  Reg.Add('control_tabstop:@',     @f_tabstop_get);   Reg.Add('control_tabstop@:@n',   @f_tabstop_set);
+  Reg.Add('control_taborder:@',    @f_taborder_get);  Reg.Add('control_taborder@:@n',  @f_taborder_set);
+  Reg.Add('control_spacing:@',     @f_spacing_get);   Reg.Add('control_spacing@:@n',   @f_spacing_set);
+  Reg.Add('control_minwidth:@',    @f_minwidth_get);  Reg.Add('control_minwidth@:@n',  @f_minwidth_set);
+  Reg.Add('control_maxwidth:@',    @f_maxwidth_get);  Reg.Add('control_maxwidth@:@n',  @f_maxwidth_set);
+  Reg.Add('control_minheight:@',   @f_minheight_get); Reg.Add('control_minheight@:@n', @f_minheight_set);
+  Reg.Add('control_maxheight:@',   @f_maxheight_get); Reg.Add('control_maxheight@:@n', @f_maxheight_set);
+  Reg.Add('control_parent@:@@',    @f_parent_set);
+  // synthesising one, the way button_click already synthesises a click
+  Reg.Add('control_keydown@:@n$',        @f_do_keydown);
+  Reg.Add('control_keyup@:@n$',          @f_do_keyup);
+  Reg.Add('control_keypress@:@$',        @f_do_keypress);
+  Reg.Add('control_mousedown@:@nnn$',    @f_do_mousedown);
+  Reg.Add('control_mouseup@:@nnn$',      @f_do_mouseup);
+  Reg.Add('control_mousemove@:@nn$',     @f_do_mousemove);
+  Reg.Add('control_mousewheel:@nnn$',    @f_do_mousewheel);
+  // the key and mouse events, on any control that can carry them
+  Reg.AddHost('control_onkeydown@:@$',    @f_on_keydown);
+  Reg.AddHost('control_onkeyup@:@$',      @f_on_keyup);
+  Reg.AddHost('control_onkeypress@:@$',   @f_on_keypress);
+  Reg.AddHost('control_onmousedown@:@$',  @f_on_mousedown);
+  Reg.AddHost('control_onmouseup@:@$',    @f_on_mouseup);
+  Reg.AddHost('control_onmousemove@:@$',  @f_on_mousemove);
+  Reg.AddHost('control_onmousewheel@:@$', @f_on_mousewheel);
   // the generic property bridge
   Reg.Add('control_set@:@$n', @f_prop_set);
   Reg.Add('control_set@:@$$', @f_prop_set);

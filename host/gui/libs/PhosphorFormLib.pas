@@ -25,7 +25,7 @@ interface
 
 uses
   SysUtils, Classes, Controls, Forms,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorVM, PhosphorGuiCore;
 
 procedure RegisterFormFuncs(Reg: TPhosphorRegistry);
 
@@ -36,12 +36,19 @@ type
     window (the X button) ends the program the way a main form would. Hides rather
     than frees, so the handle registry frees the form once, at the end. }
   TFormCloser = class(TComponent)
+    { The program's own OnClose handler, when it bound one. The closer calls it
+      before terminating, rather than being replaced by it: a form has one OnClose
+      and two things must happen on it, and losing the terminator would leave a
+      window that cannot close the program it belongs to. }
+    UserBridge: TGuiEventBridge;
     procedure DoClose(Sender: TObject; var CloseAction: TCloseAction);
     function Handler: TCloseEvent;
   end;
 
 procedure TFormCloser.DoClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
+  if UserBridge <> nil then
+    UserBridge.FireClose(Sender, CloseAction);   // the program sees it first
   CloseAction := caHide;
   Application.Terminate;
 end;
@@ -49,6 +56,19 @@ end;
 function TFormCloser.Handler: TCloseEvent;
 begin
   Result := @DoClose;
+end;
+
+{ The closer serving AForm, created and installed on demand. Both form_show and
+  form_onclose@ go through this, so whichever the program calls first wins the
+  installation and the other finds it. }
+function CloserOf(AForm: TForm): TFormCloser;
+var i: Integer;
+begin
+  for i := 0 to AForm.ComponentCount - 1 do
+    if AForm.Components[i] is TFormCloser then
+      Exit(TFormCloser(AForm.Components[i]));
+  Result := TFormCloser.Create(AForm);   // owned by the form, freed with it
+  AForm.OnClose := Result.Handler;
 end;
 
 function f_form(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -120,13 +140,54 @@ begin
   Err := NoError;
   if GuiResolve(Args[0].Hnd, TForm, c) then
   begin
-    if not Assigned(TForm(c).OnClose) then
-      // The closer is owned by the form (freed with it) and reached only through
-      // the assigned method pointer, so no local reference is kept.
-      TForm(c).OnClose := TFormCloser.Create(c).Handler;
+    // Find-or-create: if the program already bound form_onclose@, the closer is
+    // there and keeps that binding rather than being replaced.
+    CloserOf(TForm(c));
     TForm(c).Show;
   end;
   Result := Args[0];
+end;
+
+// --- the two form-lifetime events ------------------------------------------
+function f_form_onclose(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; br: TGuiEventBridge;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TForm, c) then Exit;
+  if A[1].Str = '' then
+    CloserOf(TForm(c)).UserBridge := nil          // unbind, keeping the terminator
+  else
+  begin
+    br := GuiBridgeOf(c, 'onclose');
+    br.Bind(TPhosphorVM(AVM), A[1].Str, A[0].Hnd);
+    CloserOf(TForm(c)).UserBridge := br;
+  end;
+end;
+
+function f_form_onclosequery(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TForm, c) then
+    TForm(c).OnCloseQuery := GuiCloseQueryHandler(AVM, c, 'onclosequery', A[1].Str, A[0].Hnd);
+end;
+
+{ Ask the form to close, the way the X button does -- so a headless test can
+  exercise OnCloseQuery and OnClose without a window manager. }
+function f_form_close(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TForm, c) then TForm(c).Close;
+end;
+
+{ True while the form is still visible: what a program reads after asking it to
+  close, to see whether an OnCloseQuery handler vetoed. }
+function f_form_visible(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TForm, c) then Result := ValInt(Ord(TForm(c).Visible));
 end;
 
 procedure RegisterFormFuncs(Reg: TPhosphorRegistry);
@@ -141,6 +202,10 @@ begin
   Reg.Add('form_height@:@n',  @f_form_height_set);
   Reg.Add('form_height:@',    @f_form_height_get);
   Reg.Add('form_show:@',      @f_form_show);
+  Reg.Add('form_close@:@',    @f_form_close);
+  Reg.Add('form_visible:@',   @f_form_visible);
+  Reg.AddHost('form_onclose@:@$',      @f_form_onclose);
+  Reg.AddHost('form_onclosequery@:@$', @f_form_onclosequery);
 end;
 
 end.

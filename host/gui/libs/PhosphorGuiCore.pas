@@ -37,7 +37,7 @@ unit PhosphorGuiCore;
 interface
 
 uses
-  SysUtils, Classes, Controls, Forms,
+  SysUtils, Classes, Types, Controls, Forms,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorVM;
 
 type
@@ -59,9 +59,26 @@ type
     FHandler: String;
     FSenderId: Int64;
     FEventName: String;   // which event this bridge serves (e.g. 'onclick')
+    { Every variant funnels through this: build the argument list, call into
+      BASIC, record a failing handler as error 2, and honour END. Returns what the
+      handler answered so the two var-parameter events can read it. }
+    function Call(const AArgs: array of TValue): TValue;
   public
     procedure Bind(AVM: TPhosphorVM; const AHandler: String; ASenderId: Int64);
-    procedure Fire(Sender: TObject);   // matches TNotifyEvent
+    { One method per LCL event signature. The name after Fire is the signature, not
+      the event: OnKeyDown and OnKeyUp are both TKeyEvent and share FireKey. }
+    procedure Fire(Sender: TObject);                                        // TNotifyEvent
+    procedure FireKey(Sender: TObject; var Key: Word; Shift: TShiftState);  // TKeyEvent
+    procedure FireKeyPress(Sender: TObject; var Key: char);                 // TKeyPressEvent
+    procedure FireMouse(Sender: TObject; Button: TMouseButton;
+                        Shift: TShiftState; X, Y: Integer);                 // TMouseEvent
+    procedure FireMouseMove(Sender: TObject; Shift: TShiftState;
+                            X, Y: Integer);                                 // TMouseMoveEvent
+    procedure FireMouseWheel(Sender: TObject; Shift: TShiftState;
+                             WheelDelta: Integer; MousePos: TPoint;
+                             var Handled: Boolean);                         // TMouseWheelEvent
+    procedure FireClose(Sender: TObject; var CloseAction: TCloseAction);     // TCloseEvent
+    procedure FireCloseQuery(Sender: TObject; var CanClose: Boolean);        // TCloseQueryEvent
     property Handler: String read FHandler;
     property EventName: String read FEventName write FEventName;
   end;
@@ -85,6 +102,27 @@ function GuiBridgeOf(AControl: TComponent; const AEventName: String): TGuiEventB
   nil when AHandler is '' (which unwires). One line per event in a control lib. }
 function GuiNotifyHandler(AVM: TObject; AControl: TComponent;
   const AEvent, AHandler: String; ASenderId: Int64): TNotifyEvent;
+{ The same one line per event, for the other seven signatures. Each returns nil for
+  an empty handler name, which unwires. }
+function GuiKeyHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TKeyEvent;
+function GuiKeyPressHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TKeyPressEvent;
+function GuiMouseHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TMouseEvent;
+function GuiMouseMoveHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TMouseMoveEvent;
+function GuiMouseWheelHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TMouseWheelEvent;
+function GuiCloseHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TCloseEvent;
+function GuiCloseQueryHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TCloseQueryEvent;
+
+{ The modifier keys as the short string the handler receives: "S", "C", "A", joined
+  by spaces in that order, so all three read "S C A" exactly as the plan specified.
+  A program tests one with instr(mods$, "C") > 0. }
+function GuiModsStr(Shift: TShiftState): String;
 
 procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
 
@@ -104,20 +142,104 @@ begin
   FSenderId := ASenderId;
 end;
 
-procedure TGuiEventBridge.Fire(Sender: TObject);
+function TGuiEventBridge.Call(const AArgs: array of TValue): TValue;
 var
   err: TPhosphorError;
 begin
+  Result := ValInt(0);
   if (FVM = nil) or (FHandler = '') then Exit;
-  FVM.CallUserFunc(FHandler, [ValHandle(FSenderId)], err);
+  Result := FVM.CallUserFunc(FHandler, AArgs, err);
   if IsError(err) then
     GGuiError := 2;   // a handler that failed is recorded, not raised
-  // A handler that says END means the program is over. The engine now records that
+  // A handler that says END means the program is over. The engine records that
   // instead of quietly ending only the handler's own activation, so the window it
   // was clicked in has to go too -- otherwise `end` in a click handler is a
   // statement that does nothing, which is a worse answer than the bug it replaced.
   if FVM.Halted then
     Application.Terminate;
+end;
+
+procedure TGuiEventBridge.Fire(Sender: TObject);
+begin
+  Call([ValHandle(FSenderId)]);
+end;
+
+procedure TGuiEventBridge.FireKey(Sender: TObject; var Key: Word; Shift: TShiftState);
+begin
+  // Key stays a var parameter in the LCL signature, but the handler's answer does
+  // NOT write to it: a routine that falls off its end would swallow the keystroke.
+  Call([ValHandle(FSenderId), ValInt(Key), ValStr(GuiModsStr(Shift))]);
+end;
+
+procedure TGuiEventBridge.FireKeyPress(Sender: TObject; var Key: char);
+begin
+  Call([ValHandle(FSenderId), ValStr(Key)]);
+end;
+
+procedure TGuiEventBridge.FireMouse(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  // mbLeft/mbRight/mbMiddle are 0/1/2 by declaration order, which is the encoding
+  // the plan specified.
+  Call([ValHandle(FSenderId), ValInt(Ord(Button)), ValInt(X), ValInt(Y),
+        ValStr(GuiModsStr(Shift))]);
+end;
+
+procedure TGuiEventBridge.FireMouseMove(Sender: TObject; Shift: TShiftState;
+  X, Y: Integer);
+begin
+  Call([ValHandle(FSenderId), ValInt(X), ValInt(Y), ValStr(GuiModsStr(Shift))]);
+end;
+
+procedure TGuiEventBridge.FireMouseWheel(Sender: TObject; Shift: TShiftState;
+  WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
+var
+  v: TValue;
+begin
+  v := Call([ValHandle(FSenderId), ValInt(WheelDelta), ValInt(MousePos.X),
+             ValInt(MousePos.Y), ValStr(GuiModsStr(Shift))]);
+  // Only an explicit boolean true claims the wheel. A number, or no return at all,
+  // leaves LCL's default handling in place.
+  if (v.Kind = vkBool) and v.Bl then
+    Handled := True;
+end;
+
+procedure TGuiEventBridge.FireClose(Sender: TObject; var CloseAction: TCloseAction);
+begin
+  // Notification only. Rewriting CloseAction from a return value would turn a
+  // handler that forgets to answer into one that changes what closing means.
+  Call([ValHandle(FSenderId)]);
+end;
+
+procedure TGuiEventBridge.FireCloseQuery(Sender: TObject; var CanClose: Boolean);
+var
+  v: TValue;
+begin
+  v := Call([ValHandle(FSenderId)]);
+  // Only an explicit boolean false vetoes. A handler that falls off its end must
+  // not be able to make a window impossible to close -- that is the one failure
+  // here a program cannot recover from.
+  if (v.Kind = vkBool) and (not v.Bl) then
+    CanClose := False;
+end;
+
+function GuiModsStr(Shift: TShiftState): String;
+const
+  NAMES: array[0..2] of String = ('S', 'C', 'A');
+var
+  i: Integer;
+  present: array[0..2] of Boolean;
+begin
+  present[0] := ssShift in Shift;
+  present[1] := ssCtrl in Shift;
+  present[2] := ssAlt in Shift;
+  Result := '';
+  for i := 0 to 2 do
+    if present[i] then
+    begin
+      if Result <> '' then Result := Result + ' ';
+      Result := Result + NAMES[i];
+    end;
 end;
 
 function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;
@@ -173,16 +295,86 @@ begin
   Result.EventName := AEventName;
 end;
 
+{ Find-or-create the bridge for this event and bind it, or nil for an empty name.
+  Every factory below is the same three lines with a different method taken. }
+function BoundBridge(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TGuiEventBridge;
+begin
+  if AHandler = '' then Exit(nil);   // an empty name unwires the event
+  Result := GuiBridgeOf(AControl, AEvent);
+  Result.Bind(TPhosphorVM(AVM), AHandler, ASenderId);
+end;
+
 function GuiNotifyHandler(AVM: TObject; AControl: TComponent;
   const AEvent, AHandler: String; ASenderId: Int64): TNotifyEvent;
-var
-  bridge: TGuiEventBridge;
+var b: TGuiEventBridge;
 begin
-  if AHandler = '' then
-    Exit(nil);   // an empty name unwires the event
-  bridge := GuiBridgeOf(AControl, AEvent);
-  bridge.Bind(TPhosphorVM(AVM), AHandler, ASenderId);
-  Result := @bridge.Fire;
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.Fire;
+end;
+
+function GuiKeyHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TKeyEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireKey;
+end;
+
+function GuiKeyPressHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TKeyPressEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireKeyPress;
+end;
+
+function GuiMouseHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TMouseEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireMouse;
+end;
+
+function GuiMouseMoveHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TMouseMoveEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireMouseMove;
+end;
+
+function GuiMouseWheelHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TMouseWheelEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireMouseWheel;
+end;
+
+function GuiCloseHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TCloseEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireClose;
+end;
+
+function GuiCloseQueryHandler(AVM: TObject; AControl: TComponent;
+  const AEvent, AHandler: String; ASenderId: Int64): TCloseQueryEvent;
+var b: TGuiEventBridge;
+begin
+  Result := nil;
+  b := BoundBridge(AVM, AControl, AEvent, AHandler, ASenderId);
+  if b <> nil then Result := @b.FireCloseQuery;
 end;
 
 // --- app_* : the message loop, for the interactive host ---------------------

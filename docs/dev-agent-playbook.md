@@ -281,6 +281,42 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-05 · round 23 · asked whether one README sentence was true; ended up
+  building sixteen controls.** Three audits ran: one sentence, one document, and all
+  thirteen documents against the code. Between them they found the largest gaps in
+  the project, and none of them were failing tests.
+  - **The GUI plan named sixteen things nobody had built**, five of them Tier 1 —
+    including seven of the eight event signatures, so a program could not bind a
+    key, a mouse click with coordinates, a wheel or a form close AT ALL, while the
+    page showed the handler shapes as if they existed. All sixteen built the same
+    day, plus `paintbox@` (which needed the canvas target generalised from "a
+    TBitmap" to "anything with a canvas" before it could exist at all). 311 → 412
+    GUI names.
+  - **The audit found two CODE defects the tests never would have.**
+    `control_set@(b@, "Anchors", "akLeft,akRight")` — the natural line to write
+    after reading the page, and the same shape that works one line earlier for an
+    ENUM — fell through to `SetOrdProp(.., 0)` because `tkSet` is in `IsOrdKind`:
+    it wrote the EMPTY set, wiping 7 to 0, and left `gui_error` at 0. IT DESTROYED
+    LIVE STATE AND REPORTED SUCCESS, which is worse than an error because nothing
+    looks wrong. And the two halves of the bridge disagreed: writing an unreadable
+    property recorded error 3, reading one answered 0 with error 0.
+  - **Three DOCUMENTED calls aborted the reader's program.** `narr_set@` and
+    friends were documented as answering a handle; they answer the value written.
+    `h@ = narr_set@(a@, 1, 42)` → "cannot store int into handle variable", exit 1.
+  - **THE GATES ONLY EVER CHECKED ONE DIRECTION.** `registered → documented` was
+    enforced; `documented → registered` was not, so a page could call a function
+    that never existed and everything stayed green. `decisions.md` advertised
+    `crt_gotoxy`/`crt_color`/`crt_clear` for months. Two rules close it: the CALL
+    FORM (a backticked `name(` — a variable is never followed by a parenthesis) and
+    the FAMILY PREFIX (`crt_something` where other `crt_` names are registered).
+  - **A gate that cries wolf is a gate people learn to skip.** The first version
+    flagged `http_get_via$`, which is real — registered by the http TEST HOST, a
+    program rather than a unit. Fixed the gate, not the document. It also caught
+    two things I had written myself that same hour, which is the point.
+  - **The pattern across all three audits is one thing:** the project gated what it
+    could count and left everything else to prose. Numbers, names and directions
+    are all mechanically checkable, and every one of them had drifted somewhere.
+
 - **2026-09-05 · round 22 · the runner could report success for work it did not do.**
   Asked whether one README sentence was true. It was not, but the audit's completeness
   critic found something worse than the wording: FIVE paths by which the acceptance

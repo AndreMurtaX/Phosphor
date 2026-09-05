@@ -280,6 +280,10 @@ RESOLVED 2026-08-31 (see [decisions.md](decisions.md), "Resolved specifics"):
 
 STILL PENDING (needed before its step, not before increment 1):
 
-5. **too-many-globals cap** (negative 01) — reuse Plan9Basic's `13_global_limit`
+5. ~~**too-many-globals cap** (negative 01)~~ — **RESOLVED the other way** on
+   2026-09-01, see [decisions.md](decisions.md) "No fixed global-variable cap":
+   globals live in a dynamic array sized from the program, so there is no ceiling
+   to pick and no negative test to write. Kept here struck through rather than
+   deleted, because a plan that quietly loses an item cannot be audited.
    value or choose a new one, and enforce at compile or run time? Needed before
    step 5.

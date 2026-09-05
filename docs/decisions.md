@@ -190,7 +190,14 @@ the output is redirected: `cls$`, `home$`, `at$(x, y)`, `color$`, `bg$`, `bold$`
 `getkey$`, `inkey$` and `keypressed`. Only the two lifecycle calls carry a prefix:
 `crt_init` and `crt_done`.
 
-## On-disk bytecode — decisions now, implementation later
+## On-disk bytecode — decisions taken up front, now implemented
+
+> **STATUS 2026-09-01 — built.** `engine/PhosphorBytecode` implements
+> `WriteProgram`/`ReadProgram` against the format frozen below, with
+> `ValidateProgram` checking every index and jump target on load rather than
+> trusting the file, and `phosphor compile` / `phosphor pack` are the two CLI verbs
+> that produce a `.pbc` and a self-extracting executable. The decisions in this
+> section were kept as taken; what follows is the record of why.
 
 The eventual goal (a later phase) is the Clipper/PyInstaller/AutoIt model:
 compile a script to bytecode, append the bytecode to a copy of the VM to make a

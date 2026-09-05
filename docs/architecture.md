@@ -7,10 +7,18 @@ several language decisions change on purpose (see [decisions.md](decisions.md)).
 ## The one rule
 
 **The engine is a library. The host is a consumer of it.** The engine knows
-nothing about consoles, files, windows, or the LCL. Everything it shows the
-outside world leaves through a callback; everything it reads comes back the same
-way. The console host is merely the *first* consumer; the GUI (phase 2) will be
-another, and the engine must never be able to tell which one it is talking to.
+nothing about **consoles, windows, or the LCL**: everything a program *prints*
+leaves through a callback, everything it *reads from the user* comes back the same
+way, and the engine cannot tell which host it is talking to. The console host is
+merely the first consumer; the GUI host is another.
+
+The engine does reach the **filesystem** directly, and that is deliberate rather
+than an exception to the rule: `engine/libs/PhosphorIoLib` implements 58 names on
+`TFileStream`/`FileExists`/`ForceDirectories`, and the `#`-channel statements live
+in the VM. A file is not a user interface — it needs no callback to be portable,
+and routing it through one would have made every host reimplement it. What the rule
+protects is the *interaction* surface, which is what differs between a terminal, a
+window and an embedder.
 
 This is enforced, not just intended. `scripts/build.ps1` scans every `engine/`
 unit's `uses` clauses and fails the build if one names a host- or GUI-facing
@@ -87,9 +95,12 @@ minefield otherwise.
   source string and hands the raw bytes to the host. What you typed is what
   comes out.
 - The console host writes output as raw bytes straight to the OS stdout handle,
-  so the golden comparison is byte-exact regardless of the console's codepage.
-  On Windows it also switches the console to UTF-8 (65001) so interactive text
-  renders. A source may be saved with a UTF-8 BOM; the host strips it.
+  so the golden comparison is byte-exact regardless of the console's codepage. On
+  Windows, when that handle is an interactive console it writes through the
+  console's native Unicode API (`WriteConsoleW`) instead; it does **not** change the
+  console's code page, because switching to 65001 is exactly the unreliable path
+  that approach exists to avoid. Redirected to a file or a pipe, it is raw bytes
+  either way. A source may be saved with a UTF-8 BOM; the host strips it.
 
 ## Phases
 

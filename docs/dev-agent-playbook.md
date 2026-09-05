@@ -81,7 +81,9 @@ So:
   sqlite, crt — and anything new.
 - **Errors are values, not exceptions**, inside the engine. `print` emits no newline;
   `println` does (opPrint vs opPrintLn) — load-bearing for CRT and for exact output.
-- **`ValAdd` concatenates when either operand is a string**, so a string-element `+=`
+- **`ValAdd` concatenates when the LEFT operand is a string** (a string on the
+  RIGHT of a number is a type mismatch the compiler refuses, not a silent
+  concatenation -- see negative 17), so a string-element `+=`
   (and any string `+=`) works through the generic `opAdd` compound path — no special
   string-append opcode is needed for it.
 - **An undeclared variable used inside a function resolves to a GLOBAL** (the compiler's

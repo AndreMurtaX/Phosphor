@@ -30,12 +30,21 @@ and additionally receive the executing VM.
 - **`@` handles.** Arrays, dictionaries, JSON nodes, config files, string lists,
   byte buffers, RAG indexes, zip archives, HTTP clients and SQLite databases are
   all handle objects. A handle is validated before use, so a fabricated or stale
-  handle is **refused** (answered with `0`/`""`), never dereferenced.
-- **Errors are values, not exceptions.** Inside the engine, a failing built-in
-  returns an empty/zero answer and (where the library keeps one) sets a last-error
-  code you read back — `ioerror()`, `valcode()`, `strerror()`, `rag_error()`,
-  `http_error()`, `sqlite_error()`, `err()`. A program branches on the value
-  instead of being aborted.
+  handle is **never dereferenced** — the call raises a **catchable runtime error**
+  (`not a valid array handle`, and so on). It is not answered with `0`/`""`; trap it
+  with `on error goto`, or the program stops.
+- **Errors are values where a library keeps a slot, and catchable errors otherwise.**
+  Both halves are real and the difference matters:
+  - Libraries with a last-error slot answer an empty/zero value and set a code you
+    read back — `ioerror()`, `strerror()`, `rag_error()`, `http_error()`,
+    `sqlite_error()`, `gui_error()`. A program branches on the value.
+  - Everything else — a bad handle, an out-of-range index, division by zero, a
+    malformed JSON text — **raises**, and the program stops unless an `on error`
+    handler is installed. `err()`/`errmsg$()`/`erl()` then describe what happened.
+
+  Nothing ever escapes as a Pascal exception, and nothing is ever dereferenced
+  after being refused; what varies is whether the refusal arrives as a value or as
+  a fault you catch.
 
 ### Engine built-ins vs opt-in packages
 
@@ -44,9 +53,12 @@ themselves when a `TPhosphorEngine` is created, so any host (the console
 `phosphor`, the embedding host, the test runner) has them.
 
 The **six packages are opt-in**: a host must call the package's register function.
-The console `phosphor` host registers **CRT** (so terminal control works out of the
-box); the test and embedding hosts register the rest (Base64, Zip, Gzip, Http,
-Sqlite). Http and Sqlite additionally need an external runtime (OpenSSL, SQLite)
+The **six packages are opt-in**: a host must call each package's register
+function, and an embedder is free to call none. The shipped `phosphor` console host
+calls **all six** — its `RegisterAllPackages` (host/console/phosphor.lpr) registers
+Crt, Base64, Zip, Gzip, Http and Sqlite on every path — so from the command line
+they are all present. The GUI host does the same; a host you write yourself decides
+for itself. Http and Sqlite additionally need an external runtime (OpenSSL, SQLite)
 and are gated on it — the package still compiles everywhere, and reports
 availability (`sqlite_available()`) rather than crashing when the library is
 absent.
@@ -799,7 +811,7 @@ on desktop by design.
 | `fileexists(path$, followlinks) → num` | 1 if a file exists |
 | `kill(path$) → num` | delete a file (returns 1) |
 | `environ$(name$) → str` | an environment variable's value |
-| `color(name$) → num` | the RGB number for a colour name (or a `$rrggbb`/decimal literal) |
+| `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal. It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
 | `colortostr$(n) → str` | the colour name for an RGB number (or `$rrggbb`) |
 | `alphacolor(name$) → num` | the colour number with an opaque alpha channel |
 | *mobile directory paths (18)* | `shareddocumentspath$`, `librarypath$`, `cachepath$`, `publicpath$`, `picturespath$`, `sharedpicturespath$`, `camerapath$`, `sharedcamerapath$`, `musicpath$`, `sharedmusicpath$`, `moviespath$`, `sharedmoviespath$`, `alarmspath$`, `sharedalarmspath$`, `downloadspath$`, `shareddownloadspath$`, `ringtonespath$`, `sharedringtonespath$` — each `() → str`, answering `""` on desktop |

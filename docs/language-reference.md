@@ -648,7 +648,22 @@ after the error, x = 0
 faulting line; `x` was never assigned, so it is still `0`.) Error codes: `1`
 integer overflow, `2` division by zero, `3` type mismatch, `4` unknown function,
 `5` syntax, `6` runtime. You can raise your own with `error("message")`, clear the
-state with `err_clear()`, or route faults to a function with `on error call fn`.
+state with `err_clear()`, or route faults to a function with `on error call fn`. **That function must take
+exactly two arguments** — the error code and the message, in that order — because
+that is what the VM passes. A one-argument handler fails with *no BASIC function
+… taking 2 argument(s)* and the program stops:
+
+```basic
+on error call handler
+x = 5 / 0
+println "after the error"
+end
+
+function handler(code, msg$)
+  println "caught "; code; ": "; msg$
+  return 0
+endfunction
+```
 
 ---
 
@@ -752,8 +767,13 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
 - **`/` vs `\`.** `/` always gives a float (`10 / 4` → `2.5`); use `\` for integer
   division (`10 \ 4` → `2`).
 - **Everything is 1-based** — arrays, string characters, string lines, `instr`
-  positions. There is no index `0`; an absent `instr` match returns `0` to mean
-  "not found".
+  positions, `byteat` offsets, buffer positions and JSON array indices. An absent
+  `instr` match returns `0` to mean "not found".
+  The **one exception is a regex capture group**, where group `0` is the whole
+  match, as it is in every regex dialect: `regex_group$(pat$, s$, 0)` gives the
+  text that matched, and `regex_groupcount` counts it — so two parenthesised
+  groups answer `3`. Numbering the parts of a match differently from the rest of
+  the language would have been worse than this exception.
 - **`next` takes no variable.** Write `next`, not `next i`.
 - **Undeclared names inside a function are globals.** List scratch variables after
   `local` so they don't leak.

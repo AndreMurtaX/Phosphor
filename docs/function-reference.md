@@ -232,11 +232,11 @@ fabricated handles are returned as errors.
 
 | function | description |
 | --- | --- |
-| `narr_set@(a@, i.., value) → handle` | set a numeric element (1–3 indices) |
+| `narr_set@(a@, i.., value) → num` | set a numeric element (1–3 indices); answers the **value written**, not the array |
 | `narr_get(a@, i..) → num` | read a numeric element (1–3 indices) |
-| `sarr_set@(a@, i, value$) → handle` | set a string element |
+| `sarr_set@(a@, i, value$) → str` | set a string element; answers the **string written**, not the array |
 | `sarr_get$(a@, i) → str` | read a string element |
-| `parr_set@(a@, i, value@) → handle` | set a handle element |
+| `parr_set@(a@, i, value@) → handle` | set a handle element; answers the **value stored**, not the array |
 | `parr_get@(a@, i) → handle` | read a handle element |
 
 **Bracket sugar** — the `a@[i, ...]` and `a@[i] = v` syntax compiles to these
@@ -272,7 +272,7 @@ Maps keyed by string, as handles, in insertion order. Three value kinds: numeric
 | `dict_haskey(d@, key$) → num` | 1 if the key exists |
 | `dict_exists(d@, key$) → num` | alias of `dict_haskey` |
 | `dict_remove(d@, key$) → num` | remove a key (1 on success) |
-| `dict_clear@(d@) → handle` | remove all entries |
+| `dict_clear@(d@) → num` | remove all entries; answers `1`, not the dict — unlike `dict_set@`, which does answer the dict |
 | `dict_key$(d@, n) → str` | the key at 1-based insertion position `n` |
 | `dict_type(d@) → num` | value-kind code: 0 numeric, 1 string, 2 pointer |
 | `dict_typename$(d@) → str` | `"numeric"`, `"string"`, or `"pointer"` |

@@ -178,11 +178,17 @@ Settled when the phase-1 [roadmap](roadmap.md) surfaced them as freeze-now forks
 
 ## Extensibility
 
-The registry `Lib.Add('name:signature')` (note the `:` separator, per the `@`
+The registry `Reg.Add('name:signature')` (note the `:` separator, per the `@`
 decision above) is how every function package integrates, and it stays. A styled
-console ships as a **function package** (`crt_gotoxy`, `crt_color`, `crt_clear`,
-…), not as language commands — FPC's `rtl-console` (`crt`, `video`, `keyboard`)
-is already built for win64 here; `video` + `keyboard` is the more portable base.
+console ships as a **function package**, not as language commands.
+
+*Built, and in a better shape than this decision imagined.* It does not expose
+`gotoxy`/`color` COMMANDS; every call answers an escape SEQUENCE that a program
+prints, so styling composes with ordinary string handling and costs nothing when
+the output is redirected: `cls$`, `home$`, `at$(x, y)`, `color$`, `bg$`, `bold$`,
+`underline$`, `inverse$`, `clreol$`, `savepos$`/`restorepos$`, plus the input side
+`getkey$`, `inkey$` and `keypressed`. Only the two lifecycle calls carry a prefix:
+`crt_init` and `crt_done`.
 
 ## On-disk bytecode — decisions now, implementation later
 

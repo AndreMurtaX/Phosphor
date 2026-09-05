@@ -224,6 +224,126 @@ def main():
          len(gui_names()),
          'LCL GUI functions'),
     ]
+    # --- the reverse direction: a name a DOCUMENT calls must exist -------------
+    # Everything above checks registered -> documented. Nothing checked
+    # documented -> registered, so a page could call a function that was renamed or
+    # never built and every gate stayed green. That happened in five documents at
+    # once, and three of the cases ABORT the reader's program: docs/decisions.md
+    # advertised crt_gotoxy/crt_color/crt_clear, none of which exist under those
+    # names, and function-reference.md documented narr_set@/sarr_set@/dict_clear@
+    # as answering a handle when they answer the value.
+    #
+    # The signal is the CALL FORM -- a backticked `name(` beginning with a
+    # lowercase letter. A variable is never followed by an open parenthesis, so
+    # example code does not trip it, which is what makes this a gate rather than a
+    # list of warnings to ignore.
+    every = set(all_names)
+    for f in glob.glob(os.path.join(ROOT, 'host', 'gui', 'libs', '*.pas')):
+        every |= registered_names(f)
+    # Hosts register functions too, and a document may legitimately name one: the
+    # http test host adds http_get_via$ so a fallback can be proven without a real
+    # network, and roadmap-phase3 says so correctly. Scanning only units made that
+    # read as a ghost -- and a gate that cries wolf is a gate people learn to skip.
+    for pat in (('host', 'console', '*.lpr'), ('host', 'gui', '*.lpr'),
+                ('host', 'packages', '*.lpr'), ('host', 'embed', '*.lpr'),
+                ('tests', '*.lpr')):
+        for f in glob.glob(os.path.join(ROOT, *pat)):
+            every |= registered_names(f)
+
+    # Names a document writes ON PURPOSE that are not functions. Each is here for a
+    # stated reason, not to silence a failure: a template placeholder, a handler
+    # shape the PROGRAM defines, a host-supplied example, or a name a plan document
+    # proposes for work not yet built.
+    DELIBERATE = {
+        # gui-components.md's uniform-surface table: x is the placeholder for any
+        # control, which is the whole point of that table
+        'x@', 'x_prop', 'x_prop$', 'x_prop@', 'x_onevent@', 'x_onevent$',
+        'x_verb@', 'x_free',
+        # handler SHAPES: the program writes these, the library only calls them
+        'on_key', 'on_press', 'on_mouse', 'on_move', 'on_wheel', 'on_close',
+        'on_click', 'on_change', 'on_query', 'on_timer',
+        # embedding.md's worked example of a function the HOST registers
+        'host_discount',
+        # roadmap-phase2.md's placeholder for a per-library error slot it rejected
+        'xxx_error', 'xxx_clearerror',
+        # roadmap-net.md proposes names for work that does not exist yet, which is
+        # what a roadmap is for
+        'server_url_https$',
+    }
+
+    # Names the LANGUAGE provides, which the registry therefore does not hold: the
+    # compiler resolves these itself, so they are real and callable and absent here.
+    LANGUAGE = {
+        'not', 'and', 'or', 'mod',
+        'eof', 'lof', 'loc', 'input$', 'print', 'println', 'input', 'line',
+        'open', 'close', 'seek', 'swap', 'dim', 'sdim', 'pdim', 'data', 'read',
+        'restore', 'gosub', 'return', 'error', 'resume', 'end', 'stop', 'rem',
+        'function', 'endfunction', 'sub', 'endsub', 'let', 'const', 'local',
+        'width', 'using', 'assert_eq', 'assert_true', 'assert_false', 'assert_near',
+        'assert_int', 'assert_add_overflows', 'test_case', 'probe_new_a',
+        'probe_new_b', 'probe_is_handle', 'probe_is_a', 'probe_is_b', 'probe_free',
+        'probe_count', 'pointer',
+    }
+
+    docfiles = [os.path.join(ROOT, 'README.md')] + \
+               sorted(glob.glob(os.path.join(ROOT, 'docs', '*.md')))
+    ghosts = []
+    for df in docfiles:
+        try:
+            txt = open(df, encoding='utf-8', errors='ignore').read()
+        except OSError:
+            continue
+        rel = os.path.relpath(df, ROOT).replace('\\', '/')
+        for lineno, line in enumerate(txt.splitlines(), 1):
+            for m in re.finditer(r'`([a-z][a-z0-9_]*[$@%?]?)\s*\(', line):
+                nm = m.group(1)
+                base = nm.rstrip('?')
+                if nm in every or nm.lower() in every:
+                    continue
+                if base in LANGUAGE or nm in LANGUAGE:
+                    continue
+                if nm in DELIBERATE or base in DELIBERATE:
+                    continue
+                # a family shown as a prefix, e.g. `path_*(`
+                if any(x.startswith(nm) for x in every):
+                    continue
+                ghosts.append((rel, lineno, nm))
+    # A name written WITHOUT parentheses, under a prefix the registry really uses.
+    # This is the shape the call-form rule cannot see, and the one that produced the
+    # worst instance: docs/decisions.md advertised `crt_gotoxy`, `crt_color` and
+    # `crt_clear` when the only registered crt_ names are crt_init and crt_done.
+    prefixes = set()
+    for n in every:
+        u = n.find('_')
+        if u > 0:
+            prefixes.add(n[:u + 1])
+    for df in docfiles:
+        try:
+            txt = open(df, encoding='utf-8', errors='ignore').read()
+        except OSError:
+            continue
+        rel = os.path.relpath(df, ROOT).replace('\\', '/')
+        for lineno, line in enumerate(txt.splitlines(), 1):
+            for m in re.finditer(r'`([a-z][a-z0-9]*_[a-z0-9_]*[$@%?]?)`', line):
+                nm = m.group(1)
+                if nm in every or nm in DELIBERATE or nm in LANGUAGE:
+                    continue
+                u = nm.find('_')
+                if nm[:u + 1] not in prefixes:
+                    continue          # not a family this project registers
+                if nm.endswith('_*') or any(x.startswith(nm) for x in every):
+                    continue          # a family shown as a prefix
+                ghosts.append((rel, lineno, nm))
+
+    print()
+    if ghosts:
+        print("CALLED IN A DOCUMENT BUT NOT REGISTERED:")
+        for rel, lineno, nm in ghosts:
+            print(f"  {rel}:{lineno}: {nm}")
+        rc = 1
+    else:
+        print("every function a document calls is a real function.")
+
     print()
     bad = []
     for relpath, pat, actual, what in claims:

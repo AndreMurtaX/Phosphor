@@ -106,3 +106,24 @@ ok = file_delete(dp$)
 dh@ = buffer_new@(4)
 x = buffer_setint(dh@, 1, 4, 305419896, true)
 assert_eq(buffer_getint(dh@, 1, 4, true), 305419896, "and the big-endian round trip prints 305419896")
+
+test_case("docs/curated/a-name-in-@-does-not-mean-it-answers-a-handle")
+rem function-reference.md documented narr_set@, sarr_set@ and dict_clear@ as
+rem answering a handle. They do not, and a reader who copied the row got
+rem "cannot store int into handle variable" and an aborted program -- verified:
+rem   a@ = dim@(3) : h@ = narr_set@(a@, 1, 42)   -> exit 1
+rem The @ in a BUILT-IN's name types what the ENGINE returns, and these three
+rem answer the value written (arr_set's house rule) or 1. Pinned here so the page
+rem and the code cannot drift apart again in either direction.
+da@ = dim@(3)
+assert_eq(narr_set@(da@, 1, 42), 42, "narr_set@ answers the value written")
+assert_eq(narr_get(da@, 1), 42, "and the value really went in")
+ds@ = sdim@(2)
+assert_eq(sarr_set@(ds@, 1, "hi"), "hi", "sarr_set@ answers the string written")
+assert_eq(sarr_get$(ds@, 1), "hi", "and it really went in")
+dd@ = dict@()
+dict_set@(dd@, "k", 7)
+assert_eq(dict_clear@(dd@), 1, "dict_clear@ answers 1, not the dict")
+assert_eq(dict_count(dd@), 0, "and it really cleared")
+rem the contrast that makes the rule worth stating: dict_set@ DOES answer the dict
+assert_eq(dict_count(dict_set@(dd@, "z", 1)), 1, "dict_set@ answers the dict, so it chains")

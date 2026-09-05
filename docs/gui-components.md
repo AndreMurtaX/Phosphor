@@ -260,7 +260,7 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 ### Dialogs (high value, low cost — no form lifecycle to manage)
 | Component | Phosphor name | Verdict |
 |---|---|---|
-| ShowMessage / MessageDlg | `msgbox` / `msgbox_confirm` | **Built** — the yes/no form is spelled `msgbox_confirm`, not `msgbox_yesno` |
+| ShowMessage / MessageDlg | `msgbox` / `msgbox_confirm` | **Built** — the yes/no form is spelled **confirm**, not yesno as this plan first proposed |
 | InputQuery / InputBox | `inputbox$` | **Built** — `inputbox$(prompt$)`, `(prompt$, default$)`, `(title$, prompt$, default$)`. Modal, so interactive-host only. It cannot distinguish cancel from an empty answer; LCL returns the default on cancel |
 | TOpenDialog / TSaveDialog | `openfile$` / `savefile$` | **Built** (also the retained `opendialog@` / `savedialog@` with `dialog_filter@`, `dialog_title@`, `dialog_execute`) |
 | TSelectDirectoryDialog | `selectdir$` | **Built** (also `selectdirdialog@`) |

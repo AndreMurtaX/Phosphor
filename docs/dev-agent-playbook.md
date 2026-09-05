@@ -281,6 +281,34 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-05 · round 24 · the last two GUI items, and four traps in the way.**
+  `FreeNotification` and `drawgrid@` — held back as "their own increment" — closed
+  together. Neither was hard; getting there was instructive.
+  - **`x is TClass` on a possibly-dead pointer IS A DEREFERENCE.** It reads the
+    object's VMT. The first `TGuiHandle.Destroy` asked `c is TComponent` to decide
+    whether to unhook — on a `TTreeNode` already destroyed with its tree, that is
+    the exact access violation the change existed to prevent. ASK ONCE, WHILE THE
+    POINTER IS CERTAINLY LIVE, and remember the answer.
+  - **A TComponent field needs explicit visibility.** `TComponent` is `{$M+}`, so a
+    field with no section defaults to *published*, and a plain `TObject` cannot be
+    published. Two errors, no obvious connection to what changed.
+  - **A HEADLESS RUNNER MUST NEVER OPEN A DIALOG.** That access violation escaped
+    into the LCL, whose default handler is a modal box — *"Press OK to ignore and
+    risk data corruption"* — and the suite sat on it. A HANG IS WORSE THAN A
+    FAILURE: no message, no exit code, no file name, and on an unattended run it
+    holds the machine. `Application.OnException` now reports and halts 3. The owner
+    saw the box before the tooling did, which is the wrong way round.
+  - **A synthesiser must go through the real event property.** `drawgrid_drawcell@`
+    first called the bridge object directly; a test caught it, because unwiring
+    `OnDrawCell` then left the synthetic path still firing. `control_keydown@` calls
+    `KeyDown` for the same reason — reaching past the property exercises a path no
+    real paint or keypress ever takes.
+  - **One principled exemption, not a silencing.** The new name gate flagged the
+    playbook's own round-23 entry, which lists `crt_gotoxy` and friends precisely
+    because they do not exist. A record of a mistake has to be able to name it, so
+    the RETROSPECTIVE LOG is exempt and sections 0-5 above it stay gated — verified
+    by planting a ghost in each half.
+
 - **2026-09-05 · round 23 · asked whether one README sentence was true; ended up
   building sixteen controls.** Three audits ran: one sentence, one document, and all
   thirteen documents against the code. Between them they found the largest gaps in

@@ -187,6 +187,12 @@ def main():
         low = tok.lower()
         return WORDS[low] if low in WORDS else int(tok)
 
+    def gui_names():
+        names = set()
+        for f in glob.glob(os.path.join(ROOT, 'host', 'gui', 'libs', '*.pas')):
+            names |= registered_names(f)
+        return names
+
     def registered_packages(*parts):
         # One Register*Funcs procedure per package. It appears in the interface
         # and again in the implementation, so count DISTINCT names.
@@ -211,6 +217,12 @@ def main():
          NUM + r'\s+isolated packages\s+under `host/gui/libs/`',
          registered_packages('host', 'gui', 'libs', '*.pas'),
          'GUI packages under host/gui/libs'),
+        # README counted the engine in NAMES (682) and the GUI in registry ENTRIES
+        # (321) on the same page. Both are now names, and this keeps them that way.
+        ('README.md',
+         NUM + r'\s+LCL GUI functions',
+         len(gui_names()),
+         'LCL GUI functions'),
     ]
     print()
     bad = []

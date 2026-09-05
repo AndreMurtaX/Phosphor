@@ -65,7 +65,7 @@ phosphor --version | --help | --diag
 Two binaries ship, and the split is deliberate. `phosphor` is the headless host —
 engine plus every non-GUI package — and works over a pipe, in CI and on a server with
 no display. `phosphorgui` (built by `scripts/build-gui.ps1` / `.sh`) is the **complete**
-runner: the same packages *plus* the 321 LCL GUI functions. `phosphor --gui` hands over
+runner: the same packages *plus* the 311 LCL GUI functions. `phosphor --gui` hands over
 to it, so one command reaches everything.
 
 The LCL cannot simply be loaded on demand: on Linux the gtk2 widgetset opens the X

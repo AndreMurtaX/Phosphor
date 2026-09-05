@@ -115,17 +115,61 @@ if ($ProveFailure) {
     else { Write-Host 'ProveFailure: NOT detected -- the check is broken' -ForegroundColor Red; $allOk = $false }
 }
 else {
+    # THE MANIFEST MUST COVER THE DIRECTORY, BOTH WAYS. Nothing used to check this. A
+    # .bas dropped into tests\suite and never listed simply did not run -- on either
+    # OS -- while scripts\coverage.py still counted it as "exercised by a test",
+    # because that gate globs tests\**\*.bas rather than reading the manifest. The
+    # two checks then agreed on a green nobody had earned.
+    $onDisk = @(Get-ChildItem $suite -Filter *.bas | ForEach-Object { $_.BaseName })
+    if ($onDisk.Count -eq 0) {
+        Write-Host 'FAIL  manifest: tests\suite holds no .bas files at all' -ForegroundColor Red
+        $allOk = $false
+    }
+    foreach ($b in $onDisk) {
+        if ($manifest -notcontains $b) {
+            Write-Host ("FAIL  manifest: {0}.bas is in tests\suite but not in manifest.txt -- it never runs" -f $b) -ForegroundColor Red
+            $allOk = $false
+        }
+    }
+    foreach ($name in $manifest) {
+        if (-not (Test-Path (Join-Path $suite "$name.bas"))) {
+            Write-Host ("FAIL  manifest: {0} is listed but {0}.bas is missing" -f $name) -ForegroundColor Red
+            $allOk = $false
+        }
+        if (-not (Test-Path (Join-Path $suite "$name.expected"))) {
+            Write-Host ("FAIL  manifest: {0} is listed but {0}.expected is missing" -f $name) -ForegroundColor Red
+            $allOk = $false
+        }
+    }
+
     foreach ($name in $manifest) {
         $bas = Join-Path $suite "$name.bas"
-        $exp = [System.IO.File]::ReadAllBytes((Join-Path $suite "$name.expected"))
+        $expPath = Join-Path $suite "$name.expected"
+        # A manifest entry with no file was already reported above. Skipping it here
+        # is what lets the run reach its SUMMARY: ReadAllBytes on a missing golden
+        # throws under ErrorActionPreference=Stop, and the script died mid-run --
+        # printing the diagnosis and then never printing SUITE FAILED.
+        if (-not (Test-Path $bas) -or -not (Test-Path $expPath)) { continue }
+        $exp = [System.IO.File]::ReadAllBytes($expPath)
         if (-not (Run-One $bas $exp 0 $name)) { $allOk = $false }
     }
 
     # Negatives: each MUST be rejected (non-zero exit). A negative that RUNS is
     # a failure of the language, so this is a real gate, not decoration.
-    if (Test-Path $negDir) {
+    # A missing directory used to be skipped in silence and an empty one produced an
+    # empty loop -- either way the suite stayed green while proving nothing about
+    # rejection. (On Linux the same emptiness printed "PASS  reject: *.bas", the
+    # unexpanded glob reading as a correct rejection.) Both are failures now.
+    $negFiles = @()
+    if (Test-Path $negDir) { $negFiles = @(Get-ChildItem $negDir -Filter *.bas | Sort-Object Name) }
+    if ($negFiles.Count -eq 0) {
         Write-Host ''
-        foreach ($neg in Get-ChildItem $negDir -Filter *.bas | Sort-Object Name) {
+        Write-Host 'FAIL  negatives: no .bas files found in tests\negative -- the suite proves nothing about rejection' -ForegroundColor Red
+        $allOk = $false
+    }
+    if ($negFiles.Count -gt 0) {
+        Write-Host ''
+        foreach ($neg in $negFiles) {
             $out = Join-Path $tmp 'phosphortest.out'
             $err = Join-Path $tmp 'phosphortest.err'
             cmd /c "`"$exe`" `"$($neg.FullName)`" > `"$out`" 2> `"$err`""
@@ -153,7 +197,14 @@ else {
     )
     foreach ($hp in $hostProbes) {
         $psrc = Join-Path $root $hp.src
-        if (-not (Test-Path $psrc)) { continue }
+        # A probe whose SOURCE has gone missing used to be skipped in silence, so
+        # deleting tests\probe_bytecode.lpr or host\embed\phosphorembed.lpr still
+        # printed SUITE OK. Not running is not passing.
+        if (-not (Test-Path $psrc)) {
+            Write-Host ("FAIL  probe: {0}  source {1} is missing" -f $hp.name, $hp.src) -ForegroundColor Red
+            $allOk = $false
+            continue
+        }
         $pexe = Join-Path $binDir ($hp.name + '.exe')
         if (Test-Path $pexe) { Remove-Item $pexe -Force }
         & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
@@ -193,7 +244,14 @@ if (-not $py) {
 } else {
     foreach ($gate in @('check-codepage.py', 'coverage.py')) {
         $gp = Join-Path $here $gate
-        if (-not (Test-Path $gp)) { continue }
+        # The comment above says a gate that quietly does not run is worse than no
+        # gate, and then this line skipped a gate whose FILE was missing -- exactly
+        # the case that sentence was written about.
+        if (-not (Test-Path $gp)) {
+            Write-Host ("FAIL  gate: {0} is missing from scripts/" -f $gate) -ForegroundColor Red
+            $allOk = $false
+            continue
+        }
         $gout = & $py.Source $gp 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host ("PASS  gate: {0}" -f $gate) -ForegroundColor Green

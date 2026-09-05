@@ -279,6 +279,35 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-05 · round 22 · the runner could report success for work it did not do.**
+  Asked whether one README sentence was true. It was not, but the audit's completeness
+  critic found something worse than the wording: FIVE paths by which the acceptance
+  suite prints SUITE OK without having checked anything.
+  - `tests/negative` emptied printed **`PASS  reject: *.bas`** — the Linux loop has no
+    `nullglob`, so it runs once on the unexpanded pattern, phosphortest fails to open a
+    file named `*.bas`, and the non-zero exit reads as a correct rejection. Demonstrated
+    before being fixed; a hollow pass indistinguishable from a real one.
+  - A missing probe SOURCE and a missing GATE FILE were `continue`d in silence on BOTH
+    platforms. Delete `tests/probe_bytecode.lpr` or `scripts/check-codepage.py` and the
+    suite stayed green. The gate skip sits **ten lines under a comment saying "a gate
+    that quietly does not run is worse than no gate, because it reads as a pass"**. The
+    rule was written and then not applied to the line beneath it.
+  - Nothing checked that `manifest.txt` COVERS `tests/suite`. An unlisted `.bas` never
+    ran on either OS, while `coverage.py` still counted it as "exercised by a test"
+    because that gate globs `tests/**/*.bas`. Two gates agreeing on a green nobody
+    earned: one proved the function was mentioned, the other never ran the file
+    mentioning it.
+  - **THE LESSON IS ONE I HAD ALREADY WRITTEN AND DID NOT FOLLOW.** Earlier the same
+    day I fixed `test-suite.sh` accepting an unknown flag by silently running the full
+    suite — the identical class — and committed it alone. Round 13's rule says: WHEN YOU
+    FIND A BUG CLASS, SWEEP EVERY INSTANCE IN THE SAME COMMIT. One instance was fixed
+    and four were left, in the same two files, for the rest of the day.
+  - **The prove-it script caught a defect in the fix itself.** A manifest entry with no
+    golden printed the diagnosis and then killed the run on `ReadAllBytes` under
+    `ErrorActionPreference=Stop` — so the operator saw the reason but never saw SUITE
+    FAILED. Fixed by skipping already-reported entries so the run reaches its summary.
+    Five sabotages, each restored, each seen failing.
+
 - **2026-09-05 · round 21 · the last unbuilt promise: the byte buffer.**
   `decisions.md` had settled binary I/O in one line since the founding brief -- "no
   scalar BYTE type; binary I/O uses a buffer-as-handle" -- and the handle existed

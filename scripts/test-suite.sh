@@ -66,6 +66,25 @@ if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
   if [ "$allok" -eq 0 ]; then echo "SUITE OK"; exit 0; else echo "SUITE FAILED"; exit 1; fi
 fi
 
+# THE MANIFEST MUST COVER THE DIRECTORY, BOTH WAYS. Nothing used to check this. A
+# .bas dropped into tests/suite and never listed simply did not run -- on either OS --
+# while scripts/coverage.py still counted it as "exercised by a test", because that
+# gate globs tests/**/*.bas rather than reading the manifest. The two checks then
+# agreed on a green nobody had earned: one proved the function was mentioned, the
+# other never executed the file mentioning it.
+for f in "$suite"/*.bas; do
+  [ -e "$f" ] || { echo "FAIL  manifest: tests/suite holds no .bas files at all"; allok=1; break; }
+  b="$(basename "$f" .bas)"
+  case " $manifest " in
+    *" $b "*) ;;
+    *) echo "FAIL  manifest: $b.bas is in tests/suite but not in manifest.txt -- it never runs"; allok=1 ;;
+  esac
+done
+for name in $manifest; do
+  [ -f "$suite/$name.bas" ]      || { echo "FAIL  manifest: $name is listed but $name.bas is missing"; allok=1; }
+  [ -f "$suite/$name.expected" ] || { echo "FAIL  manifest: $name is listed but $name.expected is missing"; allok=1; }
+done
+
 for name in $manifest; do
   "$exe" "$suite/$name.bas" > "$out" 2> "$err"; code=$?
   if [ "$code" -eq 0 ] && cmp -s "$out" "$suite/$name.expected"; then
@@ -76,7 +95,18 @@ for name in $manifest; do
 done
 
 echo
+# An emptied tests/negative used to print "PASS  reject: *.bas" and leave the suite
+# green: without nullglob the loop runs ONCE on the unexpanded pattern, phosphortest
+# fails to open a file called "*.bas", the non-zero exit reads as a correct rejection,
+# and the hollow pass is indistinguishable from a real one. Demonstrated, then fixed.
+negcount=0
+for f in "$neg"/*.bas; do [ -f "$f" ] && negcount=$((negcount + 1)); done
+if [ "$negcount" -eq 0 ]; then
+  echo "FAIL  negatives: no .bas files found in tests/negative -- the suite proves nothing about rejection"
+  allok=1
+fi
 for f in "$neg"/*.bas; do
+  [ -f "$f" ] || continue          # the unexpanded pattern, already reported above
   "$exe" "$f" > "$out" 2> "$err"; code=$?
   if [ "$code" -ne 0 ]; then
     echo "PASS  reject: $(basename "$f")  (exit $code)"
@@ -92,7 +122,10 @@ done
 echo
 for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
-  [ -f "$root/$src" ] || continue
+  # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
+  # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.
+  # The same rule the gates below state: not running is not passing.
+  [ -f "$root/$src" ] || { echo "FAIL  probe: $name  source $src is missing"; allok=1; continue; }
   pexe="$bin/$name"; rm -f "$pexe"
   "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
     -Fu"$root/engine" -Fu"$root/engine/libs" -FU"$units" -FE"$bin" -o"$pexe" \
@@ -119,7 +152,10 @@ if [ -z "$PY" ]; then
   echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
 else
   for gate in check-codepage.py coverage.py; do
-    [ -f "$here/$gate" ] || continue
+    # The comment above says a gate that quietly does not run is worse than no gate,
+    # and then this line skipped a gate whose FILE was missing. A deleted gate is
+    # exactly the case the sentence was written about.
+    [ -f "$here/$gate" ] || { echo "FAIL  gate: $gate is missing from scripts/"; allok=1; continue; }
     if gout="$("$PY" "$here/$gate" 2>&1)"; then
       echo "PASS  gate: $gate"
     else

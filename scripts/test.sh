@@ -62,4 +62,33 @@ else
   echo "FAIL  F:pack refuses source (exit $refusecode)"; echo "$refuse" | sed 's/^/        /'; fail=1
 fi
 
+# G: a name no host built from this binary can provide. The COMPILER cannot judge
+# that -- it has no registry, which is what lets one .pbc run on hosts with
+# different packages -- but PACK can, because it carries this binary as its stub.
+badbas="$(mktemp -u).bas"; badpbc="$(mktemp -u).pbc"; neverexe="$(mktemp -u).never"
+printf '%s\n' 'println "before"' 'x = no_such_function_anywhere(1)' > "$badbas"
+
+# compile alone must not complain: late binding is the point.
+if out1="$("$exe" compile "$badbas" "$badpbc" 2>&1)"; then c1=0; else c1=$?; fi
+okG1=0; { [ "$c1" -eq 0 ] && [ -z "$out1" ]; } || okG1=1
+
+# compile --check must warn, still succeed, and still write the file.
+if out2="$("$exe" compile --check "$badbas" "$badpbc" 2>&1)"; then c2=0; else c2=$?; fi
+okG2=0
+{ [ "$c2" -eq 0 ] && [ -f "$badpbc" ] && echo "$out2" | grep -q warning \
+  && echo "$out2" | grep -q no_such_function_anywhere; } || okG2=1
+
+# pack must refuse it and name it.
+if out3="$("$exe" pack "$badpbc" "$neverexe" 2>&1)"; then c3=0; else c3=$?; fi
+okG3=0
+{ [ "$c3" -eq 1 ] && echo "$out3" | grep -q no_such_function_anywhere; } || okG3=1
+
+if [ "$okG1" -eq 0 ] && [ "$okG2" -eq 0 ] && [ "$okG3" -eq 0 ]; then
+  echo "PASS  G:name check     (compile is silent, --check warns, pack refuses)"
+else
+  echo "FAIL  G:name check     (silent=$okG1 warned=$okG2 refused=$okG3)"
+  echo "$out3" | sed 's/^/        /'; fail=1
+fi
+rm -f "$badbas" "$badpbc" "$neverexe"
+
 exit "$fail"

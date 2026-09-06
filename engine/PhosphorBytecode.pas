@@ -29,13 +29,26 @@ unit PhosphorBytecode;
 interface
 
 uses
-  Classes, SysUtils, PhosphorValue, PhosphorOpcodes;
+  Classes, SysUtils, PhosphorValue, PhosphorOpcodes, PhosphorRegistry;
 
 const
   PBC_MAGIC   = 'PBC';   // 3 bytes at the start of every .pbc stream
   PBC_VERSION = 1;       // bump whenever the format or opcode meaning changes
 
 { Write AProg to AStream in the .pbc format. }
+{ Every library function this program calls that AReg cannot provide, as a report
+  ready to print, and the count. Empty and 0 when the program is fully satisfied.
+
+  A call is a library call only if the program does not define the name itself:
+  the VM looks in UserFuncs first and reaches the registry second, and this walks
+  the same order, so a program's own functions are never reported missing.
+
+  Only the NAME is judged. The registry can also refuse a known name given the
+  wrong argument kinds, but those kinds come from values that exist only while
+  running -- deciding that here would be guessing. }
+function UnresolvedCalls(AProg: TProgram; AReg: TPhosphorRegistry;
+                         out AReport: String): Integer;
+
 procedure WriteProgram(AStream: TStream; AProg: TProgram);
 { Read a program from AStream. False (with AErr set) on a bad magic, an
   unsupported version, an opcode-set mismatch, or a truncated/corrupt stream. }
@@ -93,6 +106,40 @@ begin
 end;
 
 // --- the program -------------------------------------------------------------
+function UnresolvedCalls(AProg: TProgram; AReg: TPhosphorRegistry;
+                         out AReport: String): Integer;
+var
+  i, j: Integer;
+  ins: TInstr;
+  name: String;
+  seen: array of String;
+  isNew: Boolean;
+begin
+  Result := 0;
+  AReport := '';
+  SetLength(seen, 0);
+  for i := 0 to AProg.Count - 1 do
+  begin
+    ins := AProg.Instr(i);
+    if ins.Op <> opCall then Continue;
+    name := AProg.Consts.Get(ins.A).Str;
+    // The program's own functions are resolved before the registry is consulted.
+    if AProg.FindUserFunc(name, ins.B) >= 0 then Continue;
+    if AReg.HasName(name) then Continue;
+    // Report each name ONCE, at the first line that calls it: a name used in a
+    // loop is one problem, not fifty.
+    isNew := True;
+    for j := 0 to High(seen) do
+      if seen[j] = name then begin isNew := False; Break; end;
+    if not isNew then Continue;
+    SetLength(seen, Length(seen) + 1);
+    seen[High(seen)] := name;
+    Inc(Result);
+    AReport := AReport + '    ' + name + '   (first called at line ' +
+               IntToStr(ins.Line) + ')' + LineEnding;
+  end;
+end;
+
 procedure WriteProgram(AStream: TStream; AProg: TProgram);
 var
   i, j: Integer;

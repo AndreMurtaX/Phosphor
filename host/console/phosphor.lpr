@@ -13,7 +13,7 @@
     phosphor <file.bas|file.pbc>     run a file, output to stdout
     phosphor run <file> [--out F]    same, explicit verb; --out writes bytes to F
     phosphor --sandbox <dir> <file>  confine every path the script names to <dir>
-    phosphor compile <in.bas> <out.pbc>   compile to portable bytecode
+    phosphor compile [--check] <in.bas> <out.pbc>   compile to portable bytecode
     phosphor pack <in.pbc> <out>     make a standalone executable (stub + payload).
                                      Takes COMPILED bytecode, not source: compile
                                      once, pack as often as you like
@@ -216,6 +216,65 @@ begin
   Result := True;
 end;
 
+{ The six opt-in packages, and the seventeen GUI ones. Separate routines because
+  a CHECK needs every name this binary can ever provide, GUI included, without
+  bringing a widgetset up -- and on a headless machine the running registry has no
+  GUI names at all, while the executable being packed will register them wherever
+  it finds a session. }
+procedure RegisterOptInPackages(Reg: TPhosphorRegistry);
+begin
+  RegisterCrtFuncs(Reg);
+  RegisterBase64Funcs(Reg);
+  RegisterZipFuncs(Reg);
+  RegisterGzipFuncs(Reg);
+  RegisterHttpFuncs(Reg);
+  RegisterSqliteFuncs(Reg);
+end;
+
+procedure RegisterGuiPackages(Reg: TPhosphorRegistry);
+begin
+  RegisterGuiCoreFuncs(Reg);
+  RegisterControlFuncs(Reg);
+  RegisterFormFuncs(Reg);
+  RegisterButtonFuncs(Reg);
+  RegisterLabelFuncs(Reg);
+  RegisterEditFuncs(Reg);
+  RegisterChoiceFuncs(Reg);
+  RegisterContainerFuncs(Reg);
+  RegisterRangeFuncs(Reg);
+  RegisterMenuFuncs(Reg);
+  RegisterTimerFuncs(Reg);
+  RegisterImageFuncs(Reg);
+  RegisterGridFuncs(Reg);
+  RegisterTreeListFuncs(Reg);
+  RegisterCanvasFuncs(Reg);
+  RegisterDialogFuncs(Reg);
+  RegisterMiscFuncs(Reg);
+end;
+
+{ Every function name this BINARY can ever provide -- both halves, no widgetset.
+  The caller frees the engine. }
+function EverythingThisBinaryProvides: TPhosphorEngine;
+begin
+  Result := TPhosphorEngine.Create();     // the engine's own libraries register here
+  RegisterOptInPackages(Result.Registry);
+  RegisterGuiPackages(Result.Registry);
+end;
+
+{ Names this program calls that no host built from this binary could satisfy.
+  Answers the count and leaves a printable list in AReport. }
+function NamesThisBinaryCannotProvide(AProg: TProgram; out AReport: String): Integer;
+var
+  eng: TPhosphorEngine;
+begin
+  eng := EverythingThisBinaryProvides();
+  try
+    Result := UnresolvedCalls(AProg, eng.Registry, AReport);
+  finally
+    eng.Free;
+  end;
+end;
+
 { Is a graphical session reachable?
 
   Windows: always. The win32 widgetset draws through USER32 and needs no display
@@ -350,34 +409,12 @@ var
   svc: THostServices;
 begin
   Reg := AEng.Registry;
-  RegisterCrtFuncs(Reg);
-  RegisterBase64Funcs(Reg);
-  RegisterZipFuncs(Reg);
-  RegisterGzipFuncs(Reg);
-  RegisterHttpFuncs(Reg);
-  RegisterSqliteFuncs(Reg);
+  RegisterOptInPackages(Reg);
 
   if not GuiPossible then Exit;
 
   StartGui;
-  RegisterGuiCoreFuncs(Reg);
-  RegisterControlFuncs(Reg);
-  RegisterFormFuncs(Reg);
-  RegisterButtonFuncs(Reg);
-  RegisterLabelFuncs(Reg);
-  RegisterEditFuncs(Reg);
-  RegisterChoiceFuncs(Reg);
-  RegisterContainerFuncs(Reg);
-  RegisterRangeFuncs(Reg);
-  RegisterMenuFuncs(Reg);
-  RegisterTimerFuncs(Reg);
-  RegisterImageFuncs(Reg);
-  RegisterGridFuncs(Reg);
-  RegisterTreeListFuncs(Reg);
-  RegisterCanvasFuncs(Reg);
-  RegisterDialogFuncs(Reg);
-  RegisterMiscFuncs(Reg);
-
+  RegisterGuiPackages(Reg);
   if GGuiSvc = nil then GGuiSvc := TGuiServices.Create();
   svc.ProcessMessages := @GGuiSvc.Pump;
   svc.HandleMessage := @GGuiSvc.PumpOne;
@@ -409,11 +446,13 @@ begin
 end;
 
 { Compile a .bas source to a .pbc bytecode file. }
-function CompileFile(const AInPath, AOutPath: String): Integer;
+function CompileFile(const AInPath, AOutPath: String; ACheck: Boolean): Integer;
 var
   comp: TPhosphorCompiler;
   prog: TProgram;
   fs: TFileStream;
+  missing: Integer;
+  report: String;
 begin
   if not FileExists(AInPath) then
   begin
@@ -433,6 +472,24 @@ begin
   try
     fs := TFileStream.Create(AOutPath, fmCreate);
     try WriteProgram(fs, prog); finally fs.Free; end;
+    // A WARNING, never a failure. A name this host does not have is not
+    // necessarily a mistake: the file may be meant for a host that does have it,
+    // which is the whole reason names resolve late. So the .pbc is written and
+    // the exit code stays 0 -- what changes is that a typo is now visible at the
+    // moment it is cheapest to fix, instead of on the day someone runs it.
+    if ACheck then
+    begin
+      missing := NamesThisBinaryCannotProvide(prog, report);
+      if missing > 0 then
+      begin
+        Writeln(StdErr, 'phosphor: warning: ', missing,
+                ' function name(s) this host does not provide:');
+        Write(StdErr, report);
+        Writeln(StdErr, '  Fine if the program is meant for a host that registers them.');
+        Writeln(StdErr, '  `phosphor pack` refuses them, because a packed program has');
+        Writeln(StdErr, '  only the host packed with it.');
+      end;
+    end;
     Result := 0;
   finally
     prog.Free;
@@ -553,7 +610,8 @@ var
   payload: TBytesStream;
   src, dst: TFileStream;
   off: Int64;
-  pbcErr: String;
+  pbcErr, missingReport: String;
+  missing: Integer;
 begin
   if not FileExists(AInPbc) then begin Writeln(StdErr, 'phosphor: file not found: ', AInPbc); Exit(2); end;
 
@@ -583,7 +641,24 @@ begin
       Writeln(StdErr, 'phosphor: ', AInPbc, ': ', pbcErr);
       Exit(1);
     end;
+    // AND REFUSE WHAT CANNOT RUN. A packed executable carries this binary as its
+    // stub, so the host is known exactly here: a name this binary cannot provide
+    // will never resolve in the file being written. The compiler could not have
+    // said this -- it has no registry, and that is what lets one .pbc run on
+    // hosts with different packages -- but pack has given that portability up on
+    // purpose, and gets certainty in exchange.
+    missing := NamesThisBinaryCannotProvide(prog, missingReport);
     prog.Free;
+    if missing > 0 then
+    begin
+      Writeln(StdErr, 'phosphor: ', AInPbc, ': ', missing,
+              ' function name(s) this binary cannot provide:');
+      Write(StdErr, missingReport);
+      Writeln(StdErr, '  A packed program has only the host packed with it. This .pbc');
+      Writeln(StdErr, '  may still run under a host that registers them -- the test');
+      Writeln(StdErr, '  runners register the assertion library, for instance.');
+      Exit(1);
+    end;
     payload.Position := 0;
     src := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
     dst := TFileStream.Create(AOutExe, fmCreate);
@@ -769,15 +844,36 @@ begin
     Halt(code);
   end;
 
-  // `phosphor compile <in.bas> <out.pbc>` -- compile to bytecode and stop.
+  // `phosphor compile [--check] <in.bas> <out.pbc>` -- compile to bytecode and stop.
   if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
   begin
-    if ParamCount < 3 then
+    packFlags := 0;   // reused as "--check was given"
+    packArgs := 0;
+    packIn := '';
+    packOut := '';
+    for i := 2 to ParamCount do
     begin
-      Writeln(StdErr, 'usage: phosphor compile <in.bas> <out.pbc>');
+      arg := ParamStr(i);
+      if arg = '--check' then
+        packFlags := 1
+      else
+      begin
+        Inc(packArgs);
+        if packArgs = 1 then packIn := arg
+        else if packArgs = 2 then packOut := arg
+        else
+        begin
+          Writeln(StdErr, 'phosphor: compile: unexpected argument: ', arg);
+          Halt(2);
+        end;
+      end;
+    end;
+    if packArgs < 2 then
+    begin
+      Writeln(StdErr, 'usage: phosphor compile [--check] <in.bas> <out.pbc>');
       Halt(2);
     end;
-    Halt(CompileFile(ParamStr(2), ParamStr(3)));
+    Halt(CompileFile(packIn, packOut, packFlags <> 0));
   end;
 
   // `phosphor pack [--no-console] <in.bas> <out.exe>` -- make a standalone
@@ -829,7 +925,10 @@ begin
     else if (arg = '--help') or (arg = '-h') then
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
-      Writeln('       phosphor compile <in.bas> <out.pbc>');
+      Writeln('       phosphor compile [--check] <in.bas> <out.pbc>');
+      Writeln('              --check warns about function names this host does not');
+      Writeln('              have; it never fails, because the file may be meant');
+      Writeln('              for a host that has them');
       Writeln('       phosphor pack [--no-console] <in.pbc> <out>   (standalone executable)');
       Writeln('              pack takes COMPILED bytecode: compile first, then pack');
       Writeln('              --no-console is baked into the file: a packed program');

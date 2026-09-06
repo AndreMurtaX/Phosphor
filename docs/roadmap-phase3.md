@@ -286,7 +286,13 @@ every future integration follows.
 > 3. **`.pbc` specifics** → magic `PBC`, version 1, extension `.pbc`, and today's
 >    **late-bound** resolution kept: functions resolve by name against whatever the
 >    loading host registered, which is what lets one file run on hosts with
->    different packages.
+>    different packages. *(2026-09-06: the cost of that — a missing name surfacing
+>    only when its line runs — is now paid at the two moments the host IS known.
+>    `pack` REFUSES a payload naming a function this binary cannot provide, since
+>    the executable it writes carries this binary as its stub and no other host
+>    will load that payload; `compile --check` WARNS and carries on, because a name
+>    this host lacks may be perfectly right for the host the file is meant for. The
+>    compiler itself still has no registry, which is the point.)*
 > 4. **Phase boundary** → deployment stayed inside phase 3; steps 1–5 all shipped
 >    together, so the split was never needed.
 

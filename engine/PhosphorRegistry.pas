@@ -73,6 +73,11 @@ type
     { Resolve by name + the actual argument kinds, widening int% -> n as needed. }
     function Resolve(const AName: String;
                      const AKinds: array of TValueKind): TResolvedFunc;
+    { Is there ANY function of this name, whatever its arguments? Resolve answers
+      "not with these argument kinds", which needs values that only exist while
+      running. This answers the question a static check can actually settle: the
+      name is unknown to this host entirely, so no call to it can ever work. }
+    function HasName(const AName: String): Boolean;
     class function CodeOf(K: TValueKind): Char;
   end;
 
@@ -157,6 +162,19 @@ begin
     Inc(Result, Ord(Mask and 1));
     Mask := Mask shr 1;
   end;
+end;
+
+function TPhosphorRegistry.HasName(const AName: String): Boolean;
+var
+  i: Integer;
+  prefix: String;
+begin
+  // Keys are '<name>:<argument codes>', so the name is everything before the
+  // first colon and a prefix match on 'name:' is exact.
+  prefix := LowerCase(AName) + ':';
+  for i := 0 to FCount - 1 do
+    if Copy(LowerCase(FKeys[i]), 1, Length(prefix)) = prefix then Exit(True);
+  Result := False;
 end;
 
 function TPhosphorRegistry.Resolve(const AName: String;

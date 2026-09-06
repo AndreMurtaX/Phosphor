@@ -56,7 +56,7 @@ bin\phosphor.exe run hello.bas
 ```
 phosphor run  <file.bas>            run a program
 phosphor --no-console <file.bas>    run with no console window (see below)
-phosphor compile <in.bas> <out.pbc> compile to portable .pbc bytecode
+phosphor compile [--check] <in.bas> <out.pbc> compile to portable .pbc bytecode
 phosphor pack [--no-console] <in.pbc> <out>   standalone executable (from bytecode)
 phosphor                            an interactive REPL (state persists)
 phosphor --version | --help | --diag
@@ -85,6 +85,24 @@ display server.
 **Compiling needs no session either**: the compiler is host-agnostic, so `phosphor
 compile <gui-app.bas> <out.pbc>` works on a headless machine, and `phosphor pack` makes
 a standalone GUI application — the stub is this same complete binary.
+
+**A function name is resolved when the program runs, not when it compiles** — and
+that is what makes a `.pbc` portable. Which functions exist is a *host's* decision:
+`phosphor` registers 685 names, the package test runner adds the assertion library,
+the GUI runner adds 426 more. So the compiler has no registry at all and cannot know
+which names will exist; the VM asks whichever host loaded the program.
+
+The cost is that a typo survives until the line runs, so the two moments where the
+host IS known now check:
+
+- **`phosphor pack` refuses** a `.pbc` that calls a name this binary cannot provide,
+  and names it with the line that first calls it. It can be certain: the executable
+  it writes carries this very binary as its stub, so no other host will ever load
+  that payload. Portability is not lost here — packing is where you give it up on
+  purpose.
+- **`phosphor compile --check` warns** and carries on, exit 0, `.pbc` written. A
+  name this host lacks is not necessarily a mistake; the file may be meant for a
+  host that has it.
 
 **The console is kept by default, and can be let go.** A windowed program still has a
 console, which is where `PRINT` goes — useful while developing, unwanted in something

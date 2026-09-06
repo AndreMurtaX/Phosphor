@@ -126,4 +126,42 @@ else {
     Write-Host ("        {0}" -f ($refuseText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
 }
 
-if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF) { exit 0 } else { exit 1 }
+# G. A name no host built from this binary can provide. The COMPILER cannot judge
+#    that -- it has no registry, which is what lets one .pbc run on hosts with
+#    different packages -- but PACK can, because the executable it writes carries
+#    this very binary as its stub.
+$badBas = Join-Path $tmp 'phosphor_badname.bas'
+Set-Content -LiteralPath $badBas -Encoding ascii -Value @(
+    'println "before"',
+    'x = no_such_function_anywhere(1)'
+)
+$badPbc = Join-Path $tmp 'phosphor_badname.pbc'
+$checkOut = Join-Path $tmp 'phosphor_badname.check.txt'
+
+# compile alone must NOT complain: late binding is the point.
+cmd /c "`"$exe`" compile `"$badBas`" `"$badPbc`" > `"$checkOut`" 2>&1"
+$okG1 = ($LASTEXITCODE -eq 0) -and ((Get-Content -Raw $checkOut) -eq $null -or (Get-Content -Raw $checkOut).Trim() -eq '')
+
+# compile --check must WARN and still succeed, and still write the file.
+cmd /c "`"$exe`" compile --check `"$badBas`" `"$badPbc`" > `"$checkOut`" 2>&1"
+$checkText = Get-Content -Raw $checkOut
+$okG2 = ($LASTEXITCODE -eq 0) -and (Test-Path $badPbc) -and
+        ($checkText -like '*warning*') -and ($checkText -like '*no_such_function_anywhere*')
+
+# pack must REFUSE it, name it, and write no executable.
+$neverExe = Join-Path $tmp 'phosphor_never.exe'
+if (Test-Path $neverExe) { Remove-Item $neverExe -Force }
+cmd /c "`"$exe`" pack `"$badPbc`" `"$neverExe`" > `"$checkOut`" 2>&1"
+$packCode = $LASTEXITCODE
+$packText = Get-Content -Raw $checkOut
+$okG3 = ($packCode -eq 1) -and ($packText -like '*no_such_function_anywhere*')
+
+$okG = $okG1 -and $okG2 -and $okG3
+if ($okG) { Write-Host "PASS  G:name check     (compile is silent, --check warns, pack refuses)" -ForegroundColor Green }
+else {
+    Write-Host "FAIL  G:name check" -ForegroundColor Red
+    Write-Host ("        compile silent={0}  --check warned={1}  pack refused={2}" -f $okG1, $okG2, $okG3) -ForegroundColor DarkGray
+    Write-Host ("        last output: {0}" -f ($packText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+}
+
+if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG) { exit 0 } else { exit 1 }

@@ -53,6 +53,13 @@ var
   ZipErr: Integer = 0;   // 0 = the last zip op was clean; 1 = it failed
 
 type
+  { Raised by a constructor the sandbox refused. A named class rather than a bare
+    Exception so the reason survives into any handler that cares to look, and so
+    a reader of the raise line does not have to guess why a zip constructor is
+    throwing. Every caller in this unit already turns an exception into
+    ZipErr := 1 and a zero handle, which is the refusal the script sees. }
+  EPhosphorZipRefused = class(Exception);
+
   { A write handle: a TZipper plus the in-memory streams that back its
     string entries. The streams must outlive the AddFileEntry call and stay
     alive until ZipAllFiles has read them, so the writer owns and frees them. }
@@ -81,8 +88,16 @@ type
 
 { TZipWriter }
 
+{ THE GUARD IS IN THE CONSTRUCTOR, where the file is actually bound, rather than
+  only in the registered function that calls it -- so a caller added later is
+  covered without anyone remembering. It RAISES rather than answering: a
+  constructor has no way to say no, and every caller here already turns an
+  exception into ZipErr := 1 and a zero handle, which is the refusal a script
+  sees. }
 constructor TZipWriter.Create(const APath: String);
 begin
+  if not SandboxAllows(APath, puWrite) then
+    raise EPhosphorZipRefused.Create('refused: the path is outside the sandbox root');
   Z := TZipper.Create();
   Z.FileName := APath;
   Owned := TList.Create();
@@ -131,6 +146,8 @@ end;
 
 constructor TZipReader.Create(const APath: String);
 begin
+  if not SandboxAllows(APath, puRead) then
+    raise EPhosphorZipRefused.Create('refused: the path is outside the sandbox root');
   UZ := TUnZipper.Create();
   UZ.FileName := APath;
   UZ.Examine;              // populates Entries; raises on a missing/corrupt file
@@ -315,6 +332,7 @@ var uz: TUnZipper;
 begin
   Err := NoError();
   Result := ValInt(0);
+  if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     uz := TUnZipper.Create();
     try
@@ -345,6 +363,7 @@ var uz: TUnZipper;
 begin
   Err := NoError();
   Result := ValInt(0);
+  if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     uz := TUnZipper.Create();
     try
@@ -369,6 +388,7 @@ var uz: TUnZipper; n: Integer;
 begin
   Err := NoError();
   Result := ValStr('');
+  if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     uz := TUnZipper.Create();
     try
@@ -392,6 +412,17 @@ begin
 end;
 
 // --- handle-based create/add/close ------------------------------------------
+{ EVERY DISK PATH THIS PACKAGE IS HANDED GOES THROUGH THE GATE FIRST.
+
+  Only zip_compress asked. The other four -- create, open, addfile, extract --
+  took a path straight from the script and handed it to the RTL, so a run
+  confined by --sandbox wrote a zip anywhere on the disk while file_writealltext
+  to a comparable path was refused two lines earlier. Demonstrated on 2026-09-06:
+  a script rooted in a scratch directory created an archive in C:\Dev.
+
+  check-sandbox.py did not report it, and could not: it looks for Pascal
+  filesystem primitives, and TZipper/TUnZipper open their own files. The gate has
+  been taught these names too. }
 function f_zip_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
@@ -410,6 +441,8 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetWriter(Args[0].Hnd, w) then begin ZipErr := 1; Exit; end;
+  // Args[1] is a path ON DISK being read into the archive.
+  if not SandboxAllows(Args[1].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     w.AddFile(Args[1].Str, Args[2].Str);
     Result := ValInt(1);
@@ -553,6 +586,14 @@ begin
           'destination directory');
         Exit;
       end;
+      // Args[2] is a DESTINATION DIRECTORY on disk. ArchiveIsSafe above stops an
+      // entry name from climbing out of it; this stops the destination itself
+      // from being outside the root in the first place.
+      if not SandboxAllows(Args[2].Str, puWrite) then
+      begin
+        ZipErr := 1;
+        Exit;
+      end;
       r.UZ.OutputPath := Args[2].Str;
       r.UZ.UnZipFiles(sl);
       Result := ValInt(1);
@@ -596,6 +637,7 @@ var z: TZipper;
 begin
   Err := NoError();
   Result := ValInt(0);
+  if not SandboxAllows(Args[0].Str, puWrite) then begin ZipErr := 1; Exit; end;
   try
     z := TZipper.Create();
     try

@@ -20,7 +20,7 @@ interface
 
 uses
   SysUtils, Classes, Controls, ExtCtrls, ComCtrls, Graphics,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore, PhosphorSandbox;
 
 procedure RegisterImageFuncs(Reg: TPhosphorRegistry);
 
@@ -56,6 +56,11 @@ begin
   E := NoError;
   Result := A[0];
   if not GuiResolve(A[0].Hnd, TImage, c) then Exit;
+  { A PICTURE IS A FILE. host/gui/libs was never scanned by check-sandbox.py, so
+    these two read from any path a confined script named. The gate now covers
+    this directory. }
+  if not SandboxAllows(A[1].Str, puRead) then
+  begin GGuiError := ERR_FILE_NOT_FOUND; Exit; end;
   if not FileExists(A[1].Str) then begin GGuiError := ERR_FILE_NOT_FOUND; Exit; end;
   try
     TImage(c).Picture.LoadFromFile(A[1].Str);
@@ -122,6 +127,7 @@ var c: TComponent; bm: TBitmap; pic: TPicture;
 begin
   E := NoError; Result := ValInt(0);
   if not GuiResolve(A[0].Hnd, TImageList, c) then Exit;
+  if not SandboxAllows(A[1].Str, puRead) then begin GGuiError := 1; Exit; end;
   if not FileExists(A[1].Str) then begin GGuiError := 1; Exit; end;
   pic := TPicture.Create;
   try

@@ -109,7 +109,8 @@ interface
 
 uses
   SysUtils, Classes, fpjson, SQLite3Dyn,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
+  PhosphorSandbox;
 
 procedure RegisterSqliteFuncs(Reg: TPhosphorRegistry);
 
@@ -401,6 +402,16 @@ var p: psqlite3; rc: Integer;
 begin
   Result := ValHandle(0);
   if not GReady then Exit;
+  { THE GUARD LIVES HERE, not only in the registered function, so every caller is
+    covered including any added later. ':memory:' is not a path -- sqlite reads it
+    as "no file at all" -- so it is the one name that bypasses the check without
+    touching a disk. }
+  if (APath <> ':memory:') and (not SandboxAllows(APath, puWrite)) then
+  begin
+    GLastErr := 14;   // SQLITE_CANTOPEN
+    GLastMsg := 'refused: the path is outside the sandbox root';
+    Exit;
+  end;
   p := nil;
   rc := sqlite3_open(PAnsiChar(APath), @p);
   if (rc <> SQLITE_OK) or (p = nil) then
@@ -423,8 +434,21 @@ begin Err := NoError(); Result := ValInt(Ord(GReady)); end;
 function f_open_mem(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := OpenDatabase(':memory:'); end;
 
+{ A DATABASE IS A FILE. This package asked the gate nowhere, and
+  check-sandbox.py could not see it: sqlite3_open is a C call, not one of the
+  Pascal primitives the gate scans for. A run confined by --sandbox created an
+  8KB database in C:\Dev on 2026-09-06 while an ordinary write to the same
+  directory was refused.
+
+  puWrite, not puRead: sqlite3_open CREATES the file when it is not there, so a
+  read-only-looking call is a write. sqlite_open@ with no argument opens an
+  in-memory database and touches nothing, which is why only this arity is
+  guarded. }
 function f_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := OpenDatabase(Args[0].Str); end;
+begin
+  Err := NoError();
+  Result := OpenDatabase(Args[0].Str);   // which asks the gate
+end;
 
 function f_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb;

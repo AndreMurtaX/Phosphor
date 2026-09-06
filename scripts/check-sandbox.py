@@ -39,6 +39,18 @@ PRIMITIVES = [
     # refused. Found by an agent READING the library to document it, not by any
     # check: the gate only knows the primitives it is told about.
     'TIniFile.Create', 'TMemIniFile.Create', 'TCustomIniFile.Create',
+    # A LIBRARY THAT OPENS ITS OWN FILES IS STILL OPENING A FILE. These were
+    # missing, and the two packages that use them escaped the sandbox entirely:
+    # a run confined by --sandbox wrote a zip and created an 8KB sqlite database
+    # in C:\Dev while file_writealltext to the same place was refused. The gate
+    # reported clean throughout, because it knew only the Pascal primitives and
+    # TZipper and sqlite3_open are neither.
+    'TZipper', 'TUnZipper', 'sqlite3_open',
+    # The LCL's own loaders, for host/gui/libs below. NOT 'AddFile': it is a
+    # method name common enough (TStringList, a multipart form builder, a zip
+    # writer adding a STRING) that it reported nine routines that never touch a
+    # path. A primitive that cries wolf teaches people to widen ALLOWED.
+    'Picture.LoadFrom',
 ]
 # DeleteTree and CopyTree are NOT in that list: they are this project's own
 # helpers and they ask the gate themselves, at every level of their recursion.
@@ -56,12 +68,22 @@ ALLOWED = {
     # cannot steer these anywhere, so a root would bound nothing.
     'PhosphorPlatformLib.pas:ReadFirstLine': 'reads /etc/os-release and friends; the path is a constant in this unit',
     'PhosphorHttpLib.pas:LocateCABundle': 'probes the platform CA bundle list, a constant array',
+    # Routines that name a zip type without ever binding a path to it. The two
+    # constructors that DO bind one ask the gate; these three are the registration
+    # table, and a helper that inspects an already-open archive.
+    'PhosphorZipLib.pas:RegisterZipFuncs': 'the registration table; opens nothing',
+    'PhosphorZipLib.pas:ArchiveIsSafe': 'inspects an already-open TUnZipper, binds no path',
 }
 
 SCAN_DIRS = [
     os.path.join(ROOT, 'engine'),
     os.path.join(ROOT, 'engine', 'libs'),
     os.path.join(ROOT, 'host', 'packages'),
+    # host/gui/libs WAS NOT SCANNED, and 17 units live there. One of them reads
+    # files from disk on a path the script supplies. A directory left out of this
+    # list is not a directory that passes the check -- it is one the check has
+    # never looked at, and nothing said so.
+    os.path.join(ROOT, 'host', 'gui', 'libs'),
 ]
 # The hosts are deliberately NOT scanned. The sandbox bounds the SCRIPT, not the
 # program that chose to run one: a host reading the file named on its own command

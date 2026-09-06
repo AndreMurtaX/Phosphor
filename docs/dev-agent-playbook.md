@@ -321,6 +321,52 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 30 · the three paths nothing reached, and a defect in each.**
+  Round 29 ended by naming what still had no automated visitor: the `--gui`
+  handoff, the Unix keyboard, and a real message loop. All three are closed, and
+  **every one of them had something in it** — which is the argument for closing a
+  blind spot rather than reasoning about how likely it is to hold anything.
+  - **The handoff** makes four decisions (is there a session, is `phosphorgui`
+    beside me, spawn it, hand back its exit code) and nothing exercised any of
+    them. Now driven against fixtures that open no window on purpose. Linux
+    carries the case Windows cannot — no session, refuse before spawning, exit 3.
+    *And the first version of that test could never run it*: `test-gui.sh` exports
+    `DISPLAY=:0` near the top, so asking "is DISPLAY empty?" further down always
+    answered no. **A branch is not tested by waiting for the environment to
+    provide it** — take the session away for one command (`env -u DISPLAY`) and
+    the branch that exists for every ssh session is exercised by the machine that
+    has a session.
+  - **The Unix keyboard** held two. `Result := c` assigned a Char into a String in
+    a `{$codepage UTF8}` unit, re-encoding every byte ≥ 128 a terminal sent —
+    the second half of every accented character. `check-codepage.py` names that
+    exact blind spot in its own header, which is a gate documenting the hole it
+    does not cover. And the assembly gathered ESC sequences only, so a typed
+    accented character answered its **first byte** while Windows answered the
+    whole character: two platforms disagreeing about what one keypress is.
+    Extracting `CrtAssembleKey` then surfaced a third: a source cannot peek, so a
+    byte read to be judged is a byte **consumed** — off the terminal, where it was
+    the first byte of the next key. It is handed back now, and the reader keeps a
+    one-byte pushback.
+  - **The message loop.** `app_run()` — the verb every interactive GUI program
+    ends with — had never run, because every other GUI test fires events
+    synchronously. Entering it once worked. Entering it a **second** time found the
+    defect: `app_quit` called `Application.Terminate`, which sets a flag the LCL
+    gives no public way to clear, so every later `app_run()` in that process
+    returned instantly having dispatched nothing. *The second call is the test.* A
+    feature that works once and is silently dead afterwards passes every
+    single-shot check ever written for it.
+  - **A runner that can block needs a way not to.** `phosphorguitest` arms a
+    watchdog timer that can only fire while a message loop is pumping — precisely
+    the stuck case — and reports the file as failed. A hang tells nobody anything
+    and blocks everything queued behind it; a hang that becomes a failure is a bug
+    report.
+  - **Two more things fell out, both about order and both small.** `test-classic`
+    was the last runner that required the binary to already exist and told you to
+    go build it: a suite whose result depends on the order you typed the commands
+    in. And four `.sh` runners were committed non-executable while four were not.
+  - **Recorded, not waved away:** one GUI-suite failure was seen once and did not
+    reproduce in six further runs. The clipboard's bounded retry is the standing
+    mitigation. An unexplained failure is written down as unexplained.
 - **2026-09-06 · round 29 · the rule was written, and nothing was running it.**
   The owner ran `phosphor --gui examples/interactive.bas` and every INPUT prompt
   printed at once, each answered with an empty string. Then, asked the obvious

@@ -427,8 +427,6 @@ def main():
         ('docs/dev-agent-playbook.md', 'arr_set'): 'now arr_set@',
         ('docs/function-reference.md', 'arr_set'): 'now arr_set@',
         ('docs/roadmap.md', 'arr_set'): 'now arr_set@',
-        ('docs/gui-components.md', 'button_click'): 'now button_click@',
-        ('docs/gui-components.md', 'control_anchors'): 'now control_anchors$ / control_anchors@',
         ('docs/roadmap-phase2.md', 'button_click'): 'now button_click@',
         ('docs/roadmap-phase2.md', 'button_caption'): 'now button_caption$ / button_caption@',
         ('docs/roadmap-phase2.md', 'form_show'): 'now form_show@',

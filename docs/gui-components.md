@@ -6,9 +6,19 @@ a study written when increment 3 (form + button + one event) was all that stood;
 is now also the record of what was built from it.
 
 > **STATUS 2026-09-05 — the plan is built.** All **17** proposed packages exist
-> under `host/gui/libs/`, registering **426 distinct names**, covered by 16
+> under `host/gui/libs/`, registering **426 distinct names**, covered by **18**
 > byte-exact test files that run headless on Windows and Linux (`scripts/test-gui`).
 > The **Verdict** column below is measured against the registry, not intended.
+>
+> **This paragraph is where the page counts, and the count is a measured one.** The
+> closing section used to answer 412 names and 15 files where this block answered
+> 426 and 16, and the package layout added a non-existent eighteenth unit on top —
+> three readings, no way for a reader to tell which was current, and all three
+> written as fact. Re-measured 2026-09-06: `host/gui/libs/*.pas` holds **17** units
+> and nothing else, registering **426** distinct `Reg.Add`/`Reg.AddHost` names;
+> `tests/gui/manifest.txt` lists **18** files, each byte-compared to its own
+> `.expected`. The unit count is repeated once below, over the table that IS the
+> list of 17; the other two are not repeated anywhere.
 >
 > An audit against the code on 2026-09-05 found sixteen in-scope items this page
 > named and nobody had built — the largest being seven of the eight event
@@ -16,10 +26,10 @@ is now also the record of what was built from it.
 > model, `inputbox$`, `fontdialog@`, `openpicture$`/`savepicture$`, `idletimer@`,
 > `radiogroup@`, `checkgroup@`, `popupmenu@`, `tabcontrol@`, `imagelist@`,
 > `trayicon@`, `paintbox@` with the arc/pie/polygon/polyline primitives, and the
-> backbone helpers `control_parent@`, `control_anchors`, `control_tabstop`,
-> `control_taborder`, plus the `BorderSpacing`/`Constraints` this page claimed were
-> exposed and were not. What remains deliberately unbuilt is listed under
-> **Recommended build order**, with the reason.
+> backbone helpers `control_parent@`, `control_anchors$`/`control_anchors@`,
+> `control_tabstop`, `control_taborder`, plus the `BorderSpacing`/`Constraints` this
+> page claimed were exposed and were not. What remains deliberately unbuilt is listed
+> under **Recommended build order**, with the reason.
 
 Two inputs are crossed:
 
@@ -66,15 +76,40 @@ mapped to its own conventions (`@` handle suffix, base-1, strict boolean):
 
 | Form | Meaning |
 |---|---|
-| `x@(parent@)` | constructor → a handle; parent first for a control, none for form/timer/dialog. **Geometry is a second call**, not constructor arguments: `control_bounds@(h@, x, y, w, h)` or `control_move@`/`control_size@`. (The original plan put `[, left, top, w, h]` on the constructor; no constructor takes it. `form@` is the one with extra arities: `form@()`, `form@(caption$)`, `form@(caption$, w, h)`.) |
+| `x@(parent@)` | constructor → a handle; parent first for a control, none for form/timer/dialog. **Position is always a second call** — `control_bounds@(h@, x, y, w, h)` or `control_move@`/`control_size@`; the original plan's `[, left, top, w, h]` tail is on no constructor, and nothing takes a left/top at all. Seven constructors do carry extra arities, listed below. |
 | `x_prop(h@)` / `x_prop$(h@)` | numeric / string getter |
 | `x_prop@(h@, value)` | setter; returns the handle so calls read left to right |
-| `x_onevent@(h@, "func")` | bind an event to a BASIC function by name; `""` unbinds. **There is no read-back getter** — the planned `x_onevent$(h@)` was never built, and none of the 14 registered binders has a `$` counterpart. |
+| `x_onevent@(h@, "func")` | bind an event to a BASIC function by name; `""` unbinds. **There is no read-back getter** — the planned `x_onevent$(h@)` was never built, and none of the **28** registered binders has a `$` counterpart. |
 | `x_verb@(h@[, …])` | imperative action (show, focus, bringtofront, start…) |
-| `x_free(h@)` | destroy; 1 the first time, 0 (and an error) on a double free |
+| `x_free(h@)` | destroy; 1 the first time, 0 (and an error) on a double free. There is exactly ONE of these — the generic `control_free(h@)` — rather than one per family, because freeing is the same act for every handle the registry holds, so the backbone owns it |
 
 The setter-`@` vs getter-no-`@` distinction is load-bearing, exactly as in the
 reference: `form_width@(f@, 800)` sets, `form_width(f@)` reads.
+
+**The constructors with extra arities.** Seven of them, and the page named only
+the first for a long time. Read off the registrations, they are:
+
+| constructor | arities |
+|---|---|
+| `form@` | `form@()`, `form@(caption$)`, `form@(caption$, w, h)` |
+| `label@` | `label@(parent@)`, `label@(parent@, caption$)` |
+| `statictext@` | `statictext@(parent@)`, `statictext@(parent@, caption$)` |
+| `radiogroup@` | `radiogroup@(parent@)`, `radiogroup@(parent@, caption$)` |
+| `checkgroup@` | `checkgroup@(parent@)`, `checkgroup@(parent@, caption$)` |
+| `menuitem@` | `menuitem@(parent@)`, `menuitem@(parent@, caption$)` |
+| `imagelist@` | `imagelist@()`, **`imagelist@(w, h)`** |
+
+Six of the seven follow one shape: the extra argument is a **caption**, saving the
+`x_caption@` call that would otherwise follow every construction. `imagelist@` is
+the odd one, and the one real exception to "size is a second call": its extra arity
+is `(w, h)`, the pixel size of the images the list will hold. It has to be, because
+an image list is **not a control** — `control_size@` and even the generic property
+bridge resolve a `TControl`, and `TImageList` is not one, so `control_set@(il@,
+"Width", 48)` records `gui_error` 1 and writes nothing. The `imagelist_*` family
+has no width or height helper of its own either, so the size arrives at
+construction or not at all. `form@(caption$, w, h)` sizes a window at construction
+too, as a convenience — a form has no parent to be positioned inside, so a size is
+the only geometry a constructor is ever given.
 
 ### Shared control "chrome" — `PhosphorControlLib` (the backbone)
 
@@ -85,8 +120,9 @@ exposes it generically for **any** control handle:
 - **Geometry / state:** `control_left/top/width/height`, `control_align`,
   `control_anchors$`/`control_anchors@`, `control_visible`, `control_enabled`,
   `control_color`, `control_hint$`, `control_cursor`, `control_tag`,
-  `control_tabstop`, `control_taborder`, `control_spacing`, the four
-  `control_min/maxwidth/height` constraints, and font (`control_fontname$`,
+  `control_tabstop`, `control_taborder`, `control_spacing`, the four constraints
+  (`control_minwidth`, `control_maxwidth`, `control_minheight`,
+  `control_maxheight`), and font (`control_fontname$`,
   `control_fontsize`, `control_fontcolor`, `control_bold/italic/underline`).
 - **Verbs:** `control_move@(x,y)`, `control_size@(w,h)`,
   `control_bounds@(x,y,w,h)`, `control_bringtofront@`, `control_sendtoback@`,
@@ -151,7 +187,7 @@ the window's X button end the program, so a program's handler runs first and the
 terminator still runs after.
 
 Events can also be **synthesised** — `control_keydown@`, `control_mousedown@`,
-`control_mousewheel`, … — the way `button_click` already synthesised a click. That
+`control_mousewheel`, … — the way `button_click@` already synthesised a click. That
 is what makes the whole surface reachable from a headless suite, and it is what a
 macro or an accessibility path needs anyway.
 
@@ -162,7 +198,7 @@ carries the `?` too**, because the suffix is part of the name:
 Caveat carried from the reference and confirmed for LCL: **a programmatic change
 does not raise its event** (setting `Value` does not fire `OnChange` the way a user
 drag does), and timers/animations fire only under a running message loop. Headless
-tests therefore assert *wiring* (bind + read-back, and `button_click` to fire
+tests therefore assert *wiring* (bind + read-back, and `button_click@` to fire
 `OnClick` synchronously), not spontaneous firing — which is exactly what
 `tests/gui/01_events` already does.
 
@@ -238,7 +274,7 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 | TScrollBox | `scrollbox@` | **Built** |
 | TFlowPanel | `flowpanel@` | Defer |
 | TCheckListBox | `checklistbox@` | **Built** — helpers are `checklist_*` |
-| TStringGrid / TDrawGrid | `stringgrid@` / `drawgrid@` | **Built**. `OnDrawCell` is a drawing PROTOCOL rather than another event — the handler gets a cell, a rectangle and a state, and paints into the grid's own canvas — which is why it waited for the canvas target to widen to any control that paints itself. `drawgrid_drawcell@` draws one cell on demand, as `button_click` fires one click |
+| TStringGrid / TDrawGrid | `stringgrid@` / `drawgrid@` | **Built**. `OnDrawCell` is a drawing PROTOCOL rather than another event — the handler gets a cell, a rectangle and a state, and paints into the grid's own canvas — which is why it waited for the canvas target to widen to any control that paints itself. `drawgrid_drawcell@` draws one cell on demand, as `button_click@` fires one click |
 | TValueListEditor | `valuelist@` | Defer |
 | TColorBox / TColorListBox | `colorbox@` | Defer |
 | TMaskEdit | `maskedit@` | **Built** |
@@ -311,16 +347,25 @@ first). "Defer" = real but later; "Out" = out of scope with reason.
 Under `host/gui/libs/`, one unit per family, each `RegisterXxxFuncs(engine.Registry)`.
 They MAY use the LCL; the boundary check scans only `engine/`.
 
-**All 17 units below exist.** The *(done)* markers were written when three did; the
-list is complete as a set of units, though several of the controls assigned to them
-were never built — see the Verdict column above. An eighteenth file,
-`PhosphorDisplayGuard.pas`, registers nothing: it is the headless-display guard, not
-a function package.
+**All 17 units below exist, and `host/gui/libs/` holds nothing else.** The *(done)*
+markers were written when three did; the list is complete as a set of units, and
+every control assigned to one has since been built — see the Verdict column above.
+
+This paragraph used to add an eighteenth file, `PhosphorDisplayGuard.pas`, "the
+headless-display guard, which registers nothing". **There is no such file.** It was
+deleted by the one-binary merge, along with `phosphorgui`, `build-gui.{ps1,sh}` and
+the `uses`-clause ordering check that existed only to protect the guard's trick. The
+trick was to sit ahead of `Interfaces` in the `uses` clause so that unit's
+initialization could not open the display; `phosphor` now names the widgetset unit
+directly (`Win32Int`/`Gtk2Int`) and makes the `CreateWidgetset` call itself, after
+`GuiPossible` has answered, so there is nothing left for a guard to get in front of
+(see [architecture.md](architecture.md), "One host, and how it can be both").
+Directory count and unit count are the same number again.
 
 | Unit | Controls | Tier |
 |---|---|---|
 | `PhosphorGuiCore` | handle wrapper, event bridge(s), `gui_error`, `app_*` | 1 |
-| `PhosphorControlLib` | shared chrome + generic `control_set/get` TypInfo bridge + common events | **1 (next)** |
+| `PhosphorControlLib` | shared chrome + generic `control_set@` / `control_get` TypInfo bridge + common events | **1 (next)** |
 | `PhosphorFormLib` | `form@`, window/geometry/state, form events | 1 |
 | `PhosphorButtonLib` | `button@`, `bitbtn@`, `speedbutton@` | 1 |
 | `PhosphorLabelLib` | `label@`, `statictext@` | 1 |
@@ -333,7 +378,7 @@ a function package.
 | `PhosphorImageLib` | `image@`, `imagelist@` | 2 |
 | `PhosphorCanvasLib` | `paintbox@`, `shape@`, `canvas_*` drawing primitives | 4 |
 | `PhosphorMenuLib` | `mainmenu@`, `popupmenu@`, `menuitem@`, `toolbar@`, `statusbar@` | 2–3 |
-| `PhosphorDialogLib` | `msgbox`, `inputbox$`, `openfile$`, `savefile$`, `selectdir$`, `colordialog`, `fontdialog@` | 1–2 |
+| `PhosphorDialogLib` | `msgbox`, `inputbox$`, `openfile$`, `savefile$`, `selectdir$`, `colordialog@`, `fontdialog@` | 1–2 |
 | `PhosphorTimerLib` | `timer@`, `idletimer@` | 2 |
 | `PhosphorMiscLib` | `calendar@`, `colorbutton@`, `trayicon@` | 3–4 |
 
@@ -363,8 +408,10 @@ host exercised by hand. Deferred throughout, as in phase 1: DB controls
 (`Data.DB`), media, FMX effects/animations, and the niche palette entries.
 
 **All six steps were carried out**, and a seventh closed the sixteen items an audit
-found named-but-unbuilt: 17 units, **412 names**, 15 byte-exact test files green on
-both OSes.
+found named-but-unbuilt. What that left standing is counted once, at the top of this
+page, and deliberately not recounted here — this sentence used to answer 412 names
+and 15 files while the STATUS block answered 426 and 16, and neither had been
+re-measured since the day it was typed.
 
 **Every item this document ever named is now built.** The last two — the
 `FreeNotification` lifetime hook and `drawgrid@` — closed together, and each turned

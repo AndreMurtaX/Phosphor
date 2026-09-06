@@ -12,6 +12,14 @@ to embed) — then each was stress-tested and the survivors merged. This file is
 plan of record; it can be re-run through the adversarial council
 (`.claude/workflows/adversarial-council.js`) to stress-test it further.
 
+> **Amendment (2026-09-06) — that path is stale.** There is no `.claude/workflows/`
+> directory in this checkout any more, so the file named above cannot be run. The
+> council itself is not gone: it survives as an **agent skill invoked by name**
+> (`adversarial-council`), outside the repository, which is why the checkout no
+> longer carries a script for it. The sentence above is left as written because it
+> is the dated record of how this plan was produced; only the way to re-run it
+> changed.
+
 ## Verdict
 
 Phase 3 = **make Phosphor robust to run and safe to embed, then deployable** — in

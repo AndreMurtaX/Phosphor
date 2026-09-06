@@ -8,9 +8,21 @@
     button_onclick@(b@, name$)   bind the click to a BASIC routine by name;
                                  "" unwires it. The handler is
                                  function name(sender@) ... end function.
-    button_click(b@)             fire the click programmatically -- the headless
+    button_click@(b@)            fire the click programmatically -- the headless
                                  way to prove an event reaches its handler with
                                  no window shown and no message loop.
+
+  bitbtn@ and speedbutton@ live here too and repeat that shape name for name
+  (bitbtn_caption@ / bitbtn_caption$ / bitbtn_click@ / bitbtn_onclick@, and the
+  same four for speedbutton, plus speedbutton_down@ / speedbutton_down and
+  speedbutton_groupindex@ for the groupable toggle).
+
+  THE @ ON button_click@ IS PART OF THE NAME. This block advertised it as
+  button_click for a while, from before the suffix rule settled that a built-in's
+  return type is read off its own name: it answers the button handle, so it is
+  spelled with @ -- and a reader who copied the unsuffixed spelling out of this
+  comment got "unknown function", the one failure mode a header comment exists to
+  prevent. Checked against RegisterButtonFuncs below, which is the only authority.
 
   button_onclick@ is the one host-aware function here: it is handed the executing
   VM and stores it in the event bridge, so the click can later run the handler

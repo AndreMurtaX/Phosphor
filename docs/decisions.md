@@ -190,8 +190,28 @@ console ships as a **function package**, not as language commands.
 prints, so styling composes with ordinary string handling and costs nothing when
 the output is redirected: `cls$`, `home$`, `at$(x, y)`, `color$`, `bg$`, `bold$`,
 `underline$`, `inverse$`, `clreol$`, `savepos$`/`restorepos$`, plus the input side
-`getkey$`, `inkey$` and `keypressed`. Only the two lifecycle calls carry a prefix:
-`crt_init` and `crt_done`.
+`getkey$`, `inkey$` and `keypressed`.
+
+**Four names carry the `crt_` prefix, not two.** Everything listed above is spelled
+without one — including the input trio, which keeps its classic-BASIC name. What the
+four have in common is that none of them is about producing output at all: each
+reconfigures the terminal or the console this process is attached to.
+
+- `crt_init` / `crt_done` — the lifecycle pair: turn VT escape processing on (a
+  Windows console needs `ENABLE_VIRTUAL_TERMINAL_PROCESSING`; elsewhere ANSI already
+  works and it answers 1 unconditionally), and put the terminal back the way it was
+  by undoing raw mode. A backstop `crt_done` also runs from the unit's finalization,
+  so a program that forgets it does not leave the user's shell in raw mode.
+- `crt_hideconsole` / `crt_showconsole` — let go of the console window this process
+  OWNS, and make a new one. `1` when there was one of its own to act on, `0`
+  otherwise, which is the honest answer both for "you ran me from a terminal" (that
+  console belongs to the shell and is never touched) and for Unix. This is the same
+  act `phosphor --no-console` performs at startup, exposed to the language with an
+  answer, for a program that wants to do it itself and know whether it happened.
+
+This paragraph replaces one that said "only the two lifecycle calls carry a prefix"
+while the package registered four. The console pair was added later and nobody came
+back to the sentence — the ordinary way a true statement becomes a false one.
 
 ## On-disk bytecode — decisions taken up front, now implemented
 

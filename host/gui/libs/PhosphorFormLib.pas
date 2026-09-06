@@ -14,7 +14,17 @@
     form_caption@(f@, s$)   form_caption$(f@)
     form_width@(f@, n)      form_width(f@)
     form_height@(f@, n)     form_height(f@)
-    form_show(f@)           -- realizes the window (interactive host)
+    form_show@(f@)          -- realizes the window (interactive host)
+    form_close@(f@)         form_visible(f@)
+    form_onclose@(f@, name$)  form_onclosequery@(f@, "name?")
+
+  THE @ ON form_show@ IS PART OF THE NAME. This block advertised it as form_show
+  for a while, from before the suffix rule settled that a built-in's return type is
+  read off its own name: form_show@ and form_close@ both answer the form handle, so
+  they chain, so both are spelled with @ -- and a reader who copied the unsuffixed
+  spelling out of this comment got "unknown function", the one failure mode a header
+  comment exists to prevent. The last three lines were missing here entirely.
+  Checked against RegisterFormFuncs below, which is the only authority.
 ******************************************************************************}
 unit PhosphorFormLib;
 

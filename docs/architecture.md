@@ -58,9 +58,29 @@ Phosphor/
   scripts/
     build.ps1            authoritative build (drives fpc directly).
     test.ps1            build + run + byte-exact golden compare.
+    test-suite / -classic / -examples / -packages / -gui   the five corpora,
+                        each in a .ps1 and a .sh that run the same goldens.
+    coverage.py check-examples.py check-suffix.py check-sandbox.py
+    check-seams.py check-codepage.py    the gates test-suite runs after the
+                        corpora: every built-in tested AND documented, every doc
+                        example compiled, every suffix honest, every filesystem
+                        call asking the sandbox first.
   docs/
     architecture.md     this file.
     decisions.md        frozen language & on-disk-bytecode decisions.
+    language-reference.md   the guided tour of the language.
+    function-reference.md   the catalogue of every registered built-in. A gate
+                          (coverage.py) fails the suite if a name is missing.
+    embedding.md        the public API, for a host that links the engine.
+    gui-components.md   the LCL palette study and the record of what was built.
+    libraries/          one page per library -- 40 of them, engine, host packages
+                          and GUI alike; the same gate holds each page to its own
+                          library's names.
+    roadmap*.md         the dated per-phase records. History, not the present: a
+                          roadmap that is wrong about today carries an AMENDMENT
+                          rather than being rewritten.
+    dev-agent-playbook.md   how this project is worked on, and the retrospective
+                          log of what each round cost.
   bin/                    build output (git-ignored).
 ```
 

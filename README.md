@@ -123,8 +123,8 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `host/embed/`    | an example of embedding the engine.                              |
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
-| `examples/`      | runnable example programs.                                       |
-| `scripts/`       | `build`, `build-gui`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui` (`.ps1`/`.sh`), and the three source gates `coverage.py`, `check-codepage.py` and `check-sandbox.py`.|
+| `examples/`      | runnable example programs — and they are RUN: `test-examples` byte-compares each to a golden (a windowed one is compiled, since the compiler needs no display). |
+| `scripts/`       | `build`, `build-gui`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the four source gates `coverage.py`, `check-codepage.py`, `check-sandbox.py` and `check-seams.py`.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

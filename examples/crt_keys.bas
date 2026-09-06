@@ -37,6 +37,6 @@ while running% = 1
   endif
 endwhile
 
-x$ = crt_done()
+x% = crt_done()
 println
 println "bye."

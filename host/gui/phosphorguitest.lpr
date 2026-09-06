@@ -21,9 +21,9 @@ program phosphorguitest;
 
 uses
   Interfaces,   // the LCL widgetset (win32 / gtk2), selected at build time
-  Forms,
+  Forms, Clipbrd, LCLType,
   SysUtils, Classes,
-  PhosphorEngine, PhosphorTestLib,
+  PhosphorEngine, PhosphorValue, PhosphorTestLib,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
@@ -49,6 +49,116 @@ begin
     Delete(Result, 1, 3);
 end;
 
+{ The host services, as a TEST RUNNER can honestly provide them.
+
+  processmessages() and the clipboard are the real thing -- the widgetset is up,
+  so a .bas test can drive them and see a host answer rather than the
+  absent-service answer that tests/suite/17_host_services pins headlessly.
+
+  handlemessage() is deliberately NOT the real thing here, and this is the
+  interesting one. Application.HandleMessage WAITS for a message; in an unattended
+  runner with no window and nobody clicking, that wait never ends and the suite
+  hangs. So this runner reports that it CANNOT handle one -- which is precisely
+  what the seam's 0 means, and is true: it cannot, not without hanging. The
+  interactive host (phosphorgui) installs the real, blocking one. A test asserting
+  the difference is tests/gui/16_host_services. }
+type
+  TGuiTestServices = class
+    function Pump: Integer;
+    function PumpOne: Integer;
+    function ClipCopy(const AText: String): Boolean;
+    function ClipPaste(out AText: String): Boolean;
+  end;
+
+function TGuiTestServices.Pump: Integer;
+begin
+  Application.ProcessMessages;
+  Result := 1;
+end;
+
+function TGuiTestServices.PumpOne: Integer;
+begin
+  Result := 0;   // see the note above: waiting here would be a hang, not a test
+end;
+
+{ THE CLIPBOARD IS A CONTENDED OS RESOURCE. On Windows every access opens and
+  closes it, and any other process holding it at that instant -- a clipboard
+  manager, the shell, another Phosphor call a millisecond earlier -- makes the
+  attempt fail. Measured here: a tight copy/paste/copy loop failed on roughly one
+  access in three, with no pattern in the CONTENT at all. A single try is not a
+  clipboard implementation; it is a coin flip a script has to code around. Three
+  quick attempts is what turns it back into a service. If all three fail the
+  answer is still False -- reported, never fabricated. }
+function ClipRetryCopy(const AText: String): Boolean;
+var i: Integer;
+begin
+  // WRITE, THEN CONFIRM. The write does not land synchronously: a paste issued
+  // straight after a copy reproducibly read the PREVIOUS contents -- two bytes
+  // where seventeen had just been stored -- and reported no error, because the
+  // read really had succeeded. It just read the old value. copytext$ is
+  // documented to answer the text it stored, so it must not answer until the
+  // clipboard actually holds it.
+  for i := 1 to 6 do
+  begin
+    try
+      if AText = '' then
+      begin
+        // Storing the empty string is CLEARING, and it has to be done with Clear:
+        // assigning '' to AsText left the previous text in place, so copytext$("")
+        // reported success and the next pastetext$ answered the old value.
+        Clipboard.Clear;
+        if not Clipboard.HasFormat(CF_TEXT) then Exit(True);
+      end
+      else
+      begin
+        Clipboard.AsText := AText;
+        if Clipboard.HasFormat(CF_TEXT) and (Clipboard.AsText = AText) then Exit(True);
+      end;
+    except
+      on Exception do ;    // held by someone else; wait and try again
+    end;
+    Sleep(15);
+  end;
+  Result := False;
+end;
+
+function ClipRetryPaste(out AText: String): Boolean;
+var i: Integer; threw: Boolean;
+begin
+  AText := '';
+  threw := False;
+  for i := 1 to 3 do
+  begin
+    try
+      if Clipboard.HasFormat(CF_TEXT) then
+      begin
+        AText := Clipboard.AsText;
+        Exit(True);
+      end;
+    except
+      on Exception do threw := True;
+    end;
+    Sleep(15);
+  end;
+  // No text format after three tries. Either the clipboard genuinely holds no
+  // text -- readable, and '' is the true answer -- or every attempt failed, which
+  // is not the same thing and must not answer as if it were. The two are told
+  // apart by PERSISTENCE: contention clears within the retries, an empty
+  // clipboard does not. A clipboard held by another process for longer than that
+  // reads as empty; that is the bound, and it is stated rather than hidden.
+  Result := not threw;
+end;
+
+function TGuiTestServices.ClipCopy(const AText: String): Boolean;
+begin
+  Result := ClipRetryCopy(AText);
+end;
+
+function TGuiTestServices.ClipPaste(out AText: String): Boolean;
+begin
+  Result := ClipRetryPaste(AText);
+end;
+
 procedure WriteSummary;
 var
   s: String;
@@ -60,6 +170,8 @@ end;
 
 var
   eng: TPhosphorEngine;
+  GuiSvc: TGuiTestServices;
+  gsvc: THostServices;
   path: String;
   rc, i: Integer;
 { Turns an escaped exception into a reported failure. A class method rather than a
@@ -104,6 +216,18 @@ begin
   // working directory is the root -- every test writes under bin/ , which is
   // inside it -- so nothing a test names can resolve outside the checkout.
   eng.SandboxRoot := GetCurrentDir;
+
+  // THE HOST SERVICES, so a .bas test can assert them. This runner is the only
+  // program in the tree that both has a widgetset and runs test files, which makes
+  // it the only place processmessages()/handlemessage() and the clipboard can be
+  // checked against a real host rather than against their absent-service answers
+  // (tests/suite/17_host_services pins those, headless, under phosphortest).
+  GuiSvc := TGuiTestServices.Create();
+  gsvc.ProcessMessages := @GuiSvc.Pump;
+  gsvc.HandleMessage := @GuiSvc.PumpOne;
+  gsvc.ClipboardCopy := @GuiSvc.ClipCopy;
+  gsvc.ClipboardPaste := @GuiSvc.ClipPaste;
+  eng.HostServices := gsvc;
 
   try
     RegisterTestFuncs(eng.Registry);

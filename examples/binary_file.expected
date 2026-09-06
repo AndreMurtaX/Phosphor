@@ -1,0 +1,16 @@
+wrote 7 bytes, checksum 18
+bytes: 80 66 1 0 128 255 18
+size on disk = 7
+byte 6 was 255, now 64
+size unchanged = true
+byte 4 in place = 7
+bytes 2..3 = 66 1, loc now 4
+file length = 7
+magic = PB, bytes left = 5
+'café': bytelen = 5 but len = 4
+bytestr$(200) is 1 byte, chr$(200) is 2 bytes
+buffer wrote 7 bytes, identical = 1
+byte 5 now   64, byte 6 untouched 255
+LE bytes     120 86 52 18
+BE bytes     18 52 86 120
+reads back   305419896

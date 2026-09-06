@@ -260,6 +260,26 @@ Rules, in order of how easily they are got wrong:
   the `uses` clause for that reason — that order is the only thing making the guard
   work, and violating it still compiles and still passes on Windows.
 
+### Every path a human can reach must have something that reaches it too
+
+The two defects the owner found by hand in one afternoon were both on paths no
+automated thing executed: the Windows key encoder (needs a keypress) and
+`phosphorgui` (which nothing ran). Neither was a weak test; neither had a test.
+
+- **Ask of every program in the tree: what runs this?** If the answer is "a
+  person", that is the bug, before any line of it is read. `examples/` had seven
+  programs and no runner while `tests/` had six corpora and five runners.
+- **Split the decision from the I/O.** The part of a human-facing path that is a
+  pure function of its inputs — which key this event means, which colour this
+  attribute maps to — comes out into a function a probe can call with no console,
+  no display and no person. What is left should be a handful of lines with no
+  decisions in them.
+- **A seam left nil answers silently.** The engine offers `OnOutput`, `OnInput`,
+  `OnBreakpoint` and `HostServices` and installs none; leaving one nil is a
+  designed behaviour for a headless runner, which is exactly what makes the nil
+  case look like the working case. `scripts/check-seams.py` makes every host
+  answer for every seam, once, in writing.
+
 ### A destructive defect is verified by READING
 
 A finding whose CONTENT is destruction — it deletes, it overwrites, it sends — is
@@ -301,6 +321,47 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 29 · the rule was written, and nothing was running it.**
+  The owner ran `phosphor --gui examples/interactive.bas` and every INPUT prompt
+  printed at once, each answered with an empty string. Then, asked the obvious
+  question: *what is the point of writing a rule if a simple existing test finds
+  the error anyway?* The answer is the entry.
+  - **`phosphorgui` assigned `OnOutput` and stopped.** The engine documents a nil
+    `OnInput` as "a program that asks for input gets an empty line" — correct for a
+    headless runner, and a fabricated answer in a host with a console attached.
+    `HostServices` was nil in **every** host in the tree, so `processmessages()`
+    answered 0 and the clipboard answered `""` inside the one program written to
+    provide them. Nothing failed, because nothing was looking.
+  - **THE STRUCTURAL REASON, and it is the whole lesson: `phosphorgui` was the
+    only program in the tree that nothing ever ran.** The GUI suite tests
+    `phosphorguitest`, a different binary from a different file. `examples/` — the
+    directory the README points at, the first code anyone runs — had no runner at
+    all, while every corpus under `tests/` had one. Both defects the owner found by
+    hand (this one and round 28's `getkey$`) sit on paths no automated thing
+    touched. **The gates were not weak where they existed; they did not exist where
+    a human was the only visitor.**
+  - **So the deliverable is not the fix.** `scripts/check-seams.py` fails the suite
+    if a host leaves an engine seam nil without a written reason — 7 filled, 21
+    deliberately nil, each with its sentence — and a new seam or a new host fails
+    until someone answers for it. `scripts/test-examples.{ps1,sh}` runs every
+    example against a golden, sandboxed to the checkout, with a recorded `.in` for
+    the interactive one and compile-only for the windowed one; its manifest covers
+    the directory in both directions.
+  - **What running them found immediately.** `examples/crt_keys.bas` could never
+    reach its own last line (`x$ = crt_done()` — a number into a string variable),
+    so the example the owner was told to try could not exit cleanly. And the
+    clipboard, once actually exercised: a copy did NOT land before the next paste
+    read it, so `pastetext$` returned the PREVIOUS contents while `strerror()` said
+    0; and `copytext$("")` left the old text in place, because assigning `''` to
+    `Clipboard.AsText` is not clearing. Both now write-then-confirm, bounded, and
+    report failure instead of inventing success.
+  - **AND THE PART THAT IS ABOUT ME.** The first version of the clipboard methods
+    I wrote — an hour after building a gate against fabricated answers — was
+    `Clipboard.AsText := AText; Result := True;`. Unconditional success, in new
+    code, by the same hand, in the same session. Writing a rule does not install
+    it. **A rule takes effect at the moment something fails when it is broken, and
+    not one minute earlier.** Prose in this file is a description of a gate that
+    must already exist; if the gate is not there, the paragraph is a wish.
 - **2026-09-06 · round 28 · `getkey$` answered `chr$(0)` for every key, and the
   suite could not have known.** Reported by the owner running
   `examples/crt_keys.bas`: every keypress printed *control/extended, first code 0*,

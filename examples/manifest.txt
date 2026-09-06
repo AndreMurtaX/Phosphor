@@ -1,0 +1,13 @@
+# Every program in examples/ and how it is verified.
+#   run      run with stdin closed, compare stdout+stderr to <name>.expected
+#   input    the same, with <name>.in piped in (a recorded session)
+#   compile  compile only -- it opens a window and waits, so running it here
+#            would block; the compiler needs no display, so this is what CAN
+#            be checked and it is checked rather than skipped in silence.
+binary_file|run
+crt_dashboard|run
+crt_demo|run
+crt_keys|run
+file_report|run
+gui_demo|compile
+interactive|input

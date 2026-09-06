@@ -152,7 +152,7 @@ PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
   echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
 else
-  for gate in check-codepage.py coverage.py check-sandbox.py; do
+  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py; do
     # The comment above says a gate that quietly does not run is worse than no gate,
     # and then this line skipped a gate whose FILE was missing. A deleted gate is
     # exactly the case the sentence was written about.

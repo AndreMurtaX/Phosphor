@@ -88,7 +88,7 @@ Each of these writes into the control's own `Font`; the pair round-trips.
 | `control_bringtofront@(c@) → handle` | the control, moved to the front of its parent's z-order |
 | `control_sendtoback@(c@) → handle` | the control, moved to the back |
 | `control_invalidate@(c@) → handle` | the control, marked for repaint. Nothing is drawn until the host pumps messages |
-| `control_setfocus@(c@) → handle` | the control. It focuses only a windowed control whose window **already exists** — after `form_show` — and is a deliberate no-op before that and headless, because asking whether it *could* focus would force the window into being and hang a run with no display. A control that cannot take focus at all (a label) is a silent no-op, not an error |
+| `control_setfocus@(c@) → handle` | the control. It focuses only a windowed control whose window **already exists** — after `form_show@` — and is a deliberate no-op before that and headless, because asking whether it *could* focus would force the window into being and hang a run with no display. A control that cannot take focus at all (a label) is a silent no-op, not an error |
 | `control_focused(c@) → num` | `1` only when this control really holds the focus in a realized window; `0` headless, before the form is shown, and for anything that cannot be focused |
 | `control_free(c@) → num` | `1` when it destroyed a control, `0` with `gui_error() = 1` for a stale, doubly-freed or fabricated handle. Freeing a **form** frees the whole tree it owns, and every handle naming a control in that tree is afterwards *refused* — it answers `0`/`""` with `gui_error() = 1` rather than dereferencing a dead pointer |
 

@@ -138,7 +138,7 @@ endfunction
 
 Two things worth noticing:
 
-- **The self-check line runs before `form_show`.** `menuitem_click@` reaches the
+- **The self-check line runs before `form_show@`.** `menuitem_click@` reaches the
   handler synchronously, so the status bar already reads `Open chosen 1x` while
   nothing is on screen. A menu's wiring can be tested without a user, a window or a
   message loop.

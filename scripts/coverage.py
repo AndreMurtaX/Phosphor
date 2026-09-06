@@ -424,12 +424,17 @@ def main():
     #     property the gate did not have at all before today.
     # The end state is an empty table, and then no table.
     PENDING_NAMES = {
-        ('docs/dev-agent-playbook.md', 'arr_set'): 'now arr_set@',
-        ('docs/function-reference.md', 'arr_set'): 'now arr_set@',
-        ('docs/roadmap.md', 'arr_set'): 'now arr_set@',
-        ('docs/roadmap-phase2.md', 'button_click'): 'now button_click@',
-        ('docs/roadmap-phase2.md', 'button_caption'): 'now button_caption$ / button_caption@',
-        ('docs/roadmap-phase2.md', 'form_show'): 'now form_show@',
+        # A DATED RECORD IS NOT BACKLOG. The playbook and the roadmaps say what a
+        # round found and delivered, on the day it did; rewriting them so the names
+        # match today's tree would make the account of what happened wrong. They are
+        # recorded here so a NEW stale mention in a live page still fails, without
+        # the gate waiting for a change that must not be made.
+        ('docs/dev-agent-playbook.md', 'arr_set'): 'HISTORY: a dated record, not to be rewritten',
+
+        ('docs/roadmap.md', 'arr_set'): 'HISTORY: a dated record, not to be rewritten',
+        ('docs/roadmap-phase2.md', 'button_click'): 'HISTORY: a dated record, not to be rewritten',
+        ('docs/roadmap-phase2.md', 'button_caption'): 'HISTORY: a dated record, not to be rewritten',
+        ('docs/roadmap-phase2.md', 'form_show'): 'HISTORY: a dated record, not to be rewritten',
         # gui-button.md and gui-form.md now name the OLD spelling on purpose, in a
         # sentence that says it is gone ('the unsuffixed spelling is gone --
         # button_click(b@) is *no function button_click:@*'). That prose is correct
@@ -440,10 +445,10 @@ def main():
         ('docs/libraries/gui-button.md', 'button_click'): 'DELIBERATE: named in a sentence that says it is gone',
         ('docs/libraries/gui-button.md', 'bitbtn_click'): 'DELIBERATE: named in a sentence that says it is gone',
         ('docs/libraries/gui-button.md', 'speedbutton_click'): 'DELIBERATE: named in a sentence that says it is gone',
-        ('docs/libraries/gui-grid.md', 'button_click'): 'now button_click@',
-        ('docs/libraries/gui-control.md', 'form_show'): 'now form_show@',
+
+
         ('docs/libraries/gui-form.md', 'form_show'): 'DELIBERATE: named in a sentence that says it is gone',
-        ('docs/libraries/gui-menu.md', 'form_show'): 'now form_show@',
+
     }
 
     # A prose count known to be stale, pinned to BOTH numbers so the entry stops

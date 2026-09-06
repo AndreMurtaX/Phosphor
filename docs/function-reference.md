@@ -270,7 +270,7 @@ fabricated handles are returned as errors.
 | `parr_get@(a@, i) → handle` | read a handle element |
 
 **Bracket sugar** — the `a@[i, ...]` and `a@[i] = v` syntax compiles to these
-variadic get/set forms (`arr_get` with 1–3 indices; `arr_set` with 1–3 indices ×
+variadic get/set forms (`arr_get` with 1–3 indices; `arr_set@` with 1–3 indices ×
 numeric/string/handle value). Both read the array's own kind.
 
 | function | description |

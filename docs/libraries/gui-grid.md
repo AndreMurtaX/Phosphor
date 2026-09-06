@@ -39,7 +39,7 @@ spaces, tested with `instr(state$, "X") > 0`. `sender@` is a canvas target, so t
 `canvas_*` verbs draw straight onto the grid that asked. An empty handler name
 unwires, as everywhere else in the GUI. And since a headless run never paints,
 `drawgrid_drawcell@` paints one cell **now**, on demand — the same discipline as
-`button_click` firing one click — going through the grid's own `OnDrawCell`, so a
+`button_click@` firing one click — going through the grid's own `OnDrawCell`, so a
 grid that has been unwired really does stop.
 
 ## Functions

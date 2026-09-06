@@ -132,6 +132,8 @@ rem when the next token ends the statement, so the word is being used for nothin
 rem Pinned for the whole family, not just elseif, so the next attempt to widen the
 rem check fails here instead of in someone's program.
 next = 1
+else = 13
+endwhile = 14
 endif = 2
 wend = 3
 loop = 4
@@ -146,6 +148,10 @@ local = 12
 assert_eq(next + endif + wend + loop, 10, "next/endif/wend/loop are ordinary variables")
 assert_eq(until + case + endselect + endfunction, 26, "and so are until/case/endselect/endfunction")
 assert_eq(then + to + step + local, 42, "and the mid-line words then/to/step/local")
+rem `else` and `endwhile` were named in the comment above as covered and were not
+rem here at all -- the block said "all FIFTEEN" and exercised thirteen. A claim in
+rem a test comment is not a test.
+assert_eq(else + endwhile, 27, "else and endwhile are ordinary variables too")
 next += 1
 assert_eq(next, 2, "a terminator name takes a compound assignment")
 assert_eq(next * step, 22, "and reads as a value in an expression")

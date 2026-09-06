@@ -1673,8 +1673,14 @@ begin
     { Before anything else: a block terminator with nothing after it. Reaching
       here means no open block is waiting for it, and standing alone it cannot be
       a variable being used for anything -- see OrphanKeyword above. }
+    { ...and `else`, which ends a statement as surely as a newline does. On the
+      one-line form `if c then next else ...` the orphan sits complete before the
+      `else`, so the newline test alone let it through and it went back to being a
+      silent no-op in exactly one place. `else` cannot follow a variable being
+      read for anything either, so the word is still doing nothing. }
     k := FLex.Peek().Kind;
-    if ((k = tkEOL) or (k = tkEOF) or (k = tkColon)) and
+    if ((k = tkEOL) or (k = tkEOF) or (k = tkColon) or
+        ((k = tkIdent) and (LowerCase(FLex.Peek().StrVal) = 'else'))) and
        OrphanKeyword(t.StrVal, cname) then
     begin
       Fail(cname, t.Line);

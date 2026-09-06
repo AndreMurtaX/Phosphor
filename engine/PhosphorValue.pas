@@ -343,10 +343,22 @@ begin
     Exit(True);
   end;
   R := A * B;
-  // Recover the operand; a mismatch (or a sign flip on the MinInt edge) means
-  // the product did not fit.
-  if (R div B <> A) or ((A = Low(Int64)) and (B = -1)) or
-     ((B = Low(Int64)) and (A = -1)) then
+  { THE MinInt EDGES ARE TESTED FIRST, and the order is the whole fix.
+
+    Pascal short-circuits `or` left to right, so these two tests written AFTER
+    `R div B` never ran when it mattered: for A = Low(Int64), B = -1 the wrapped
+    product is Low(Int64) again, so `R div B` is `Low(Int64) div -1` -- the x86
+    idiv whose quotient does not fit -- and it TRAPPED, killing the process with
+    an uncatchable EIntOverflow.
+
+    The proof it was an ordering bug and not a policy is that the SAME
+    multiplication survived with the operands swapped: for A = -1, B = Low(Int64),
+    `R div B` is 1 <> -1, so the first term answered False cleanly. No rule about
+    multiplication depends on which factor is written first. }
+  if ((A = Low(Int64)) and (B = -1)) or ((B = Low(Int64)) and (A = -1)) then
+    Exit(False);
+  // Recover the operand; a mismatch means the product did not fit.
+  if R div B <> A then
     Exit(False);
   Result := True;
 end;
@@ -549,13 +561,57 @@ begin
   end;
 end;
 
+{ THE DOMAIN IS CHECKED BEFORE Power IS CALLED, because Power does not check it
+  and the traps it raises are not the ones the VM masks.
+
+  The VM masks overflow, underflow, precision and denormal, and deliberately
+  leaves INVALID-OPERATION and DIVIDE-BY-ZERO unmasked, on the premise that
+  neither can arise from a finite value space. Power breaks that premise from
+  inside: for a whole exponent it ends in `1.0/intpower`, which is literally
+  1.0/0.0 when the base is zero and the exponent negative; for any other exponent
+  it computes exp(e * ln(b)), and ln of a negative base raises. Neither result
+  ever reaches FiniteD, so the finiteness gate downstream cannot help -- the
+  process was already dead. `0 ^ -1` and `(-8) ^ 0.5` each killed it.
+
+  The third case is subtler and was found by probing rather than reported: Power
+  takes its intpower path only for an exponent that fits an Integer, so a NEGATIVE
+  base with a whole exponent past MaxInt fell into the ln path too. The magnitude
+  there is the same as for the positive base; only the sign has to be decided, and
+  above 2^53 every representable Double is even. }
 function ValPow(const A, B: TValue; out R: TValue): TPhosphorError;
+var
+  { base/expo, not b/e: Pascal is case-insensitive and the parameters are
+    named A and B, so a local `b` collides with the operand it is read from. }
+  base, expo, mag: Double;
+  negative: Boolean;
 begin
   R := Default(TValue);
   Result := NumericPair(A, B, '^');
   if IsError(Result) then Exit;
+  base := AsDouble(A);
+  expo := AsDouble(B);
+
+  if (base = 0) and (expo < 0) then
+    Exit(MakeError(peDivByZero,
+      'division by zero: ' + ValToStr(A) + ' ^ ' + ValToStr(B)));
+
+  if (base < 0) and (expo <> Int(expo)) then
+    Exit(MakeError(peRuntime,
+      '^ has no numeric result: ' + ValToStr(A) + ' ^ ' + ValToStr(B) +
+      ' (a negative base needs a whole-number exponent)'));
+
+  if (base < 0) and (Abs(expo) > MaxInt) then
+  begin
+    mag := Power(-base, expo);
+    // Above 2^53 consecutive integers are no longer representable, so every
+    // Double that large is even and the result is positive.
+    negative := (Abs(expo) <= 9007199254740992.0) and Odd(Trunc(expo));
+    if negative then mag := -mag;
+    Exit(FiniteD('^', mag, R));
+  end;
+
   // '^' is always a double (2 ^ 0.5 is meaningful).
-  Exit(FiniteD('^', Power(AsDouble(A), AsDouble(B)), R));
+  Exit(FiniteD('^', Power(base, expo), R));
 end;
 
 function ValCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError;

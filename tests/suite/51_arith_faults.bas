@@ -115,3 +115,87 @@ assert_eq(1e+3, 1000, "and an explicit plus")
 test_case("lexer/an identifier butted against a number is still two tokens")
 e30 = 5
 assert_eq(1 + e30, 6, "'e' not followed by digits does not start an exponent")
+
+test_case("arith/Low(Int64) * -1 overflows catchably in EITHER operand order")
+rem The guard for this edge existed and never ran. Pascal short-circuits `or`
+rem left to right, so the two MinInt tests written AFTER `R div B` were only
+rem reached once that division had already executed -- and for this pair it is
+rem `Low(Int64) div -1`, the x86 idiv whose quotient does not fit, which TRAPS.
+rem The process died with an uncatchable EIntOverflow.
+rem
+rem BOTH ORDERS ARE PINNED because only one of them was broken: `-1 * lo%` was
+rem catchable before the fix, so a test of that order alone would have passed
+rem with and without it. No rule about multiplication depends on which factor is
+rem written first, and that asymmetry is what proved it was an ordering bug.
+lo% = -9223372036854775807
+lo% = lo% - 1
+caught% = 0
+on error goto mA
+za% = -1 * lo%
+goto afterA
+mA:
+caught% = 1
+resume next
+afterA:
+on error goto 0
+assert_eq(caught%, 1, "-1 * Low(Int64) is a catchable overflow")
+
+caught% = 0
+on error goto mB
+zb% = lo% * -1
+goto afterB
+mB:
+caught% = 1
+resume next
+afterB:
+on error goto 0
+assert_eq(caught%, 1, "and so is Low(Int64) * -1, which used to kill the process")
+assert_eq(err(), 1, "with the integer-overflow code, not a crash")
+
+rem A guard that refuses too much fails here.
+assert_eq(lo% * 1, lo%, "multiplying the minimum by one still works")
+assert_eq(-1 * -1, 1, "and so does the ordinary case")
+
+test_case("arith/'^' outside its real domain reports instead of trapping")
+rem Power does not check its own domain, and the traps it raises are not the ones
+rem the VM masks: for a whole exponent it ends in 1.0/intpower -- literally 1/0
+rem when the base is zero and the exponent negative -- and otherwise it computes
+rem exp(e * ln(b)), where ln of a negative base raises. Neither result reaches
+rem the finiteness gate downstream, because the process is already dead.
+caught% = 0
+on error goto pA
+pa = 0 ^ -1
+goto afterPA
+pA:
+caught% = 1
+resume next
+afterPA:
+on error goto 0
+assert_eq(caught%, 1, "0 ^ -1 is caught, not fatal")
+assert_eq(err(), 2, "and reads as division by zero, like 1/0")
+
+caught% = 0
+on error goto pB
+pb = (-8) ^ 0.5
+goto afterPB
+pB:
+caught% = 1
+resume next
+afterPB:
+on error goto 0
+assert_eq(caught%, 1, "a negative base with a fractional exponent is caught")
+assert_true(instr(errmsg$(), "-8 ^ 0.5") > 0, "and the message carries the values")
+
+rem Power takes its whole-number path only for an exponent that fits an Integer,
+rem so a negative base with a LARGER whole exponent fell into ln(negative) too.
+assert_eq((-1) ^ 3000000000, 1, "an even exponent past MaxInt answers 1")
+assert_eq((-1) ^ 2999999999, -1, "and an odd one answers -1")
+
+rem Everything a too-eager domain guard would break.
+assert_eq(2 ^ 10, 1024, "an ordinary power")
+assert_near(10 ^ -3, 0.001, 0.0000001, "a negative exponent on a positive base")
+assert_eq((-2) ^ 3, -8, "a negative base with a whole exponent")
+assert_near((-2) ^ -3, -0.125, 0.0000001, "and with a negative whole exponent")
+assert_eq(0 ^ 0, 1, "zero to the zero is one")
+assert_eq(0 ^ 2, 0, "and zero to a positive power is zero")
+assert_near(2 ^ 0.5, 1.4142135624, 0.000001, "a fractional exponent on a positive base")

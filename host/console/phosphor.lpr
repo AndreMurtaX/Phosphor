@@ -79,6 +79,10 @@ var
     creates, so `run`, the REPL and an embedded payload are bounded alike. }
   GSandboxDir: String = '';
 
+{ Defined further down, beside the crash guard; declared here because all three
+  places that build an engine come before it. }
+procedure BindSandbox(AEng: TPhosphorEngine); forward;
+
 type
   { The whole host side of the boundary: give the engine somewhere to put its
     output, and (for the REPL) a way to read a line. }
@@ -527,7 +531,7 @@ begin
   end;
   host := TConsoleHost.Create(AOutPath);
   eng := TPhosphorEngine.Create();
-  eng.SandboxRoot := GSandboxDir;   // '' = unbounded, as before
+  BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -732,7 +736,7 @@ var host: TConsoleHost; eng: TPhosphorEngine; line: Integer;
 begin
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
-  eng.SandboxRoot := GSandboxDir;   // '' = unbounded, as before
+  BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -775,7 +779,7 @@ var
 begin
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
-  eng.SandboxRoot := GSandboxDir;   // '' = unbounded, as before
+  BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -830,6 +834,31 @@ end;
   are consoles, then prints a known UTF-8 line through the same path the engine
   uses. On a fixed console it must render "Ola -- cafe -- acucar -- coffee --
   pi" with the proper accents and symbols. }
+{ Bind the sandbox the command line asked for, and REFUSE TO RUN if it did not
+  take.
+
+  SetSandboxRoot answers '' when the root cannot be made -- and '' is also what it
+  answers for "no sandbox was requested", so the two were indistinguishable and
+  the property setter discarded the answer either way. A script the operator had
+  explicitly confined with `--sandbox` then ran completely unconfined, silently,
+  and exited 0. A security boundary that cannot be established must be a hard
+  failure: the whole point of asking for it is that the run is not trusted.
+
+  Reading the root back is what makes this checkable -- the engine reports the
+  root actually in force, so "asked for one, got none" is a state the host can
+  see. }
+procedure BindSandbox(AEng: TPhosphorEngine);
+begin
+  AEng.SandboxRoot := GSandboxDir;
+  if (GSandboxDir <> '') and (AEng.SandboxRoot = '') then
+  begin
+    Writeln(StdErr, 'phosphor: cannot establish the sandbox root ', GSandboxDir,
+                    ' -- refusing to run unconfined');
+    Flush(StdErr);
+    Halt(2);
+  end;
+end;
+
 { An exception that escapes anywhere in this program.
 
   THIS BINARY LINKS THE LCL, and that alone is enough: the `Forms` unit routes

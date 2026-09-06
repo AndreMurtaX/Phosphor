@@ -79,17 +79,54 @@ var
 function IsPerilousPath(const APath: String): Boolean;
 var
   p: String;
+  {$IFDEF WINDOWS}
+  q: String;
+  i, n: Integer;
+  {$ENDIF}
 begin
   p := Trim(APath);
   if p = '' then Exit(True);                       // '' -> the drive root
-  p := ExcludeTrailingPathDelimiter(p);
+  {$IFDEF WINDOWS}
+  { EVERY SEPARATOR, NOT JUST THE NATIVE ONE. ExcludeTrailingPathDelimiter strips
+    PathDelim, which on Windows is '\' alone -- so "C:\" reduced to "C:" and was
+    caught, while "C:/" stayed three characters long and was not. The Windows API
+    accepts both spellings equally, and this project's own documentation tells a
+    reader to prefer the forward slash ("C:/temp") because a backslash in a string
+    literal is an escape. The rule was therefore blind to the spelling it had
+    taught people to use.
+
+    Repeated, because "C://" and "C:\\" are drive roots too: strip until nothing
+    trailing is left. }
+  { Both spellings, everywhere: the separator is normalised BEFORE anything is
+    measured, so the rest of this function sees one form. '/' alone still reduces
+    to '' and is still the root. }
+  p := StringReplace(p, '/', '\', [rfReplaceAll]);
+  while (Length(p) > 0) and (p[Length(p)] = '\') do
+    Delete(p, Length(p), 1);
+  {$ELSE}
+  while (Length(p) > 0) and (p[Length(p)] = '/') do
+    Delete(p, Length(p), 1);
+  {$ENDIF}
   if p = '' then Exit(True);                       // '/' or '\' alone
   {$IFDEF WINDOWS}
-  // 'C:' and 'C:\' both reduce to two characters here
+  // 'C:', 'C:\', 'C:/' and 'C://' all reduce to two characters here
   if (Length(p) = 2) and (p[2] = ':') then Exit(True);
-  // a UNC share root: \\server\share with nothing under it
-  if (Length(p) > 2) and (p[1] = '\') and (p[2] = '\') and
-     (Pos('\', Copy(p, 3, Length(p))) = 0) then Exit(True);
+  { A UNC root, in either spelling: \\server and \\server\share alike.
+
+    The comment here used to promise "\\server\share with nothing under it" while
+    the test was `Pos('\', ...) = 0`, which is true only for \\server -- so the
+    share root itself, the one thing on a network that answers to "delete
+    everything", was treated as an ordinary folder. A share root is a drive root
+    with a different spelling. Two components after the slashes is still a root;
+    three is a folder inside one. }
+  if (Length(p) > 2) and (p[1] = '\') and (p[2] = '\') then
+  begin
+    q := Copy(p, 3, Length(p));
+    n := 0;
+    for i := 1 to Length(q) do
+      if q[i] = '\' then Inc(n);
+    if n <= 1 then Exit(True);
+  end;
   {$ENDIF}
   Result := False;
 end;

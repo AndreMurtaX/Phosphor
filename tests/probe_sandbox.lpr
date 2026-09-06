@@ -130,6 +130,40 @@ begin
   WriteFile(OutDir + PathDelim + 'victim.txt', 'still here');
   WriteFile(OutDir + PathDelim + 'sub' + PathDelim + 'deep.txt', 'still here too');
 
+  { --- the perilous-path rule, asserted DIRECTLY ---------------------------
+    IsPerilousPath is a pure function, so every one of these can be asked without
+    a filesystem anywhere near it. That matters more here than anywhere else in
+    this probe: the thing being tested is the guard in front of a recursive
+    delete, and the way NOT to test it is to run one.
+
+    'C:/' is the case that was open. ExcludeTrailingPathDelimiter strips PathDelim
+    and nothing else, which on Windows is the backslash alone -- so "C:\" reduced
+    to "C:" and was caught, while "C:/" stayed three characters and was not. The
+    Windows API takes both, and this project's own documentation tells a reader to
+    write the forward slash, because a backslash in a string literal is an escape.
+    The rule was blind to the spelling it had taught people to use. }
+  Report(IsPerilousPath(''), 'perilous: the empty path');
+  Report(IsPerilousPath('   '), 'perilous: whitespace only');
+  {$IFDEF WINDOWS}
+  Report(IsPerilousPath('C:'), 'perilous: a bare drive letter');
+  Report(IsPerilousPath('C:\'), 'perilous: a drive root with a backslash');
+  Report(IsPerilousPath('C:/'), 'perilous: a drive root with a FORWARD slash');
+  Report(IsPerilousPath('C:\\'), 'perilous: a drive root with two backslashes');
+  Report(IsPerilousPath('C://'), 'perilous: a drive root with two forward slashes');
+  Report(IsPerilousPath(' C:/ '), 'perilous: a drive root with spaces around it');
+  Report(IsPerilousPath('\\server\share'), 'perilous: a UNC share root');
+  Report(IsPerilousPath('//server/share'), 'perilous: a UNC share root, forward slashes');
+  Report(not IsPerilousPath('C:\Users\someone'), 'and an ordinary path is not');
+  Report(not IsPerilousPath('C:/Users/someone'), 'nor is it with forward slashes');
+  Report(not IsPerilousPath('\\server\share\folder'), 'nor a folder on a share');
+  {$ELSE}
+  Report(IsPerilousPath('/'), 'perilous: the filesystem root');
+  Report(IsPerilousPath('//'), 'perilous: the root, doubled');
+  Report(IsPerilousPath(' / '), 'perilous: the root with spaces around it');
+  Report(not IsPerilousPath('/home/someone'), 'and an ordinary path is not');
+  Report(not IsPerilousPath('/home/someone/'), 'nor one with a trailing slash');
+  {$ENDIF}
+
   // --- the root is what the host asked for, and the script can read it --------
   RunUnder(RootDir, 'print sandboxroot$()' + LF);
   Report(SameText(Answer, RealPathOf(RootDir)),

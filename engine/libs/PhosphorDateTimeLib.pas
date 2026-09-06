@@ -241,7 +241,20 @@ end;
   any literal below the range does too. }
 function SourceOk(const AFn: String; const D: TDateTime; out E: TPhosphorError): Boolean;
 begin
-  Result := (D >= FirstDay) and (D < LastMoment);
+  { THE FIRST DAY IS AN OPEN INTERVAL BELOW ITS OWN MIDNIGHT, because a negative
+    TDateTime carries its time of day as a NEGATIVE fraction. Midnight on
+    0001-01-01 is -693593, and noon that same day is -693593.5 -- a SMALLER
+    number. `D >= FirstDay` therefore refused every instant of the first day
+    except midnight, while datetimetostr$, yearof and hourof all agreed it was
+    0001-01-01 12:00:00. The library called a value it had just built through its
+    own strtodatetime "not a date".
+
+    The high end was written correctly and the low end was not, which is the whole
+    lesson: LastMoment is the first instant AFTER the last day precisely so that a
+    time on that day counts as inside, and the mirror image at the front needs the
+    same widening in the other direction -- to just above -693594, the threshold
+    this file's own comment names as where DecodeDate stops answering a real year. }
+  Result := (D > FirstDay - 1) and (D < LastMoment);
   if not Result then
     E := MakeError(peRuntime, AFn +
                    ': that number is not a date in 0001-01-01..9999-12-31')

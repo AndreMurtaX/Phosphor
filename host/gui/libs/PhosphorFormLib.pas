@@ -201,7 +201,7 @@ begin
   Reg.Add('form_width:@',     @f_form_width_get);
   Reg.Add('form_height@:@n',  @f_form_height_set);
   Reg.Add('form_height:@',    @f_form_height_get);
-  Reg.Add('form_show:@',      @f_form_show);
+  Reg.Add('form_show@:@',      @f_form_show);
   Reg.Add('form_close@:@',    @f_form_close);
   Reg.Add('form_visible:@',   @f_form_visible);
   Reg.AddHost('form_onclose@:@$',      @f_form_onclose);

@@ -176,7 +176,7 @@ control_onmousemove@(f@, "on_move")
 control_onkeydown@(f@, "on_key")
 if gui_error() <> 0 then println "something up there was refused, code " + str$(gui_error())
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_move(sender@, x%, y%, mods$)

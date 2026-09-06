@@ -106,7 +106,7 @@ println "the swatch took index " + str$(slot) + " of " + str$(imagelist_count(ic
 tb@ = toolbar@(f@)
 imagelist_attach@(icons@, tb@)
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function placeholder(img@, w, h) local bm@

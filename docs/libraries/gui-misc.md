@@ -109,7 +109,7 @@ trayicon_show@(ti@)
 
 if gui_error() <> 0 then println "some control could not be built"
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 rem The window is gone; the icon is not. Take it out deliberately.

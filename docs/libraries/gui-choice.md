@@ -156,7 +156,7 @@ button_caption@(qb@, "Quit")
 control_bounds@(qb@, 12, 216, 100, 32)
 button_onclick@(qb@, "on_quit")
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_change(sender@)

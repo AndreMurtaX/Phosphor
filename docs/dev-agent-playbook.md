@@ -336,7 +336,7 @@ exists so they can next time.
     `narr_set@`/`sarr_set@` promise a handle and answer the value written;
     `arr_set` and `button_click`/`form_show` carry no suffix (so promise a number)
     and answer a string or a handle. Verified by hand, not just reported:
-    `x = arr_set(a@, 1, "hi")` prints `before` and then aborts with *cannot store
+    `x = arr_set@(a@, 1, "hi")` prints `before` and then aborts with *cannot store
     string into number variable*. **Nothing checks this.** `TPhosphorRegistry.Add`
     stores `'dict_clear@:@'` as an opaque key; the suffix is part of the NAME, not
     a checked contract, which is exactly why an int-returning function could live
@@ -390,6 +390,43 @@ exists so they can next time.
     count in the unit header that said *seven* while the page I wrote in the same
     edit said *nine*. Writing a count and a list in one sitting is not enough to
     keep them agreeing.
+
+- **2026-09-06 · round 34 · fifteen names lied about their own return type, and
+  the fix was to build the check first.** A built-in's return type IS the suffix
+  on its name — that is the whole type system for the library — and nothing
+  enforced it. `TPhosphorRegistry.Add` stores `'dict_clear@:@'` as an opaque
+  lookup key, so an int-returning function sat behind an `@` name for a year.
+
+  - **The gate came before the fix, and that ordering was the point.** A
+    subagent's audit had reported 14; `scripts/check-suffix.py` was written to
+    answer the same question from source, and it disagreed twice — both times
+    because *my gate* was wrong, not the report. It double-reported files reached
+    by two globs, and it let `arr_set:@n$` pass because the house pattern opens
+    with a PLACEHOLDER (`Result := ValInt(0);`) before the guards, so collecting
+    every `Result :=` made the error path vouch for the success path. Judging by
+    the LAST assignment fixed it. **A list you did not derive yourself is a
+    hypothesis; deriving it is also how the check gets debugged.**
+  - **Two of the four families were not design decisions at all.** `form_close@`
+    sits one line below `form_show`, `button_onclick@` beside `button_click` —
+    the convention (a setter ends in `@` and answers the handle) was already
+    everywhere. Four names had simply missed it. Renaming was not a judgement
+    call; reading the neighbours made that obvious in a minute.
+  - **"Answers the value written" is not information.** The array setters handed
+    back the value the caller had just passed in, while the `@` on their names
+    promised the array. They now answer the array, like `dict_set@`, so the call
+    chains — and the only thing lost was a value the caller already had.
+  - **A doc claim can be load-bearing in appearance only.** `array.md` said
+    `arr_set`'s return "is what makes `a@[i] += 1` work with the index evaluated
+    once". Both compiler paths end in `opPop`; what makes it work is `opDupN`.
+    The sentence had been wrong since before this change, and it read exactly
+    like a constraint — the kind that stops you making a correct change. **Check
+    a claim that blocks you before you honour it.**
+  - **The stale-harness trap fired three times in one session.** `build.ps1`
+    builds `phosphor`, not `phosphortest`; only the runners build the harness. So
+    `bin\phosphortest.exe tests/...` runs OLD code and reports a failure that was
+    already fixed. Every time it cost a wrong conclusion until the timestamps
+    were checked. The rule is unchanged and simple: **run the suite, not the
+    binary** — and if you do run the binary, `ls -l` it first.
 
 - **2026-09-06 · round 33c · a stray `next` was a silent no-op, and the obvious
   fix broke eighteen assertions.** A block terminator with no open block fell

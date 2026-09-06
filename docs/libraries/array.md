@@ -33,10 +33,7 @@ was wrong (`index 4 out of bounds 1..3 on dimension 1`, `array has 1 dimensions,
 got 2 indices`). With no `on error goto` handler that message ends the program;
 with one, it is a value the handler reads through `errmsg$()`.
 
-Three things would otherwise surprise a reader. **A trailing `@` in these names is
-part of the name, not a promise of a handle**: `narr_set@`, `sarr_set@` and
-`parr_set@` answer *the value written*, so `narr_set@(a@, 1, 42)` is `42` and
-assigning it to an `@` variable fails at run time. **Only numeric arrays are
+Two things would otherwise surprise a reader. **Only numeric arrays are
 multi-dimensional** — `dim@` takes one, two or three sizes, while `sdim@` and
 `pdim@` take exactly one. And **a pointer array stores handles without owning
 them**: freeing the outer array leaves everything it pointed at alive, to be
@@ -71,11 +68,11 @@ the bounds check rather than wrapped into a valid one.
 
 | function | what it answers |
 | --- | --- |
-| `narr_set@(a@, i [, i [, i]], value) → num` | writes a numeric element and answers **the value written**, not the array — despite the `@` in the name. Wrong index count, out-of-range index or bad handle: the corresponding error, and nothing is written |
+| `narr_set@(a@, i [, i [, i]], value) → handle` | writes a numeric element and answers **the array**, so the call chains. Wrong index count, out-of-range index or bad handle: the corresponding error, and nothing is written |
 | `narr_get(a@, i [, i [, i]]) → num` | the element. On a string array it answers that string converted to a number, since the read is kind-agnostic |
-| `sarr_set@(a@, i, value$) → str` | writes a string element, answers the string written. One index only |
+| `sarr_set@(a@, i, value$) → handle` | writes a string element and answers the array. One index only |
 | `sarr_get$(a@, i) → str` | the element as a string; `""` for a slot never written, which is a real answer and not a signal of failure |
-| `parr_set@(a@, i, value@) → handle` | stores a handle in a handle array and answers the handle stored. The array does not take ownership of it |
+| `parr_set@(a@, i, value@) → handle` | stores a handle in a handle array and answers **the array**, not the handle stored. The array does not take ownership of what it holds |
 | `parr_get@(a@, i) → handle` | the stored handle; the nil handle `0` for a slot never written. Nil is not an array, so passing it on gets `not a valid array handle` |
 
 ### Bracket sugar, and handles themselves
@@ -83,7 +80,7 @@ the bounds check rather than wrapped into a valid one.
 | function | what it answers |
 | --- | --- |
 | `arr_get(a@, i [, i [, i]]) → value` | what `a@[i]`, `a@[i, j]` and `a@[i, j, k]` compile to. One implementation for every element kind, reading the array's own kind |
-| `arr_set(a@, i [, i [, i]], value) → value` | what `a@[i] = v` compiles to, for a numeric, string or handle value. It answers the value written, which is what makes `a@[i] += 1` work with the index expression evaluated exactly once |
+| `arr_set@(a@, i [, i [, i]], value) → handle` | what `a@[i] = v` compiles to, for a numeric, string or handle value. It answers the array, like the typed setters. What makes `a@[i] += 1` evaluate the index exactly once is not this return value — the compiler duplicates the handle and the indices on the stack and discards whatever the call answers |
 | `arr_free(a@) → num` | releases the array and revokes its handle, answering `1`. Freeing the same handle twice is **the error `not a valid array handle`**, not a quiet `0` — ids are never reused within a run, so a stale handle stays detectably stale. Freeing is optional: every handle is released at the end of the run |
 | `pointer@(n) → handle` | relabels a plain number as a handle value **without creating anything**. It exists so tests can prove that a library validates a handle instead of dereferencing it: `ndims(pointer@(305419896))` answers the error `not a valid array handle` on every platform, where following the address would be a crash |
 

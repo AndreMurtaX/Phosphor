@@ -147,7 +147,7 @@ println "pages: " + str$(pagecontrol_pagecount(pc@)) + ", first is " + tabsheet_
 println "tabs on page 2: " + str$(tabcontrol_count(tc@)) + ", tab 1 is " + tabcontrol_tab$(tc@, 1)
 println "gui_error: " + str$(gui_error())
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_server_tab(sender@)

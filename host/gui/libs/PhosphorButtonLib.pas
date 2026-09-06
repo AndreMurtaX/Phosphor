@@ -128,19 +128,19 @@ begin
   Reg.Add('button@:@', @f_button);
   Reg.Add('button_caption@:@$', @f_button_caption_set);
   Reg.Add('button_caption$:@',  @f_button_caption_get);
-  Reg.Add('button_click:@',     @f_button_click);
+  Reg.Add('button_click@:@',     @f_button_click);
   Reg.AddHost('button_onclick@:@$', @f_button_onclick);
 
   Reg.Add('bitbtn@:@', @f_bitbtn);
   Reg.Add('bitbtn_caption@:@$', @f_bb_caption_set); Reg.Add('bitbtn_caption$:@', @f_bb_caption_get);
-  Reg.Add('bitbtn_click:@', @f_bb_click);
+  Reg.Add('bitbtn_click@:@', @f_bb_click);
   Reg.AddHost('bitbtn_onclick@:@$', @f_bb_onclick);
 
   Reg.Add('speedbutton@:@', @f_speedbutton);
   Reg.Add('speedbutton_caption@:@$', @f_sb_caption_set); Reg.Add('speedbutton_caption$:@', @f_sb_caption_get);
   Reg.Add('speedbutton_down@:@n', @f_sb_down_set); Reg.Add('speedbutton_down:@', @f_sb_down_get);
   Reg.Add('speedbutton_groupindex@:@n', @f_sb_groupindex_set);
-  Reg.Add('speedbutton_click:@', @f_sb_click);
+  Reg.Add('speedbutton_click@:@', @f_sb_click);
   Reg.AddHost('speedbutton_onclick@:@$', @f_sb_onclick);
 end;
 

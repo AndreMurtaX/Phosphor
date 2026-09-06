@@ -244,11 +244,11 @@ fabricated handles are returned as errors.
 
 | function | description |
 | --- | --- |
-| `narr_set@(a@, i.., value) → num` | set a numeric element (1–3 indices); answers the **value written**, not the array |
+| `narr_set@(a@, i.., value) → handle` | set a numeric element (1–3 indices); answers **the array**, so it chains |
 | `narr_get(a@, i..) → num` | read a numeric element (1–3 indices) |
-| `sarr_set@(a@, i, value$) → str` | set a string element; answers the **string written**, not the array |
+| `sarr_set@(a@, i, value$) → handle` | set a string element; answers **the array** |
 | `sarr_get$(a@, i) → str` | read a string element |
-| `parr_set@(a@, i, value@) → handle` | set a handle element; answers the **value stored**, not the array |
+| `parr_set@(a@, i, value@) → handle` | set a handle element; answers **the array**, not the handle stored |
 | `parr_get@(a@, i) → handle` | read a handle element |
 
 **Bracket sugar** — the `a@[i, ...]` and `a@[i] = v` syntax compiles to these
@@ -258,7 +258,7 @@ numeric/string/handle value). Both read the array's own kind.
 | function | description |
 | --- | --- |
 | `arr_get(a@, i..) → value` | element read for `a@[i, ...]` (1–3 indices) |
-| `arr_set(a@, i.., value) → value` | element write for `a@[i, ...] = value` |
+| `arr_set@(a@, i.., value) → handle` | element write for `a@[i, ...] = value`; answers the array |
 | `pointer@(n) → handle` | fabricate a raw handle from an integer (for negative/validation tests) |
 
 ## Dict — string-keyed maps (20 functions)

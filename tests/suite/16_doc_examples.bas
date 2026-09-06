@@ -107,20 +107,29 @@ dh@ = buffer_new@(4)
 x = buffer_setint(dh@, 1, 4, 305419896, true)
 assert_eq(buffer_getint(dh@, 1, 4, true), 305419896, "and the big-endian round trip prints 305419896")
 
-test_case("docs/curated/a-name-in-@-does-not-mean-it-answers-a-handle")
-rem function-reference.md documented narr_set@, sarr_set@ and dict_clear@ as
-rem answering a handle. TWO OF THE THREE STILL DO NOT, and a reader who copied
-rem the row got "cannot store int into handle variable" and an aborted program:
+test_case("docs/curated/a-name-in-@-DOES-mean-it-answers-a-handle")
+rem This block used to say the opposite, and was right to: narr_set@, sarr_set@
+rem and dict_clear@ carried an @ and answered the value written, or a constant 1.
+rem A reader who copied the documented row got an aborted program --
 rem   a@ = dim@(3) : h@ = narr_set@(a@, 1, 42)   -> exit 1
-rem The @ in a BUILT-IN's name types what the ENGINE returns, and these two answer
-rem the value written -- arr_set's house rule, that a mutator hands back what it
-rem stored. Pinned so the page and the code cannot drift apart in either direction.
+rem -- so the one spelling the name invites was the one that could not work. All
+rem fifteen such names were corrected on 2026-09-06 and scripts/check-suffix.py
+rem now compares every registration's suffix to what its body returns, so the
+rem rule has a check instead of a convention. What is pinned here is the rule
+rem itself, from the language side: an @ answers a handle, and the handle it
+rem answers is the CONTAINER, so the call chains.
 da@ = dim@(3)
-assert_eq(narr_set@(da@, 1, 42), 42, "narr_set@ answers the value written")
-assert_eq(narr_get(da@, 1), 42, "and the value really went in")
+same@ = narr_set@(da@, 1, 42)
+assert_eq(narr_get(same@, 1), 42, "narr_set@ answers the array, holding what was written")
+assert_eq(narr_get(da@, 1), 42, "and it is the SAME array, not a copy")
 ds@ = sdim@(2)
-assert_eq(sarr_set@(ds@, 1, "hi"), "hi", "sarr_set@ answers the string written")
-assert_eq(sarr_get$(ds@, 1), "hi", "and it really went in")
+assert_eq(sarr_get$(sarr_set@(ds@, 1, "hi"), 1), "hi", "sarr_set@ answers the array, so it chains")
+dp@ = pdim@(2)
+inner@ = dict@()
+assert_eq(dict_count(parr_get@(parr_set@(dp@, 1, inner@), 1)), 0, "and parr_set@ answers the array too, not the value")
+rem the generic bracket-sugar name follows the same rule
+dg@ = dim@(2)
+assert_eq(narr_get(arr_set@(dg@, 2, 7), 2), 7, "arr_set@ answers the array as well")
 
 test_case("dict/clear-answers-the-dict")
 rem dict_clear@ WAS the third of them, answering a constant 1 -- a lie about the

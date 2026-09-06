@@ -15,9 +15,9 @@ swap p, q
 println "reals: "; p; " "; q
 
 v@ = dim@(3)
-arr_set(v@, 1, 100)
-arr_set(v@, 2, 200)
-arr_set(v@, 3, 300)
+arr_set@(v@, 1, 100)
+arr_set@(v@, 2, 200)
+arr_set@(v@, 3, 300)
 swap v@[1], v@[3]
 println "array: "; v@[1]; " "; v@[2]; " "; v@[3]
 

@@ -89,7 +89,7 @@ println "every " + str$(timer_interval(clock@)) + " ms, running " + str$(timer_e
 
 timer_start@(clock@)
 timer_start@(idle@)
-form_show(f@)
+form_show@(f@)
 
 rem Nothing above this line ticked. Everything ticks inside here.
 app_run()

@@ -115,7 +115,7 @@ rem so ask for the one cell that moved.
 stringgrid_cell@(t@, 2, 3, "27")
 drawgrid_drawcell@(bars@, 1, 3)
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function paint_bar(sender@, col%, row%, x%, y%, w%, h%, state$)

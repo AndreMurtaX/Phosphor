@@ -154,7 +154,7 @@ pb@ = paintbox@(f@)
 control_bounds@(pb@, 10, 220, 320, 60)
 paintbox_onpaint@(pb@, "draw_legend")
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function draw_legend(sender@)

@@ -53,7 +53,7 @@ after_big:
 on error goto 0
 assert_eq(caught%, 1, "the product wrapped and ubound then disagreed with the allocation")
 b@ = dim@(3, 4)
-arr_set(b@, 3, 4, 7)
+arr_set@(b@, 3, 4, 7)
 assert_eq(narr_get(b@, 3, 4), 7, "an ordinary array is unaffected")
 assert_eq(ubound(b@, 1), 3, "and reports the size it was given")
 

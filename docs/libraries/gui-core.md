@@ -81,7 +81,7 @@ button_onclick@(b@, "on_click")
 button_onclick@(q@, "on_done")
 if gui_error() <> 0 then println "wiring failed, code " + str$(gui_error())
 
-form_show(f@)
+form_show@(f@)
 app_run()                  rem blocks here until on_done calls app_quit()
 
 println "closed after " + str$(clicks) + " clicks"

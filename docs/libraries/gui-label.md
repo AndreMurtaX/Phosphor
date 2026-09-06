@@ -92,7 +92,7 @@ st@ = statictext@(f@, "clicks: 0")
 control_bounds@(st@, 16, 126, 150, 26)
 control_set@(st@, "BorderStyle", "sbsSunken")
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_body_click(sender@, button%, x%, y%, mods$)

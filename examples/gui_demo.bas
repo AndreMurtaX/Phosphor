@@ -57,7 +57,7 @@ pic@ = image@(f@)
 control_bounds@(pic@, 20, 180, 430, 130)
 image_setbitmap@(pic@, bm@)
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_greet(sender@)

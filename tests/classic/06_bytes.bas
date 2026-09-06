@@ -52,7 +52,7 @@ println "patched      "; byteat(q$, 2); " size "; bytelen(q$)
 
 rem --- strings_free must refuse a handle that is not a string list -----------
 a@ = dim@(2)
-arr_set(a@, 1, 7)
+arr_set@(a@, 1, 7)
 println "free refuses "; strings_free(a@); " array kept "; a@[1]
 
 ok% = file_delete(f$)

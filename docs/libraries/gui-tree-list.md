@@ -109,7 +109,7 @@ desc$ = listitem_caption$(first@) + " is " + listitem_subitem$(first@, 1)
 println desc$ + ", a " + listitem_subitem$(first@, 2) + " file"
 println "anything go wrong? gui_error = " + str$(gui_error())
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function row@(lv@, name$, size$, kind$) local it@

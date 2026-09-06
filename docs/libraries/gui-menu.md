@@ -115,7 +115,7 @@ rem --- self-check: choose it from the program, no window needed ---
 menuitem_click@(mopen@)
 println "wiring: " + statusbar_text$(sb@) + "   (gui_error " + str$(gui_error()) + ")"
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_open(sender@)

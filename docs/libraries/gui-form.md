@@ -53,7 +53,7 @@ it, with no window manager anywhere in the picture.
 | `form_width(f@) → num` | the window width; `0` on a bad handle |
 | `form_height@(f@, n) → handle` | set the window height in pixels; answers `f@`. Bad handle: recorded, unapplied, handle returned |
 | `form_height(f@) → num` | the window height; `0` on a bad handle |
-| `form_show(f@) → num` | realize the window: install the closer if it is not there yet, then show it. Called for its effect — on a bad handle nothing is shown and `gui_error()` is `1`. Headless, it makes the form visible without a window on screen, which is what `form_visible` then reports |
+| `form_show@(f@) → handle` | realize the window: install the closer if it is not there yet, then show it. Answers the form, as `form_close@` does. On a bad handle nothing is shown and `gui_error()` is `1`. Headless, it makes the form visible without a window on screen, which is what `form_visible` then reports |
 | `form_close@(f@) → handle` | ask the form to close, along exactly the path the X button takes: `form_onclosequery@` first, then `form_onclose@`, then hide. Answers `f@` whether the close happened or was vetoed — ask `form_visible` which it was. Bad handle: nothing is asked |
 | `form_visible(f@) → num` | `1` while the form is still up, `0` once it has closed — and `0`, indistinguishably, for a handle that is not a live form |
 | `form_onclose@(f@, name$) → handle` | bind the BASIC routine named by `name$` to run when the form actually closes; it is called with one argument, `sender@`, the form's own handle. `""` unbinds it *and still leaves the terminator installed*, so the window keeps ending the program. Answers `f@`; a non-form handle sets `gui_error()` and binds nothing |
@@ -81,7 +81,7 @@ button_onclick@(b@, "on_click")
 form_onclosequery@(f@, "on_query?")         rem the '?' is part of the name
 form_onclose@(f@, "on_close")
 
-form_show(f@)
+form_show@(f@)
 println form_caption$(f@) + " is " + str$(form_width(f@)) + "x" + str$(form_height(f@))
 println "gui_error = " + str$(gui_error())
 app_run()
@@ -117,7 +117,7 @@ Two things worth noticing:
 
 - `form_show` is the one name here whose answer does not match its own suffix: it
   hands back the handle it was given, while its unsuffixed name promises a number.
-  Call it as a statement. Assigning it (`n = form_show(f@)`) is a runtime *cannot
+  Call it as a statement. Assigning it (`n = form_show@(f@)`) is a runtime *cannot
   store handle* type mismatch.
 - Handles are watched. If a form is freed while a program still holds handles to
   the controls inside it, those handles resolve to `gui_error() = 1` rather than

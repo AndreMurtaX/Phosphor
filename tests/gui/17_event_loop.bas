@@ -1,6 +1,6 @@
 rem ---------------------------------------------------------------
 rem THE REAL MESSAGE LOOP. Every other GUI file here fires events
-rem synchronously -- button_click(b@) calls the handler directly --
+rem synchronously -- button_click@(b@) calls the handler directly --
 rem which proves the wiring and never starts a loop. So app_run(),
 rem the verb every interactive Phosphor GUI program ends with, and
 rem app_quit(), the only way back out of it, had never run.
@@ -31,7 +31,7 @@ endfunction
 test_case("eventloop/a timer fires inside app_run and app_quit ends it")
 
 f@ = form@()
-form_show(f@)
+form_show@(f@)
 
 t@ = timer@()
 timer_interval@(t@, 30)

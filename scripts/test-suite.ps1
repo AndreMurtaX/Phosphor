@@ -243,6 +243,11 @@ else {
 #                      leave it nil -- a nil seam answers silently, which is how
 #                      the GUI host of the day shipped answering every INPUT with an
 #                      empty line; it has since been merged into phosphor
+#   check-suffix.py    a registered name's type SUFFIX is the kind its body returns.
+#                      The suffix is the whole return-type system for built-ins and
+#                      nothing enforced it: fifteen registrations lied, across three
+#                      unrelated libraries, and each one aborted a caller at run time
+#                      with "cannot store X into Y variable"
 #   check-examples.py  every ```basic block in the docs COMPILES. coverage.py already
 #                      refuses a block that calls a function which does not exist; it
 #                      cannot refuse one whose functions are all real and whose syntax
@@ -259,7 +264,7 @@ if (-not $py) {
     Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
     $allOk = $false
 } else {
-    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py')) {
+    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py')) {
         $gp = Join-Path $here $gate
         # The comment above says a gate that quietly does not run is worse than no
         # gate, and then this line skipped a gate whose FILE was missing -- exactly

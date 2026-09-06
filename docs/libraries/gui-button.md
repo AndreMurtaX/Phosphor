@@ -53,7 +53,7 @@ as `gui_error()` = `2`.
 | `button@(parent@) → handle` | a new push button parented to `parent@`, owned by it and freed with it. A parent that is not a window control — a fabricated or freed handle, or a *graphic* control such as a speed button, which cannot host children — answers handle `0`, builds nothing, and records `gui_error()` `1` |
 | `button_caption@(b@, s$) → handle` | sets the text and answers `b@`, so the next call can take it. On a handle that is not a button it changes nothing, still answers the handle, and records `1` — the return value is never a success flag |
 | `button_caption$(b@) → str` | the text. `""` both for a button whose caption is empty and for a handle that is not a button; `gui_error()` is what tells the two apart |
-| `button_click(b@) → num` | fires `OnClick` synchronously, right now, with no window shown and no message loop — the headless way to prove an event reaches its handler. With nothing bound, nothing happens and nothing is recorded. On a wrong handle nothing fires and `gui_error()` is `1`. The value it leaves is the handle it was given, despite the suffix-less name; call it as a statement |
+| `button_click@(b@) → handle` | fires `OnClick` synchronously, right now, with no window shown and no message loop — the headless way to prove an event reaches its handler. With nothing bound, nothing happens and nothing is recorded. On a wrong handle nothing fires and `gui_error()` is `1`. Answers the button, like every other `@` in this library |
 | `button_onclick@(b@, name$) → handle` | binds the click to the BASIC function `name$` and answers `b@`. `""` unwires it; binding again replaces the previous handler. A name that is not a function is accepted here and fails at the **first click**, as `gui_error()` `2` |
 
 ### Bitmap button — `TBitBtn`
@@ -65,7 +65,7 @@ The same four verbs, on the LCL control that carries a glyph beside its caption.
 | `bitbtn@(parent@) → handle` | a new bitmap button on `parent@`; handle `0` and `gui_error()` `1` for a parent that cannot hold controls |
 | `bitbtn_caption@(bb@, s$) → handle` | sets the text, answers `bb@`; silently a no-op plus `gui_error()` `1` on a wrong handle |
 | `bitbtn_caption$(bb@) → str` | the text; `""` when empty **and** when the handle is not a bitmap button |
-| `bitbtn_click(bb@) → num` | fires `OnClick` at once, as `button_click` does, and answers the handle it was given |
+| `bitbtn_click@(bb@) → handle` | fires `OnClick` at once, as `button_click@` does, and answers the button |
 | `bitbtn_onclick@(bb@, name$) → handle` | binds or (with `""`) unwires the click; an unknown name surfaces only on the first click |
 
 The **picture itself is not reachable from BASIC**: `Glyph` is an object-typed
@@ -82,7 +82,7 @@ to the LCL's own (`&OK`), so a `bitbtn_caption@` done first is thrown away.
 | `speedbutton@(parent@) → handle` | a new speed button on `parent@`; handle `0` and `gui_error()` `1` for a parent that cannot hold controls. Note it is a *graphic* control: it cannot take focus and cannot itself be a parent |
 | `speedbutton_caption@(sb@, s$) → handle` | sets the text, answers `sb@`; a no-op plus `1` on a wrong handle |
 | `speedbutton_caption$(sb@) → str` | the text; `""` when empty and when the handle is not a speed button |
-| `speedbutton_click(sb@) → num` | fires `OnClick`, and **only** that: a synthesised click does not latch the button the way a real mouse press does. Answers the handle it was given |
+| `speedbutton_click@(sb@) → handle` | fires `OnClick`, and **only** that: a synthesised click does not latch the button the way a real mouse press does. Answers the button |
 | `speedbutton_onclick@(sb@, name$) → handle` | binds or unwires the click, exactly as the other two families |
 | `speedbutton_down@(sb@, n) → handle` | latches the button when `n` is non-zero, releases it when `0`, and answers `sb@`. Two LCL rules bite here and **neither records an error**: with the group index still `0` the button cannot latch at all, so `speedbutton_down(sb@)` keeps answering `0`; and releasing the only latched button of a group is refused unless `control_set@(sb@, "AllowAllUp", 1)` was set first |
 | `speedbutton_down(sb@) → num` | `1` latched, `0` up. Also `0` — with `gui_error()` `1` — for a handle that is not a speed button |
@@ -127,14 +127,14 @@ control_bounds@(undo@, 106, 50, 90, 30)
 button_onclick@(undo@, "on_undo")
 
 rem --- drive it with no window and no message loop ---
-speedbutton_click(pen@)
+speedbutton_click@(pen@)
 speedbutton_down@(pen@, 1)
 println "pen down:  " + str$(speedbutton_down(pen@))
 speedbutton_down@(fill@, 1)
 println "fill down: " + str$(speedbutton_down(fill@))
 println "pen down:  " + str$(speedbutton_down(pen@))
-bitbtn_click(ok@)
-button_click(undo@)
+bitbtn_click@(ok@)
+button_click@(undo@)
 println "tool is " + tool$ + ", gui_error " + str$(gui_error())
 
 function on_tool(sender@)
@@ -169,7 +169,7 @@ tool is Pen, gui_error 0
 
 Two things worth noticing:
 
-- **Clicking and latching are separate acts.** `speedbutton_click(pen@)` ran
+- **Clicking and latching are separate acts.** `speedbutton_click@(pen@)` ran
   `on_tool` — that is the first line of output — but left the button up. Only
   `speedbutton_down@` latches it, and only because a group index was set first.
   Latching `fill@` then released `pen@` without any code saying so: the group is
@@ -192,8 +192,8 @@ Two things worth noticing:
 - **A wart worth naming.** `button_click`, `bitbtn_click` and `speedbutton_click`
   are registered without a suffix, which by Phosphor's own convention reads as
   *answers a number* — but each returns the handle it was given, so
-  `n = button_click(b@)` is refused with *cannot store handle into number
-  variable* while `z@ = button_click(b@)` is accepted. Calling them as statements,
+  `n = button_click@(b@)` is refused with *cannot store handle into number
+  variable* while `z@ = button_click@(b@)` is accepted. Calling them as statements,
   which is what every test and example does, makes the question moot.
 - **Key and mouse events** on a button are bound with `control_onkeydown@`,
   `control_onmousedown@` and friends — one set for every control, rather than one

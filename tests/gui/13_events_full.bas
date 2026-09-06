@@ -124,7 +124,7 @@ assert_eq(mousehits, 0, "and so is the mouse event")
 test_case("events/closequery can veto, and only an explicit false does")
 form_onclosequery@(f@, "on_query?")
 form_onclose@(f@, "on_close")
-form_show(f@)
+form_show@(f@)
 assert_eq(form_visible(f@), 1, "the form is up")
 
 vetoing? = true

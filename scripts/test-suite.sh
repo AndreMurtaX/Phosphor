@@ -151,6 +151,11 @@ done
 #                      OnBreakpoint, HostServices) or records why it is right to leave
 #                      it nil -- a nil seam answers silently, which is how the GUI host
 #                      of the day shipped answering every INPUT with an empty line
+#   check-suffix.py    a registered name's type SUFFIX is the kind its body returns.
+#                      The suffix is the whole return-type system for built-ins and
+#                      nothing enforced it: fifteen registrations lied, across three
+#                      unrelated libraries, and each one aborted a caller at run time
+#                      with "cannot store X into Y variable"
 #   check-examples.py  every ```basic block in the docs COMPILES. coverage.py already
 #                      refuses a block that calls a function which does not exist; it
 #                      cannot refuse one whose functions are all real and whose syntax
@@ -165,7 +170,7 @@ PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
   echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
 else
-  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py check-examples.py; do
+  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py check-examples.py check-suffix.py; do
     # The comment above says a gate that quietly does not run is worse than no gate,
     # and then this line skipped a gate whose FILE was missing. A deleted gate is
     # exactly the case the sentence was written about.

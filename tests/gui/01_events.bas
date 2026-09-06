@@ -13,8 +13,8 @@ f@ = form@()
 b@ = button@(f@)
 button_onclick@(b@, "on_click")
 assert_eq(gui_error(), 0, "binding the event recorded no error")
-button_click(b@)
-button_click(b@)
+button_click@(b@)
+button_click@(b@)
 assert_eq(clicks, 2, "two clicks ran the handler twice")
 
 test_case("events/the handler is handed the sender it fired on")
@@ -26,7 +26,7 @@ assert_eq(button_caption$(b@), "was clicked", "the handler mutated the button it
 test_case("events/clearing the name unwires it")
 button_onclick@(b@, "")
 clicks = 0
-button_click(b@)
+button_click@(b@)
 assert_eq(clicks, 0, "an empty name stops the event")
 
 test_case("events/handle validation")

@@ -1520,7 +1520,7 @@ begin
     begin FLex.Advance(); ParseExpr(); Inc(nidx); end;
     Expect(tkRBracket, ''']''');
     FProg.Emit(opLoadVar, ATempVar, 0, ln);   // the value to store
-    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 1 + nidx + 1, ln);
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set@')), 1 + nidx + 1, ln);
     FProg.Emit(opPop, 0, 0, ln);              // discard arr_set's returned handle
   end
   else
@@ -1803,7 +1803,7 @@ begin
       begin
         FLex.Advance();
         ParseExpr();                     // the value
-        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 1 + nidx + 1, t.Line);
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set@')), 1 + nidx + 1, t.Line);
       end
       else if FLex.Cur().Kind in [tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq] then
       begin
@@ -1816,7 +1816,7 @@ begin
         FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, t.Line);   // [h,i..,elem]
         ParseExpr();                                                                    // [h,i..,elem,rhs]
         FProg.Emit(CompoundOp(k), 0, 0, t.Line);                                     // [h,i..,newval]
-        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set')), 1 + nidx + 1, t.Line);
+        FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set@')), 1 + nidx + 1, t.Line);
       end
       else
         FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, t.Line);

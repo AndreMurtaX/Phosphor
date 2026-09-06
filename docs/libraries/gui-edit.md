@@ -143,7 +143,7 @@ rem Wire the events LAST, so the setup above does not log itself.
 edit_onchange@(name@, "on_edit")
 spinedit_onchange@(qty@, "on_edit")
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_edit(sender@)

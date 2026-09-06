@@ -6,7 +6,7 @@
   Registers the array functions through the ':' registry. Arrays are handle
   objects (TPhosphorArray, minted into the core PhosphorHandles registry):
   dim@/sdim@/pdim@ create one and return a handle; narr_*/sarr_*/parr_* and the
-  bracket-sugar arr_get/arr_set read and write elements. Element get/set is
+  bracket-sugar arr_get/arr_set@ read and write elements. Element get/set is
   kind-agnostic (one implementation each, registered under every typed name),
   because the array already knows its own element kind. All errors are RETURNED,
   never raised (decisions.md).
@@ -159,7 +159,18 @@ begin Result := DoDim(akString, Args, Err); end;
 function t_dim_ptr(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Result := DoDim(akPointer, Args, Err); end;
 
-// Generic element write: (handle, index..., value). The value is the last arg.
+{ Generic element write: (handle, index..., value). The value is the last arg.
+
+  IT ANSWERS THE ARRAY, which is what every one of its names ends in `@` to say,
+  and what dict_set@ has always done for the other container.
+
+  It used to answer the VALUE WRITTEN, and that was wrong twice over. The names
+  said otherwise: `h@ = narr_set@(a@, 1, 42)` aborted at run time with "cannot
+  store int into handle variable", and `x = arr_set(a@, 1, "hi")` with "cannot
+  store string into number variable" -- so the spelling a reader takes from the
+  name was the one that could not work. And the value written is information the
+  caller already has: it just passed it in. The array is the useful answer,
+  because it chains. }
 function t_arr_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   a: TPhosphorArray;
@@ -167,7 +178,7 @@ var
   i: Integer;
   flat: Int64;
 begin
-  Result := ValInt(0);
+  Result := Args[0];
   if not GetArr(Args[0], a, Err) then Exit;
   SetLength(idx, Length(Args) - 2);
   for i := 1 to High(Args) - 1 do
@@ -175,7 +186,6 @@ begin
   Err := a.FlatIndex(idx, flat);
   if IsError(Err) then Exit;
   a.Data[flat] := Args[High(Args)];
-  Result := Args[High(Args)];
 end;
 
 // Generic element read: (handle, index...).
@@ -297,15 +307,15 @@ begin
   Reg.Add('arr_get:@nn',  @t_arr_get);   // two indices
   Reg.Add('arr_get:@nnn', @t_arr_get);   // three indices
 
-  Reg.Add('arr_set:@nn',  @t_arr_set);   // 1 index, numeric value
-  Reg.Add('arr_set:@n$',  @t_arr_set);   // 1 index, string value
-  Reg.Add('arr_set:@n@',  @t_arr_set);   // 1 index, handle value
-  Reg.Add('arr_set:@nnn', @t_arr_set);   // 2 indices, numeric value
-  Reg.Add('arr_set:@nn$', @t_arr_set);   // 2 indices, string value
-  Reg.Add('arr_set:@nn@', @t_arr_set);   // 2 indices, handle value
-  Reg.Add('arr_set:@nnnn',@t_arr_set);   // 3 indices, numeric value
-  Reg.Add('arr_set:@nnn$',@t_arr_set);   // 3 indices, string value
-  Reg.Add('arr_set:@nnn@',@t_arr_set);   // 3 indices, handle value
+  Reg.Add('arr_set@:@nn',  @t_arr_set);   // 1 index, numeric value
+  Reg.Add('arr_set@:@n$',  @t_arr_set);   // 1 index, string value
+  Reg.Add('arr_set@:@n@',  @t_arr_set);   // 1 index, handle value
+  Reg.Add('arr_set@:@nnn', @t_arr_set);   // 2 indices, numeric value
+  Reg.Add('arr_set@:@nn$', @t_arr_set);   // 2 indices, string value
+  Reg.Add('arr_set@:@nn@', @t_arr_set);   // 2 indices, handle value
+  Reg.Add('arr_set@:@nnnn',@t_arr_set);   // 3 indices, numeric value
+  Reg.Add('arr_set@:@nnn$',@t_arr_set);   // 3 indices, string value
+  Reg.Add('arr_set@:@nnn@',@t_arr_set);   // 3 indices, handle value
 
   Reg.Add('pointer@:n', @t_pointer);   // fabricate a handle (for negative tests)
   Reg.Add('arr_free:@', @t_arr_free);

@@ -128,7 +128,7 @@ trackbar_max@(sl@, 100)
 trackbar_position@(sl@, 40)
 trackbar_onchange@(sl@, "on_slide")
 
-form_show(f@)
+form_show@(f@)
 app_run()
 
 function on_slide(sender@)

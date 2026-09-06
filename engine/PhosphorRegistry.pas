@@ -62,6 +62,7 @@ type
     FHostFuncs: array of TPhosphorHostFunc;
     FIsHost: array of Boolean;
     FMaxArity: Integer;   // the widest arity anything is registered under
+    FWild: array of Integer;   // indices of keys holding a '*' (see Resolve)
     FCount: Integer;
     function IndexOfKey(const AKey: String): Integer;
     function EnsureSlot(const AKey: String): Integer;
@@ -117,6 +118,15 @@ begin
   // makes that an O(1) answer instead of an exhaustive search for nothing.
   i := Pos(':', AKey);
   if (i > 0) and (Length(AKey) - i > FMaxArity) then FMaxArity := Length(AKey) - i;
+  // A signature may say '*' at a position: any kind matches there. Only callfunc
+  // uses it, and only because a per-kind signature for every arity would be 5^n
+  // keys. Kept in a list so the fallback in Resolve examines these and nothing
+  // else.
+  if Pos('*', AKey) > 0 then
+  begin
+    SetLength(FWild, Length(FWild) + 1);
+    FWild[High(FWild)] := FCount;
+  end;
   Result := FCount;
   Inc(FCount);
 end;
@@ -237,6 +247,33 @@ begin
       end;
     end;
   end;
+  // NOTHING MATCHED EXACTLY. Only now are wildcard signatures considered, so a
+  // call that resolves normally never pays for this: it runs on the path that
+  // used to end in "no function". Each candidate must agree on name and arity,
+  // and on every position that is not '*'.
+  if bestIdx < 0 then
+    for j := 0 to High(FWild) do
+    begin
+      idx := FWild[j];
+      key := FKeys[idx];
+      i := Pos(':', key);
+      if i <= 0 then Continue;
+      if Copy(key, 1, i - 1) <> lname then Continue;
+      if Length(key) - i <> n then Continue;
+      mask := 0;                       // reused as "this candidate still matches"
+      for pop := 0 to n - 1 do
+        if (key[i + 1 + pop] <> '*') and (key[i + 1 + pop] <> CodeOf(AKinds[pop])) then
+        begin
+          mask := 1;
+          Break;
+        end;
+      if mask = 0 then
+      begin
+        bestIdx := idx;
+        Break;
+      end;
+    end;
+
   if bestIdx >= 0 then
   begin
     Result.Found := True;

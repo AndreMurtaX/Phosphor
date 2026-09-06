@@ -711,7 +711,7 @@ the full catalog of every function is in
 | System | args, dirs, env, colours | `environ$` `mkdir` `temppath$` |
 | Platform | OS name / version / arch | `os_name$` `os_platform$` `os_check` |
 | Errors | the ON ERROR face | `err` `errmsg$` `erl` `error` |
-| Indirect call | call a user function by name | `callfunc` |
+| Indirect call | call anything by name, program routines first | `callfunc` |
 | Host services | event pump, clipboard (host-filled) | `processmessages` `copytext$` |
 | Retrieval (RAG) | local keyword index over markdown | `rag@` `rag_retrieve$` |
 

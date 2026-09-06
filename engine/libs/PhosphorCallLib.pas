@@ -40,16 +40,17 @@ procedure RegisterCallFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
-{ callfunc(name$) -- no argument beyond the name. }
-function f_call0(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+{ One implementation for every arity. Args[0] is the NAME; everything after it is
+  handed on untouched, in order. CallByName looks in the program's routines first
+  and the library second -- the order a direct call uses. }
+function f_calln(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+var
+  rest: array of TValue;
+  i: Integer;
 begin
-  Result := TPhosphorVM(AVM).CallUserFunc(Args[0].Str, [], Err);
-end;
-
-{ callfunc(name$, x) -- one argument of any kind, passed straight through. }
-function f_call1(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin
-  Result := TPhosphorVM(AVM).CallUserFunc(Args[0].Str, [Args[1]], Err);
+  SetLength(rest, Length(Args) - 1);
+  for i := 1 to High(Args) do rest[i - 1] := Args[i];
+  Result := TPhosphorVM(AVM).CallByName(Args[0].Str, rest, Err);
 end;
 
 procedure RegisterCallFuncs(Reg: TPhosphorRegistry);
@@ -57,16 +58,24 @@ const
   { One return-suffix spelling per value kind (none / % / $ / @ / ?); all share one
     impl -- the suffix only tells the caller's reader (and the compiler) the kind. }
   Names: array[0..4] of String = ('callfunc', 'callfunc%', 'callfunc$', 'callfunc@', 'callfunc?');
-  { The one argument may be any of the five kinds. }
-  ArgCodes: array[0..4] of Char = ('n', '%', '$', '@', '?');
+  { How many arguments may follow the name. A per-KIND signature for each arity
+    would be 5^n keys, and the registry is a linear scan -- so the arguments are
+    registered as '*' (any kind), one key per arity instead of 5^n. Eight is
+    generous: the widest thing in the whole library takes six. }
+  MaxIndirectArgs = 8;
 var
   s, a: Integer;
+  wild: String;
 begin
   for s := 0 to High(Names) do
   begin
-    Reg.AddHost(Names[s] + ':$', @f_call0);
-    for a := 0 to High(ArgCodes) do
-      Reg.AddHost(Names[s] + ':$' + ArgCodes[a], @f_call1);
+    Reg.AddHost(Names[s] + ':$', @f_calln);
+    wild := '';
+    for a := 1 to MaxIndirectArgs do
+    begin
+      wild := wild + '*';
+      Reg.AddHost(Names[s] + ':$' + wild, @f_calln);
+    end;
   end;
 end;
 

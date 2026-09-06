@@ -81,6 +81,48 @@ function fact(n)
   return n * callfunc("fact", n - 1)
 endfunction
 
+test_case("callback/it reaches the library too, in the same order a direct call uses")
+
+rem callfunc used to see only the program's own routines, so a name from the
+rem library was a runtime error while the identical direct call worked. It now
+rem asks the program FIRST and the library SECOND -- opCall's order -- so an
+rem indirect call means what a direct one means, including which of two
+rem same-named things wins.
+assert_eq(callfunc("sqr", 9), 3, "a library function by name")
+assert_eq(callfunc$("ucase$", "phosphor"), "PHOSPHOR", "and one that answers a string")
+assert_eq(callfunc("len", "abcd"), 4, "and one taking a string, answering a number")
+
+test_case("callback/more than one argument")
+
+rem The registry resolves by argument KINDS, so a per-kind signature for every
+rem arity would be 5^n keys. The arguments are registered as "any kind" instead,
+rem one signature per arity -- which is why these work at all.
+assert_eq(callfunc$("mid$", "abcdefgh", 3, 4), "cdef", "three arguments through to a library function")
+assert_eq(callfunc("max", 7, 12), 12, "two arguments")
+assert_eq(callfunc$("replacestr$", "a-b-c", "-", "+"), "a+b+c", "three strings")
+
+test_case("callback/the program's own routine still wins")
+
+rem shadow$ is defined below and also names nothing in the library; triple% is
+rem the program's. If the library were consulted first, a program could not
+rem override anything, and an event handler named like a built-in would silently
+rem call the built-in.
+assert_eq(callfunc%("triple%", 5), 15, "the program's routine is found first")
+
+test_case("callback/a name in neither is one error, not two")
+
+rem One question from the caller's side -- "can this be called?" -- so one answer.
+caught = 0
+on error goto h_none
+x = callfunc("neither_program_nor_library", 1, 2, 3)
+assert_eq(caught, 1, "an unknown name is refused however many arguments it was given")
+on error goto 0
+goto skip_none
+h_none:
+  caught = 1
+  resume next
+skip_none:
+
 function identity@(h@)
   return h@
 endfunction

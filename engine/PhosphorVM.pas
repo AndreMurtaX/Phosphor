@@ -194,6 +194,11 @@ type
       function is unknown or the routine fails. }
     function CallUserFunc(const AName: String; const Args: array of TValue;
                           out Err: TPhosphorError): TValue;
+    { Same, but falling through to the LIBRARY when the program defines no such
+      routine -- the order opCall uses, so an indirect call means what a direct
+      one means. This is what callfunc calls. }
+    function CallByName(const AName: String; const Args: array of TValue;
+                        out Err: TPhosphorError): TValue;
     { The last error caught by an ON ERROR handler -- what err()/errmsg$()/erl()
       read. Set on each fault; persists until the next fault. }
     { True once the program has run END. A host that re-enters the VM (a GUI event
@@ -1627,6 +1632,44 @@ begin
   FErrCode := 0;
   FErrMsg := '';
   FErrLine := 0;
+end;
+
+{ Call ANYTHING by name, in the order a direct call uses: the program's own
+  routines first, the registry second. That order is opCall's, and matching it is
+  the whole point -- callfunc("sqr", 9) has to mean what sqr(9) means, including
+  which of two same-named things wins. }
+function TPhosphorVM.CallByName(const AName: String; const Args: array of TValue;
+  out Err: TPhosphorError): TValue;
+var
+  kinds: array of TValueKind;
+  res: TResolvedFunc;
+  i: Integer;
+begin
+  Result := CallUserFunc(AName, Args, Err);
+  if Err.Code <> peUnknownFunction then Exit;   // ran, or failed for a real reason
+
+  SetLength(kinds, Length(Args));
+  for i := 0 to High(Args) do kinds[i] := Args[i].Kind;
+  res := Registry.Resolve(AName, kinds);
+  if not res.Found then
+  begin
+    // Neither a routine of this program nor a library function. One message for
+    // both, because from the caller's side there is one question.
+    Err := MakeError(peUnknownFunction, 'no function ' + SignatureOf(AName, Args));
+    Exit;
+  end;
+  Err := NoError();
+  // The same safety net opCall puts around a library call: a Pascal exception
+  // from inside a library becomes a catchable engine error, never a crash.
+  try
+    if res.IsHost then
+      Result := res.HostFunc(Self, Args, Err)
+    else
+      Result := res.Func(Args, Err);
+  except
+    on E: Exception do
+      Err := MakeError(peRuntime, AName + ': ' + E.Message);
+  end;
 end;
 
 function TPhosphorVM.CallUserFunc(const AName: String; const Args: array of TValue;

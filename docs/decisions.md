@@ -314,14 +314,24 @@ Two additions, both host-agnostic:
 
 The language face of this is **`callfunc`** (`engine/libs/PhosphorCallLib`):
 
-    callfunc(name$)       call a BASIC user function by name, no arguments
-    callfunc(name$, x)    ... with one argument of any kind
+    callfunc(name$)                 call by name, no arguments
+    callfunc(name$, a, b, ...)      ... with up to eight, of any kinds
 
 The name string is the routine's *exact* name, suffix and all (`"shout$"`,
 `"identity@"`); the suffix on the call spelling (`callfunc` / `callfunc$` /
-`callfunc@`) only reads as the return type expected. `callfunc` reaches user
-functions, not library functions — an unknown name is a runtime error, not a
-silent no-op (negative `12_callfunc_unknown`). `tests/suite/48_callback.bas`
+`callfunc@`) only reads as the return type expected. `callfunc` looks in the
+program's own routines FIRST and the library SECOND — the order `opCall` uses, so
+an indirect call means what a direct one means, including which of two same-named
+things wins *(reaching the library was added 2026-09-06; until then it saw only
+the program's routines, and a built-in by name was an error while the identical
+direct call worked)*. An unknown name is a runtime error, not a silent no-op
+(negative `12_callfunc_unknown`).
+
+Eight arguments rather than one needs no signature explosion: the registry
+resolves by argument KINDS, so a per-kind signature for every arity would be 5^n
+keys in a linear-scan table. A `*` in a registered signature matches any kind at
+that position, tried only after exact resolution has failed — so the successful
+path is untouched, and `callfunc` costs 45 keys instead of 488281. `tests/suite/48_callback.bas`
 proves the whole seam headless: indirect numeric/string/handle calls, a routine
 mutating a shared global (the event-handler shape), and indirect recursion
 through the re-entrant path.

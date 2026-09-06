@@ -881,8 +881,8 @@ type; all spellings run the same primitive. An unknown name is a runtime error.
 
 | function | description |
 | --- | --- |
-| `callfunc(name$) → num` | call a user function by name with no argument |
-| `callfunc(name$, arg) → num` | call with one argument of any kind |
+| `callfunc(name$) → num` | call by name with no argument. The program's own routines are searched first, then the library, which is the order a direct call uses |
+| `callfunc(name$, a, …) → num` | the same with up to eight arguments, of any kinds |
 | `callfunc$(name$ [, arg]) → str` | same, when the callee returns a string |
 | `callfunc%(name$ [, arg]) → int` | same, when the callee returns an int |
 | `callfunc?(name$ [, arg]) → bool` | same, when the callee returns a bool |

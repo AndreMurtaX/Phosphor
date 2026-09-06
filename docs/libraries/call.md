@@ -24,28 +24,42 @@ value. `z$ = callfunc$("bump")` on a routine that returns a number does not fail
 at the call — it fails at the assignment, with `cannot store int into string
 variable` (`err()` code 3).
 
-Two things a caller would otherwise be surprised by. First, `callfunc` reaches
-**user functions only**, never library built-ins, and it matches on the routine's
-exact name (suffix and all: `"shout$"`, `"identity@"`, case-insensitively) *and*
-its parameter count — so a routine declared with two parameters cannot be reached
-at all, since the primitive offers zero or one argument. Second, the routine runs
-over the **caller's globals and handles**, with fresh locals of its own: an event
-handler bumping a shared counter is the canonical use, and a handle passed in and
-returned is the same live object, not a copy.
+Two things a caller would otherwise be surprised by. First, the name is matched
+**exactly** — suffix and all (`"shout$"`, `"identity@"`), case-insensitively —
+because the suffix is part of a function's name in this language; storing
+`"shout"` for a routine called `shout$` finds nothing. Second, a routine you call
+this way runs over the **caller's globals and handles**, with fresh locals of its
+own: an event handler bumping a shared counter is the canonical use, and a handle
+passed in and returned is the same live object, not a copy.
+
+**Where it looks, and in what order.** The program's own routines first, the
+library second — the same two lookups, in the same order, that a direct call
+makes. So `callfunc("sqr", 9)` means what `sqr(9)` means, and a routine your
+program defines under a library name shadows that library name here exactly as it
+does everywhere else. *(Reaching the library was added on 2026-09-06. Before that
+`callfunc` saw only the program's routines, so a built-in named at run time was an
+error while the identical direct call worked.)*
 
 ## Functions
 
-`name$` is the routine to run; `arg` may be a value of any of the five kinds and
-is passed straight through, unconverted, into the routine's first parameter.
+`name$` is the routine to run. Up to **eight** arguments may follow it, each of
+any of the five kinds, and each is passed straight through, unconverted, in
+order.
+
+That arity is not free-form by accident. The registry resolves a call by its
+argument KINDS, so a signature per kind combination would be 5^n keys for n
+arguments — in a table that is searched linearly. Instead one signature per arity
+says "any kind" at every argument position, and it is consulted only after normal
+resolution has found nothing, so no ordinary call pays for it.
 
 | function | what it answers |
 | --- | --- |
-| `callfunc(name$) → num` | the result of running user function `name$` with no argument. When no user function of that name takes zero parameters: a catchable runtime error, `err()` code 4, `no BASIC function <name> taking 0 argument(s)` — never a silent no-op and never a `0` |
-| `callfunc(name$, arg) → num` | the same with one argument. A routine that declares a different number of parameters is *not* a match: same code-4 error, counting the argument you passed |
-| `callfunc$(name$ [, arg]) → str` | the same call, written where the callee returns a string. Answers the routine's value unchanged; if that value is not a string, nothing fails here — the mismatch surfaces as a type error (code 3) at the variable or expression that receives it |
-| `callfunc%(name$ [, arg]) → int` | the same, written where the callee returns an `int64` |
-| `callfunc@(name$ [, arg]) → handle` | the same, written where the callee returns a handle. The handle that comes back is the live object, not a copy — mutating it through the returned name changes what the callee still refers to |
-| `callfunc?(name$ [, arg]) → bool` | the same, written where the callee returns a bool |
+| `callfunc(name$) → num` | the result of running `name$` with no argument. When neither the program nor the library has anything of that name taking none: a catchable runtime error, `err()` code 4 — never a silent no-op and never a `0` |
+| `callfunc(name$, a, …) → num` | the same with one to eight arguments. The parameter count is part of the match, in both places it looks: a routine declaring two parameters is not reached by a one-argument call, and the error counts the arguments you passed |
+| `callfunc$(name$ [, a, …]) → str` | the same call, written where the callee returns a string. Answers the routine's value unchanged; if that value is not a string, nothing fails here — the mismatch surfaces as a type error (code 3) at the variable or expression that receives it |
+| `callfunc%(name$ [, a, …]) → int` | the same, written where the callee returns an `int64` |
+| `callfunc@(name$ [, a, …]) → handle` | the same, written where the callee returns a handle. The handle that comes back is the live object, not a copy — mutating it through the returned name changes what the callee still refers to |
+| `callfunc?(name$ [, a, …]) → bool` | the same, written where the callee returns a bool |
 
 Three failures are shared by all five spellings, and all three are catchable by
 an `on error` handler installed in the **caller**:

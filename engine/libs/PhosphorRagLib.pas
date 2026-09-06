@@ -35,7 +35,8 @@ interface
 
 uses
   SysUtils, Classes, StrUtils, fpjson,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
+  PhosphorSandbox;
 
 procedure RegisterRagFuncs(Reg: TPhosphorRegistry);
 
@@ -207,6 +208,7 @@ function ReadFileText(const APath: String): String;
 var fs: TFileStream; len: Int64;
 begin
   Result := '';
+  if not SandboxAllows(APath, puRead) then Exit;
   if not FileExists(APath) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
@@ -305,6 +307,7 @@ procedure TPhosphorRag.Rebuild;
 var sr: TSearchRec; base: String; doc: TRagDoc;
 begin
   SetLength(FDocs, 0);
+  if not SandboxAllows(FBasePath, puRead) then Exit;
   if not DirectoryExists(FBasePath) then Exit;   // an empty/missing folder = no docs, not a fault
   base := IncludeTrailingPathDelimiter(FBasePath);
   if FindFirst(base + '*.md', faAnyFile, sr) = 0 then

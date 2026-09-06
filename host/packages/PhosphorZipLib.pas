@@ -43,7 +43,7 @@ interface
 
 uses
   SysUtils, Classes, Zipper,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox;
 
 procedure RegisterZipFuncs(Reg: TPhosphorRegistry);
 
@@ -104,6 +104,8 @@ begin
   // records a name: a missing file was reported as a successful add and only failed
   // later, inside zip_close, where it took the whole archive down with it and left
   // the writer handle leaked. The caller had already been told it worked.
+  if not SandboxAllows(ADisk, puRead) then
+    raise EInOutError.Create('zip_addfile: "' + ADisk + '" is outside the sandbox root');
   if not FileExists(ADisk) then
     raise EInOutError.Create('zip_addfile: "' + ADisk + '" does not exist');
   Z.Entries.AddFileEntry(ADisk, AArchive);
@@ -229,6 +231,7 @@ begin
     z := TZipper.Create();
     try
       z.FileName := Args[0].Str;
+      if not SandboxAllows(Args[1].Str, puRead) then Exit(ValInt(0));
       base := IncludeTrailingPathDelimiter(Args[1].Str);
       // Collected, SORTED, then added. Entries went in in raw directory-enumeration
       // order, which NTFS and ext4 do not agree on, so the same folder produced

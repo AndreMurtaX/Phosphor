@@ -20,7 +20,7 @@ interface
 
 uses
   SysUtils, Classes, IniFiles,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox;
 
 procedure RegisterConfigFuncs(Reg: TPhosphorRegistry);
 
@@ -128,6 +128,10 @@ function t_cfg_path(const Args: array of TValue; out Err: TPhosphorError): TValu
 var d: String;
 begin
   Err := NoError();
+  // Under a sandbox the config directory is inside the root, like temppath$ --
+  // a script that writes its settings where cfg_path$ points then stays contained
+  // instead of reaching the real user profile.
+  if SandboxActive then begin Result := ValStr(SandboxScratchPath); Exit; end;
   d := GetAppConfigDir(False);
   if d = '' then d := GetTempDir;
   Result := ValStr(d);

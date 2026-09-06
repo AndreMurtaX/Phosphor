@@ -32,7 +32,8 @@ interface
 
 uses
   SysUtils, Classes,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorIoLib;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorIoLib,
+  PhosphorSandbox;
 
 type
   TPhosphorStringList = class
@@ -518,6 +519,7 @@ function SaveTextToFile(const APath, AText: String): Boolean;
 var fs: TFileStream;
 begin
   Result := False;
+  if not SandboxAllows(APath, puWrite) then Exit;
   try
     fs := TFileStream.Create(APath, fmCreate);
     try
@@ -531,6 +533,7 @@ function LoadTextFromFile(const APath: String; out AText: String): Boolean;
 var fs: TFileStream; len: Int64;
 begin
   AText := ''; Result := False;
+  if not SandboxAllows(APath, puRead) then Exit;
   if not FileExists(APath) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);

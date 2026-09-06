@@ -160,6 +160,59 @@ When one is hit, the run aborts and `eng.LastError.Code` is `peLimit`. The
 ceilings are cumulative over a prepared session (`Prepare` + all its
 `CallFunction`s); re-`Prepare` to reset the counters.
 
+Those three bound how **long** a script runs. The fourth bounds **where** it
+writes.
+
+## The filesystem sandbox
+
+A script that is bounded in time and output can still delete your home directory.
+`SandboxRoot` is the ceiling for that: set it and every path the script names —
+through `file_*`, `dir_*`, `open … as #n`, the string-list and RAG loaders, and
+the `zip`/`gzip`/`base64` packages — must resolve inside that directory, or the
+call is refused.
+
+```pascal
+eng.SandboxRoot := '/var/tmp/run-42';   // '' (the default) = unbounded
+```
+
+What "resolve inside" means, exactly: the path is made absolute against the
+working directory, `.` and `..` are collapsed, and symlinks are followed on every
+component that exists. So `../../etc/passwd` and a link planted inside the root
+are both outside it, and both are refused.
+
+Three details worth knowing before you rely on it:
+
+- **A refusal is a value, not an exception.** `file_writealltext` answers `0`,
+  `file_readalltext$` answers `""`, `dir_getfiles$` answers `""`, `dir_delete`
+  answers `0` and `ioerror()` reports it. The one exception is `OPEN`, which has
+  no return value to answer with and so fails the run with a catchable runtime
+  error. This is the same house rule the rest of the library follows: a call that
+  could not do what it was asked says so in its answer.
+
+- **The scratch directories move inside the root.** With a root set, `temppath$`,
+  `tempfilename$`, `homepath$`, `documentspath$` and `cfg_path$` all answer a
+  directory inside it. A script that keeps its working files in the platform's
+  temp directory therefore runs unchanged and contained, instead of failing on its
+  first write for a reason it cannot see. `sandboxroot$()` reports the root; there
+  is no function that sets or clears it, so a script cannot widen its own cage.
+
+- **It is process-wide, not per-engine.** A library function is a plain callback
+  with no VM to ask, so the root lives in `PhosphorSandbox` as one process-wide
+  setting. Two engines in the same process share it, and the last host to assign
+  `SandboxRoot` wins. If you run scripts with different trust levels, run them in
+  different processes.
+
+One rule applies **even with no root set**: a destructive call is never handed an
+empty path or a bare filesystem root. `dir_delete("", 1)` used to resolve the
+empty string to the root of the current drive and delete from there, answering
+success — because `DirectoryExists("")` is `False`, so the post-check read the
+disaster as a clean removal. An empty path, `/`, `C:\` and a UNC share root are
+now refused by `dir_delete`, `dir_create` and every other write, root or no root.
+
+`scripts/check-sandbox.py` is what keeps this true as the library grows: it fails
+the acceptance suite if any routine a script can reach touches the filesystem
+without asking the gate first.
+
 ## Output and input
 
 `OnOutput` takes what the program prints. `OnInput` supplies what it reads — it is
@@ -189,6 +242,7 @@ Create
   -> Registry.Add / AddHost   (your functions)
   -> OnOutput := ...          (optional)
   -> MaxSteps / MaxOutputBytes / TimeoutMs := ...   (optional, for untrusted scripts)
+  -> SandboxRoot := '<dir>'                   (optional; bounds WHERE it writes)
   -> Run(source)                              one-shot
      OR
      Prepare(source); CallFunction(name, args); ...   load once, call many

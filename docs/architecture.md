@@ -33,6 +33,11 @@ Phosphor/
   engine/                 the library core. Host-agnostic, GUI-free, no I/O of its own.
     PhosphorEngine.pas      public facade (TPhosphorEngine, OnOutput callback).
     PhosphorValue/Errors/Opcodes/Lexer/Compiler/VM/Registry/Handles.pas  the core.
+    PhosphorSandbox.pas     the filesystem ceiling: the one place that decides
+                          whether a path a script named may be touched. Every
+                          library that opens, lists, writes or deletes asks it,
+                          and scripts/check-sandbox.py fails the suite if one
+                          stops asking.
     libs/                 function packages, integrated only through the registry
                           (like Plan9Basic's engine/Libs): PhosphorArrayLib,
                           PhosphorDictLib, ... The engine registers them in Create.

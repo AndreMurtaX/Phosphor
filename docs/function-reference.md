@@ -798,9 +798,10 @@ on desktop by design.
 | `dirseparator$() → str` | the path-component separator (`\` or `/`) |
 | `pathseparator$() → str` | the PATH list separator (`;` or `:`) |
 | `altseparator$() → str` | the alternate separator (`/` on Windows, else `""`) |
-| `temppath$() → str` | the system temp directory |
-| `homepath$() → str` | the user's home directory |
-| `documentspath$() → str` | the user's Documents directory |
+| `temppath$() → str` | the system temp directory — or, under a [sandbox root](embedding.md#the-filesystem-sandbox), a scratch directory inside it |
+| `homepath$() → str` | the user's home directory — the sandbox scratch directory when a root is set |
+| `documentspath$() → str` | the user's Documents directory — the sandbox scratch directory when a root is set |
+| `sandboxroot$() → str` | the filesystem root this script is confined to, or `""` when it is unconfined. Read-only: there is no function that sets or clears it, so a program cannot widen its own cage — only the host can, in Pascal |
 | `tempfilename$() → str` | a fresh temp file name |
 | `randomfilename$() → str` | a random name (GUID hex, no separators) |
 | `guidfilename$(withdashes) → str` | a GUID-based name, with or without dashes |

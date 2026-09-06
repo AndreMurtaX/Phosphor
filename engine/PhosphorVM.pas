@@ -16,7 +16,8 @@ unit PhosphorVM;
 interface
 
 uses
-  SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry;
+  SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
+  PhosphorSandbox;
 
 const
   { Classic file-I/O channel numbers run 1..MaxChannel (#0 is not used). The cap
@@ -462,6 +463,12 @@ begin
   else
     Exit(MakeError(peRuntime, 'bad OPEN mode'));
   end;
+  // One gate for all five OPEN modes: a channel is the other way a script reaches
+  // the filesystem, and it must be bounded by the same root as file_* is.
+  if not SandboxAllows(APath, puRead) then
+    Exit(MakeError(peRuntime, 'cannot open "' + APath + '": outside the sandbox root'));
+  if (fmode <> cmInput) and not SandboxAllows(APath, puWrite) then
+    Exit(MakeError(peRuntime, 'cannot open "' + APath + '" for writing: outside the sandbox root'));
   // Reset the slot field by field -- FillChar over a record holding a managed
   // string would zero the reference without releasing it.
   FChannels[ANum].Stream := nil;

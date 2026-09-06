@@ -144,13 +144,62 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    stdout paths (all three flip under `-ProveFailure`); verified on Windows and
    Linux. `-B -vewn` clean.
 
-## Status — PHASE 3 STEPS 1–5 COMPLETE (2026-09-01)
+
+6. **The filesystem ceiling — `SandboxRoot`.** *DONE (2026-09-06).* Step 2 claimed
+   the engine was "safe to embed untrusted scripts" on the strength of three
+   ceilings that all bound how **long** a script runs. None of them bounded **where
+   it writes**, so a host that set all three still handed the script the whole
+   filesystem — and on 2026-09-05 that gap was paid for outside this repository,
+   when an unbounded run of a defective `dir_delete("")` walked the root of the
+   current drive and erased the working trees of thirteen projects. The claim was
+   the defect: a sentence in a plan said "safe" and nothing in the code was
+   checking the half it did not mention.
+
+   `engine/PhosphorSandbox.pas` is the missing ceiling, shaped like the other
+   three: `TPhosphorEngine.SandboxRoot`, `''` by default, costing nothing when
+   unset. With a root set, every path a script names — `file_*`, `dir_*`,
+   `open … as #n`, the string-list and RAG loaders, and the `zip`/`gzip`/`base64`
+   packages — is made absolute, has `.`/`..` collapsed and its symlinks followed,
+   and must land inside the root or the call is refused. A refusal is a **value**
+   (`0`, `""`, and `ioerror()`), not an exception, except `OPEN`, which has no
+   return value and so fails the run catchably. With a root set the platform's
+   scratch places (`temppath$`, `tempfilename$`, `homepath$`, `documentspath$`,
+   `cfg_path$`) answer **inside** it, so a script that uses them runs unchanged
+   and contained rather than failing on its first write; `sandboxroot$()` reports
+   the root and nothing registered can change it. One rule holds with **no root at
+   all**: an empty path or a bare filesystem root is never written to or deleted.
+
+   **The part that is not the feature.** A rule enforced at every call site is a
+   rule that rots one new function at a time, so `scripts/check-sandbox.py` is the
+   real deliverable: it reads every routine in `engine/` and `host/packages/` that
+   a script can reach, and fails the acceptance suite if one touches the
+   filesystem without asking the gate — or carries a stale exemption. It found 20
+   holes on its first run, including three the author had already convinced
+   himself were covered. The hosts are deliberately outside its scope: a program
+   reading the file named on its own command line is doing its job, before any
+   script exists to bound.
+
+   **Gate met:** `tests/probe_sandbox.lpr` (24 checks) is the proof, and its shape
+   is the point — a guard whose job is to stop a deletion cannot be proven by
+   attempting one on anything that matters, so the probe **builds its own victim
+   tree** in the platform temp directory, outside the root it then sets, and
+   asserts the tree is still standing afterwards. Seen failing: with rule 2
+   disabled the probe reports 14 failures, and the tree it reports as destroyed is
+   the one the probe itself created. `tests/suite/58_sandbox.bas` (27 assertions)
+   pins the script-visible half and deliberately attempts **no deletion outside
+   the root**. Every test runner (`phosphortest`, `phosphorguitest`,
+   `phosphorpkgtest`, `phosphorhttptest`) now confines its script to the working
+   directory with no flag to turn it off, and `phosphor --sandbox <dir>` offers the
+   same to anyone running a script by hand. Byte-exact green on Windows and Linux;
+   `-B -vewn` clean; `-ProveFailure` and `probe_sandbox --fail` both seen failing.
+
+## Status — PHASE 3 STEPS 1–6 COMPLETE (2026-09-06)
 
 Phosphor is now robust to run (catchable `ON ERROR`, in the label, function-call,
 and `resume`/`resume next` forms), safe to embed untrusted scripts (fatal step /
-time / output ceilings), documented and demonstrated as an embedding library (a
-third host + `docs/embedding.md`), and deployable (the `.pbc` on-disk bytecode and
-the self-extracting `pack`). External integrations (sqlite/http/zip/base64) remain
+time / output ceilings **and a filesystem root**), documented and demonstrated as
+an embedding library (a third host + `docs/embedding.md`), and deployable (the
+`.pbc` on-disk bytecode and the self-extracting `pack`). External integrations (sqlite/http/zip/base64) remain
 opt-in host packages for whenever they are wanted; the engine stays dependency-free.
 
 **Parallel / optional — integration libraries as opt-in host packages.** *CLOSED

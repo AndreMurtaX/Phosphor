@@ -22,7 +22,7 @@ interface
 uses
   SysUtils, Classes,
   PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
-  PhosphorCompiler, PhosphorVM, PhosphorHandles, PhosphorBytecode,
+  PhosphorCompiler, PhosphorVM, PhosphorHandles, PhosphorBytecode, PhosphorSandbox,
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
   PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorBufferLib,
@@ -57,6 +57,8 @@ type
     FReplPC: Integer;       // first instruction of the NEXT line
     function CompileSource(const ASource: String; out AProg: TProgram): Boolean;
     procedure ConfigureVM(AVM: TPhosphorVM);
+    function GetSandboxRoot: String;
+    procedure SetSandboxRootProp(const AValue: String);
   public
     constructor Create;
     destructor Destroy; override;
@@ -120,6 +122,20 @@ type
     property MaxSteps: Int64 read FMaxSteps write FMaxSteps;
     property MaxOutputBytes: Int64 read FMaxOutputBytes write FMaxOutputBytes;
     property TimeoutMs: Int64 read FTimeoutMs write FTimeoutMs;
+    { The FOURTH ceiling, and the only one that bounds WHERE rather than how long.
+      '' (the default) = no sandbox: every path a script names reaches the real
+      filesystem, which is what a trusted script wants and what every host did
+      before this existed. Set it and every file, directory, channel and package
+      call must resolve inside that directory -- '..' and symlinks included -- or
+      it is refused, and the platform's scratch directories (temppath$, homepath$,
+      cfg_path$) answer inside the root instead of outside it. Reading it back
+      answers the root actually installed, which is the resolved absolute path,
+      or '' if the directory could not be made.
+
+      PROCESS-WIDE, unlike the other three: a library function is a plain callback
+      with no VM to ask, so two engines in one process share one root. Setting it
+      from a host with several engines sets it for all of them. }
+    property SandboxRoot: String read GetSandboxRoot write SetSandboxRootProp;
   end;
 
 implementation
@@ -192,6 +208,16 @@ begin
   finally
     comp.Free;
   end;
+end;
+
+function TPhosphorEngine.GetSandboxRoot: String;
+begin
+  Result := PhosphorSandbox.SandboxRoot;
+end;
+
+procedure TPhosphorEngine.SetSandboxRootProp(const AValue: String);
+begin
+  PhosphorSandbox.SetSandboxRoot(AValue);
 end;
 
 procedure TPhosphorEngine.ConfigureVM(AVM: TPhosphorVM);

@@ -260,6 +260,26 @@ Rules, in order of how easily they are got wrong:
   the `uses` clause for that reason — that order is the only thing making the guard
   work, and violating it still compiles and still passes on Windows.
 
+### A destructive defect is verified by READING
+
+A finding whose CONTENT is destruction — it deletes, it overwrites, it sends — is
+confirmed by reading the code, or by running the repro only after the fix is in a
+**rebuilt** binary, or in a disposable VM. Never on the working machine, and never
+"in a sandbox directory": on 2026-09-05 the sandbox directory protected against a
+CWD-relative walk and the defect was drive-root-relative, so it walked `C:\`.
+
+Two mechanical parts of that, both paid for:
+
+- **Check which binary a script builds before trusting it.** `test-suite.ps1`
+  builds `phosphortest`; only `build.ps1` builds `phosphor.exe`. Running the one
+  the suite did not rebuild is running the old code, defect included.
+- **Test a destructive guard through its NON-destructive path.** The guard runs
+  before the recursive branch, so proving `dir_delete("")` is refused proves
+  `dir_delete("", 1)` is too — and the test is never one edit away from being the
+  disaster it tests for. Where the destructive path itself must be exercised, the
+  test creates its own victim, outside the root and inside the platform temp
+  directory (`tests/probe_sandbox.lpr`), so the blast radius is what the test made.
+
 ## 5. Gauntlet discipline (builder vs critic)
 
 - **Builder and critic are separate agents with fresh context.** The critic must not know
@@ -281,6 +301,47 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 27 · the ceiling that was claimed and never built.**
+  Phase 3 step 2 shipped `MaxSteps`, `TimeoutMs` and `MaxOutputBytes` and wrote
+  down that the engine was now "safe to embed untrusted scripts". All three bound
+  how LONG a script runs. **Nothing bounded where it writes**, and the sentence did
+  not notice, because a plan is prose and prose does not fail a build. The bill
+  arrived on 2026-09-05, outside this repository: an unbounded run of a defective
+  `dir_delete("")` resolved the empty path to the root of the current drive and
+  erased the working trees of thirteen projects.
+  - **The rule: a safety claim is a test or it is a wish.** "Safe to embed
+    untrusted scripts" is not a status line; it is a list of what a script cannot
+    do, each item with a check that fails when it becomes false. When a document
+    claims a property, go find the check. If there is none, either build it or
+    change the sentence — the sentence is the part that will be believed.
+  - **A per-call-site rule needs a gate, or it rots one function at a time.**
+    `SandboxRoot` is asked at ~40 call sites; the next library function that opens
+    a file is one forgotten line from being a hole, and nothing would say so. So
+    the deliverable is not the guard, it is `scripts/check-sandbox.py`: it reads
+    every routine a script can reach and fails the suite if one touches the
+    filesystem without asking. **It found 20 holes on its first run**, three of
+    which the author had already convinced himself were covered — including the
+    RECURSIVE half of a lister and a deleter, where the top-level guard is asked
+    once and the walk then descends on its own. *Guard the recursion, not the
+    entry point: a directory symlink is how a bounded walk leaves its bounds.*
+  - **A guard against destruction is tested by making your own victim.**
+    `tests/probe_sandbox.lpr` builds a tree in the platform temp directory,
+    OUTSIDE the root it then sets, and asserts the tree is still standing. If the
+    guard ever breaks, what the test destroys is what the test created. Proven by
+    disabling the root check and watching 14 assertions fail — including the one
+    that reports the tree gone. The .bas half (`58_sandbox.bas`) deliberately
+    attempts **no deletion outside the root at all**: if that assertion regressed
+    it would BE the disaster it tests for.
+  - **Redirect where you can, refuse where you must.** `temppath$`/`homepath$`/
+    `cfg_path$` answer INSIDE the root rather than being refused, so a script that
+    keeps working files in the platform's temp directory runs unchanged and
+    contained. A ceiling a program cannot comply with gets switched off by whoever
+    is in a hurry; one it does not notice stays on.
+  - **The test runners have no opt-out.** `phosphortest`, `phosphorguitest`,
+    `phosphorpkgtest` and `phosphorhttptest` confine the script to the working
+    directory, unconditionally — no flag, no argument. The suite exists to run code
+    that is being CHANGED, which is exactly the code most likely to name a path it
+    did not mean to.
 - **2026-09-05 · round 25 · the audit's medium and low findings, and what "low" hid.**
   Thirty-five findings across thirteen documents, filed by the audit as
   documentation. **Four of them were defects in the CODE**, and the page was the

@@ -29,7 +29,7 @@ interface
 
 uses
   SysUtils, Classes, base64,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox;
 
 procedure RegisterBase64Funcs(Reg: TPhosphorRegistry);
 
@@ -98,6 +98,7 @@ var fs: TFileStream;
 begin
   Result := False;
   S := '';
+  if not SandboxAllows(APath, puRead) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
@@ -116,6 +117,7 @@ function SaveFileStr(const APath: String; const S: RawByteString): Boolean;
 var fs: TFileStream;
 begin
   Result := False;
+  if not SandboxAllows(APath, puWrite) then Exit;
   try
     fs := TFileStream.Create(APath, fmCreate);
     try

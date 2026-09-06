@@ -12,6 +12,7 @@
   anyone reading the source rather than running it):
     phosphor <file.bas|file.pbc>     run a file, output to stdout
     phosphor run <file> [--out F]    same, explicit verb; --out writes bytes to F
+    phosphor --sandbox <dir> <file>  confine every path the script names to <dir>
     phosphor compile <in.bas> <out.pbc>   compile to portable bytecode
     phosphor pack <in.bas> <out>     make a standalone executable (stub + payload)
     phosphor --gui <file.bas>        run a GUI program (hands over to phosphorgui)
@@ -47,6 +48,13 @@ uses
   // whose library is absent reports an error, and the rest keep working.
   PhosphorCrtLib, PhosphorBase64Lib, PhosphorZipLib, PhosphorGzipLib,
   PhosphorHttpLib, PhosphorSqliteLib;
+
+var
+  { --sandbox <dir>: the root every path this run may touch. '' (the default) is
+    no sandbox, which is what a trusted script wants and what this host always
+    did. Set once from the command line and applied to every engine the run
+    creates, so `run`, the REPL and an embedded payload are bounded alike. }
+  GSandboxDir: String = '';
 
 type
   { The whole host side of the boundary: give the engine somewhere to put its
@@ -281,6 +289,7 @@ begin
   end;
   host := TConsoleHost.Create(AOutPath);
   eng := TPhosphorEngine.Create();
+  eng.SandboxRoot := GSandboxDir;   // '' = unbounded, as before
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -434,6 +443,7 @@ var host: TConsoleHost; eng: TPhosphorEngine; line: Integer;
 begin
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
+  eng.SandboxRoot := GSandboxDir;   // '' = unbounded, as before
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -522,6 +532,7 @@ var
 begin
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
+  eng.SandboxRoot := GSandboxDir;   // '' = unbounded, as before
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
@@ -631,6 +642,9 @@ begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor compile <in.bas> <out.pbc>');
       Writeln('       phosphor pack <in.bas> <out>   (standalone executable)');
+      Writeln('       phosphor --sandbox <dir> <file.bas>');
+      Writeln('              confine the script to <dir>: every file, directory and');
+      Writeln('              channel it names must resolve inside, or it is refused');
       Writeln('       phosphor --gui <file.bas>     run a GUI program (via phosphorgui)');
       Writeln('       phosphor            (REPL)');
       Writeln('       phosphor --diag     (console/UTF-8 self-check)');
@@ -643,6 +657,16 @@ begin
       guiMode := True
     else if arg = 'run' then
       { optional verb; ignore }
+    else if arg = '--sandbox' then
+    begin
+      Inc(i);
+      if i > ParamCount then
+      begin
+        Writeln(StdErr, 'phosphor: --sandbox needs a directory');
+        Halt(2);
+      end;
+      GSandboxDir := ParamStr(i);
+    end
     else if arg = '--out' then
     begin
       Inc(i);

@@ -250,6 +250,14 @@ begin
   end;
 
   eng := TPhosphorEngine.Create();
+  // A TEST RUNNER IS ALWAYS SANDBOXED, with no flag to turn it off. The suite
+  // exists to run code that is being changed, which is exactly the code most
+  // likely to name a path it did not mean to; on 2026-09-05 an unbounded run of a
+  // defective dir_delete erased thirteen projects outside this checkout. The
+  // working directory is the root -- every test writes under bin/ , which is
+  // inside it -- so nothing a test names can resolve outside the checkout.
+  eng.SandboxRoot := GetCurrentDir;
+
   try
     RegisterTestFuncs(eng.Registry);
     RegisterHttpFuncs(eng.Registry);

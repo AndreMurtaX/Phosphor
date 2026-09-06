@@ -193,6 +193,7 @@ else {
         @{ name='probe_value';    src='tests\probe_value.lpr' },
         @{ name='probe_limits';   src='tests\probe_limits.lpr' },
         @{ name='probe_bytecode'; src='tests\probe_bytecode.lpr' },
+        @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' }
     )
     foreach ($hp in $hostProbes) {
@@ -231,6 +232,10 @@ else {
 #                      are silently destroyed; the class has been swept three times)
 #   coverage.py        every registered built-in is exercised by a test AND listed in
 #                      the function reference
+#   check-sandbox.py   every routine a script can reach that touches the filesystem
+#                      asks the sandbox gate first (or is exempt, by name, with a
+#                      reason) -- the rule that would otherwise rot one new function
+#                      at a time
 # They are run HERE, in the acceptance gate, rather than in the build: building
 # should not need Python, but passing the suite should mean the invariants hold.
 # A missing interpreter is a FAILURE, not a skip -- a gate that quietly does not run
@@ -242,7 +247,7 @@ if (-not $py) {
     Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
     $allOk = $false
 } else {
-    foreach ($gate in @('check-codepage.py', 'coverage.py')) {
+    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py')) {
         $gp = Join-Path $here $gate
         # The comment above says a gate that quietly does not run is worse than no
         # gate, and then this line skipped a gate whose FILE was missing -- exactly

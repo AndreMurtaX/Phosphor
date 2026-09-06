@@ -20,7 +20,7 @@ interface
 
 uses
   SysUtils,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox;
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 
@@ -52,12 +52,32 @@ begin
 end;
 
 // --- known and optional paths -----------------------------------------------
+// Under a sandbox these answer INSIDE the root. Redirecting is better than
+// refusing: a script that keeps its working files in the platform's temp
+// directory then runs unchanged and contained, instead of failing on its first
+// write for a reason it cannot see.
 function t_temppath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(GetTempDir(False)); end;
+begin
+  Err := NoError();
+  if SandboxActive then Result := ValStr(SandboxScratchPath)
+  else Result := ValStr(GetTempDir(False));
+end;
 function t_homepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(GetUserDir); end;
+begin
+  Err := NoError();
+  if SandboxActive then Result := ValStr(SandboxScratchPath)
+  else Result := ValStr(GetUserDir);
+end;
 function t_documentspath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(IncludeTrailingPathDelimiter(GetUserDir) + 'Documents' + PathDelim); end;
+begin
+  Err := NoError();
+  if SandboxActive then Result := ValStr(SandboxScratchPath)
+  else Result := ValStr(IncludeTrailingPathDelimiter(GetUserDir) + 'Documents' + PathDelim);
+end;
+// Reports the cage; it cannot open it. There is no setter registered for a
+// script to call -- only the host, in Pascal, can set or clear a root.
+function t_sandboxroot(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Err := NoError(); Result := ValStr(SandboxRoot); end;
 // Answered but empty on desktop by design (the tests only require they return).
 function t_emptypath(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValStr(''); end;
@@ -73,25 +93,56 @@ begin
   else Result := StringReplace(s, '-', '', [rfReplaceAll]);
 end;
 function t_tempfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(GetTempFileName); end;
+begin
+  Err := NoError();
+  if SandboxActive then Result := ValStr(SandboxScratchPath + GuidHex(False) + '.tmp')
+  else Result := ValStr(GetTempFileName);
+end;
 function t_randomfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValStr(GuidHex(False)); end;
 function t_guidfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValStr(GuidHex(AsDouble(Args[0]) <> 0)); end;
 
 // --- directories, files -----------------------------------------------------
+// These answer 1 for the oracle, whatever the filesystem said -- but a REFUSED
+// call answers 0, because reporting success for something that was not even
+// attempted is the fabricated-answer shape the house rule forbids.
 function t_mkdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); CreateDir(Args[0].Str); Result := ValInt(1); end;
+begin
+  Err := NoError();
+  if not SandboxAllows(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  CreateDir(Args[0].Str); Result := ValInt(1);
+end;
 function t_rmdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); RemoveDir(Args[0].Str); Result := ValInt(1); end;
+begin
+  Err := NoError();
+  if not SandboxAllows(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
+  RemoveDir(Args[0].Str); Result := ValInt(1);
+end;
 function t_forcedirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(ForceDirectories(Args[0].Str))); end;
+begin
+  Err := NoError();
+  if not SandboxAllows(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  Result := ValInt(Ord(ForceDirectories(Args[0].Str)));
+end;
 function t_chdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); SetCurrentDir(Args[0].Str); Result := ValInt(1); end;
+begin
+  Err := NoError();
+  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  SetCurrentDir(Args[0].Str); Result := ValInt(1);
+end;
 function t_fileexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0))); end;
+begin
+  Err := NoError();
+  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  Result := ValInt(Ord(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0)));
+end;
 function t_kill(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); DeleteFile(Args[0].Str); Result := ValInt(1); end;
+begin
+  Err := NoError();
+  if not SandboxAllows(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
+  DeleteFile(Args[0].Str); Result := ValInt(1);
+end;
 
 // --- environment ------------------------------------------------------------
 function t_environ(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -135,6 +186,7 @@ begin
   Reg.Add('pathseparator$:',   @t_pathseparator);
   Reg.Add('altseparator$:',    @t_altseparator);
   Reg.Add('temppath$:',        @t_temppath);
+  Reg.Add('sandboxroot$:',     @t_sandboxroot);
   Reg.Add('homepath$:',        @t_homepath);
   Reg.Add('documentspath$:',   @t_documentspath);
   for i := 0 to High(OptPaths) do

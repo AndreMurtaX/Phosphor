@@ -120,7 +120,7 @@ done
 # (the value kernel, the execution limits, the embedding API). Each prints ok:/
 # fail: and exits non-zero on a failure.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
   # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.
@@ -151,7 +151,7 @@ PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
   echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
 else
-  for gate in check-codepage.py coverage.py; do
+  for gate in check-codepage.py coverage.py check-sandbox.py; do
     # The comment above says a gate that quietly does not run is worse than no gate,
     # and then this line skipped a gate whose FILE was missing. A deleted gate is
     # exactly the case the sentence was written about.

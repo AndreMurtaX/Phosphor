@@ -13,7 +13,7 @@ Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact gree
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
 dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
 rules), the negative suite, and six opt-in host packages (crt, base64, zip, gzip,
-http, sqlite). **682 built-in functions** are registered across the standard
+http, sqlite). **683 built-in functions** are registered across the standard
 libraries, every one of them exercised by a test and listed in the reference --
 both held by a gate in the acceptance suite rather than by a promise. Errors are *values*, not
 crashes: a library records its error state and the program keeps running. It is a
@@ -124,7 +124,7 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs.                                       |
-| `scripts/`       | `build`, `build-gui`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui` (`.ps1`/`.sh`), and the two source gates `coverage.py` and `check-codepage.py`.|
+| `scripts/`       | `build`, `build-gui`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui` (`.ps1`/`.sh`), and the three source gates `coverage.py`, `check-codepage.py` and `check-sandbox.py`.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

@@ -654,7 +654,16 @@ after the error, x = 0
 ```
 
 (The handler runs first, then `resume next` continues at the `println` after the
-faulting line; `x` was never assigned, so it is still `0`.) Error codes: `1`
+faulting line; `x` was never assigned, so it is still `0`.)
+
+A handler also catches errors raised inside a function it called, and `resume
+next` then continues at the next statement **of that function** — the function
+runs on, returns, and the caller's half-finished expression carries on with its
+result. If the fault happened on the function's *last* statement there is no next
+statement in it: the function ends there and hands back the default value for its
+type (`0`, or `""` for a `$` name), and the caller continues with that.
+
+Error codes: `1`
 integer overflow, `2` division by zero, `3` type mismatch, `4` unknown function,
 `5` syntax, `6` runtime. You can raise your own with `error("message")`, clear the
 state with `err_clear()`, or route faults to a function with `on error call fn`. **That function must take

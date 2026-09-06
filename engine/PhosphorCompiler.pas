@@ -358,7 +358,12 @@ begin
 
   FInFunction := True;
   FRetType := retType;
-  jOver := FProg.Emit(opJump, 0, 0, ln);   // skip the body in normal flow
+  // Skip the body in normal flow. This jump is ALSO the body's end marker: it sits
+  // immediately before the entry point and its target is the first instruction that
+  // is not part of the body, which is how the VM knows where a body stops when
+  // `resume next` looks for the statement after a fault (PhosphorVM,
+  // ResumeAtNextStmt). Moving it away from here needs that read moved with it.
+  jOver := FProg.Emit(opJump, 0, 0, ln);
   entry := FProg.Count;
   SetLength(ltypes, FLocalCount);
   for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];

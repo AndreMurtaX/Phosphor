@@ -33,11 +33,19 @@ const
 
 type
   { One activation of a user function: its local frame (parameters first, then
-    declared locals), the function it belongs to, and where to resume. }
+    declared locals), the function it belongs to, and where to resume.
+
+    CallerStmt* is the CALLER's statement boundary, put here by the call and taken
+    back by the return. Without it the "current statement" kept pointing into a
+    function that had already returned: `x = f(1) / 0` faults in the CALLER, but
+    the last boundary passed was the one inside f, so ON ERROR remembered a resume
+    point in a frame that no longer existed and `resume next` continued inside the
+    dead body -- silently running nothing at all in the caller. (2026-09-06.) }
   TCallFrame = record
     Locals: array of TValue;
     FuncIndex: Integer;
     ReturnAddr: Integer;
+    CallerStmtPC, CallerStmtSP, CallerStmtFrameSP: Integer;
   end;
 
   { An open file channel for classic I/O (OPEN ... AS #n).
@@ -1092,6 +1100,9 @@ var
       begin
         FFrames[FErrHandlerFrameSP + i].FuncIndex := FErrSaveFrames[i].FuncIndex;
         FFrames[FErrHandlerFrameSP + i].ReturnAddr := FErrSaveFrames[i].ReturnAddr;
+        FFrames[FErrHandlerFrameSP + i].CallerStmtPC := FErrSaveFrames[i].CallerStmtPC;
+        FFrames[FErrHandlerFrameSP + i].CallerStmtSP := FErrSaveFrames[i].CallerStmtSP;
+        FFrames[FErrHandlerFrameSP + i].CallerStmtFrameSP := FErrSaveFrames[i].CallerStmtFrameSP;
         SetLength(FFrames[FErrHandlerFrameSP + i].Locals, Length(FErrSaveFrames[i].Locals));
         for j := 0 to High(FErrSaveFrames[i].Locals) do
           FFrames[FErrHandlerFrameSP + i].Locals[j] := FErrSaveFrames[i].Locals[j];
@@ -1099,6 +1110,89 @@ var
       FErrSaveValid := False;
     end;
     FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;
+  end;
+
+  { Put pc on the statement AFTER the one that faulted -- what `resume next` and a
+    zero-returning `on error call` handler both continue at. Call it only once
+    RestoreOverlap has stood the VM back at the faulting statement's level.
+
+    "THE NEXT STATEMENT" ONLY EXISTS INSIDE THE BODY THAT FAULTED. A fault in a
+    called function resumes in that function (its frame is back), so the next
+    statement has to be one of ITS statements; walking on into whatever the
+    compiler laid out after the body ran the CALLER's code with the callee's frame
+    still stacked. For
+
+        function f(x)
+          return no_such_name(x)
+        endfunction
+        on error goto oops
+        println "before: " ; str$(f(-5))
+
+    the scan left the body, found the next boundary in the main program -- the very
+    statement that called f -- and called f again: the program printed its first
+    line for ever. (2026-09-06.)
+
+    WHEN THE FAULTING STATEMENT WAS THE LAST OF THE BODY, "next" is the end of the
+    function: it returns the default value for its type and the caller's pending
+    expression carries on with that, exactly as falling off the end of a body
+    always does. Unwinding further -- resuming in the caller, as VB does -- was the
+    other candidate and is NOT what Phosphor does: a fault deeper in already
+    resumes at the next statement of the frame that faulted (54_onerror_reentrancy
+    pins `1000 + risky(0)` = 1005), and the last statement of a body is not a
+    special case of that rule, it is the end of it.
+
+    A caller of this only ever has to `Continue`. If the end-of-body return unwinds
+    the very frame a re-entrant activation was launched for, pc lands past the last
+    instruction, so the loop ends and ExecFrom returns True with the value on the
+    stack -- what opRetFunc does with Exit(True) at that same moment. It must NOT
+    be reached with that frame's ReturnAddr (-1, "no return address"): resuming to
+    pc -1 read out of bounds for ever, which is the shape 54_onerror_reentrancy's
+    third case was written for. }
+  procedure ResumeAtNextStmt;
+  var scan, bodyEnd, entry, ufi: Integer;
+  begin
+    // The body's extent. ParseFunction emits `opJump <past the body>` immediately
+    // before the entry point so that normal flow steps over the body, which makes
+    // that jump's target the first instruction beyond it. A program not built that
+    // way (only a hand-written .pbc can be) gets the bounded answer -- the function
+    // ends here -- rather than a jump into open code.
+    bodyEnd := FProg.Count;
+    if FFrameSP > 0 then
+    begin
+      entry := FProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].Entry;
+      if (entry > 0) and (FProg.Instr(entry - 1).Op = opJump) and
+         (FProg.Instr(entry - 1).A > entry) and (FProg.Instr(entry - 1).A <= FProg.Count) then
+        bodyEnd := FProg.Instr(entry - 1).A
+      else
+        bodyEnd := entry;   // extent unknown: end the function instead of guessing
+    end;
+    scan := FErrStmtPC + 1;
+    while (scan < bodyEnd) and (FProg.Instr(scan).Op <> opStmt) do Inc(scan);
+    if scan < bodyEnd then
+    begin
+      pc := scan;
+      Exit;
+    end;
+    if FFrameSP = 0 then
+    begin
+      // Top level, nothing after the failing statement: the program is over. (A
+      // function DEFINED after it is not "next" -- the definition's own statement
+      // boundary sits in the main program and jumps over the body.)
+      pc := FProg.Count;
+      Exit;
+    end;
+    ufi := FFrames[FFrameSP - 1].FuncIndex;
+    Push(DefaultValue(FProg.UserFuncs[ufi].RetType));
+    pc := FFrames[FFrameSP - 1].ReturnAddr;
+    Dec(FFrameSP);
+    if FFrameSP = AStopFrameSP then
+      pc := FProg.Count   // this activation is done; see the note above
+    else
+    begin
+      stmtPC := FFrames[FFrameSP].CallerStmtPC;
+      stmtSP := FFrames[FFrameSP].CallerStmtSP;
+      stmtFrameSP := FFrames[FFrameSP].CallerStmtFrameSP;
+    end;
   end;
 
   { A runtime error. Returns True if an ON ERROR handler took it (pc now points at
@@ -1143,6 +1237,9 @@ var
       begin
         FErrSaveFrames[i].FuncIndex := FFrames[FErrHandlerFrameSP + i].FuncIndex;
         FErrSaveFrames[i].ReturnAddr := FFrames[FErrHandlerFrameSP + i].ReturnAddr;
+        FErrSaveFrames[i].CallerStmtPC := FFrames[FErrHandlerFrameSP + i].CallerStmtPC;
+        FErrSaveFrames[i].CallerStmtSP := FFrames[FErrHandlerFrameSP + i].CallerStmtSP;
+        FErrSaveFrames[i].CallerStmtFrameSP := FFrames[FErrHandlerFrameSP + i].CallerStmtFrameSP;
         // The locals are copied ELEMENT BY ELEMENT: assigning the dynamic array
         // would only share a reference, and an element write through the other
         // name would then reach right into the copy.
@@ -1170,8 +1267,7 @@ var
           LastError := AErr; ErrorLine := FErrLine; Exit(False);   // handler said: abort
         end;
         RestoreOverlap();                                           // resume next
-        pc := FErrStmtPC + 1;
-        while (pc < FProg.Count) and (FProg.Instr(pc).Op <> opStmt) do Inc(pc);
+        ResumeAtNextStmt();
         Result := True;
       end
       else
@@ -1387,11 +1483,8 @@ begin
           FInHandler := False;
           RestoreOverlap();
           if ins.A = 1 then
-          begin
             // resume next: continue at the statement after the one that failed
-            pc := FErrStmtPC + 1;
-            while (pc < FProg.Count) and (FProg.Instr(pc).Op <> opStmt) do Inc(pc);
-          end
+            ResumeAtNextStmt()
           else
             pc := FErrStmtPC;   // resume: retry the failing statement
           Continue;
@@ -1446,7 +1539,13 @@ begin
           Dec(FFrameSP);
           // A re-entrant call (CallUserFunc) stops here, handing its return value
           // back to the host through the stack, when the frame it pushed unwinds.
+          // Its frame carries no caller statement -- the caller is Pascal code, not
+          // this activation -- so the restore below is deliberately not reached.
           if FFrameSP = AStopFrameSP then Exit(True);
+          // Back in the caller: its statement boundary is the current one again.
+          stmtPC := FFrames[FFrameSP].CallerStmtPC;
+          stmtSP := FFrames[FFrameSP].CallerStmtSP;
+          stmtFrameSP := FFrames[FFrameSP].CallerStmtFrameSP;
           pc := savedRet;
           Continue;
         end;
@@ -1466,6 +1565,12 @@ begin
               FFrames[FFrameSP].Locals[i] := DefaultValue(FProg.UserFuncs[ufi].LocalTypes[i]);
             FFrames[FFrameSP].FuncIndex := ufi;
             FFrames[FFrameSP].ReturnAddr := pc + 1;
+            // The caller's statement boundary rides on the frame and comes back at
+            // the return, so a fault AFTER the call returns still resumes in the
+            // caller. See TCallFrame.
+            FFrames[FFrameSP].CallerStmtPC := stmtPC;
+            FFrames[FFrameSP].CallerStmtSP := stmtSP;
+            FFrames[FFrameSP].CallerStmtFrameSP := stmtFrameSP;
             Inc(FFrameSP);
             pc := FProg.UserFuncs[ufi].Entry;
             Continue;
@@ -1749,6 +1854,12 @@ begin
     FFrames[FFrameSP].Locals[i] := DefaultValue(FProg.UserFuncs[ufi].LocalTypes[i]);
   FFrames[FFrameSP].FuncIndex := ufi;
   FFrames[FFrameSP].ReturnAddr := -1;   // unused: ExecFrom stops by frame level
+  // No caller STATEMENT either -- this frame was pushed by Pascal, not by an opCall
+  // in some activation's statement. The slot is reused from an earlier call, so it
+  // is cleared rather than left holding a boundary from a program long since past.
+  FFrames[FFrameSP].CallerStmtPC := -1;
+  FFrames[FFrameSP].CallerStmtSP := 0;
+  FFrames[FFrameSP].CallerStmtFrameSP := 0;
   Inc(FFrameSP);
   Inc(FCallDepth);
   try

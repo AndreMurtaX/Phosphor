@@ -126,6 +126,126 @@ on error goto 0
 assert_eq(tries%, 1, "the handler ran once")
 assert_eq(q6, 5, "and the retried statement then produced its real value")
 
+test_case("onerror/`resume next` at the END of a body ends the function")
+rem THE HANG. "The statement after the failing one" was looked up in the code as
+rem laid out, not in the BODY that faulted. When the fault is the last statement of
+rem a function there is no next statement in it, and the scan walked out of the body
+rem into the main program -- landing on the very statement that had called the
+rem function, which called it again, and again: this program printed its first line
+rem millions of times before anyone stopped it.
+rem
+rem What it must do instead: the function ENDS, returning the default value for its
+rem type, and the caller's half-built expression carries on with that -- the same
+rem thing falling off the end of a body always does. The 1000 keeps the overlap
+rem honest at the same time.
+rem
+rem tries7% IS THE GUARD. The definition sits immediately before the call on
+rem purpose, so a regression resumes onto that call; the fourth visit stops
+rem faulting, so a regression FAILS these assertions instead of hanging the suite.
+tries7% = 0
+caught7% = 0
+r7 = -1
+on error goto h7
+
+function tailfault(n)
+  tries7% = tries7% + 1
+  if tries7% > 3 then return -1
+  return no_such_name_at_all(n)
+endfunction
+
+r7 = 1000 + tailfault(5)
+goto after7
+h7:
+caught7% = caught7% + 1
+resume next
+after7:
+on error goto 0
+assert_eq(tries7%, 1, "the body ran once -- a regression calls it again for ever")
+assert_eq(caught7%, 1, "and the handler ran once")
+assert_eq(r7, 1000, "the function ended with its type's default and 1000 + it finished")
+
+test_case("onerror/... and a string function ends with the empty string")
+rem The default is the RETURN TYPE's, so the $ suffix decides it here.
+tries8% = 0
+s8$ = "unset"
+on error goto h8
+
+function tailfault$(s$)
+  tries8% = tries8% + 1
+  if tries8% > 3 then return "guard"
+  return no_such_name_at_all$(s$)
+endfunction
+
+s8$ = "[" + tailfault$("x") + "]"
+goto after8
+h8:
+resume next
+after8:
+on error goto 0
+assert_eq(tries8%, 1, "the body ran once")
+assert_eq(s8$, "[]", "the string function ended empty and the concatenation finished")
+
+test_case("onerror/the resume point follows the CALLER once the callee has returned")
+rem The current statement was left pointing INSIDE a function that had already
+rem returned, because only entering a body moved it and returning never moved it
+rem back. The fault here is the caller's own `/ 0`, and the resume point named a
+rem statement of plain9 -- a frame that no longer existed.
+rem
+rem THE HANDLER COUNT IS WHAT CATCHES IT. Ending that dead frame hands its default
+rem back into the MIDDLE of `plain9(1) / d9`, which divides by zero a second time,
+rem so the handler runs twice for one mistake; every other visible result of this
+rem test case is the same either way, and asserting them alone tested nothing.
+rem d9 is the guard -- a regression that instead resumes onto the faulting call
+rem comes back here, so the fourth visit removes the fault and these assertions
+rem fail instead of the suite hanging.
+tries9% = 0
+step9% = 0
+caught9% = 0
+d9 = 0
+q9 = -1
+on error goto h9
+
+function plain9(n)
+  tries9% = tries9% + 1
+  if tries9% > 3 then d9 = 1
+  return n
+endfunction
+
+q9 = plain9(1) / d9
+step9% = 7
+goto after9
+h9:
+caught9% = caught9% + 1
+resume next
+after9:
+on error goto 0
+assert_eq(caught9%, 1, "one fault, one handler run -- a stale resume point faults again")
+assert_eq(tries9%, 1, "the callee ran once")
+assert_eq(step9%, 7, "the statement after the failing one really ran")
+assert_eq(q9, -1, "and the failing assignment left its variable alone")
+
+test_case("onerror/`resume next` may END the call a re-entrant activation was launched for")
+rem The fault is the LAST statement of worker10, and worker10 is running under
+rem callfunc -- a NATIVE re-entry, whose frame has no return address (-1) because
+rem the activation stops by frame level instead. Ending the function there has to
+rem stop this activation the way opRetFunc does, with the value on the stack;
+rem resuming to that -1 is the out-of-bounds spin the third case above is about.
+hcount10% = 0
+r10 = callfunc("worker10")
+on error goto 0
+assert_eq(r10, 0, "callfunc got the ended function's default back")
+assert_eq(hcount10%, 1, "and the handler installed inside it ran once")
+
+function worker10()
+  on error call count10
+  return no_such_name_at_all(1)
+endfunction
+
+function count10(code, msg$)
+  hcount10% = hcount10% + 1
+  return 0
+endfunction
+
 function sumto(n)
   if n <= 0 then return 0
   return n + sumto(n - 1)

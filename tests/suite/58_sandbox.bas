@@ -75,11 +75,17 @@ assert_eq(file_writealltext("bin/../../p9b_sandbox_climb.txt", "x"), 0, "climbin
 
 test_case("sandbox/the perilous paths, which are refused with or without a root")
 
-rem These two hold even when no root is set: an empty path resolves to the
-rem root of the current drive, which is never a directory a program meant.
+rem This holds even when no root is set: an empty path resolves to the root of
+rem the current drive, which is never a directory a program meant.
+rem
+rem The two dir_delete calls that used to be here were removed on 2026-09-06.
+rem They passed -- the gate refused them, as it always had -- but one of them was
+rem spelled dir_delete("", 1), which is the RECURSIVE form and the exact call that
+rem once walked the root of the current drive. A suite file should not contain it
+rem at all. probe_sandbox now asks SandboxAllows the same question instead, which
+rem answers True or False and cannot delete anything.
 assert_eq(dir_create(""), 0, "an empty path is not a directory to create")
-assert_eq(dir_delete("", 1), 0, "nor one to delete")
-assert_eq(dir_delete(" ", 1), 0, "and neither is whitespace")
+assert_eq(dir_create(" "), 0, "and neither is whitespace")
 
 test_case("sandbox/a channel is bounded by the same root")
 

@@ -261,11 +261,37 @@ begin
   Report(Pos(LowerCase(RealPathOf(RootDir)), LowerCase(Answer)) = 1,
          'temppath$ answers inside the root (got "' + Answer + '")');
 
-  // --- rule 1 holds with NO sandbox at all -----------------------------------
-  RunUnder('', 'print dir_delete("", 1)' + LF);
-  Report(Answer = '0', 'an empty path is refused even with no root set');
-  RunUnder('', 'print dir_delete("' + {$IFDEF WINDOWS}'C:/'{$ELSE}'/'{$ENDIF} + '", 1)' + LF);
-  Report(Answer = '0', 'and so is a drive root');
+  { --- rule 1 holds with NO sandbox at all -----------------------------------
+
+    ASKED, NOT ATTEMPTED. This block used to drive the engine's recursive
+    directory-removal function, with no sandbox set, against the empty path and
+    against a drive root, and assert the answer was 0. It always was -- the gate
+    refused both before any removal was issued, on this version and on every
+    version before it -- but a test file that CONTAINS that call spelled against a
+    root is a loaded weapon lying on the bench. One editing slip, one guard that
+    stops holding, and the assertion meant to prove safety is the thing that
+    destroys the machine. This project has already lost thirteen working trees
+    that way; every runner carries a comment about it. The call is not written
+    here in any form, so there is nothing to copy and nothing to run by accident.
+
+    SandboxAllows is the gate itself -- the function dir_delete asks before acting
+    -- and it is a pure query returning True or False. Asking it proves exactly
+    what the old lines proved, including that rule 1 applies when no root is set,
+    with no code path from here to a deletion at all.
+
+    The end-to-end chain, that dir_delete really does consult this gate, is proven
+    above by 'a recursive dir_delete outside the root is refused', which names a
+    temporary directory this probe created. }
+  SetSandboxRoot('');
+  Report(not SandboxActive, 'no root is set for these');
+  Report(not SandboxAllows('', puDelete),
+         'an empty path is refused even with no root set');
+  Report(not SandboxAllows({$IFDEF WINDOWS}'C:/'{$ELSE}'/'{$ENDIF}, puDelete),
+         'and so is a drive root');
+  Report(not SandboxAllows({$IFDEF WINDOWS}'C:\'{$ELSE}'//'{$ENDIF}, puDelete),
+         'and the other spelling of it');
+  Report(SandboxAllows(OutDir, puDelete),
+         'while an ordinary directory is allowed, so the rule is not refusing everything');
 
   // --- and with no root, the ceiling costs nothing ----------------------------
   RunUnder('', 'print file_writealltext("' + Slash(OutDir) + '/unbounded.txt", "x")' + LF);

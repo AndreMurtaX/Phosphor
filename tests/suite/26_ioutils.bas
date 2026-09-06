@@ -1,4 +1,4 @@
-rem ---------------------------------------------------------------
+﻿rem ---------------------------------------------------------------
 rem IOUtilsLib. check-coverage.py reported 10/52: the whole
 rem directory, timestamp, byte and path half had never been run.
 rem
@@ -221,16 +221,24 @@ rem at the ROOT OF THE CURRENT DRIVE and deleted everything it could reach, then
 rem answered 1, because DirectoryExists("") is False and the post-check read the
 rem disaster as success. One line of BASIC.
 rem
-rem The guard runs BEFORE the recursive/non-recursive split, so these non-recursive
-rem calls -- harmless in themselves -- prove it fires for the recursive form too.
-rem The recursive form is deliberately NOT exercised here: a test must not be one
-rem edit away from being the disaster it is testing for.
-bs$ = chr$(92)
-assert_eq(dir_delete(""), 0, "an empty path is refused, not resolved to the drive root")
+rem NO dir_delete OF A ROOT IS CALLED HERE, in any form. This block used to make
+rem three non-recursive ones -- refused every time, on every version -- on the
+rem reasoning that the guard fires before the recursive split so the harmless
+rem spelling proves the dangerous one. That reasoning is sound and the file still
+rem should not contain the call: a test that names a drive root and a delete in the
+rem same line is one edit, or one regression in the guard, away from being the
+rem disaster it exists to prevent. This project has already lost thirteen working
+rem trees that way.
+rem
+rem The refusal itself is proven where it can be ASKED instead of attempted:
+rem tests/probe_sandbox.lpr calls SandboxAllows -- the gate dir_delete consults --
+rem on every spelling of a root, and IsPerilousPath directly. Both are pure
+rem functions that answer True or False and touch nothing.
+rem
+rem dir_create stays: making a directory is not destructive, and it exercises the
+rem same guard from the other side.
+assert_eq(dir_create(""), 0, "an empty path is refused -- ForceDirectories('') answers True having made nothing")
 assert_true(ioerror(), "and the refusal is recorded")
-assert_eq(dir_delete(bs$), 0, "a bare separator is a filesystem root, not a directory")
-assert_eq(dir_delete("C:" + bs$), 0, "and so is a drive root")
-assert_eq(dir_create(""), 0, "dir_create refuses it too -- ForceDirectories('') answers True having made nothing")
 
 rem the legitimate path is untouched by the guard
 gp$ = path_combine$(temppath$(), "phosphor_guard_ok")

@@ -17,6 +17,8 @@ Exit 0 = every filesystem call is gated. Exit 1 = a hole; the routine is named.
 Run standalone, or through scripts/test-suite.{ps1,sh} which runs it before the
 suite.
 """
+import glob
+import io
 import os
 import re
 import sys
@@ -107,6 +109,58 @@ def sources():
             yield p
 
 
+
+# --- no test may name a filesystem root and a removal in the same breath -------
+_SEP = r'\\/'          # both separators, spelled once
+ROOT_ARG = re.compile(
+    r'dir_delete\s*\(\s*(?:'
+    r'"\s*"'                          # the empty path, or whitespace only
+    r'|"[' + _SEP + r']+"'            # a bare separator: the filesystem root
+    r'|"[A-Za-z]:[' + _SEP + r']*"'   # C:  C:\  C:/  C:\\ ...
+    r'|"[A-Za-z]:"\s*\+'              # "C:" + something
+    r'|bs\$'                          # the bare-separator variable this tree uses
+    r')')
+
+
+def no_root_deletes():
+    """A test must never CALL the recursive remover on a drive or filesystem root.
+
+    Not because such a call would succeed -- the perilous-path rule refuses it,
+    and has since the rule was written -- but because a file that contains the
+    call spelled against a root is one edit, or one regression in that rule, away
+    from being the disaster it was written to prove against. This project has
+    already lost thirteen working trees to a defective dir_delete.
+
+    The property is proven where it can be ASKED instead of attempted:
+    tests/probe_sandbox.lpr calls SandboxAllows and IsPerilousPath, both pure
+    functions that answer True or False and touch nothing.
+
+    Comment lines are exempt -- prose explaining the history is not a call -- but
+    the spelling is discouraged even there.
+    """
+    bad = []
+    for pat in ('tests/**/*.bas', 'tests/**/*.lpr', 'examples/**/*.bas'):
+        for path in glob.glob(os.path.join(ROOT, pat), recursive=True):
+            for n, line in enumerate(io.open(path, encoding='utf-8',
+                                             errors='ignore'), 1):
+                stripped = line.strip()
+                if stripped.startswith(('rem ', "'", '//', '{', '*')):
+                    continue
+                if ROOT_ARG.search(line):
+                    rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
+                    bad.append((rel, n, stripped[:88]))
+    if bad:
+        print('A TEST CALLS THE RECURSIVE REMOVER ON A FILESYSTEM ROOT:')
+        for rel, n, text in bad:
+            print('  %s:%d  %s' % (rel, n, text))
+        print('')
+        print('Ask the gate instead of attempting the removal: SandboxAllows and')
+        print('IsPerilousPath both answer True or False and touch nothing. See the')
+        print('block in tests/probe_sandbox.lpr for the shape.')
+        return False
+    return True
+
+
 def main():
     holes = []
     gated = 0
@@ -146,6 +200,12 @@ def main():
         for key in sorted(unused):
             print('  ' + key)
         return 1
+
+    # The second rule this file carries: no test may CALL the recursive remover
+    # on a root. See no_root_deletes for why a passing test is not enough.
+    if not no_root_deletes():
+        return 1
+    print('and no test calls a recursive removal on a filesystem root.')
     return 0
 
 

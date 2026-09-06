@@ -41,8 +41,27 @@ rm -f "$exe"
 
 echo "compiler: $FPC"
 buildlog="$(mktemp)"
-"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
-  -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/host/packages" \
+# The LCL comes in because phosphor IS the GUI host now -- one binary that brings
+# the widgetset up when a session is reachable and stays a console interpreter
+# when there is not. NOTE the units it will name in its own uses clause: Gtk2Int
+# and InterfaceBase, never `Interfaces` -- that unit's initialization calls
+# CreateWidgetset, which opens the X display before main and is exactly what made
+# an LCL-linked binary unusable headless. The engine still sees none of it; the
+# boundary check above fails the build if a unit under engine/ reaches the LCL.
+cpu="$("$FPC" -iTP)"
+lcl=""
+for d in /usr/share/lazarus/*/lcl/units/${cpu}-linux /usr/lib/lazarus/*/lcl/units/${cpu}-linux ~/lazarus/lcl/units/${cpu}-linux; do
+  [ -d "$d/gtk2" ] && { lcl="$d"; break; }
+done
+[ -n "$lcl" ] || { echo "LCL gtk2 units not found (install lazarus/lcl-gtk2)"; exit 1; }
+lazroot="${lcl%/lcl/units/*}"
+
+"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
+  -Fu"$lcl/gtk2" -Fu"$lcl" \
+  -Fu"$lazroot/components/lazutils/lib/${cpu}-linux" \
+  -Fu"$lazroot/packager/units/${cpu}-linux" \
+  -Fu"$root/engine" -Fu"$root/engine/libs" \
+  -Fu"$root/host/gui/libs" -Fu"$root/host/packages" \
   -FU"$units" -FE"$bin" -o"$exe" \
   "$root/host/console/phosphor.lpr" >"$buildlog" 2>&1
 cat "$buildlog"

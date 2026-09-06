@@ -321,6 +321,43 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 31 · the owner said one binary; the reason for two was false.**
+  Phase 2 shipped two hosts and justified it in three documents: *the LCL cannot be
+  loaded on demand, because on Linux gtk2 opens the X display in a unit
+  initialization, before main — a runtime flag cannot undo a link-time decision.*
+  Every clause of that is true except the one that mattered. **Linking the LCL is
+  not what connects to the display.** The `Interfaces` unit contains one thing: a
+  `CreateWidgetset` call in its initialization section. Name the widgetset unit
+  directly (`Gtk2Int` / `Win32Int` with `InterfaceBase`) and the same code links
+  while the call stays yours to make — or not.
+  - **The owner proposed it; I had twice explained why it was impossible.** Both
+    times I was quoting the project's own documents back, which is not evidence.
+    The experiment took four minutes: three programs, headless and with a display,
+    on both platforms. `uses Forms, Gtk2Int, InterfaceBase` without the call —
+    alive, exit 0, headless. **When a design is defended by a measurement, re-run
+    the measurement before defending it again.** A number in a document is a claim
+    about the past.
+  - **What the merge deleted.** `phosphorgui`, `build-gui.{ps1,sh}`,
+    `PhosphorDisplayGuard` and the `uses`-clause ordering check that existed only
+    to protect its trick, the `--gui` flag's handoff, and the exec of a second
+    process. Two defects found the day before **evaporated with them**: `--sandbox`
+    could no longer be dropped on the way to a child that never runs, and `pack`
+    produces a working GUI application because the stub is the complete binary.
+    *A defect that a design change makes unreachable is better closed than fixed.*
+  - **What it cost, measured rather than estimated:** `phosphor` goes from 1.3 MB
+    to 4.5 MB on Windows and 7.9 MB on Linux, and `pack` copies the running binary,
+    so every packed application carries it. Stripping saves nothing — that is gtk
+    bindings, not symbols. The owner was told the number before the work started
+    and judged it irrelevant; the point of the rule is that the number was *known*
+    and *theirs to judge*, not that it was small.
+  - **The degradation is now a missing name, not a dead process.** Where no session
+    is reachable, `form@()` answers *no function form@* — an ordinary catchable
+    error — and every other library still works. Before, the binary that could open
+    a window died inside gtk before its own first line.
+  - **The dated record was annotated, not rewritten.** `roadmap-phase2.md` still
+    says what phase 2 built and why it believed the split was necessary, with a
+    note at the top saying what later replaced it and that the reason was wrong. A
+    plan that edits its own history cannot be audited.
 - **2026-09-06 · round 30 · the three paths nothing reached, and a defect in each.**
   Round 29 ended by naming what still had no automated visitor: the `--gui`
   handoff, the Unix keyboard, and a real message loop. All three are closed, and

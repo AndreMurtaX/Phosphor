@@ -241,7 +241,8 @@ else {
 #   check-seams.py     every host either fills each engine seam (OnOutput, OnInput,
 #                      OnBreakpoint, HostServices) or records why it is right to
 #                      leave it nil -- a nil seam answers silently, which is how
-#                      phosphorgui shipped answering every INPUT with an empty line
+#                      the GUI host of the day shipped answering every INPUT with an
+#                      empty line; it has since been merged into phosphor
 # They are run HERE, in the acceptance gate, rather than in the build: building
 # should not need Python, but passing the suite should mean the invariants hold.
 # A missing interpreter is a FAILURE, not a skip -- a gate that quietly does not run

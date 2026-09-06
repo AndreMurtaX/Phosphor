@@ -57,37 +57,37 @@ bin\phosphor.exe run hello.bas
 phosphor run  <file.bas>            run a program
 phosphor compile <in.bas> <out.pbc> compile to portable .pbc bytecode
 phosphor pack <in.bas> <out>        build a standalone self-extracting executable
-phosphor --gui <file.bas>           run a GUI program (hands over to phosphorgui)
 phosphor                            an interactive REPL (state persists)
 phosphor --version | --help | --diag
 ```
 
-Two binaries ship, and the split is deliberate. `phosphor` is the headless host —
-engine plus every non-GUI package — and works over a pipe, in CI and on a server with
-no display. `phosphorgui` (built by `scripts/build-gui.ps1` / `.sh`) is the **complete**
-runner: the same packages *plus* the 426 LCL GUI functions. `phosphor --gui` hands over
-to it, so one command reaches everything.
+**One binary, and it decides at startup.** `phosphor` links the LCL and asks a
+single question when it starts: is a graphical session reachable? If it is, it brings
+the widgetset up and registers the 426 LCL GUI functions alongside everything else; if
+is not, it registers none of them and is a plain console interpreter. A GUI program
+therefore needs no flag and no second file, and a `.bas` that never opens a window runs
+identically on a desktop, over a pipe, in CI and on a headless server.
 
-The LCL cannot simply be loaded on demand: on Linux the gtk2 widgetset opens the X
-display in a unit *initialization* section, before `main`, so a binary that merely links
-it exits with `cannot open display` wherever none is reachable — a runtime flag cannot
-undo a link-time decision.
+This works because **linking the LCL is not what connects to the display**. The unit
+everyone reaches for, `Interfaces`, contains one thing: a `CreateWidgetset` call in its
+*initialization* section — and on gtk2 that call opens the X display, before `main`,
+which is why a binary that merely listed it died wherever no session existed. Name the
+widgetset unit directly (`Gtk2Int` / `Win32Int` with `InterfaceBase`) and the same code
+links while the call stays ours to make, when we have already checked. Measured both
+ways on both platforms before this was built.
 
-Both binaries therefore check for a session first and say so plainly instead of letting
-gtk print its bare warning: with neither `DISPLAY` nor `WAYLAND_DISPLAY` set they
-explain the problem, suggest `DISPLAY=:0 phosphor --gui …` or `phosphor run …`, and exit
-with code **3** (distinct from `1` program error and `2` usage, so a script can tell them
-apart). `phosphorgui` manages this by listing a guard unit *before* `Interfaces`, which
-puts its initialization ahead of the widgetset's. Windows needs no display, so the guard
-is Unix-only.
+Where no session is reachable, a program that calls a GUI function is told exactly
+that — `no function form@` — rather than the process dying inside gtk before `main`.
+Windows always has the GUI: the win32 widgetset draws through USER32 and needs no
+display server.
 
-**Compiling needs neither host**: the compiler is host-agnostic, so `phosphor compile
-<gui-app.bas> <out.pbc>` already works — and both runners accept either a `.bas` or the
-`.pbc` it produces.
+**Compiling needs no session either**: the compiler is host-agnostic, so `phosphor
+compile <gui-app.bas> <out.pbc>` works on a headless machine, and `phosphor pack` makes
+a standalone GUI application — the stub is this same complete binary.
 
 `phosphor` (the console host) is the develop-compile-run tool. There is no dedicated
-IDE — write `.bas` in any editor and run it. For a GUI program, `phosphorgui
-<file.bas>` runs a `.bas` that builds an LCL window; to embed the engine in your own
+IDE — write `.bas` in any editor and run it. A GUI program is run the same way,
+`phosphor run <file.bas>`, and builds an LCL window; to embed the engine in your own
 Pascal program, see [docs/embedding.md](docs/embedding.md).
 
 ## Learn the language
@@ -119,12 +119,12 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `engine/`        | the interpreter library. Host-agnostic, GUI-free.                |
 | `engine/libs/`   | the standard built-in libraries (Str, Num, Array, Dict, Json, …).|
 | `host/console/`  | the `phosphor` CLI: run / compile / pack / REPL.                 |
-| `host/gui/`      | `phosphorgui`, the LCL GUI host.                                 |
+| `host/gui/`      | the 17 LCL GUI packages under `libs/`, and `phosphorguitest`, the headless runner for the GUI suite. The GUI *host* is `phosphor` itself. |
 | `host/embed/`    | an example of embedding the engine.                              |
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs — and they are RUN: `test-examples` byte-compares each to a golden (a windowed one is compiled, since the compiler needs no display). |
-| `scripts/`       | `build`, `build-gui`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the four source gates `coverage.py`, `check-codepage.py`, `check-sandbox.py` and `check-seams.py`.|
+| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the four source gates `coverage.py`, `check-codepage.py`, `check-sandbox.py` and `check-seams.py`.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

@@ -107,67 +107,59 @@ foreach ($name in $manifest) {
 }
 
 
-# --- the --gui handoff --------------------------------------------------------
-# `phosphor --gui <file>` is what a person types to run a GUI program, and until
-# now nothing ran it. It makes four decisions -- is there a graphical session, is
-# phosphorgui beside me, spawn it, hand back its exit code -- and each is checked
-# here. The fixtures open no window: the handoff is the subject, and a window
-# would only hide it.
+# --- host mode: one binary that decides ---------------------------------------
+# phosphor links the LCL and brings the widgetset up only when a graphical
+# session is reachable, registering the GUI functions with it. On Windows that is
+# always -- the win32 widgetset needs no display -- so what is checked here is
+# that a GUI program runs through the ONE binary with no flag, that a console
+# program still does, and that the exit code is the program's own. The
+# no-session half of the decision can only be produced on Unix and is checked in
+# test-gui.sh, which takes the session away for one command.
 Write-Host ''
 $console = Join-Path $binDir 'phosphor.exe'
-$guiExe  = Join-Path $binDir 'phosphorgui.exe'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build.ps1') | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL  handoff: phosphor did not build' -ForegroundColor Red; $allOk = $false }
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build-gui.ps1') | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL  handoff: phosphorgui did not build' -ForegroundColor Red; $allOk = $false }
-
-function Handoff-Case {
-    # NOT $Args: that is a PowerShell automatic variable, and a param by that
-    # name is silently ignored -- the first version of this ran phosphor with no
-    # arguments at all and got the REPL, four times over.
-    param([string] $Name, [string[]] $CliArgs, [int] $WantExit, [string] $WantText)
-    $o = Join-Path $tmp 'handoff.out'
-    $quoted = ($CliArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-    cmd /c "`"$console`" $quoted > `"$o`" 2>&1"
-    $code = $LASTEXITCODE
-    $text = Get-Content -Raw $o -ErrorAction SilentlyContinue
-    if ($null -eq $text) { $text = '' }
-    $okCode = ($code -eq $WantExit)
-    $okText = ($WantText -eq '') -or ($text -like "*$WantText*")
-    if ($okCode -and $okText) {
-        Write-Host ("PASS  handoff: {0}  (exit {1})" -f $Name, $code) -ForegroundColor Green
-        return $true
-    }
-    Write-Host ("FAIL  handoff: {0}" -f $Name) -ForegroundColor Red
-    if (-not $okCode) { Write-Host ("        wanted exit {0}, got {1}" -f $WantExit, $code) -ForegroundColor DarkGray }
-    if (-not $okText) { Write-Host ("        wanted text containing '{0}', got: {1}" -f $WantText, ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray }
-    return $false
-}
-
-$hoDir = Join-Path $gui 'handoff'
-if (Test-Path $guiExe) {
-    # 1. It really hands over: the child's stdout comes back unchanged, exit 0.
-    if (-not (Handoff-Case 'runs the program through phosphorgui' @('--gui', (Join-Path $hoDir 'hello.bas')) 0 'handoff ok')) { $allOk = $false }
-
-    # 2. And it hands back the child's FAILURE. A wrapper that swallows the
-    #    child's status reports every run as a success.
-    if (-not (Handoff-Case 'gives back the failing exit code' @('--gui', (Join-Path $hoDir 'fails.bas')) 1 'about to fail')) { $allOk = $false }
-
-    # 3. Usage: --gui with nothing to run.
-    if (-not (Handoff-Case 'refuses --gui with no file' @('--gui') 2 'needs a file to run')) { $allOk = $false }
-
-    # 4. The message when phosphorgui is not beside it. Hidden and put straight
-    #    back, so a failure here cannot leave the tree without its binary.
-    $hidden = Join-Path $binDir 'phosphorgui.hidden'
-    Rename-Item -Path $guiExe -NewName 'phosphorgui.hidden' -Force
-    try {
-        if (-not (Handoff-Case 'says what is missing when phosphorgui is not there' @('--gui', (Join-Path $hoDir 'hello.bas')) 2 'needs phosphorgui beside this binary')) { $allOk = $false }
-    } finally {
-        Rename-Item -Path $hidden -NewName 'phosphorgui.exe' -Force
-    }
-} else {
-    Write-Host 'FAIL  handoff: phosphorgui.exe is not present, so the handoff was not tested' -ForegroundColor Red
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
+    Write-Host 'FAIL  hostmode: phosphor did not build' -ForegroundColor Red
     $allOk = $false
+} else {
+    function Host-Case {
+        # NOT $Args: that is a PowerShell automatic variable and a param by that
+        # name is silently ignored, which once ran phosphor with no arguments at
+        # all and got the REPL back, four times over.
+        param([string] $Name, [string[]] $CliArgs, [int] $WantExit, [string] $WantText)
+        $o = Join-Path $tmp 'hostmode.out'
+        $quoted = ($CliArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
+        cmd /c "`"$console`" $quoted > `"$o`" 2>&1"
+        $code = $LASTEXITCODE
+        $text = Get-Content -Raw $o -ErrorAction SilentlyContinue
+        if ($null -eq $text) { $text = '' }
+        $okCode = ($code -eq $WantExit)
+        $okText = ($WantText -eq '') -or ($text -like "*$WantText*")
+        if ($okCode -and $okText) {
+            Write-Host ("PASS  hostmode: {0}  (exit {1})" -f $Name, $code) -ForegroundColor Green
+            return $true
+        }
+        Write-Host ("FAIL  hostmode: {0}" -f $Name) -ForegroundColor Red
+        if (-not $okCode) { Write-Host ("        wanted exit {0}, got {1}" -f $WantExit, $code) -ForegroundColor DarkGray }
+        if (-not $okText) { Write-Host ("        wanted text containing '{0}', got: {1}" -f $WantText, ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray }
+        return $false
+    }
+
+    $hm = Join-Path $gui 'hostmode'
+    # 1. A GUI program, with no flag and no second binary.
+    if (-not (Host-Case 'a GUI program runs with no flag' @('run', (Join-Path $hm 'gui.bas')) 0 'gui ok: registrado')) { $allOk = $false }
+    # 2. A console program through the same binary, unchanged.
+    if (-not (Host-Case 'and a console program still does' @('run', (Join-Path $hm 'hello.bas')) 0 'console ok')) { $allOk = $false }
+    # 3. The exit code is the program's.
+    if (-not (Host-Case 'a failing program fails the run' @('run', (Join-Path $hm 'fails.bas')) 1 'about to fail')) { $allOk = $false }
+    # 4. --gui is accepted and says it is not needed, rather than being ignored.
+    if (-not (Host-Case '--gui is accepted and answered' @('--gui', 'run', (Join-Path $hm 'gui.bas')) 0 'no longer needed')) { $allOk = $false }
+    # 5. THE SANDBOX REACHES A GUI RUN. It could not before: the console host
+    #    spawned a second binary and passed it only the file name, so --sandbox
+    #    was accepted and silently dropped on exactly the path a GUI program took.
+    $cage = Join-Path $tmp 'phosphor-hostmode-cage'
+    New-Item -ItemType Directory -Force $cage | Out-Null
+    if (-not (Host-Case 'the sandbox root reaches a GUI program' @('--sandbox', $cage, 'run', (Join-Path $hm 'gui.bas')) 0 'gui ok')) { $allOk = $false }
 }
 
 Write-Host ''

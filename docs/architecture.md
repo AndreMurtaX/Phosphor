@@ -136,36 +136,45 @@ minefield otherwise.
    binary is the CLI bare and the application packed. See
    [roadmap-phase3.md](roadmap-phase3.md), which carries the per-step record.
 
-## The GUI host and the display guard
+## One host, and how it can be both
 
-Two host binaries ship because the LCL cannot be loaded on demand. On Linux the
-gtk2 widgetset opens the X display from a unit *initialization* section, before
-`main` runs — so a binary that merely **links** the LCL dies with gtk's bare
-`cannot open display` wherever no session is reachable, and no runtime flag can
-undo that. The headless `phosphor` therefore does not link it; `phosphorgui`
-does, and `phosphor --gui` hands over.
+`phosphor` is the only shipped binary. It links the LCL and decides at startup
+whether to use it: with a graphical session reachable it creates the widgetset,
+calls `Application.Initialize` and registers the GUI function packages; with none
+it does neither, and runs as a console interpreter with the GUI names simply
+absent from the registry.
 
-That same load order is what makes the guard work, and it is fragile enough to
-state plainly:
+**Why that is possible at all**, since it was once believed not to be: linking the
+LCL does not connect to the display. The `Interfaces` unit — the usual way in —
+holds a single `CreateWidgetset` call in its *initialization* section, and on gtk2
+that call is what opens the X display. Initialization runs before `main`, so a
+binary that listed `Interfaces` was dead before its own first line wherever no
+session existed. `phosphor` therefore names the widgetset unit directly
+(`Gtk2Int` on Unix, `Win32Int` on Windows, with `InterfaceBase`) and makes the
+call itself, from `RegisterAllPackages`, after `GuiPossible` has answered.
 
-> `PhosphorDisplayGuard` **must stay first in `phosphorgui.lpr`'s `uses`
-> clause**, ahead of `Interfaces`. Unit initialization runs in `uses` order, so
-> first means *before the widgetset touches the display*. Move it and the guard
-> still compiles, still passes its tests on Windows, and silently stops working
-> on Linux.
+Measured on both platforms before the design was adopted:
 
-The guard checks `DISPLAY` and `WAYLAND_DISPLAY` (either is enough), and when
-both are empty it explains the situation, points at `DISPLAY=:0 phosphor --gui
-<file>` and at `phosphor run <file>`, and halts with **exit code 3** — separate
-from `1` (program error) and `2` (usage) so a script can tell "no display" from
-"your program failed". `phosphor --gui` runs the same check inline before it
-execs, so the user gets a message either way rather than gtk's bare `cannot open
-display`. The two texts are written separately and each names its own binary, so
-they read alike without being byte-identical. On
-Windows there is no display to miss, so the whole guard is `{$IFDEF UNIX}`.
+| what the program did | headless | with a display |
+| --- | --- | --- |
+| `uses Forms` alone | does not link — the LCL needs a widgetset unit present | — |
+| `uses Forms, Gtk2Int, InterfaceBase`, never calling `CreateWidgetset` | alive, exit 0 | alive, exit 0 |
+| the same, calling `CreateWidgetset` only when `DISPLAY` is set | runs as a console program | widgetset up, `Application.Initialize` passes |
 
-A `DISPLAY` that is *set but broken* still fails inside gtk; the guard is aimed
-at the common, confusing case — an ssh session, a service, a container.
+`GuiPossible` answers `True` unconditionally on Windows — the win32 widgetset
+draws through USER32 and needs no display server — and on Unix checks `DISPLAY`
+and `WAYLAND_DISPLAY`, either being enough. The question is asked *before*
+`CreateWidgetset` rather than after, because gtk offers no way to fail politely: a
+`DISPLAY` that is set but broken still dies inside gtk, and the check is aimed at
+the common confusing case — an ssh session, a service, a container.
+
+What a program sees where there is no session: `form@()` answers *no function
+form@*, an ordinary missing-name error it can catch, and every non-GUI library
+works. That is the whole degradation.
+
+The engine is untouched by any of this. `engine/` still may not name an LCL unit,
+and `scripts/build.{ps1,sh}` still fails the build if one does — the widgetset,
+the GUI packages and the decision all live in `host/`.
 
 ## Linux
 
@@ -197,7 +206,7 @@ Two supported ways to get a Linux binary, in order of preference:
 
   ```
   bash scripts/build.sh          # build the console host
-  bash scripts/build-gui.sh      # build phosphorgui (needs the LCL; see below)
+                                 # (the one build; it links the LCL -- see above)
   bash scripts/test.sh           # skeleton smoke test (byte-exact golden)
   bash scripts/test-suite.sh     # the oracle suite + negatives
   bash scripts/test-classic.sh   # the standard-BASIC command set + the REPL

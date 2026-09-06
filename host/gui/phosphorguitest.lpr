@@ -107,12 +107,12 @@ begin
         // assigning '' to AsText left the previous text in place, so copytext$("")
         // reported success and the next pastetext$ answered the old value.
         Clipboard.Clear;
-        if not Clipboard.HasFormat(CF_TEXT) then Exit(True);
+        if not Clipboard.HasFormat(CF_Text()) then Exit(True);
       end
       else
       begin
         Clipboard.AsText := AText;
-        if Clipboard.HasFormat(CF_TEXT) and (Clipboard.AsText = AText) then Exit(True);
+        if Clipboard.HasFormat(CF_Text()) and (Clipboard.AsText = AText) then Exit(True);
       end;
     except
       on Exception do ;    // held by someone else; wait and try again
@@ -130,7 +130,7 @@ begin
   for i := 1 to 3 do
   begin
     try
-      if Clipboard.HasFormat(CF_TEXT) then
+      if Clipboard.HasFormat(CF_Text()) then
       begin
         AText := Clipboard.AsText;
         Exit(True);

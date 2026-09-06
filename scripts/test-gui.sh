@@ -66,18 +66,20 @@ for name in $manifest; do
 done
 
 
-# --- the --gui handoff --------------------------------------------------------
-# `phosphor --gui <file>` is what a person types to run a GUI program, and until
-# now nothing ran it. It makes four decisions -- is there a graphical session, is
-# phosphorgui beside me, spawn it, hand back its exit code. The fixtures under
-# tests/gui/handoff/ open no window: the handoff is the subject.
+# --- host mode: one binary that decides ---------------------------------------
+# phosphor links the LCL and calls CreateWidgetset itself, only when a graphical
+# session is reachable. Unix is the platform that can produce BOTH answers, so
+# both are checked here -- and the no-session one is produced deliberately, by
+# taking the session away for one command, rather than by hoping the machine
+# running the suite happens not to have one. (This script exports DISPLAY=:0 near
+# the top so the GUI files can reach the live session, which means asking "is
+# DISPLAY empty?" here would always answer no.)
 echo
 console="$bin/phosphor"
-guiexe="$bin/phosphorgui"
-hodir="$gui/handoff"
-bash "$here/build.sh" >/dev/null 2>&1 || { echo "FAIL  handoff: phosphor did not build"; allok=1; }
+hm="$gui/hostmode"
+bash "$here/build.sh" > "$out" 2>&1 || { echo "FAIL  hostmode: phosphor did not build"; sed 's/^/        /' "$out" | tail -12; allok=1; }
 
-handoff_case() {   # name, want_exit, want_text, args...
+host_case() {   # name, want_exit, want_text, args...
   local name="$1" wantexit="$2" wanttext="$3"; shift 3
   local o="$out"
   "$console" "$@" > "$o" 2>&1; local code=$?
@@ -85,9 +87,9 @@ handoff_case() {   # name, want_exit, want_text, args...
   [ "$code" -eq "$wantexit" ] || ok=1
   if [ -n "$wanttext" ] && ! grep -qF -- "$wanttext" "$o"; then ok=1; fi
   if [ "$ok" -eq 0 ]; then
-    echo "PASS  handoff: $name  (exit $code)"
+    echo "PASS  hostmode: $name  (exit $code)"
   else
-    echo "FAIL  handoff: $name"
+    echo "FAIL  hostmode: $name"
     echo "        wanted exit $wantexit, got $code"
     [ -n "$wanttext" ] && echo "        wanted text containing '$wanttext'"
     sed 's/^/        /' "$o"
@@ -95,39 +97,43 @@ handoff_case() {   # name, want_exit, want_text, args...
   fi
 }
 
-# The no-session branch is tested UNCONDITIONALLY, by taking the session away for
-# one command. This script exports DISPLAY=:0 near the top so the suite can reach
-# the logged-in session, which means asking "is DISPLAY empty?" here would only
-# ever answer no -- the branch that exists for every ssh session and every CI
-# container would never be exercised by the machine that has one.
-env -u DISPLAY -u WAYLAND_DISPLAY "$console" --gui "$hodir/hello.bas" > "$out" 2>&1
-code=$?
-if [ "$code" -eq 3 ] && grep -qF "needs a graphical session" "$out" && grep -qF "phosphor run" "$out"; then
-  echo "PASS  handoff: refuses without a graphical session, and points at the console host (exit 3)"
-else
-  echo "FAIL  handoff: refuses without a graphical session"
-  echo "        wanted exit 3 and the guidance text, got exit $code"
-  sed 's/^/        /' "$out"
-  allok=1
-fi
-
-# The rest needs a session and the child binary.
-if bash "$here/build-gui.sh" > "$out" 2>&1; then
-  if [ -x "$guiexe" ]; then
-    handoff_case "runs the program through phosphorgui" 0 "handoff ok" --gui "$hodir/hello.bas"
-    handoff_case "gives back the failing exit code" 1 "about to fail" --gui "$hodir/fails.bas"
-    handoff_case "refuses --gui with no file" 2 "needs a file to run" --gui
-    mv "$guiexe" "$guiexe.hidden"
-    handoff_case "says what is missing when phosphorgui is not there" 2 "needs phosphorgui beside this binary" --gui "$hodir/hello.bas"
-    mv "$guiexe.hidden" "$guiexe"
+host_case_nosession() {   # the same, with the session taken away
+  local name="$1" wantexit="$2" wanttext="$3"; shift 3
+  local o="$out"
+  env -u DISPLAY -u WAYLAND_DISPLAY "$console" "$@" > "$o" 2>&1; local code=$?
+  local ok=0
+  [ "$code" -eq "$wantexit" ] || ok=1
+  if [ -n "$wanttext" ] && ! grep -qF -- "$wanttext" "$o"; then ok=1; fi
+  if [ "$ok" -eq 0 ]; then
+    echo "PASS  hostmode: $name  (exit $code)"
   else
-    echo "FAIL  handoff: build-gui.sh reported success but produced no binary"
+    echo "FAIL  hostmode: $name"
+    echo "        wanted exit $wantexit, got $code"
+    [ -n "$wanttext" ] && echo "        wanted text containing '$wanttext'"
+    sed 's/^/        /' "$o"
     allok=1
   fi
+}
+
+if [ -x "$console" ]; then
+  # --- with a session ---------------------------------------------------------
+  host_case "a GUI program runs with no flag" 0 "gui ok: registrado" run "$hm/gui.bas"
+  host_case "and a console program still does" 0 "console ok" run "$hm/hello.bas"
+  host_case "a failing program fails the run" 1 "about to fail" run "$hm/fails.bas"
+  host_case "--gui is accepted and answered" 0 "no longer needed" --gui run "$hm/gui.bas"
+  cage="$(mktemp -d)"
+  host_case "the sandbox root reaches a GUI program" 0 "gui ok" --sandbox "$cage" run "$hm/gui.bas"
+  rm -rf "$cage"
+
+  # --- WITHOUT a session: the half that only exists here ----------------------
+  # The binary links the LCL either way. With nothing to connect to it must not
+  # try -- it must stay a console interpreter, which is the entire reason the
+  # widgetset is created by us instead of by a unit initialization.
+  host_case_nosession "with no session it is still a console interpreter" 0 "console ok" run "$hm/hello.bas"
+  # And the GUI functions are simply NOT REGISTERED, which the program is told.
+  host_case_nosession "and the GUI functions are not registered" 1 "no function form@" run "$hm/gui.bas"
 else
-  # Not a silent skip, and not a bare "did not build": the compiler said why.
-  echo "FAIL  handoff: phosphorgui did not build"
-  sed 's/^/        /' "$out" | tail -12
+  echo "FAIL  hostmode: no phosphor binary, so host mode was not tested"
   allok=1
 fi
 

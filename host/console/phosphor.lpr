@@ -15,7 +15,10 @@
     phosphor --sandbox <dir> <file>  confine every path the script names to <dir>
     phosphor compile <in.bas> <out.pbc>   compile to portable bytecode
     phosphor pack <in.bas> <out>     make a standalone executable (stub + payload)
-    phosphor --gui <file.bas>        run a GUI program (hands over to phosphorgui)
+    phosphor run <gui-app.bas>       a GUI program needs no flag: this binary
+                                     brings the widgetset up when a session is
+                                     reachable, and runs as a plain console
+                                     interpreter when it is not
     phosphor                         REPL
     phosphor --diag                  print console detection + a known UTF-8 line
     phosphor --version | --help
@@ -39,8 +42,22 @@ program phosphor;
 uses
   {$IFDEF WINDOWS}Windows,{$ENDIF}
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
-  SysUtils, Classes, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes, PhosphorBytecode,
-  PhosphorRegistry,
+  // The LCL, named by its PARTS. Deliberately NOT `Interfaces`: that unit's only
+  // content is a CreateWidgetset call in its initialization section, and on gtk2
+  // that call opens the X display -- before main, so a binary that merely listed
+  // it died on any machine without a session. Naming the widgetset unit directly
+  // links the same code and leaves the call to us, to make when a session is
+  // actually there. This is the whole reason one binary can do both jobs.
+  Forms, Clipbrd, LCLType, InterfaceBase,
+  {$IFDEF WINDOWS}Win32Int,{$ELSE}Gtk2Int,{$ENDIF}
+  SysUtils, Classes, PhosphorEngine, PhosphorValue, PhosphorCompiler, PhosphorOpcodes,
+  PhosphorBytecode, PhosphorRegistry,
+  // the GUI function packages -- registered only when a widgetset is up
+  PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
+  PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
+  PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
+  PhosphorImageLib, PhosphorGridLib, PhosphorTreeListLib, PhosphorCanvasLib,
+  PhosphorDialogLib, PhosphorMiscLib,
   // This host opts into EVERY shipped function package, so a program run, compiled
   // or packed by `phosphor` can reach the whole library surface (~700 built-ins).
   // The external-dependency packages (sqlite, http) load their libraries lazily,
@@ -193,16 +210,174 @@ begin
   Result := True;
 end;
 
-{ Register every shipped function package into a registry, so a program run,
-  compiled or packed by this host can reach the whole library surface. }
-procedure RegisterAllPackages(Reg: TPhosphorRegistry);
+{ Is a graphical session reachable?
+
+  Windows: always. The win32 widgetset draws through USER32 and needs no display
+  server, so a console binary can bring it up and nothing is lost when it does.
+
+  Unix: only with a session to connect to. gtk2's CreateWidgetset opens the X
+  display and there is no way to ask it to fail politely, so the question has to
+  be answered BEFORE the call rather than after it. }
+function GuiPossible: Boolean;
 begin
+  {$IFDEF WINDOWS}
+  Result := True;
+  {$ELSE}
+  Result := (GetEnvironmentVariable('DISPLAY') <> '') or
+            (GetEnvironmentVariable('WAYLAND_DISPLAY') <> '');
+  {$ENDIF}
+end;
+
+type
+  { The host services a windowed program needs: an event pump and the clipboard.
+    The engine only ever offers the seam; this is a host filling it. }
+  TGuiServices = class
+    function Pump: Integer;
+    function PumpOne: Integer;
+    function ClipCopy(const AText: String): Boolean;
+    function ClipPaste(out AText: String): Boolean;
+  end;
+
+var
+  GGuiUp: Boolean = False;       // the widgetset has been created
+  GGuiSvc: TGuiServices = nil;
+
+function TGuiServices.Pump: Integer;
+begin
+  Application.ProcessMessages;
+  Result := 1;
+end;
+
+function TGuiServices.PumpOne: Integer;
+begin
+  Application.HandleMessage;
+  Result := 1;
+end;
+
+{ The clipboard is a contended OS resource: every access opens and closes it, and
+  another process holding it at that instant makes the attempt fail. A single try
+  is a coin flip a script would have to code around. The write is also not
+  synchronous -- a paste issued straight after a copy read the PREVIOUS contents
+  -- so the copy confirms before it answers, and storing '' means CLEARING, which
+  assigning '' to AsText does not do. }
+function ClipRetryCopy(const AText: String): Boolean;
+var i: Integer;
+begin
+  for i := 1 to 6 do
+  begin
+    try
+      if AText = '' then
+      begin
+        Clipboard.Clear;
+        if not Clipboard.HasFormat(CF_Text()) then Exit(True);
+      end
+      else
+      begin
+        Clipboard.AsText := AText;
+        if Clipboard.HasFormat(CF_Text()) and
+           (Clipboard.AsText = AText) then Exit(True);
+      end;
+    except
+      on Exception do ;
+    end;
+    Sleep(15);
+  end;
+  Result := False;
+end;
+
+function ClipRetryPaste(out AText: String): Boolean;
+var i: Integer; threw: Boolean;
+begin
+  AText := '';
+  threw := False;
+  for i := 1 to 3 do
+  begin
+    try
+      if Clipboard.HasFormat(CF_Text()) then
+      begin
+        AText := Clipboard.AsText;
+        Exit(True);
+      end;
+    except
+      on Exception do threw := True;
+    end;
+    Sleep(15);
+  end;
+  // No text after three tries: either the clipboard genuinely holds none --
+  // readable, and '' is the true answer -- or every attempt failed, which is not
+  // the same thing. Told apart by persistence, and the bound is stated.
+  Result := not threw;
+end;
+
+function TGuiServices.ClipCopy(const AText: String): Boolean;
+begin
+  Result := ClipRetryCopy(AText);
+end;
+
+function TGuiServices.ClipPaste(out AText: String): Boolean;
+begin
+  Result := ClipRetryPaste(AText);
+end;
+
+{ Bring the widgetset up. This is what `uses Interfaces` would have done in its
+  initialization section, done here instead: once, on purpose, and only when
+  GuiPossible has already said there is something to connect to. }
+procedure StartGui;
+begin
+  if GGuiUp then Exit;
+  {$IFDEF WINDOWS}
+  CreateWidgetset(TWin32WidgetSet);
+  {$ELSE}
+  CreateWidgetset(TGtk2WidgetSet);
+  {$ENDIF}
+  Application.Initialize;
+  GGuiUp := True;
+end;
+
+{ Register every shipped function package, so a program run, compiled or packed
+  by this host can reach the whole library surface -- INCLUDING the GUI, when a
+  session is there to draw on. Where it is not, the GUI names are simply not
+  registered and a program that calls one is told so; everything else works. }
+procedure RegisterAllPackages(AEng: TPhosphorEngine);
+var
+  Reg: TPhosphorRegistry;
+  svc: THostServices;
+begin
+  Reg := AEng.Registry;
   RegisterCrtFuncs(Reg);
   RegisterBase64Funcs(Reg);
   RegisterZipFuncs(Reg);
   RegisterGzipFuncs(Reg);
   RegisterHttpFuncs(Reg);
   RegisterSqliteFuncs(Reg);
+
+  if not GuiPossible then Exit;
+
+  StartGui;
+  RegisterGuiCoreFuncs(Reg);
+  RegisterControlFuncs(Reg);
+  RegisterFormFuncs(Reg);
+  RegisterButtonFuncs(Reg);
+  RegisterLabelFuncs(Reg);
+  RegisterEditFuncs(Reg);
+  RegisterChoiceFuncs(Reg);
+  RegisterContainerFuncs(Reg);
+  RegisterRangeFuncs(Reg);
+  RegisterMenuFuncs(Reg);
+  RegisterTimerFuncs(Reg);
+  RegisterImageFuncs(Reg);
+  RegisterGridFuncs(Reg);
+  RegisterTreeListFuncs(Reg);
+  RegisterCanvasFuncs(Reg);
+  RegisterDialogFuncs(Reg);
+  RegisterMiscFuncs(Reg);
+
+  if GGuiSvc = nil then GGuiSvc := TGuiServices.Create();
+  svc.ProcessMessages := @GGuiSvc.Pump;
+  svc.HandleMessage := @GGuiSvc.PumpOne;
+  svc.ClipboardCopy := @GGuiSvc.ClipCopy;
+  svc.ClipboardPaste := @GGuiSvc.ClipPaste;
+  AEng.HostServices := svc;
 end;
 
 { Reads a whole file as raw bytes and strips a leading UTF-8 BOM if present, so
@@ -293,7 +468,7 @@ begin
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
-    RegisterAllPackages(eng.Registry);
+    RegisterAllPackages(eng);
     if IsBytecode(APath) then
     begin
       // a precompiled .pbc: run it without the lexer/compiler
@@ -447,7 +622,7 @@ begin
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
-    RegisterAllPackages(eng.Registry);
+    RegisterAllPackages(eng);
     line := eng.RunBytecode(APayload);
     if line <> 0 then begin Writeln(StdErr, Format('phosphor: %d: %s', [line, eng.ErrorMessage])); Exit(1); end;
     Result := 0;
@@ -469,61 +644,6 @@ begin
             (AMsg = 'expected ''until''');
 end;
 
-{ `phosphor --gui <file.bas>` hands over to phosphorgui, the COMPLETE runner (engine
-  + every package + the LCL GUI libraries). It is a separate binary on purpose.
-
-  Why a `--gui` flag cannot simply load the LCL in-process: on Linux the gtk2
-  widgetset connects to the X display in the `Interfaces` unit's INITIALIZATION
-  section -- before main runs. Measured on the project VM: an LCL-linked binary that
-  never calls Application.Initialize still prints "cannot open display" and exits 1
-  when no display is reachable, while the same binary runs fine (exit 0) with
-  DISPLAY set to a live session. Linking is a compile-time decision, so no runtime
-  flag can undo it.
-
-  A display is often absent exactly where the console host is needed -- CI, a
-  container, a headless server, and every plain `ssh` session (including the one this
-  project's own Linux test runs arrive on, where DISPLAY is empty). Keeping the LCL
-  out of THIS binary is what lets `phosphor run`, the REPL and the byte-exact tests
-  work there. On Windows the win32 widgetset needs no display, so the split costs
-  nothing; it is kept on both platforms so the two behave alike.
-
-  Compiling needs neither host: the compiler is host-agnostic, so
-  `phosphor compile <gui-app.bas> <out.pbc>` already works for GUI programs. }
-function RunGui(const APath: String): Integer;
-var gui: String;
-begin
-  {$IFDEF UNIX}
-  // Check for a session BEFORE spawning the GUI binary: on Linux gtk2 opens the
-  // display in a unit initialization, so launching it without one produces a bare
-  // "cannot open display" that names neither Phosphor nor the remedy. (phosphorgui
-  // carries the same guard for when it is invoked directly; this one saves the
-  // process launch and keeps the message identical.) Windows needs no display.
-  if (GetEnvironmentVariable('DISPLAY') = '') and
-     (GetEnvironmentVariable('WAYLAND_DISPLAY') = '') then
-  begin
-    Writeln(StdErr, 'phosphor: --gui needs a graphical session, and neither DISPLAY');
-    Writeln(StdErr, '  nor WAYLAND_DISPLAY is set here (a plain ssh session, a service');
-    Writeln(StdErr, '  or a container usually has none).');
-    Writeln(StdErr, '');
-    Writeln(StdErr, '  Run it from a desktop session, or point it at one:');
-    Writeln(StdErr, '      DISPLAY=:0 phosphor --gui ' + APath);
-    Writeln(StdErr, '  A console program needs no display:');
-    Writeln(StdErr, '      phosphor run ' + APath);
-    Exit(3);
-  end;
-  {$ENDIF}
-  gui := ExtractFilePath(SelfExePath()) + 'phosphorgui' +
-         {$IFDEF WINDOWS}'.exe'{$ELSE}''{$ENDIF};
-  if not FileExists(gui) then
-  begin
-    Writeln(StdErr, 'phosphor: --gui needs phosphorgui beside this binary:');
-    Writeln(StdErr, '  ', gui);
-    Writeln(StdErr, '  build it with scripts/build-gui.ps1 (Windows) or scripts/build-gui.sh (Linux)');
-    Exit(2);
-  end;
-  Result := ExecuteProcess(gui, [APath]);
-end;
-
 function Repl: Integer;
 var
   host: TConsoleHost;
@@ -536,7 +656,7 @@ begin
   try
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
-    RegisterAllPackages(eng.Registry);
+    RegisterAllPackages(eng);
     host.Output('Phosphor BASIC ' + PhosphorVersion +
                 ' -- REPL. Variables and functions persist across lines.'#10 +
                 'Type a multi-line block and it waits for the terminator. ' +
@@ -592,7 +712,6 @@ end;
 var
   i, code: Integer;
   arg, filePath, outPath: String;
-  guiMode: Boolean;
   payload: TBytesStream;
 begin
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
@@ -627,7 +746,6 @@ begin
 
   filePath := '';
   outPath := '';
-  guiMode := False;
   i := 1;
   while i <= ParamCount do
   begin
@@ -645,7 +763,8 @@ begin
       Writeln('       phosphor --sandbox <dir> <file.bas>');
       Writeln('              confine the script to <dir>: every file, directory and');
       Writeln('              channel it names must resolve inside, or it is refused');
-      Writeln('       phosphor --gui <file.bas>     run a GUI program (via phosphorgui)');
+      Writeln('              a GUI program needs no flag: this binary brings the');
+      Writeln('              widgetset up when a graphical session is reachable');
       Writeln('       phosphor            (REPL)');
       Writeln('       phosphor --diag     (console/UTF-8 self-check)');
       Writeln('       phosphor --version');
@@ -654,7 +773,13 @@ begin
     else if arg = '--diag' then
       Halt(Diag())
     else if arg = '--gui' then
-      guiMode := True
+      // Accepted, and answered. It used to hand this file to a second binary;
+      // there is only one binary now and it brings the GUI up by itself when a
+      // session is there. Kept working rather than removed, and said out loud
+      // rather than ignored -- a flag that quietly does nothing is worse than one
+      // that is refused.
+      Writeln(StdErr, 'phosphor: --gui is no longer needed; this binary runs GUI ' +
+                      'programs directly (the flag is accepted and ignored)')
     else if arg = 'run' then
       { optional verb; ignore }
     else if arg = '--sandbox' then
@@ -685,16 +810,6 @@ begin
       Halt(2);
     end;
     Inc(i);
-  end;
-
-  if guiMode then
-  begin
-    if filePath = '' then
-    begin
-      Writeln(StdErr, 'phosphor: --gui needs a file to run');
-      Halt(2);
-    end;
-    Halt(RunGui(filePath));
   end;
 
   if filePath <> '' then

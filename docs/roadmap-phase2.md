@@ -14,6 +14,18 @@ an oracle for *shape*, not a thing to port.
 
 ## Status — PHASE 2 COMPLETE (2026-09-01)
 
+> **Later change, recorded here rather than edited into the text below
+> (2026-09-06):** the two hosts this phase shipped were **merged into one**.
+> `phosphorgui` is gone; `phosphor` links the LCL and brings the widgetset up
+> itself when a graphical session is reachable, so a GUI program needs no second
+> binary and no `--gui` flag. The reason phase 2 gave for the split — that linking
+> the LCL is what connects to the display — was wrong: the connection is a
+> `CreateWidgetset` call inside the `Interfaces` unit's initialization, and naming
+> the widgetset unit directly leaves that call to the host. See
+> [architecture.md](architecture.md), "One host, and how it can be both". What
+> this phase delivered is otherwise unchanged, and the text below is left as the
+> dated record of it.
+
 The GUI control library is delivered and the engine never learned it exists. What
 shipped:
 

@@ -30,6 +30,7 @@
 [CmdletBinding()]
 param(
     [string] $Fpc,
+    [string] $Lazarus = 'C:\lazarus',
     [ValidateSet('win64','linux')]
     [string] $TargetOS = 'win64'
 )
@@ -101,11 +102,24 @@ New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
 Write-Host "compiler: $fpcExe"
+# The LCL comes in because phosphor IS the GUI host now -- one binary that brings
+# the widgetset up when there is a session and stays a console interpreter when
+# there is not. The engine still never sees any of it: the boundary check above
+# scans engine/ and fails the build if a unit there reaches for the LCL.
+$lcl = Join-Path $Lazarus 'lcl\units\x86_64-win64'
+if (-not (Test-Path (Join-Path $lcl 'win32'))) {
+    throw "LCL win32 units not found under $lcl -- pass -Lazarus <dir>"
+}
 $args = @(
     '-Mobjfpc', '-Scghi', '-O2', '-vewn',
-    "-T$TargetOS",
+    "-T$TargetOS", '-dLCL', '-dLCLwin32',
+    "-Fu$(Join-Path $lcl 'win32')",
+    "-Fu$lcl",
+    "-Fu$(Join-Path $Lazarus 'components\lazutils\lib\x86_64-win64')",
+    "-Fu$(Join-Path $Lazarus 'packager\units\x86_64-win64')",
     "-Fu$engineDir",
     "-Fu$(Join-Path $engineDir 'libs')",
+    "-Fu$(Join-Path $root 'host\gui\libs')",
     "-Fu$(Join-Path $root 'host\packages')",
     "-FU$unitsDir",
     "-FE$binDir",

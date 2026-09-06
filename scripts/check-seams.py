@@ -8,11 +8,13 @@ DESIGNED behaviour -- a headless runner has no keyboard, and `input` answering
 empty is correct there. That is exactly what makes it dangerous: the nil case
 looks like the working case.
 
-`phosphorgui` assigned OnOutput and stopped. So `phosphor --gui interactive.bas`
-printed every prompt at once and answered every INPUT with an empty string, in a
-host with a console attached and a person at it. HostServices was nil in EVERY
-host in the tree, so processmessages() answered 0 and the clipboard answered ""
-in the one program written to provide them. Nothing failed. Nothing could.
+The GUI host of the day assigned OnOutput and stopped. So a GUI program printed
+every INPUT prompt at once and answered each with an empty string, with a console
+attached and a person at it. HostServices was nil in EVERY host in the tree, so
+processmessages() answered 0 and the clipboard answered "" in the one program
+written to provide them. Nothing failed. Nothing could. (That host has since been
+merged into `phosphor`, which fills all three -- the seam table is what keeps the
+merge honest.)
 
 WHAT THIS CHECKS. Every seam on TPhosphorEngine, against every shipped host under
 host/. A host either assigns the seam, or is listed below with the reason it does
@@ -38,9 +40,9 @@ SEAM_TYPES = ('TPhosphorOutputProc', 'TPhosphorInputProc',
 # reason == None means "must be assigned". A string means "deliberately not
 # assigned, because ...". Keys are "<host file>:<seam>".
 EXEMPT = {
-    # The console host: no window, so no event loop and no widgetset clipboard.
-    'phosphor.lpr:OnBreakpoint': 'a console run has nowhere to pause to; BREAKPOINT reports and continues',
-    'phosphor.lpr:HostServices': 'no event loop and no widgetset clipboard in a console binary',
+    # The one shipped host. It fills OnOutput, OnInput and HostServices -- the last
+    # only when a graphical session is reachable, which is the point of the merge.
+    'phosphor.lpr:OnBreakpoint': 'BREAKPOINT is report-and-continue; there is nowhere for a host to pause to',
 
     # The suite runners report through assertion counters and write their own
     # summary bytes, and a .bas test file cannot type at a prompt.
@@ -65,10 +67,6 @@ EXEMPT = {
     'phosphorembed.lpr:OnBreakpoint': 'an embedder that wants a pause installs one; the demo shows the seam exists',
     'phosphorembed.lpr:HostServices': 'no window and no clipboard in the embedding demo',
 
-    # phosphorgui fills the three that reach a person. BREAKPOINT is report-only
-    # by design (the engine never blocks on it), and a windowed host has no more
-    # to say about it than a console one.
-    'phosphorgui.lpr:OnBreakpoint': 'BREAKPOINT is report-and-continue; a window adds nothing the console host does not have',
 }
 
 ASSIGN = r'\.\s*%s\s*:='

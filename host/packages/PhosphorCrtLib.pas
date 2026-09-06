@@ -67,7 +67,8 @@ type
   character -- and the second was not handled at all, so a typed accented letter
   answered its first byte and left the rest for the next call, while Windows
   answered the whole character. }
-function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource): String;
+function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource;
+                        out ALeftover: Integer): String;
 {$ENDIF}
 
 {$IFDEF WINDOWS}
@@ -381,15 +382,27 @@ end;
 function ByteWaiting: Boolean;
 var fds: TFDSet; tv: TTimeVal;
 begin
+  if GPushback >= 0 then Exit(True);   // a handed-back byte is waiting too
   fpFD_ZERO(fds);
   fpFD_SET(StdInputHandle, fds);
   tv.tv_sec := 0; tv.tv_usec := 0;
   Result := fpSelect(StdInputHandle + 1, @fds, nil, nil, @tv) > 0;
 end;
 
+var
+  { One byte handed back by the key assembly, waiting to be read again. -1 is
+    empty. A terminal has no ungetc, so the buffer lives here. }
+  GPushback: Integer = -1;
+
 function ReadRawByte(out AByte: Byte): Boolean;
 var c: Char;
 begin
+  if GPushback >= 0 then
+  begin
+    AByte := Byte(GPushback);
+    GPushback := -1;
+    Exit(True);
+  end;
   { FileRead (SysUtils), not fpRead: fpRead is `inline` and FPC declines to inline it
     here, which -vewn reports as a note. FileRead is a plain function wrapping the same
     read, so the RTL owns that call and our unit stays note-clean.
@@ -420,9 +433,15 @@ begin
   else Result := 0;
 end;
 
-function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource): String;
+function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource;
+                        out ALeftover: Integer): String;
 var b: Byte; want, i, n: Integer;
 begin
+  // -1 when every byte read was part of this key. Anything else is a byte that
+  // was read to be judged, turned out not to belong here, and must go back: the
+  // source cannot peek, so inspecting a byte consumes it, and on a terminal a
+  // consumed byte is the first byte of the NEXT key, gone.
+  ALeftover := -1;
   // Built by index and tagged, never by concatenating a Char: under this unit's
   // UTF8 codepage that re-encodes every byte >= 128, and these bytes are a key,
   // not text to be converted.
@@ -448,7 +467,7 @@ begin
     for i := 1 to want do
     begin
       if not ANext(b) then Break;
-      if (b < $80) or (b > $BF) then Break;
+      if (b < $80) or (b > $BF) then begin ALeftover := b; Break; end;
       n := Length(Result) + 1;
       SetLength(Result, n);
       Result[n] := Chr(b);
@@ -463,12 +482,15 @@ begin
 end;
 
 function KbdRead(ABlock: Boolean): String;
-var first: Byte;
+var first, leftover: Integer; b: Byte;
 begin
   Result := '';
   if (not ABlock) and (not ByteWaiting()) then Exit;
-  if not ReadRawByte(first) then Exit;
-  Result := CrtAssembleKey(first, @NextWaitingByte);
+  if not ReadRawByte(b) then Exit;
+  first := b;
+  Result := CrtAssembleKey(Byte(first), @NextWaitingByte, leftover);
+  // Give back what did not belong to this key, so the next read sees it.
+  if leftover >= 0 then GPushback := leftover;
 end;
 {$ENDIF}
 

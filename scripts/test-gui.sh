@@ -95,14 +95,24 @@ handoff_case() {   # name, want_exit, want_text, args...
   fi
 }
 
-if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-  # THE CASE ONLY LINUX HAS. No session: the console host must refuse before it
-  # spawns anything, name the problem and exit 3 -- distinct from 1 (program
-  # error) and 2 (usage), so a script can tell them apart.
-  handoff_case "refuses without a graphical session (exit 3)" 3 "needs a graphical session" --gui "$hodir/hello.bas"
-  handoff_case "and points at the console host instead" 3 "phosphor run" --gui "$hodir/hello.bas"
+# The no-session branch is tested UNCONDITIONALLY, by taking the session away for
+# one command. This script exports DISPLAY=:0 near the top so the suite can reach
+# the logged-in session, which means asking "is DISPLAY empty?" here would only
+# ever answer no -- the branch that exists for every ssh session and every CI
+# container would never be exercised by the machine that has one.
+env -u DISPLAY -u WAYLAND_DISPLAY "$console" --gui "$hodir/hello.bas" > "$out" 2>&1
+code=$?
+if [ "$code" -eq 3 ] && grep -qF "needs a graphical session" "$out" && grep -qF "phosphor run" "$out"; then
+  echo "PASS  handoff: refuses without a graphical session, and points at the console host (exit 3)"
 else
-  bash "$here/build-gui.sh" >/dev/null 2>&1 || { echo "FAIL  handoff: phosphorgui did not build"; allok=1; }
+  echo "FAIL  handoff: refuses without a graphical session"
+  echo "        wanted exit 3 and the guidance text, got exit $code"
+  sed 's/^/        /' "$out"
+  allok=1
+fi
+
+# The rest needs a session and the child binary.
+if bash "$here/build-gui.sh" > "$out" 2>&1; then
   if [ -x "$guiexe" ]; then
     handoff_case "runs the program through phosphorgui" 0 "handoff ok" --gui "$hodir/hello.bas"
     handoff_case "gives back the failing exit code" 1 "about to fail" --gui "$hodir/fails.bas"
@@ -111,9 +121,14 @@ else
     handoff_case "says what is missing when phosphorgui is not there" 2 "needs phosphorgui beside this binary" --gui "$hodir/hello.bas"
     mv "$guiexe.hidden" "$guiexe"
   else
-    echo "FAIL  handoff: phosphorgui is not present, so the handoff was not tested"
+    echo "FAIL  handoff: build-gui.sh reported success but produced no binary"
     allok=1
   fi
+else
+  # Not a silent skip, and not a bare "did not build": the compiler said why.
+  echo "FAIL  handoff: phosphorgui did not build"
+  sed 's/^/        /' "$out" | tail -12
+  allok=1
 fi
 
 echo

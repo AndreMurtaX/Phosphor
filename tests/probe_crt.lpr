@@ -71,11 +71,14 @@ begin
     if A[i] <> B[i] then Exit(False);
 end;
 
+var
+  Leftover: Integer = -1;
+
 procedure Key(const AName: String; AFirst: Byte; ANext: TCrtByteSource; const AWant: String);
 var got: String;
 begin
   Fed := 0;
-  got := CrtAssembleKey(AFirst, ANext);
+  got := CrtAssembleKey(AFirst, ANext, Leftover);
   Report(SameBytes(got, AWant),
          AName + ' (wanted [' + Hex(AWant) + '], got [' + Hex(got) + '])');
 end;
@@ -171,18 +174,22 @@ begin
   // A UTF-8 CHARACTER IS ONE KEY. This is what the old code got wrong: it
   // answered the lead byte and left the continuation for the next call, so a
   // typed accented letter arrived in two pieces here and in one on Windows.
-  Script := #$C3#$A9;                      // 'e-acute', two bytes
+  // The first byte is the ARGUMENT; the script holds only what follows it.
+  Script := #$A9;                          // 'e-acute' = C3 A9
   Key('an accented character comes back whole', $C3, @Feed, #$C3#$A9);
-  Script := #$E2#$82#$AC;                  // euro sign, three bytes
+  Script := #$82#$AC;                      // euro sign = E2 82 AC
   Key('and a three-byte character too', $E2, @Feed, #$E2#$82#$AC);
-  Script := #$F0#$9F#$92#$A1;              // an astral codepoint, four bytes
+  Script := #$9F#$92#$A1;                  // an astral codepoint = F0 9F 92 A1
   Key('and a four-byte one', $F0, @Feed, #$F0#$9F#$92#$A1);
+  Report(Leftover = -1, 'and a whole character leaves nothing over');
 
   // A BROKEN STREAM MUST NOT EAT THE NEXT KEY. A lead byte followed by something
-  // that is not a continuation stops there, leaving that byte for the next read.
+  // that is not a continuation stops there -- and because a source cannot peek,
+  // that byte has already been read, so it is HANDED BACK rather than lost. On a
+  // terminal it is the first byte of the next key.
   Script := 'X';
   Key('a lead byte with no continuation stops', $C3, @Feed, #$C3);
-  Report(Fed = 0, 'without swallowing the byte that followed');
+  Report(Leftover = Ord('X'), 'and hands back the byte that followed, unswallowed');
 
   // AN ESCAPE SEQUENCE is whatever is already waiting behind the ESC.
   Script := '[A';
@@ -192,11 +199,11 @@ begin
 
   // THE TAG, for the same reason as the Windows side: the engine's strings are
   // UTF-8, and a key tagged with the system code page is converted on the way in.
-  Script := #$C3#$A9;
-  Report(StringCodePage(CrtAssembleKey($C3, @Feed)) = CP_UTF8,
+  Script := #$A9;
+  Report(StringCodePage(CrtAssembleKey($C3, @Feed, Leftover)) = CP_UTF8,
          'the key is tagged with the engine code page');
-  Script := #$C3#$A9;
-  Report(Length(ValStr(CrtAssembleKey($C3, @Feed)).Str) = 2,
+  Script := #$A9;
+  Report(Length(ValStr(CrtAssembleKey($C3, @Feed, Leftover)).Str) = 2,
          'and is still two bytes after crossing into a TValue');
   {$ENDIF}
 

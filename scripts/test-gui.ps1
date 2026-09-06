@@ -157,6 +157,11 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
     # 5. THE SANDBOX REACHES A GUI RUN. It could not before: the console host
     #    spawned a second binary and passed it only the file name, so --sandbox
     #    was accepted and silently dropped on exactly the path a GUI program took.
+    # 6. --no-console must be a NO-OP on a console shared with this terminal: it
+    #    is the shell's window, not the program's. The run still prints and still
+    #    succeeds -- an early version released the console and then died on its
+    #    next println with EInOutError, exit 217.
+    if (-not (Host-Case '--no-console leaves a terminal console alone' @('--no-console', 'run', (Join-Path $hm 'hello.bas')) 0 'console ok')) { $allOk = $false }
     $cage = Join-Path $tmp 'phosphor-hostmode-cage'
     New-Item -ItemType Directory -Force $cage | Out-Null
     if (-not (Host-Case 'the sandbox root reaches a GUI program' @('--sandbox', $cage, 'run', (Join-Path $hm 'gui.bas')) 0 'gui ok')) { $allOk = $false }

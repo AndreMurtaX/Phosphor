@@ -67,6 +67,10 @@ uses
   PhosphorHttpLib, PhosphorSqliteLib;
 
 var
+  { --no-console: hide the console window at startup, when this process owns one.
+    A console shared with a terminal is never touched -- see CrtHideOwnConsole. }
+  GHideConsole: Boolean = False;
+
   { --sandbox <dir>: the root every path this run may touch. '' (the default) is
     no sandbox, which is what a trusted script wants and what this host always
     did. Set once from the command line and applied to every engine the run
@@ -760,6 +764,10 @@ begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor compile <in.bas> <out.pbc>');
       Writeln('       phosphor pack <in.bas> <out>   (standalone executable)');
+      Writeln('       phosphor --no-console <file.bas>');
+      Writeln('              hide the console window when this process owns one');
+      Writeln('              (a terminal''s console is never touched); a packed');
+      Writeln('              program calls crt_hideconsole() for the same effect');
       Writeln('       phosphor --sandbox <dir> <file.bas>');
       Writeln('              confine the script to <dir>: every file, directory and');
       Writeln('              channel it names must resolve inside, or it is refused');
@@ -782,6 +790,14 @@ begin
                       'programs directly (the flag is accepted and ignored)')
     else if arg = 'run' then
       { optional verb; ignore }
+    else if arg = '--no-console' then
+      // Hidden at STARTUP, before a line of the program runs, so a GUI program
+      // launched from Explorer never flashes a console. It is a flag rather than
+      // a default because a console is where PRINT goes, and a developer
+      // debugging a windowed program wants it: the default keeps it.
+      // A PACKED application ignores its command line, so a program that wants
+      // this baked in calls crt_hideconsole() itself -- the same one rule.
+      GHideConsole := True
     else if arg = '--sandbox' then
     begin
       Inc(i);
@@ -811,6 +827,14 @@ begin
     end;
     Inc(i);
   end;
+
+  // Asked for AFTER the arguments are read and BEFORE the program runs, so a
+  // windowed program launched from Explorer never flashes a console. The answer
+  // is discarded on purpose: "there was no console of mine to hide" is not a
+  // failure of the run, and the REPL below would have nowhere to print if it
+  // were treated as one. crt_hideconsole() is the same act with an answer, for a
+  // program that wants to know.
+  if GHideConsole then CrtHideOwnConsole();
 
   if filePath <> '' then
     Halt(RunFile(filePath, outPath))

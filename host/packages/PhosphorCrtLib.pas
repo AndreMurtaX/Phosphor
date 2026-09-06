@@ -53,6 +53,14 @@ uses
 
 procedure RegisterCrtFuncs(Reg: TPhosphorRegistry);
 
+{ Hide / show the console window THIS PROCESS OWNS, answering whether there was
+  one to act on. A console shared with a terminal is never touched. Public
+  because the host offers the same thing as a startup flag (--no-console), and
+  the two must not become two implementations of one rule. Always False on Unix,
+  where the terminal belongs to the user rather than to the program. }
+function CrtHideOwnConsole: Boolean;
+function CrtShowOwnConsole: Boolean;
+
 type
   { Where the rest of a multi-byte key comes from. False means nothing is waiting.
     A plain procedural type, not a method pointer: the unit hands it a reader that
@@ -496,6 +504,127 @@ begin
 end;
 {$ENDIF}
 
+// --- the console this process owns (Windows only) ---------------------------
+{ Is the console attached to this process ours alone?
+
+  It is when exactly one process is attached to it. A console created for a
+  double-clicked executable holds one process -- us; a console belonging to a
+  terminal holds the shell as well, and detaching from that would take the
+  terminal's client away from the person using it.
+
+  Unix has no equivalent: the terminal is the user's, never the program's, so
+  this answers False there and both verbs answer 0. }
+function OwnsItsConsole: Boolean;
+{$IFDEF WINDOWS}
+var
+  pids: array[0..7] of DWORD;
+{$ENDIF}
+begin
+  Result := False;
+  {$IFDEF WINDOWS}
+  Result := GetConsoleProcessList(@pids[0], Length(pids)) = 1;
+  {$ENDIF}
+end;
+
+{$IFDEF WINDOWS}
+var
+  gDetached: Boolean = False;   // we let go of a console and can make a new one
+
+{ Was this standard handle a console, rather than a file or a pipe? Asked BEFORE
+  detaching, because afterwards there is nothing left to ask. }
+function HandleIsConsole(AStd: DWORD): Boolean;
+var mode: DWORD;
+begin
+  Result := (GetFileType(GetStdHandle(AStd)) = FILE_TYPE_CHAR) and
+            GetConsoleMode(GetStdHandle(AStd), mode);
+end;
+
+{ Point a standard text file at NUL. Without this, the first Writeln after
+  FreeConsole raises EInOutError and takes the program with it -- measured, exit
+  217. The close is guarded because the handle it would close is already dead. }
+procedure SendToNul(var AText: Text);
+begin
+  {$push}{$I-}
+  Close(AText);
+  {$pop}
+  if IOResult <> 0 then ;   // it was already gone; nothing to close
+  Assign(AText, 'NUL');
+  {$push}{$I-}
+  Rewrite(AText);
+  {$pop}
+  if IOResult <> 0 then ;
+end;
+
+procedure PointAtConsole(var AText: Text; const ADev: String);
+begin
+  {$push}{$I-}
+  Close(AText);
+  {$pop}
+  if IOResult <> 0 then ;
+  Assign(AText, ADev);
+  {$push}{$I-}
+  Rewrite(AText);
+  {$pop}
+  if IOResult <> 0 then ;
+end;
+{$ENDIF}
+
+function CrtHideOwnConsole: Boolean;
+{$IFDEF WINDOWS}
+var outWasConsole, errWasConsole: Boolean;
+{$ENDIF}
+begin
+  Result := False;
+  {$IFDEF WINDOWS}
+  if not OwnsItsConsole() then Exit;      // it belongs to a terminal; leave it
+  if GetConsoleWindow() = 0 then Exit;    // nothing attached to let go of
+  outWasConsole := HandleIsConsole(STD_OUTPUT_HANDLE);
+  errWasConsole := HandleIsConsole(STD_ERROR_HANDLE);
+  Flush(Output);
+  FreeConsole();
+  // Only the handles that WERE consoles are rewired: a run redirected to a file
+  // or a pipe keeps its redirection, which is how a windowed program still
+  // writes a debug log with no window in sight.
+  if outWasConsole then SendToNul(Output);
+  if errWasConsole then SendToNul(ErrOutput);
+  gDetached := True;
+  Result := True;
+  {$ENDIF}
+end;
+
+function CrtShowOwnConsole: Boolean;
+begin
+  Result := False;
+  {$IFDEF WINDOWS}
+  // Only meaningful after we let one go: this makes a NEW console, it does not
+  // bring the old window back, and saying so is the difference between a verb
+  // that works and one that looks like it did.
+  if not gDetached then Exit;
+  if not AllocConsole() then Exit;
+  PointAtConsole(Output, 'CONOUT$');
+  PointAtConsole(ErrOutput, 'CONOUT$');
+  gDetached := False;
+  Result := True;
+  {$ENDIF}
+end;
+
+{ crt_hideconsole() -- let go of the console window this program owns, if it owns
+  one. Answers 1 when it did and 0 when there was none of its own to let go of,
+  which is the honest answer for "you ran me from a terminal" and for Unix. }
+function f_crt_hideconsole(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(CrtHideOwnConsole()));
+end;
+
+{ crt_showconsole() -- make a new console and print to it again. 0 unless this
+  program had let one go. }
+function f_crt_showconsole(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(CrtShowOwnConsole()));
+end;
+
 function f_inkey(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
@@ -584,6 +713,8 @@ begin
   Reg.Add('color$:n',       @f_color1);
   Reg.Add('color$:nn',      @f_color2);
   Reg.Add('bg$:n',          @f_bg);
+  Reg.Add('crt_hideconsole:', @f_crt_hideconsole);
+  Reg.Add('crt_showconsole:', @f_crt_showconsole);
   Reg.Add('inkey$:',        @f_inkey);
   Reg.Add('getkey$:',       @f_getkey);
   Reg.Add('keypressed:',    @f_keypressed);

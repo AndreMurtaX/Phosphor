@@ -13,7 +13,7 @@ Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact gree
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
 dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
 rules), the negative suite, and six opt-in host packages (crt, base64, zip, gzip,
-http, sqlite). **683 built-in functions** are registered across the standard
+http, sqlite). **685 built-in functions** are registered across the standard
 libraries, every one of them exercised by a test and listed in the reference --
 both held by a gate in the acceptance suite rather than by a promise. Errors are *values*, not
 crashes: a library records its error state and the program keeps running. It is a
@@ -55,6 +55,7 @@ bin\phosphor.exe run hello.bas
 
 ```
 phosphor run  <file.bas>            run a program
+phosphor --no-console <file.bas>    run with no console window (see below)
 phosphor compile <in.bas> <out.pbc> compile to portable .pbc bytecode
 phosphor pack <in.bas> <out>        build a standalone self-extracting executable
 phosphor                            an interactive REPL (state persists)
@@ -84,6 +85,15 @@ display server.
 **Compiling needs no session either**: the compiler is host-agnostic, so `phosphor
 compile <gui-app.bas> <out.pbc>` works on a headless machine, and `phosphor pack` makes
 a standalone GUI application — the stub is this same complete binary.
+
+**The console is kept by default, and can be let go.** A windowed program still has a
+console, which is where `PRINT` goes — useful while developing, unwanted in something
+you hand to someone. `phosphor --no-console <file.bas>` releases it at startup, and a
+packed application (which ignores its command line by design) calls `crt_hideconsole()`
+to do the same from inside. Both refuse to touch a console **shared with a terminal**:
+run from a shell, they answer 0 and change nothing, because that window is the user's.
+Printing after releasing is safe — output that was a console goes to the null device,
+output redirected to a file or pipe keeps going there.
 
 `phosphor` (the console host) is the develop-compile-run tool. There is no dedicated
 IDE — write `.bas` in any editor and run it. A GUI program is run the same way,

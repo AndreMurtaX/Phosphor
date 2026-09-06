@@ -121,6 +121,9 @@ if [ -x "$console" ]; then
   host_case "and a console program still does" 0 "console ok" run "$hm/hello.bas"
   host_case "a failing program fails the run" 1 "about to fail" run "$hm/fails.bas"
   host_case "--gui is accepted and answered" 0 "no longer needed" --gui run "$hm/gui.bas"
+  # --no-console is a no-op on a shared console, and on Unix altogether: the
+  # terminal is the user's. The run still prints and still succeeds.
+  host_case "--no-console leaves a terminal console alone" 0 "console ok" --no-console run "$hm/hello.bas"
   cage="$(mktemp -d)"
   host_case "the sandbox root reaches a GUI program" 0 "gui ok" --sandbox "$cage" run "$hm/gui.bas"
   rm -rf "$cage"

@@ -39,3 +39,28 @@ rem is nothing waiting -- which is always the case under the headless test harne
 test_case("crt/key input is non-blocking when idle")
 assert_eq(inkey$(), "", "inkey$ is empty when no key is waiting")
 assert_eq(keypressed(), 0, "keypressed() is 0 when no key is waiting")
+
+rem ---------------------------------------------------------------
+rem The console this process owns -- and the one it does not.
+rem
+rem A packed GUI application double-clicked from Explorer gets a
+rem console window it never asked for, and crt_hideconsole() lets it
+rem go. Run from a terminal, that same call must do NOTHING: the
+rem console there belongs to the shell, and letting go of it would
+rem take the terminal's client away from the person using it.
+rem
+rem The suite always runs from a terminal, so what is pinned here is
+rem the REFUSAL -- which is the half that protects somebody. The
+rem accepting half needs a process with a console of its own and is
+rem checked by launching one (scripts/test-gui, host-mode section).
+rem
+rem It also has to be SAFE. An early version let go of the console
+rem and left stdout pointing at it; the next println raised
+rem EInOutError and killed the process with exit 217. These three
+rem lines print after the call on purpose.
+rem ---------------------------------------------------------------
+test_case("crt/the console a program owns")
+
+assert_eq(crt_hideconsole(), 0, "a console shared with a terminal is not ours to release")
+assert_eq(crt_hideconsole(), 0, "asking twice does not change that")
+assert_eq(crt_showconsole(), 0, "and there is nothing to bring back")

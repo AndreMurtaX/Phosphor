@@ -294,6 +294,29 @@ var s: String;
 begin
   Result := ReadAllBytes(ASrc, s) and WriteAllBytes(ADst, s);
 end;
+{ A path a destructive call must never be handed. An empty string is the one that
+  costs a disk: IncludeTrailingPathDelimiter('') answers the path delimiter, so a
+  tree walk starting at '' starts at the ROOT OF THE CURRENT DRIVE. A bare root is
+  refused for the same reason -- neither is a directory a program meant to name, and
+  a program that computed one has a bug this must not carry out for it. }
+function IsPerilousPath(const APath: String): Boolean;
+var
+  p: String;
+begin
+  p := Trim(APath);
+  if p = '' then Exit(True);                       // '' -> the drive root
+  p := ExcludeTrailingPathDelimiter(p);
+  if p = '' then Exit(True);                       // '/' or '\' alone
+  {$IFDEF WINDOWS}
+  // 'C:' and 'C:\' both reduce to two characters here
+  if (Length(p) = 2) and (p[2] = ':') then Exit(True);
+  // a UNC share root: \\server\share with nothing under it
+  if (Length(p) > 2) and (p[1] = '\') and (p[2] = '\') and
+     (Pos('\', Copy(p, 3, Length(p))) = 0) then Exit(True);
+  {$ENDIF}
+  Result := False;
+end;
+
 procedure DeleteTree(const ADir: String);
 var sr: TSearchRec; base: String;
 begin
@@ -336,7 +359,20 @@ begin i := StrToInt64Def(S, 0); Result := PDouble(@i)^; end;
 
 // --- directory functions ----------------------------------------------------
 function t_dir_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); ForceDirectories(Args[0].Str); Result := ValInt(1); end;
+begin
+  Err := NoError();
+  // Same class as dir_delete's: the answer was discarded and 1 returned regardless,
+  // so a path that could not be created reported success. An empty path is refused
+  // here too -- ForceDirectories('') answers True having made nothing.
+  if IsPerilousPath(Args[0].Str) then
+  begin
+    GIoError := 3;
+    Result := ValInt(0);
+    Exit;
+  end;
+  if ForceDirectories(Args[0].Str) then GIoError := 0 else GIoError := 3;
+  Result := ValInt(Ord(DirectoryExists(Args[0].Str)));
+end;
 function t_dir_isempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValInt(Ord(ListToStr(Args[0].Str, '*', True, True, False) = '')); end;
 function t_dir_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -348,6 +384,15 @@ begin
   // thrown away, so a dir_delete of a non-empty directory answered 1, left the
   // directory standing, and set no error -- a program could not tell it had
   // failed by any means. file_delete next door already answers Ord(DeleteFile).
+  // REFUSE BEFORE DOING ANYTHING. dir_delete("", 1) used to walk the root of the
+  // current drive and delete it, then answer 1 -- because DirectoryExists("") is
+  // False, so the post-check read the disaster as success.
+  if IsPerilousPath(Args[0].Str) then
+  begin
+    GIoError := 3;
+    Result := ValInt(0);
+    Exit;
+  end;
   if (Length(Args) >= 2) and (AsDouble(Args[1]) <> 0) then
   begin
     // The local tree walker reports nothing, so ask the filesystem the question

@@ -213,3 +213,28 @@ ok% = dir_create(path_combine$(dr$, "sub"))
 ok% = file_writealltext(path_combine$(dr$, "sub/deep.txt"), "y")
 assert_eq(dir_delete(dr$, 1), 1, "recursive delete of a populated tree succeeds")
 assert_eq(dir_exists(dr$), 0, "and the tree is gone")
+
+test_case("io/a destructive call refuses a path that names a whole filesystem")
+rem THIS ONE COST A DISK. dir_delete("", 1) used to reach DeleteTree(""), and
+rem IncludeTrailingPathDelimiter("") answers the path delimiter -- so the walk began
+rem at the ROOT OF THE CURRENT DRIVE and deleted everything it could reach, then
+rem answered 1, because DirectoryExists("") is False and the post-check read the
+rem disaster as success. One line of BASIC.
+rem
+rem The guard runs BEFORE the recursive/non-recursive split, so these non-recursive
+rem calls -- harmless in themselves -- prove it fires for the recursive form too.
+rem The recursive form is deliberately NOT exercised here: a test must not be one
+rem edit away from being the disaster it is testing for.
+bs$ = chr$(92)
+assert_eq(dir_delete(""), 0, "an empty path is refused, not resolved to the drive root")
+assert_true(ioerror(), "and the refusal is recorded")
+assert_eq(dir_delete(bs$), 0, "a bare separator is a filesystem root, not a directory")
+assert_eq(dir_delete("C:" + bs$), 0, "and so is a drive root")
+assert_eq(dir_create(""), 0, "dir_create refuses it too -- ForceDirectories('') answers True having made nothing")
+
+rem the legitimate path is untouched by the guard
+gp$ = path_combine$(temppath$(), "phosphor_guard_ok")
+assert_eq(dir_create(gp$), 1, "an ordinary directory is still created")
+assert_eq(dir_exists(gp$), 1, "and really exists")
+assert_eq(dir_delete(gp$), 1, "and is still deletable")
+assert_eq(dir_exists(gp$), 0, "and really goes")

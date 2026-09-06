@@ -340,12 +340,29 @@ end;
 // A control's parent, which the property bridge cannot reach: TControl.Parent is
 // public, not published, so RTTI does not see it.
 function f_parent_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c, pc: TComponent;
+var c, pc: TComponent; w: TWinControl;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
   if not GuiResolve(A[1].Hnd, TWinControl, pc) then Exit;
-  TControl(c).Parent := TWinControl(pc);
+  // A CONTROL CANNOT BE ITS OWN ANCESTOR. Handing a control one of its own
+  // descendants makes a cycle, and the LCL then recurses until the stack is gone --
+  // reported as a BASIC stack overflow, but only after the process has spun for
+  // minutes. Walk the proposed parent's chain first: if this control is anywhere on
+  // it, the request is a bug in the program, not a layout.
+  w := TWinControl(pc);
+  while w <> nil do
+  begin
+    if w = c then begin GGuiError := 1; Exit; end;
+    w := w.Parent;
+  end;
+  try
+    TControl(c).Parent := TWinControl(pc);
+  except
+    // The LCL refuses some pairings itself (EInvalidOperation). The package's rule
+    // is that a bad request is RECORDED, never raised into the program.
+    on Exception do GGuiError := 1;
+  end;
 end;
 
 // Anchors is a SET, so it reads and writes as the identifier list the bridge also

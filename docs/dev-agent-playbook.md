@@ -391,6 +391,51 @@ exists so they can next time.
     edit said *nine*. Writing a count and a list in one sitting is not enough to
     keep them agreeing.
 
+- **2026-09-06 · round 36 · a 144-agent gauntlet, a 10-agent council, and 45
+  findings closed.** A session-wide adversarial sweep over 38 commits returned 45
+  findings that survived three refuters each. Two sandbox escapes, a modal crash
+  dialog, an out-of-bounds write, a silent stack overflow, a REPL that wedged
+  permanently, and a `resume next` that looped for ever. All closed, on both
+  operating systems.
+
+  - **THE SWEEP FOUND MORE THAN 34 ROUNDS AND SEVEN GATES HAD.** That is the
+    headline and it should be uncomfortable. Gates check what someone thought to
+    check; an adversary with a lens and an instruction to REFUTE checks what
+    nobody did.
+  - **It was wrong once, and I repeated it before verifying.** It claimed
+    `dir_delete("C:/", 1)` was permitted. It was not — FPC's
+    `AllowDirectorySeparators` is `['\','/']` on Windows, so the guard already
+    caught it. I relayed that as "confirmed by reading" on a wrong reading of the
+    RTL, and alarmed the owner. **Two minutes of running the pure function would
+    have settled it.** Adjacent holes WERE real (`C:\\`, `C://`, a UNC share
+    root), which is the trap: a false report next to true ones reads as true.
+  - **Zero of 45 were killed by the refuters.** Three refuters each, majority to
+    kill, and none died. That is not a sign the findings were all solid — it is a
+    sign the refuters were too soft. A verification stage that never rejects is
+    measuring nothing, exactly like a test that passes with the fix removed.
+  - **THE COUNCIL'S LANES WERE NOT DISJOINT, AND I SAID THEY WERE.** I gave
+    `coverage.py`'s blind spot to the gates lane and README's counts to another —
+    but a correct total is not knowable until the counter is fixed, so both lanes
+    fixed the same file and their patches conflicted. **Partition by dependency,
+    not by directory.**
+  - **`isolation: worktree` is not a sandbox.** One lane edited the MAIN tree
+    anyway and produced its patch by diffing it, capturing another lane's work.
+    Caught because the patch size exactly matched the main tree's diff. An agent
+    given a path in its prompt will use that path.
+  - **The best thing the council built was a RATCHET.** The gates lane recorded
+    every known-stale mention in a table that FAILS the gate when an entry stops
+    occurring — so fixing a page forces its line to be deleted, and a new stale
+    mention fails on the spot. A backlog that can only shrink beats a backlog
+    nobody reads. Its end state is the label, not the entry: four mentions are
+    DELIBERATE (a name written to say it is gone) and five are HISTORY (a dated
+    record must not be rewritten to match today's tree).
+  - **A claim in a test comment is not a test.** `42_syntax_elseif` said it pinned
+    "all FIFTEEN names"; it pinned thirteen. Written by the change that widened
+    the rule, in the block whose purpose is to catch the next widening.
+  - **The stale-harness trap fired four times in one session** and cost a wrong
+    conclusion every time. `build.ps1` builds `phosphor`, not `phosphortest`.
+    Run the suite, not the binary.
+
 - **2026-09-06 · round 35 · a modal dialog on a headless machine, and the
   out-of-bounds write behind it.** The owner saw *"Access violation. Press OK to
   ignore and risk data corruption."* while an adversarial sweep was running. Two

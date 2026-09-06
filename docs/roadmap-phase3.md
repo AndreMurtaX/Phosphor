@@ -133,7 +133,11 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    app.exe` compiles the script and appends the `.pbc` payload to a copy of the
    `phosphor` binary (the *stub*) behind a fixed little-endian trailer
    (payload-offset, size, an FNV checksum, and the magic `PHOSPBC1`, at the very
-   end — PE and ELF both ignore trailing bytes). At startup the stub reads its own
+   end) — **trailer bumped to `PHOSPBC2` on 2026-09-06**, adding a 32-bit flags
+   word before the magic so `pack --no-console` can travel with the file; the
+   magic IS the version, the reader accepts both and refuses anything else, and a
+   packed file always carries the stub that made it (see README, "The console is
+   kept by default — PE and ELF both ignore trailing bytes). At startup the stub reads its own
    tail (`GetModuleFileNameW` / `/proc/self/exe`); if the trailer's magic is there
    and the checksum matches, it runs the embedded bytecode and ignores its CLI
    arguments — so the SAME `phosphor` binary is the CLI tool bare and a standalone

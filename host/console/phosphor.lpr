@@ -500,8 +500,16 @@ end;
 // embedded payload. Same phosphor binary: bare it is the CLI, packed it is an app.
 
 const
-  PACK_MAGIC   = 'PHOSPBC1';       // 8 bytes at the very end of a packed file
-  PACK_TRAILER = 8 + 8 + 4 + 8;    // offset(i64) + size(i64) + checksum(u32) + magic(8)
+  { The magic IS the version. A packed file carries the stub that made it, so a v1
+    file always meets a v1 reader in practice -- and the reader below handles both
+    anyway, because "that cannot happen" is how a format break ends up being
+    executed as the wrong bytes. }
+  PACK_MAGIC_V1 = 'PHOSPBC1';      // offset + size + checksum + magic
+  PACK_MAGIC_V2 = 'PHOSPBC2';      // ...and a flags word before the magic
+  PACK_TRAILER_V1 = 8 + 8 + 4 + 8;
+  PACK_TRAILER_V2 = 8 + 8 + 4 + 4 + 8;
+  { Flags in a v2 trailer. }
+  PACK_FLAG_NOCONSOLE = 1;         // let go of the console this process owns
 
 function SelfExePath: String;
 {$IFDEF WINDOWS}
@@ -537,7 +545,7 @@ function  RLE32(S: TStream): LongWord;     begin S.ReadBuffer(Result, 4); Result
 
 { Compile AInBas, copy this running binary (the stub) to AOutExe, and append the
   .pbc payload plus the trailer -- a standalone executable that needs no install. }
-function PackFile(const AInBas, AOutExe: String): Integer;
+function PackFile(const AInBas, AOutExe: String; AFlags: LongWord): Integer;
 var
   comp: TPhosphorCompiler;
   prog: TProgram;
@@ -570,7 +578,8 @@ begin
       WLE64(dst, off);
       WLE64(dst, payload.Size);
       WLE32(dst, PayloadChecksum(payload.Memory^, payload.Size));
-      dst.WriteBuffer(PACK_MAGIC[1], 8);
+      WLE32(dst, AFlags);
+      dst.WriteBuffer(PACK_MAGIC_V2[1], 8);
     finally
       src.Free; dst.Free;
     end;
@@ -582,15 +591,17 @@ begin
 end;
 
 { True if THIS binary carries an embedded .pbc payload (a valid trailer). }
-function TryReadEmbeddedPayload(out APayload: TBytesStream): Boolean;
+function TryReadEmbeddedPayload(out APayload: TBytesStream; out AFlags: LongWord): Boolean;
 var
   fs: TFileStream;
   total, off, siz: Int64;
   ck: LongWord;
+  trailer: Int64;
   magic: array[0..7] of Char;
 begin
   Result := False;
   APayload := nil;
+  AFlags := 0;
   try
     fs := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
   except
@@ -598,11 +609,19 @@ begin
   end;
   try
     total := fs.Size;
-    if total < PACK_TRAILER then Exit;
-    fs.Position := total - PACK_TRAILER;
-    off := RLE64(fs); siz := RLE64(fs); ck := RLE32(fs); fs.ReadBuffer(magic[0], 8);
-    if magic <> PACK_MAGIC then Exit;                          // a bare stub -> CLI
-    if (off < 0) or (siz <= 0) or (off + siz > total - PACK_TRAILER) then Exit;
+    if total < PACK_TRAILER_V1 then Exit;
+    // The magic is the last 8 bytes whichever version this is, so it is read
+    // FIRST and decides how much trailer to read back.
+    fs.Position := total - 8;
+    fs.ReadBuffer(magic[0], 8);
+    if magic = PACK_MAGIC_V2 then trailer := PACK_TRAILER_V2
+    else if magic = PACK_MAGIC_V1 then trailer := PACK_TRAILER_V1
+    else Exit;                                                 // a bare stub -> CLI
+    if total < trailer then Exit;
+    fs.Position := total - trailer;
+    off := RLE64(fs); siz := RLE64(fs); ck := RLE32(fs);
+    if trailer = PACK_TRAILER_V2 then AFlags := RLE32(fs);
+    if (off < 0) or (siz <= 0) or (off + siz > total - trailer) then Exit;
     APayload := TBytesStream.Create();
     APayload.Size := siz;
     fs.Position := off;
@@ -715,12 +734,20 @@ end;
 
 var
   i, code: Integer;
-  arg, filePath, outPath: String;
+  arg, filePath, outPath, packIn, packOut: String;
+  packFlags: LongWord;
+  packArgs: Integer;
   payload: TBytesStream;
+  embFlags: LongWord;
 begin
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
-  if TryReadEmbeddedPayload(payload) then
+  if TryReadEmbeddedPayload(payload, embFlags) then
   begin
+    // Asked for BEFORE the program runs, so a windowed application launched from
+    // a file manager never flashes a console. Anything the program prints then
+    // goes to the null device -- which is what "no console" means, and why the
+    // flag is opt-in. Output redirected to a file or a pipe still lands.
+    if (embFlags and PACK_FLAG_NOCONSOLE) <> 0 then CrtHideOwnConsole();
     code := RunEmbedded(payload);
     payload.Free;
     Halt(code);
@@ -737,15 +764,39 @@ begin
     Halt(CompileFile(ParamStr(2), ParamStr(3)));
   end;
 
-  // `phosphor pack <in.bas> <out.exe>` -- make a standalone executable and stop.
+  // `phosphor pack [--no-console] <in.bas> <out.exe>` -- make a standalone
+  // executable and stop. The flag is BAKED IN because a packed application ignores
+  // its command line by design: the choice has to travel with the file.
   if (ParamCount >= 1) and (ParamStr(1) = 'pack') then
   begin
-    if ParamCount < 3 then
+    packFlags := 0;
+    packArgs := 0;
+    packIn := '';
+    packOut := '';
+    for i := 2 to ParamCount do
     begin
-      Writeln(StdErr, 'usage: phosphor pack <in.bas> <out' + {$IFDEF WINDOWS}'.exe>'{$ELSE}'>'{$ENDIF});
+      arg := ParamStr(i);
+      if arg = '--no-console' then
+        packFlags := packFlags or PACK_FLAG_NOCONSOLE
+      else
+      begin
+        Inc(packArgs);
+        if packArgs = 1 then packIn := arg
+        else if packArgs = 2 then packOut := arg
+        else
+        begin
+          Writeln(StdErr, 'phosphor: pack: unexpected argument: ', arg);
+          Halt(2);
+        end;
+      end;
+    end;
+    if packArgs < 2 then
+    begin
+      Writeln(StdErr, 'usage: phosphor pack [--no-console] <in.bas> <out' +
+              {$IFDEF WINDOWS}'.exe>'{$ELSE}'>'{$ENDIF});
       Halt(2);
     end;
-    Halt(PackFile(ParamStr(2), ParamStr(3)));
+    Halt(PackFile(packIn, packOut, packFlags));
   end;
 
   filePath := '';
@@ -763,7 +814,9 @@ begin
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor compile <in.bas> <out.pbc>');
-      Writeln('       phosphor pack <in.bas> <out>   (standalone executable)');
+      Writeln('       phosphor pack [--no-console] <in.bas> <out>   (standalone executable)');
+      Writeln('              --no-console is baked into the file: a packed program');
+      Writeln('              ignores its command line, so the choice travels with it');
       Writeln('       phosphor --no-console <file.bas>');
       Writeln('              hide the console window when this process owns one');
       Writeln('              (a terminal''s console is never touched); a packed');

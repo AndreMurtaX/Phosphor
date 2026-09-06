@@ -203,7 +203,12 @@ The eventual goal (a later phase) is the Clipper/PyInstaller/AutoIt model:
 compile a script to bytecode, append the bytecode to a copy of the VM to make a
 single executable, and have it read its own tail at startup. PE and ELF both
 ignore bytes after the last section, so the payload rides at the end behind a
-trailer (magic signature, offset, size, format version, checksum). The binary's
+trailer (magic signature, offset, size, format version, checksum). The magic IS
+the format version: `PHOSPBC1` was offset/size/checksum, `PHOSPBC2` (2026-09-06)
+adds a 32-bit flags word before the magic, the first flag being "release the
+console this process owns" so `pack --no-console` can be baked into the file. A
+reader takes the last eight bytes first, decides how much trailer to read from
+what it finds, and refuses a magic it does not know. The binary's
 own path is `ParamStr(0)` on Windows and `/proc/self/exe` on Linux.
 
 Plan9Basic's `TInstr` already nearly serializes:

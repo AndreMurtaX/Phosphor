@@ -80,9 +80,33 @@ if ($LASTEXITCODE -ne 0) { throw "pack exited $LASTEXITCODE" }
 cmd /c "`"$packExe`" > `"$outC`""
 if ($LASTEXITCODE -ne 0) { throw "packed exe exited $LASTEXITCODE" }
 
+# D. packed with --no-console: the choice is BAKED INTO THE FILE, because a packed
+#    program ignores its command line. Redirected output must be untouched by it --
+#    a windowed program with no console still writes its log.
+$packExeD = Join-Path $tmp 'phosphor_hello_packed_noconsole.exe'
+$outD     = Join-Path $tmp 'phosphor_hello.D.actual'
+& $exe 'pack' '--no-console' $bas $packExeD
+if ($LASTEXITCODE -ne 0) { throw "pack --no-console exited $LASTEXITCODE" }
+cmd /c "`"$packExeD`" > `"$outD`""
+if ($LASTEXITCODE -ne 0) { throw "packed --no-console exe exited $LASTEXITCODE" }
+
 Write-Host ''
 $okA = Test-Golden 'A:--out        ' $outA $expectedBytes
 $okB = Test-Golden 'B:stdout-redir ' $outB $expectedBytes
 $okC = Test-Golden 'C:packed       ' $outC $expectedBytes
+$okD = Test-Golden 'D:packed-noconsole' $outD $expectedBytes
 
-if ($okA -and $okB -and $okC) { exit 0 } else { exit 1 }
+# The trailer has to be the VERSIONED one, or there is nowhere for a flag to live
+# and the stub would be reading a format it was not told about.
+$okE = $true
+foreach ($f in @($packExe, $packExeD)) {
+    $b = [IO.File]::ReadAllBytes($f)
+    $magic = [Text.Encoding]::ASCII.GetString($b, $b.Length - 8, 8)
+    if ($magic -ne 'PHOSPBC2') {
+        Write-Host ("FAIL  trailer: {0} ends with '{1}', wanted 'PHOSPBC2'" -f (Split-Path -Leaf $f), $magic) -ForegroundColor Red
+        $okE = $false
+    }
+}
+if ($okE) { Write-Host "PASS  E:trailer        (both packed files carry a v2 trailer)" -ForegroundColor Green }
+
+if ($okA -and $okB -and $okC -and $okD -and $okE) { exit 0 } else { exit 1 }

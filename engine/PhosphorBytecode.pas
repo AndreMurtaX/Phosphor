@@ -106,12 +106,57 @@ begin
 end;
 
 // --- the program -------------------------------------------------------------
+{ The five spellings of the indirect call, one per return kind. }
+function IsIndirectCall(const AName: String): Boolean;
+var n: String;
+begin
+  n := LowerCase(AName);
+  Result := (n = 'callfunc') or (n = 'callfunc%') or (n = 'callfunc$') or
+            (n = 'callfunc@') or (n = 'callfunc?');
+end;
+
+{ The callee name of an indirect call, when it was written at the call site.
+
+  Arguments are compiled in order and opCall carries their COUNT, not their
+  width, so the first argument's instruction cannot be found by subtracting the
+  count: for `callfunc("f", "a" + "b")` that lands on `push "b"` and would report
+  a function named b. The walk back therefore crosses only instructions that push
+  exactly one value and consume none, and gives up on anything else -- so a call
+  is either understood exactly or left alone. False silence, never false alarm. }
+function LiteralIndirectTarget(AProg: TProgram; ACallAt: Integer;
+                               out AName: String): Boolean;
+var
+  argc, k, at: Integer;
+  op: TOpcode;
+  v: TValue;
+begin
+  Result := False;
+  AName := '';
+  argc := AProg.Instr(ACallAt).B;
+  if argc < 1 then Exit;              // no name argument at all
+  at := ACallAt;
+  for k := 1 to argc do
+  begin
+    Dec(at);
+    if at < 0 then Exit;
+    op := AProg.Instr(at).Op;
+    if (op <> opPushConst) and (op <> opLoadVar) and (op <> opLoadLocal) then
+      Exit;                           // a compound argument: stop guessing
+  end;
+  // `at` is now the first argument's instruction, exactly.
+  if AProg.Instr(at).Op <> opPushConst then Exit;
+  v := AProg.Consts.Get(AProg.Instr(at).A);
+  if v.Kind <> vkString then Exit;
+  AName := v.Str;
+  Result := AName <> '';
+end;
+
 function UnresolvedCalls(AProg: TProgram; AReg: TPhosphorRegistry;
                          out AReport: String): Integer;
 var
   i, j: Integer;
   ins: TInstr;
-  name: String;
+  name, lit: String;
   seen: array of String;
   isNew: Boolean;
 begin
@@ -123,6 +168,29 @@ begin
     ins := AProg.Instr(i);
     if ins.Op <> opCall then Continue;
     name := AProg.Consts.Get(ins.A).Str;
+    lit := '';
+    // An INDIRECT call whose callee is written at the call site. The name is a
+    // constant in the pool like any other, so it is as checkable as a direct
+    // call -- and only then. See LiteralIndirectTarget for why the walk back is
+    // as cautious as it is.
+    if IsIndirectCall(name) and LiteralIndirectTarget(AProg, i, lit) then
+    begin
+      if (AProg.FindUserFunc(lit, ins.B - 1) < 0) and (not AReg.HasName(lit)) then
+      begin
+        isNew := True;
+        for j := 0 to High(seen) do
+          if seen[j] = lit then begin isNew := False; Break; end;
+        if isNew then
+        begin
+          SetLength(seen, Length(seen) + 1);
+          seen[High(seen)] := lit;
+          Inc(Result);
+          AReport := AReport + '    ' + lit + '   (named at line ' +
+                     IntToStr(ins.Line) + ', called indirectly)' + LineEnding;
+        end;
+      end;
+      Continue;   // the callfunc name itself is real; the callee has been judged
+    end;
     // The program's own functions are resolved before the registry is consulted.
     if AProg.FindUserFunc(name, ins.B) >= 0 then Continue;
     if AReg.HasName(name) then Continue;

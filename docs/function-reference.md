@@ -886,6 +886,7 @@ type; all spellings run the same primitive. An unknown name is a runtime error.
 | `callfunc$(name$ [, arg]) → str` | same, when the callee returns a string |
 | `callfunc%(name$ [, arg]) → int` | same, when the callee returns an int |
 | `callfunc?(name$ [, arg]) → bool` | same, when the callee returns a bool |
+| `funcexists?(name$) → bool` | is anything callable under this name — a routine of the running program or a library function — without calling it? Asked of the same two places, in the same order, that an indirect call uses. About the NAME only: the arity and argument kinds of a call that has not happened yet are not knowable, so there is no arity form |
 | `callfunc@(name$ [, arg]) → handle` | same, when the callee returns a handle |
 
 ## Rag — local retrieval index (14 functions)

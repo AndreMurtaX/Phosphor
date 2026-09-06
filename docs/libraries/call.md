@@ -46,6 +46,16 @@ error while the identical direct call worked.)*
 any of the five kinds, and each is passed straight through, unconverted, in
 order.
 
+**Checking before calling.** A name that comes from data — a dictionary, a
+configuration file, something typed — cannot be checked when the program is
+packed: a name in a dictionary is not an instruction, and no amount of analysis
+makes it one. `phosphor pack` does check an indirect call whose callee is written
+at the call site, because that name is a constant like any other; everything else
+is a runtime error by nature. What `funcexists?` adds is *when* the program finds
+out: a dispatch table built at startup can be validated at startup, in the place
+that built it, instead of failing on whichever branch reaches the bad entry
+first.
+
 That arity is not free-form by accident. The registry resolves a call by its
 argument KINDS, so a signature per kind combination would be 5^n keys for n
 arguments — in a table that is searched linearly. Instead one signature per arity
@@ -60,6 +70,7 @@ resolution has found nothing, so no ordinary call pays for it.
 | `callfunc%(name$ [, a, …]) → int` | the same, written where the callee returns an `int64` |
 | `callfunc@(name$ [, a, …]) → handle` | the same, written where the callee returns a handle. The handle that comes back is the live object, not a copy — mutating it through the returned name changes what the callee still refers to |
 | `callfunc?(name$ [, a, …]) → bool` | the same, written where the callee returns a bool |
+| `funcexists?(name$) → bool` | can this name be called at all — by this program or by the library — **without calling it**? The same two places, in the same order. About the NAME only: the arity and kinds of a call that has not happened yet are not knowable, so there is no arity form and this never guesses |
 
 Three failures are shared by all five spellings, and all three are catchable by
 an `on error` handler installed in the **caller**:

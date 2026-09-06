@@ -13,7 +13,7 @@ Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact gree
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
 dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
 rules), the negative suite, and six opt-in host packages (crt, base64, zip, gzip,
-http, sqlite). **685 built-in functions** are registered across the standard
+http, sqlite). **686 built-in functions** are registered across the standard
 libraries, every one of them exercised by a test and listed in the reference --
 both held by a gate in the acceptance suite rather than by a promise. Errors are *values*, not
 crashes: a library records its error state and the program keeps running. It is a

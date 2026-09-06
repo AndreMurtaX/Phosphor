@@ -123,6 +123,21 @@ h_none:
   resume next
 skip_none:
 
+test_case("callback/asking before calling")
+
+rem A dispatch table whose names come from data cannot be checked when the
+rem program is packed -- a name in a dictionary is not an instruction. It can be
+rem checked by the PROGRAM, where the table is built, which turns a failure that
+rem would surface on some rare branch into one that surfaces at startup.
+assert_true(funcexists?("sqr") = true, "a library name is callable")
+assert_true(funcexists?("triple%") = true, "and one of this program's own routines")
+assert_true(funcexists?("TRIPLE%") = true, "the question is case-insensitive, like the call")
+assert_true(funcexists?("no_such_name_anywhere") = false, "and a name in neither is not")
+
+rem It answers about the NAME, not the arity: the kinds of a call that has not
+rem happened yet are not knowable, so a predicate about them would be guessing.
+assert_true(funcexists?("mid$") = true, "a name that exists under several arities is still just there")
+
 function identity@(h@)
   return h@
 endfunction

@@ -53,6 +53,14 @@ begin
   Result := TPhosphorVM(AVM).CallByName(Args[0].Str, rest, Err);
 end;
 
+{ funcexists?(name$) -- can this name be called at all? Asked of the same two
+  places CallByName looks, and about the NAME only. }
+function f_funcexists(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValBool(TPhosphorVM(AVM).KnowsName(Args[0].Str));
+end;
+
 procedure RegisterCallFuncs(Reg: TPhosphorRegistry);
 const
   { One return-suffix spelling per value kind (none / % / $ / @ / ?); all share one
@@ -77,6 +85,10 @@ begin
       Reg.AddHost(Names[s] + ':$' + wild, @f_calln);
     end;
   end;
+  { A dispatch table whose names come from data cannot be checked when the
+    program is packed -- a name in a dictionary is not an instruction. It can be
+    checked by the PROGRAM, once, where the table is built. }
+  Reg.AddHost('funcexists?:$', @f_funcexists);
 end;
 
 end.

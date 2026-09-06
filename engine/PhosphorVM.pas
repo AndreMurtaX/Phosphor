@@ -199,6 +199,11 @@ type
       one means. This is what callfunc calls. }
     function CallByName(const AName: String; const Args: array of TValue;
                         out Err: TPhosphorError): TValue;
+    { Is anything callable under this name -- a routine of the running program or
+      a library function -- without calling it? The same two places CallByName
+      looks. About the NAME only: the arity and kinds of a call that has not
+      happened yet are not knowable, and guessing is not a predicate. }
+    function KnowsName(const AName: String): Boolean;
     { The last error caught by an ON ERROR handler -- what err()/errmsg$()/erl()
       read. Set on each fault; persists until the next fault. }
     { True once the program has run END. A host that re-enters the VM (a GUI event
@@ -1638,6 +1643,17 @@ end;
   routines first, the registry second. That order is opCall's, and matching it is
   the whole point -- callfunc("sqr", 9) has to mean what sqr(9) means, including
   which of two same-named things wins. }
+function TPhosphorVM.KnowsName(const AName: String): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  if FProg <> nil then
+    for i := 0 to FProg.UserFuncCount - 1 do
+      if SameText(FProg.UserFuncs[i].Name, AName) then Exit(True);
+  Result := (Registry <> nil) and Registry.HasName(AName);
+end;
+
 function TPhosphorVM.CallByName(const AName: String; const Args: array of TValue;
   out Err: TPhosphorError): TValue;
 var

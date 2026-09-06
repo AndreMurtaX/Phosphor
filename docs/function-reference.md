@@ -264,13 +264,16 @@ numeric/string/handle value). Both read the array's own kind.
 ## Dict — string-keyed maps (20 functions)
 
 Maps keyed by string, as handles, in insertion order. Three value kinds: numeric
-(`dict@`), string (`sdict@`), handle (`pdict@`). Get/set is kind-agnostic.
+One dictionary holds any of the five kinds; `dict_typeof` says which a key holds.
+`dict@`, `sdict@` and `pdict@` all construct the same container and differ only in
+what `dict_type` then reports it was made for. Get/set is kind-agnostic and never
+converts.
 
 | function | description |
 | --- | --- |
-| `dict@() → handle` | a new numeric-valued dictionary |
-| `sdict@() → handle` | a new string-valued dictionary |
-| `pdict@() → handle` | a new handle-valued dictionary |
+| `dict@() → handle` | a new dictionary, holding any kind; reports itself as numeric |
+| `sdict@() → handle` | the same container, reporting itself as string |
+| `pdict@() → handle` | the same container, reporting itself as handle |
 | `dict_set@(d@, key$, value) → handle` | set a numeric value; returns the dict |
 | `sdict_set@(d@, key$, value$) → handle` | set a string value |
 | `pdict_set@(d@, key$, value@) → handle` | set a handle value |

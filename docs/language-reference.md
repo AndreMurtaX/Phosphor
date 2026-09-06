@@ -700,7 +700,7 @@ the full catalog of every function is in
 | Strings | case, slicing, search, replace, radix, words | `ucase$` `mid$` `instr` `replacestr$` `hex$` |
 | Numbers | rounding, roots, logs, trig, random | `abs` `sqr` `round` `sin` `rnd` |
 | Arrays | create, index, bounds, multi-dim | `dim@` `sdim@` `ubound` `narr_get` |
-| Dictionaries | string-keyed maps | `dict@` `sdict@` `pdict@` |
+| Dictionaries | string-keyed maps of any kind | `dict@` `dict_set@` `dict_typeof` |
 | String lists | growable text lists | `strings@` `strings_add` `strings_text$` |
 | JSON | parse / build / query | `json_parse@` `json_object@` `json_get@` |
 | Files & paths | whole-file text, path ops | `file_writealltext` `file_readalltext$` `path_*` |

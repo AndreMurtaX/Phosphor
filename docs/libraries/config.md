@@ -43,13 +43,29 @@ default only when the key is **absent**; a key that is present but does not pars
 as a number reads as `0`, because the key does exist. And `cfg_getb` treats
 exactly the string `1` as true — a hand-edited `true` or `yes` reads as false.
 
+## An .ini is a file
+
+A configuration file is confined by the [sandbox root](../embedding.md#the-filesystem-sandbox)
+like anything else a program opens. Outside it, `cfg_open@` **binds no file**: the
+handle still opens and the config still works entirely in memory, `cfg_filename$`
+answers `""`, and `cfg_save` answers `0` having written nothing. A program gets an
+object it can use and a failure it can see, rather than a nil handle or a write
+somewhere it did not ask for.
+
+That was not always true. Until 2026-09-06 this library opened an `.ini` by path
+with no check at all, so a sandboxed script could read and write one anywhere on
+the disk while `file_writealltext` to the very same path was refused — and
+`scripts/check-sandbox.py` said nothing, because the ways it knew of opening a
+file did not include an INI. Both are fixed, and `tests/suite/58_sandbox` pins the
+refusal and the ordinary case together.
+
 ## Functions
 
 ### Opening a config, and where configs live
 
 | function | what it answers |
 | --- | --- |
-| `cfg_open@(path$) → handle` | a config handle bound to `path$`, holding the file's contents in memory. A path that does not exist is not an error: the config is simply empty, and the file appears on the first save |
+| `cfg_open@(path$) → handle` | a config handle bound to `path$`, holding the file's contents in memory. A path that does not exist is not an error: the config is simply empty, and the file appears on the first save. A path **outside the sandbox root** binds no file at all — see *An .ini is a file* above |
 | `cfg_open_auto@(path$) → handle` | the same, with autosave already on — every later set writes the whole file through. Nothing is written until that first set |
 | `cfg_filename$(c@) → str` | the path the handle was opened with, unchanged |
 | `cfg_path$() → str` | the platform's per-application configuration directory, as a path; the system temp directory when the platform names none, and a directory **inside the sandbox root** when a root is set. It answers a location, it does not create it |
@@ -108,7 +124,7 @@ take the section name **literally**, so `""` there means a section actually name
 | function | what it answers |
 | --- | --- |
 | `cfg_modified(c@) → num` | `1` while the memory copy differs from the last save, `0` right after a save, a reload, or an open |
-| `cfg_save(c@) → num` | `1` once the whole file has been written, creating any missing directories along the path. It writes whether or not anything changed. A write the OS refuses is a catchable runtime error carrying the OS message, not a `0` |
+| `cfg_save(c@) → num` | `1` once the whole file has been written, creating any missing directories along the path. It writes whether or not anything changed. A write the OS refuses is a catchable runtime error carrying the OS message. **`0` means no file was ever bound** — the path was outside the sandbox root when the handle was opened, so there is nowhere to write and nothing was written |
 | `cfg_reload@(c@) → handle` | the handle, now holding what is on disk — every unsaved change is discarded, and `cfg_modified` returns to `0`. Reloading a file that no longer exists leaves an empty config |
 
 ### Removing

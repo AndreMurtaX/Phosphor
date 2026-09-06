@@ -1,13 +1,17 @@
 # dict — string-keyed maps as handles
 
-`engine/libs/PhosphorDictLib.pas` · 20 functions · always available (engine core, no package to enable)
+`engine/libs/PhosphorDictLib.pas` · 29 functions · always available (engine core, no package to enable)
 
 ## What it is for
 
 A dictionary is a map from a string key to a value, held as a handle and passed
-around like any other `@`. There are three of them, one per value kind: `dict@`
-holds numbers, `sdict@` holds strings, `pdict@` holds other handles — which is how
-a dictionary of dictionaries, or of arrays, or of JSON nodes, is built. Entries
+around like any other `@`. **One dictionary holds any of the five kinds** — a
+number, a string, an int, a handle or a bool — under whatever keys you like, and
+`dict_typeof` says which a given key holds. A handle value is how a dictionary of
+dictionaries, or of arrays, or of JSON nodes, is built.
+
+`dict@`, `sdict@` and `pdict@` all construct the same thing; the names differ only
+in what they say the dictionary was *made for*, which `dict_type` reports. Entries
 keep **insertion order**, so `dict_key$(d@, n)` walks them in the order they were
 first set, and a key that is overwritten keeps the position it already had.
 

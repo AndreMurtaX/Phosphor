@@ -23,6 +23,7 @@ program probe_sandbox;
 {$codepage UTF8}
 
 uses
+  {$IFDEF UNIX}BaseUnix,{$ENDIF}
   SysUtils, PhosphorEngine, PhosphorSandbox;
 
 type
@@ -116,7 +117,11 @@ begin
   DeleteFile(OutDir + PathDelim + 'chan.txt');
   DeleteFile(OutDir + PathDelim + 'new.txt');
   DeleteFile(OutDir + PathDelim + 'unbounded.txt');
+  DeleteFile(OutDir + PathDelim + 'through.txt');
   RemoveDir(OutDir + PathDelim + 'made');
+  {$IFDEF UNIX}
+  FpUnlink(PChar(RootDir + PathDelim + 'door'));
+  {$ENDIF}
 
   // Build the victim tree OUTSIDE the root. Everything destroyed if a guard fails
   // is something this probe just made.
@@ -186,6 +191,36 @@ begin
          'OPEN FOR OUTPUT outside the root fails the run');
   Report(not FileExists(OutDir + PathDelim + 'chan.txt'),
          'and no channel file was made outside');
+
+  // --- a door planted INSIDE the root, opening outside it ---------------------
+  // The one escape a path-string check does not catch: every component of
+  // '<root>/door/secret.txt' is inside the root as WRITTEN, and only resolving
+  // the link shows where it really goes.
+  {$IFDEF UNIX}
+  FpSymlink(PChar(OutDir), PChar(RootDir + PathDelim + 'door'));
+  if not DirectoryExists(RootDir + PathDelim + 'door') then
+    Report(False, 'the probe could not plant a symlink to test with')
+  else
+  begin
+    Check('a read through a symlink out of the root is refused',
+          'print file_readalltext$("' + Slash(RootDir) + '/door/victim.txt")' + LF, '');
+    Check('a write through a symlink out of the root is refused',
+          'print file_writealltext("' + Slash(RootDir) + '/door/through.txt", "x")' + LF, '0');
+    Report(not FileExists(OutDir + PathDelim + 'through.txt'),
+           'and nothing was written through it');
+    Check('a listing through a symlink out of the root is refused',
+          'print dir_getfiles$("' + Slash(RootDir) + '/door")' + LF, '');
+    Report(FileExists(OutDir + PathDelim + 'victim.txt'),
+           'and the tree the link points at is untouched');
+    FpUnlink(PChar(RootDir + PathDelim + 'door'));
+  end;
+  {$ELSE}
+  // Not a silent skip: creating a symlink on Windows needs SeCreateSymbolicLink,
+  // which this machine does not grant. It goes to STDOUT with a "skip:" prefix,
+  // which the suite runners print alongside ok:/fail: -- a skip nobody sees is a
+  // pass, and this one is not a pass.
+  Writeln('skip: symlink escape (needs a symlink; Windows creation is privileged)');
+  {$ENDIF}
 
   // --- the scratch places answer inside the root ------------------------------
   RunUnder(RootDir, 'print temppath$()' + LF);

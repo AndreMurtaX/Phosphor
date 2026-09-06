@@ -301,6 +301,39 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 28 · `getkey$` answered `chr$(0)` for every key, and the
+  suite could not have known.** Reported by the owner running
+  `examples/crt_keys.bas`: every keypress printed *control/extended, first code 0*,
+  and `'q'` did not quit — because `'q'` never came back as `"q"`.
+  - **The defect was a missing `begin`/`end`.** In `CrtKeyFromEvent` the `else`
+    owned only the `SetLength(Result, 2)`; the two assignments under it ran for
+    EVERY key. A printable key built its one-byte string, then had byte 1
+    overwritten with `#0` and byte 2 written **one past the end** — over the
+    AnsiString's terminator. Length 1 for printable keys, 2 for extended ones,
+    first code 0 for both: exactly the output that was reported.
+  - **`SetLength` stamps the SYSTEM code page, not the unit's.** The same function
+    then returned a string tagged 1252 while the engine speaks UTF-8, so `=`
+    against a UTF-8 string was False for identical bytes. The project's standard
+    remedy for the `{$codepage UTF8}` trap is *build by index, do not concatenate a
+    Char* — and that remedy leaves the wrong tag on the result. When the bytes are
+    a PROTOCOL (`chr$(0)` + a code) rather than text, finish the job:
+    `SetCodePage(RawByteString(Result), CP_UTF8, False)` re-tags without
+    converting. Building it and tagging it are two halves of one rule.
+  - **THE REAL LESSON: a path that needs a human at a keyboard is a path nothing
+    is watching.** `EventToKey` is reachable only through a console handle, raw
+    mode and a live keypress, so the headless suite never ran a line of it —
+    and `check-codepage.py`'s own header records that an earlier sweep had already
+    edited this very function. It was edited, shipped, and never executed by a test.
+    The fix is not more care; it is to **separate the decision from the I/O**:
+    `CrtKeyFromEvent(char, vk)` takes the two fields the console event carries and
+    answers the key, with no console anywhere, and `tests/probe_crt.lpr` calls it
+    directly. Seen failing: with the defect put back, the probe reports `'q'` as
+    `[00]` and five checks fail.
+  - **Where else this applies.** Any host-side seam that only a human, a display or
+    a network peer can trigger — key decoding, mouse hit-testing, a terminal
+    capability probe. Ask what part of it is a pure function of its inputs, lift
+    that out, and test it. What is left needing a human should be a handful of
+    lines with no decisions in them.
 - **2026-09-06 · round 27 · the ceiling that was claimed and never built.**
   Phase 3 step 2 shipped `MaxSteps`, `TimeoutMs` and `MaxOutputBytes` and wrote
   down that the engine was now "safe to embed untrusted scripts". All three bound

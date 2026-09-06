@@ -53,6 +53,16 @@ uses
 
 procedure RegisterCrtFuncs(Reg: TPhosphorRegistry);
 
+{$IFDEF WINDOWS}
+{ The keyboard DECISION, lifted out of the keyboard I/O so it can be tested.
+  Everything else on this path needs a real console -- a console handle, raw mode,
+  a live keypress -- so the headless suite never ran a line of it, and a missing
+  begin/end sat in it reporting every key as an extended one. This takes the two
+  fields an INPUT_RECORD carries and answers what the key is; tests/probe_crt.lpr
+  calls it with no console in sight. }
+function CrtKeyFromEvent(AUnicodeChar: WideChar; AVirtualKey: Word): String;
+{$ENDIF}
+
 implementation
 
 const
@@ -253,20 +263,42 @@ begin
   end;
 end;
 
+function CrtKeyFromEvent(AUnicodeChar: WideChar; AVirtualKey: Word): String;
+begin
+  if AUnicodeChar <> #0 then
+    // A normal key: its character, as UTF-8 bytes.
+    Result := UTF8Encode(WideString(AUnicodeChar))
+  else
+  begin
+    // An arrow or function key: chr$(0) + the virtual-key code.
+    // The begin/end is not decoration. Without it only SetLength belonged to the
+    // else, and the two assignments below ran for EVERY key -- overwriting byte 1
+    // of a printable key with #0 and writing byte 2 one past the end of a
+    // one-byte string. Every key then read as extended, and 'q' never equalled
+    // "q", so a demo that quits on 'q' could not be quit.
+    // Built by index, not by concatenation: under this unit's UTF8 codepage a
+    // virtual-key code >= 128 (F-keys and the OEM range) would otherwise be
+    // re-encoded and the key misreported.
+    SetLength(Result, 2);
+    Result[1] := #0;
+    Result[2] := Chr(Byte(AVirtualKey));
+    // AND TAG IT. SetLength on an empty string stamps the SYSTEM code page (1252
+    // here), not this unit's UTF-8, so the two bytes would be CONVERTED on their
+    // way into the engine -- a virtual-key code of $BA arriving as $C2 $BA, a
+    // two-byte key three bytes long, asc() answering 194. These two bytes are a
+    // protocol, not text; re-tag without converting so they reach the program as
+    // written. (The indexed writes above are the other half of the same rule: see
+    // scripts/check-codepage.py.)
+    SetCodePage(RawByteString(Result), CP_UTF8, False);
+  end;
+end;
+
 function EventToKey(const ARec: INPUT_RECORD): String;
 begin
   Result := '';
   if (ARec.EventType = KEY_EVENT) and (ARec.Event.KeyEvent.bKeyDown) then
-  begin
-    if ARec.Event.KeyEvent.UnicodeChar <> #0 then
-      Result := UTF8Encode(WideString(ARec.Event.KeyEvent.UnicodeChar))
-    else                                   // arrow / function key: chr$(0) + VK code
-      // Built by index, not by concatenation: a virtual-key code >= 128 (F-keys and
-      // the OEM range) would otherwise be re-encoded and the key misreported.
-      SetLength(Result, 2);
-      Result[1] := #0;
-      Result[2] := Chr(Byte(ARec.Event.KeyEvent.wVirtualKeyCode));
-  end;
+    Result := CrtKeyFromEvent(ARec.Event.KeyEvent.UnicodeChar,
+                              ARec.Event.KeyEvent.wVirtualKeyCode);
 end;
 
 function KbdKeyPressed: Boolean;

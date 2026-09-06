@@ -194,6 +194,7 @@ else {
         @{ name='probe_limits';   src='tests\probe_limits.lpr' },
         @{ name='probe_bytecode'; src='tests\probe_bytecode.lpr' },
         @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
+        @{ name='probe_crt';      src='tests\probe_crt.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' }
     )
     foreach ($hp in $hostProbes) {
@@ -210,13 +211,14 @@ else {
         if (Test-Path $pexe) { Remove-Item $pexe -Force }
         & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
             "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
+            "-Fu$(Join-Path $root 'host\packages')" `
             "-FU$unitsDir" "-FE$binDir" "-o$pexe" $psrc | Out-Null
         if (-not (Test-Path $pexe)) { Write-Host ("FAIL  probe: {0}  did not build" -f $hp.name) -ForegroundColor Red; $allOk = $false; continue }
         $pout = Join-Path $tmp 'probe.out'
         $perr = Join-Path $tmp 'probe.err'
         cmd /c "`"$pexe`" > `"$pout`" 2> `"$perr`""
         $pcode = $LASTEXITCODE
-        $psum = (((Get-Content -Raw $pout) -split "`r?`n" | Where-Object { $_ -match '^(ok|fail):' }) -join ' ').Trim()
+        $psum = (((Get-Content -Raw $pout) -split "`r?`n" | Where-Object { $_ -match '^(ok|fail|skip):' }) -join ' ').Trim()
         if ($pcode -eq 0) { Write-Host ("PASS  probe: {0}  ({1})" -f $hp.name, $psum) -ForegroundColor Green }
         else {
             Write-Host ("FAIL  probe: {0}  ({1})" -f $hp.name, $psum) -ForegroundColor Red

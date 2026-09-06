@@ -45,8 +45,10 @@ Phosphor/
     console/              the first consumer: REPL + file runner.
       phosphor.lpr          program; produces the `phosphor` binary.
       phosphor.lpi          Lazarus project file (opens/builds in the IDE).
-    gui/                  the second consumer: 17 LCL packages under libs/, plus
-                          phosphorgui (the interactive host) and phosphorguitest.
+    gui/                  17 LCL packages under libs/, plus phosphorguitest, the
+                          headless runner for the GUI suite. There is no separate
+                          GUI host: `phosphor` links the widgetset and opens the
+                          display only when a script asks for a window.
     packages/             the six opt-in packages a host may register.
     embed/                the third consumer: phosphorembed, which is what the
                           embedding API is tested through.

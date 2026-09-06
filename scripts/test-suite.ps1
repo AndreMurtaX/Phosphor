@@ -229,7 +229,7 @@ else {
 }
 
 # --- source-level gates -------------------------------------------------------
-# Two invariants no compiler can check and no golden happens to cover:
+# The invariants no compiler can check and no golden happens to cover:
 #   check-codepage.py  no Char is concatenated into a code-page string (bytes >= 128
 #                      are silently destroyed; the class has been swept three times)
 #   coverage.py        every registered built-in is exercised by a test AND listed in
@@ -243,6 +243,11 @@ else {
 #                      leave it nil -- a nil seam answers silently, which is how
 #                      the GUI host of the day shipped answering every INPUT with an
 #                      empty line; it has since been merged into phosphor
+#   check-examples.py  every ```basic block in the docs COMPILES. coverage.py already
+#                      refuses a block that calls a function which does not exist; it
+#                      cannot refuse one whose functions are all real and whose syntax
+#                      is wrong, and on 2026-09-06 four such blocks were in the tree,
+#                      including the worked example a reader is most likely to copy
 # They are run HERE, in the acceptance gate, rather than in the build: building
 # should not need Python, but passing the suite should mean the invariants hold.
 # A missing interpreter is a FAILURE, not a skip -- a gate that quietly does not run
@@ -254,7 +259,7 @@ if (-not $py) {
     Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
     $allOk = $false
 } else {
-    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py')) {
+    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py')) {
         $gp = Join-Path $here $gate
         # The comment above says a gate that quietly does not run is worse than no
         # gate, and then this line skipped a gate whose FILE was missing -- exactly

@@ -381,13 +381,17 @@ def main():
         ONLY basic blocks. A shell command, a directory tree or a Pascal snippet
         is not Phosphor code, and reading one as Phosphor reports every English
         word followed by a parenthesis -- a gate that cries wolf is a gate people
-        learn to skip."""
+        learn to skip.
+
+        The FIRST WORD of the fence decides, not the whole fence: check-examples.py
+        marks a syntax summary ```basic notation to be excused from compiling, and
+        a block excused from compiling is not excused from naming real functions."""
         out = []
         lines = txt.splitlines()
         i = 0
         while i < len(lines):
             fence = lines[i].lstrip()
-            if fence.startswith('```') and fence[3:].strip().lower() == 'basic':
+            if fence.startswith('```') and fence[3:].strip().lower().split(' ')[0] == 'basic':
                 j = i + 1
                 body = []
                 while j < len(lines) and not lines[j].lstrip().startswith('```'):

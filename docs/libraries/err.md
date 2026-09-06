@@ -39,20 +39,29 @@ rem Read a number from a config file, falling back to a default when
 rem anything at all goes wrong -- a missing file, a key that is not a
 rem number, or a value the program itself judges invalid.
 
+rem `on error call` is the form to use inside a function: the handler is a
+rem ROUTINE, so it needs no label, and a label written inside a function body is
+rem not somewhere `on error goto` can reach.
+failed? = false
+
+function complain(code, msg$)
+  println "config: " + msg$ + "  (code " + str$(code) + ")"
+  failed? = true
+  return 0                       rem 0 resumes at the next statement
+endfunction
+
 function port_or_default(path$, fallback)
-  on error goto bad
+  on error call complain
+  failed? = false
+  n = 0
   cfg@ = cfg_open@(path$)
   raw$ = cfg_gets$(cfg@, "server", "port")
   if raw$ = "" then error("no 'port' key in " + path$)
   n = val(raw$)
   if n < 1 or n > 65535 then error("port " + raw$ + " is out of range")
   on error goto 0
+  if failed? = true then return fallback
   return n
-
-bad:
-  println "config: " + errmsg$() + "  (code " + str$(err()) + ", line " + str$(erl()) + ")"
-  err_clear()
-  resume next
 endfunction
 
 port = port_or_default("server.ini", 8080)
@@ -70,8 +79,16 @@ Three things worth noticing:
 - **`error` is not special.** The handler cannot tell a failure the program raised
   from one the engine raised, and does not need to: both arrive with a code, a
   message and a line.
-- **`err_clear` before returning to normal work.** Without it, a later `if err()`
-  somewhere else would still be looking at this error, long after it was handled.
+- **`err_clear` before returning to normal work.** Without it, a later `err()`
+  read somewhere else would still be describing this error, long after it was
+  handled. The handler above does not need it because it answers through a
+  variable of its own, which is the shape to prefer when the caller has to make a
+  decision.
+
+- **A label written inside a function is not a handler.** `on error goto` needs a
+  label the compiler can see from where the error happens, and a function body's
+  labels are not that. Inside a function, `on error call` — the handler is a
+  routine, taking the code and the message.
 
 ## Where the rest of the mechanism lives
 

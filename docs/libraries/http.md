@@ -174,7 +174,7 @@ rem Compose a URL from a client's base and a form's rendering, then fetch it.
 c@ = http_client@("http://127.0.0.1:8080")
 http_timeout(c@, 5000)
 http_header(c@, "X-Requested-With", "phosphor")
-if http_error() then println "config refused: " + http_strerror$(http_error())
+if http_error() <> 0 then println "config refused: " + http_strerror$(http_error())
 
 f@ = http_form@()
 http_formfield(f@, "q", "phosphor basic")

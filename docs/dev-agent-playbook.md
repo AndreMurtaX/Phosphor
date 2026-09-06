@@ -321,6 +321,43 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 32 · a documented example that every gate approved and no
+  reader could run.** The owner asked how to type a dictionary walk at the prompt.
+  The REPL threw the line away: `IsUnterminatedBlock` listed six of the compiler's
+  nine "expected X" messages and `next` was not among them, so a multi-line `for` —
+  the one block a person is most likely to type interactively — was rejected while
+  the banner two lines above promised the prompt would wait. Fixed by taking the
+  list from the compiler rather than from memory.
+
+  Then the one-liner failed too, for an unrelated reason, and that is the entry:
+  **the example on `docs/libraries/dict.md` was not valid BASIC.** `case "string" :
+  println …` is not how a case label is written. I had written it that day. Every
+  gate passed it, and correctly so — `coverage.py` checks that a documented name is
+  a registered function, and every name in that block was real. Nothing anywhere
+  checked that the block was a *program*.
+
+  So I compiled all of them: **71 blocks, 66 compiled, 4 of the 5 failures were
+  defects** — a label inside a function reached by `on error goto` (which cannot
+  work; a function's handler is a routine), and three conditions written `if x then`
+  where the language wants `if x <> 0 then`. Now `scripts/check-examples.py` compiles
+  every one on every suite run.
+
+  - **The rule this produces: a gate that checks the parts does not check the whole.**
+    Name-coverage is a real invariant and it was passing; it simply answers a
+    different question than "would this run". Whenever a gate is added, ask what the
+    *next* layer of wrongness looks like — here, the names were right and the grammar
+    was wrong, and the only honest check was to hand the block to the compiler.
+  - **The exemption rides on the thing it exempts.** The quick-reference block is a
+    cheat sheet with `…` in it and is not meant to run. It is fenced ```basic
+    notation, so the marker moves with the block; a list of `file:line` exemptions
+    would have gone stale on the next edit. `coverage.py` was taught to match the
+    first word of the fence, because a block excused from *compiling* is not excused
+    from naming real functions — relabelling it would otherwise have quietly dropped
+    it from the name gate too.
+  - **Docs written the same day are not safer than old ones.** Two of the four were
+    hours old. Writing an example is not testing it, and reading it back proves only
+    that it looks right.
+
 - **2026-09-06 · round 31 · the owner said one binary; the reason for two was false.**
   Phase 2 shipped two hosts and justified it in three documents: *the LCL cannot be
   loaded on demand, because on Linux gtk2 opens the X display in a unit

@@ -163,7 +163,7 @@ h    = cfg_getn(c@, "Window", "height", 600)
 dark = cfg_getb(c@, "Features", "darkMode", 0)
 
 println "run " + str$(runs) + ", window " + str$(w) + "x" + str$(h)
-if dark then println "dark mode is on"
+if dark <> 0 then println "dark mode is on"
 
 rem Write back what was read, so a first run leaves the defaults behind
 rem for the next one to find.
@@ -176,7 +176,7 @@ for i = 1 to cfg_sectioncount(c@)
   println "  [" + s$ + "] " + str$(cfg_keycount(c@, s$)) + " keys"
 next
 
-if cfg_modified(c@) then cfg_save(c@)
+if cfg_modified(c@) <> 0 then x = cfg_save(c@)
 println "saved to " + cfg_filename$(c@)
 ```
 

@@ -750,12 +750,21 @@ end;
   instead of rejecting the line, so a multi-line IF, loop or FUNCTION can be typed. }
 function IsUnterminatedBlock(const AMsg: String): Boolean;
 begin
+  { EVERY terminator the compiler can ask for, taken from the compiler rather than
+    remembered. `next` was missing, so a FOR loop -- the one block a person is most
+    likely to type at a prompt -- answered "expected 'next'" and threw the line
+    away, while the banner two lines above promised it would wait. The two `case`
+    messages belong here for the same reason: a bare `select case v` is a block
+    that has not been finished yet, not a mistake. }
   Result := (AMsg = 'expected ''endif''') or
             (AMsg = 'expected ''endwhile'' or ''wend''') or
             (AMsg = 'expected ''endfunction''') or
             (AMsg = 'expected ''endselect''') or
             (AMsg = 'expected ''loop''') or
-            (AMsg = 'expected ''until''');
+            (AMsg = 'expected ''until''') or
+            (AMsg = 'expected ''next''') or
+            (AMsg = 'expected ''case'' after ''select''') or
+            (AMsg = 'expected ''case'' or ''endselect''');
 end;
 
 function Repl: Integer;

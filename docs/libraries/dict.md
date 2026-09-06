@@ -73,11 +73,16 @@ holds before reading it:
 for i% = 1 to dict_count(d@)
   k$ = dict_key$(d@, i%)
   select case dict_typeof$(d@, k$)
-    case "string"  : println k$ + " = " + dict_get$(d@, k$)
-    case "int"     : println k$ + " = " + str$(dict_get%(d@, k$))
-    case "number"  : println k$ + " = " + str$(dict_get(d@, k$))
-    case "bool"    : if dict_get?(d@, k$) = true then println k$ + " = true"
-    case "handle"  : println k$ + " = <handle>"
+    case "string"
+      println k$ + " = " + dict_get$(d@, k$)
+    case "int"
+      println k$ + " = " + str$(dict_get%(d@, k$))
+    case "number"
+      println k$ + " = " + str$(dict_get(d@, k$))
+    case "bool"
+      if dict_get?(d@, k$) = true then println k$ + " = true"
+    case "handle"
+      println k$ + " = <handle>"
   endselect
 next
 ```

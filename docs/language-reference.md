@@ -721,7 +721,7 @@ the full catalog of every function is in
 
 ## Quick reference
 
-```basic
+```basic notation
 ' --- values ------------------------------------------------------------
 n   = 3.14        ' number (Double)      i% = 7      ' integer
 s$  = "text"      ' string               b? = 1 < 2  ' boolean (true/false)

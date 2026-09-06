@@ -375,6 +375,24 @@ begin
             if InI64Range(dv) then V := ValInt(Round(dv))
             else Result := MakeError(peRuntime, '"' + AField + '" is out of integer range');
           end
+          { THE FINITENESS GATE APPLIES TO INPUT TOO.
+
+            "no TValue ever holds a non-finite Double" (see FiniteD in
+            PhosphorValue) is what makes it safe to run a program with the
+            invalid-operation trap unmasked -- and TryStrToFloat is perfectly happy
+            to answer a field like 1e999 with +Inf. `input x` over that field used
+            to store the Inf and carry on; the next operation on it (x - x, an Inf
+            to NaN) then raised EInvalidOp OUTSIDE the engine's error path, so the
+            process died with "unhandled EInvalidOp" at exit 3 and the running
+            program could not catch a thing. In an embedded host that is the host's
+            process, which decisions.md forbids.
+
+            A field is DATA, not source, so this arrives from a file as readily as
+            from a keyboard: `input #1, x` over a data line reaches this same
+            function through opFileField. Refused here, next to the int% overflow
+            just above, with the offending text in the message. (2026-09-06.) }
+          else if IsInfinite(dv) or IsNan(dv) then
+            Result := MakeError(peRuntime, '"' + AField + '" is out of range')
           else V := ValDouble(dv);
         end
         else
@@ -1301,6 +1319,23 @@ var
     end;
   end;
 
+  { Why a local slot could not be used, for opLoadLocal/opStoreLocal. Built ONLY
+    on the failing path -- the guards at those two opcodes stay integer compares,
+    which is the whole reason this is not a "check it and return NoError" helper:
+    a managed TPhosphorError returned by value on every local access is a real
+    cost, and locals are as hot as the VM gets. }
+  function BadLocal(ASlot: Integer; const AVerb: String): TPhosphorError;
+  begin
+    if FFrameSP = 0 then
+      Result := MakeError(peRuntime, 'corrupt bytecode: local slot ' +
+                          IntToStr(ASlot) + ' ' + AVerb + ' outside any function')
+    else
+      Result := MakeError(peRuntime, 'corrupt bytecode: local slot ' +
+                          IntToStr(ASlot) + ' is outside the ' +
+                          IntToStr(Length(FFrames[FFrameSP - 1].Locals)) +
+                          ' locals of this function');
+  end;
+
   { Emit output, enforcing the output-byte ceiling. False = the ceiling was hit
     (a fatal peLimit is set; the caller must Exit(False)). }
   function EmitOutput(const S: String): Boolean;
@@ -1415,8 +1450,36 @@ begin
           Inc(FDataPtr);
         end;
       opRestore: FDataPtr := 0;
+      { THE TWO DUPS INDEX FStack DIRECTLY, so they -- alone among the stack
+        opcodes -- can read below FStack[0].
+
+        Everything else takes its operands through Pop(), which bottoms out
+        harmlessly at FSP = 0. These two compute a slot and read it, so a .pbc
+        holding `DUPN 1000000` with an empty stack read a megabyte below the array
+        and then REFCOUNTED each slot's Str field as if it were a string: an
+        out-of-bounds read followed by a write through a garbage pointer, which
+        arrived as "unhandled EAccessViolation" and exit 3. (2026-09-06.)
+
+        WHY THE CHECK IS HERE AND NOT IN ValidateProgram. The loader verifies what
+        an instruction says about itself -- a constant index, a variable index, a
+        jump target. How DEEP the value stack is at an instruction is not a
+        property of the instruction; it is a property of the path taken to reach
+        it, and the loader has neither a control-flow graph nor a way to build a
+        sound one: opGosub/opReturn pick a return address at run time, an ON ERROR
+        handler is entered from any faulting instruction with FSP reset to the
+        install point, `resume` re-enters mid-statement, and CallUserFunc re-enters
+        ExecFrom at a function entry chosen by the host. A static answer would be
+        unsound or would reject programs the compiler legitimately emits. FSP here
+        is the real depth, so the refusal lives here, and it is one compare.
+
+        ins.A is also re-checked for a negative: ValidateProgram runs on a LOADED
+        program, and a program that came straight from the compiler never passed
+        through it. }
       opDup2:
         begin
+          if FSP < 2 then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: DUP2 needs 2 values ' +
+                     'but the stack holds ' + IntToStr(FSP))) then Continue else Exit(False);
           a := FStack[FSP - 2];
           b := FStack[FSP - 1];
           Push(a);
@@ -1424,6 +1487,10 @@ begin
         end;
       opDupN:
         begin
+          if (ins.A < 0) or (ins.A > FSP) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: DUPN wants ' +
+                     IntToStr(ins.A) + ' values but the stack holds ' +
+                     IntToStr(FSP))) then Continue else Exit(False);
           // Duplicate the top ins.A values in order. base is fixed before the
           // pushes so a stack reallocation inside Push cannot disturb the source
           // slots (they sit below the original top and keep their copied values).
@@ -1515,9 +1582,48 @@ begin
           pc := FCallStack[FCSP];
           Continue;
         end;
-      opLoadLocal: Push(FFrames[FFrameSP - 1].Locals[ins.A]);
+      { A LOCAL NEEDS AN ACTIVATION FRAME, and the frame it lands in decides how
+        many slots there are.
+
+        opReturn and opRetFunc, three lines up, already refuse to run on an empty
+        stack of their own kind. These two did not, and a .pbc whose MAIN BODY
+        contains `LOADLOCAL 0` reached FFrames[-1]: a read of a TCallFrame's
+        dynamic-array header from before the array, and -- worse -- for the store a
+        write through whatever that header happened to contain. Both arrived as
+        "unhandled EAccessViolation" and exit 3, uncatchable, in a process the host
+        owns. (2026-09-06.)
+
+        The slot is bounded against THIS frame, not against the program. The loader
+        can only bound it against the widest local table in the file, because
+        nothing on disk says which function an instruction belongs to (see the note
+        at opLoadLocal in ValidateProgram); a slot legal for the widest function and
+        wild for the one actually running still indexed past the frame's Locals.
+        That one has not been seen to fault -- a short array's slack is usually
+        still mapped -- which is precisely the kind of luck that stops holding. The
+        frame knows its own size, so ask the frame.
+
+        STATIC OR RUN TIME: "is a frame live at this instruction" is a property of
+        the PATH, not of the instruction, exactly like the stack depth the two dups
+        need, so ValidateProgram cannot decide it and the dispatch loop must. The
+        two tests are written as separate statements rather than one `or` so that
+        the frame index is never formed before the frame is known to exist,
+        whatever the boolean-evaluation switch is set to. }
+      opLoadLocal:
+        begin
+          if FFrameSP = 0 then
+            if Fault(BadLocal(ins.A, 'read')) then Continue else Exit(False);
+          if (ins.A < 0) or (ins.A >= Length(FFrames[FFrameSP - 1].Locals)) then
+            if Fault(BadLocal(ins.A, 'read')) then Continue else Exit(False);
+          Push(FFrames[FFrameSP - 1].Locals[ins.A]);
+        end;
       opStoreLocal:
         begin
+          // Refused BEFORE the pop: the store never begins, so a `resume` retries a
+          // statement whose operand is still where the saved overlap expects it.
+          if FFrameSP = 0 then
+            if Fault(BadLocal(ins.A, 'written')) then Continue else Exit(False);
+          if (ins.A < 0) or (ins.A >= Length(FFrames[FFrameSP - 1].Locals)) then
+            if Fault(BadLocal(ins.A, 'written')) then Continue else Exit(False);
           v := Pop();
           lt := FProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].LocalTypes[ins.A];
           e := StoreCheck(lt, v, r);

@@ -62,28 +62,70 @@ begin
   end;
 end;
 
+{ NARROWING A PROGRAM'S NUMBER TO AN ORDINAL -- through the ENGINE's saturating
+  helpers, never through Round.
+
+  This used to be `Round(ArgNum(V))`, the only Round( in host/gui/libs, and it had
+  both halves of the bug that PhosphorValue.ArgI64/ArgI32 exist to prevent.
+  Round traps on a double outside Int64 (the x87/SSE invalid-operation exception),
+  so control_left@(b@, 9223372036854775807) -- the largest Int64 the LANGUAGE has,
+  a value a program can simply write down -- killed the program with "Invalid
+  floating point operation" from every one of the thirty-odd control_* setters and
+  from control_set@ as well. PhosphorValue's finiteness gate makes leaving that trap
+  unmasked safe by keeping Inf and NaN out of the value space, but 9.3e18 is FINITE:
+  it enters legally and traps here anyway.
+
+  And below the trap it wrapped, in silence, which is worse: control_left@(b@, 3e9)
+  answered -1294967296. Every other GUI package already narrows with ArgI32 and
+  saturates; this one file did not. So:
+
+    ArgOrd    for an Int64-wide target (Tag, and SetOrdProp's Int64 parameter)
+    ArgOrd32  for the Integer-typed LCL properties -- Left, Width, Font.Size, ...
+    ArgOrdIn  for a property whose own type is narrower than Integer, saturating
+              into that declared range (Cursor is -32768..32767, TabOrder -1..32767)
+
+  All three answer a value; none of them can raise. }
 function ArgOrd(const V: TValue): Int64;
 begin
-  Result := Round(ArgNum(V));
+  Result := ArgI64(V);
+end;
+
+function ArgOrd32(const V: TValue): Integer;
+begin
+  Result := ArgI32(V);
+end;
+
+function ArgOrdIn(const V: TValue; ALo, AHi: Int64): Int64;
+begin
+  Result := ArgI64(V);
+  if Result < ALo then Result := ALo
+  else if Result > AHi then Result := AHi;
 end;
 
 // --- named geometry helpers -------------------------------------------------
 function f_left_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Left) else Result := ValInt(0); end;
 function f_left_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Left := ArgOrd(A[1]); Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Left := ArgOrd32(A[1]); Result := A[0]; end;
 function f_top_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Top) else Result := ValInt(0); end;
 function f_top_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Top := ArgOrd(A[1]); Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Top := ArgOrd32(A[1]); Result := A[0]; end;
 function f_width_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Width) else Result := ValInt(0); end;
 function f_width_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Width := ArgOrd(A[1]); Result := A[0]; end;
+var c: TControl; n: Integer; begin E := NoError;
+  // GuiExtentOk, not a bare assignment: past 100000 the LCL traps rather than
+  // refusing -- see the constant's note in PhosphorGuiCore. The height it will see
+  // is the one the control already has, so that is what is offered for checking.
+  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiExtentOk(n, c.Height) then c.Width := n; end;
+  Result := A[0]; end;
 function f_height_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Height) else Result := ValInt(0); end;
 function f_height_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Height := ArgOrd(A[1]); Result := A[0]; end;
+var c: TControl; n: Integer; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiExtentOk(c.Width, n) then c.Height := n; end;
+  Result := A[0]; end;
 
 function f_align_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(Ord(c.Align)) else Result := ValInt(0); end;
@@ -106,7 +148,7 @@ var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Enabled := ArgOr
 function f_color_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Color) else Result := ValInt(0); end;
 function f_color_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Color := TColor(ArgOrd(A[1])); Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Color := TColor(ArgOrd32(A[1])); Result := A[0]; end;
 function f_hint_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValStr(c.Hint) else Result := ValStr(''); end;
 function f_hint_set(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -114,7 +156,7 @@ var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Hint := A[1].Str
 function f_cursor_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Cursor) else Result := ValInt(0); end;
 function f_cursor_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Cursor := TCursor(ArgOrd(A[1])); Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Cursor := TCursor(ArgOrdIn(A[1], Low(TCursor), High(TCursor))); Result := A[0]; end;
 function f_tag_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Tag) else Result := ValInt(0); end;
 function f_tag_set(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -128,11 +170,11 @@ var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Font.Name := A[1
 function f_fontsize_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Font.Size) else Result := ValInt(0); end;
 function f_fontsize_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Font.Size := ArgOrd(A[1]); Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Font.Size := ArgOrd32(A[1]); Result := A[0]; end;
 function f_fontcolor_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Font.Color) else Result := ValInt(0); end;
 function f_fontcolor_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Font.Color := TColor(ArgOrd(A[1])); Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Font.Color := TColor(ArgOrd32(A[1])); Result := A[0]; end;
 
 function StyleGet(const A: array of TValue; St: TFontStyle): TValue;
 var c: TControl; begin if Ctl(A[0].Hnd, c) and (St in c.Font.Style) then Result := ValInt(1) else Result := ValInt(0); end;
@@ -157,11 +199,25 @@ begin E := NoError; StyleSet(A, fsUnderline); Result := A[0]; end;
 
 // --- geometry verbs ---------------------------------------------------------
 function f_move(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then begin c.Left := ArgOrd(A[1]); c.Top := ArgOrd(A[2]); end; Result := A[0]; end;
+var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then begin c.Left := ArgOrd32(A[1]); c.Top := ArgOrd32(A[2]); end; Result := A[0]; end;
 function f_size(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then begin c.Width := ArgOrd(A[1]); c.Height := ArgOrd(A[2]); end; Result := A[0]; end;
+var c: TControl; w, h: Integer; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then
+  begin
+    w := ArgOrd32(A[1]); h := ArgOrd32(A[2]);
+    // Both together, and BOTH refused if either is too big: half a resize is not a
+    // size anybody asked for.
+    if GuiExtentOk(w, h) then begin c.Width := w; c.Height := h; end;
+  end;
+  Result := A[0]; end;
 function f_bounds(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.SetBounds(ArgOrd(A[1]), ArgOrd(A[2]), ArgOrd(A[3]), ArgOrd(A[4])); Result := A[0]; end;
+var c: TControl; w, h: Integer; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then
+  begin
+    w := ArgOrd32(A[3]); h := ArgOrd32(A[4]);
+    if GuiExtentOk(w, h) then c.SetBounds(ArgOrd32(A[1]), ArgOrd32(A[2]), w, h);
+  end;
+  Result := A[0]; end;
 function f_bringtofront(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.BringToFront; Result := A[0]; end;
 function f_sendtoback(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -194,6 +250,16 @@ begin
   o := HandleObj(A[0].Hnd);
   if not (o is TGuiHandle) then begin GGuiError := 1; Exit(ValInt(0)); end;
   h := TGuiHandle(o);
+  // THE ONE CONTROL THAT MUST NOT BE FREED IS THE ONE THE LCL IS STANDING ON.
+  // "Dispose of the window when it closes" -- form_onclose@ plus control_free, both
+  // documented, the obvious pairing -- destroyed the form from inside
+  // TCustomForm.Close, which then went on writing CloseAction and hiding an object
+  // that no longer existed: an access violation, 3 runs out of 3. Freeing a BUTTON
+  // inside its own click handler is fine and stays fine, because Click does not
+  // touch the control again; the close path does, and says so through GuiInUse.
+  // Refused, not raised -- gui_error 1 is the answer this package gives every
+  // operation a control will not accept. The window is still freed at ResetHandles.
+  if GuiInUse(h.Control) then begin GGuiError := 1; Exit(ValInt(0)); end;
   if (not h.Owns) and (h.Control <> nil) then
   begin
     h.Control.Free;   // a non-owned control is freed here; the owning form frees its own
@@ -281,7 +347,7 @@ var c: TComponent; k: Word;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
-  k := Word(ArgOrd(A[1]));
+  k := Word(ArgOrdIn(A[1], Low(Word), High(Word)));
   TWinControlAccess(c).KeyDown(k, ModsOf(A[2].Str));
 end;
 function f_do_keyup(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -289,7 +355,7 @@ var c: TComponent; k: Word;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
-  k := Word(ArgOrd(A[1]));
+  k := Word(ArgOrdIn(A[1], Low(Word), High(Word)));
   TWinControlAccess(c).KeyUp(k, ModsOf(A[2].Str));
 end;
 function f_do_keypress(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -307,7 +373,7 @@ begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
   TControlAccess(c).MouseDown(MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
-                              ArgOrd(A[2]), ArgOrd(A[3]));
+                              ArgOrd32(A[2]), ArgOrd32(A[3]));
 end;
 function f_do_mouseup(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
@@ -315,25 +381,25 @@ begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
   TControlAccess(c).MouseUp(MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
-                            ArgOrd(A[2]), ArgOrd(A[3]));
+                            ArgOrd32(A[2]), ArgOrd32(A[3]));
 end;
 function f_do_mousemove(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
-  TControlAccess(c).MouseMove(ModsOf(A[3].Str), ArgOrd(A[1]), ArgOrd(A[2]));
+  TControlAccess(c).MouseMove(ModsOf(A[3].Str), ArgOrd32(A[1]), ArgOrd32(A[2]));
 end;
 function f_do_mousewheel(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; pt: TPoint;
 begin
   E := NoError; Result := ValInt(0);
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
-  pt.X := ArgOrd(A[2]); pt.Y := ArgOrd(A[3]);
+  pt.X := ArgOrd32(A[2]); pt.Y := ArgOrd32(A[3]);
   // ONE call. DoMouseWheel already answers whether the event was consumed, which is
   // what the handler's Handled var parameter decided -- so the program reads back
   // its own answer, and the wheel is not spun twice to find out.
-  Result := ValInt(Ord(TControlAccess(c).DoMouseWheel(ModsOf(A[4].Str), ArgOrd(A[1]), pt)));
+  Result := ValInt(Ord(TControlAccess(c).DoMouseWheel(ModsOf(A[4].Str), ArgOrd32(A[1]), pt)));
 end;
 
 // --- the backbone helpers the plan named and never had ----------------------
@@ -383,7 +449,16 @@ begin
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
   pi := GetPropInfo(c, 'Anchors');
   if pi = nil then begin GGuiError := ERR_NO_PROPERTY; Exit; end;
-  SetSetProp(c, pi, A[1].Str);
+  // A MISSPELLED ANCHOR IS A TYPO, NOT A CRASH. SetSetProp raises
+  // EPropertyConvertError ('Unknown enumeration value: "akNope"') on any identifier
+  // it does not know, and that message named nothing in the program that caused it.
+  // The property EXISTS -- it is the value the control refuses -- so this is
+  // gui_error 1, "an operation the control refused", not ERR_NO_PROPERTY.
+  try
+    SetSetProp(c, pi, A[1].Str);
+  except
+    on Exception do GGuiError := 1;
+  end;
 end;
 
 function f_tabstop_get(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -397,7 +472,7 @@ var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TWinControl, c) then Result := ValInt(TWinControl(c).TabOrder); end;
 function f_taborder_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TWinControl, c) then TWinControl(c).TabOrder := ArgOrd(A[1]); end;
+  if GuiResolve(A[0].Hnd, TWinControl, c) then TWinControl(c).TabOrder := ArgOrdIn(A[1], Low(TTabOrder), High(TTabOrder)); end;
 
 // BorderSpacing and Constraints are class-typed sub-objects, which is exactly why
 // the property bridge refuses them. The plan claimed both were exposed; these are
@@ -407,31 +482,31 @@ var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).BorderSpacing.Around); end;
 function f_spacing_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).BorderSpacing.Around := ArgOrd(A[1]); end;
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).BorderSpacing.Around := ArgOrd32(A[1]); end;
 function f_minwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MinWidth); end;
 function f_minwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinWidth := ArgOrd(A[1]); end;
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinWidth := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
 function f_maxwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MaxWidth); end;
 function f_maxwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxWidth := ArgOrd(A[1]); end;
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxWidth := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
 function f_minheight_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MinHeight); end;
 function f_minheight_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinHeight := ArgOrd(A[1]); end;
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinHeight := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
 function f_maxheight_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MaxHeight); end;
 function f_maxheight_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxHeight := ArgOrd(A[1]); end;
+  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxHeight := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
 
 // --- the generic TypInfo property bridge ------------------------------------
 function IsStrKind(K: TTypeKind): Boolean;
@@ -452,22 +527,50 @@ begin
   pi := GetPropInfo(c, A[1].Str);
   if pi = nil then begin GGuiError := ERR_NO_PROPERTY; Exit; end;
   k := pi^.PropType^.Kind;
-  if IsStrKind(k) then
-    SetStrProp(c, pi, A[2].Str)
-  else if k = tkFloat then
-    SetFloatProp(c, pi, ArgNum(A[2]))
-  else if (k = tkEnumeration) and (A[2].Kind = vkString) then
-    SetEnumProp(c, pi, A[2].Str)              // an enum may be set by its identifier
-  else if (k = tkSet) and (A[2].Kind = vkString) then
-    SetSetProp(c, pi, A[2].Str)               // and a SET by its identifiers: "akLeft,akRight"
-  else if A[2].Kind = vkString then
-    // A string reaching a plain ordinal is not a value to coerce, it is a mistake to
-    // report. It used to become Round(ArgNum(s)) = 0 and be written silently.
-    GGuiError := ERR_NO_PROPERTY
-  else if IsOrdKind(k) then
-    SetOrdProp(c, pi, ArgOrd(A[2]))
-  else
-    GGuiError := ERR_NO_PROPERTY;             // an unsupported property kind
+  // THE VALUE IS THE PROGRAM'S, SO EVERY WAY IT CAN BE WRONG IS THE PROGRAM'S BUG
+  // TO SEE -- and each of these four RTTI writers raises rather than returning:
+  //   SetStrProp  on Name   -- '"not a name" is not a valid component name', and a
+  //                            duplicate name is EComponentError as well
+  //   SetEnumProp           -- 'Unknown enumeration value: "taCentre"'  (a typo)
+  //   SetSetProp            -- the same, per identifier in "akLeft,akNope"
+  //   SetOrdProp  on an index property -- the CONTROL's own bounds check fires
+  //                            inside the write: 'TListBox Index 500 out of bounds'
+  // Every one of those killed the program from a single control_set@ call, with an
+  // LCL-internal message that named nothing the programmer had written. There is no
+  // pre-check available here -- the bounds belong to a property this code is
+  // deliberately generic about -- so the refusal is caught, exactly the way
+  // control_parent@ above catches the LCL's own refusals, and recorded as
+  // gui_error 1: the property exists, the VALUE was refused. (ERR_NO_PROPERTY stays
+  // what it has always meant: no such published property.)
+  try
+    if IsStrKind(k) then
+      SetStrProp(c, pi, A[2].Str)
+    else if k = tkFloat then
+      SetFloatProp(c, pi, ArgNum(A[2]))
+    else if (k = tkEnumeration) and (A[2].Kind = vkString) then
+      SetEnumProp(c, pi, A[2].Str)              // an enum may be set by its identifier
+    else if (k = tkSet) and (A[2].Kind = vkString) then
+      SetSetProp(c, pi, A[2].Str)               // and a SET by its identifiers: "akLeft,akRight"
+    else if A[2].Kind = vkString then
+      // A string reaching a plain ordinal is not a value to coerce, it is a mistake to
+      // report. It used to become Round(ArgNum(s)) = 0 and be written silently.
+      GGuiError := ERR_NO_PROPERTY
+    else if (k = tkInt64) or (k = tkQWord) then
+      // Only these two properties are 64 bits wide (Tag is one, PtrInt on win64),
+      // so only these take the Int64 unnarrowed.
+      SetOrdProp(c, pi, ArgOrd(A[2]))
+    else if IsOrdKind(k) then
+      // EVERY OTHER ordinal property is at most 32 bits, and SetOrdProp TRUNCATES
+      // rather than clamping: passing it High(Int64) for an Integer property wrote
+      // -1. That is the same silent wrap ArgOrd32 exists to stop -- it just reached
+      // the property through the bridge instead of through control_left@, and
+      // control_set@(h, "Left", 1e19) is one of the calls the report named.
+      SetOrdProp(c, pi, ArgOrd32(A[2]))
+    else
+      GGuiError := ERR_NO_PROPERTY;             // an unsupported property kind
+  except
+    on Exception do GGuiError := 1;
+  end;
 end;
 
 function f_prop_get(const A: array of TValue; out E: TPhosphorError): TValue;

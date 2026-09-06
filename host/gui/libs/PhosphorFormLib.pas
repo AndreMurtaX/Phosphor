@@ -88,11 +88,15 @@ begin
   Err := NoError;
   frm := TForm.CreateNew(nil);
   if Length(Args) >= 1 then frm.Caption := Args[0].Str;
+  // A form is a TControl too, so form@(caption$, w, h) reaches the same trapping
+  // ceiling as control_width@ -- see GuiMaxExtent. Refused, the window keeps the
+  // default size it was created with and gui_error() says so.
   if Length(Args) >= 3 then
-  begin
-    frm.Width := ArgI32(Args[1]);
-    frm.Height := ArgI32(Args[2]);
-  end;
+    if GuiExtentOk(ArgI32(Args[1]), ArgI32(Args[2])) then
+    begin
+      frm.Width := ArgI32(Args[1]);
+      frm.Height := ArgI32(Args[2]);
+    end;
   Result := ValHandle(GuiRegister(frm, True));   // a form owns its tree
 end;
 
@@ -116,7 +120,8 @@ function f_form_width_set(const Args: array of TValue; out Err: TPhosphorError):
 var c: TComponent;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Width := ArgI32(Args[1]);
+  if GuiResolve(Args[0].Hnd, TForm, c) and GuiExtentOk(ArgI32(Args[1]), TForm(c).Height) then
+    TForm(c).Width := ArgI32(Args[1]);
   Result := Args[0];
 end;
 
@@ -132,7 +137,8 @@ function f_form_height_set(const Args: array of TValue; out Err: TPhosphorError)
 var c: TComponent;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) then TForm(c).Height := ArgI32(Args[1]);
+  if GuiResolve(Args[0].Hnd, TForm, c) and GuiExtentOk(TForm(c).Width, ArgI32(Args[1])) then
+    TForm(c).Height := ArgI32(Args[1]);
   Result := Args[0];
 end;
 
@@ -188,7 +194,21 @@ function f_form_close(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
 begin
   E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TForm, c) then TForm(c).Close;
+  if not GuiResolve(A[0].Hnd, TForm, c) then Exit;
+  // THE FORM BELONGS TO THE LCL FOR THE LENGTH OF Close. Close runs OnCloseQuery
+  // and OnClose, then goes on writing CloseAction and hiding the window; any BASIC
+  // routine reached from inside that -- the close handlers themselves, or an
+  // onchange a hide happens to fire -- must not be able to destroy the object the
+  // unwinding code is still standing on. The two close bridges mark the sender
+  // themselves; marking it here as well covers every other callback the close
+  // sequence can reach. GuiInUse only makes control_free ANSWER gui_error 1
+  // instead of freeing, so the window still dies at ResetHandles as it always has.
+  GuiEnterCallback(c);
+  try
+    TForm(c).Close;
+  finally
+    GuiLeaveCallback(c);
+  end;
 end;
 
 { True while the form is still visible: what a program reads after asking it to

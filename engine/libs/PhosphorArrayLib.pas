@@ -45,6 +45,7 @@ implementation
 constructor TPhosphorArray.Create(AKind: TArrayKind; const ADims: array of Int64);
 var
   i: Integer;
+  n: SizeInt;
   total: Int64;
   def: TValue;
 begin
@@ -64,8 +65,15 @@ begin
     def := ValDouble(0);
   end;
   SetLength(Data, total);
-  for i := 0 to High(Data) do
-    Data[i] := def;
+  // SizeInt, not Integer, for the same reason ArgI32/ArgI64 exist: High(Data) is a
+  // SizeInt, and an Integer counter would wrap negative past 2^31 elements and fill
+  // BACKWARDS out of the block. DoDim's byte-size guard means reaching that needs an
+  // allocation of 2^31 * SizeOf(TValue) = 103 GB that actually SUCCEEDED, so this is
+  // not reachable on any machine here and is written as hardening, not as a fix for
+  // something observed -- but a narrowed loop counter over a heap block is the same
+  // defect class as the one below, and it costs nothing to not have it.
+  for n := 0 to High(Data) do
+    Data[n] := def;
 end;
 
 function TPhosphorArray.TotalSize: Int64;
@@ -122,7 +130,7 @@ function DoDim(AKind: TArrayKind; const Args: array of TValue; out Err: TPhospho
 var
   dims: array of Int64;
   i: Integer;
-  total: Int64;
+  total, bytes: Int64;
 begin
   Err := NoError();
   Result := ValHandle(0);
@@ -148,6 +156,30 @@ begin
         'array is too large: the dimensions multiply out beyond the integer range');
       Exit;
     end;
+  end;
+  // AND THE SAME CHECK ON THE BYTE SIZE, because a count that fits in an Int64 is
+  // not a size that fits in memory. SetLength(Data, total) allocates total *
+  // SizeOf(TValue) bytes -- 48 here, not 1 -- and FPC's dynamic-array allocator
+  // computes that product WITHOUT checking it. dim@(2^30, 2^30) passed the loop
+  // above (2^60 elements is a perfectly good Int64) and then asked for 2^60 * 48
+  // bytes = 3 * 2^64, which is exactly ZERO modulo 2^64: SetLength returned a
+  // near-empty block while the array header went on claiming 2^60 elements, and the
+  // fill loop directly beneath it wrote straight off the end. The process died with
+  // STATUS_HEAP_CORRUPTION (0xC0000374) and not one byte of output. Nothing upstream
+  // could have saved it -- a wild write is not a Pascal exception, so neither the
+  // VM's try/except around library calls nor the program's own `on error goto` ever
+  // saw it; a one-line program took the host process down with it.
+  //
+  // The ceiling is deliberately the representable range and not a policy about how
+  // much memory is reasonable: a size that passes here but cannot be had still fails
+  // the honest way, with SetLength raising EOutOfMemory and the VM's net reporting
+  // the catchable "Out of memory" that dim@(10^12) has always given.
+  if not TryMulI64(total, SizeOf(TValue), bytes) then
+  begin
+    Err := MakeError(peIntOverflow, Format(
+      'array is too large: %d elements of %d bytes each is past the %d-byte limit',
+      [total, SizeOf(TValue), High(Int64)]));
+    Exit;
   end;
   Result := ValHandle(RegisterHandle(TPhosphorArray.Create(AKind, dims)));
 end;

@@ -37,8 +37,27 @@ end;
 // --- calendar ---------------------------------------------------------------
 function f_calendar(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TCalendar, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+{ A DATE OUTSIDE THE CALENDAR IS ANSWERED, NOT RAISED.
+
+  TCalendar.DateTime goes through DateTimeToSystemTime, which refuses anything the
+  Gregorian calendar has no day for -- 'Date cannot be before 01/01/0001' and 'Date
+  cannot be past 31/12/9999' -- and those exceptions killed the program. A date
+  number is arithmetic in Phosphor, so a program can reach them by subtracting too
+  much, which is not an exotic input.
+
+  Checked first, against the SAME bounds SysUtils itself uses, in the shape
+  PhosphorDateTimeLib's YearOk/MonthOk already gave this codebase: test the value,
+  then act. Out of range is gui_error 1 -- a value the control refused -- and the
+  calendar keeps the date it had. }
 function f_cal_date_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCalendar, c) then TCalendar(c).DateTime := AsDouble(A[1]); Result := A[0]; end;
+var c: TComponent; d: Double;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TCalendar, c) then Exit;
+  d := AsDouble(A[1]);
+  if (d < MinDateTime) or (d > MaxDateTime) then begin GGuiError := 1; Exit; end;
+  TCalendar(c).DateTime := d;
+end;
 function f_cal_date_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCalendar, c) then Result := ValDouble(TCalendar(c).DateTime) else Result := ValDouble(0); end;
 

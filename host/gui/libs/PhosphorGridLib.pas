@@ -27,6 +27,12 @@ procedure RegisterGridFuncs(Reg: TPhosphorRegistry);
 implementation
 
 type
+  { RowCount/ColCount/FixedRows/FixedCols are declared PROTECTED on TCustomGrid and
+    republished by TStringGrid and TDrawGrid, so this is how one guard can serve
+    both without being written twice -- the same trick PhosphorControlLib's
+    TControlAccess uses to reach a protected event. Never instantiated. }
+  TGridAccess = class(TCustomGrid);
+
   { OnDrawCell's signature lives in Grids, so its bridge lives here rather than in
     GuiCore -- the same reason PhosphorFormLib owns its own closer. Owned by the
     grid it serves, so it dies with it. }
@@ -38,6 +44,80 @@ type
     procedure Fire(Sender: TObject; aCol, aRow: Integer; aRect: TRect;
                    aState: TGridDrawState);
   end;
+
+{ A GRID HAS AN INVARIANT AND THE LCL ENFORCES IT BY RAISING.
+
+  TCustomGrid.CheckFixedCount refuses a header taller than the grid --
+  EGridException 'FixedRows can't be > RowCount', 'FixedRows<0', and the two column
+  spellings of the same -- and it runs from all four setters, so BOTH sides can trip
+  it: raising the header above the row count, and dropping the row count below the
+  header. That second one is the ordinary case, not an exotic one: a program that
+  gives a grid a header row and then EMPTIES it (rowcount 0) killed the interpreter
+  with a message naming neither the grid nor the line.
+
+  So the quadruple is checked HERE, before the LCL is asked, exactly as
+  stringgrid_cell@ below checks a cell before indexing it -- and a refused change
+  answers gui_error 1 and leaves the grid alone. The rule is CheckFixedCount's,
+  transcribed: a fixed count is never negative, and never exceeds its own count
+  unless BOTH are zero (an all-fixed grid, which the LCL allows). Counts themselves
+  are not checked: a negative RowCount or ColCount clears the grid, which the LCL
+  does without complaint.
+
+  Note the argument order matches CheckFixedCount's: cols, rows, fixed cols, fixed
+  rows -- so a reader can hold this against Grids.pas line for line. }
+function GridWouldRefuse(ACols, ARows, AFixedCols, AFixedRows: Integer): Boolean;
+begin
+  Result := True;
+  if (AFixedRows < 0) or (AFixedCols < 0) then Exit;
+  if not ((ACols = 0) and (AFixedCols = 0)) and (AFixedCols > ACols) then Exit;
+  if not ((ARows = 0) and (AFixedRows = 0)) and (AFixedRows > ARows) then Exit;
+  Result := False;
+end;
+
+{ The four setters, each proposing ONE new number and keeping the other three.
+
+  THE TWO COUNTS ARE NOT SYMMETRICAL, and the difference is the LCL's, not a typo
+  here. InternalSetColCount takes `if ACount<1 then Clear` BEFORE the check, so a
+  column count of 0 empties the grid and never reaches CheckFixedCount; SetRowCount
+  takes `if AValue>=0 then ... CheckFixedCount` and only its NEGATIVE branch clears.
+  So rowcount 0 IS checked and colcount 0 is not -- which is exactly the case the
+  report arrived with, "empty a grid that has a header row". Guessing symmetry here
+  is what left that one still aborting after the first attempt at this guard. }
+procedure GridSetColCount(G: TCustomGrid; N: Integer);
+begin
+  if (N >= 1) and GridWouldRefuse(N, TGridAccess(G).RowCount,
+                                  TGridAccess(G).FixedCols, TGridAccess(G).FixedRows) then
+    GGuiError := 1
+  else
+    TGridAccess(G).ColCount := N;
+end;
+
+procedure GridSetRowCount(G: TCustomGrid; N: Integer);
+begin
+  if (N >= 0) and GridWouldRefuse(TGridAccess(G).ColCount, N,
+                                  TGridAccess(G).FixedCols, TGridAccess(G).FixedRows) then
+    GGuiError := 1
+  else
+    TGridAccess(G).RowCount := N;
+end;
+
+procedure GridSetFixedCols(G: TCustomGrid; N: Integer);
+begin
+  if GridWouldRefuse(TGridAccess(G).ColCount, TGridAccess(G).RowCount,
+                     N, TGridAccess(G).FixedRows) then
+    GGuiError := 1
+  else
+    TGridAccess(G).FixedCols := N;
+end;
+
+procedure GridSetFixedRows(G: TCustomGrid; N: Integer);
+begin
+  if GridWouldRefuse(TGridAccess(G).ColCount, TGridAccess(G).RowCount,
+                     TGridAccess(G).FixedCols, N) then
+    GGuiError := 1
+  else
+    TGridAccess(G).FixedRows := N;
+end;
 
 { The cell's state as the short string the mouse and key events already use, so a
   program tests it the same way: instr(state$, "S") > 0. }
@@ -143,25 +223,25 @@ end;
 
 function f_dg_colcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then TDrawGrid(c).ColCount := ArgI32(A[1]); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetColCount(TDrawGrid(c), ArgI32(A[1])); end;
 function f_dg_colcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).ColCount); end;
 function f_dg_rowcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then TDrawGrid(c).RowCount := ArgI32(A[1]); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetRowCount(TDrawGrid(c), ArgI32(A[1])); end;
 function f_dg_rowcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).RowCount); end;
 function f_dg_fixedrows_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then TDrawGrid(c).FixedRows := ArgI32(A[1]); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetFixedRows(TDrawGrid(c), ArgI32(A[1])); end;
 function f_dg_fixedrows_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).FixedRows); end;
 function f_dg_fixedcols_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then TDrawGrid(c).FixedCols := ArgI32(A[1]); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetFixedCols(TDrawGrid(c), ArgI32(A[1])); end;
 function f_dg_fixedcols_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).FixedCols); end;
@@ -191,15 +271,15 @@ begin
 end;
 
 function f_colcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).ColCount := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetColCount(TStringGrid(c), ArgI32(A[1])); Result := A[0]; end;
 function f_colcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).ColCount) else Result := ValInt(0); end;
 function f_rowcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).RowCount := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetRowCount(TStringGrid(c), ArgI32(A[1])); Result := A[0]; end;
 function f_rowcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).RowCount) else Result := ValInt(0); end;
 function f_fixedrows_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).FixedRows := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetFixedRows(TStringGrid(c), ArgI32(A[1])); Result := A[0]; end;
 function f_fixedrows_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).FixedRows) else Result := ValInt(0); end;
 

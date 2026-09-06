@@ -271,6 +271,23 @@ const
   The alternative was bounds-checking every index in the dispatch loop, which
   would cost every program a little to protect against a file almost no program
   loads. Validating once, at the boundary, costs the load and nothing after it.
+
+  WHERE THIS PASS STOPS, AND WHY (2026-09-06). Three crashes that a valid-looking
+  .pbc could still reach are guarded in the DISPATCH LOOP instead, not here:
+  opDupN/opDup2 reading below the bottom of the value stack, and
+  opLoadLocal/opStoreLocal running with no activation frame. Each needs a fact
+  this pass cannot have -- how deep the value stack is, and whether a frame is
+  live -- and neither is a property of the INSTRUCTION. Both are properties of
+  the PATH that reached it, and there is no sound cheap path analysis to do here:
+  opGosub/opReturn choose a return address at run time, an ON ERROR handler is
+  entered from any faulting instruction with the stack reset to its install
+  point, `resume` re-enters mid-statement, and the host can re-enter the VM at
+  any function entry through CallUserFunc. An abstract-depth pass would have to
+  be either unsound or strict enough to reject what the compiler emits.
+
+  So the rule this file follows is: STATIC where the instruction carries the
+  answer, RUN TIME where only the running VM does -- and run time means a
+  catchable engine error, never a trap. Do not try to move those four here.
   ------------------------------------------------------------------------------ }
 function ValidateProgram(AProg: TProgram; out AErr: String): Boolean;
 var
@@ -322,8 +339,11 @@ begin
           checked against the LARGEST local table in the program, which is a real
           bound and costs one pass: no slot index above it can ever be valid in
           any frame. A wild index from a corrupt file is caught; one that is
-          merely too large for its own function is not, and the parameter-count
-          invariant below covers the case that was actually reachable. }
+          merely too large for its own function is not -- the VM now bounds the
+          slot against the frame it actually lands in, which is the only place
+          that number exists (PhosphorVM, opLoadLocal). Nor does this say whether
+          a frame exists at all when the instruction runs; the VM refuses that
+          too. Both are noted in the policy comment above. }
         if (ins.A < 0) or (ins.A >= maxLocals) then
         begin
           { "outside 0..-1" is what the general message says when the program

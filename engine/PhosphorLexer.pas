@@ -54,6 +54,7 @@ type
     procedure PushSimple(K: TTokenKind; ALine: Integer);
     procedure MergeCompoundKeywords;
     function Tokenize: Boolean;
+    function EofToken: TToken;   // the answer when there is no token to answer with
   public
     constructor Create(const ASource: String);
     function Cur: TToken;
@@ -67,6 +68,9 @@ type
   end;
 
 implementation
+
+uses
+  Math;   // IsNan/IsInfinite: the finiteness check on a numeric literal, below
 
 var
   LexFS: TFormatSettings;   // invariant: '.' as decimal separator
@@ -241,7 +245,24 @@ begin
         // the lexer and killed the process on a literal FPC cannot represent -- a
         // 400-digit integer pasted into a source file was enough. A number the
         // machine cannot hold is a source error, and the user gets told which one.
-        if not TryStrToFloat(s, T.DblVal, LexFS) then
+        //
+        // ...AND TRY ALONE IS NOT ENOUGH, which is the second half of the same
+        // bug. TryStrToFloat SUCCEEDS on an exponent that overflows Double:
+        // '1e999' returns True and hands back +Inf. So the plain-digit spelling
+        // was rejected while the exponent spelling of the same impossible number
+        // walked a non-finite value into the constant pool. That falsifies the
+        // invariant FiniteD states in PhosphorValue -- "no TValue ever holds a
+        // non-finite Double" -- which is the sole reason it is safe to leave the
+        // invalid-operation trap unmasked while a program runs. `x = 1e999`
+        // printed +Inf and then `x - x` raised EInvalidOp and killed the process
+        // at exit 3, past an `on error goto` that was already in force, taking
+        // any embedding host with it. Same message as the digit form, because it
+        // is the same mistake written another way. (NaN cannot be spelled as a
+        // literal here -- a number token always starts with a digit -- but it is
+        // checked with the same breath, so the guarantee this makes is the whole
+        // one FiniteD relies on and not a corner of it.)
+        if (not TryStrToFloat(s, T.DblVal, LexFS)) or
+           IsNan(T.DblVal) or IsInfinite(T.DblVal) then
         begin
           FErr := 'the number ' + s + ' is out of range';
           FErrLine := startLine;
@@ -416,20 +437,49 @@ begin
   Result := True;
 end;
 
+{ THE TOKEN ARRAY CAN BE EMPTY, and both readers below used to assume it never
+  was. Tokenize gives up the moment it meets a character that cannot start a
+  token, so when that character is the FIRST one not a single token was ever
+  pushed: FCount is 0 and FTokens is still nil. The fallback `FTokens[FCount - 1]`
+  is then FTokens[-1] -- a read from unallocated memory, and worse than a read,
+  because copying a TToken also copies its StrVal: String field and increments a
+  refcount through whatever pointer that garbage holds.
+
+  The damage was not theoretical. TPhosphorCompiler.Fail asks `FLex.Cur().Kind`
+  to record whether the input had run out, so EVERY lexical failure at offset 1
+  came through here: `phosphor run` on a file starting with '@', '~' or a NUL byte
+  died with an access violation instead of printing the syntax error the very same
+  character prints on line 2, and a UTF-8 BOM -- which every Windows editor and
+  `Set-Content -Encoding utf8` writes -- killed the REPL on the first line of a
+  piped session.
+
+  Answering with a synthesised EOF is the honest answer: there is no token, and
+  the input is over. FLine is where the lexer stopped, so the line number is real
+  rather than a zero. }
+function TLexer.EofToken: TToken;
+begin
+  Result := Default(TToken);   // Kind = tkEOF: the first value of TTokenKind
+  Result.Line := FLine;
+end;
+
 function TLexer.Cur: TToken;
 begin
   if FIndex < FCount then
     Result := FTokens[FIndex]
+  else if FCount > 0 then
+    Result := FTokens[FCount - 1] // tkEOF
   else
-    Result := FTokens[FCount - 1]; // tkEOF
+    Result := EofToken();
 end;
 
 function TLexer.Peek: TToken;
 begin
   if FIndex + 1 < FCount then
     Result := FTokens[FIndex + 1]
+  else if FCount > 0 then
+    Result := FTokens[FCount - 1]
   else
-    Result := FTokens[FCount - 1];
+    Result := EofToken();
 end;
 
 procedure TLexer.Advance;

@@ -380,10 +380,90 @@ begin Err := NoError(); Result := RegJson(TJSONObject.Create(), True); end;
 function t_json_array(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := RegJson(TJSONArray.Create(), True); end;
 
+{ THE NESTING CEILING FOR PARSED JSON, and why it is measured on the TEXT rather
+  than counted inside the parser.
+
+  fpjson's GetJSON is recursive descent, and the tree it hands back is freed by a
+  recursive destructor -- so a document's nesting depth is spent on the process
+  stack TWICE, once going in and once on the way out. Measured here, before the
+  ceiling existed: 40000 levels of "[[[...]]]" parsed and exited 0; 50000 levels
+  parsed CORRECTLY, printed the program's complete and correct output, and then
+  died in teardown -- "phosphor: unhandled EStackOverflow" and exit 0xC0000005 --
+  while ResetHandles freed the tree, handing the shell a crash status for a run
+  that had already succeeded; 200000 levels never returned from the parse at all.
+  A stack overflow is not an exception a handler can catch, so the try/except a
+  few lines below never saw it and neither did the program's `on error goto`.
+
+  That teardown half is why the check is a scan of the text and not a depth
+  counter threaded through the parse: refusing the document is the only way to be
+  sure the recursive destructor is never handed a 50000-deep tree, because by the
+  time a counter inside the parser could complain the tree already exists.
+
+  256 is the ceiling the compiler already puts on nested expressions
+  (MaxExprDepth in PhosphorCompiler), adopted here for the same stated reason --
+  unbounded recursion on input the program did not write is a defect, not a
+  feature. json_parse@ is the one function in this library whose input is foreign
+  by definition (a file, an HTTP body), and 256 is far past anything a person or a
+  serializer emits: .NET's JSON reader stops at 64. }
+const
+  MaxJsonDepth = 256;
+
+{ True when AText nests deeper than ALimit, with APos set to the character that
+  crossed it. Brackets inside a string literal are text, not structure, so the
+  scan tracks string state and its backslash escapes; unbalanced closers are left
+  to the parser, which reports them far better than a depth scan could. Only
+  nesting counts, so a long FLAT document -- 100k sibling elements -- is
+  unaffected however long it gets, exactly as a long non-nested expression is. }
+function JsonNestsTooDeep(const AText: String; ALimit: Integer;
+  out APos: Int64): Boolean;
+var
+  i, depth: Int64;
+  inStr, esc: Boolean;
+begin
+  APos := 0;
+  depth := 0;
+  inStr := False;
+  esc := False;
+  for i := 1 to Length(AText) do
+  begin
+    if inStr then
+    begin
+      if esc then esc := False
+      else if AText[i] = '\' then esc := True
+      else if AText[i] = '"' then inStr := False;
+      Continue;
+    end;
+    case AText[i] of
+      '"': inStr := True;
+      '[', '{':
+        begin
+          Inc(depth);
+          if depth > ALimit then
+          begin
+            APos := i;
+            Exit(True);
+          end;
+        end;
+      ']', '}': if depth > 0 then Dec(depth);
+    end;
+  end;
+  Result := False;
+end;
+
 function t_json_parse(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var d: TJSONData;
+var
+  d: TJSONData;
+  pos: Int64;
 begin
   Result := ValInt(0);
+  // Before the parser is entered at all -- see the note above JsonNestsTooDeep.
+  if JsonNestsTooDeep(Args[0].Str, MaxJsonDepth, pos) then
+  begin
+    Err := MakeError(peRuntime, Format(
+      'invalid json: nests more than %d levels deep (at character %d)',
+      [MaxJsonDepth, pos]));
+    Exit;
+  end;
   d := nil;
   try
     // UseUTF8 = FALSE, and the name is the opposite of what it does for us. True

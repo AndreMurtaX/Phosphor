@@ -221,6 +221,164 @@ begin
   end;
 end;
 
+{ ----------------------------------------------------------------------------
+  HAND-BUILT .pbc FILES: instructions the compiler never emits.
+
+  Everything above corrupts a COMPILED program, which can only reach the shapes a
+  compiler produces. A .pbc is untrusted input, and an attacker writes the bytes
+  directly -- so these build a TProgram instruction by instruction, serialize it,
+  and load it the way the host would.
+
+  Each of the four below PASSES ValidateProgram and used to kill the interpreter
+  once running: exit 3, "unhandled EAccessViolation", nothing a program could
+  catch and nothing an embedding host could survive. The loader cannot refuse
+  them, because each depends on a fact the file does not contain -- how deep the
+  value stack is, or whether an activation frame is live -- so the dispatch loop
+  refuses them instead, with the engine's own catchable error. (2026-09-06.)
+  ---------------------------------------------------------------------------- }
+
+{ Run a hand-built program and assert it was refused with a catchable engine
+  error rather than a trap.
+
+  THE RUN IS WRAPPED. Without the guards these programs took the process down,
+  and a probe that dies prints no "ok:/fail:" line at all -- the suite would
+  report the crash, but as a probe that "did not build or did not run", which
+  says nothing about which case broke. Catching the exception turns the crash
+  into a named FAILURE, which is what a regression test owes its reader.
+
+  `rc <> 0` alone would be too weak, for the reason CheckBodyRefusal spells out:
+  a crashing run also sets a non-zero code and prints nothing. The message has to
+  be the VM's own refusal. }
+procedure CheckVmRefusal(const AName: String; AProg: TProgram);
+var bytes: TBytesStream; msg, outp: String; rc: Integer;
+begin
+  bytes := TBytesStream.Create();
+  try
+    try
+      WriteProgram(bytes, AProg);
+    finally
+      AProg.Free;
+    end;
+    try
+      outp := RunBytes(bytes, rc, msg);
+    except
+      on E: Exception do
+      begin
+        Report(False, AName + '  [the VM raised ' + E.ClassName + ': ' + E.Message + ']');
+        Exit;
+      end;
+    end;
+    Report((rc <> 0) and (outp = '') and (Pos('corrupt bytecode', msg) > 0), AName);
+    if Pos('corrupt bytecode', msg) = 0 then
+      Writeln('     (rc was ', rc, ', message was: ', msg, ')');
+  finally
+    bytes.Free;
+  end;
+end;
+
+{ The refusal must be CATCHABLE, not merely fatal -- that is the house rule the
+  whole class exists to defend (decisions.md: a library fault is an error VALUE,
+  never a process death). This program installs an ON ERROR handler, faults, and
+  must print from the handler and exit 0. }
+procedure CheckVmFaultIsCatchable(const AName: String; AProg: TProgram; const AWant: String);
+var bytes: TBytesStream; msg, outp: String; rc: Integer;
+begin
+  bytes := TBytesStream.Create();
+  try
+    try
+      WriteProgram(bytes, AProg);
+    finally
+      AProg.Free;
+    end;
+    try
+      outp := RunBytes(bytes, rc, msg);
+    except
+      on E: Exception do
+      begin
+        Report(False, AName + '  [the VM raised ' + E.ClassName + ': ' + E.Message + ']');
+        Exit;
+      end;
+    end;
+    Report((rc = 0) and (outp = AWant), AName);
+    if outp <> AWant then
+      Writeln('     (rc was ', rc, ', output was: ', outp, ')');
+  finally
+    bytes.Free;
+  end;
+end;
+
+{ DUPN asking for a million values with an empty stack. ValidateProgram checks
+  the operand only for a negative, which this is not. }
+function ProgDupNUnderflow: TProgram;
+begin
+  Result := TProgram.Create();
+  Result.Emit(opDupN, 1000000, 0, 1);
+end;
+
+{ DUP2 with an empty stack. It carries no operand at all, so there is nothing for
+  the loader to look at even in principle. }
+function ProgDup2Underflow: TProgram;
+begin
+  Result := TProgram.Create();
+  Result.Emit(opDup2, 0, 0, 1);
+end;
+
+{ LOADLOCAL in the MAIN BODY, where no frame exists. The unused function is there
+  only so the program declares a local and the slot passes the loader's bound
+  (which is the widest local table in the file -- see ValidateProgram). }
+function ProgLoadLocalNoFrame: TProgram;
+begin
+  Result := TProgram.Create();
+  Result.Emit(opLoadLocal, 0, 0, 1);
+  Result.Emit(opHalt, 0, 0, 1);
+  Result.Emit(opRetFunc, 0, 0, 2);                            // entry 2: never called
+  Result.AddUserFunc('never', 2, 0, [vtNumber], vtNumber);
+end;
+
+{ STORELOCAL in the main body: the same missing frame, but a WRITE through it. }
+function ProgStoreLocalNoFrame: TProgram;
+begin
+  Result := TProgram.Create();
+  Result.Consts.Add(ValStr('x'));
+  Result.Emit(opPushConst, 0, 0, 1);
+  Result.Emit(opStoreLocal, 0, 0, 1);
+  Result.Emit(opHalt, 0, 0, 1);
+  Result.Emit(opRetFunc, 0, 0, 2);                            // entry 3: never called
+  Result.AddUserFunc('never', 3, 0, [vtString], vtString);
+end;
+
+{ A slot legal for the WIDEST function in the file and wild for the one actually
+  running: main calls f, which has one local, and f's body reads slot 4. The
+  loader accepts it (a five-local function exists); only the frame knows better. }
+function ProgLocalSlotBeyondFrame: TProgram;
+begin
+  Result := TProgram.Create();
+  Result.Consts.Add(ValStr('f'));
+  Result.Emit(opCall, 0, 0, 1);
+  Result.Emit(opPop, 0, 0, 1);
+  Result.Emit(opHalt, 0, 0, 1);
+  Result.Emit(opLoadLocal, 4, 0, 2);                          // entry 3: f's body
+  Result.Emit(opRetFunc, 0, 0, 2);
+  Result.AddUserFunc('f', 3, 0, [vtNumber], vtNumber);
+  Result.AddUserFunc('never', 3, 0,
+                     [vtNumber, vtNumber, vtNumber, vtNumber, vtNumber], vtNumber);
+end;
+
+{ The same DUP2 underflow, but with `on error goto` installed: the handler must
+  run, print, and the program must finish normally. }
+function ProgDup2Caught: TProgram;
+begin
+  Result := TProgram.Create();
+  Result.Consts.Add(ValStr('caught'));
+  Result.Emit(opSetErrHandler, 4, 0, 1);                      // handler at pc 4
+  Result.Emit(opStmt, 0, 0, 1);
+  Result.Emit(opDup2, 0, 0, 1);                               // faults
+  Result.Emit(opHalt, 0, 0, 1);
+  Result.Emit(opPushConst, 0, 0, 2);                          // pc 4: the handler
+  Result.Emit(opPrintLn, 0, 0, 2);
+  Result.Emit(opHalt, 0, 0, 2);
+end;
+
 const
   Rich =
     'data 10, 20, 30'                                          + #10 +
@@ -268,6 +426,17 @@ begin
   // WithFunc: these two need a program that has a user function and no data.
   CheckBodyRefusal('refuse: a function with no room for its parameter', WithFunc, 2);
   CheckBodyRefusal('refuse: a negative parameter count', WithFunc, 3);
+
+  // HAND-BUILT files that PASS the loader and used to crash the VM once running.
+  // Each is refused in the dispatch loop with a catchable engine error instead.
+  CheckVmRefusal('refuse at run time: DUPN below the bottom of the stack', ProgDupNUnderflow());
+  CheckVmRefusal('refuse at run time: DUP2 below the bottom of the stack', ProgDup2Underflow());
+  CheckVmRefusal('refuse at run time: LOADLOCAL with no activation frame', ProgLoadLocalNoFrame());
+  CheckVmRefusal('refuse at run time: STORELOCAL with no activation frame', ProgStoreLocalNoFrame());
+  CheckVmRefusal('refuse at run time: a local slot past this frame''s locals', ProgLocalSlotBeyondFrame());
+  // ...and the refusal is an ERROR VALUE, which is the whole point.
+  CheckVmFaultIsCatchable('catchable: ON ERROR takes the DUP2 refusal and carries on',
+                          ProgDup2Caught(), 'caught' + #10);
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

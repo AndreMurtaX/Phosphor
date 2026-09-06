@@ -1,0 +1,13 @@
+? console kept x = 7
+console said: "1e999" is out of range
+x - x = 0
+? console kept y = 9
+console said: "-1e999" is out of range
+? console read z = 6.25
+file kept a = 1
+file said: "1e999" is out of range
+file kept b = 2
+file said: "-1e999" is out of range
+file read c = 6.25
+deleted: 1
+still running

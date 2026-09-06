@@ -39,6 +39,7 @@ type
     FErrLine: Integer;
     FErrAtEof: Boolean;
     FExprDepth: Integer;
+    FStmtDepth: Integer;   // block nesting; see THE PARSER'S DEPTH BUDGET
     FBool: Boolean;
     FVarNames: array of String;
     FVarTypes: array of TVarType;
@@ -128,7 +129,8 @@ type
     procedure EmitWriteTarget(APos, ATempVar: Integer); // SWAP: assign a temp into an lvalue
     procedure SkipTarget;         // SWAP: advance the lexer past one lvalue
     function  InputTypeCode(const AName: String): Integer;
-    procedure ParseStatement;
+    procedure ParseStatement;      // the depth-guarded door; calls the body below
+    procedure ParseStatementBody;
   public
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
     property ErrorMessage: String read FErr;
@@ -139,6 +141,59 @@ type
   end;
 
 implementation
+
+{ THE PARSER'S DEPTH BUDGET -- and it is spent by every kind of nesting, not one.
+
+  This is a recursive-descent parser, so nesting in the SOURCE is a run of stack
+  frames in the parser: a '(' or a call argument re-enters ParseExpr, a prefix
+  operator re-enters ParseUnary / ParseSignedPrimary / ParseNot, and the body of
+  an if/while/do/repeat/for/select re-enters ParseStatement through
+  ParseBlockUntil. Enough of any one of them exhausts the process stack, and a
+  stack overflow is not an exception a handler can catch: the process DIES --
+  0xC0000005 on Windows, exit 139 on Linux with not one byte on stdout or stderr
+  -- so the crash guard the host installs never sees it, and an embedding host
+  goes down with the script it was running.
+
+  A ceiling was added for parentheses first, in the stated belief that ParseExpr
+  is "THE ONE PLACE a nested expression passes through". It is not, and the
+  belief is what made the guard look finished. `print ----...1` (a run of unary
+  minus), `print 2 ^ ---...1` (the exponent's own signed-primary rule), the
+  one-line `if c then if c then if c then ...`, and 20000 nested block IFs -- one
+  loop of a code generator -- each recurse on a path that never passes through
+  ParseExpr, and each still killed the process AFTER that guard existed. So the
+  count now lives at each place the recursion actually is:
+
+    MaxExprDepth   spent by ParseExpr (a parenthesis, an argument, an index) and
+                   by each prefix operator ACTUALLY CONSUMED, since a chain of
+                   them nests exactly the way a chain of parentheses does. It is
+                   deliberately not spent by ParseUnary/ParseNot on entry: those
+                   are called once per operand in `a * b * c` without recursing
+                   at all, and charging them there would make a flat expression
+                   pay for depth it never uses -- and would quietly cut the
+                   parenthesis ceiling this constant names to a third of it.
+    MaxBlockDepth  spent by ParseStatement, the single door every nested block
+                   goes through, whichever statement opened it.
+
+  256 of each is far past anything a person writes and far short of a crash --
+  the measured cliff was between 10000 and 20000 nested statements. Only NESTING
+  is counted, never length: `a + b + c + ...` is a loop in ParseAdditive and one
+  statement after another is a loop in ParseBlockUntil, so long expressions and
+  long programs are unaffected however long they get. }
+const
+  MaxExprDepth  = 256;
+  MaxBlockDepth = 256;
+
+{ Built from the constants rather than written out, so the number in the message
+  cannot drift from the number that is enforced. tests/negative/23 reads it. }
+function TooDeepExpr: String;
+begin
+  Result := 'expression nests more than ' + IntToStr(MaxExprDepth) + ' levels deep';
+end;
+
+function TooDeepBlock: String;
+begin
+  Result := 'blocks nest more than ' + IntToStr(MaxBlockDepth) + ' levels deep';
+end;
 
 { Every failure also records WHETHER THE INPUT HAD RUN OUT, which is a different
   fact from what the message says and cannot be recovered from the text.
@@ -785,30 +840,64 @@ begin
     Fail('''on error goto'' needs a label or 0', FLex.Cur().Line);
 end;
 
+{ A leading '-' or '+' recurses into ParseUnary again, so a RUN of them is a run
+  of stack frames -- and this path never passes through ParseExpr, so the
+  parenthesis guard did not see it: `print` followed by 300000 minus signs killed
+  the process with a stack overflow long after that guard was in place. Each sign
+  consumed spends one level of the same budget a '(' spends. }
 procedure TPhosphorCompiler.ParseUnary;
 var ln: Integer;
 begin
   if FFailed then Exit;
-  if FLex.Cur().Kind = tkMinus then
+  if (FLex.Cur().Kind = tkMinus) or (FLex.Cur().Kind = tkPlus) then
   begin
-    ln := FLex.Cur().Line; FLex.Advance(); ParseUnary();
-    FProg.Emit(opNeg, 0, 0, ln); FBool := False;
+    Inc(FExprDepth);
+    try
+      if FExprDepth > MaxExprDepth then
+      begin
+        Fail(TooDeepExpr(), FLex.Cur().Line);
+        Exit;
+      end;
+      if FLex.Cur().Kind = tkMinus then
+      begin
+        ln := FLex.Cur().Line; FLex.Advance(); ParseUnary();
+        FProg.Emit(opNeg, 0, 0, ln); FBool := False;
+      end
+      else begin FLex.Advance(); ParseUnary(); end;
+    finally
+      Dec(FExprDepth);
+    end;
   end
-  else if FLex.Cur().Kind = tkPlus then begin FLex.Advance(); ParseUnary(); end
   else ParsePower();
 end;
 
 { An exponent: any number of leading signs, then a primary. Deliberately NOT the
-  full unary rule -- see ParsePower. }
+  full unary rule -- see ParsePower. "Any number of" is a recursion on the input
+  exactly as ParseUnary's is, and it dies exactly the same way (`print 2 ^` and
+  200000 minus signs), so it is charged to the same budget. }
 procedure TPhosphorCompiler.ParseSignedPrimary;
 var ln: Integer;
 begin
-  if FLex.Cur().Kind = tkMinus then
+  if FFailed then Exit;
+  if (FLex.Cur().Kind = tkMinus) or (FLex.Cur().Kind = tkPlus) then
   begin
-    ln := FLex.Cur().Line; FLex.Advance(); ParseSignedPrimary();
-    FProg.Emit(opNeg, 0, 0, ln); FBool := False;
+    Inc(FExprDepth);
+    try
+      if FExprDepth > MaxExprDepth then
+      begin
+        Fail(TooDeepExpr(), FLex.Cur().Line);
+        Exit;
+      end;
+      if FLex.Cur().Kind = tkMinus then
+      begin
+        ln := FLex.Cur().Line; FLex.Advance(); ParseSignedPrimary();
+        FProg.Emit(opNeg, 0, 0, ln); FBool := False;
+      end
+      else begin FLex.Advance(); ParseSignedPrimary(); end;
+    finally
+      Dec(FExprDepth);
+    end;
   end
-  else if FLex.Cur().Kind = tkPlus then begin FLex.Advance(); ParseSignedPrimary(); end
   else ParsePrimary();
 end;
 
@@ -878,13 +967,27 @@ begin
   end;
 end;
 
+{ `not` chains the same way the sign operators do, on its own path around
+  ParseExpr: a million of them overflowed the stack and killed the process.
+  Charged to the same budget, for the same reason. }
 procedure TPhosphorCompiler.ParseNot;
 var ln: Integer;
 begin
+  if FFailed then Exit;
   if IsKeyword('not') then
   begin
-    ln := FLex.Cur().Line; FLex.Advance(); ParseNot();
-    FProg.Emit(opNot, 0, 0, ln); FBool := True;
+    Inc(FExprDepth);
+    try
+      if FExprDepth > MaxExprDepth then
+      begin
+        Fail(TooDeepExpr(), FLex.Cur().Line);
+        Exit;
+      end;
+      ln := FLex.Cur().Line; FLex.Advance(); ParseNot();
+      FProg.Emit(opNot, 0, 0, ln); FBool := True;
+    finally
+      Dec(FExprDepth);
+    end;
   end
   else ParseComparison();
 end;
@@ -911,25 +1014,13 @@ begin
   end;
 end;
 
-{ THE ONE PLACE A NESTED EXPRESSION PASSES THROUGH, and therefore where the
-  recursion is counted.
-
-  This parser is recursive descent: each '(' and each call argument re-enters here
-  through ParsePrimary, several stack frames deeper each time. A program with
-  fifty thousand nested parentheses -- which is a few seconds of typing, or one
-  line of a generator gone wrong -- exhausted the process stack and the process
-  DIED: exit 139, STATUS_STACK_OVERFLOW, and not one byte on stdout or stderr. Not
-  a syntax error, not a message, nothing to tell anyone what happened. A stack
-  overflow is not an exception a handler can catch either, so the crash guard the
-  host installs never saw it.
-
-  A limit of 256 is far past anything a person writes -- deeply parenthesised
-  arithmetic is unreadable long before it -- and only nesting counts, not length:
-  `a + b + c + ...` is a loop in ParseAdd, not recursion, so a long expression is
-  unaffected however long it gets. }
-const
-  MaxExprDepth = 256;
-
+{ Where a parenthesis, a call argument or an index spends a level of the depth
+  budget. Each '(' re-enters here through ParsePrimary, several stack frames
+  deeper each time; fifty thousand of them -- a few seconds of typing, or one
+  line of a generator gone wrong -- exhausted the process stack and killed the
+  process outright. See THE PARSER'S DEPTH BUDGET at the top of the
+  implementation for the whole rule, and for the three other paths that recurse
+  on nesting and had to be counted too. }
 procedure TPhosphorCompiler.ParseExpr;
 begin
   if FFailed then Exit;
@@ -937,8 +1028,7 @@ begin
   try
     if FExprDepth > MaxExprDepth then
     begin
-      Fail('expression nests more than ' + IntToStr(MaxExprDepth) +
-           ' levels deep', FLex.Cur().Line);
+      Fail(TooDeepExpr(), FLex.Cur().Line);
       Exit;
     end;
     ParseOr();
@@ -1655,7 +1745,32 @@ begin
   end;
 end;
 
+{ EVERY NESTED BLOCK COMES THROUGH HERE, whichever statement opened it:
+  ParseIf / ParseWhile / ParseDo / ParseRepeat / ParseFor / ParseSelect /
+  ParseFunction all recurse ParseBlockUntil -> ParseStatement, and the one-line
+  `if c then if c then ...` form recurses through ParseInlineStatements. None of
+  them touches ParseExpr, so none of them was counted, and 20000 nested IFs --
+  one loop of a code generator -- killed the process with a stack overflow: no
+  message, no catchable error, and an embedding host taken down with it. This
+  wrapper is the whole guard; the statement grammar itself is ParseStatementBody,
+  left exactly as it was so the counting is visibly the only change. }
 procedure TPhosphorCompiler.ParseStatement;
+begin
+  if FFailed then Exit;
+  Inc(FStmtDepth);
+  try
+    if FStmtDepth > MaxBlockDepth then
+    begin
+      Fail(TooDeepBlock(), FLex.Cur().Line);
+      Exit;
+    end;
+    ParseStatementBody();
+  finally
+    Dec(FStmtDepth);
+  end;
+end;
+
+procedure TPhosphorCompiler.ParseStatementBody;
 var
   t: TToken;
   i: Integer;
@@ -2019,13 +2134,31 @@ var i: Integer;
 begin
   FFailed := False; FErr := ''; FErrLine := 0;
   FVarCount := 0; FHidden := 0; FLoopDepth := 0;
+  // The two nesting counters are balanced by try/finally on every path, failures
+  // included, so they are already 0 here -- set outright anyway, because a reused
+  // compiler must not inherit a depth from the program before it.
+  FExprDepth := 0; FStmtDepth := 0;
   FLabelCount := 0; FGotoCount := 0; FBool := False;
   FInFunction := False; FLocalCount := 0; FRetType := vtNumber;
   FConstCount := 0;
   FProg := TProgram.Create();
   FLex := TLexer.Create(ASource);
   try
-    if not FLex.Ok() then Fail(FLex.ErrorMessage, FLex.ErrorLine);
+    if not FLex.Ok() then
+    begin
+      Fail(FLex.ErrorMessage, FLex.ErrorLine);
+      { A LEXICAL error is never "the input has not finished yet". A character
+        that cannot start a token, an unknown escape, an unterminated string --
+        no continuation line repairs any of them (a newline is what ENDS a string
+        literal, so more of them cannot close one). Fail infers the flag from the
+        current token, and for a failure at the very first character there is no
+        token at all: the lexer answers a synthesised tkEOF, which reads as "the
+        input ran out" and would have made the REPL sit waiting for a
+        continuation that can never come. Say it outright instead of inferring
+        it. For every other lexical error the inference already produced False,
+        so this only settles the case it could not see. }
+      FErrAtEof := False;
+    end;
     while (not FFailed) and (FLex.Cur().Kind <> tkEOF) do
     begin
       if FLex.Cur().Kind = tkEOL then begin FLex.Advance(); Continue; end;

@@ -75,12 +75,27 @@ begin
   if ix >= 0 then Result := ix + 1;
 end;
 
+{ A SELECTION IS AN INDEX, SO IT IS BOUND-CHECKED BEFORE IT IS WRITTEN.
+
+  TListBox.SetItemIndex asks the widgetset, which raises -- 'TListBox Index 3 out of
+  bounds 0 .. 0' -- and that killed the program. It is the ordinary case that finds
+  it, not a hostile one: restoring a saved selection against a list that has since
+  got shorter is the shape a program actually has. So the range is checked here, the
+  way stringgrid_cell@ and checkgroup_checked@ already check theirs, and an index the
+  control has no item for answers gui_error 1 and leaves the selection alone.
+
+  0 is not out of range: it is Phosphor's spelling of "nothing selected" (ItemIndex
+  -1), which is why the accepted band is 0..Count and not 1..Count. }
 procedure IndexSet(AId: Int64; AClass: TClass; N1: Integer);   // 1-based, 0 = none
-var c: TComponent;
+var c: TComponent; items: TStrings;
 begin
   if not GuiResolve(AId, AClass, c) then Exit;
+  if c is TComboBox then items := TComboBox(c).Items
+  else if c is TListBox then items := TListBox(c).Items
+  else Exit;
+  if (N1 < 0) or (N1 > items.Count) then begin GGuiError := 1; Exit; end;
   if c is TComboBox then TComboBox(c).ItemIndex := N1 - 1
-  else if c is TListBox then TListBox(c).ItemIndex := N1 - 1;
+  else TListBox(c).ItemIndex := N1 - 1;
 end;
 
 // --- checkbox ---------------------------------------------------------------
@@ -234,8 +249,15 @@ function f_rg_index_get(const A: array of TValue; out E: TPhosphorError): TValue
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TRadioGroup, c) then Result := ValInt(TRadioGroup(c).ItemIndex + 1); end;
 function f_rg_index_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TRadioGroup, c) then TRadioGroup(c).ItemIndex := ArgI32(A[1]) - 1; end;
+var c: TComponent; n: Integer;
+begin E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TRadioGroup, c) then Exit;
+  // Same rule and same reason as IndexSet above -- TRadioGroup raises too
+  // ('TRadioGroup Index 499 out of bounds -1 .. 0'), and here even a NEGATIVE index
+  // raised, which IndexSet's controls happened to tolerate. 0 selects nothing.
+  n := ArgI32(A[1]);
+  if (n < 0) or (n > TRadioGroup(c).Items.Count) then begin GGuiError := 1; Exit; end;
+  TRadioGroup(c).ItemIndex := n - 1; end;
 function f_rg_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValStr('');
   if GuiResolve(A[0].Hnd, TRadioGroup, c) then Result := ValStr(TRadioGroup(c).Caption); end;

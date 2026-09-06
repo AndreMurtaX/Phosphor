@@ -112,6 +112,27 @@ var
     handle is 1; a handler that failed at run time is 2. }
   GGuiError: Integer;
 
+const
+  { THE LCL'S OWN CEILING ON A CONTROL'S SIZE, AND IT ENFORCES IT BY TRAPPING.
+    lcl/include/control.inc, TControl.DoSetBounds, first statement:
+
+        if (AWidth>100000) or (AHeight>100000) then BoundsOutOfBounds;
+
+    and BoundsOutOfBounds calls RaiseGDBException, which raises EDivByZero ON
+    PURPOSE so a debugger stops on it. So a program that asked for a control a
+    million pixels wide -- an ordinary number, no arithmetic needed to reach it --
+    died with "Division by zero", a message with nothing in it about size, about
+    bounds, or about the line that asked. Every path into DoSetBounds is affected:
+    Width, Height, SetBounds, and a form's own w/h. Checked here first, so the
+    answer is gui_error 1 and no resize. }
+  GuiMaxExtent = 100000;
+
+{ True when this width and height are a size TControl will accept; records
+  gui_error 1 and answers False when they are not. Pass the dimension that is NOT
+  changing as the control's current one -- that is what the LCL sees, since every
+  setter routes through the four-argument SetBounds. }
+function GuiExtentOk(AWidth, AHeight: Integer): Boolean;
+
 { Register AObj under a fresh '@' handle; AOwns ties its lifetime here. }
 function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;
 { Resolve a handle to an object of (at least) AClass. Records GGuiError and
@@ -142,6 +163,29 @@ function GuiCloseHandler(AVM: TObject; AControl: TComponent;
   const AEvent, AHandler: String; ASenderId: Int64): TCloseEvent;
 function GuiCloseQueryHandler(AVM: TObject; AControl: TComponent;
   const AEvent, AHandler: String; ASenderId: Int64): TCloseQueryEvent;
+
+{ --- objects the LCL is standing on ----------------------------------------
+  A handler is usually the last thing that touches its sender: TControl.Click
+  calls the notify event and returns, so a program may free the control it was
+  just handed and nothing dereferences it afterwards. CLOSING A FORM is not like
+  that. TCustomForm.Close runs OnCloseQuery, then OnClose, and then keeps working
+  on the same form -- it writes CloseAction, hides the window, unwinds through
+  fields of the object. control_free inside an onclose handler destroyed the form
+  underneath that, and the LCL walked on into freed memory: an access violation
+  reachable from an idiom the documentation itself invites ("dispose of the window
+  when it closes"). TGuiHandle.Watch closes the other half of this hole -- a handle
+  left pointing at a control its parent freed; this closes the half where the
+  FRAMEWORK, not the program, is the one still holding the pointer.
+
+  So a close bridge marks its sender as in use for the length of the callback, and
+  control_free REFUSES a control on that list, answering gui_error 1 the way every
+  other refused operation in this package does. The window is still freed -- by
+  ResetHandles at the end of the program, which is where a form's handle has always
+  freed it. }
+function GuiInUse(AObj: TObject): Boolean;
+{ Bracket a callback during which AObj must survive. Always in a try/finally. }
+procedure GuiEnterCallback(AObj: TObject);
+procedure GuiLeaveCallback(AObj: TObject);
 
 { Call a BASIC routine the way an event bridge does: record a failing handler as
   error 2, honour END, and answer what the routine returned. Exposed because a
@@ -202,6 +246,37 @@ begin
   FVM := AVM;
   FHandler := AHandler;
   FSenderId := ASenderId;
+end;
+
+// --- objects the LCL is standing on (see the interface note) -----------------
+var
+  { A stack, not a single slot: a close handler may close a second form, so two
+    forms can be in use at once and the inner one must not un-protect the outer. }
+  GInUse: array of TObject;
+
+procedure GuiEnterCallback(AObj: TObject);
+begin
+  SetLength(GInUse, Length(GInUse) + 1);
+  GInUse[High(GInUse)] := AObj;
+end;
+
+procedure GuiLeaveCallback(AObj: TObject);
+begin
+  // Popped by IDENTITY. Enter and Leave are always paired in a try/finally, so the
+  // top IS AObj; saying so keeps a future unpaired call from silently unprotecting
+  // somebody else's form instead of failing visibly here.
+  if (Length(GInUse) > 0) and (GInUse[High(GInUse)] = AObj) then
+    SetLength(GInUse, Length(GInUse) - 1);
+end;
+
+function GuiInUse(AObj: TObject): Boolean;
+var
+  i: Integer;
+begin
+  if AObj = nil then Exit(False);
+  for i := 0 to High(GInUse) do
+    if GInUse[i] = AObj then Exit(True);
+  Result := False;
 end;
 
 function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
@@ -276,14 +351,28 @@ procedure TGuiEventBridge.FireClose(Sender: TObject; var CloseAction: TCloseActi
 begin
   // Notification only. Rewriting CloseAction from a return value would turn a
   // handler that forgets to answer into one that changes what closing means.
-  Call([ValHandle(FSenderId)]);
+  // The sender is marked in use because TCustomForm.Close keeps working on it
+  // after this returns -- see the note on GuiInUse.
+  GuiEnterCallback(Sender);
+  try
+    Call([ValHandle(FSenderId)]);
+  finally
+    GuiLeaveCallback(Sender);
+  end;
 end;
 
 procedure TGuiEventBridge.FireCloseQuery(Sender: TObject; var CanClose: Boolean);
 var
   v: TValue;
 begin
-  v := Call([ValHandle(FSenderId)]);
+  // Same protection as FireClose, and needed even more here: this handler runs
+  // BEFORE the close proper, so everything the form does afterwards is ahead of it.
+  GuiEnterCallback(Sender);
+  try
+    v := Call([ValHandle(FSenderId)]);
+  finally
+    GuiLeaveCallback(Sender);
+  end;
   // Only an explicit boolean false vetoes. A handler that falls off its end must
   // not be able to make a window impossible to close -- that is the one failure
   // here a program cannot recover from.
@@ -308,6 +397,14 @@ begin
       if Result <> '' then Result := Result + ' ';
       Result := Result + NAMES[i];
     end;
+end;
+
+function GuiExtentOk(AWidth, AHeight: Integer): Boolean;
+begin
+  // Only the upper end is the LCL's: a negative width is absorbed by the control,
+  // not trapped, so it stays the caller's business as it always was.
+  Result := (AWidth <= GuiMaxExtent) and (AHeight <= GuiMaxExtent);
+  if not Result then GGuiError := 1;
 end;
 
 function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;

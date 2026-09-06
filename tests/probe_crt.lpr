@@ -35,6 +35,52 @@ begin
   else begin Inc(Failed); Writeln(StdErr, 'FAIL: ', Name); end;
 end;
 
+{$IFNDEF WINDOWS}
+{ A scripted byte source: the bytes the terminal would have had waiting. Fed
+  counts what was actually taken, so a test can assert that a decision did NOT
+  consume the byte after the key it returned. }
+var
+  Script: String = '';
+  Fed: Integer = 0;
+
+function Feed(out AByte: Byte): Boolean;
+begin
+  AByte := 0;
+  if Script = '' then Exit(False);
+  AByte := Byte(Script[1]);
+  Delete(Script, 1, 1);
+  Inc(Fed);
+  Result := True;
+end;
+
+function Hex(const S: String): String;
+var i: Integer;
+begin
+  Result := '';
+  for i := 1 to Length(S) do
+    Result := Result + IntToHex(Byte(S[i]), 2) + ' ';
+  Result := Trim(Result);
+end;
+
+function SameBytes(const A, B: String): Boolean;
+var i: Integer;
+begin
+  Result := Length(A) = Length(B);
+  if not Result then Exit;
+  for i := 1 to Length(A) do
+    if A[i] <> B[i] then Exit(False);
+end;
+
+procedure Key(const AName: String; AFirst: Byte; ANext: TCrtByteSource; const AWant: String);
+var got: String;
+begin
+  Fed := 0;
+  got := CrtAssembleKey(AFirst, ANext);
+  Report(SameBytes(got, AWant),
+         AName + ' (wanted [' + Hex(AWant) + '], got [' + Hex(got) + '])');
+end;
+{$ENDIF}
+
 {$IFDEF WINDOWS}
 const
   VK_LEFT_  = 37;
@@ -118,10 +164,40 @@ begin
   Report(Byte(ValStr(CrtKeyFromEvent(#0, VK_OEM_1_)).Str[2]) = VK_OEM_1_,
          'and the second byte is the virtual-key code the program will read');
   {$ELSE}
-  // Not a silent skip. The Unix keyboard path has no equivalent decision function
-  // -- it hands back the raw bytes it read, escape sequence and all -- so there is
-  // nothing here to call, and this says so rather than reporting a pass.
-  Writeln('skip: keyboard decision (Windows-only; the Unix path returns raw bytes)');
+  // A NORMAL KEY IS ONE BYTE, and nothing else is consumed after it.
+  Key('a printable key is its own byte', Ord('q'), @Feed, 'q');
+  Report(Fed = 0, 'and nothing after it was taken from the stream');
+
+  // A UTF-8 CHARACTER IS ONE KEY. This is what the old code got wrong: it
+  // answered the lead byte and left the continuation for the next call, so a
+  // typed accented letter arrived in two pieces here and in one on Windows.
+  Script := #$C3#$A9;                      // 'e-acute', two bytes
+  Key('an accented character comes back whole', $C3, @Feed, #$C3#$A9);
+  Script := #$E2#$82#$AC;                  // euro sign, three bytes
+  Key('and a three-byte character too', $E2, @Feed, #$E2#$82#$AC);
+  Script := #$F0#$9F#$92#$A1;              // an astral codepoint, four bytes
+  Key('and a four-byte one', $F0, @Feed, #$F0#$9F#$92#$A1);
+
+  // A BROKEN STREAM MUST NOT EAT THE NEXT KEY. A lead byte followed by something
+  // that is not a continuation stops there, leaving that byte for the next read.
+  Script := 'X';
+  Key('a lead byte with no continuation stops', $C3, @Feed, #$C3);
+  Report(Fed = 0, 'without swallowing the byte that followed');
+
+  // AN ESCAPE SEQUENCE is whatever is already waiting behind the ESC.
+  Script := '[A';
+  Key('an arrow key is ESC plus what is buffered', 27, @Feed, #27'[A');
+  Script := '';
+  Key('and ESC alone is a key on its own', 27, @Feed, #27);
+
+  // THE TAG, for the same reason as the Windows side: the engine's strings are
+  // UTF-8, and a key tagged with the system code page is converted on the way in.
+  Script := #$C3#$A9;
+  Report(StringCodePage(CrtAssembleKey($C3, @Feed)) = CP_UTF8,
+         'the key is tagged with the engine code page');
+  Script := #$C3#$A9;
+  Report(Length(ValStr(CrtAssembleKey($C3, @Feed)).Str) = 2,
+         'and is still two bytes after crossing into a TValue');
   {$ENDIF}
 
   if ProveFail then

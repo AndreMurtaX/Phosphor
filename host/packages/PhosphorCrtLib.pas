@@ -53,6 +53,23 @@ uses
 
 procedure RegisterCrtFuncs(Reg: TPhosphorRegistry);
 
+type
+  { Where the rest of a multi-byte key comes from. False means nothing is waiting.
+    A plain procedural type, not a method pointer: the unit hands it a reader that
+    touches the terminal, the probe hands it a scripted array. }
+  TCrtByteSource = function(out AByte: Byte): Boolean;
+
+{$IFNDEF WINDOWS}
+{ The Unix keyboard DECISION, lifted out of the keyboard I/O so it can be tested.
+  A terminal hands over bytes; deciding where one KEY ends is the whole content of
+  this path, and it is decided here, with no terminal in sight. Two shapes are
+  more than one byte: an escape sequence (arrows, function keys) and a UTF-8
+  character -- and the second was not handled at all, so a typed accented letter
+  answered its first byte and left the rest for the next call, while Windows
+  answered the whole character. }
+function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource): String;
+{$ENDIF}
+
 {$IFDEF WINDOWS}
 { The keyboard DECISION, lifted out of the keyboard I/O so it can be tested.
   Everything else on this path needs a real console -- a console handle, raw mode,
@@ -370,13 +387,74 @@ begin
   Result := fpSelect(StdInputHandle + 1, @fds, nil, nil, @tv) > 0;
 end;
 
-function ReadByte: String;
+function ReadRawByte(out AByte: Byte): Boolean;
 var c: Char;
 begin
   { FileRead (SysUtils), not fpRead: fpRead is `inline` and FPC declines to inline it
     here, which -vewn reports as a note. FileRead is a plain function wrapping the same
-    read, so the RTL owns that call and our unit stays note-clean. }
-  if FileRead(StdInputHandle, c, 1) = 1 then Result := c else Result := '';
+    read, so the RTL owns that call and our unit stays note-clean.
+    A BYTE, not a Char-into-String: assigning a Char to a String in this unit
+    re-encodes it under {$codepage UTF8}, so every byte >= 128 a terminal sent --
+    the second half of every accented character -- arrived as something else. }
+  AByte := 0;
+  Result := FileRead(StdInputHandle, c, 1) = 1;
+  if Result then AByte := Byte(c);
+end;
+
+function NextWaitingByte(out AByte: Byte): Boolean;
+begin
+  AByte := 0;
+  if not ByteWaiting() then Exit(False);
+  Result := ReadRawByte(AByte);
+end;
+
+{ How many bytes follow this UTF-8 lead byte. 0 for ASCII and for anything that is
+  not a lead byte -- a continuation byte arriving first is a broken stream, and
+  guessing a length for it would consume bytes belonging to the next key. }
+function Utf8Extra(AFirst: Byte): Integer;
+begin
+  if AFirst < $80 then Result := 0
+  else if (AFirst >= $C0) and (AFirst <= $DF) then Result := 1
+  else if (AFirst >= $E0) and (AFirst <= $EF) then Result := 2
+  else if (AFirst >= $F0) and (AFirst <= $F7) then Result := 3
+  else Result := 0;
+end;
+
+function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource): String;
+var b: Byte; want, i, n: Integer;
+begin
+  // Built by index and tagged, never by concatenating a Char: under this unit's
+  // UTF8 codepage that re-encodes every byte >= 128, and these bytes are a key,
+  // not text to be converted.
+  SetLength(Result, 1);
+  Result[1] := Chr(AFirst);
+  if AFirst = 27 then
+  begin
+    // An escape sequence: take whatever is ALREADY waiting. Nothing waiting means
+    // the user pressed Escape itself, which is a key on its own.
+    while ANext(b) do
+    begin
+      n := Length(Result) + 1;
+      SetLength(Result, n);
+      Result[n] := Chr(b);
+    end;
+  end
+  else
+  begin
+    // A UTF-8 character: take exactly its continuation bytes, no more. Stopping
+    // at the first byte that is not a continuation leaves the stream where the
+    // next key begins instead of eating it.
+    want := Utf8Extra(AFirst);
+    for i := 1 to want do
+    begin
+      if not ANext(b) then Break;
+      if (b < $80) or (b > $BF) then Break;
+      n := Length(Result) + 1;
+      SetLength(Result, n);
+      Result[n] := Chr(b);
+    end;
+  end;
+  SetCodePage(RawByteString(Result), CP_UTF8, False);
 end;
 
 function KbdKeyPressed: Boolean;
@@ -385,14 +463,12 @@ begin
 end;
 
 function KbdRead(ABlock: Boolean): String;
+var first: Byte;
 begin
   Result := '';
   if (not ABlock) and (not ByteWaiting()) then Exit;
-  Result := ReadByte();
-  { an ESC begins a multi-byte sequence (arrows, F-keys); if the rest is already in
-    the buffer, take it too so the caller gets the whole key in one call. }
-  if Result = #27 then
-    while ByteWaiting() do Result := Result + ReadByte();
+  if not ReadRawByte(first) then Exit;
+  Result := CrtAssembleKey(first, @NextWaitingByte);
 end;
 {$ENDIF}
 

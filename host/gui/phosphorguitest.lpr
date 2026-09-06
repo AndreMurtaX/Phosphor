@@ -21,7 +21,7 @@ program phosphorguitest;
 
 uses
   Interfaces,   // the LCL widgetset (win32 / gtk2), selected at build time
-  Forms, Clipbrd, LCLType,
+  Forms, Clipbrd, LCLType, ExtCtrls,
   SysUtils, Classes,
   PhosphorEngine, PhosphorValue, PhosphorTestLib,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
@@ -159,6 +159,24 @@ begin
   Result := ClipRetryPaste(AText);
 end;
 
+{ THE WATCHDOG. A test file may now enter the real message loop (app_run), and a
+  loop that is never asked to end does not fail -- it HANGS, which tells nobody
+  anything and blocks every suite queued behind it. This timer can only fire while
+  a message loop is pumping, which is exactly the stuck case; it reports the file
+  as failed and ends the process rather than waiting for a human to notice. }
+type
+  TWatchdog = class
+    procedure Bark(Sender: TObject);
+  end;
+
+procedure TWatchdog.Bark(Sender: TObject);
+begin
+  Writeln(StdErr, 'phosphorguitest: the message loop did not end within 30s -- ' +
+                  'app_run() was entered and nothing called app_quit()');
+  Inc(AssertsFailed);
+  Application.Terminate;
+end;
+
 procedure WriteSummary;
 var
   s: String;
@@ -171,6 +189,8 @@ end;
 var
   eng: TPhosphorEngine;
   GuiSvc: TGuiTestServices;
+  Dog: TWatchdog;
+  DogTimer: TTimer;
   gsvc: THostServices;
   path: String;
   rc, i: Integer;
@@ -222,6 +242,12 @@ begin
   // it the only place processmessages()/handlemessage() and the clipboard can be
   // checked against a real host rather than against their absent-service answers
   // (tests/suite/17_host_services pins those, headless, under phosphortest).
+  Dog := TWatchdog.Create();
+  DogTimer := TTimer.Create(nil);
+  DogTimer.Interval := 30000;
+  DogTimer.OnTimer := @Dog.Bark;
+  DogTimer.Enabled := True;
+
   GuiSvc := TGuiTestServices.Create();
   gsvc.ProcessMessages := @GuiSvc.Pump;
   gsvc.HandleMessage := @GuiSvc.PumpOne;

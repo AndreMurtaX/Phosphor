@@ -106,6 +106,70 @@ foreach ($name in $manifest) {
     if (-not (Run-One $name)) { $allOk = $false }
 }
 
+
+# --- the --gui handoff --------------------------------------------------------
+# `phosphor --gui <file>` is what a person types to run a GUI program, and until
+# now nothing ran it. It makes four decisions -- is there a graphical session, is
+# phosphorgui beside me, spawn it, hand back its exit code -- and each is checked
+# here. The fixtures open no window: the handoff is the subject, and a window
+# would only hide it.
+Write-Host ''
+$console = Join-Path $binDir 'phosphor.exe'
+$guiExe  = Join-Path $binDir 'phosphorgui.exe'
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build.ps1') | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL  handoff: phosphor did not build' -ForegroundColor Red; $allOk = $false }
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build-gui.ps1') | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL  handoff: phosphorgui did not build' -ForegroundColor Red; $allOk = $false }
+
+function Handoff-Case {
+    # NOT $Args: that is a PowerShell automatic variable, and a param by that
+    # name is silently ignored -- the first version of this ran phosphor with no
+    # arguments at all and got the REPL, four times over.
+    param([string] $Name, [string[]] $CliArgs, [int] $WantExit, [string] $WantText)
+    $o = Join-Path $tmp 'handoff.out'
+    $quoted = ($CliArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    cmd /c "`"$console`" $quoted > `"$o`" 2>&1"
+    $code = $LASTEXITCODE
+    $text = Get-Content -Raw $o -ErrorAction SilentlyContinue
+    if ($null -eq $text) { $text = '' }
+    $okCode = ($code -eq $WantExit)
+    $okText = ($WantText -eq '') -or ($text -like "*$WantText*")
+    if ($okCode -and $okText) {
+        Write-Host ("PASS  handoff: {0}  (exit {1})" -f $Name, $code) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ("FAIL  handoff: {0}" -f $Name) -ForegroundColor Red
+    if (-not $okCode) { Write-Host ("        wanted exit {0}, got {1}" -f $WantExit, $code) -ForegroundColor DarkGray }
+    if (-not $okText) { Write-Host ("        wanted text containing '{0}', got: {1}" -f $WantText, ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray }
+    return $false
+}
+
+$hoDir = Join-Path $gui 'handoff'
+if (Test-Path $guiExe) {
+    # 1. It really hands over: the child's stdout comes back unchanged, exit 0.
+    if (-not (Handoff-Case 'runs the program through phosphorgui' @('--gui', (Join-Path $hoDir 'hello.bas')) 0 'handoff ok')) { $allOk = $false }
+
+    # 2. And it hands back the child's FAILURE. A wrapper that swallows the
+    #    child's status reports every run as a success.
+    if (-not (Handoff-Case 'gives back the failing exit code' @('--gui', (Join-Path $hoDir 'fails.bas')) 1 'about to fail')) { $allOk = $false }
+
+    # 3. Usage: --gui with nothing to run.
+    if (-not (Handoff-Case 'refuses --gui with no file' @('--gui') 2 'needs a file to run')) { $allOk = $false }
+
+    # 4. The message when phosphorgui is not beside it. Hidden and put straight
+    #    back, so a failure here cannot leave the tree without its binary.
+    $hidden = Join-Path $binDir 'phosphorgui.hidden'
+    Rename-Item -Path $guiExe -NewName 'phosphorgui.hidden' -Force
+    try {
+        if (-not (Handoff-Case 'says what is missing when phosphorgui is not there' @('--gui', (Join-Path $hoDir 'hello.bas')) 2 'needs phosphorgui beside this binary')) { $allOk = $false }
+    } finally {
+        Rename-Item -Path $hidden -NewName 'phosphorgui.exe' -Force
+    }
+} else {
+    Write-Host 'FAIL  handoff: phosphorgui.exe is not present, so the handoff was not tested' -ForegroundColor Red
+    $allOk = $false
+}
+
 Write-Host ''
 if ($allOk) { Write-Host 'GUI SUITE OK' -ForegroundColor Green; exit 0 }
 else { Write-Host 'GUI SUITE FAILED' -ForegroundColor Red; exit 1 }

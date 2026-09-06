@@ -65,6 +65,57 @@ for name in $manifest; do
   fi
 done
 
+
+# --- the --gui handoff --------------------------------------------------------
+# `phosphor --gui <file>` is what a person types to run a GUI program, and until
+# now nothing ran it. It makes four decisions -- is there a graphical session, is
+# phosphorgui beside me, spawn it, hand back its exit code. The fixtures under
+# tests/gui/handoff/ open no window: the handoff is the subject.
+echo
+console="$bin/phosphor"
+guiexe="$bin/phosphorgui"
+hodir="$gui/handoff"
+bash "$here/build.sh" >/dev/null 2>&1 || { echo "FAIL  handoff: phosphor did not build"; allok=1; }
+
+handoff_case() {   # name, want_exit, want_text, args...
+  local name="$1" wantexit="$2" wanttext="$3"; shift 3
+  local o="$out"
+  "$console" "$@" > "$o" 2>&1; local code=$?
+  local ok=0
+  [ "$code" -eq "$wantexit" ] || ok=1
+  if [ -n "$wanttext" ] && ! grep -qF -- "$wanttext" "$o"; then ok=1; fi
+  if [ "$ok" -eq 0 ]; then
+    echo "PASS  handoff: $name  (exit $code)"
+  else
+    echo "FAIL  handoff: $name"
+    echo "        wanted exit $wantexit, got $code"
+    [ -n "$wanttext" ] && echo "        wanted text containing '$wanttext'"
+    sed 's/^/        /' "$o"
+    allok=1
+  fi
+}
+
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  # THE CASE ONLY LINUX HAS. No session: the console host must refuse before it
+  # spawns anything, name the problem and exit 3 -- distinct from 1 (program
+  # error) and 2 (usage), so a script can tell them apart.
+  handoff_case "refuses without a graphical session (exit 3)" 3 "needs a graphical session" --gui "$hodir/hello.bas"
+  handoff_case "and points at the console host instead" 3 "phosphor run" --gui "$hodir/hello.bas"
+else
+  bash "$here/build-gui.sh" >/dev/null 2>&1 || { echo "FAIL  handoff: phosphorgui did not build"; allok=1; }
+  if [ -x "$guiexe" ]; then
+    handoff_case "runs the program through phosphorgui" 0 "handoff ok" --gui "$hodir/hello.bas"
+    handoff_case "gives back the failing exit code" 1 "about to fail" --gui "$hodir/fails.bas"
+    handoff_case "refuses --gui with no file" 2 "needs a file to run" --gui
+    mv "$guiexe" "$guiexe.hidden"
+    handoff_case "says what is missing when phosphorgui is not there" 2 "needs phosphorgui beside this binary" --gui "$hodir/hello.bas"
+    mv "$guiexe.hidden" "$guiexe"
+  else
+    echo "FAIL  handoff: phosphorgui is not present, so the handoff was not tested"
+    allok=1
+  fi
+fi
+
 echo
 if [ "$allok" -eq 0 ]; then echo "GUI SUITE OK"; else echo "GUI SUITE FAILED"; fi
 exit "$allok"

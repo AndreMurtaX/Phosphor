@@ -447,10 +447,23 @@ begin
 end;
 
 // --- app_* : the message loop, for the interactive host ---------------------
+var
+  GAppQuit: Boolean = False;   // set by app_quit, read by the loop below
+
 function f_app_run(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError;
-  Application.Run;
+  // OUR OWN LOOP, not Application.Run. app_quit used to call
+  // Application.Terminate, which sets a flag the LCL gives no public way to
+  // clear -- so once a program had left the loop, every later app_run() in that
+  // process returned instantly, having dispatched nothing. A host that runs one
+  // script after another, or an embedder driving the engine between loops, got a
+  // GUI that silently stopped being a GUI. This loop is left by app_quit AND by
+  // the application terminating (which is what closing the last window does), and
+  // leaves the application usable either way.
+  GAppQuit := False;
+  while (not GAppQuit) and (not Application.Terminated) do
+    Application.HandleMessage;
   Result := ValInt(0);
 end;
 function f_app_processmessages(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -462,7 +475,10 @@ end;
 function f_app_quit(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError;
-  Application.Terminate;
+  // Leave the loop; do NOT terminate the application. "Stop showing this window
+  // and give me back control" is what a script means here, and terminating made
+  // that a one-way door for the whole process.
+  GAppQuit := True;
   Result := ValInt(0);
 end;
 

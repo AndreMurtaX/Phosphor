@@ -51,7 +51,11 @@ done
 [ "$okE" -eq 0 ] && echo "PASS  E:trailer        (both packed files carry a v2 trailer)"
 
 # F: pack REFUSES source. The rule is only real if something fails when broken.
-refuse="$("$exe" pack "$bas" "$(mktemp -u).never" 2>&1)"; refusecode=$?
+# The `if` form is not optional: this script runs under `set -e`, and a plain
+# assignment from a command that exits non-zero ABORTS the script -- which is
+# exactly what happened here, silently, after E had already printed PASS. A
+# condition is exempt from set -e; an assignment is not.
+if refuse="$("$exe" pack "$bas" "$(mktemp -u).never" 2>&1)"; then refusecode=0; else refusecode=$?; fi
 if [ "$refusecode" -eq 2 ] && echo "$refuse" | grep -q "not a .pbc" && echo "$refuse" | grep -q "phosphor compile"; then
   echo "PASS  F:pack refuses source (exit 2, and says how to compile)"
 else

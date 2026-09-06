@@ -98,3 +98,30 @@ h_chan:
   caught = 1
   resume next
 skip_chan:
+
+test_case("sandbox/an .ini is a file too")
+
+rem The config library opens a file by path like any other library, and for a
+rem while it was the one that did not ask: with a root set, file_writealltext to
+rem a path outside answered 0 while cfg_open@ + cfg_save wrote the file. Found by
+rem reading the library to document it, not by a check -- scripts/check-sandbox.py
+rem did not know TMemIniFile was a way to open a file.
+rem
+rem A refused config still OPENS: it works in memory and binds no file, so the
+rem program gets an object it can use and a save that answers 0.
+fora$ = path_combine$(dir_getparent$(root$), "p9b_sandbox_cfg.ini")
+c@ = cfg_open@(fora$)
+assert_eq(cfg_filename$(c@), "", "a config outside the root binds no file")
+x@ = cfg_sets@(c@, "k", "v")
+assert_eq(cfg_gets$(c@, "k", ""), "v", "and still works in memory")
+assert_eq(cfg_save(c@), 0, "but saving it answers 0 -- no file was bound")
+assert_eq(file_exists(fora$), 0, "and nothing was written outside the root")
+
+rem Inside the root it behaves exactly as before.
+dentro$ = "bin/p9b_sandbox_cfg.ini"
+if file_exists(dentro$) <> 0 then file_delete(dentro$)
+d@ = cfg_open@(dentro$)
+y@ = cfg_sets@(d@, "k", "v")
+assert_eq(cfg_save(d@), 1, "a config inside the root saves")
+assert_eq(file_exists(dentro$), 1, "and the file is there")
+assert_eq(file_delete(dentro$), 1, "tidied up")

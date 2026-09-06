@@ -53,6 +53,24 @@ def load_corpus():
         text += open(p, encoding='utf-8', errors='ignore').read().lower()
     return text
 
+def lib_slug(path):
+    """docs/libraries/<slug>.md for a library source.
+
+    PhosphorStrLib.pas -> str ; PhosphorGuiCore.pas -> gui-core ;
+    a GUI package -> gui-<name>, so a reader can tell which surface a page is."""
+    base = os.path.basename(path)
+    name = base[:-4]                       # drop .pas
+    if name.startswith('Phosphor'):
+        name = name[len('Phosphor'):]
+    if name.endswith('Lib'):
+        name = name[:-3]
+    slug = re.sub(r'(?<!^)(?=[A-Z])', '-', name).lower()
+    is_gui = os.sep + os.path.join('gui', 'libs') + os.sep in path
+    if is_gui and not slug.startswith('gui'):
+        slug = 'gui-' + slug
+    return slug
+
+
 def is_referenced(name, corpus):
     esc = re.escape(name)
     # a call `name(` or a bare token boundary (covers statements/args)
@@ -123,6 +141,54 @@ def main():
         rc = 1
     else:
         print("every registered function is in the reference.")
+
+    # --- per-library technical documentation -----------------------------------
+    # The reference above is a catalogue of engine + package names. It says nothing
+    # about the 426 GUI functions, and nothing anywhere about what a library is FOR
+    # or how to use one. So each library carries its own page, and this holds every
+    # page to its own library: a function that is registered and not described is a
+    # function whose only documentation is its source.
+    libdir = os.path.join(ROOT, 'docs', 'libraries')
+    all_libs = libs + sorted(glob.glob(os.path.join(ROOT, 'host', 'gui', 'libs', '*.pas')))
+    missing_pages = []
+    undescribed = []
+    described = 0
+    lib_count = 0
+    for lib in all_libs:
+        names = registered_names(lib)
+        if not names:
+            continue
+        lib_count += 1
+        page = os.path.join(libdir, lib_slug(lib) + '.md')
+        try:
+            text = open(page, encoding='utf-8', errors='ignore').read().lower()
+        except OSError:
+            missing_pages.append((os.path.basename(lib), os.path.relpath(page, ROOT)))
+            undescribed.extend((lib_slug(lib), n) for n in sorted(names))
+            continue
+        for n in sorted(names):
+            if n in text:
+                described += 1
+            else:
+                undescribed.append((lib_slug(lib), n))
+    print()
+    print(f"library pages: {described}/{described + len(undescribed)} names described"
+          f" across {lib_count} libraries")
+    if missing_pages:
+        print("LIBRARIES WITH NO PAGE:")
+        for src, page in missing_pages:
+            print(f"  {src:<28} expected {page}")
+        rc = 1
+    if undescribed:
+        print(f"NAMES NOT DESCRIBED IN THEIR LIBRARY PAGE ({len(undescribed)}):")
+        shown = undescribed if show else undescribed[:20]
+        for slug, n in shown:
+            print(f"  {slug:<16} {n}")
+        if not show and len(undescribed) > 20:
+            print(f"  ... and {len(undescribed) - 20} more (--list to see them all)")
+        rc = 1
+    if not missing_pages and not undescribed:
+        print("every library has a page, and every function it registers is on it.")
 
     # --- the guided tour's name table -----------------------------------------
     # language-reference.md carries a "standard library" map whose last column
@@ -286,7 +352,8 @@ def main():
     }
 
     docfiles = [os.path.join(ROOT, 'README.md')] + \
-               sorted(glob.glob(os.path.join(ROOT, 'docs', '*.md')))
+               sorted(glob.glob(os.path.join(ROOT, 'docs', '*.md'))) + \
+               sorted(glob.glob(os.path.join(ROOT, 'docs', 'libraries', '*.md')))
 
     def scannable(txt):
         # The playbook's retrospective log is DATED HISTORY, and a record of a past
@@ -297,6 +364,43 @@ def main():
         marker = '## Retrospective log'
         i = txt.find(marker)
         return txt if i < 0 else txt[:i]
+    # Statement keywords the compiler resolves itself. `if (`, `while (` and
+    # `print (` are not calls, and a gate that reported them would be one nobody
+    # reads. Kept short on purpose: anything not here has to be a real function.
+    KEYWORDS = {
+        'if', 'elseif', 'while', 'until', 'for', 'select', 'case', 'print',
+        'println', 'return', 'and', 'or', 'not', 'mod', 'input', 'line',
+        'open', 'close', 'write', 'read', 'data', 'dim', 'let', 'goto',
+        'gosub', 'on', 'error', 'resume', 'end', 'function', 'sub', 'to',
+        'step', 'then', 'else', 'do', 'loop', 'wend', 'next', 'using', 'as',
+    }
+
+    def fenced_blocks(txt):
+        """Each ```basic block, with the names it declares itself.
+
+        ONLY basic blocks. A shell command, a directory tree or a Pascal snippet
+        is not Phosphor code, and reading one as Phosphor reports every English
+        word followed by a parenthesis -- a gate that cries wolf is a gate people
+        learn to skip."""
+        out = []
+        lines = txt.splitlines()
+        i = 0
+        while i < len(lines):
+            fence = lines[i].lstrip()
+            if fence.startswith('```') and fence[3:].strip().lower() == 'basic':
+                j = i + 1
+                body = []
+                while j < len(lines) and not lines[j].lstrip().startswith('```'):
+                    body.append(lines[j])
+                    j += 1
+                block = '\n'.join(body)
+                own = set(re.findall(r'(?im)^\s*(?:function|sub)\s+([a-z][a-z0-9_]*[$@%?]?)',
+                                     block))
+                out.append((i + 2, body, {o.lower() for o in own}))
+                i = j
+            i += 1
+        return out
+
     ghosts = []
     for df in docfiles:
         try:
@@ -346,6 +450,37 @@ def main():
                 ghosts.append((rel, lineno, nm))
 
     print()
+    # ...and the same question asked INSIDE the code blocks, where a reader copies
+    # from. A call there needs no backtick, so the name is taken bare.
+    for df in docfiles:
+        try:
+            txt = open(df, encoding='utf-8', errors='ignore').read()
+        except OSError:
+            continue
+        rel = os.path.relpath(df, ROOT).replace('\\', '/')
+        for first, body, own in fenced_blocks(scannable(txt)):
+            for off, line in enumerate(body):
+                # A comment and a string literal are not code: a println of
+                # "cheese (nice)" is not a call to cheese.
+                code = re.sub(r'"(?:[^"]|"")*"', '""', line)
+                code = re.split(r"(?i)(?:^|\s)rem(?:\s|$)", code)[0]
+                # The apostrophe is a comment too -- the language accepts both,
+                # and docs/language-reference.md's quick-reference block is written
+                # entirely in that style.
+                code = code.split("'")[0]
+                for m in re.finditer(r'(?<![`\w$@%?.])([a-z][a-z0-9_]*[$@%?]?)\s*\(', code):
+                    nm = m.group(1)
+                    low = nm.lower()
+                    if low in KEYWORDS or low in own:
+                        continue
+                    if nm in every or low in every:
+                        continue
+                    if nm in DELIBERATE or low in DELIBERATE:
+                        continue
+                    if nm in LANGUAGE or low in LANGUAGE:
+                        continue
+                    ghosts.append((rel, first + off, nm))
+
     if ghosts:
         print("CALLED IN A DOCUMENT BUT NOT REGISTERED:")
         for rel, lineno, nm in ghosts:

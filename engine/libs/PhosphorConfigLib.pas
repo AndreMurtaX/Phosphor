@@ -38,15 +38,24 @@ type
     constructor Create(const APath: String; AAuto: Boolean);
     destructor Destroy; override;
     procedure Touch;
-    procedure Save;
+    function Save: Boolean;
     procedure Reload;
   end;
 
 constructor TPhosphorConfig.Create(const APath: String; AAuto: Boolean);
+var
+  bound: String;
 begin
   inherited Create();
-  FileName := APath;
-  Ini := TMemIniFile.Create(APath);   // reads the file if it exists
+  // AN .INI IS A FILE, and is confined like any other. Outside the sandbox root
+  // no file is bound at all: the object still exists and still works in memory,
+  // FileName is empty, and Save answers 0 -- an honest refusal the program can
+  // see, rather than a nil handle or a write somewhere it did not ask for.
+  // Until this guard, cfg_open@ + cfg_save wrote an .ini anywhere on the disk
+  // while file_writealltext to the same path was refused.
+  if SandboxAllows(APath, puWrite) then bound := APath else bound := '';
+  FileName := bound;
+  Ini := TMemIniFile.Create(bound);   // reads the file if it exists
   Modified := False;
   AutoSave := AAuto;
 end;
@@ -62,8 +71,14 @@ begin
   inherited Destroy();
 end;
 
-procedure TPhosphorConfig.Save;
+function TPhosphorConfig.Save: Boolean;
 begin
+  // No file bound means the path was refused when this was opened. Answering
+  // False is what lets cfg_save report it; UpdateFile on an empty name would
+  // write into the process's working directory, which is precisely the escape
+  // this exists to stop.
+  Result := FileName <> '';
+  if not Result then Exit;
   Ini.UpdateFile;
   Modified := False;
 end;
@@ -341,8 +356,7 @@ var c: TPhosphorConfig;
 begin
   Result := ValInt(0);
   if not GetConfig(Args[0], c, Err) then Exit;
-  c.Save();
-  Result := ValInt(1);
+  Result := ValInt(Ord(c.Save()));
 end;
 function t_cfg_reload(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;

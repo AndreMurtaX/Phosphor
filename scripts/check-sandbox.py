@@ -31,6 +31,12 @@ PRIMITIVES = [
     'DirectoryExists', 'FileAge', 'FileSetDate', 'AssignFile', 'LoadFromFile',
     'SaveToFile', 'FileCreate', 'FileOpen',
     'GetTempFileName', 'GetTempDir', 'GetUserDir',
+    # An INI file is a file. These were missing, and PhosphorConfigLib opened one
+    # by path with no guard at all -- a sandboxed script could read and write an
+    # .ini anywhere on the disk while file_writealltext to the same path was
+    # refused. Found by an agent READING the library to document it, not by any
+    # check: the gate only knows the primitives it is told about.
+    'TIniFile.Create', 'TMemIniFile.Create', 'TCustomIniFile.Create',
 ]
 # DeleteTree and CopyTree are NOT in that list: they are this project's own
 # helpers and they ask the gate themselves, at every level of their recursion.

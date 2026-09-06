@@ -1,6 +1,8 @@
 rem ===============================================================
 rem Phosphor BASIC -- interactive GUI demo.
-rem   Run it with the GUI host:   phosphorgui examples/gui_demo.bas
+rem   Run it:   phosphor run examples/gui_demo.bas
+rem A GUI program needs no flag and no second binary: phosphor brings the
+rem widgetset up itself wherever a graphical session is reachable.
 rem A window with a menu, a few controls, a live canvas drawing, and
 rem events wired to BASIC handlers. Close it from File > Quit or the X.
 rem ===============================================================

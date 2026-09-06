@@ -274,7 +274,7 @@ const
   ------------------------------------------------------------------------------ }
 function ValidateProgram(AProg: TProgram; out AErr: String): Boolean;
 var
-  i: Integer;
+  i, maxLocals: Integer;
   ins: TInstr;
 
   function Bad(const AWhat: String; AIndex, ALimit: Integer): Boolean;
@@ -291,6 +291,13 @@ begin
   begin AErr := 'corrupt .pbc: negative variable count'; Exit; end;
   if Length(AProg.VarTypes) <> AProg.VarCount then
   begin AErr := 'corrupt .pbc: the variable table does not match its count'; Exit; end;
+
+  { The widest local table any frame can have. Computed before the instruction
+    pass, because that pass bounds every local slot against it. }
+  maxLocals := 0;
+  for i := 0 to AProg.UserFuncCount - 1 do
+    if Length(AProg.UserFuncs[i].LocalTypes) > maxLocals then
+      maxLocals := Length(AProg.UserFuncs[i].LocalTypes);
 
   for i := 0 to AProg.Count - 1 do
   begin
@@ -309,7 +316,28 @@ begin
         // -1 disables the handler; anything else is a pc
         if (ins.A < -1) or (ins.A > AProg.Count) then
           Exit(Bad('handler target', ins.A, AProg.Count + 1));
-      opLoadLocal, opStoreLocal, opDupN, opBreakpoint, opPrintUsing:
+      opLoadLocal, opStoreLocal:
+        { A local slot cannot be checked against ITS OWN function here -- nothing
+          in the file says which function an instruction belongs to. It can be
+          checked against the LARGEST local table in the program, which is a real
+          bound and costs one pass: no slot index above it can ever be valid in
+          any frame. A wild index from a corrupt file is caught; one that is
+          merely too large for its own function is not, and the parameter-count
+          invariant below covers the case that was actually reachable. }
+        if (ins.A < 0) or (ins.A >= maxLocals) then
+        begin
+          { "outside 0..-1" is what the general message says when the program
+            declares no locals at all, and it reads like a bug in the checker
+            rather than a fact about the file. }
+          if maxLocals = 0 then
+            AErr := Format('corrupt .pbc: instruction %d reads local slot %d, ' +
+                           'but no function in this program declares any locals',
+                           [i, ins.A])
+          else
+            Bad('local slot', ins.A, maxLocals);
+          Exit(False);
+        end;
+      opDupN, opBreakpoint, opPrintUsing:
         if ins.A < 0 then
           Exit(Bad('operand', ins.A, 0));
     end;
@@ -319,12 +347,38 @@ begin
   end;
 
   for i := 0 to AProg.UserFuncCount - 1 do
+  begin
     if (AProg.UserFuncs[i].Entry < 0) or (AProg.UserFuncs[i].Entry > AProg.Count) then
     begin
       AErr := Format('corrupt .pbc: function %d starts at %d, outside the program',
                      [i, AProg.UserFuncs[i].Entry]);
       Exit;
     end;
+    { A FUNCTION'S LOCAL TABLE MUST HOLD ITS PARAMETERS, and this one is not
+      theoretical: it was an out-of-bounds WRITE, found 2026-09-06 by flipping the
+      local-slot count of a one-parameter function from 1 to 0 in a .pbc.
+
+      opCall resolves by name AND arity, so a match guarantees argc = ParamCount --
+      and nothing guaranteed the frame had room for them. The call path sizes the
+      frame from LocalTypes (`SetLength(Locals, Length(LocalTypes))`) and then
+      writes `Locals[i]` for each argument, so a table shorter than the parameter
+      list writes past the allocation. That reached the LCL as an access violation
+      and, in a binary that links Forms, a modal dialog on a machine with nobody
+      watching. }
+    if AProg.UserFuncs[i].ParamCount < 0 then
+    begin
+      AErr := Format('corrupt .pbc: function %d has a negative parameter count (%d)',
+                     [i, AProg.UserFuncs[i].ParamCount]);
+      Exit;
+    end;
+    if Length(AProg.UserFuncs[i].LocalTypes) < AProg.UserFuncs[i].ParamCount then
+    begin
+      AErr := Format('corrupt .pbc: function %d takes %d parameters but has room ' +
+                     'for %d locals', [i, AProg.UserFuncs[i].ParamCount,
+                     Length(AProg.UserFuncs[i].LocalTypes)]);
+      Exit;
+    end;
+  end;
   Result := True;
 end;
 

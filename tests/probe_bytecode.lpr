@@ -152,7 +152,7 @@ begin
   first := 5 + 4 + vc + 4;              // each instruction: op(1) A(4) B(4) line(4)
   if AMode = 0 then
     buf[first] := 200                    // an opcode this build does not have
-  else
+  else if AMode = 1 then
   begin
     for k := 0 to n - 1 do
     begin
@@ -163,11 +163,59 @@ begin
         Break;
       end;
     end;
+  end
+  else
+  begin
+    { Modes 2 and 3 corrupt the USER-FUNCTION TABLE, which lives at the end of the
+      file: after each name come three LongInts -- entry, parameter count, local
+      count. The table is found by its name bytes rather than by walking every
+      preceding section, which keeps this probe readable and independent of the
+      const/data layout.
+
+      Mode 2 zeroes the LOCAL count of a function that takes a parameter. That
+      combination was an out-of-bounds WRITE, not merely a bad read: opCall
+      resolves by name and arity, so the call matched, the frame was then sized
+      from the (now empty) local table, and the argument was written into it. On
+      Windows it surfaced as an access violation and -- in a binary that links the
+      LCL -- a modal dialog nobody was there to click.
+
+      Mode 3 makes the parameter count negative, the same table read the other way
+      round. }
+    { BACKWARDS. The name 'dbl' is in the file TWICE: once in the constant pool,
+      because the call site stores the callee's name as a constant, and once in
+      the function table. The pool is written first, so a forward search corrupts
+      four bytes of a string constant and the function table is left untouched --
+      the file then loads and runs, the check still reports a refusal because the
+      output no longer matches, and nothing is being tested. Found by neutralising
+      the validator and watching the check stay green anyway. }
+    for k := Length(buf) - 4 downto 0 do
+      if (buf[k] = Ord('d')) and (buf[k + 1] = Ord('b')) and (buf[k + 2] = Ord('l')) then
+      begin
+        o := k + 3;                       // just past the name: entry, pcount, ltc
+        if AMode = 2 then
+          PLongInt(@buf[o + 8])^ := 0     // no locals, though it has a parameter
+        else
+          PLongInt(@buf[o + 4])^ := -1;   // a negative parameter count
+        Break;
+      end;
   end;
   bad := TBytesStream.Create(buf);
   try
     dummy := RunBytes(bad, rc, msg);
-    Report((rc <> 0) and (Length(msg) > 0) and (dummy = ''), AName);
+    { REFUSED, not merely "did not run". `rc <> 0` on its own was too weak: a
+      corrupt file that drove the VM into an access violation also fails to run,
+      also sets a message, and also printed nothing -- so the check passed while
+      the interpreter was crashing, which is the one outcome it exists to forbid.
+      Demonstrated on 2026-09-06 by neutralising the validator and watching all
+      eight checks stay green. The message has to say the LOADER refused it.
+      The word is 'corrupt' rather than the full 'corrupt .pbc' because a file can
+      be refused by two honest routes -- the validator's own message, and the
+      stream reader when a bad length makes the next field unreadable. A negative
+      parameter count takes the second route. Both are the LOADER saying no; an
+      access violation is not, and says nothing of the kind. }
+    Report((rc <> 0) and (dummy = '') and (Pos('corrupt', msg) > 0), AName);
+    if Pos('corrupt', msg) = 0 then
+      Writeln('     (message was: ', msg, ')');
   finally
     bad.Free;
   end;
@@ -185,6 +233,19 @@ const
     'next'                                                     + #10 +
     'println "done: " + str$(2 + 3 * 4)'                       + #10;
   Simple = 'println "hello"' + #10 + 'println 42 * 10' + #10;
+  { A one-parameter function and NOTHING ELSE after it in the file.
+    Rich cannot be used for the user-function modes: WriteProgram puts the
+    DATA section AFTER the function table, so zeroing a local count shifts
+    the data-count read and the stream reader refuses the file before the
+    program is ever built -- the check then passed without the validator
+    doing anything, which is how this was found. With no data section the
+    corrupt table loads cleanly and reaches the VM, which is the case that
+    was an out-of-bounds write. }
+  WithFunc =
+    'function dbl(n)'          + #10 +
+    '  return n * 2'           + #10 +
+    'end function'             + #10 +
+    'println str$(dbl(21))'    + #10;
 
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
@@ -204,6 +265,9 @@ begin
   // A operand, at offsets computed from the format rather than guessed.
   CheckBodyRefusal('refuse: an opcode this build does not have', Simple, 0);
   CheckBodyRefusal('refuse: a constant index past the pool', Simple, 1);
+  // WithFunc: these two need a program that has a user function and no data.
+  CheckBodyRefusal('refuse: a function with no room for its parameter', WithFunc, 2);
+  CheckBodyRefusal('refuse: a negative parameter count', WithFunc, 3);
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

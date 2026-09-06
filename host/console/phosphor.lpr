@@ -830,6 +830,41 @@ end;
   are consoles, then prints a known UTF-8 line through the same path the engine
   uses. On a fixed console it must render "Ola -- cafe -- acucar -- coffee --
   pi" with the proper accents and symbols. }
+{ An exception that escapes anywhere in this program.
+
+  THIS BINARY LINKS THE LCL, and that alone is enough: the `Forms` unit routes
+  unhandled exceptions to Application.HandleException, whose default is a MODAL
+  DIALOG -- in a console run, with no window and no message loop, on a machine
+  with nobody watching. It was seen on 2026-09-06: `phosphor f1_bad.pbc` on a
+  corrupted bytecode file opened "Access violation. Press OK to ignore and risk
+  data corruption." and sat there, holding a lock on its own executable, until
+  someone clicked it.
+
+  phosphorguitest has had this guard since the day a suite hung on it. When round
+  31 merged the two hosts into one, the guard did not come along -- the merge
+  moved the LCL into a binary that had never needed protecting from it.
+
+  A crash must be a MESSAGE and an EXIT CODE. 3, distinct from a runtime error (1)
+  and a compile error (2), so a script can tell an interpreter bug from a program
+  that was wrong. The report itself is wrapped: after --no-console the standard
+  handles may be closed, and a handler that raises while reporting a raise leaves
+  the user with nothing at all. }
+type
+  TCrashGuard = class
+    class procedure Report(Sender: TObject; E: Exception);
+  end;
+
+class procedure TCrashGuard.Report(Sender: TObject; E: Exception);
+begin
+  try
+    Writeln(StdErr, 'phosphor: unhandled ', E.ClassName, ': ', E.Message);
+    Flush(StdErr);
+  except
+    // nowhere left to say it; the exit code still carries the news
+  end;
+  Halt(3);   // never a dialog, never a wait
+end;
+
 function Diag: Integer;
 var
   host: TConsoleHost;
@@ -854,6 +889,11 @@ var
   payload: TBytesStream;
   embFlags: LongWord;
 begin
+  // FIRST, before anything can raise: take the LCL's modal crash dialog out of
+  // the picture. See TCrashGuard above -- linking Forms is what puts it there,
+  // and this binary links Forms whether or not a window is ever opened.
+  Application.OnException := @TCrashGuard.Report;
+
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
   if TryReadEmbeddedPayload(payload, embFlags) then
   begin

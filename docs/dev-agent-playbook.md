@@ -391,6 +391,46 @@ exists so they can next time.
     edit said *nine*. Writing a count and a list in one sitting is not enough to
     keep them agreeing.
 
+- **2026-09-06 · round 35 · a modal dialog on a headless machine, and the
+  out-of-bounds write behind it.** The owner saw *"Access violation. Press OK to
+  ignore and risk data corruption."* while an adversarial sweep was running. Two
+  defects met in it, and the second was only findable because of the first.
+
+  - **`phosphor` links the LCL, and that alone is enough.** The `Forms` unit
+    routes unhandled exceptions to `Application.HandleException`, whose default is
+    a modal box — in a console run, with no window, on a machine with nobody
+    watching. The process then sits there holding a lock on its own executable,
+    so the next build fails too. `phosphorguitest` has had
+    `Application.OnException` since the day a suite hung on exactly this; **when
+    round 31 merged the two hosts into one, the guard did not come along.** A
+    merge moves code into a binary that never needed protecting from it, and the
+    protection is the thing nobody lists. `phosphor` now reports to stderr and
+    exits 3. Audited the rest: only two `.lpr` files link the LCL, and both are
+    covered.
+  - **The crash was a WRITE past an allocation.** A `.pbc` with one byte changed —
+    a one-parameter function's local-slot count from 1 to 0 — passed the loader.
+    `opCall` resolves by name AND arity, so the call matched; the frame is then
+    sized from `LocalTypes` and each argument written into it, so an empty table
+    means `Locals[0] :=` on a zero-length array. `ValidateProgram` already existed
+    for precisely this class and checked the function's *entry point* but not the
+    relationship the call path assumes. It now requires
+    `Length(LocalTypes) >= ParamCount`, and bounds every local slot by the widest
+    table in the program.
+  - **THREE DEFECTS IN MY OWN TEST, each found by removing the fix and watching
+    the test stay green.** (1) The assertion was `rc <> 0` — "did not run" — which
+    a crash also satisfies, so the check passed while the interpreter was
+    crashing; it now requires the loader's own word, `corrupt`. (2) The corruption
+    was applied to a program with a `data` section, which `WriteProgram` puts
+    AFTER the function table, so the shifted read was refused by the stream reader
+    before the VM saw anything. (3) The function's name was found by searching
+    FORWARD, and `dbl` is in the file twice — the call site stores the callee name
+    as a constant, and the constant pool is written first — so four bytes of a
+    string constant were corrupted and the function table left untouched.
+  - **The rule: "the test passes" and "the fix works" are different claims.**
+    Only removing the fix separates them. Here it took three attempts before the
+    probe crashed with exit 217 without the validator and passed with it — and
+    every one of those attempts had looked green.
+
 - **2026-09-06 · round 34 · fifteen names lied about their own return type, and
   the fix was to build the check first.** A built-in's return type IS the suffix
   on its name — that is the whole type system for the library — and nothing

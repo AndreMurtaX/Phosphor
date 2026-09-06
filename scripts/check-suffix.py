@@ -95,7 +95,20 @@ def bodies(text):
     return out
 
 
-def returned_kinds(body, argsig):
+def kind_of(expr, argsig):
+    """The kind of one expression, or None when it cannot be told."""
+    c = re.match(r'(Val\w+)\s*\(', expr)
+    if c:
+        return CTOR_KIND.get(c.group(1))
+    a = re.match(r'Args\[\s*(\d+)\s*\]\s*$', expr)
+    if a and int(a.group(1)) < len(argsig):
+        return ARG_KIND.get(argsig[int(a.group(1))])
+    if re.match(r'Args\[\s*High\(Args\)\s*\]\s*$', expr) and argsig:
+        return ARG_KIND.get(argsig[-1])
+    return None
+
+
+def returned_kinds(body, argsig, helpers=None):
     """The kind of the LAST `Result :=` in the body, which is this codebase's
     success path.
 
@@ -132,23 +145,33 @@ def returned_kinds(body, argsig):
         sure = False          # a helper call, a variable, something else
     kinds.discard(None)
     if last is None:
-        return set(), True
-    # Re-read ONLY the last assignment; the set above is kept just to know
-    # whether anything at all was resolvable.
+        return set(), False
+    # Re-read ONLY the last assignment; the scan above is kept just for its side
+    # effect of finding `last`.
     kinds = set()
-    c = re.match(r'(Val\w+)\s*\(', last)
-    if c and c.group(1) in CTOR_KIND:
-        kinds.add(CTOR_KIND[c.group(1)])
-    else:
-        a = re.match(r'Args\[\s*(\d+)\s*\]\s*$', last)
-        h = re.match(r'Args\[\s*High\(Args\)\s*\]\s*$', last)
-        if a and int(a.group(1)) < len(argsig):
-            kinds.add(ARG_KIND.get(argsig[int(a.group(1))]))
-        elif h and argsig:
-            kinds.add(ARG_KIND.get(argsig[-1]))
-        else:
-            sure = False
-    kinds.discard(None)
+    k = kind_of(last, argsig)
+    if k is None and helpers is not None:
+        # ONE level of indirection: `Result := DoDim(akNumeric, Args, Err);` is
+        # the house shape for a family of names sharing one worker, and leaving
+        # it unread silenced dim@/sdim@/pdim@ and every function like them --
+        # 263 registrations the gate counted as "checked" while judging nothing.
+        # The helper is read only if EVERY assignment in it agrees on one kind,
+        # so a worker that can answer two kinds still says nothing.
+        call = re.match(r'(\w+)\s*\(', last)
+        if call and call.group(1) in helpers:
+            inner = helpers[call.group(1)]
+            got = {kind_of(m.group(1).strip(), argsig)
+                   for m in re.finditer(r'Result\s*:=\s*([^;]+);', inner)}
+            if len(got) == 1 and None not in got:
+                k = got.pop()
+    # `sure` is decided HERE and nowhere else: the verdict rests on the last
+    # assignment alone, so an earlier one the scan could not read says nothing
+    # about it. Leaving the scan's `sure` in place silenced every function whose
+    # answer came through a helper -- the resolution above found the kind and the
+    # stale flag threw it away.
+    sure = k is not None
+    if sure:
+        kinds.add(k)
     return kinds, sure
 
 
@@ -166,23 +189,25 @@ def main():
             if body is None:
                 continue                      # registered from another unit
             line = text[:m.start()].count('\n') + 1
-            seen[(spec, path, line)] = (name, argsig, body)
+            # fns rides along: it is this file's other functions, the only
+            # helper candidates a `Result := Worker(...)` can name.
+            seen[(spec, path, line)] = (name, argsig, body, fns)
 
     bad = []
-    for (spec, path, line), (name, argsig, body) in sorted(seen.items()):
+    judged = 0
+    for (spec, path, line), (name, argsig, body, fns) in sorted(seen.items()):
         if spec in EXEMPT:
             continue
         suffix = name[-1] if name and name[-1] in SUFFIX_KIND and name[-1] != '' else ''
         if suffix not in SUFFIX_KIND:
             suffix = ''
         want = SUFFIX_KIND[suffix]
-        kinds, sure = returned_kinds(body, argsig)
-        if not kinds:
-            continue
+        kinds, sure = returned_kinds(body, argsig, fns)
+        if not sure or not kinds:
+            continue                          # indeterminate: say nothing
+        judged += 1
         if want in kinds:
             continue
-        if not sure:
-            continue                          # an unread path might return it
         rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
         bad.append((rel, line, spec, want, sorted(kinds)))
 
@@ -199,8 +224,12 @@ def main():
         print('with the reason.')
         return 1
 
-    print('suffixes: %d registrations checked, every one returns what its name says'
-          % len(seen))
+    # Say how many were actually JUDGED, not just how many were looked at. A gate
+    # that reports 1230 while resolving 967 of them is overstating its own reach,
+    # and the number a reader trusts should be the smaller one.
+    print('suffixes: %d of %d registrations resolved, every one returns what its '
+          'name says (%d indeterminate and reported on by nothing)'
+          % (judged, len(seen), len(seen) - judged))
     return 0
 
 

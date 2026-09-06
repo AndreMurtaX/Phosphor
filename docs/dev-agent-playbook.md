@@ -375,6 +375,49 @@ exists so they can next time.
     CLAMP the out-of-range number back to `9999-12-31` and report it as real. That
     is a whole-library question, not these two functions', and `date-time.md` now
     says so where a reader will meet it.
+  - **THE GUARD FAILED THE WAY IT WAS WRITTEN TO PREVENT, and adversarial review
+    found it, not me.** The first version checked only the year the step *lands*
+    in. `DecodeDate` answers year 0 for any number at or below −693594 rather than
+    refusing it, so the arithmetic started from a year that does not exist and
+    landed back inside 1..9999: `incmonth(x, 12)` was refused while
+    `incmonth(x, 13)` answered `1899-12-30` — non-monotonic, and exactly the
+    silent wrong date the comment above it claimed to stop. **A guard that trusts a
+    decomposition has to check that the decomposition is real.** The input was not
+    exotic: the same change documents `incday` as having no range check, so one
+    step back from the first representable day produces such a number.
+  - **Four reviewers, one lens each, all told to REFUTE.** They cost ~530k tokens
+    and returned four findings, two certain and load-bearing — this one, and a
+    count in the unit header that said *seven* while the page I wrote in the same
+    edit said *nine*. Writing a count and a list in one sitting is not enough to
+    keep them agreeing.
+
+- **2026-09-06 · round 33b · the REPL had a test, and it covered two of seven
+  block forms.** `08_repl` entered `function` and `if`. The other five — `for`,
+  `while`, `wend`, `do…loop`, `repeat…until`, `select case` — were never typed
+  interactively, which is how `expected 'next'` could be missing from
+  `IsUnterminatedBlock` while a test existed and passed.
+
+  - **The proof a regression test is worth anything is watching it catch the
+    original bug.** With `expected 'next'` removed and the host rebuilt,
+    `09_repl_blocks` fails and **`08_repl` still passes**. That contrast is the
+    argument; without running it, "I added a test" is a claim.
+  - **Silence plus exit 0 is a lie to a script.** Input ending inside an open
+    block used to discard it without a word and answer 0 — anything piping a
+    truncated file was told the whole file had run. It now names the missing
+    terminator and exits 2. **stdout is byte-identical either way**, so pinning it
+    needed the runner to learn an optional `<name>.exit`; seen failing when set
+    to 0.
+  - **What a piped test structurally CANNOT reach:** on Windows, an interactive
+    console takes the `ReadConsoleW`/UTF-16 path in `TConsoleHost.ReadLine`, and a
+    pipe takes the raw-byte path. Every automated REPL test is piped, so the
+    console path — Ctrl+Z at line start, non-ASCII typed at the prompt, a line
+    longer than the 8191-WideChar buffer — is exercised only by a person. Worth
+    knowing before calling interactive mode "covered".
+  - **The heredoc backslash trap bit again**, and this time it wrote a raw CR into
+    a `.sh` file: `tr -d ' \r\n'` reached Python as a real carriage return. A
+    shell script with CRLF fails on Linux. Rewritten as `tr -dc '0-9'`, which
+    needs no backslash at all and is more forgiving of the file it reads. **When a
+    patch needs an escape, that is the signal to find a spelling that does not.**
 
 - **2026-09-06 · round 32 · a documented example that every gate approved and no
   reader could run.** The owner asked how to type a dictionary walk at the prompt.

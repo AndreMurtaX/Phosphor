@@ -160,7 +160,8 @@ logic works
 ### IF / ELSEIF / ELSE
 
 A one-line form (`if cond then statement`) and a block form terminated by `endif`
-(the two-word `end if` also works). `elseif` chains extra tests.
+(the two-word `end if` also works). `elseif` chains extra tests, and `else if` in
+two words is the same chain — not a nested `if` needing a second `endif`.
 
 ```basic
 score = 72
@@ -183,7 +184,10 @@ pass
 
 ### Loops
 
-Phosphor has a pre-test loop, a post-test loop, and a counted loop.
+Phosphor has a pre-test loop, a post-test loop, and a counted loop. `while` ends
+with `endwhile` or `wend`, and the two-word `end while` is accepted too. `for`
+ends with `next`, `do while` with `loop`, and `repeat` with `until` — those three
+have no two-word form, because their terminator is not the word `end`.
 
 ```basic
 ' pre-test: while
@@ -225,7 +229,9 @@ Notes:
 ### SELECT CASE
 
 Matches a value against cases; `case else` catches the rest. Works on numbers and
-on strings.
+on strings, and ends with `endselect` or the two-word `end select`. **Each `case`
+takes its own line** — the label is not a statement, so `case 1 : println "x"` is
+a syntax error; put the body on the line below.
 
 ```basic
 cmd$ = "help"

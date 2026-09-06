@@ -379,6 +379,12 @@ begin
   end;
 end;
 
+var
+  { One byte handed back by the key assembly, waiting to be read again. -1 is
+    empty. A terminal has no ungetc, so the buffer lives here. Declared BEFORE
+    ByteWaiting, which is the first thing that reads it. }
+  GPushback: Integer = -1;
+
 function ByteWaiting: Boolean;
 var fds: TFDSet; tv: TTimeVal;
 begin
@@ -388,11 +394,6 @@ begin
   tv.tv_sec := 0; tv.tv_usec := 0;
   Result := fpSelect(StdInputHandle + 1, @fds, nil, nil, @tv) > 0;
 end;
-
-var
-  { One byte handed back by the key assembly, waiting to be read again. -1 is
-    empty. A terminal has no ungetc, so the buffer lives here. }
-  GPushback: Integer = -1;
 
 function ReadRawByte(out AByte: Byte): Boolean;
 var c: Char;
@@ -407,7 +408,8 @@ begin
     here, which -vewn reports as a note. FileRead is a plain function wrapping the same
     read, so the RTL owns that call and our unit stays note-clean.
     A BYTE, not a Char-into-String: assigning a Char to a String in this unit
-    re-encodes it under {$codepage UTF8}, so every byte >= 128 a terminal sent --
+    re-encodes it under this unit's UTF8 codepage directive, so every byte >= 128
+    a terminal sent --
     the second half of every accented character -- arrived as something else. }
   AByte := 0;
   Result := FileRead(StdInputHandle, c, 1) = 1;

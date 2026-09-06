@@ -11,7 +11,12 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 exe="$root/bin/phosphor"
-[ -x "$exe" ] || { echo "phosphor not built -- run scripts/build.sh first"; exit 2; }
+# BUILD IT, do not ask for it. Every other runner here builds what it needs, and
+# a suite that only works when you happened to build first is a suite whose result
+# depends on the order you typed things in. A stale binary is worse still: it is
+# old code reporting on new source.
+bash "$here/build.sh" >/dev/null 2>&1 || { echo "FAIL  build: phosphor did not build"; exit 2; }
+[ -x "$exe" ] || { echo "FAIL  build: no phosphor binary"; exit 2; }
 dir="$root/tests/classic"
 tmp="$(mktemp -d)"
 prove="${1:-}"

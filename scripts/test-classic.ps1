@@ -26,7 +26,13 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
 $exe  = Join-Path $root 'bin\phosphor.exe'
-if (-not (Test-Path $exe)) { throw "phosphor.exe not built -- run scripts\build.ps1 first" }
+# BUILD IT, do not ask for it. Every other runner here builds what it needs, and
+# a suite that only works when you happened to build first is a suite whose result
+# depends on the order you typed things in. A stale binary is worse still: it is
+# old code reporting on new source.
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build.ps1') | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'phosphor did not build' }
+if (-not (Test-Path $exe)) { throw 'no phosphor.exe was produced' }
 $dir  = Join-Path $root 'tests\classic'
 $tmp  = [System.IO.Path]::GetTempPath()
 $tests = @(Get-ChildItem $dir -Filter *.bas) + @(Get-ChildItem $dir -Filter *.repl) |

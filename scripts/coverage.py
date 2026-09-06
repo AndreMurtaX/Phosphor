@@ -8,7 +8,7 @@ line), then checks whether each function's name is referenced by any test progra
 function is uncovered.
 
 A handful of built-ins are reached only through SYNTAX SUGAR, never by name -- an
-`a@[i]` compiles to `arr_get`/`arr_set`, `s$[n]`/`s$[[n]]` to `strline$`/`strchar$`,
+`a@[i]` compiles to `arr_get`/`arr_set@`, `s$[n]`/`s$[[n]]` to `strline$`/`strchar$`,
 and a `[...]`/`{...}` literal to the json_*val@/json_*null@/json_array@/json_object@
 builders. Those are exercised by every test that uses the sugar, so they are listed
 in SUGAR_BACKED and counted as covered.
@@ -18,6 +18,17 @@ itself the complete catalog. That claim went stale silently once: eight dir_*/fi
 timestamp functions had never been listed, and four byte primitives plus two callfunc
 spellings were added without it. A gate is cheaper than a promise.
 
+TWO THINGS IT USED TO MISS, both of the same kind -- a check that reports clean
+while seeing less than it claims:
+
+  * eighteen registrations whose NAME IS COMPUTED (`Reg.Add(OptPaths[i] + ':', ...)`
+    in PhosphorSysLib) were invisible to the literal-string scan, so every total on
+    this page, and the README count it gates, was 18 short at 100%. The const array
+    is now read; see CONST_STR_ARRAY.
+  * a document naming a function WITHOUT its type suffix -- `arr_set` for
+    `arr_set@` -- was excused as "a family shown as a prefix", which is the exact
+    shape of every rename this project makes. See is_family().
+
 Usage:  python scripts/coverage.py [--list]      (--list prints uncovered names)
 """
 import re, glob, os, sys, collections
@@ -26,24 +37,58 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Built-ins reached through syntax, never by name (see the module docstring).
 SUGAR_BACKED = {
-    'arr_get', 'arr_set',
+    'arr_get', 'arr_set@',
     'strline$', 'strchar$',
     'json_array@', 'json_object@',
     'json_pushval@', 'json_pushnull@',
     'json_setval@', 'json_setnull@',
 }
 
-# Functions registered under computed names (a loop over a Names[] array) that the
-# literal-string scan cannot see. Kept explicit so the enumeration stays complete.
-COMPUTED = {
-    'PhosphorCallLib.pas': ['callfunc', 'callfunc%', 'callfunc$', 'callfunc@', 'callfunc?'],
-}
+# --- registrations whose NAME is computed ------------------------------------
+# Two libraries register a family by walking a const array of spellings:
+#
+#     Names:    array[0..4]  of String = ('callfunc', 'callfunc%', ...);
+#     OptPaths: array[0..17] of String = ('librarypath$', 'cachepath$', ...);
+#     ...
+#     Reg.AddHost(Names[s] + ':$', @f_calln);
+#     Reg.Add(OptPaths[i] + ':', @t_emptypath);
+#
+# The literal-string scan above sees neither, because there is no literal name to
+# see. The five callfunc spellings used to be listed by hand in a COMPUTED table
+# and the EIGHTEEN optional-path names were not listed at all -- so every total on
+# this page, and the README count this file gates, was 18 short while reporting
+# 100%. They are real functions: tests/suite/25_sys.bas calls them and
+# docs/libraries/sys.md documents them; only the enumeration could not see them.
+#
+# So the array is READ instead of transcribed. A nineteenth path added to OptPaths
+# is counted the day it is added, which is the whole difference between a gate and
+# a list somebody has to remember to update. A computed registration whose array
+# cannot be found is reported (see UNRESOLVED) rather than skipped: silence is the
+# failure this costs 18 names to learn.
+CONST_STR_ARRAY = re.compile(
+    r"(?is)\b([A-Za-z_]\w*)\s*:\s*array\s*\[[^\]]*\]\s*of\s+String\s*=\s*\((.*?)\)\s*;")
+COMPUTED_REG = re.compile(
+    r"\.Add(?:Host)?\(\s*([A-Za-z_]\w*)\s*\[[^\]]*\]\s*\+\s*'([^']*)'")
+
+UNRESOLVED = []          # (file, array name) a computed registration names but the file does not declare
 
 def registered_names(path):
     txt = open(path, encoding='utf-8', errors='ignore').read()
     names = set(m.group(1).lower()
                 for m in re.finditer(r"\.Add(?:Host)?\(\s*'([^:']+):", txt))
-    names |= set(n.lower() for n in COMPUTED.get(os.path.basename(path), []))
+    arrays = {m.group(1): re.findall(r"'((?:[^']|'')*)'", m.group(2))
+              for m in CONST_STR_ARRAY.finditer(txt)}
+    for m in COMPUTED_REG.finditer(txt):
+        arr, tail = m.group(1), m.group(2)
+        if arr not in arrays:
+            entry = (os.path.basename(path), arr)
+            if entry not in UNRESOLVED:
+                UNRESOLVED.append(entry)
+            continue
+        # The literal that follows carries the rest of the spelling: ':' or ':$'
+        # begins the ARGUMENT signature, so anything before it belongs to the name.
+        for elem in arrays[arr]:
+            names.add((elem + tail.split(':')[0]).lower())
     return names
 
 def load_corpus():
@@ -318,6 +363,22 @@ def main():
         for f in glob.glob(os.path.join(ROOT, *pat)):
             every |= registered_names(f)
 
+    # A family shown as a PREFIX -- `path_*`, `sqlite_`, `checklist_` -- is a real
+    # way to name a group in prose, and both scans below used to excuse one with
+    # "some registered name starts with this". That is too generous by exactly one
+    # character, and the character it gets wrong is the TYPE SUFFIX -- which is how
+    # this project renames a function. 2026-09-06 moved arr_set, form_show,
+    # button_click, bitbtn_click and speedbutton_click to their `@` spellings in one
+    # commit; `arr_set@` starts with `arr_set`, so every page still saying `arr_set`
+    # was excused as "a family". That is the shape a reader is most likely to copy
+    # and least likely to doubt, and it was the one shape the gate could not see.
+    #
+    # A family prefix continues at a WORD boundary: the `_` that starts the next
+    # word, or the `*` the document writes itself. `name` + `$@%?` is not a family;
+    # it is one function spelled wrong.
+    def is_family(nm):
+        return nm.endswith('_') or any(x.startswith(nm + '_') for x in every)
+
     # Names a document writes ON PURPOSE that are not functions. Each is here for a
     # stated reason, not to silence a failure: a template placeholder, a handler
     # shape the PROGRAM defines, a host-supplied example, or a name a plan document
@@ -337,6 +398,56 @@ def main():
         # roadmap-net.md proposes names for work that does not exist yet, which is
         # what a roadmap is for
         'server_url_https$',
+        # THE WRONG SPELLING, QUOTED IN ORDER TO CALL IT WRONG. A page is allowed to
+        # name what a function is NOT called -- that is how a rename is explained --
+        # and each of these sits next to the right spelling in the same sentence:
+        #   libraries/buffer.md   "the brief wrote `buffer_new(1024)` ... the
+        #                          constructor is `buffer_new@`"
+        #   libraries/rag.md      "suffix included (`button_onclick@`, not
+        #                          `button_onclick`)"
+        #   libraries/gui-edit.md "there is no `spinedit_min`/`spinedit_max` to read
+        #                          them back"
+        'buffer_new', 'button_onclick', 'spinedit_min', 'spinedit_max',
+    }
+
+    # --- known-stale, recorded, owned by a page this script may not edit --------
+    # DATED 2026-09-06. Each entry is a real finding of the widened rule above: a
+    # document naming a function by a spelling the registry lost when that name
+    # gained its type suffix. The fix is a one-word edit in a .md file; this file
+    # gates, it does not write documentation.
+    #
+    # This is a BACKLOG, not an excuse list, and it is built so it can only shrink:
+    #   * every entry is PRINTED on every run -- nothing here is quiet;
+    #   * an entry that no longer occurs FAILS, so a page that gets fixed forces the
+    #     line to be deleted, exactly like check-seams.py's EXEMPT;
+    #   * a NEW stale mention matches no entry and fails on the spot, which is the
+    #     property the gate did not have at all before today.
+    # The end state is an empty table, and then no table.
+    PENDING_NAMES = {
+        ('docs/dev-agent-playbook.md', 'arr_set'): 'now arr_set@',
+        ('docs/function-reference.md', 'arr_set'): 'now arr_set@',
+        ('docs/roadmap.md', 'arr_set'): 'now arr_set@',
+        ('docs/libraries/array.md', 'arr_set'): 'now arr_set@',
+        ('docs/gui-components.md', 'button_click'): 'now button_click@',
+        ('docs/gui-components.md', 'control_anchors'): 'now control_anchors$ / control_anchors@',
+        ('docs/roadmap-phase2.md', 'button_click'): 'now button_click@',
+        ('docs/roadmap-phase2.md', 'button_caption'): 'now button_caption$ / button_caption@',
+        ('docs/roadmap-phase2.md', 'form_show'): 'now form_show@',
+        ('docs/libraries/gui-button.md', 'button_click'): 'now button_click@; the sentence also still SAYS these are registered without a suffix, which needs rewording, not renaming',
+        ('docs/libraries/gui-button.md', 'bitbtn_click'): 'now bitbtn_click@; same sentence',
+        ('docs/libraries/gui-button.md', 'speedbutton_click'): 'now speedbutton_click@; same sentence',
+        ('docs/libraries/gui-grid.md', 'button_click'): 'now button_click@',
+        ('docs/libraries/gui-control.md', 'form_show'): 'now form_show@',
+        ('docs/libraries/gui-form.md', 'form_show'): 'now form_show@; the Notes bullet also still says the name is unsuffixed, which needs rewording',
+        ('docs/libraries/gui-menu.md', 'form_show'): 'now form_show@',
+    }
+
+    # The same idea for the ONE prose count this lane's other fix falsified: reading
+    # the eighteen computed sys-path registrations moved the true total from 697 to
+    # 715, and README.md still says 697. The entry pins BOTH numbers, so it stops
+    # matching the moment either the README or the registry changes.
+    PENDING_COUNTS = {
+        ('README.md', 'built-in functions'): (697, 715),
     }
 
     # Names the LANGUAGE provides, which the registry therefore does not hold: the
@@ -425,7 +536,7 @@ def main():
                 if nm in DELIBERATE or base in DELIBERATE:
                     continue
                 # a family shown as a prefix, e.g. `path_*(`
-                if any(x.startswith(nm) for x in every):
+                if is_family(nm):
                     continue
                 ghosts.append((rel, lineno, nm))
     # A name written WITHOUT parentheses, under a prefix the registry really uses.
@@ -451,7 +562,7 @@ def main():
                 u = nm.find('_')
                 if nm[:u + 1] not in prefixes:
                     continue          # not a family this project registers
-                if nm.endswith('_*') or any(x.startswith(nm) for x in every):
+                if nm.endswith('_*') or is_family(nm):
                     continue          # a family shown as a prefix
                 ghosts.append((rel, lineno, nm))
 
@@ -487,16 +598,45 @@ def main():
                         continue
                     ghosts.append((rel, first + off, nm))
 
-    if ghosts:
+    # Split what was found into what is NEW and what the backlog already records.
+    # Every recorded one is still printed -- the point of writing them down is that
+    # they stay visible, not that they go quiet.
+    pending_seen = collections.defaultdict(list)
+    fresh = []
+    for rel, lineno, nm in ghosts:
+        if (rel, nm) in PENDING_NAMES:
+            pending_seen[(rel, nm)].append(lineno)
+        else:
+            fresh.append((rel, lineno, nm))
+    if fresh:
         print("CALLED IN A DOCUMENT BUT NOT REGISTERED:")
-        for rel, lineno, nm in ghosts:
+        for rel, lineno, nm in fresh:
             print(f"  {rel}:{lineno}: {nm}")
         rc = 1
     else:
-        print("every function a document calls is a real function.")
+        print("every function a document calls is a real function"
+              + (", apart from the recorded backlog below." if PENDING_NAMES
+                 else "."))
+    if PENDING_NAMES:
+        mentions = sum(len(v) for v in pending_seen.values())
+        docs_touched = len({rel for rel, _ in pending_seen})
+        print(f"KNOWN-STALE NAMES STILL IN THE DOCUMENTATION "
+              f"({mentions} mentions across {docs_touched} documents, recorded "
+              f"2026-09-06, each a one-word edit):")
+        for (rel, nm), lines in sorted(pending_seen.items()):
+            where = ','.join(str(x) for x in lines)
+            print(f"  {rel}:{where}: {nm} -- {PENDING_NAMES[(rel, nm)]}")
+        gone = sorted(set(PENDING_NAMES) - set(pending_seen))
+        if gone:
+            print("BACKLOG ENTRIES THAT NO LONGER OCCUR -- delete them from "
+                  "PENDING_NAMES in scripts/coverage.py:")
+            for rel, nm in gone:
+                print(f"  {rel}: {nm}")
+            rc = 1
 
     print()
     bad = []
+    pending_counts_seen = set()
     for relpath, pat, actual, what in claims:
         try:
             txt = open(os.path.join(ROOT, relpath), encoding='utf-8',
@@ -515,6 +655,9 @@ def main():
             bad.append(f"{relpath}: '{m.group(1)}' is not a number ({what})")
             continue
         if claimed != actual:
+            if PENDING_COUNTS.get((relpath, what)) == (claimed, actual):
+                pending_counts_seen.add((relpath, what))
+                continue
             bad.append(f"{relpath}: claims {m.group(1)} {what}, there are {actual}")
     if bad:
         print("COUNTS STATED IN PROSE THAT ARE NO LONGER TRUE:")
@@ -522,7 +665,42 @@ def main():
             print(f"  {b}")
         rc = 1
     else:
-        print("every count stated in prose matches what is registered.")
+        print("every count stated in prose matches what is registered"
+              + (", apart from the recorded one below." if PENDING_COUNTS else "."))
+    for (relpath, what), (claimed, actual) in sorted(PENDING_COUNTS.items()):
+        if (relpath, what) in pending_counts_seen:
+            print(f"KNOWN-STALE COUNT (recorded 2026-09-06): {relpath} says "
+                  f"{claimed} {what}, there are {actual} -- reading the eighteen "
+                  f"computed sys-path registrations is what moved it")
+        else:
+            print(f"BACKLOG ENTRY THAT NO LONGER APPLIES -- delete "
+                  f"('{relpath}', '{what}') from PENDING_COUNTS in "
+                  f"scripts/coverage.py")
+            rc = 1
+
+    # --- the enumeration's own honesty ----------------------------------------
+    # Everything above is measured against `registered_names`, so a registration
+    # that function cannot read makes every number on this page quietly wrong --
+    # which is exactly what happened to eighteen of them. Two things are checked
+    # here: a computed registration whose array could not be found, and a
+    # SUGAR_BACKED name that is no longer registered under that spelling (the
+    # compiler emits `arr_set@` now, and a set entry reading `arr_set` excuses a
+    # function that does not exist while the one that does goes unexcused).
+    print()
+    if UNRESOLVED:
+        print("COMPUTED REGISTRATIONS THIS SCRIPT COULD NOT READ:")
+        for base, arr in UNRESOLVED:
+            print(f"  {base}: Reg.Add({arr}[i] + ...) -- no `const {arr}: array[..] "
+                  f"of String = (...)` in that file, so its names are not counted")
+        rc = 1
+    stale_sugar = sorted(n for n in SUGAR_BACKED if n not in all_names)
+    if stale_sugar:
+        print("SUGAR_BACKED NAMES THAT ARE NOT REGISTERED:")
+        for n in stale_sugar:
+            print(f"  {n} -- renamed or removed; the entry excuses nothing now")
+        rc = 1
+    if not UNRESOLVED and not stale_sugar:
+        print("the enumeration reads every registration, computed ones included.")
     return rc
 
 if __name__ == '__main__':

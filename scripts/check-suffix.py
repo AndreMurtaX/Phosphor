@@ -62,10 +62,20 @@ CTOR_KIND = {'ValInt': NUMBER, 'ValDouble': NUMBER, 'ValNum': NUMBER,
 # and leaving AddHost out would have exempted a whole class from the rule by
 # accident rather than by decision.
 REG = re.compile(r"""Reg\.Add(?:Host)?\(\s*'([^']+)'\s*,\s*@(\w+)\s*\)""")
-# `function <name>(` ... up to the line that closes it. Pascal has no block
-# markers a regex can trust, so the body is taken as the text between this
-# function's header and the next top-level `function`/`procedure` header.
-FUNC = re.compile(r'^\s*function\s+(\w+)\s*\(', re.M)
+# A routine header. Pascal has no block markers a regex can trust, so a body is
+# taken as the text between one header and the NEXT one -- which makes the header
+# pattern load-bearing: anything it fails to recognise is not a boundary, and the
+# routine it introduces is swallowed by whatever came before.
+#
+# It used to read `function <name>(`, and three shapes have no `(` after the name:
+# a parameterless function (`function StdinIsInteractive: Boolean;`), a procedure,
+# and a qualified method (`function TPhosphorCompiler.Compile(...)` -- the name is
+# followed by a dot, not a parenthesis). 737 of the 1300 registrations were being
+# judged on a body that ran on into the next routine; `bg$:n` and `http_strerror$:n`
+# were silenced outright because the `Result :=` the reader landed on belonged to
+# the parameterless function underneath them. So: function OR procedure, dotted
+# name allowed, parameter list optional.
+ROUTINE = re.compile(r'(?im)^[ \t]*(?:function|procedure)\s+([A-Za-z_][\w.]*)')
 
 
 def sources():
@@ -85,9 +95,65 @@ def sources():
     return sorted(keep)
 
 
+def mask_comments(text):
+    """The same text with every comment blanked to spaces, newlines kept.
+
+    Offsets and line numbers survive, so a caller can still report a line. This
+    is here because the header pattern above is only as good as the text it runs
+    on: PhosphorEngine.pas wraps a paragraph so that a line begins "function is
+    unknown, or it fails. }", and reading that as a routine header would split a
+    body in half at a sentence. Blanking comments also means a commented-out
+    `Result :=` no longer votes on what a function returns, which it should not.
+
+    String literals are kept -- REG reads the registration name out of one -- so
+    the scan has to know where a string starts to avoid taking the apostrophe in
+    a comment, or the '{' in a literal, for something it is not."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":                       # a string literal: skipped, not blanked
+            i += 1
+            while i < n and text[i] != "'" and text[i] != '\n':
+                i += 1
+            i += 1
+            continue
+        if c == '/' and i + 1 < n and text[i + 1] == '/':
+            while i < n and text[i] != '\n':
+                out[i] = ' '
+                i += 1
+            continue
+        if c == '{':                       # also swallows {$...} directives
+            while i < n and text[i] != '}':
+                if text[i] != '\n':
+                    out[i] = ' '
+                i += 1
+            if i < n:
+                out[i] = ' '
+                i += 1
+            continue
+        if c == '(' and i + 1 < n and text[i + 1] == '*':
+            while i + 1 < n and not (text[i] == '*' and text[i + 1] == ')'):
+                if text[i] != '\n':
+                    out[i] = ' '
+                i += 1
+            for _ in range(2):
+                if i < n:
+                    out[i] = ' '
+                    i += 1
+            continue
+        i += 1
+    return ''.join(out)
+
+
 def bodies(text):
-    """name -> body text, for every function in the file."""
-    marks = [(m.start(), m.group(1)) for m in FUNC.finditer(text)]
+    """name -> body text, for every routine in the file.
+
+    A qualified method is keyed by its full `TClass.Method` spelling, which keeps
+    it out of the plain-name namespace a registration's `@fn` looks in -- a method
+    cannot be registered that way, and letting `TFoo.Run` answer to `Run` would
+    hand the reader the wrong body."""
+    marks = [(m.start(), m.group(1)) for m in ROUTINE.finditer(text)]
     out = {}
     for i, (pos, name) in enumerate(marks):
         end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
@@ -178,7 +244,11 @@ def returned_kinds(body, argsig, helpers=None):
 def main():
     seen = {}
     for path in sources():
-        text = io.open(path, encoding='utf-8', errors='ignore').read()
+        raw = io.open(path, encoding='utf-8', errors='ignore').read()
+        # Comments are blanked in place, so offsets and line numbers still line up
+        # with the file on disk -- and a registration written inside a comment is
+        # no longer read as one.
+        text = mask_comments(raw)
         fns = bodies(text)
         for m in REG.finditer(text):
             spec, impl = m.group(1), m.group(2)

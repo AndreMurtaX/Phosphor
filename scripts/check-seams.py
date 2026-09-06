@@ -23,6 +23,13 @@ too, so the table cannot rot in the other direction. A new host, or a new seam o
 the engine, fails until someone answers for it. That is the point: the answer may
 well be "this runner has no keyboard", but it has to be written down once.
 
+WHAT COUNTS AS ASSIGNED. Only code, and only a value. Comments are blanked before
+the scan, because a commented-out assignment is not an assignment -- it is the
+exact shape of a seam somebody meant to put back. And `seam := nil` is not a
+filled seam either: it produces the same silence as never writing to it, so it is
+reported unless EXEMPT records why nil is right there. A host that says nil out
+loud AND has the reason written down is the best case and passes.
+
 Exit 0 = every seam of every host is either filled or explained.
 """
 import glob
@@ -69,7 +76,77 @@ EXEMPT = {
 
 }
 
-ASSIGN = r'\.\s*%s\s*:='
+# The right-hand side is part of the question, not decoration: `eng.OnInput := nil`
+# leaves the seam exactly as empty as never writing to it at all, and a host that
+# says so out loud still has to say WHY -- which is what EXEMPT is for. So the
+# assignment is matched up to its semicolon and the value is read.
+ASSIGN = r'\.\s*%s\s*:=\s*([^;]*)'
+
+
+def strip_comments(src):
+    """The same text with every comment blanked to spaces, newlines kept.
+
+    THE BUG THIS EXISTS FOR. The scan below asks a regex whether a host assigns a
+    seam, and a regex cannot tell code from prose. A host that had its assignment
+    commented out during a debugging session --
+
+        // eng.OnInput := @host.ReadLine;   // TODO: put back
+
+    -- read as a filled seam, which is the one answer that must never be given by
+    accident: the whole file exists because a nil seam looks like a working one.
+    Line numbers are preserved so a finding can still name a line, and string
+    literals are skipped rather than blanked so an apostrophe inside a comment,
+    or a '{' inside a literal, cannot throw the scan off."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "'":                        # a string literal: skipped, not blanked
+            i += 1
+            while i < n and src[i] != "'" and src[i] != '\n':
+                i += 1
+            i += 1
+            continue
+        if c == '/' and i + 1 < n and src[i + 1] == '/':
+            while i < n and src[i] != '\n':
+                out[i] = ' '
+                i += 1
+            continue
+        if c == '{':                        # also swallows {$...} directives
+            while i < n and src[i] != '}':
+                if src[i] != '\n':
+                    out[i] = ' '
+                i += 1
+            if i < n:
+                out[i] = ' '
+                i += 1
+            continue
+        if c == '(' and i + 1 < n and src[i + 1] == '*':
+            while i + 1 < n and not (src[i] == '*' and src[i + 1] == ')'):
+                if src[i] != '\n':
+                    out[i] = ' '
+                i += 1
+            for _ in range(2):
+                if i < n:
+                    out[i] = ' '
+                    i += 1
+            continue
+        i += 1
+    return ''.join(out)
+
+
+def assignment(src, seam):
+    """('filled' | 'nil' | None) for one seam in one host's source.
+
+    'nil' when every assignment the host makes writes nil, so a host that clears a
+    seam and later fills it still counts as filling it."""
+    found = None
+    for m in re.finditer(ASSIGN % seam, src):
+        if m.group(1).strip().lower() == 'nil':
+            found = found or 'nil'
+        else:
+            return 'filled'
+    return found
 
 
 def engine_seams():
@@ -104,18 +181,24 @@ def main():
     for path in hosts():
         base = os.path.basename(path)
         with open(path, encoding='utf-8') as fh:
-            src = fh.read()
+            src = strip_comments(fh.read())
         for seam in seams:
             key = '%s:%s' % (base, seam)
-            assigned = re.search(ASSIGN % seam, src) is not None
+            state = assignment(src, seam)
             if key in EXEMPT:
                 unused.discard(key)
-                if assigned:
+                if state == 'filled':
                     problems.append(
                         '%-44s is listed as deliberately unassigned, but it IS '
                         'assigned now -- remove the exemption' % key)
+                # state == 'nil' is the exemption written in code as well as in
+                # the table, which is the best case, not a problem.
                 continue
-            if not assigned:
+            if state == 'nil':
+                problems.append(
+                    '%-44s is explicitly set to nil, and no reason is recorded. '
+                    'Writing nil is not filling the seam.' % key)
+            elif state is None:
                 problems.append(
                     '%-44s is never assigned, and no reason is recorded. A nil '
                     'seam answers silently.' % key)

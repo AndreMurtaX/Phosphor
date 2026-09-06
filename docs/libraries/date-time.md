@@ -228,15 +228,19 @@ age = dayspan(opened, now())
 println "the ticket is " + str$(int(age)) + " days old today (" + date$() + ")"
 ```
 
+The last line reads the clock, so it is dated rather than fixed. Real output from
+a run on 2026-09-06; every other line is the same on any day.
+
 ```
 opened 2024-02-29 14:30:00 (Thursday, ISO week 9)
 due    2024-04-01 14:30:00 (Monday)
 gap    32 whole days, 768 hours
 February 2024 has 29 days
 because 2024 is a leap year
+the ticket is 920 days old today (2026-09-06)
 ```
 
-Two things worth noticing:
+Three things worth noticing:
 
 - **The gap is 32, not 30.** `incday` moved thirty days to a Saturday and
   `next_workday` pushed it to the Monday; `daysbetween` then reported the real
@@ -246,6 +250,12 @@ Two things worth noticing:
   `a`-in-the-middle naming exists for: take a date apart into numbers, ask a
   question about the numbers. Had `monthof` answered 13, this call would have
   raised rather than invented a length.
+- **Only the last line moves.** Every other line is arithmetic on a date fixed in
+  the source, so it is the same on any machine on any day; the sixth reads the
+  clock through `now()` and `date$()`, and the run above happened on 2026-09-06.
+  That line was missing from this block until 2026-09-06 — the program printed six
+  lines and the page showed five, which no gate could catch, because
+  `check-examples.py` compiles an example and does not run it.
 
 ## Notes
 

@@ -1,6 +1,6 @@
 # call — running a BASIC routine chosen by name at run time
 
-`engine/libs/PhosphorCallLib.pas` · 5 functions (30 registry entries) · always available
+`engine/libs/PhosphorCallLib.pas` · 6 functions (46 registry entries) · always available
 
 ## What it is for
 
@@ -15,7 +15,7 @@ takes to reach a handler. Proving it here, headless and with no GUI at all,
 froze that seam before phase 2's LCL host was built on top of it — which is why
 a console program can exercise the exact mechanism a button click uses.
 
-There are five spellings and **one** primitive. The suffix on the call
+There are five spellings of `callfunc` and **one** primitive. The suffix on the call
 (none / `%` / `$` / `@` / `?`) is chosen to read as the callee's return type, one
 per value kind, so `n% = callfunc%(...)` and `ok? = callfunc?(...)` read right.
 The suffix is *not* a check: the value that comes back is whatever the routine
@@ -65,7 +65,7 @@ resolution has found nothing, so no ordinary call pays for it.
 | function | what it answers |
 | --- | --- |
 | `callfunc(name$) → num` | the result of running `name$` with no argument. When neither the program nor the library has anything of that name taking none: a catchable runtime error, `err()` code 4 — never a silent no-op and never a `0` |
-| `callfunc(name$, a, …) → num` | the same with one to eight arguments. The parameter count is part of the match, in both places it looks: a routine declaring two parameters is not reached by a one-argument call, and the error counts the arguments you passed |
+| `callfunc(name$, a, …) → num` | the same with one to eight arguments. The parameter count is part of the match, in both places it looks: a routine declaring two parameters is not reached by a one-argument call, and the message names the call it could not resolve as a **signature** — `no function missing$:$%`, one kind code per argument (`n` number, `%` int, `$` string, `@` handle, `?` bool) |
 | `callfunc$(name$ [, a, …]) → str` | the same call, written where the callee returns a string. Answers the routine's value unchanged; if that value is not a string, nothing fails here — the mismatch surfaces as a type error (code 3) at the variable or expression that receives it |
 | `callfunc%(name$ [, a, …]) → int` | the same, written where the callee returns an `int64` |
 | `callfunc@(name$ [, a, …]) → handle` | the same, written where the callee returns a handle. The handle that comes back is the live object, not a copy — mutating it through the returned name changes what the callee still refers to |
@@ -148,13 +148,13 @@ It prints:
 ```
 onopen -> 1
 onhit -> 21
-unbound event: no BASIC function onclose taking 1 argument(s)
+unbound event: no function onclose:%
 onclose -> 0
 score is 21
 FINISHED!
 ```
 
-Two things worth noticing:
+Three things worth noticing:
 
 - **The handlers moved `score`, which is the caller's global.** Neither routine
   was passed it and neither returned it into place; they simply ran over the same
@@ -165,6 +165,11 @@ Two things worth noticing:
   at the `println`, which would otherwise print the previous iteration's 21 under
   the name `onclose`. A failed call leaves its target alone — it does not zero it
   for you.
+- **`no function onclose:%` is one message for both places.** It does not say
+  "no BASIC function", because by the time it is written the engine has looked in
+  the program's routines *and* in the library and neither had the name — and from
+  the caller's side that is one question, not two. The `%` is the kind of the one
+  argument passed: `i` is a `for` counter, so it is an integer.
 
 ## Notes / Where the rest lives
 

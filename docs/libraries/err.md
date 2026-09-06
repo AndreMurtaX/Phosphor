@@ -55,10 +55,14 @@ function port_or_default(path$, fallback)
   failed? = false
   n = 0
   cfg@ = cfg_open@(path$)
-  raw$ = cfg_gets$(cfg@, "server", "port")
+  rem section, key, default -- three arguments after the handle. cfg_gets$ takes
+  rem only a key and a default, so it would read "server" and fall back to "port".
+  raw$ = cfg_get$(cfg@, "server", "port", "")
   if raw$ = "" then error("no 'port' key in " + path$)
-  n = val(raw$)
-  if n < 1 or n > 65535 then error("port " + raw$ + " is out of range")
+  rem the handler RESUMED us here, it did not return for us, so every later
+  rem statement has to ask whether the earlier one already failed
+  if failed? = false then n = val(raw$)
+  if failed? = false and (n < 1 or n > 65535) then error("port " + raw$ + " is out of range")
   on error goto 0
   if failed? = true then return fallback
   return n
@@ -68,13 +72,35 @@ port = port_or_default("server.ini", 8080)
 println "listening on " + str$(port)
 ```
 
-Three things worth noticing:
+With no `server.ini` in the working directory it prints:
+
+```
+config: no 'port' key in server.ini  (code 6)
+listening on 8080
+```
+
+Six things worth noticing:
 
 - **The config handle is not closed.** That library registers no close and no
   free at all: a handle lives until the program ends, and `cfg_save` is the only
   thing that reaches the disk. The first version of this example called a closing
   function that does not exist, and no gate caught it, because the reverse check
   could not read inside a code block. It can now.
+
+- **A right-arity call can still be the wrong call.** This example used to read
+  the port with `cfg_gets$(cfg@, "server", "port")`, which compiles, runs, and
+  raises nothing — `cfg_gets$` takes a *key* and a *default*, so it looked up a
+  key named `server` in section `General` and answered its default, `"port"`. The
+  emptiness check could then never fire, and the program reported `port port is
+  out of range` for a file it had never really read. Nothing but running it says
+  so; `check-examples.py` compiles every block on this page and this one compiled.
+
+- **A handler that answers `0` resumes; it does not return.** That is why the two
+  checks after the first one ask `failed? = false` before they run. Without the
+  guards a missing key reports twice — once for the key, and again for the `0`
+  that `val("")` left in `n` — which reads like two faults where there was one.
+  (A handler answering anything non-zero does the opposite: it re-raises, and the
+  function never reaches its own `return`.)
 
 - **`error` is not special.** The handler cannot tell a failure the program raised
   from one the engine raised, and does not need to: both arrive with a code, a

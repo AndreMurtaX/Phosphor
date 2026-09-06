@@ -189,12 +189,16 @@ Two things worth noticing:
   this file: `control_set@(b@, "Default", 1)` makes Enter press it,
   `control_set@(b@, "Cancel", 1)` makes Esc do so, and
   `control_get(b@, "Default")` reads back.
-- **A wart worth naming.** `button_click`, `bitbtn_click` and `speedbutton_click`
-  are registered without a suffix, which by Phosphor's own convention reads as
-  *answers a number* — but each returns the handle it was given, so
-  `n = button_click@(b@)` is refused with *cannot store handle into number
-  variable* while `z@ = button_click@(b@)` is accepted. Calling them as statements,
-  which is what every test and example does, makes the question moot.
+- **A wart that used to be here.** Until 2026-09-06 the three click verbs were
+  registered as `button_click`, `bitbtn_click` and `speedbutton_click` — no
+  suffix, which by Phosphor's own convention reads as *answers a number* — while
+  each in fact returned the handle it was given. They carry `@` now, like every
+  other setter on this page, so the name and the answer agree:
+  `z@ = button_click@(b@)` is accepted, `n = button_click@(b@)` is the ordinary
+  *cannot store handle into number variable* (`err()` code 3), and the unsuffixed
+  spelling is gone — `button_click(b@)` is *no function button_click:@*.
+  `scripts/check-suffix.py` is the gate that keeps the fifteen names it fixed from
+  drifting back.
 - **Key and mouse events** on a button are bound with `control_onkeydown@`,
   `control_onmousedown@` and friends — one set for every control, rather than one
   per widget. They are documented with the rest of the event model in

@@ -10,7 +10,7 @@ answer a handle; every other function here takes that handle as its first argume
 Because a handle is an ordinary value, an array can be passed to a function,
 returned from one, stored inside another array, and freed when it is no longer
 wanted — none of which a variable-shaped array could do. The bracket syntax
-`a@[i]` and `a@[i] = v` is sugar the compiler turns into `arr_get` / `arr_set`
+`a@[i]` and `a@[i] = v` is sugar the compiler turns into `arr_get` / `arr_set@`
 calls; there is no second, hidden array mechanism behind it.
 
 Two design rules run through the whole library. **Indices are base 1, everywhere**
@@ -21,9 +21,14 @@ array is actually asked. And **element access is kind-agnostic**: there is one
 array already knows whether it holds numbers, strings or handles. The typed
 spellings (`narr_get`, `sarr_get$`, `parr_get@`) exist so the *compiler* knows what
 type the expression has; they do not dispatch. A consequence a caller should know:
-`sarr_get$` on a numeric array is not an error — it answers the stored number
-converted to a string, because the conversion happens at the call boundary, not
-inside the array.
+kind-agnostic means **the array converts nothing**. The value that comes back
+carries the *array's* kind, not the name's, so `sarr_get$` on a numeric array
+answers the number itself — `len(sarr_get$(n@, 1))` is *no function len:%*, and
+`s$ = sarr_get$(n@, 1)` aborts with *cannot store int into string variable*
+(`err()` code 3). The suffix is a promise the compiler believes; the **store** is
+where it finds out the promise was false. Until 2026-09-06 this page described
+both spellings as converting at the call boundary, which is the one thing they do
+not do: a program written to that description aborts.
 
 **Every failure here is a returned error, never a raised one** (decisions.md). A
 handle that is not an array, an index outside its bounds, the wrong *number* of
@@ -69,9 +74,9 @@ the bounds check rather than wrapped into a valid one.
 | function | what it answers |
 | --- | --- |
 | `narr_set@(a@, i [, i [, i]], value) → handle` | writes a numeric element and answers **the array**, so the call chains. Wrong index count, out-of-range index or bad handle: the corresponding error, and nothing is written |
-| `narr_get(a@, i [, i [, i]]) → num` | the element. On a string array it answers that string converted to a number, since the read is kind-agnostic |
+| `narr_get(a@, i [, i [, i]]) → num` | the element. On a string array it answers **the string**, unconverted — the read is kind-agnostic, not coercing — and `n = narr_get(s@, 1)` then fails at the assignment with *cannot store string into number variable* |
 | `sarr_set@(a@, i, value$) → handle` | writes a string element and answers the array. One index only |
-| `sarr_get$(a@, i) → str` | the element as a string; `""` for a slot never written, which is a real answer and not a signal of failure |
+| `sarr_get$(a@, i) → str` | the element; `""` for a slot never written, which is a real answer and not a signal of failure. On a numeric array it answers the number, unconverted, and the mismatch surfaces at the store |
 | `parr_set@(a@, i, value@) → handle` | stores a handle in a handle array and answers **the array**, not the handle stored. The array does not take ownership of what it holds |
 | `parr_get@(a@, i) → handle` | the stored handle; the nil handle `0` for a slot never written. Nil is not an array, so passing it on gets `not a valid array handle` |
 
@@ -152,7 +157,7 @@ Two things worth noticing:
 
 - **19 names, 35 registry entries.** Most names are registered several times, once
   per arity or per value kind, and every one of those entries points at the same
-  variadic implementation. `arr_set` alone accounts for nine of them: three index
+  variadic implementation. `arr_set@` alone accounts for nine of them: three index
   counts times three value kinds.
 - **Handles are ids, not addresses.** A handle is a 1-based index into the engine's
   registry (`engine/PhosphorHandles.pas`), which is what lets every function here

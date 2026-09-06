@@ -427,18 +427,24 @@ def main():
         ('docs/dev-agent-playbook.md', 'arr_set'): 'now arr_set@',
         ('docs/function-reference.md', 'arr_set'): 'now arr_set@',
         ('docs/roadmap.md', 'arr_set'): 'now arr_set@',
-        ('docs/libraries/array.md', 'arr_set'): 'now arr_set@',
         ('docs/gui-components.md', 'button_click'): 'now button_click@',
         ('docs/gui-components.md', 'control_anchors'): 'now control_anchors$ / control_anchors@',
         ('docs/roadmap-phase2.md', 'button_click'): 'now button_click@',
         ('docs/roadmap-phase2.md', 'button_caption'): 'now button_caption$ / button_caption@',
         ('docs/roadmap-phase2.md', 'form_show'): 'now form_show@',
-        ('docs/libraries/gui-button.md', 'button_click'): 'now button_click@; the sentence also still SAYS these are registered without a suffix, which needs rewording, not renaming',
-        ('docs/libraries/gui-button.md', 'bitbtn_click'): 'now bitbtn_click@; same sentence',
-        ('docs/libraries/gui-button.md', 'speedbutton_click'): 'now speedbutton_click@; same sentence',
+        # gui-button.md and gui-form.md now name the OLD spelling on purpose, in a
+        # sentence that says it is gone ('the unsuffixed spelling is gone --
+        # button_click(b@) is *no function button_click:@*'). That prose is correct
+        # and will never be 'fixed', so these are not backlog: they are the same
+        # deliberate case DELIBERATE above exists for -- a name written to say it
+        # does not exist. Kept here rather than moved so the reason travels with
+        # them, and marked so the end-state check does not wait on them.
+        ('docs/libraries/gui-button.md', 'button_click'): 'DELIBERATE: named in a sentence that says it is gone',
+        ('docs/libraries/gui-button.md', 'bitbtn_click'): 'DELIBERATE: named in a sentence that says it is gone',
+        ('docs/libraries/gui-button.md', 'speedbutton_click'): 'DELIBERATE: named in a sentence that says it is gone',
         ('docs/libraries/gui-grid.md', 'button_click'): 'now button_click@',
         ('docs/libraries/gui-control.md', 'form_show'): 'now form_show@',
-        ('docs/libraries/gui-form.md', 'form_show'): 'now form_show@; the Notes bullet also still says the name is unsuffixed, which needs rewording',
+        ('docs/libraries/gui-form.md', 'form_show'): 'DELIBERATE: named in a sentence that says it is gone',
         ('docs/libraries/gui-menu.md', 'form_show'): 'now form_show@',
     }
 

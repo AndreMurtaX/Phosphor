@@ -1,6 +1,6 @@
 # sys — the machine around the program: arguments, paths, directories, colours
 
-`engine/libs/PhosphorSysLib.pas` · 40 functions · always available
+`engine/libs/PhosphorSysLib.pas` · 22 functions · always available
 
 ## What it is for
 

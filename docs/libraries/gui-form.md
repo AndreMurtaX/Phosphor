@@ -115,10 +115,14 @@ Two things worth noticing:
 
 ## Notes
 
-- `form_show` is the one name here whose answer does not match its own suffix: it
-  hands back the handle it was given, while its unsuffixed name promises a number.
-  Call it as a statement. Assigning it (`n = form_show@(f@)`) is a runtime *cannot
-  store handle* type mismatch.
+- `form_show@` used to be the one name here whose answer did not match its own
+  suffix: until 2026-09-06 it was registered as `form_show`, promising a number
+  while handing back the handle it was given. It carries `@` now, so it reads and
+  chains like every other setter on this page — `form_height@(form_show@(f@), 320)`
+  is legal — and `form_show(f@)` no longer exists (*no function form_show:@*).
+  Assigning it to a number, `n = form_show@(f@)`, is still the ordinary *cannot
+  store handle into number variable* every `@` function gives you.
+  `scripts/check-suffix.py` is the gate that keeps this from coming back.
 - Handles are watched. If a form is freed while a program still holds handles to
   the controls inside it, those handles resolve to `gui_error() = 1` rather than
   dereferencing a dead pointer — the rule this library states as *a bad handle is

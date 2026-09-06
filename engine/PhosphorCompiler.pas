@@ -1555,6 +1555,54 @@ begin
   FLex.Reset(mEnd);
 end;
 
+{ A word that can only ever appear INSIDE a construct, met where a statement
+  belongs -- and the sentence that says so.
+
+  ParseBlockUntil consumes the terminator it is waiting for and returns, so a
+  terminator that reaches ParseStatement is orphaned BY DEFINITION: there is no
+  open block it could be closing. Until now they fell through to the expression
+  path, where a lone identifier compiles to a variable read and an opPop, so a
+  stray `next` -- or `endif`, or `wend` -- was a silent no-op. A typo that deleted
+  the `for` line left a program that still ran, once, with the loop gone.
+
+  `then`, `to`, `step` and `local` are here for the same reason from the other
+  end: they belong to the middle of an `if`, `for` or `function` line, so one
+  standing alone as a statement is a line that lost the rest of itself.
+
+  ONLY WHEN THE WORD STANDS ALONE, and that restriction is the whole subtlety.
+  None of these is a lexer keyword -- they are CONTEXTUAL, decided by the parser,
+  which is what lets a program keep a variable called `elseif` or `next`
+  (tests/suite/42_syntax_elseif pins exactly that, and a first version of this
+  check broke all 18 of its assertions). `elseif = 5` is an assignment and stays
+  one. What cannot be anything but a mistake is the word with NOTHING after it:
+  read as a variable it compiles to a load and a discard, which is why the typo
+  was silent. So the next token decides, and only end-of-line, end-of-file or `:`
+  makes it an orphan. }
+function OrphanKeyword(const S: String; out AMsg: String): Boolean;
+begin
+  Result := True;
+  case S of
+    'next':        AMsg := '''next'' without a matching ''for''';
+    'endif':       AMsg := '''endif'' without a matching ''if''';
+    'else':        AMsg := '''else'' without a matching ''if''';
+    'elseif':      AMsg := '''elseif'' without a matching ''if''';
+    'endwhile':    AMsg := '''endwhile'' without a matching ''while''';
+    'wend':        AMsg := '''wend'' without a matching ''while''';
+    'loop':        AMsg := '''loop'' without a matching ''do''';
+    'until':       AMsg := '''until'' without a matching ''repeat''';
+    'case':        AMsg := '''case'' without a matching ''select case''';
+    'endselect':   AMsg := '''endselect'' without a matching ''select case''';
+    'endfunction': AMsg := '''endfunction'' without a matching ''function''';
+    'then':        AMsg := '''then'' belongs on an ''if'' line, not on one of its own';
+    'to':          AMsg := '''to'' belongs on a ''for'' line, not on one of its own';
+    'step':        AMsg := '''step'' belongs on a ''for'' line, not on one of its own';
+    'local':       AMsg := '''local'' belongs on the ''function'' line that declares the names';
+  else
+    Result := False;
+    AMsg := '';
+  end;
+end;
+
 procedure TPhosphorCompiler.ParseStatement;
 var
   t: TToken;
@@ -1570,6 +1618,16 @@ begin
   t := FLex.Cur();
   if t.Kind = tkIdent then
   begin
+    { Before anything else: a block terminator with nothing after it. Reaching
+      here means no open block is waiting for it, and standing alone it cannot be
+      a variable being used for anything -- see OrphanKeyword above. }
+    k := FLex.Peek().Kind;
+    if ((k = tkEOL) or (k = tkEOF) or (k = tkColon)) and
+       OrphanKeyword(t.StrVal, cname) then
+    begin
+      Fail(cname, t.Line);
+      Exit;
+    end;
     if t.StrVal = 'function' then begin ParseFunction(); Exit; end;
     if t.StrVal = 'if' then begin ParseIf(); Exit; end;
     if t.StrVal = 'while' then begin ParseWhile(); Exit; end;

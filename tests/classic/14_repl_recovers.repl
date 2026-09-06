@@ -1,7 +1,10 @@
 rem An error inside a half-typed block must abandon THAT block and nothing else:
-rem the session keeps its variables and functions, and the next line runs. The
-rem error text goes to stderr and is not part of this transcript -- what stdout
-rem proves is the recovery, which is the part a person depends on.
+rem the session keeps its variables and functions, and the next line runs. There
+rem are TWO errors below, not one: the bad statement, and then the `next` left
+rem behind by the abandoned block, which since 2026-09-06 is itself an error
+rem rather than a silent no-op. Both go to stderr and are not part of this
+rem transcript -- what stdout proves is that the session came back from each of
+rem them, which is the part a person depends on.
 kept = 5
 function twice(n)
 return n * 2

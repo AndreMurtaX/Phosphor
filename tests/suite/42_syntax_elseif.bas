@@ -122,3 +122,30 @@ assert_eq(elseif * 2, 20, "and reads as a value")
 const = 7
 assert_eq(const, 7, "const is an ordinary variable too")
 assert_eq(elseif + const, 17, "both at once")
+
+test_case("elseif/the-orphan-check-must-not-eat-these")
+rem 2026-09-06: a block terminator standing ALONE became an error, because a
+rem stray `next` with no `for` had been a silent no-op. The first version of that
+rem check fired on the WORD and broke every assertion above -- `elseif = 5` is an
+rem assignment, not an orphan `elseif`. What makes it safe is that it fires only
+rem when the next token ends the statement, so the word is being used for nothing.
+rem Pinned for the whole family, not just elseif, so the next attempt to widen the
+rem check fails here instead of in someone's program.
+next = 1
+endif = 2
+wend = 3
+loop = 4
+until = 5
+case = 6
+endselect = 7
+endfunction = 8
+then = 9
+to = 10
+step = 11
+local = 12
+assert_eq(next + endif + wend + loop, 10, "next/endif/wend/loop are ordinary variables")
+assert_eq(until + case + endselect + endfunction, 26, "and so are until/case/endselect/endfunction")
+assert_eq(then + to + step + local, 42, "and the mid-line words then/to/step/local")
+next += 1
+assert_eq(next, 2, "a terminator name takes a compound assignment")
+assert_eq(next * step, 22, "and reads as a value in an expression")

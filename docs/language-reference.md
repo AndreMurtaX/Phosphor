@@ -784,6 +784,16 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
   groups answer `3`. Numbering the parts of a match differently from the rest of
   the language would have been worse than this exception.
 - **`next` takes no variable.** Write `next`, not `next i`.
+- **A block terminator on its own, with nothing open, is an error.** A stray
+  `next`, `endif`, `wend`, `loop`, `until`, `case`, `endselect` or `endfunction`
+  used to be accepted and do nothing, so deleting a `for` line by accident left a
+  program that still ran with the loop gone. The same goes for `then`, `to`,
+  `step` and `local`, which belong in the middle of a line rather than at the
+  start of one. *(Since 2026-09-06.)*
+- **But those words are still ordinary names.** They are decided by the parser
+  from where they appear, not reserved by the lexer, so `next = 5` and
+  `elseif += 3` are assignments and always were. Only the word standing **alone**,
+  where it can be doing nothing at all, is refused.
 - **Undeclared names inside a function are globals.** List scratch variables after
   `local` so they don't leak.
 - **`sqr` is square root.** For x², write `x * x` or `x ^ 2`.

@@ -391,6 +391,34 @@ exists so they can next time.
     edit said *nine*. Writing a count and a list in one sitting is not enough to
     keep them agreeing.
 
+- **2026-09-06 · round 33c · a stray `next` was a silent no-op, and the obvious
+  fix broke eighteen assertions.** A block terminator with no open block fell
+  through to the expression path, where a lone identifier compiles to a variable
+  read and an `opPop`. So deleting a `for` line by accident left a program that
+  still ran — once, with the loop gone — and said nothing. Eleven terminators
+  behaved that way, plus `then`, `to`, `step` and `local`, which belong in the
+  middle of a line.
+
+  The rule that makes the check sound: **`ParseBlockUntil` consumes the terminator
+  it is waiting for, so a terminator reaching `ParseStatement` is orphaned by
+  definition.** No bookkeeping needed.
+
+  - **THE FIRST VERSION FIRED ON THE WORD AND WAS WRONG.** These are *contextual*
+    keywords, decided by the parser, not reserved by the lexer — a program may
+    have a variable called `elseif` or `next`, and `tests/suite/42_syntax_elseif`
+    exists to pin exactly that. The check turned its 18 assertions into a compile
+    error. The suite caught it in one run; nothing else would have.
+  - **The narrow rule is the right one:** fire only when the NEXT token ends the
+    statement (EOL, EOF or `:`). `elseif = 5` stays an assignment; a bare `elseif`
+    cannot be doing anything at all, which is precisely why the typo was silent.
+  - **When a check has to distinguish two readings of the same word, the
+    discriminator is what FOLLOWS it, not the word.** Reaching for the word is the
+    tempting version and it is the one that breaks working programs.
+  - **The regression test now covers the family, not the instance.** 42 pins all
+    fifteen names as ordinary variables, so the next attempt to widen this fails
+    there rather than in someone's program. A test that pinned only `elseif` let
+    me break `next` — pin the RULE, not the example that happened to be written.
+
 - **2026-09-06 · round 33b · the REPL had a test, and it covered two of seven
   block forms.** `08_repl` entered `function` and `if`. The other five — `for`,
   `while`, `wend`, `do…loop`, `repeat…until`, `select case` — were never typed

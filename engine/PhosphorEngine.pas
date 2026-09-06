@@ -45,6 +45,7 @@ type
     FHostServices: THostServices;
     FErrorLine: Integer;
     FErrorMessage: String;
+    FErrorAtEof: Boolean;
     FLastError: TPhosphorError;
     FMaxSteps: Int64;
     FMaxOutputBytes: Int64;
@@ -115,6 +116,10 @@ type
     property HostServices: THostServices read FHostServices write FHostServices;
     property ErrorLine: Integer read FErrorLine;
     property ErrorMessage: String read FErrorMessage;
+    { A host reading a line at a time asks this before deciding to wait for more:
+      a message about a missing terminator means "unfinished" only if the input
+      actually ran out. See TPhosphorCompiler.Fail. }
+    property ErrorAtEndOfInput: Boolean read FErrorAtEof;
     property LastError: TPhosphorError read FLastError;
     { Execution ceilings for running untrusted scripts; 0 (the default) = no limit.
       A ceiling is fatal -- ON ERROR cannot catch it -- so a script cannot escape
@@ -202,6 +207,7 @@ begin
     begin
       FErrorMessage := comp.ErrorMessage;
       FErrorLine := comp.ErrorLine;
+      FErrorAtEof := comp.ErrorAtEndOfInput;
       if FErrorLine = 0 then FErrorLine := 1;
       FLastError := MakeError(peSyntax, FErrorMessage);
     end;

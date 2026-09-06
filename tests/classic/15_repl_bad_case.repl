@@ -1,0 +1,17 @@
+rem A typo in a case label used to WEDGE THE PROMPT PERMANENTLY. The compiler
+rem answers "expected 'case' or 'endselect'" both when the input ran out and when
+rem a wrong token turned up where the label belonged, and the REPL read the
+rem message alone -- so it waited for a line that could never come, swallowing
+rem everything typed after the mistake, for as long as the session lasted.
+rem
+rem The compiler now records whether the failure happened AT the end of input,
+rem and the prompt waits only then. The error below is reported at once and the
+rem session carries on; the error text is on stderr and not in this transcript.
+kept = 7
+select case 2
+csae 2
+println "the session came back: " + str$(kept)
+select case 3
+case 3
+println "and a correct select still waits and runs"
+endselect

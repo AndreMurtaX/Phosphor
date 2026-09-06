@@ -37,6 +37,8 @@ type
     FFailed: Boolean;
     FErr: String;
     FErrLine: Integer;
+    FErrAtEof: Boolean;
+    FExprDepth: Integer;
     FBool: Boolean;
     FVarNames: array of String;
     FVarTypes: array of TVarType;
@@ -131,16 +133,30 @@ type
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
     property ErrorMessage: String read FErr;
     property ErrorLine: Integer read FErrLine;
+    { True when the failure happened AT the end of the input rather than on a
+      token. Only then can reading another line help. }
+    property ErrorAtEndOfInput: Boolean read FErrAtEof;
   end;
 
 implementation
 
+{ Every failure also records WHETHER THE INPUT HAD RUN OUT, which is a different
+  fact from what the message says and cannot be recovered from the text.
+
+  "expected 'endselect'" is produced both when the file simply ends mid-block and
+  when a wrong token turns up where the terminator belonged. A file does not care:
+  either way it is a syntax error. The REPL cares completely -- the first means
+  "read another line", the second means "this can never be fixed by reading more".
+  Without the distinction a typo in a case label made the prompt swallow every
+  line that followed it, for ever, because no continuation can satisfy an error
+  that has already been typed. }
 procedure TPhosphorCompiler.Fail(const AMsg: String; ALine: Integer);
 begin
   if FFailed then Exit;
   FFailed := True;
   FErr := AMsg;
   FErrLine := ALine;
+  FErrAtEof := (FLex <> nil) and (FLex.Cur().Kind = tkEOF);
 end;
 
 procedure TPhosphorCompiler.Expect(AKind: TTokenKind; const AWhat: String);
@@ -890,9 +906,40 @@ begin
   end;
 end;
 
+{ THE ONE PLACE A NESTED EXPRESSION PASSES THROUGH, and therefore where the
+  recursion is counted.
+
+  This parser is recursive descent: each '(' and each call argument re-enters here
+  through ParsePrimary, several stack frames deeper each time. A program with
+  fifty thousand nested parentheses -- which is a few seconds of typing, or one
+  line of a generator gone wrong -- exhausted the process stack and the process
+  DIED: exit 139, STATUS_STACK_OVERFLOW, and not one byte on stdout or stderr. Not
+  a syntax error, not a message, nothing to tell anyone what happened. A stack
+  overflow is not an exception a handler can catch either, so the crash guard the
+  host installs never saw it.
+
+  A limit of 256 is far past anything a person writes -- deeply parenthesised
+  arithmetic is unreadable long before it -- and only nesting counts, not length:
+  `a + b + c + ...` is a loop in ParseAdd, not recursion, so a long expression is
+  unaffected however long it gets. }
+const
+  MaxExprDepth = 256;
+
 procedure TPhosphorCompiler.ParseExpr;
 begin
-  ParseOr();
+  if FFailed then Exit;
+  Inc(FExprDepth);
+  try
+    if FExprDepth > MaxExprDepth then
+    begin
+      Fail('expression nests more than ' + IntToStr(MaxExprDepth) +
+           ' levels deep', FLex.Cur().Line);
+      Exit;
+    end;
+    ParseOr();
+  finally
+    Dec(FExprDepth);
+  end;
 end;
 
 procedure TPhosphorCompiler.ParseCondition;

@@ -812,7 +812,13 @@ begin
       if pending <> '' then line := pending + #10 + line;
       if eng.ReplRun(line) <> 0 then
       begin
-        if IsUnterminatedBlock(eng.ErrorMessage) then
+        { BOTH conditions. The message says a terminator is missing; the flag says
+          the input ran out rather than a wrong token turning up where the
+          terminator belonged. The message alone was not enough: `csae 2` for
+          `case 2` produces "expected 'case' or 'endselect'", so the prompt kept
+          waiting and swallowed every line that followed -- for ever, because no
+          continuation can satisfy an error already sitting in the buffer. }
+        if IsUnterminatedBlock(eng.ErrorMessage) and eng.ErrorAtEndOfInput then
         begin
           pending := line;              // not wrong, just unfinished -- read on
           waitingFor := eng.ErrorMessage;

@@ -13,9 +13,12 @@ Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact gree
 Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
 dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
 rules), the negative suite, and six opt-in host packages (crt, base64, zip, gzip,
-http, sqlite). **697 built-in functions** are registered across the standard
-libraries, every one of them exercised by a test and listed in the reference --
-both held by a gate in the acceptance suite rather than by a promise. Errors are *values*, not
+http, sqlite). **715 built-in functions** are registered across those libraries and
+packages together -- 534 names from `engine/libs` and 181 from `host/packages` -- and
+the `phosphor` binary registers all of them, which is why the resolution section below
+points back at this number instead of stating a second one. Every one is exercised by
+a test and listed in the reference -- both held by a gate in the acceptance suite
+rather than by a promise. Errors are *values*, not
 crashes: a library records its error state and the program keeps running. It is a
 real, working interpreter — not a skeleton.
 
@@ -88,9 +91,12 @@ a standalone GUI application — the stub is this same complete binary.
 
 **A function name is resolved when the program runs, not when it compiles** — and
 that is what makes a `.pbc` portable. Which functions exist is a *host's* decision:
-`phosphor` registers 685 names, the package test runner adds the assertion library,
-the GUI runner adds 426 more. So the compiler has no registry at all and cannot know
-which names will exist; the VM asks whichever host loaded the program.
+`phosphor` registers all 715 names counted above — it links every package — the
+package test runner adds the assertion library, and the GUI runner adds 426 more, as
+does `phosphor` itself wherever a graphical session is reachable. No GUI name
+collides with a library name, so that is 1141 in one process. The compiler has no
+registry at all and cannot know which names will exist; the VM asks whichever host
+loaded the program.
 
 The cost is that a typo survives until the line runs, so the two moments where the
 host IS known now check:
@@ -142,6 +148,28 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)
   · [docs/roadmap.md](docs/roadmap.md).
 
+## The six source gates
+
+After the acceptance corpus, `test-suite` runs six Python checks over the *source* —
+invariants no compiler can check and no golden happens to cover. They run in the
+suite rather than in the build, because building should not need Python but passing
+should mean the invariants hold; and a missing interpreter **fails** the run instead
+of skipping them, since a gate that quietly does not run reads as a pass. Unlike the
+function totals above, *nothing checks this list* — `coverage.py` gates four named
+claims and the number of gates is not one of them — which is how `check-suffix.py`
+and `check-examples.py` joined the suite on 2026-09-06 and were named nowhere here.
+It is verified the only way it can be: by reading `scripts/test-suite.ps1` and
+`scripts/test-suite.sh`, which run the same six on both platforms.
+
+| gate | what it refuses to let through |
+| ---- | ------------------------------ |
+| `coverage.py` | a registered built-in that no test calls, that the function reference omits, or that its own library page does not describe — and, the other way round, a function name or a count a document states that the registry does not back. |
+| `check-codepage.py` | a `Char` concatenated into a code-page string, where every byte `>= 128` is silently destroyed. The class has been swept three times. |
+| `check-sandbox.py` | a routine a script can reach that touches the filesystem without asking the sandbox gate first — or without being exempt by name, with a reason. |
+| `check-seams.py` | a host that neither fills an engine seam (`OnOutput`, `OnInput`, `OnBreakpoint`, `HostServices`) nor records why leaving it nil is right. A nil seam answers silently. |
+| `check-suffix.py` | a registered name whose type suffix is not the kind its body returns. The suffix *is* the return-type system for built-ins, and fifteen registrations lied. |
+| `check-examples.py` | a `basic` code block in the docs that does not compile. `coverage.py` already refuses a block calling a function that does not exist; it cannot refuse one whose names are all real and whose syntax is wrong. |
+
 ## Layout
 
 | path             | what                                                              |
@@ -154,7 +182,7 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs — and they are RUN: `test-examples` byte-compares each to a golden (a windowed one is compiled, since the compiler needs no display). |
-| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the four source gates `coverage.py`, `check-codepage.py`, `check-sandbox.py` and `check-seams.py`.|
+| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the six source gates described above.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

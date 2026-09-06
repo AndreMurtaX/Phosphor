@@ -442,13 +442,16 @@ def main():
         ('docs/libraries/gui-menu.md', 'form_show'): 'now form_show@',
     }
 
-    # The same idea for the ONE prose count this lane's other fix falsified: reading
-    # the eighteen computed sys-path registrations moved the true total from 697 to
-    # 715, and README.md still says 697. The entry pins BOTH numbers, so it stops
-    # matching the moment either the README or the registry changes.
-    PENDING_COUNTS = {
-        ('README.md', 'built-in functions'): (697, 715),
-    }
+    # A prose count known to be stale, pinned to BOTH numbers so the entry stops
+    # matching the moment either the document or the registry changes -- which is
+    # the point: fixing the document makes this gate FAIL and name the line to
+    # delete, so the backlog cannot be quietly forgotten.
+    #
+    # README's "built-in functions" was the only entry, recorded when reading the
+    # eighteen computed sys-path registrations moved the true total from 697 to
+    # 715. The README was corrected in the same integration, so the entry is gone
+    # and the ratchet did exactly what it was built to do.
+    PENDING_COUNTS = {}
 
     # Names the LANGUAGE provides, which the registry therefore does not hold: the
     # compiler resolves these itself, so they are real and callable and absent here.

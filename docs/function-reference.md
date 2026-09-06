@@ -46,19 +46,37 @@ and additionally receive the executing VM.
   after being refused; what varies is whether the refusal arrives as a value or as
   a fault you catch.
 
+### How this page counts
+
+Two different numbers can both be called "how many functions a library has", and this
+page quoted whichever one had been measured that day — which is how four section
+headings came to match neither. Every heading now gives **both**, in this order:
+
+- **names** — distinct registered names, which is what a reader counts: `mid$` is one
+  function whether it is given two arguments or three.
+- **registry entries** — `Reg.Add`/`Reg.AddHost` calls, which is what the engine
+  holds: `mid$` occupies two of them, one per arity, and `dict_set@` four, one per
+  value kind it stores.
+
+Across the seventeen engine libraries and the six packages that is **715 names /
+826 registry entries**. `scripts/coverage.py` prints the names column per library
+from the same source, and it gates the 715 where README states it. The entries
+column has no gate: it is counted off the `Reg.Add`/`Reg.AddHost` lines, which is how
+four of the headings below were found to be wrong under *either* reading.
+
 ### Engine built-ins vs opt-in packages
 
 The **engine built-ins are always present** — the seventeen libraries below register
 themselves when a `TPhosphorEngine` is created, so any host (the console
 `phosphor`, the embedding host, the test runner) has them.
 
-The **six packages are opt-in**: a host must call the package's register function.
-The **six packages are opt-in**: a host must call each package's register
-function, and an embedder is free to call none. The shipped `phosphor` console host
-calls **all six** — its `RegisterAllPackages` (host/console/phosphor.lpr) registers
-Crt, Base64, Zip, Gzip, Http and Sqlite on every path — so from the command line
-they are all present. The GUI host does the same; a host you write yourself decides
-for itself. Http and Sqlite additionally need an external runtime (OpenSSL, SQLite)
+The **six packages are opt-in**: a host must call each package's register function,
+and an embedder is free to call none. The shipped `phosphor` console host calls
+**all six** — its `RegisterAllPackages` (host/console/phosphor.lpr) registers Crt,
+Base64, Zip, Gzip, Http and Sqlite on every path, before it decides anything about a
+display — so from the command line they are all present, and so are they in a
+windowed program, since `phosphor` is the GUI host too. A host you write yourself
+decides for itself. Http and Sqlite additionally need an external runtime (OpenSSL, SQLite)
 and are gated on it — the package still compiles everywhere, and reports
 availability (`sqlite_available()`) rather than crashing when the library is
 absent.
@@ -182,7 +200,7 @@ directly. A `string$` carries all 256 byte values intact.
 | `bytestr$(v) → str` | a **one-byte** string holding `v` — the byte constructor `chr$` cannot be |
 | `bytemid$(s$, i, n) → str` | `n` bytes starting at byte `i`, clamped, never raises |
 
-## Num — numeric (35 functions)
+## Num — numeric (34 names / 35 registry entries)
 
 Thin wrappers over FPC's `Math`. Every argument is the numeric family; `sqr` is
 **square root** (per decisions.md); `round` rounds to nearest with **ties to even**
@@ -218,7 +236,7 @@ Thin wrappers over FPC's `Math`. Every argument is the numeric family; `sqr` is
 | `isnan(n) → num` | 1 if `n` is NaN |
 | `isinfinite(n) → num` | 1 if `n` is infinite |
 
-## Array — N-dimensional arrays (35 registry entries)
+## Array — N-dimensional arrays (19 names / 35 registry entries)
 
 Arrays are handle objects, 1-based, up to 3 dimensions in the bracket sugar today.
 Three element kinds: numeric (`dim@`), string (`sdim@`), handle/pointer (`pdim@`).
@@ -261,24 +279,28 @@ numeric/string/handle value). Both read the array's own kind.
 | `arr_set@(a@, i.., value) → handle` | element write for `a@[i, ...] = value`; answers the array |
 | `pointer@(n) → handle` | fabricate a raw handle from an integer (for negative/validation tests) |
 
-## Dict — string-keyed maps (20 functions)
+## Dict — string-keyed maps (29 names / 32 registry entries)
 
-Maps keyed by string, as handles, in insertion order. Three value kinds: numeric
-One dictionary holds any of the five kinds; `dict_typeof` says which a key holds.
-`dict@`, `sdict@` and `pdict@` all construct the same container and differ only in
-what `dict_type` then reports it was made for. Get/set is kind-agnostic and never
-converts.
+Maps keyed by string, as handles, in insertion order. One dictionary holds any of the
+language's five value kinds — number, string, int, handle, bool — and `dict_typeof`
+says which a key holds. `dict@`, `sdict@` and `pdict@` all construct the same
+container and differ only in what `dict_type` then reports it was made for. Get/set is
+kind-agnostic and never converts.
+
+The three `_set@` spellings are one store under three names, not three stores: the
+generic `dict_set@` takes any kind (four registry entries — the int form *is* the
+number form), and `sdict_set@`/`pdict_set@` are the typed spellings of the same
+write. All three answer **the dictionary**, so they chain.
 
 | function | description |
 | --- | --- |
 | `dict@() → handle` | a new dictionary, holding any kind; reports itself as numeric |
 | `sdict@() → handle` | the same container, reporting itself as string |
 | `pdict@() → handle` | the same container, reporting itself as handle |
-| `dict_set@(d@, key$, value) → handle` | set a numeric value; returns the dict |
-| `sdict_set@(d@, key$, value$) → handle` | set a string value |
-| `pdict_set@(d@, key$, value@) → handle` | set a handle value |
+| `dict_set@(d@, key$, v) → handle` | store **any** of the five kinds under `key$` — number, string, int, handle or bool; the int form is the number form. Answers the dictionary |
+| `sdict_set@(d@, key$, value$) → handle` | set a string value; answers the dictionary |
+| `pdict_set@(d@, key$, value@) → handle` | set a handle value; answers the dictionary |
 | `dict_get(d@, key$) → num` | numeric value, or 0 if the key is absent |
-| `dict_set@(d@, key$, v)` | store **any** of the five kinds under `key$` — number, string, handle or bool; the int form is the number form. Answers the dictionary |
 | `dict_get$(d@, key$) → str` | the value at `key$`, `""` when there is none |
 | `dict_get%(d@, key$) → int` | the same, written where an int is expected; `0` when there is none |
 | `dict_get@(d@, key$) → handle` | the same for a handle; `0` when there is none |
@@ -302,7 +324,7 @@ converts.
 | `dict_type(d@) → num` | value-kind code: 0 numeric, 1 string, 2 pointer |
 | `dict_typename$(d@) → str` | `"numeric"`, `"string"`, or `"pointer"` |
 
-## Json — JSON values (66 registry entries)
+## Json — JSON values (53 names / 66 registry entries)
 
 **Bytes.** A JSON string value carries bytes: what goes in comes out, and what
 `json_stringify$` writes parses back identical. Phosphor renders its own JSON text
@@ -396,7 +418,7 @@ default when a member is absent.
 | `json_pretty$(v@ [, indent]) → str` | indented JSON text (default indent, or `indent` spaces) |
 | `pnttonum(v@) → num` | the handle's integer id |
 
-## DateTime — dates and times (68 functions)
+## DateTime — dates and times (68 names / 68 registry entries)
 
 A date is a plain number (a `TDateTime`: days since 1899-12-30, time in the
 fraction). Thin wrappers over the RTL's `DateUtils`. String rendering/parsing is
@@ -496,7 +518,7 @@ every machine. `now`/`today`/`tomorrow`/`yesterday` read the clock.
 | `strtotime(s$) → num` | parse a time string |
 | `strtodatetime(s$) → num` | parse a date-time string |
 
-## StrList — string lists (70 registry entries)
+## StrList — string lists (60 names / 70 registry entries)
 
 A growable list of strings as a handle, **1-based**, with the `TStrings` property
 surface Plan9Basic leaned on: delimiters, name/value machinery, case/duplicates
@@ -584,7 +606,7 @@ when absent. The stream pair moves a list through the same byte-buffer handle
 | `strings_savetostream(l@, bytes@ [, enc$]) → num` | write the list into a byte buffer |
 | `strings_loadfromstream(l@, bytes@ [, enc$]) → num` | replace items from a byte buffer |
 
-## Regex — regular expressions (8 functions)
+## Regex — regular expressions (8 names / 8 registry entries)
 
 Thin wrappers over the RTL's `TRegExpr`. Throughout, the **pattern comes first**,
 the text second. Positions are 1-based, absence is 0; group 0 is the whole match.
@@ -602,7 +624,7 @@ malformed pattern is returned as an error.
 | `regex_groups@(pattern$, text$) → handle` | a string list of the groups (group 0 first) |
 | `regex_split@(pattern$, text$) → handle` | a string list of the pieces split on the pattern |
 
-## Config — INI configuration (31 functions)
+## Config — INI configuration (31 names / 31 registry entries)
 
 A config is a handle over an in-memory INI file bound to a path. An empty section
 name means the default section `General`. Numbers are stored in a **fixed
@@ -804,7 +826,7 @@ Eight bytes carry an `int%` exactly, including values a Double cannot hold:
 `buffer_setint(b@, 1, 8, 9007199254740993)` reads back as that number, not as
 `9007199254740992`.
 
-## Sys — system, paths, colours (21 functions)
+## Sys — system, paths, colours (40 names / 40 registry entries)
 
 Process arguments, path separators, known directories, generated names, directory
 and file make/remove, environment variables, and a small colour name↔number table.
@@ -837,7 +859,7 @@ on desktop by design.
 | `alphacolor(name$) → num` | the colour number with an opaque alpha channel |
 | *mobile directory paths (18)* | `shareddocumentspath$`, `librarypath$`, `cachepath$`, `publicpath$`, `picturespath$`, `sharedpicturespath$`, `camerapath$`, `sharedcamerapath$`, `musicpath$`, `sharedmusicpath$`, `moviespath$`, `sharedmoviespath$`, `alarmspath$`, `sharedalarmspath$`, `downloadspath$`, `shareddownloadspath$`, `ringtonespath$`, `sharedringtonespath$` — each `() → str`, answering `""` on desktop |
 
-## Platform — platform info and StdLib remainder (18 functions)
+## Platform — platform info and StdLib remainder (17 names / 18 registry entries)
 
 Identify the running system (decided at compile time by FPC platform macros, so
 the answer is exact), read its version, and a handful of StdLib helpers including
@@ -864,7 +886,7 @@ address.
 | `formatsettings$(name$) → str` | read a process-wide format setting by name |
 | `formatsettings(name$, value$) → num` | set a process-wide format setting by name |
 
-## Host — host services (5 functions)
+## Host — host services (5 names / 5 registry entries)
 
 The language-visible face of the engine's host-services seam (event pump,
 clipboard). Each asks the VM's seam, which a host fills in and a headless runner
@@ -878,7 +900,7 @@ leaves empty — so **an absent service returns the empty answer, never faults**
 | `pastetext$() → str` | read the host clipboard; its text, or `""` with no service |
 | `strerror() → num` | the last host-services error code (0 clear; non-zero after a clipboard call found no service) |
 
-## Err — error handling (5 functions)
+## Err — error handling (5 names / 5 registry entries)
 
 The BASIC-visible face of the `ON ERROR` handler. `err`/`errmsg$`/`erl`/`err_clear`
 read the executing VM's caught-error state; `error` lets a program raise its own
@@ -892,12 +914,18 @@ catchable runtime error.
 | `err_clear() → num` | reset the caught-error state |
 | `error(msg$) → num` | fail the current statement with a catchable runtime error carrying `msg$` |
 
-## Call — indirect calls (`callfunc`, 5 names / 30 registry entries)
+## Call — indirect calls (`callfunc`, 6 names / 46 registry entries)
 
 Calls a BASIC **user function** chosen at run time by name — the language face of
 the engine's re-entrant host-callback seam. The routine runs over the caller's
 globals and handles. The suffix on the spelling only reads as the expected return
 type; all spellings run the same primitive. An unknown name is a runtime error.
+
+The entry count is the widest gap on this page between names and registry entries,
+and it is arithmetic, not surprise: each of the five `callfunc` spellings is
+registered once per arity — no argument through eight — which is 5 × 9 = 45 entries
+under 5 names, and `funcexists?` is the 46th. A ninth argument is not registered and
+is refused by name at run time.
 
 | function | description |
 | --- | --- |
@@ -905,11 +933,11 @@ type; all spellings run the same primitive. An unknown name is a runtime error.
 | `callfunc(name$, a, …) → num` | the same with up to eight arguments, of any kinds |
 | `callfunc$(name$ [, arg]) → str` | same, when the callee returns a string |
 | `callfunc%(name$ [, arg]) → int` | same, when the callee returns an int |
+| `callfunc@(name$ [, arg]) → handle` | same, when the callee returns a handle |
 | `callfunc?(name$ [, arg]) → bool` | same, when the callee returns a bool |
 | `funcexists?(name$) → bool` | is anything callable under this name — a routine of the running program or a library function — without calling it? Asked of the same two places, in the same order, that an indirect call uses. About the NAME only: the arity and argument kinds of a call that has not happened yet are not knowable, so there is no arity form |
-| `callfunc@(name$ [, arg]) → handle` | same, when the callee returns a handle |
 
-## Rag — local retrieval index (14 functions)
+## Rag — local retrieval index (14 names / 14 registry entries)
 
 A pure-engine "RAG": a **local** retrieval index over a folder of markdown
 documents with YAML-style front-matter — no network, model or vector database. A
@@ -938,10 +966,12 @@ index is a handle; a fabricated/stale handle is refused (`rag_error` reports it)
 
 # Opt-in packages (a host must register them)
 
-The console `phosphor` host registers **CRT**. The test and embedding hosts
-register the rest. Http and Sqlite need an external runtime and are gated on it.
+The console `phosphor` host registers **all six**, on every path it takes, so from
+the command line they are as present as the engine libraries above; the test and
+embedding hosts choose for themselves, and so does a host you write. Http and Sqlite
+need an external runtime and are gated on it.
 
-## Base64 — base64 / hex encoding (10 functions)
+## Base64 — base64 / hex encoding (10 names / 10 registry entries)
 
 MIME base64 (continuous line, no wrapping), a URL-safe variant, whole-file forms,
 validity, and hex. Encoding round-trips: `base64_decode$(base64_encode$(s)) = s`.
@@ -959,7 +989,7 @@ validity, and hex. Encoding round-trips: `base64_decode$(base64_encode$(s)) = s`
 | `hex_encode$(s$) → str` | bytes → lowercase hex |
 | `hex_decode$(s$) → str` | hex → bytes (stops at the first non-hex pair) |
 
-## Zip — zip archives (18 functions)
+## Zip — zip archives (18 names / 18 registry entries)
 
 Over FPC's `Zipper` (ships with the compiler). A whole-archive surface plus a
 handle-based create/open/add/inspect/extract surface. Failures are answered and
@@ -986,7 +1016,7 @@ recorded in `zip_error()`.
 | `zip_quick(src$, zip$) → num` | archive one file by its bare name |
 | `zip_error() → num` | the last zip op's status (0 = clean) |
 
-## Gzip — gzip compression (10 functions)
+## Gzip — gzip compression (8 names / 10 registry entries)
 
 Real RFC-1952 gzip (10-byte header, raw DEFLATE, CRC32 + ISIZE trailer) over FPC's
 paszlib — a `.gz` a system `gunzip` reads. Failures are answered and recorded in
@@ -1003,7 +1033,7 @@ paszlib — a `.gz` a system `gunzip` reads. Failures are answered and recorded 
 | `gzip_ratio(orig$, packed$) → num` | packed/original ratio (< 1 when it shrank) |
 | `gzip_error() → num` | the last gzip op's status (0 = clean) |
 
-## Http — HTTP client (65 functions)
+## Http — HTTP client (60 names / 65 registry entries)
 
 Over FPC's `TFPHTTPClient`; the URL scheme selects TLS (https needs OpenSSL).
 Most of the surface is **offline configuration**: a client handle is a config
@@ -1092,7 +1122,7 @@ only when the request could not complete.
 | `http_clearerror() → num` | reset the error code |
 | `http_strerror$(code) → str` | the text for an error code |
 
-## Sqlite — SQLite (57 functions)
+## Sqlite — SQLite (56 names / 57 registry entries)
 
 Over the raw sqlite3 C API (FPC's dynamic binding — needs the SQLite runtime;
 `sqlite_available()` reports whether it loaded). One handle from `sqlite_open@`
@@ -1191,7 +1221,7 @@ Closing a database finalizes and invalidates every cursor opened on it.
 | `sqlite_backup(db@, path$) → num` | write a standalone copy of the database |
 | `sqlite_vacuum(db@) → num` | compact the database |
 
-## Crt — console control (28 functions)
+## Crt — console control (29 names / 30 registry entries)
 
 Classic-BASIC terminal control. Screen-control functions **return an ANSI escape
 sequence**, which the program emits with `print` (no newline) — keeping the

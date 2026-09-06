@@ -275,6 +275,16 @@ Maps keyed by string, as handles, in insertion order. Three value kinds: numeric
 | `sdict_set@(d@, key$, value$) → handle` | set a string value |
 | `pdict_set@(d@, key$, value@) → handle` | set a handle value |
 | `dict_get(d@, key$) → num` | numeric value, or 0 if the key is absent |
+| `dict_set@(d@, key$, v)` | store **any** of the five kinds under `key$` — number, string, handle or bool; the int form is the number form. Answers the dictionary |
+| `dict_get$(d@, key$) → str` | the value at `key$`, `""` when there is none |
+| `dict_get%(d@, key$) → int` | the same, written where an int is expected; `0` when there is none |
+| `dict_get@(d@, key$) → handle` | the same for a handle; `0` when there is none |
+| `dict_get?(d@, key$) → bool` | the same for a bool; `false` when there is none |
+| `dict_getdef$(d@, key$, def$) → str` | the value at `key$`, or `def$` when there is none |
+| `dict_getdef@(d@, key$, def@) → handle` | the same, with a handle default |
+| `dict_getdef?(d@, key$, def?) → bool` | the same, with a bool default |
+| `dict_typeof(d@, key$) → num` | **what this key holds**: `0` number, `1` string, `2` int, `3` handle, `4` bool — the language's five kinds in their own order — and `-1` when the key is not there. The `-1` matters: without it an absent key cannot be told from one holding a number |
+| `dict_typeof$(d@, key$) → str` | the same as a name — `number`, `string`, `int`, `handle`, `bool` — and `""` for an absent key |
 | `sdict_get$(d@, key$) → str` | string value, or `""` if absent |
 | `pdict_get@(d@, key$) → handle` | handle value, or 0 if absent |
 | `dict_getdef(d@, key$, default) → num` | numeric value, or `default` if absent |

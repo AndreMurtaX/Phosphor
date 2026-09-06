@@ -39,6 +39,50 @@ accessors do no conversion, so the family you call chooses only how the compiler
 types the expression. `dict_get(sd@, "name")` on a string dictionary hands back
 the string it stored. Match the family to `dict_typename$` and this never comes up.
 
+## One dictionary, any kind
+
+`dict@()`, `sdict@()` and `pdict@()` all build the **same container**, and always
+did: the storage is an array of the engine's five-kind cell and the setter never
+enforced anything. What looked like three dictionaries was three registration
+surfaces over one, which meant a program wanting a number and a string under the
+same keys needed two dictionaries with the same keys — and the bool kind, one of
+the language's five, had no dictionary at all.
+
+One dictionary now holds any of them:
+
+```basic
+d@ = dict@()
+dict_set@(d@, "nome",   "Ana")
+dict_set@(d@, "idade",  41)
+dict_set@(d@, "altura", 1.62)
+dict_set@(d@, "ativo",  true)
+dict_set@(d@, "conf",   sdict@())
+```
+
+**Reading needs typed spellings**, and that is a rule of the language rather than
+a choice here: a function's return type comes from the suffix on its own name, so
+`dict_get$` returns a string because it is spelled `$`. There can be no
+polymorphic getter. What there can be — and now is — is a way to ask what a key
+holds before reading it:
+
+```basic
+for i% = 1 to dict_count(d@)
+  k$ = dict_key$(d@, i%)
+  select case dict_typeof$(d@, k$)
+    case "string"  : println k$ + " = " + dict_get$(d@, k$)
+    case "int"     : println k$ + " = " + str$(dict_get%(d@, k$))
+    case "number"  : println k$ + " = " + str$(dict_get(d@, k$))
+    case "bool"    : if dict_get?(d@, k$) = true then println k$ + " = true"
+    case "handle"  : println k$ + " = <handle>"
+  endselect
+next
+```
+
+`dict_type` and `dict_typename$` still answer what a dictionary was **created**
+as. That is now a statement of intent rather than a constraint — nothing stops
+any of them holding anything — and every program written before this keeps
+working unchanged.
+
 ## Functions
 
 ### Creating
@@ -61,6 +105,15 @@ the string it stored. Match the family to `dict_typename$` and this never comes 
 | `pdict_get@(d@, key$) → handle` | the stored handle; **handle `0` when the key is absent**, which is not a valid handle — passing it on fails at that later call, not here |
 | `dict_getdef(d@, key$, default) → num` | the stored number, or `default` when the key is absent. The way to tell "absent" from "zero" without a second call |
 | `sdict_getdef$(d@, key$, default$) → str` | the stored string, or `default$` when absent |
+| `dict_getdef$(d@, key$, default$) → str` | the same, spelled for the one dictionary |
+| `dict_getdef@(d@, key$, default@) → handle` | the same with a handle default |
+| `dict_getdef?(d@, key$, default?) → bool` | the same with a bool default. There is no separate int form: an int default *is* a number default, because the registry widens `%` to `n` |
+| `dict_typeof(d@, key$) → num` | what this key holds — `0` number, `1` string, `2` int, `3` handle, `4` bool, the language's five kinds in their own order — and `-1` when the key is not there. That `-1` is the point: without it an absent key cannot be told from one holding a number |
+| `dict_typeof$(d@, key$) → str` | the same as a name (`number`, `string`, `int`, `handle`, `bool`), and `""` for an absent key |
+| `dict_get$(d@, key$) → str` | the value at `key$`, `""` when there is none |
+| `dict_get%(d@, key$) → int` | the same where an int is expected, `0` when there is none |
+| `dict_get@(d@, key$) → handle` | the same for a handle, `0` when there is none |
+| `dict_get?(d@, key$) → bool` | the same for a bool, `false` when there is none. Each typed spelling answers ITS OWN empty value; the single shared reader could not, because it knew the container's kind and not the caller's question |
 | `pdict_getdef@(d@, key$, default@) → handle` | the stored handle, or `default@` when absent — a usable fallback instead of handle `0` |
 
 ### Asking

@@ -146,13 +146,72 @@ begin
   end;
 end;
 
-function t_dict_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+{ Read a key, answering AMissing when there is none. The stored value is handed
+  back exactly as it was stored -- no conversion, ever -- so a mismatch surfaces
+  where the value is finally used, with the language's own type error, and
+  dict_typeof is how a program avoids reaching that point. }
+function ReadKey(const Args: array of TValue; const AMissing: TValue;
+                 out Err: TPhosphorError): TValue;
 var d: TPhosphorDict; idx: Integer;
+begin
+  Result := AMissing;
+  if not GetDict(Args[0], d, Err) then Exit;
+  idx := d.IndexOf(Args[1].Str);
+  if idx >= 0 then Result := d.Vals[idx];
+end;
+
+{ The legacy spelling: a missing key answers the CONTAINER's default, which is
+  what dict@/sdict@/pdict@ were created for and what the oracle pins. }
+function t_dict_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var d: TPhosphorDict;
 begin
   Result := ValInt(0);
   if not GetDict(Args[0], d, Err) then Exit;
+  Result := ReadKey(Args, DefaultFor(d.Kind), Err);
+end;
+
+{ The typed spellings. Each answers ITS OWN empty value for a missing key --
+  the shared reader could not, because it knew the container's kind and not the
+  caller's question. }
+function t_dict_get_num(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := ReadKey(Args, ValInt(0), Err); end;
+function t_dict_get_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := ReadKey(Args, ValStr(''), Err); end;
+function t_dict_get_hnd(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := ReadKey(Args, ValHandle(0), Err); end;
+function t_dict_get_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := ReadKey(Args, ValBool(False), Err); end;
+
+{ dict_typeof(d@, k$) -- what does this key hold?
+
+  The codes are the language's own five kinds in their declared order, and -1 for
+  a key that is not there. A separate answer for "absent" matters: without it a
+  program cannot tell an absent key from one holding a number, and dict_haskey
+  would have to be asked first every single time. }
+function t_dict_typeof(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var d: TPhosphorDict; idx: Integer;
+begin
+  Result := ValInt(-1);
+  if not GetDict(Args[0], d, Err) then Exit;
   idx := d.IndexOf(Args[1].Str);
-  if idx >= 0 then Result := d.Vals[idx] else Result := DefaultFor(d.Kind);
+  if idx >= 0 then Result := ValInt(Ord(d.Vals[idx].Kind));
+end;
+
+function t_dict_typeof_name(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var d: TPhosphorDict; idx: Integer;
+begin
+  Result := ValStr('');
+  if not GetDict(Args[0], d, Err) then Exit;
+  idx := d.IndexOf(Args[1].Str);
+  if idx < 0 then Exit;                 // absent answers "", never a kind name
+  case d.Vals[idx].Kind of
+    vkString: Result := ValStr('string');
+    vkInt:    Result := ValStr('int');
+    vkHandle: Result := ValStr('handle');
+    vkBool:   Result := ValStr('bool');
+  else
+    Result := ValStr('number');
+  end;
 end;
 
 function t_dict_getdef(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -242,17 +301,39 @@ begin
   Reg.Add('sdict@:', @t_sdict_new);
   Reg.Add('pdict@:', @t_pdict_new);
 
+  { ONE dictionary that holds anything. The storage always did -- Vals is an
+    array of the engine's five-kind cell and the setter enforced nothing -- so
+    these four shapes are the surface catching up with the container. An int
+    needs no shape of its own: the registry widens % to n. }
   Reg.Add('dict_set@:@$n',  @t_dict_set);
+  Reg.Add('dict_set@:@$$',  @t_dict_set);
+  Reg.Add('dict_set@:@$@',  @t_dict_set);
+  Reg.Add('dict_set@:@$?',  @t_dict_set);
+  { The older spellings, kept: same container, same implementation. }
   Reg.Add('sdict_set@:@$$', @t_dict_set);
   Reg.Add('pdict_set@:@$@', @t_dict_set);
 
-  Reg.Add('dict_get:@$',   @t_dict_get);
-  Reg.Add('sdict_get$:@$', @t_dict_get);
-  Reg.Add('pdict_get@:@$', @t_dict_get);
+  { A function's return type comes from the suffix on its OWN name, so there can
+    be no polymorphic getter -- typed getters are what the language allows, and
+    each answers its own empty value for a key that is not there. }
+  Reg.Add('dict_get:@$',   @t_dict_get);       // legacy: the container's default
+  Reg.Add('dict_get$:@$',  @t_dict_get_str);
+  Reg.Add('dict_get@:@$',  @t_dict_get_hnd);
+  Reg.Add('dict_get?:@$',  @t_dict_get_bool);
+  Reg.Add('dict_get%:@$',  @t_dict_get_num);
+  Reg.Add('sdict_get$:@$', @t_dict_get_str);
+  Reg.Add('pdict_get@:@$', @t_dict_get_hnd);
+  { What a KEY holds -- the question that only exists once one dictionary can
+    hold several kinds, and what makes dict_key$ useful for walking a mixed one. }
+  Reg.Add('dict_typeof:@$',   @t_dict_typeof);
+  Reg.Add('dict_typeof$:@$',  @t_dict_typeof_name);
 
   Reg.Add('dict_getdef:@$n',   @t_dict_getdef);
+  Reg.Add('dict_getdef$:@$$',  @t_dict_getdef);
+  Reg.Add('dict_getdef?:@$?',  @t_dict_getdef);
   Reg.Add('sdict_getdef$:@$$', @t_dict_getdef);
 
+  Reg.Add('dict_getdef@:@$@',  @t_dict_getdef);
   Reg.Add('pdict_getdef@:@$@', @t_dict_getdef);
 
   Reg.Add('dict_count:@',      @t_dict_count);

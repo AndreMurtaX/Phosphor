@@ -6,9 +6,18 @@
   A date is a plain number: a TDateTime, days since 1899-12-30 with the time in
   the fraction (so 45351.5 is noon on 2024-02-29). Every function here is a thin
   wrapper over the RTL's DateUtils/SysUtils, which makes the arithmetic -- leap
-  years, ISO weeks, month lengths, clamping IncYear across a leap day -- the
-  RTL's job rather than ours. Nothing raises; a bad argument just flows through
-  the RTL. now/today/tomorrow/yesterday read the clock and take no arguments.
+  years, ISO weeks, month lengths, clamping IncMonth and IncYear onto a shorter
+  month -- the RTL's job rather than ours. now/today/tomorrow/yesterday read the
+  clock and take no arguments.
+
+  Most functions cannot fail: a date is a number and almost any number is some
+  date. The NINE that can are of two kinds. Six take a year, a month or a day as
+  SEPARATE numbers, where the RTL either indexed its month table out of bounds or
+  raised with its own words: daysinayear, daysinamonth, weeksinayear, encodedate
+  and the three strto* parsers -- that is seven, because strto* is three. And
+  incmonth and incyear refuse a step that would leave 0001-01-01..9999-12-31, or
+  that starts from a number outside it. Each answers this library's own runtime
+  error with the offending value in it, never a wrong number.
 ******************************************************************************}
 unit PhosphorDateTimeLib;
 
@@ -29,6 +38,13 @@ function D0(const A: array of TValue): TDateTime; begin Result := AsDouble(A[0])
 function D1(const A: array of TValue): TDateTime; begin Result := AsDouble(A[1]); end;
 function I0(const A: array of TValue): Integer; begin Result := ArgI32(A[0]); end;
 function I1(const A: array of TValue): Integer; begin Result := ArgI32(A[1]); end;
+
+{ The representable span as plain numbers, derived in the initialization section
+  rather than written down here, so it cannot disagree with TryEncodeDate.
+  FirstDay is 0001-01-01; LastMoment is the first instant AFTER 9999-12-31, so a
+  date on the last day with a time on it still counts as inside. }
+var
+  FirstDay, LastMoment: TDateTime;
 
 // --- decomposition ----------------------------------------------------------
 function t_yearof(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -71,6 +87,22 @@ begin
   Result := (M >= 1) and (M <= 12);
   if not Result then
     E := MakeError(peRuntime, AFn + ': ' + IntToStr(M) + ' is not a month in 1..12')
+  else
+    E := NoError();
+end;
+
+{ The day, checked against the length of THAT month in THAT year, so 2023-02-29 is
+  refused and 2024-02-29 is not. Call it only after YearOk and MonthOk have passed:
+  DaysInAMonth is the same RTL table that answered 65450 for month 13. }
+function DayOk(const AFn: String; Y, M, D: Integer; out E: TPhosphorError): Boolean;
+var last: Integer;
+begin
+  last := DaysInAMonth(Y, M);
+  Result := (D >= 1) and (D <= last);
+  if not Result then
+    E := MakeError(peRuntime, AFn + ': ' + IntToStr(D) + ' is not a day in ' +
+                   IntToStr(Y) + '-' + Format('%.2d', [M]) + ', which has ' +
+                   IntToStr(last))
   else
     E := NoError();
 end;
@@ -120,13 +152,149 @@ begin
   Result := ValInt(WeeksInAYear(I0(A)));
 end;
 
+// --- construction -----------------------------------------------------------
+{ encodedate(y, m, d) -- the constructor the library did not have.
+
+  Everything else here takes a date APART. To build one from three numbers a
+  program had to assemble ISO text and hand it to strtodate, which turns an
+  arithmetic question into a string question: the day range is then checked by a
+  PARSER, and a wrong day comes back described as bad text rather than as a day
+  that does not exist in that month.
+
+  TryEncodeDate, not EncodeDate: it answers False where EncodeDate raises, so the
+  refusal becomes this library's own error carrying the value that was wrong --
+  the shape daysinamonth and weeksinayear already use.
+
+  The parts are checked as INTEGERS before they are narrowed. TryEncodeDate takes
+  Word, so year 65537 would arrive as 1 and encode a real date in the year 1; the
+  cast is safe only once YearOk, MonthOk and DayOk have run. }
+function t_encodedate(const A: array of TValue; out E: TPhosphorError): TValue;
+var y, m, d: Integer; r: TDateTime;
+begin
+  Result := ValInt(0);
+  y := I0(A); m := I1(A); d := ArgI32(A[2]);
+  if not YearOk('encodedate', y, E) then Exit;
+  if not MonthOk('encodedate', m, E) then Exit;
+  if not DayOk('encodedate', y, m, d, E) then Exit;
+  { Cannot fail once the three checks above pass -- but a guard that depends on
+    that reasoning staying true is worth its two lines. }
+  if not TryEncodeDate(Word(y), Word(m), Word(d), r) then
+  begin
+    E := MakeError(peRuntime, 'encodedate: ' + IntToStr(y) + '-' +
+                   Format('%.2d-%.2d', [m, d]) + ' is not a date');
+    Exit;
+  end;
+  E := NoError();
+  Result := ValDouble(r);
+end;
+
 // --- incrementing -----------------------------------------------------------
 function t_incday(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(IncDay(D0(A), I1(A))); end;
 function t_incweek(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(IncWeek(D0(A), I1(A))); end;
+
+{ Off-the-end, restated.
+
+  incmonth and incyear are the two increments that are NOT arithmetic on the
+  number: a day is 1 and a week is 7, so incday and incweek are additions, but a
+  month is 28, 29, 30 or 31, so the RTL takes the date apart, moves the field and
+  re-encodes. A step past either end therefore does not answer a wrong date -- it
+  RAISES, in the RTL's own words: incyear on 9999-06-15 aborted a program with
+  `Invalid date/timestamp : "10000/06/15 00:00:00,000"`. That is the one thing the
+  header of this file promises never reaches a program, so it is caught and
+  restated with the step that went off the end.
+
+  incday and incweek are NOT given the same treatment, because they do not raise
+  -- they answer a number outside the representable range, which datetostr$ and
+  yearof then silently clamp back to 9999-12-31 and report as if it were real.
+  That is a different defect and a wider one; it belongs to the whole library
+  rather than to these two functions.
+
+  AND THE TWO FAIL DIFFERENTLY, which is why neither can be guarded by catching.
+  incyear raises. incmonth does NOT: its re-encode answers 0 on failure without a
+  word, so incmonth(9999-06-15, 12) came back as 1899-12-30 -- a plausible date,
+  silently wrong, the worst of the three outcomes. The step is therefore REFUSED
+  in advance, by computing the year it lands in. }
+function SteppedOff(const AFn: String; ABy: Integer; const AUnit: String;
+                    out E: TPhosphorError): TValue;
+begin
+  Result := ValInt(0);
+  E := MakeError(peRuntime, AFn + ': ' + IntToStr(ABy) + ' ' + AUnit +
+                 ' from that date leaves 0001-01-01..9999-12-31');
+end;
+
+{ THE STEP IS ONLY HALF THE QUESTION: the date it starts from has to be a date.
+
+  Checking the target year alone was not enough, and failed in the exact way it
+  was written to prevent. DecodeDate answers Year=0, Month=0, Day=0 for ANY number
+  at or below -693594 -- the day before 0001-01-01 -- rather than refusing it. The
+  accumulator below then starts from that fictitious year 0 and lands inside
+  1..9999 for every step of 13 or more, so the guard APPROVED them; the RTL went
+  on to re-encode with Day=0, which cannot succeed, and answered 1899-12-30. The
+  result was non-monotonic and absurd: incmonth(x, 12) was refused while
+  incmonth(x, 13) came back as a silently wrong date.
+
+  Such a number is easy to hold. incday and incweek are additions with no range
+  check of their own -- this file says so a few lines up -- so
+  `incday(encodedate(1,1,1), -1)` produces one, and a date is a plain number, so
+  any literal below the range does too. }
+function SourceOk(const AFn: String; const D: TDateTime; out E: TPhosphorError): Boolean;
+begin
+  Result := (D >= FirstDay) and (D < LastMoment);
+  if not Result then
+    E := MakeError(peRuntime, AFn +
+                   ': that number is not a date in 0001-01-01..9999-12-31')
+  else
+    E := NoError();
+end;
+
+{ The year a month step lands in, computed the way the RTL's own IncAMonth
+  computes it, so the answer can be judged before the RTL is asked. Int64
+  throughout: a year near 9999 times twelve, plus an Integer step, overflows a
+  32-bit total -- and an overflow here would approve exactly the call this
+  function exists to refuse. `div` truncates toward zero, so a negative remainder
+  means the year below. Only meaningful once SourceOk has passed. }
+function MonthStepYear(const D: TDateTime; ABy: Integer): Int64;
+var y, m, dd: Word; tot: Int64;
+begin
+  DecodeDate(D, y, m, dd);
+  tot := Int64(y) * 12 + (Int64(m) - 1) + ABy;
+  Result := tot div 12;
+  if (tot mod 12) < 0 then Dec(Result);
+end;
+
+{ 31 January plus one month is 28 February -- the day is CLAMPED to the length of
+  the month it lands in, 29 February in a leap year -- and the time of day is
+  carried through untouched. Backwards clamps identically. }
+function t_incmonth(const A: array of TValue; out E: TPhosphorError): TValue;
+var ty: Int64;
+begin
+  Result := ValInt(0);
+  if not SourceOk('incmonth', D0(A), E) then Exit;
+  ty := MonthStepYear(D0(A), I1(A));
+  if (ty < 1) or (ty > 9999) then
+  begin
+    Result := SteppedOff('incmonth', I1(A), 'months', E);
+    Exit;
+  end;
+  E := NoError();
+  Result := ValDouble(IncMonth(D0(A), I1(A)));
+end;
 function t_incyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncYear(D0(A), I1(A))); end; // clamps a leap day to the 28th
+var ty: Int64;
+begin
+  Result := ValInt(0);
+  if not SourceOk('incyear', D0(A), E) then Exit;
+  ty := Int64(YearOf(D0(A))) + I1(A);
+  if (ty < 1) or (ty > 9999) then
+  begin
+    Result := SteppedOff('incyear', I1(A), 'years', E);
+    Exit;
+  end;
+  E := NoError();
+  Result := ValDouble(IncYear(D0(A), I1(A)));  // clamps a leap day to the 28th
+end;
 
 // --- distances --------------------------------------------------------------
 function t_daysbetween(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -277,8 +445,10 @@ begin
   Reg.Add('weekof:n',          @t_weekof);
   Reg.Add('weekofthemonth:n',  @t_weekofthemonth);
   Reg.Add('weeksinayear:n',    @t_weeksinayear);
+  Reg.Add('encodedate:nnn',    @t_encodedate);
   Reg.Add('incday:nn',         @t_incday);
   Reg.Add('incweek:nn',        @t_incweek);
+  Reg.Add('incmonth:nn',       @t_incmonth);
   Reg.Add('incyear:nn',        @t_incyear);
   Reg.Add('daysbetween:nn',    @t_daysbetween);
   Reg.Add('dayspan:nn',        @t_dayspan);
@@ -330,6 +500,10 @@ begin
 end;
 
 initialization
+  { Derived, never written down: whatever TryEncodeDate accepts is the range. }
+  TryEncodeDate(1, 1, 1, FirstDay);
+  TryEncodeDate(9999, 12, 31, LastMoment);
+  LastMoment := LastMoment + 1;      // the first instant AFTER the last day
   ISOFS := DefaultFormatSettings;
   ISOFS.DateSeparator := '-';
   ISOFS.TimeSeparator := ':';

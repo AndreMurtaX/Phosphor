@@ -1,6 +1,6 @@
 # date-time — a date is a number, and this is the arithmetic around it
 
-`engine/libs/PhosphorDateTimeLib.pas` · 66 functions · always available
+`engine/libs/PhosphorDateTimeLib.pas` · 68 functions · always available
 
 ## What it is for
 
@@ -101,20 +101,60 @@ is taken apart into the nonsense date it names rather than reported as bad.
 | `weekof(d) → num` | the same function under a shorter name |
 | `weekofthemonth(d) → num` | which week of its own month the date falls in, counting from 1 — a month reaches 5 whenever its days straddle five week boundaries, as February 2024 does |
 
+### Building a date from numbers
+
+The other direction from *Decomposing*: three numbers in, one date out. It is the
+only function here that constructs a date without reading the clock or moving
+another one.
+
+| function | what it answers |
+| --- | --- |
+| `encodedate(y, m, d) → num` | the date those numbers name, at midnight — so `encodedate(2020, 6, 15)` is exactly what `strtodate("2020-06-15")` answers. A date that does not exist is **refused**, naming the value and the reason: `29 is not a day in 2023-02, which has 28` |
+
+The three parts are checked against each other, which is the whole point of taking
+them as numbers: `2023-02-29` is refused because that February has 28 days, while
+`2024-02-29` is accepted because that one has 29. The range is `0001-01-01` to
+`9999-12-31`.
+
+```basic
+rem the last day of any month, without a table of month lengths
+function month_end(y, m)
+  return encodedate(y, m, daysinamonth(y, m))
+endfunction
+
+println datetostr$(month_end(2024, 2))
+println datetostr$(month_end(2023, 2))
+println datetostr$(incmonth(encodedate(2026, 1, 31), 1))
+```
+
+```
+2024-02-29
+2023-02-28
+2026-02-28
+```
+
 ### Moving a date
 
 Each `inc*` moves by its own unit and touches nothing else. A negative count goes
-backwards, which is how you subtract; none of them can fail.
+backwards, which is how you subtract.
 
 | function | what it answers |
 | --- | --- |
 | `incday(d, n) → num` | `d` moved `n` days — which is exactly `d + n`, since a day is 1 |
 | `incweek(d, n) → num` | `d` moved `n` × 7 days |
+| `incmonth(d, n) → num` | the same day-of-month `n` months away, **clamping onto a shorter month**: 31 January plus one month is 28 February, or the 29th in a leap year. The time of day is carried through |
 | `incyear(d, n) → num` | the same date `n` years away, **clamping 29 February to the 28th** when the target year has no 29th, rather than rolling into March |
 | `inchour(d, n) → num` | `d` moved `n` hours |
 | `incminute(d, n) → num` | `d` moved `n` minutes |
 | `incsecond(d, n) → num` | `d` moved `n` seconds |
 | `incmillisecond(d, n) → num` | `d` moved `n` milliseconds |
+
+**A clamp does not undo.** `incmonth(incmonth(d, 1), -1)` answers 28 January when
+`d` was 31 January, not the 31st it started from: the day was lost on the way out
+and there is nothing left to restore it. This is how month arithmetic works
+everywhere and it is not a defect, but it is the one thing about `incmonth` that
+surprises people. If you need the last day of a month, ask for it —
+`encodedate(y, m, daysinamonth(y, m))` — rather than stepping onto it.
 
 ### Distance between two dates
 
@@ -209,17 +249,39 @@ Two things worth noticing:
 
 ## Notes
 
-**There is no constructor from numbers.** No `encodedate`, and no `incmonth`
-either. A date is built either by reading the clock, by moving another date with
-`incday`/`incyear`, or by parsing ISO text with `strtodate` — which is why a
-program that has a year, a month and a day in three variables assembles the
-string and parses it. Unpadded parts are accepted, so `"2024-2-9"` works.
+**Building a date from three numbers** is `encodedate(y, m, d)`, added
+2026-09-06. Before it, a program holding a year, a month and a day had to
+assemble ISO text and hand it to `strtodate` — which asked a *parser* a question
+about arithmetic, and got back "bad text" where the honest answer was "that month
+has 28 days". `strtodate` is still there and still accepts unpadded parts, so
+`"2024-2-9"` works; it is the right tool when the date arrives as text.
 
-**The six that can fail** are `strtodate`, `strtotime`, `strtodatetime`,
-`daysinayear`, `daysinamonth` and `weeksinayear`. They fail as ordinary runtime
-errors — code `6`, catchable with `on error goto` and readable through `err()`
-and `errmsg$()` — never by answering a wrong number. See
-[err.md](err.md) for the handler side.
+**A step off the end of the calendar is refused, not invented.** The
+representable range is `0001-01-01` to `9999-12-31`. `incmonth` and `incyear`
+check **both ends of the step** — the number they start from, and the year they
+would land in — before moving. They used to fail in two different and worse ways:
+`incyear` aborted the program with the RTL's own words
+(`Invalid date/timestamp : "10000/06/15 00:00:00,000"`), and `incmonth` — when it
+was added — would have answered `1899-12-30` without a word, a plausible date
+that is silently wrong.
+
+Checking only the landing year was not enough, which is worth knowing because the
+reason is not obvious: the RTL's own `DecodeDate` answers *year 0* for a number
+below the range rather than refusing it, so the month arithmetic started from a
+year that does not exist and landed back inside `1..9999`. A step of 12 was
+refused while a step of 13 was not.
+
+`incday` and `incweek` do **not** have this check, because they are additions on
+the number and cannot raise. Stepping past the end with them answers a number
+outside the range, which `datetostr$` and `yearof` then clamp back to
+`9999-12-31` and report as though it were real. Worth knowing before you add a
+large number of days to a date near the year 9999.
+
+**The nine that can fail** are `strtodate`, `strtotime`, `strtodatetime`,
+`daysinayear`, `daysinamonth`, `weeksinayear`, `encodedate`, `incmonth` and
+`incyear`. They fail as ordinary runtime errors — code `6`, catchable with
+`on error goto` and readable through `err()` and `errmsg$()` — never by answering
+a wrong number. See [err.md](err.md) for the handler side.
 
 **Where the rest lives.** The one-line catalogue of every name is in
 [function-reference.md](../function-reference.md); the assertions that pin the

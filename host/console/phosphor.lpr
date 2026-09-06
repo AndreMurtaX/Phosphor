@@ -771,7 +771,7 @@ function Repl: Integer;
 var
   host: TConsoleHost;
   eng: TPhosphorEngine;
-  line, pending: String;
+  line, pending, waitingFor: String;
 begin
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
@@ -785,12 +785,24 @@ begin
                 'Type a multi-line block and it waits for the terminator. ' +
                 'Ctrl+Z then Enter to quit.'#10);
     pending := '';
+    waitingFor := '';
     while True do
     begin
       if pending = '' then host.Output('phosphor> ') else host.Output('     ...> ');
       if not host.ReadLine(line) then
       begin
         host.Output(#10);
+        { Input ended. If a block was still open, SAY SO and fail: discarding it
+          and answering 0 told anything that piped us a truncated file that the
+          whole file had run. A person at a keyboard sees their own half-typed
+          loop vanish; a script sees success. }
+        if pending <> '' then
+        begin
+          Writeln(StdErr, 'error: input ended inside an unfinished block (',
+                  waitingFor, ')');
+          Result := 2;
+          Exit;
+        end;
         Break;
       end;
       if pending <> '' then line := pending + #10 + line;
@@ -799,11 +811,13 @@ begin
         if IsUnterminatedBlock(eng.ErrorMessage) then
         begin
           pending := line;              // not wrong, just unfinished -- read on
+          waitingFor := eng.ErrorMessage;
           Continue;
         end;
         Writeln(StdErr, 'error: ', eng.ErrorMessage);
       end;
       pending := '';
+      waitingFor := '';
     end;
     Result := 0;
   finally

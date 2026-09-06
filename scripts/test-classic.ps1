@@ -54,10 +54,17 @@ function Run-One([System.IO.FileInfo] $t, [byte[]] $expected, [string] $label) {
         cmd /c $line
     }
     $code = $LASTEXITCODE
+    # An optional <name>.exit pins a NON-ZERO exit code; without one, 0 is required
+    # as before. stdout cannot express this on its own: when input ends inside an
+    # unfinished block the transcript is byte-identical to a session that ended
+    # cleanly, so the only observable difference is the code. That case used to
+    # answer 0, which told anything piping a truncated file that it had all run.
+    $wantP = Join-Path $dir ($t.BaseName + '.exit')
+    $want  = if (Test-Path $wantP) { [int]((Get-Content $wantP -Raw).Trim()) } else { 0 }
     $act = if (Test-Path $out) { [System.IO.File]::ReadAllBytes($out) } else { @() }
     $same = ($act.Length -eq $expected.Length)
     if ($same) { for ($i=0; $i -lt $act.Length; $i++) { if ($act[$i] -ne $expected[$i]) { $same=$false; break } } }
-    if ($same -and ($code -eq 0)) {
+    if ($same -and ($code -eq $want)) {
         Write-Host ("PASS  {0}  ({1} B)" -f $label, $act.Length) -ForegroundColor Green
         return $true
     }
@@ -66,7 +73,7 @@ function Run-One([System.IO.FileInfo] $t, [byte[]] $expected, [string] $label) {
         Write-Host ("  expected: {0}" -f (([Text.Encoding]::UTF8.GetString($expected)) -replace "`n","\n"))
         Write-Host ("  actual:   {0}" -f (([Text.Encoding]::UTF8.GetString($act)) -replace "`n","\n"))
     }
-    if ($code -ne 0) { Write-Host ("  exit {0}" -f $code) }
+    if ($code -ne $want) { Write-Host ("  exit {0}, expected {1}" -f $code, $want) }
     return $false
 }
 

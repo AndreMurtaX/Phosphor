@@ -141,7 +141,7 @@ working unchanged.
 | function | what it answers |
 | --- | --- |
 | `dict_remove(d@, key$) → num` | **whether it removed anything**: `1` if the key was there, `0` if it was never there or was already removed. The keys that follow it shift down one position, keeping their relative order |
-| `dict_clear@(d@) → num` | `1`, always — the count drops to `0` and every key is gone. Despite the `@` in the name it answers a number, not the dict, so `x@ = dict_clear@(d@)` is rejected at compile time with `cannot store int into handle variable` |
+| `dict_clear@(d@) → handle` | **the dictionary**, now empty — the count drops to `0` and every key is gone. It chains, exactly like `dict_set@`: `dict_set@(dict_clear@(d@), "k", 1)` empties the dictionary and puts one key back |
 
 ## A worked example
 
@@ -188,7 +188,7 @@ got@ = pdict_get@(report@, "words")
 println sdict_get$(labels@, "title"); ": "; dict_count(got@); " left"
 println "missing label -> ["; sdict_getdef$(labels@, "author", "(none)"); "]"
 println "kinds: "; dict_type(tally@); " "; dict_type(labels@); " "; dict_type(report@)
-println "cleared: "; dict_clear@(tally@); " count now "; dict_count(tally@)
+println "cleared: count now "; dict_count(dict_clear@(tally@))
 println "and through the pointer dict: "; dict_count(pdict_get@(report@, "words"))
 ```
 

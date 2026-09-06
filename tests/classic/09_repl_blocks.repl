@@ -1,0 +1,46 @@
+rem Every block form typed at the prompt. 08_repl covers `function` and `if`;
+rem the other five were never entered interactively, and `for` -- the one a
+rem person is most likely to type -- was thrown away as an error until 2026-09-06
+rem because IsUnterminatedBlock did not list "expected 'next'".
+for i% = 1 to 3
+println "for " + str$(i%)
+next
+w% = 0
+while w% < 2
+w% = w% + 1
+println "while " + str$(w%)
+endwhile
+v% = 0
+while v% < 2
+v% = v% + 1
+println "wend " + str$(v%)
+wend
+d% = 0
+do while d% < 2
+d% = d% + 1
+println "do " + str$(d%)
+loop
+r% = 0
+repeat
+r% = r% + 1
+println "repeat " + str$(r%)
+until r% = 2
+select case 2
+case 1
+println "select wrong"
+case 2
+println "select right"
+endselect
+select case "b"
+case "a"
+println "two-word wrong"
+case "b"
+println "two-word right"
+end select
+rem A block inside a block: the prompt has to keep waiting through both levels.
+if 1 = 1 then
+for n% = 1 to 2
+println "nested " + str$(n%)
+next
+endif
+println "state survived: " + str$(i% + w% + v% + d% + r%)

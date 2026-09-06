@@ -1,0 +1,16 @@
+rem An error inside a half-typed block must abandon THAT block and nothing else:
+rem the session keeps its variables and functions, and the next line runs. The
+rem error text goes to stderr and is not part of this transcript -- what stdout
+rem proves is the recovery, which is the part a person depends on.
+kept = 5
+function twice(n)
+return n * 2
+endfunction
+for i% = 1 to 2
+println @@@
+next
+println "the variable survived: " + str$(kept)
+println "and so did the function: " + str$(twice(21))
+for j% = 1 to 2
+println "and a good block still works: " + str$(j%)
+next

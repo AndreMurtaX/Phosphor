@@ -321,6 +321,61 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-06 · round 33 · a suffix that lied, and the two functions that were
+  missing because writing them was hard.** The owner asked for `dict_clear@`'s
+  suffix to be fixed and for `encodedate`/`incmonth` to be added. Both asks turned
+  out to be the visible corner of something bigger.
+
+  **`dict_clear@` returned `ValInt(1)`** — a lie about the type and a bare success
+  flag, the two things this codebase calls defects, in three characters. It now
+  answers the dictionary, exactly as its sibling `dict_set@` always did, so the `@`
+  is true and the call chains. Nothing was lost: the `1` was constant and never
+  once said whether anything had been removed.
+
+  - **A gate audit found the class: 14 more, out of 1297 registrations.**
+    `narr_set@`/`sarr_set@` promise a handle and answer the value written;
+    `arr_set` and `button_click`/`form_show` carry no suffix (so promise a number)
+    and answer a string or a handle. Verified by hand, not just reported:
+    `x = arr_set(a@, 1, "hi")` prints `before` and then aborts with *cannot store
+    string into number variable*. **Nothing checks this.** `TPhosphorRegistry.Add`
+    stores `'dict_clear@:@'` as an opaque key; the suffix is part of the NAME, not
+    a checked contract, which is exactly why an int-returning function could live
+    behind an `@` name for a year. A gate that compares a registration's suffix to
+    the `Val*` its implementation returns is the obvious next one to build.
+  - **The failure is at RUN time, not compile time** — `opStoreVar` is what checks
+    the kind. I wrote "rejected at compile time" in a source comment and a review
+    agent caught it; `println "before"` printing first is the proof. The old
+    `dict.md` said the same thing and had said it for as long as the wart existed.
+
+  **`encodedate` and `incmonth` were absent because they are the hard ones.** Every
+  other `inc*` is arithmetic on a number — a day is 1, a week is 7 — so they were
+  cheap and they got written. A month is 28, 29, 30 or 31, and constructing a date
+  needs three numbers validated against each other. `date-time.md` had a paragraph
+  declaring the hole permanent.
+
+  - **The rule this produces: the missing function is usually the one that was
+    hard, and that is the one a program most needs.** A library that has seven of
+    eight siblings is not 87% done; the absent one is where the difficulty went.
+  - **Two functions, three different failure modes, and catching an exception
+    would have fixed only one.** `incyear` past 9999 RAISED, aborting with the
+    RTL's own words. `incmonth` did NOT raise — its re-encode answers 0 silently,
+    so the step came back as `1899-12-30`, a plausible date that is wrong. A
+    `try/except` around both would have looked right and left the worse one
+    unguarded. The verdict has to be computed BEFORE the RTL is asked, which is
+    what `MonthStepYear` does, in `Int64` because a year near 9999 times twelve
+    plus an `Integer` step overflows 32 bits — and an overflow there approves
+    exactly the call the check exists to refuse.
+  - **`TryEncodeDate` takes `Word`.** Year 65537 arrives as 1 and encodes a real
+    date in the year 1. The parts are therefore checked as `Integer` before the
+    narrowing, and `encodedate(65537, 1, 1)` is refused. A range check written
+    after a cast is not a range check.
+  - **What was deliberately NOT fixed, and is written down rather than left
+    implied:** `incday`/`incweek` still step off the end silently, because they
+    really are additions and cannot raise — and `datetostr$` and `yearof` then
+    CLAMP the out-of-range number back to `9999-12-31` and report it as real. That
+    is a whole-library question, not these two functions', and `date-time.md` now
+    says so where a reader will meet it.
+
 - **2026-09-06 · round 32 · a documented example that every gate approved and no
   reader could run.** The owner asked how to type a dictionary walk at the prompt.
   The REPL threw the line away: `IsUnterminatedBlock` listed six of the compiler's

@@ -297,7 +297,9 @@ def main():
     # once, and three of the cases ABORT the reader's program: docs/decisions.md
     # advertised crt_gotoxy/crt_color/crt_clear, none of which exist under those
     # names, and function-reference.md documented narr_set@/sarr_set@/dict_clear@
-    # as answering a handle when they answer the value.
+    # as answering a handle when they answer the value. (dict_clear@ was made to
+    # answer the dict on 2026-09-06, so its @ is true now; the other two still
+    # answer the value written, and the page says so.)
     #
     # The signal is the CALL FORM -- a backticked `name(` beginning with a
     # lowercase letter. A variable is never followed by an open parenthesis, so

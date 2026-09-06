@@ -76,6 +76,42 @@ assert_eq(monthof(incyear(fixed, 1)), 6, "and leaves the month alone")
 rem Negative moves go backwards, which is the only way to subtract.
 assert_eq(incday(fixed, -1), fixed - 1, "a negative increment goes back")
 
+test_case("datetime/incmonth clamps onto a shorter month")
+rem The one increment that is not arithmetic on the number. A day is 1 and a
+rem week is 7; a month is 28, 29, 30 or 31, so the date is taken apart, the
+rem month moved, and the DAY CLAMPED to the length of where it lands.
+jan31 = encodedate(2026, 1, 31)
+assert_eq(datetostr$(incmonth(jan31, 1)), "2026-02-28", "31 January plus a month is 28 February")
+assert_eq(datetostr$(incmonth(encodedate(2024, 1, 31), 1)), "2024-02-29", "and the 29th in a leap year")
+assert_eq(datetostr$(incmonth(encodedate(2026, 3, 31), -1)), "2026-02-28", "backwards clamps the same way")
+assert_eq(datetostr$(incmonth(jan31, 0)), "2026-01-31", "a step of nothing changes nothing")
+
+rem A month that needs no clamping keeps its day, and the step crosses years.
+assert_eq(datetostr$(incmonth(encodedate(2026, 12, 15), 1)), "2027-01-15", "December plus one is January of the next year")
+assert_eq(datetostr$(incmonth(encodedate(2026, 1, 15), -1)), "2025-12-15", "and January minus one is the December before")
+assert_eq(datetostr$(incmonth(encodedate(2026, 5, 17), 25)), "2028-06-17", "twenty-five months is two years and one")
+
+rem The time of day is carried through: only the date part moves.
+noon = encodedate(2026, 1, 31) + 0.5
+assert_eq(datetimetostr$(incmonth(noon, 1)), "2026-02-28 12:00:00", "the time of day survives the clamp")
+
+test_case("datetime/encodedate builds a date from three numbers")
+rem Until 2026-09-06 there was no constructor at all: a program holding a year,
+rem a month and a day had to assemble ISO text and parse it, which asked a
+rem parser a question about arithmetic.
+assert_eq(datetostr$(encodedate(2020, 6, 15)), "2020-06-15", "three numbers make the date")
+assert_eq(encodedate(2020, 6, 15), fixed, "and it is the same number strtodate answers")
+assert_eq(datetostr$(encodedate(2024, 2, 29)), "2024-02-29", "a real leap day is accepted")
+assert_eq(datetostr$(encodedate(1, 1, 1)), "0001-01-01", "the first representable day")
+assert_eq(datetostr$(encodedate(9999, 12, 31)), "9999-12-31", "and the last")
+
+rem The round trip that says the parts really are the parts.
+built = encodedate(2026, 9, 6)
+assert_eq(yearof(built), 2026, "yearof gives the year back")
+assert_eq(monthof(built), 9, "monthof the month")
+assert_eq(dayof(built), 6, "dayof the day")
+assert_eq(hourof(built), 0, "and a date built from three numbers is midnight")
+
 test_case("datetime/differences")
 rem The *between family answers whole units elapsed, counting down.
 later = incday(fixed, 400)

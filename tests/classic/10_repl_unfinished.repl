@@ -1,0 +1,8 @@
+rem Input that ends while a block is still open. The REPL used to discard the
+rem block without a word and answer 0, so anything that piped it a truncated file
+rem was told the whole file had run. The transcript below is byte-identical to a
+rem session that ended cleanly -- the ONLY observable difference is the exit code,
+rem which is why this test needs the .exit file beside it.
+println "this line runs"
+for i% = 1 to 3
+println "and this one is inside a block that never closes"

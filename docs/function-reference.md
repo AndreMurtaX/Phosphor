@@ -297,7 +297,7 @@ converts.
 | `dict_haskey(d@, key$) → num` | 1 if the key exists |
 | `dict_exists(d@, key$) → num` | alias of `dict_haskey` |
 | `dict_remove(d@, key$) → num` | remove a key; answers `1` if it was there, `0` if it was not |
-| `dict_clear@(d@) → num` | remove all entries; answers `1`, not the dict — unlike `dict_set@`, which does answer the dict |
+| `dict_clear@(d@) → handle` | remove all entries; answers **the dict**, so it chains like `dict_set@` |
 | `dict_key$(d@, n) → str` | the key at 1-based insertion position `n` |
 | `dict_type(d@) → num` | value-kind code: 0 numeric, 1 string, 2 pointer |
 | `dict_typename$(d@) → str` | `"numeric"`, `"string"`, or `"pointer"` |
@@ -396,7 +396,7 @@ default when a member is absent.
 | `json_pretty$(v@ [, indent]) → str` | indented JSON text (default indent, or `indent` spaces) |
 | `pnttonum(v@) → num` | the handle's integer id |
 
-## DateTime — dates and times (66 functions)
+## DateTime — dates and times (68 functions)
 
 A date is a plain number (a `TDateTime`: days since 1899-12-30, time in the
 fraction). Thin wrappers over the RTL's `DateUtils`. String rendering/parsing is
@@ -446,12 +446,19 @@ every machine. `now`/`today`/`tomorrow`/`yesterday` read the clock.
 | `daysinmonth(d) → num` | days in the month of a date |
 | `daysinamonth(year, month) → num` | days in a given month |
 
+**Build a date from numbers**
+
+| function | description |
+| --- | --- |
+| `encodedate(y, m, d) → num` | the date those three numbers name. Refuses a date that does not exist — month 13, 29 February of a common year, a year outside 1..9999 — naming the value and the length of the month |
+
 **Increment** (return a new date)
 
 | function | description |
 | --- | --- |
 | `incday(d, n) → num` | add `n` days |
 | `incweek(d, n) → num` | add `n` weeks |
+| `incmonth(d, n) → num` | add `n` months, **clamping the day** onto a shorter month: 31 January plus one is 28 February |
 | `incyear(d, n) → num` | add `n` years (clamps Feb 29 to the 28th) |
 | `inchour(d, n) → num` | add `n` hours |
 | `incminute(d, n) → num` | add `n` minutes |

@@ -250,13 +250,26 @@ begin
   Result := ValInt(1);
 end;
 
+{ dict_clear@ answers the DICTIONARY, which is what the @ on its name has always
+  promised and what its sibling dict_set@ has always done.
+
+  It used to answer ValInt(1) -- both a lie about the type and a bare success
+  flag, the two things this codebase treats as defects, in three characters. The
+  cost was real rather than theoretical: `d@ = dict_clear@(d@)` aborted the
+  program AT RUN TIME with "cannot store int into handle variable" -- the store
+  is what checks the kind, so the line ran and the failure arrived only when it
+  did. The one spelling a reader would guess from the name was the one that could
+  not work, and the library page had to spend a paragraph apologising for it.
+
+  Nothing is lost by dropping the 1. It was constant -- it never once said
+  whether anything had been removed -- and how many entries there were is what
+  dict_count answers, before the call. }
 function t_dict_clear(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: TPhosphorDict;
 begin
-  Result := ValInt(0);
+  Result := Args[0];
   if not GetDict(Args[0], d, Err) then Exit;
   d.Clear();
-  Result := ValInt(1);
 end;
 
 function t_dict_typename(const Args: array of TValue; out Err: TPhosphorError): TValue;

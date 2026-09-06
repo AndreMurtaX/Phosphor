@@ -102,6 +102,117 @@ on error goto 0
 assert_eq(caught%, 1, "year 0 is refused")
 assert_eq(weeksinayear(2024), 52, "and a real year answers")
 
+test_case("datetime/a date that does not exist is refused, not invented")
+rem encodedate takes three separate numbers, so it is in the same family as
+rem daysinamonth above: the parts are checked against each other before the RTL
+rem sees them. TryEncodeDate takes Word, so the year is checked as an INTEGER
+rem first -- 65537 would otherwise arrive as 1 and encode a real date in year 1.
+caught% = 0
+on error goto ed1
+b1 = encodedate(2023, 2, 29)
+goto after_ed1
+ed1:
+caught% = 1
+resume next
+after_ed1:
+on error goto 0
+assert_eq(caught%, 1, "29 February of a common year is an error")
+assert_true(instr(errmsg$(), "encodedate") > 0, "and the message names the function")
+assert_true(instr(errmsg$(), "28") > 0, "and says how long that month really is")
+
+caught% = 0
+on error goto ed2
+b2 = encodedate(65537, 1, 1)
+goto after_ed2
+ed2:
+caught% = 1
+resume next
+after_ed2:
+on error goto 0
+assert_eq(caught%, 1, "a year past 65535 is refused rather than wrapping into Word")
+assert_eq(datetostr$(encodedate(2023, 2, 28)), "2023-02-28", "and the day before is fine")
+
+test_case("datetime/a step off the end of the calendar is refused")
+rem incyear RAISED here, aborting the program with the RTL's own words --
+rem `Invalid date/timestamp : "10000/06/15 00:00:00,000"`. incmonth was worse:
+rem its re-encode answers 0 without a word, so the step came back as 1899-12-30,
+rem a plausible date that is silently wrong. Both are now refused in advance.
+caught% = 0
+on error goto st1
+s1 = incyear(encodedate(9999, 6, 15), 1)
+goto after_st1
+st1:
+caught% = 1
+resume next
+after_st1:
+on error goto 0
+assert_eq(caught%, 1, "a year past 9999 is an error, not an abort")
+
+caught% = 0
+on error goto st2
+s2 = incmonth(encodedate(9999, 6, 15), 12)
+goto after_st2
+st2:
+caught% = 1
+resume next
+after_st2:
+on error goto 0
+assert_eq(caught%, 1, "and neither is it 1899-12-30")
+assert_eq(datetostr$(incmonth(encodedate(9999, 6, 15), 6)), "9999-12-15", "six months still fits")
+
+caught% = 0
+on error goto st3
+s3 = incmonth(encodedate(1, 6, 15), -6)
+goto after_st3
+st3:
+caught% = 1
+resume next
+after_st3:
+on error goto 0
+assert_eq(caught%, 1, "stepping back off the front is refused too")
+assert_eq(datetostr$(incmonth(encodedate(1, 6, 15), -5)), "0001-01-15", "and five months back still fits")
+
+test_case("datetime/a step FROM a number that is not a date is refused")
+rem Checking only the target year was not enough, and failed in the exact way it
+rem was written to prevent. DecodeDate answers year 0 / month 0 / day 0 for any
+rem number at or below -693594 instead of refusing it, so the month accumulator
+rem started from a fictitious year 0 and landed inside 1..9999 for every step of
+rem 13 or more. incmonth(x, 12) was refused while incmonth(x, 13) came back as
+rem 1899-12-30 -- non-monotonic, and silently wrong. incyear had the same hole and
+rem aborted with the RTL's own words, `Invalid date/timestamp : "0001/00/00"`.
+rem Such a number is easy to hold: incday has no range check, so one step back
+rem from the first representable day produces it.
+below = incday(encodedate(1, 1, 1), -1)
+caught% = 0
+on error goto sf1
+f1 = incmonth(below, 13)
+goto after_sf1
+sf1:
+caught% = 1
+resume next
+after_sf1:
+on error goto 0
+assert_eq(caught%, 1, "thirteen months from a non-date is refused, not answered")
+assert_true(instr(errmsg$(), "incmonth") > 0, "and the message names the function")
+
+caught% = 0
+on error goto sf2
+f2 = incyear(below, 1)
+goto after_sf2
+sf2:
+caught% = 1
+resume next
+after_sf2:
+on error goto 0
+assert_eq(caught%, 1, "and so is a year from one")
+assert_true(instr(errmsg$(), "incyear") > 0, "with this library's words, not the RTL's")
+assert_true(instr(errmsg$(), "Invalid date") = 0, "the RTL message never reaches the program")
+
+rem The exact boundaries still work, including a time of day on the last day.
+assert_eq(datetostr$(incmonth(encodedate(1, 1, 1), 0)), "0001-01-01", "the first day is inside")
+assert_eq(datetostr$(incmonth(encodedate(9999, 12, 31), 0)), "9999-12-31", "and the last")
+assert_eq(datetimetostr$(incmonth(encodedate(9999, 12, 31) + 0.5, 0)), "9999-12-31 12:00:00", "noon on the last day is still a date")
+
 test_case("registry/an absurdly wide call is refused at once, not searched for")
 rem Overload resolution enumerates 2^k combinations of int-widening, which is
 rem nothing for the six-argument signatures this registry holds and 33 million for a

@@ -26,3 +26,8 @@ Thumbs.db
 
 # crash dumps from tools run in the working tree
 *.stackdump
+
+# Python bytecode from the gate scripts (one .pyc was committed by accident
+# on 6e3bdf6 and turned up in every diff since)
+__pycache__/
+*.pyc

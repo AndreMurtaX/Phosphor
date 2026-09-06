@@ -40,12 +40,21 @@ run_one() {  # file inpath expected label
       ;;
   esac
   local code=$?
-  if cmp -s "$out" "$expected" && [ "$code" -eq 0 ]; then
+  # An optional <name>.exit pins a NON-ZERO exit code; without one, 0 is required
+  # as before. stdout cannot express this on its own: when input ends inside an
+  # unfinished block the transcript is byte-identical to a session that ended
+  # cleanly, so the only observable difference is the code. That case used to
+  # answer 0, which told anything piping a truncated file that it had all run.
+  local want=0
+  # tr -dc '0-9' keeps only the digits, so the file may end with a newline, a
+  # CRLF or trailing spaces and still read as a number on either OS.
+  [ -f "${bas%.*}.exit" ] && want=$(tr -dc '0-9' < "${bas%.*}.exit")
+  if cmp -s "$out" "$expected" && [ "$code" -eq "$want" ]; then
     echo "PASS  $label  ($(wc -c < "$out" | tr -d ' ') B)"
     return 0
   fi
   echo "FAIL  $label"
-  [ "$code" -ne 0 ] && echo "  exit $code"
+  [ "$code" -ne "$want" ] && echo "  exit $code, expected $want"
   if ! cmp -s "$out" "$expected"; then
     echo "  expected: $(tr '\n' '|' < "$expected")"
     echo "  actual:   $(tr '\n' '|' < "$out")"

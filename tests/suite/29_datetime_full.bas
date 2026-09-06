@@ -159,3 +159,28 @@ assert_true(weeks_ok, "weeksinyear answers 52 or 53")
 if w2020 <= 53 then weeks_ok2 = 1
 assert_true(weeks_ok2, "and never more")
 assert_eq(weekof(fixed), 25, "weekof answers the ISO week 2020-06-15 falls in")
+
+test_case("datetime/a date before 1900 is the same day as itself")
+rem A TDateTime before 1899-12-30 is negative, and FPC spells such a value
+rem sign-and-magnitude: noon on 1850-06-15 is -18095.5 where midnight that day
+rem is -18095, so the time of day moves the number DOWN. Two functions did
+rem arithmetic on the number instead of reading its parts, and got it backwards:
+rem issameday said a timestamp was not the same day as ITSELF (and answered
+rem differently when the arguments were swapped), and dayoftheyear was one too
+rem low for any pre-1900 time of day.
+old_noon = strtodatetime("1850-06-15 12:00:00")
+old_mid = strtodate("1850-06-15")
+assert_eq(issameday(old_noon, old_noon), 1, "a moment is the same day as itself")
+assert_eq(issameday(old_noon, old_mid), 1, "noon and midnight are one day")
+assert_eq(issameday(old_mid, old_noon), 1, "and the answer does not depend on the order")
+assert_eq(issameday(old_mid, strtodate("1850-06-16")), 0, "two days are not one")
+assert_eq(dayoftheyear(old_mid), 166, "the 166th day of 1850")
+assert_eq(dayoftheyear(old_noon), 166, "and the time of day does not change which day it is")
+
+rem the modern side, which was always right and must stay right
+new_noon = strtodatetime("2024-06-15 12:00:00")
+assert_eq(issameday(new_noon, strtodate("2024-06-15")), 1, "the same holds after 1900")
+assert_eq(dayoftheyear(new_noon), 167, "2024 is a leap year, so the 167th")
+assert_eq(dayoftheyear(strtodate("2024-01-01")), 1, "the first day is 1")
+assert_eq(dayoftheyear(strtodate("2024-12-31")), 366, "and a leap year ends at 366")
+assert_eq(dayoftheyear(strtodate("2023-12-31")), 365, "a common year at 365")

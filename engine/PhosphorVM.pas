@@ -1661,8 +1661,24 @@ var
   res: TResolvedFunc;
   i: Integer;
 begin
-  Result := CallUserFunc(AName, Args, Err);
-  if Err.Code <> peUnknownFunction then Exit;   // ran, or failed for a real reason
+  { EXISTENCE DECIDES, not the error code. This used to call the routine and fall
+    through to the library whenever the answer came back peUnknownFunction -- on
+    the reading that the code meant "there is no such routine". It also means "the
+    routine ran and hit a name IT could not resolve", and then the fallback ran a
+    DIFFERENT function under the same name and returned its answer as if nothing
+    had happened:
+
+      function abs(x)
+        return nao_existe(x)
+      endfunction
+      println abs(-5)             -> no function nao_existe:%      (correct)
+      println callfunc("abs", -5) -> 5                             (the library's)
+
+    which is exactly the property callfunc is documented to have: an indirect call
+    means what a direct one means. FindUserFunc by name AND arity is how opCall
+    decides, so it is how this decides. }
+  if FProg.FindUserFunc(AName, Length(Args)) >= 0 then
+    Exit(CallUserFunc(AName, Args, Err));
 
   SetLength(kinds, Length(Args));
   for i := 0 to High(Args) do kinds[i] := Args[i].Kind;

@@ -529,7 +529,20 @@ begin
     Writeln(StdErr, 'phosphor: file not found: ', APath);
     Exit(2);
   end;
-  host := TConsoleHost.Create(AOutPath);
+  { --out THAT CANNOT BE OPENED IS A FAILURE, not a quiet nothing. This used to
+    leave the program unrun, print not one character, and exit 0 -- so a script
+    that redirected its output to an unwritable path reported success and produced
+    no output, which is indistinguishable from a program that ran and printed
+    nothing. }
+  try
+    host := TConsoleHost.Create(AOutPath);
+  except
+    on Ex: Exception do
+    begin
+      Writeln(StdErr, 'phosphor: cannot write to ', AOutPath, ': ', Ex.Message);
+      Exit(2);
+    end;
+  end;
   eng := TPhosphorEngine.Create();
   BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try

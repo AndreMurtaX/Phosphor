@@ -57,8 +57,25 @@ function t_dayofthemonth(const A: array of TValue; out E: TPhosphorError): TValu
 begin E := NoError(); Result := ValInt(DayOfTheMonth(D0(A))); end;
 function t_monthoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(MonthOfTheYear(D0(A))); end;
+{ COUNTED FROM THE DECOMPOSED DATE, not from arithmetic on the number.
+
+  A TDateTime before 1899-12-30 is negative, and FPC stores such a value as
+  sign-and-magnitude: noon on 1850-06-15 is -18095.5 where midnight that day is
+  -18095, so the time of day moves the number DOWN. DecodeDate knows this --
+  yearof, monthof, dayof and datetostr$ all give the same answer for both -- but
+  DateUtils.DayOfTheYear subtracts one TDateTime from another, and the subtraction
+  moves the wrong way: it answered 166 at midnight and 165 at noon on the same
+  day. Adding up the months is exact and does not care how the number is spelled. }
 function t_dayoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOfTheYear(D0(A))); end;
+var y, m, d: Word; i, n: Integer;
+begin
+  E := NoError();
+  DecodeDate(D0(A), y, m, d);
+  n := d;
+  for i := 1 to Integer(m) - 1 do
+    n := n + DaysInAMonth(y, i);
+  Result := ValInt(n);
+end;
 
 // --- week-day: two bases ----------------------------------------------------
 function t_dayofweek(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -135,8 +152,23 @@ function t_isam(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) < 12)); end;
 function t_ispm(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) >= 12)); end;
+{ THE SAME DAY IS THE SAME YEAR, MONTH AND DAY -- compared as numbers, so the
+  answer cannot depend on which argument came first.
+
+  DateUtils.IsSameDay asks whether B falls in the interval [DateOf(A), DateOf(A)+1),
+  and on a negative TDateTime the next day is one LESS, not one more. The result
+  was both wrong and asymmetric: a pre-1900 timestamp was not the same day as
+  ITSELF, while swapping the arguments answered 1. }
 function t_issameday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(IsSameDay(D0(A), D1(A)))); end;
+{ Named ya/ma/da, not y1/m1/d1: Pascal is case-insensitive, so a local `d1`
+  SHADOWS the D1 helper two dozen lines up and `D1(A)` stops parsing. }
+var ya, ma, da, yb, mb, db: Word;
+begin
+  E := NoError();
+  DecodeDate(D0(A), ya, ma, da);
+  DecodeDate(D1(A), yb, mb, db);
+  Result := ValInt(Ord((ya = yb) and (ma = mb) and (da = db)));
+end;
 
 // --- weeks ------------------------------------------------------------------
 function t_weekoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;

@@ -149,3 +149,39 @@ endfunction
 function positive?(n)
   return n > 0
 endfunction
+
+rem The two routines the next block needs. shadow_that_faults calls a name that
+rem does not exist, so IT fails with peUnknownFunction -- the same code the VM
+rem used to read as "there is no such routine".
+function shadow_that_faults(n)
+  return no_such_helper(n)
+endfunction
+
+function plain_double(n)
+  return n * 2
+endfunction
+
+test_case("callback/a routine that faults is NOT replaced by the library")
+rem CallByName used to decide by the ERROR CODE: it called the program's routine
+rem and fell through to the library whenever the answer came back
+rem peUnknownFunction, on the reading that the code meant "there is no such
+rem routine". It also means "the routine ran and hit a name IT could not
+rem resolve" -- and then a DIFFERENT function ran under the same name and its
+rem answer came back as if nothing had happened. abs(-5) reported the missing
+rem name; callfunc("abs", -5) quietly answered 5, the library's. Existence now
+rem decides, by name AND arity, exactly as a direct call decides.
+caught% = 0
+on error goto cbf
+z = callfunc("shadow_that_faults", 1)
+goto after_cbf
+cbf:
+caught% = 1
+resume next
+after_cbf:
+on error goto 0
+assert_eq(caught%, 1, "the program's own routine faulting is the answer")
+assert_true(instr(errmsg$(), "no_such_helper") > 0, "and the message names what IT could not find")
+
+rem the two halves that must keep working
+assert_eq(callfunc("abs", -5), 5, "a name the program does not define still reaches the library")
+assert_eq(callfunc("plain_double", 21), 42, "and one it does define still runs")

@@ -13,19 +13,21 @@ exe="$root/bin/phosphor"
 bas="$root/tests/skeleton/hello.bas"
 expected="$root/tests/skeleton/hello.expected"
 outA="$(mktemp)"; outB="$(mktemp)"; outC="$(mktemp)"; outD="$(mktemp)"
-packed="$(mktemp -u).run"; packedD="$(mktemp -u).nc.run"
-trap 'rm -f "$outA" "$outB" "$outC" "$outD" "$packed" "$packedD"' EXIT
+pbc="$(mktemp -u).pbc"; packed="$(mktemp -u).run"; packedD="$(mktemp -u).nc.run"
+trap 'rm -f "$outA" "$outB" "$outC" "$outD" "$pbc" "$packed" "$packedD"' EXIT
 
 echo
 "$exe" run "$bas" --out "$outA"                 # A: --out file path
 "$exe" run "$bas" > "$outB"                      # B: redirected stdout (raw bytes)
-"$exe" pack "$bas" "$packed"                     # C: pack into a standalone binary
+# C: pack takes COMPILED bytecode, so the pipeline is compile-then-pack.
+"$exe" compile "$bas" "$pbc"
+"$exe" pack "$pbc" "$packed"
 "$packed" > "$outC"                              #    and run it with no arguments
 # D: the same, packed --no-console. On Unix the flag is a NO-OP -- the terminal is
 # the user's, never the program's -- and it must still be accepted and still
 # produce the same bytes, because a flag that is refused on one platform makes a
 # build script platform-specific for no reason.
-"$exe" pack --no-console "$bas" "$packedD"
+"$exe" pack --no-console "$pbc" "$packedD"
 "$packedD" > "$outD"
 
 fail=0
@@ -47,5 +49,13 @@ for f in "$packed" "$packedD"; do
   fi
 done
 [ "$okE" -eq 0 ] && echo "PASS  E:trailer        (both packed files carry a v2 trailer)"
+
+# F: pack REFUSES source. The rule is only real if something fails when broken.
+refuse="$("$exe" pack "$bas" "$(mktemp -u).never" 2>&1)"; refusecode=$?
+if [ "$refusecode" -eq 2 ] && echo "$refuse" | grep -q "not a .pbc" && echo "$refuse" | grep -q "phosphor compile"; then
+  echo "PASS  F:pack refuses source (exit 2, and says how to compile)"
+else
+  echo "FAIL  F:pack refuses source (exit $refusecode)"; echo "$refuse" | sed 's/^/        /'; fail=1
+fi
 
 exit "$fail"

@@ -57,7 +57,7 @@ bin\phosphor.exe run hello.bas
 phosphor run  <file.bas>            run a program
 phosphor --no-console <file.bas>    run with no console window (see below)
 phosphor compile <in.bas> <out.pbc> compile to portable .pbc bytecode
-phosphor pack [--no-console] <in.bas> <out>   standalone self-extracting executable
+phosphor pack [--no-console] <in.pbc> <out>   standalone executable (from bytecode)
 phosphor                            an interactive REPL (state persists)
 phosphor --version | --help | --diag
 ```
@@ -89,7 +89,7 @@ a standalone GUI application — the stub is this same complete binary.
 **The console is kept by default, and can be let go.** A windowed program still has a
 console, which is where `PRINT` goes — useful while developing, unwanted in something
 you hand to someone. `phosphor --no-console <file.bas>` releases it at startup;
-`phosphor pack --no-console <in.bas> <out>` **bakes the choice into the executable**,
+`phosphor pack --no-console <in.pbc> <out>` **bakes the choice into the executable**,
 which is what a packed application needs because it ignores its command line by
 design; and `crt_hideconsole()` does the same from inside a program that decides for
 itself. Both refuse to touch a console **shared with a terminal**:

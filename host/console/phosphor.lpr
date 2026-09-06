@@ -14,7 +14,9 @@
     phosphor run <file> [--out F]    same, explicit verb; --out writes bytes to F
     phosphor --sandbox <dir> <file>  confine every path the script names to <dir>
     phosphor compile <in.bas> <out.pbc>   compile to portable bytecode
-    phosphor pack <in.bas> <out>     make a standalone executable (stub + payload)
+    phosphor pack <in.pbc> <out>     make a standalone executable (stub + payload).
+                                     Takes COMPILED bytecode, not source: compile
+                                     once, pack as often as you like
     phosphor run <gui-app.bas>       a GUI program needs no flag: this binary
                                      brings the widgetset up when a session is
                                      reachable, and runs as a plain console
@@ -545,30 +547,44 @@ function  RLE32(S: TStream): LongWord;     begin S.ReadBuffer(Result, 4); Result
 
 { Compile AInBas, copy this running binary (the stub) to AOutExe, and append the
   .pbc payload plus the trailer -- a standalone executable that needs no install. }
-function PackFile(const AInBas, AOutExe: String; AFlags: LongWord): Integer;
+function PackFile(const AInPbc, AOutExe: String; AFlags: LongWord): Integer;
 var
-  comp: TPhosphorCompiler;
   prog: TProgram;
   payload: TBytesStream;
   src, dst: TFileStream;
   off: Int64;
+  pbcErr: String;
 begin
-  if not FileExists(AInBas) then begin Writeln(StdErr, 'phosphor: file not found: ', AInBas); Exit(2); end;
-  comp := TPhosphorCompiler.Create();
-  try
-    if not comp.Compile(ReadSource(AInBas), prog) then
-    begin
-      Writeln(StdErr, Format('phosphor: %s:%d: %s', [AInBas, comp.ErrorLine, comp.ErrorMessage]));
-      Exit(1);
-    end;
-  finally
-    comp.Free;
+  if not FileExists(AInPbc) then begin Writeln(StdErr, 'phosphor: file not found: ', AInPbc); Exit(2); end;
+
+  // PACK TAKES BYTECODE, NOT SOURCE. One verb, one job: `compile` turns source
+  // into a .pbc and `pack` turns a .pbc into an executable. Compiling inside pack
+  // made a command whose work is copying bytes able to fail with a syntax error,
+  // and hid a step that is worth doing once and packing many times.
+  if not IsBytecode(AInPbc) then
+  begin
+    Writeln(StdErr, 'phosphor: pack takes compiled bytecode, and this is not a .pbc: ', AInPbc);
+    Writeln(StdErr, '  compile it first, then pack what comes out:');
+    Writeln(StdErr, '      phosphor compile ', AInPbc, ' app.pbc');
+    Writeln(StdErr, '      phosphor pack app.pbc ', AOutExe);
+    Exit(2);
   end;
 
   payload := TBytesStream.Create();
   try
-    WriteProgram(payload, prog);
+    src := TFileStream.Create(AInPbc, fmOpenRead or fmShareDenyNone);
+    try payload.CopyFrom(src, 0); finally src.Free; end;
+    // Read it back before embedding it. A .pbc from a different build is refused
+    // by the loader at run time; refusing it HERE puts the failure in front of
+    // the person who can fix it, instead of whoever is handed the executable.
+    payload.Position := 0;
+    if not ReadProgram(payload, prog, pbcErr) then
+    begin
+      Writeln(StdErr, 'phosphor: ', AInPbc, ': ', pbcErr);
+      Exit(1);
+    end;
     prog.Free;
+    payload.Position := 0;
     src := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
     dst := TFileStream.Create(AOutExe, fmCreate);
     try
@@ -792,7 +808,7 @@ begin
     end;
     if packArgs < 2 then
     begin
-      Writeln(StdErr, 'usage: phosphor pack [--no-console] <in.bas> <out' +
+      Writeln(StdErr, 'usage: phosphor pack [--no-console] <in.pbc> <out' +
               {$IFDEF WINDOWS}'.exe>'{$ELSE}'>'{$ENDIF});
       Halt(2);
     end;
@@ -814,7 +830,8 @@ begin
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor compile <in.bas> <out.pbc>');
-      Writeln('       phosphor pack [--no-console] <in.bas> <out>   (standalone executable)');
+      Writeln('       phosphor pack [--no-console] <in.pbc> <out>   (standalone executable)');
+      Writeln('              pack takes COMPILED bytecode: compile first, then pack');
       Writeln('              --no-console is baked into the file: a packed program');
       Writeln('              ignores its command line, so the choice travels with it');
       Writeln('       phosphor --no-console <file.bas>');

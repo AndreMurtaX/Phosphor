@@ -132,7 +132,8 @@ minefield otherwise.
    costing nothing, plus a fixed call-depth ceiling, the documented embedding API
    with `phosphorembed` as a third consumer, the on-disk bytecode (`.pbc`, validated
    on load rather than trusted), and the self-extracting deployment stub --
-   `phosphor pack app.bas app.exe` appends a payload to the stub binary, so the same
+   `phosphor compile app.bas app.pbc` then `phosphor pack app.pbc app.exe` appends
+   the payload to the stub binary, so the same
    binary is the CLI bare and the application packed. See
    [roadmap-phase3.md](roadmap-phase3.md), which carries the per-step record.
 

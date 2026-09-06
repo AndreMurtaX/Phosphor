@@ -71,11 +71,15 @@ if ($LASTEXITCODE -ne 0) { throw "runner (--out) exited $LASTEXITCODE" }
 cmd /c "`"$exe`" run `"$bas`" > `"$outB`""
 if ($LASTEXITCODE -ne 0) { throw "runner (stdout redirect) exited $LASTEXITCODE" }
 
-# C. packed standalone executable: pack hello.bas into a self-extracting exe, run
-#    it with no arguments, and compare -- proves the .pbc rides in the binary.
+# C. packed standalone executable. pack takes COMPILED bytecode, so the pipeline
+#    is compile-then-pack: run the result with no arguments and compare, which
+#    proves the .pbc rides in the binary.
+$pbc     = Join-Path $tmp 'phosphor_hello.pbc'
 $packExe = Join-Path $tmp 'phosphor_hello_packed.exe'
 $outC    = Join-Path $tmp 'phosphor_hello.C.actual'
-& $exe 'pack' $bas $packExe
+& $exe 'compile' $bas $pbc
+if ($LASTEXITCODE -ne 0) { throw "compile exited $LASTEXITCODE" }
+& $exe 'pack' $pbc $packExe
 if ($LASTEXITCODE -ne 0) { throw "pack exited $LASTEXITCODE" }
 cmd /c "`"$packExe`" > `"$outC`""
 if ($LASTEXITCODE -ne 0) { throw "packed exe exited $LASTEXITCODE" }
@@ -85,7 +89,7 @@ if ($LASTEXITCODE -ne 0) { throw "packed exe exited $LASTEXITCODE" }
 #    a windowed program with no console still writes its log.
 $packExeD = Join-Path $tmp 'phosphor_hello_packed_noconsole.exe'
 $outD     = Join-Path $tmp 'phosphor_hello.D.actual'
-& $exe 'pack' '--no-console' $bas $packExeD
+& $exe 'pack' '--no-console' $pbc $packExeD
 if ($LASTEXITCODE -ne 0) { throw "pack --no-console exited $LASTEXITCODE" }
 cmd /c "`"$packExeD`" > `"$outD`""
 if ($LASTEXITCODE -ne 0) { throw "packed --no-console exe exited $LASTEXITCODE" }
@@ -109,4 +113,17 @@ foreach ($f in @($packExe, $packExeD)) {
 }
 if ($okE) { Write-Host "PASS  E:trailer        (both packed files carry a v2 trailer)" -ForegroundColor Green }
 
-if ($okA -and $okB -and $okC -and $okD -and $okE) { exit 0 } else { exit 1 }
+# F. pack REFUSES source. The rule is only real if something fails when it is
+#    broken, and the message has to name the two commands that were meant.
+$refuseOut = Join-Path $tmp 'phosphor_pack_refuse.txt'
+cmd /c "`"$exe`" pack `"$bas`" `"$(Join-Path $tmp 'never.exe')`" > `"$refuseOut`" 2>&1"
+$refuseCode = $LASTEXITCODE
+$refuseText = Get-Content -Raw $refuseOut
+$okF = ($refuseCode -eq 2) -and ($refuseText -like '*not a .pbc*') -and ($refuseText -like '*phosphor compile*')
+if ($okF) { Write-Host "PASS  F:pack refuses source (exit 2, and says how to compile)" -ForegroundColor Green }
+else {
+    Write-Host ("FAIL  F:pack refuses source (exit {0})" -f $refuseCode) -ForegroundColor Red
+    Write-Host ("        {0}" -f ($refuseText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+}
+
+if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF) { exit 0 } else { exit 1 }

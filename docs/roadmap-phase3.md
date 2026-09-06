@@ -129,8 +129,8 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    end-to-end. Byte-exact green on Windows and Linux; the same `.pbc` runs on both
    (Double + endianness fixed). `-B -vewn` clean.
 
-5. **Self-extracting deployment.** *DONE (2026-09-01).* `phosphor pack app.bas
-   app.exe` compiles the script and appends the `.pbc` payload to a copy of the
+5. **Self-extracting deployment.** *DONE (2026-09-01).* `phosphor pack app.pbc
+   app.exe` appends the payload to a copy of the
    `phosphor` binary (the *stub*) behind a fixed little-endian trailer
    (payload-offset, size, an FNV checksum, and the magic `PHOSPBC1`, at the very
    end) — **trailer bumped to `PHOSPBC2` on 2026-09-06**, adding a 32-bit flags
@@ -143,7 +143,8 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    arguments — so the SAME `phosphor` binary is the CLI tool bare and a standalone
    app once packed (on Unix the packed file is `chmod +x`'d). The AV/dropper caveat
    is stated plainly in [decisions.md](decisions.md) ("On-disk bytecode"). **Gate
-   met:** `test.{ps1,sh}` add a third path — pack `hello.bas`, run the standalone
+   met:** `test.{ps1,sh}` add a third path — compile `hello.bas`, pack the `.pbc`
+   (`pack` takes bytecode, not source, since 2026-09-06), run the standalone
    executable with no arguments, byte-compare to the same golden as the `--out` and
    stdout paths (all three flip under `-ProveFailure`); verified on Windows and
    Linux. `-B -vewn` clean.

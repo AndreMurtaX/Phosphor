@@ -36,7 +36,8 @@ Hello, Phosphor!
 REPL where variables and functions persist from line to line, and a multi-line
 block (an `if`, a loop, a `function`) waits for its terminator before running.
 You can also `phosphor compile file.bas out.pbc` (bytecode) or
-`phosphor pack file.bas app.exe` (a standalone executable).
+`phosphor compile file.bas app.pbc` followed by `phosphor pack app.pbc app.exe`
+(a standalone executable — `pack` takes compiled bytecode, not source).
 
 ---
 

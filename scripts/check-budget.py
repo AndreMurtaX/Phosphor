@@ -244,8 +244,12 @@ ALLOWED = {
         'handful',
 
     # ---- allocations bounded by data the caller already holds -----------------
-    'PhosphorStrLib.pas:CpStarts':
-        'one entry per byte of a string already in memory, then trimmed to the count found',
+    # CpStarts was here. The codepoint table moved to engine/PhosphorValue.pas
+    # (as Utf8Starts) so that the `string - n` operator and PRINT USING's string
+    # fields could stop cutting UTF-8 by bytes and share it. engine/*.pas is not
+    # scanned by this gate (see the note at the top), so the entry would be stale
+    # rather than protective; the reason it was exempt is unchanged -- one entry
+    # per byte of a string already in memory, trimmed to the count found.
     'PhosphorStrListLib.pas:TPhosphorStringList.SetDelimitedText':
         'the field buffer is trimmed to the field it just read out of the input',
     'PhosphorBase64Lib.pas:f_hex_decode':

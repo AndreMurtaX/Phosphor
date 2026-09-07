@@ -30,27 +30,20 @@ var
   GValCode: Integer;   // set by val(), read by valcode(): 0 clean, else stop position
 
 // --- UTF-8 codepoint helpers ------------------------------------------------
-// Byte index (1-based) of the start of each codepoint, plus a sentinel at
-// Length(S)+1, so codepoint k spans Starts[k] .. Starts[k+1]-1.
-function CpStarts(const S: String): TInt64DynArray;
-var i, n: Integer;
+{ THE TABLE ITSELF NOW LIVES IN PhosphorValue, and these four names are what
+  this unit calls it. It moved because it was never only this unit's: the
+  `string - n` operator (PhosphorValue) and PRINT USING's string fields
+  (PhosphorVM) mean characters too, and each had grown its own byte-based
+  version that split UTF-8 sequences. One table, one definition of where a
+  character starts, three callers -- see the header over Utf8Starts. }
+function CpStarts(const S: String): TInt64DynArray; inline;
 begin
-  Result := nil;
-  SetLength(Result, Length(S) + 1);
-  n := 0;
-  for i := 1 to Length(S) do
-    if (Ord(S[i]) < $80) or (Ord(S[i]) >= $C0) then   // not a continuation byte
-    begin
-      Result[n] := i;
-      Inc(n);
-    end;
-  Result[n] := Length(S) + 1;   // sentinel
-  SetLength(Result, n + 1);
+  Result := Utf8Starts(S);
 end;
 
-function CpLen(const S: String): Integer;
+function CpLen(const S: String): Integer; inline;
 begin
-  Result := Length(CpStarts(S)) - 1;
+  Result := Utf8Len(S);
 end;
 
 function CpAt(const S: String; AOneBased: Integer): String;
@@ -62,24 +55,14 @@ begin
     Result := Copy(S, st[AOneBased - 1], st[AOneBased] - st[AOneBased - 1]);
 end;
 
-function CpLeft(const S: String; ACount: Integer): String;
-var st: TInt64DynArray; n: Integer;
+function CpLeft(const S: String; ACount: Integer): String; inline;
 begin
-  st := CpStarts(S);
-  n := Length(st) - 1;
-  if ACount < 0 then ACount := 0;
-  if ACount >= n then Exit(S);
-  Result := Copy(S, 1, st[ACount] - 1);
+  Result := Utf8Left(S, ACount);
 end;
 
-function CpRight(const S: String; ACount: Integer): String;
-var st: TInt64DynArray; n: Integer;
+function CpRight(const S: String; ACount: Integer): String; inline;
 begin
-  st := CpStarts(S);
-  n := Length(st) - 1;
-  if ACount < 0 then ACount := 0;
-  if ACount >= n then Exit(S);
-  Result := Copy(S, st[n - ACount], MaxInt);
+  Result := Utf8Right(S, ACount);
 end;
 
 { QUADRATIC APPEND, charged. `Result := Result + Copy(...)` in a loop is not an
@@ -206,25 +189,23 @@ begin
   end;
 end;
 
-{ The UTF-8 encoding of a codepoint. Used by both chr$ and string$ so a character
-  above U+007F is emitted as its real multi-byte sequence, never a single masked
-  byte (which would be invalid UTF-8). }
-function CpUtf8(c: Integer): String;
-begin
-  if c < 0 then c := 0;
-  if c < $80 then Result := Chr(c and $FF)
-  else if c < $800 then
-    Result := Chr($C0 or (c shr 6)) + Chr($80 or (c and $3F))
-  else if c < $10000 then
-    Result := Chr($E0 or (c shr 12)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F))
-  else
-    Result := Chr($F0 or (c shr 18)) + Chr($80 or ((c shr 12) and $3F)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F));
-end;
+{ THE ENCODER IS PhosphorValue's Utf8Char, AND THERE IS NOW ONLY ONE OF IT.
 
+  This unit used to carry two copies -- CpUtf8 here for chr$/string$, and
+  Utf8Chr further down for the pad family and the case functions -- identical
+  except that only this one clamped a negative code. So the two doors disagreed
+  on the same argument:
+
+    chr$(-1)                 -> byte 00        (clamped here)
+    lfill$("x", 3, -1)       -> FF FF 78       (not clamped there)
+
+  and 0xFF cannot occur in UTF-8. Neither copy clamped the TOP, which is the
+  defect proper: see the header over Utf8Char. One encoder cannot disagree with
+  itself. }
 function f_chr(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   E := NoError();
-  Result := ValStr(CpUtf8(ArgI32(A[0])));
+  Result := ValStr(Utf8Char(ArgI32(A[0])));
 end;
 
 function ToRadix(V: Int64; Base: Integer): String;
@@ -278,6 +259,31 @@ end;
 function f_stri(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(FloatToStr(AsDouble(A[0]), InvFS)); end;
 
+{ AN int% KEEPS ITS DIGITS, and the registry is what makes that possible.
+
+  str$/stri$ were registered as ':n' only, so an int% argument bound the numeric
+  slot BY WIDENING and the value went through a Double before it was ever
+  formatted. Two losses followed, both silent:
+
+    id% = 1000000000000001 : println str$(id%)    ->  1E15
+    row% = 1234567890123456789 : println str$(row%) -> 1.23456789012346E18
+
+  FloatToStr's 15-significant-digit default switches to exponential notation at
+  10^15, and above 2^53 the Double has already dropped the low digits. Meanwhile
+  `println id%` printed all sixteen digits (ValToStr uses IntToStr for vkInt) and
+  hex$ was exact too (ArgI64 short-circuits on vkInt) -- so the engine had the
+  right primitive and the DOCUMENTED number-to-text idiom was the one path that
+  did not use it. A row id or a nanosecond timestamp written through str$ into a
+  CSV cannot be recovered from "1E15".
+
+  This is not the documented widening trade-off of decisions.md:176: that says an
+  int% MAY bind an 'n' slot, not that it must when an exact slot exists. Adding
+  the ':%' overload is the mechanism the registry was built for -- Resolve
+  prefers the fewest widenings, so a vkInt now lands here and a vkDouble still
+  lands on ':n' unchanged. }
+function f_striInt(const A: array of TValue; out E: TPhosphorError): TValue;
+begin E := NoError(); Result := ValStr(IntToStr(A[0].Int)); end;
+
 { THE THREE STRING BUILDERS, and the two things that were wrong with them.
 
   (1) THE LOOP. space$ and string$ produce the same shape of answer and only
@@ -307,7 +313,7 @@ var n, i, cl: Integer; total: Int64; ch, r: String;
 begin
   E := NoError();
   n := ArgI32(A[0]); if n < 0 then n := 0;
-  ch := CpUtf8(ArgI32(A[1]));   // the character's full UTF-8 encoding
+  ch := Utf8Char(ArgI32(A[1]));   // the character's full UTF-8 encoding
   cl := Length(ch);
   total := Int64(n) * cl;
   { SIZING ONCE MEANS THE SIZE HAS TO FIT. n saturates at High(Integer) and a
@@ -663,44 +669,88 @@ end;
 // so insert$/delete$/line$ take 1-based positions here and stuffstring$ (already
 // 1-based in Delphi) is unchanged.
 
-function Utf8Chr(c: Integer): String;
-begin
-  if c < $80 then Result := Chr(c and $FF)
-  else if c < $800 then Result := Chr($C0 or (c shr 6)) + Chr($80 or (c and $3F))
-  else if c < $10000 then Result := Chr($E0 or (c shr 12)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F))
-  else Result := Chr($F0 or (c shr 18)) + Chr($80 or ((c shr 12) and $3F)) + Chr($80 or ((c shr 6) and $3F)) + Chr($80 or (c and $3F));
-end;
-
 // Unicode (locale-following) case, over the whole codepoint range -- the 'a'
 // (Ansi) prefix, as opposed to ucase$/lcase$ which only know a-z. The result is
-// re-emitted through Utf8Chr rather than UTF8Encode ON PURPOSE: UTF8Encode tags
+// re-emitted through Utf8Char rather than UTF8Encode ON PURPOSE: UTF8Encode tags
 // its result CP_UTF8, while every other string in the engine (literals, chr$)
 // carries DefaultSystemCodePage, and AnsiString '=' transcodes on a codepage
 // mismatch -- so two byte-identical strings would compare UNEQUAL. Building the
 // bytes with Chr() (as chr$ does) keeps the codepage tag consistent. See
 // [[phosphor-project]] on the codepage-tag hazard.
+{ AND THE WALK IS OVER CODEPOINTS, NOT UTF-16 CODE UNITS.
+
+  `for i := 1 to Length(u)` over a UnicodeString steps CODE UNITS, so a
+  character above the BMP -- which UTF-16 holds as a SURROGATE PAIR -- was split
+  and each half re-encoded on its own:
+
+    aucase$(chr$(128512))   F0 9F 98 80  ->  ED A0 BD ED B8 80   len 1 -> 2
+
+  Those six bytes are CESU-8, not UTF-8. No consumer decodes them back to one
+  character -- not a file, not a browser, not Phosphor's own len() -- and the
+  round trip alcase$(aucase$(x)) = x came back false. U+1F600 has no case
+  mapping at all, so the only correct answer was to leave it alone.
+
+  A pair is now combined into its codepoint and re-emitted WHOLE, which is what
+  the old code was already trying to say: TCharacter.ToUpper answers a surrogate
+  half unchanged (a surrogate has no case mapping), so the intent was always the
+  identity here -- it was the SPLIT, not the mapping, that corrupted the string.
+
+  WHY NOT TCharacter.ToUpper(UnicodeString): that overload calls UnicodeToUpper
+  and RAISES EArgumentException on an invalid sequence (rtl/objpas/character.pas,
+  read rather than assumed). This unit's header promises errors are RETURNED,
+  never raised, and an unpaired surrogate reaches here from any malformed input.
+
+  Simple case mappings that DO exist above the BMP (Deseret, Adlam, Warang Citi)
+  are still not applied -- TCharacter offers no codepoint-level entry point, and
+  reaching into unicodedata.GetProps for them costs a note this build bars. That
+  is the behaviour this code always had for those ranges, now without the
+  corruption; it is a separate change and is written down as one.
+
+  THE MIRROR. A BMP code unit takes the same TCharacter.ToUpper it always took,
+  and an unpaired surrogate takes it too, so every string that was right stays
+  byte-identical. Only a well-formed surrogate PAIR takes the new branch. }
 { QUADRATIC APPEND, charged -- the same shape and the same reason as CpReverse.
   Unbudgeted, aucase$/alcase$ of a 160 MB string took 48984 ms under a 2000 ms
   ceiling and reported success. Length(S) is an upper bound on the number of
   appends (UTF8Decode never produces more UTF-16 units than input bytes), so the
   price is fixed before the loop starts. }
-function Utf8UpperU(const S: String; out AAllowed: Boolean): String;
-var u: UnicodeString; i: Integer;
+function Utf8CaseU(const S: String; AUpper: Boolean; out AAllowed: Boolean): String;
+var u: UnicodeString; i, n: Integer; hi, lo: Word;
 begin
   Result := '';
   AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
   if not AAllowed then Exit;
   u := UTF8Decode(S);
-  for i := 1 to Length(u) do Result := Result + Utf8Chr(Ord(TCharacter.ToUpper(u[i])));
+  n := Length(u);
+  i := 1;
+  while i <= n do
+  begin
+    hi := Word(u[i]);
+    if (hi >= $D800) and (hi <= $DBFF) and (i < n) then
+    begin
+      lo := Word(u[i + 1]);
+      if (lo >= $DC00) and (lo <= $DFFF) then
+      begin
+        Result := Result + Utf8Char(
+          $10000 + ((Integer(hi) - $D800) shl 10) + (Integer(lo) - $DC00));
+        Inc(i, 2);
+        Continue;
+      end;
+    end;
+    // a BMP code unit, or an UNPAIRED surrogate: the single-unit path, unchanged
+    if AUpper then Result := Result + Utf8Char(Ord(TCharacter.ToUpper(u[i])))
+    else Result := Result + Utf8Char(Ord(TCharacter.ToLower(u[i])));
+    Inc(i);
+  end;
+end;
+
+function Utf8UpperU(const S: String; out AAllowed: Boolean): String;
+begin
+  Result := Utf8CaseU(S, True, AAllowed);
 end;
 function Utf8LowerU(const S: String; out AAllowed: Boolean): String;
-var u: UnicodeString; i: Integer;
 begin
-  Result := '';
-  AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
-  if not AAllowed then Exit;
-  u := UTF8Decode(S);
-  for i := 1 to Length(u) do Result := Result + Utf8Chr(Ord(TCharacter.ToLower(u[i])));
+  Result := Utf8CaseU(S, False, AAllowed);
 end;
 
 function SignI(c: Integer): Integer; inline;
@@ -789,7 +839,7 @@ end;
 function f_lfill(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, n: Integer;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Chr(ArgI32(A[2])); n := CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
   if not BudgetAllows(Int64(w - n) * Length(f)) then
   begin E := BudgetRefusal('lfill$'); Exit(ValStr('')); end;
@@ -798,7 +848,7 @@ end;
 function f_rfill(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, n: Integer;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Chr(ArgI32(A[2])); n := CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
   if not BudgetAllows(Int64(w - n) * Length(f)) then
   begin E := BudgetRefusal('rfill$'); Exit(ValStr('')); end;
@@ -816,7 +866,7 @@ end;
 function f_center3(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, pad, l: Integer;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Chr(ArgI32(A[2])); pad := w - CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2])); pad := w - CpLen(s);
   if pad <= 0 then Exit(ValStr(s));
   if not BudgetAllows(Int64(pad) * Length(f)) then
   begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
@@ -1022,6 +1072,9 @@ begin
   Reg.Add('val:$', @f_val);
   Reg.Add('stri$:n', @f_stri);
   Reg.Add('str$:n', @f_stri);       // alias: number -> string, locale-invariant
+  // ...and the exact slots, so an int% is not laid out through a Double
+  Reg.Add('stri$:%', @f_striInt);
+  Reg.Add('str$:%', @f_striInt);
   Reg.Add('mid$:$n', @f_mid);
   Reg.Add('mid$:$nn', @f_mid);
   Reg.Add('space$:n', @f_space);

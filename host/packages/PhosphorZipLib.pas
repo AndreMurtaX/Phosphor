@@ -138,10 +138,20 @@ begin
   Z.Entries.AddFileEntry(ms, AArchive);
 end;
 
+{ AN ARCHIVE WITH NO ENTRIES IS NOT A FILE THIS LIBRARY CAN WRITE, so do not
+  write one and do not claim to have. TZipper.SaveToStream returns at
+  `If CheckEntries=0 then Exit` having written NOTHING -- but SaveToFile has
+  already created the stream, so what reached disk was a 0-byte file that this
+  package's own reader rejects (unzip_count answered 0 with zip_error()=1, which
+  is how it reports a CORRUPT archive). Nor is a well-formed empty archive a way
+  out: TUnZipper.FindEndHeaders uses offset 0 as its "no end-of-central-directory
+  found" sentinel, so a bare 22-byte EOCD -- which begins at offset 0 -- is
+  reported as corrupt too. There is no readable empty archive to hand back, so
+  the honest answer is False, and no file at all. }
 function TZipWriter.Save: Boolean;
 begin
-  Z.ZipAllFiles;
-  Result := True;
+  Result := Z.Entries.Count > 0;
+  if Result then Z.ZipAllFiles;
 end;
 
 { TZipReader }
@@ -260,7 +270,18 @@ begin
     z := TZipper.Create();
     try
       z.FileName := Args[0].Str;
-      if not SandboxAllows(Args[1].Str, puRead) then Exit(ValInt(0));
+      // RECORDED, not just answered: the page promises "0 if srcdir$ is outside
+      // the sandbox root or anything fails, with zip_error() set to 1", and this
+      // exit left the slot reading clean.
+      if not SandboxAllows(Args[1].Str, puRead) then begin ZipErr := 1; Exit(ValInt(0)); end;
+      { A SOURCE DIRECTORY THAT IS NOT THERE IS A FAILURE, ANSWERED BEFORE ANY FILE
+        IS MADE. FindFirst on a directory that does not exist simply matches
+        nothing -- and so does FindFirst on a path naming a FILE -- so the entry
+        list came out empty, ZipAllFiles was called on it anyway, and this
+        answered 1 with zip_error() clear while leaving behind the 0-byte file
+        TZipWriter.Save explains. A caller who mistyped the directory name was
+        told the backup succeeded and handed an archive nothing can open. }
+      if not DirectoryExists(Args[1].Str) then begin ZipErr := 1; Exit(ValInt(0)); end;
       base := IncludeTrailingPathDelimiter(Args[1].Str);
       // Collected, SORTED, then added. Entries went in in raw directory-enumeration
       // order, which NTFS and ext4 do not agree on, so the same folder produced
@@ -292,6 +313,13 @@ begin
       finally
         names.Free;
       end;
+      // NOTHING TO ARCHIVE IS A FAILURE TOO, for the reason TZipWriter.Save
+      // records: a zero-entry list produces a 0-byte file this package's own
+      // reader calls corrupt, and paszlib cannot read a well-formed empty archive
+      // back either. This is the same hole seen from the other side -- a directory
+      // that is genuinely empty, and one holding only subdirectories, which this
+      // function deliberately does not descend into.
+      if z.Entries.Count = 0 then begin ZipErr := 1; Exit(ValInt(0)); end;
       z.ZipAllFiles;
       Result := ValInt(1);
       ZipErr := 0;
@@ -514,17 +542,27 @@ begin
 end;
 
 function f_zip_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var w: TZipWriter; r: TZipReader;
+var w: TZipWriter; r: TZipReader; wrote: Boolean;
 begin
   Err := NoError();
   Result := ValInt(0);
   try
     if GetWriter(Args[0].Hnd, w) then
     begin
-      w.Save();                        // flush the archive to disk before releasing
+      // THIS is where a writer's archive reaches disk, so this is where a caller
+      // learns whether it did. Closing a writer holding no entries answered 1 and
+      // left a 0-byte file (see TZipWriter.Save) -- a program acting on that 1
+      // reports a backup that does not exist. The handle is released either way,
+      // so nothing leaks and a second close still reports itself as a stale one.
+      wrote := w.Save();               // flush the archive to disk before releasing
       FreeHandle(Args[0].Hnd);
-      Result := ValInt(1);
-      ZipErr := 0;
+      if wrote then
+      begin
+        Result := ValInt(1);
+        ZipErr := 0;
+      end
+      else
+        ZipErr := 1;
     end
     else if GetReader(Args[0].Hnd, r) then
     begin
@@ -643,6 +681,20 @@ begin
       // entry name from climbing out of it; this stops the destination itself
       // from being outside the root in the first place.
       if not SandboxAllows(Args[2].Str, puWrite) then
+      begin
+        ZipErr := 1;
+        Exit;
+      end;
+      { AN ENTRY THE ARCHIVE DOES NOT HOLD IS A FAILURE, NOT A NO-OP. The name
+        list handed to TUnZipper.UnZipFiles is a FILTER, and a filter that matches
+        nothing is not an error to it -- so this answered 1 with zip_error() clear
+        for a name never in the archive, and the destination directory was not
+        even created. Both channels said success. The sibling zip_read$ answers
+        the same absent name correctly ("" with zip_error()=1), so nothing told a
+        program that the file it believed it had just written does not exist.
+        Asked last, so every refusal that already stood -- a hostile archive, a
+        destination outside the sandbox root -- still comes first and unchanged. }
+      if r.IndexOf(Args[1].Str) < 0 then
       begin
         ZipErr := 1;
         Exit;

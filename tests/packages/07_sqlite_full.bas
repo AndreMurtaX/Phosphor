@@ -265,3 +265,47 @@ assert_eq(sqlite_isblob(c@, 1), 1, "and it is still a blob afterwards")
 assert_eq(sqlite_coltype(c@, 1), 4, "the type code has not moved either")
 sqlite_finalize(c@)
 sqlite_close(n@)
+
+test_case("sqlite/an exhausted cursor stays exhausted")
+rem sqlite3_prepare_v2 gives sqlite3_step an automatic reset: stepping again after
+rem SQLITE_DONE silently RE-RUNS the statement from the top. This binding asked
+rem sqlite3 and believed the answer, so step 4 of a three-row result handed back
+rem row 1 again and sqlite_eof dropped from 1 back to 0. The drain loop above still
+rem terminated, which is exactly why no suite ever saw it -- but a second pass over
+rem the same handle double-counted every row, and a loop that re-checks an
+rem exhausted cursor never ended at all. sqlite_reset is the documented way to
+rem re-run a statement from the top, and it is now the only way.
+x@ = sqlite_open@()
+sqlite_exec(x@, "create table s(a integer)")
+sqlite_exec(x@, "insert into s values (1)")
+sqlite_exec(x@, "insert into s values (2)")
+sqlite_exec(x@, "insert into s values (3)")
+w@ = sqlite_query@(x@, "select a from s order by a")
+walked = 0
+while sqlite_step(w@) = 1
+  walked = walked + 1
+endwhile
+assert_eq(walked, 3, "three rows were walked")
+assert_eq(sqlite_step(w@), 0, "and the step after the end is still the end")
+assert_true(sqlite_eof(w@), "eof does not drop back to false")
+assert_eq(sqlite_step(w@), 0, "nor does the one after that")
+assert_eq(sqlite_getstr$(w@, 1), "", "no row is handed back off the end")
+assert_eq(json_count(sqlite_row@(w@)), 0, "sqlite_row@ is an empty object there")
+assert_eq(json_count(sqlite_fetchone@(w@)), 0, "and sqlite_fetchone@ answers one too, not row 1 again")
+assert_eq(json_len(sqlite_fetchall@(w@)), 0, "and sqlite_fetchall@ an empty array, not the whole set again")
+
+rem Only sqlite_reset re-opens it -- and it must still re-open it completely.
+assert_eq(sqlite_reset(w@), 1, "reset rewinds the statement")
+assert_eq(sqlite_step(w@), 1, "which lands on a row again")
+assert_eq(sqlite_getstr$(w@, 1), "1", "the first one")
+sqlite_finalize(w@)
+
+rem The same auto-reset re-EXECUTED a non-SELECT: a defensive second step on a
+rem prepared INSERT quietly inserted a second row.
+i@ = sqlite_prepare@(x@, "insert into s values (9)")
+assert_eq(sqlite_step(i@), 0, "an insert reports no row")
+assert_eq(sqlite_step(i@), 0, "and stepping it again reports no row either")
+assert_eq(sqlite_step(i@), 0, "however many times it is asked")
+assert_eq(sqlite_scalar(x@, "select count(*) from s"), 4, "having inserted exactly ONE row, not three")
+sqlite_finalize(i@)
+sqlite_close(x@)

@@ -278,6 +278,191 @@ begin
   end;
 end;
 
+{ THE VALUE-KIND BYTE, WHICH WAS THE LAST ENUM BYTE IN THE FORMAT WITH NO CASE
+  OF ITS OWN HERE.
+
+  Every other enum byte a .pbc carries has been pinned above -- the opcode by
+  mode 0, a local slot's type by mode 6, a return type by mode 7 -- and the
+  GLOBAL variable type by the loader's own check since the body was first
+  distrusted. The one byte none of them covers is the kind tag on a stored
+  VALUE, and it is the one that matters most, because it is the only enum byte
+  in the file that decides HOW MANY BYTES FOLLOW.
+
+  Before RVal range-checked it (engine/PhosphorBytecode.pas, and the comment
+  there records why), an unknown tag answered Default(TValue) and consumed no
+  payload, so the file was not refused -- it was silently RE-CUT. Every later
+  constant was then decoded out of its predecessor's bytes, the function table
+  and the DATA section slid with it, and the program ran to completion, exit 0,
+  printing values nobody wrote.
+
+  Re-measured 2026-09-07 by neutralising RVal's range test and NOTHING else, on
+  a program of six printlns (no user function, no DATA), poisoning one kind
+  byte to 200. Both ends of the pool exit 0:
+
+    the FIRST constant's tag   A0
+                               2.35558110889262E-3128.2890460584581E-317
+                               B / 222 / C / 333
+    the LAST constant's tag    A / 111 / B / 222 / C / 3330
+
+  The second is the reason this case exists. A file that prints one extra digit
+  and exits 0 is the worst thing this loader can do, because the host acts on
+  the value and nothing anywhere records that a byte was wrong.
+
+  AND THIS IS WHY THE CHECK DEMANDS RVal'S OWN WORDS rather than any refusal.
+  With the guard neutralised, Rich -- which the cases below use -- is still
+  refused at both ends of its pool, but by an unrelated guard further down the
+  file ("function 0 claims 67239936 local slots"), because the re-cut ran on
+  into the function table. A case that accepted "it was refused" would have
+  stayed green on a reader with no kind check at all. Watched fail, 2026-09-07:
+  with the test neutralised all three go red, and the DATA case goes red with
+  rc = 0 and an empty message -- the silent form, exactly.
+
+  BOTH POOLS ARE PINNED, and not because the check is written twice: the
+  constant pool and the DATA pool are read by the same RVal, so one guard
+  serves both. They are here because they are the two SECTIONS whose values an
+  attacker can reach, they sit at opposite ends of the file, and a re-cut that
+  begins in the DATA section crosses no other section on its way out -- so it
+  is the one of the three that still runs to completion, which no constant-pool
+  case in this program can show. }
+
+{ The offset of one value's KIND byte, found by WALKING the sections of a
+  well-formed .pbc: AWhich 0 = the first constant, 1 = the LAST constant,
+  2 = the first DATA item.
+
+  It is a walk and not a number anyone counted, because every value in a pool is
+  variable-width -- a string carries a length and its bytes, a bool one byte,
+  the other three eight -- so the last constant cannot be reached except by
+  decoding every constant before it, and the DATA section cannot be reached
+  except across the whole function table. The widths come from the enum's own
+  ordinals rather than from literals, so reordering TValueKind moves this walker
+  with WVal instead of leaving it silently pointing one field to the left.
+
+  A walker that guessed would poison some OTHER field, and the case would then
+  pass on a refusal it did not cause -- the failure CheckBodyRefusal's own
+  comment describes. So it answers False rather than an offset it is not sure
+  of, and the caller fails the case out loud. }
+function ValueKindOffset(const ABuf: TBytes; AWhich: Integer;
+                         out AOff: Integer): Boolean;
+var
+  o, k, n, vc, nc, nf, nd, ltc: Integer;
+
+  function Grab32(out V: Integer): Boolean;
+  begin
+    Result := (o >= 0) and (o + 4 <= Length(ABuf));
+    if Result then begin V := PLongInt(@ABuf[o])^; Inc(o, 4); end;
+  end;
+
+  { Step over one serialized value, leaving `o` on the byte after it. }
+  function SkipValue: Boolean;
+  var kind: Byte; slen: Integer;
+  begin
+    Result := False;
+    if (o < 0) or (o >= Length(ABuf)) then Exit;
+    kind := ABuf[o]; Inc(o);
+    case kind of
+      Ord(vkDouble), Ord(vkInt), Ord(vkHandle): Inc(o, 8);
+      Ord(vkBool):   Inc(o, 1);
+      Ord(vkString):
+        begin
+          if not Grab32(slen) then Exit;
+          if slen < 0 then Exit;
+          Inc(o, slen);
+        end;
+    else
+      Exit;                          // a kind this build never writes
+    end;
+    Result := (o >= 0) and (o <= Length(ABuf));
+  end;
+
+begin
+  Result := False;
+  AOff := -1;
+  o := 5;                            // magic(3) version(1) opcode-set(1)
+  if not Grab32(vc) then Exit;
+  if vc < 0 then Exit;
+  Inc(o, vc);                        // one type byte per global
+  if not Grab32(n) then Exit;
+  if (n < 0) or (n > (MaxInt div 13)) then Exit;
+  Inc(o, n * 13);                    // op(1) A(4) B(4) line(4)
+  if not Grab32(nc) then Exit;
+  if nc < 0 then Exit;
+  if AWhich <= 1 then
+  begin
+    for k := 0 to nc - 1 do
+    begin
+      if ((AWhich = 0) and (k = 0)) or ((AWhich = 1) and (k = nc - 1)) then
+      begin
+        AOff := o;
+        Exit(o < Length(ABuf));
+      end;
+      if not SkipValue() then Exit;
+    end;
+    Exit;                            // an empty pool: there is no tag to poison
+  end;
+  for k := 0 to nc - 1 do
+    if not SkipValue() then Exit;
+  if not Grab32(nf) then Exit;       // the user-function table
+  if nf < 0 then Exit;
+  for k := 0 to nf - 1 do
+  begin
+    if not Grab32(n) then Exit;      // the name's length, then its bytes
+    if n < 0 then Exit;
+    Inc(o, n);
+    Inc(o, 8);                       // entry, parameter count
+    if not Grab32(ltc) then Exit;
+    if ltc < 0 then Exit;
+    Inc(o, ltc);                     // one type byte per local slot
+    Inc(o, 1);                       // the return type
+  end;
+  if not Grab32(nd) then Exit;
+  if nd <= 0 then Exit;              // no DATA section to poison
+  AOff := o;
+  Result := (o >= 0) and (o < Length(ABuf));
+end;
+
+{ Poison one value's kind byte and assert the LOADER refused the file.
+
+  The message must carry RVal's own words. "It was refused" is not enough and
+  never was: a re-cut file is also refused a moment later, by the stream reader,
+  when some field further on turns out to be unreadable -- and that refusal
+  happens whether or not the kind byte was ever checked. Naming the guard is
+  what separates a working check from a file that fell over on its own, and it
+  is the same distinction CheckBodyRefusal draws for the bounded counts. }
+procedure CheckValueKindRefusal(const AName, ASource: String; AWhich: Integer);
+const
+  Want = 'a stored value has kind 200';
+var
+  src, bad: TBytesStream;
+  buf: TBytes;
+  msg, dummy: String;
+  rc, off: Integer;
+begin
+  src := CompileToBytes(ASource);
+  if src = nil then begin Report(False, AName + ' (compiled)'); Exit; end;
+  try
+    SetLength(buf, src.Size);
+    src.Position := 0;
+    if src.Size > 0 then src.ReadBuffer(buf[0], src.Size);
+  finally
+    src.Free;
+  end;
+  if not ValueKindOffset(buf, AWhich, off) then
+  begin
+    Report(False, AName + ' -- the walker did not reach that kind byte');
+    Exit;
+  end;
+  buf[off] := 200;                   // a tag no TValueKind has
+  bad := TBytesStream.Create(buf);
+  try
+    dummy := RunBytes(bad, rc, msg);
+    Report((rc <> 0) and (dummy = '') and (Pos(Want, msg) > 0), AName);
+    if Pos(Want, msg) = 0 then
+      Writeln('     (rc was ', rc, ', message was: ', msg, ')');
+  finally
+    bad.Free;
+  end;
+end;
+
 { ----------------------------------------------------------------------------
   HAND-BUILT .pbc FILES: instructions the compiler never emits.
 
@@ -1125,6 +1310,12 @@ begin
                    'stored string claims', 16384);
   CheckBodyRefusal('refuse: a stored string of negative length', WithFunc, 9,
                    'stored string has length -1', 16384);
+  { The last enum byte in the format without a case of its own, at both ends of
+    the constant pool and in the DATA section. See CheckValueKindRefusal: on the
+    pristine reader the second of these printed one wrong digit and exited 0. }
+  CheckValueKindRefusal('refuse: the FIRST constant''s kind byte out of range', Rich, 0);
+  CheckValueKindRefusal('refuse: the LAST constant''s kind byte out of range', Rich, 1);
+  CheckValueKindRefusal('refuse: a DATA item''s kind byte out of range', Rich, 2);
 
   // HAND-BUILT files that PASS the loader and used to crash the VM once running.
   // Each is refused in the dispatch loop with a catchable engine error instead.

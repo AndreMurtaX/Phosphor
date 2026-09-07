@@ -535,7 +535,19 @@ begin
     // THE OTHER DIRECTION. +/-Inf saturates to High/Low exactly as it always
     // did -- that band is documented and is NOT the defect -- and the functions
     // that exist to look at a non-finite number still see one.
-    Door('d_chr$',   pinf, False, 'len=1 b1=255', 'chr$(+Inf)');
+    { b1 WAS 255, AND 255 IS WHY IT CHANGED. What this line pins is the
+      SATURATION -- +Inf clamps to High(Integer) and chr$ answers one codepoint
+      with no error -- and all three of those still hold. What moved is the byte
+      the ENCODER made of 2147483647: it used to overflow `Chr($F0 or (c shr
+      18))` and emit FF BF BF BF, and 0xFF cannot occur in a UTF-8 stream at any
+      position, so chr$ was handing back a string nothing could decode (asc()
+      answered 2097151 for the 2147483647 that went in). The encoder now clamps
+      at U+10FFFF, the last encodable codepoint, mirroring the clamp it already
+      had at 0 -- hence 244 ($F4), the lead byte of F4 8F BF BF.
+
+      The -Inf line below is untouched and still answers b1=0: that clamp was
+      always there, and this change did not widen it. }
+    Door('d_chr$',   pinf, False, 'len=1 b1=244', 'chr$(+Inf)');
     // chr$(-Inf) splices a NUL byte, exactly as chr$(NaN) used to. It is the
     // SAME shape of defect one band over, it is in engine/libs (not this
     // lane's file), and it is pinned here as the behaviour of record so that

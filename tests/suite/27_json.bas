@@ -156,3 +156,49 @@ rem What was rendered parses back to the same thing, which is the only
 rem claim about the text that matters.
 back@ = json_parse@(flat$)
 assert_eq(json_gets$(back@, "k"), "v", "and what comes back is what went out")
+
+test_case("json/a number too big for a double is refused at the door")
+rem `1e400` is well-formed JSON text and fpjson parses it into +Inf, so the tree
+rem held a Double the engine promises does not exist (FiniteD, in PhosphorValue:
+rem "no TValue ever holds a non-finite Double"). Everything downstream then lied
+rem in its own way -- json_stringify$ and json_pretty$ wrote "+Inf" padded to
+rem nineteen columns, which is not JSON and which Phosphor's own parser rejects,
+rem and json_stringify$ is what feeds file_writealltext and an HTTP body.
+rem
+rem A parsed document is the third door foreign text comes through, and it now
+rem answers the way the other two already do: the lexer refuses `x = 1e999`, and
+rem `input x` on a field of "1e999" says it is out of range and stores nothing.
+caught = 0
+msg$ = ""
+on error goto wildnum
+bad@ = json_parse@("{""score"": 1e400}")
+goto after_wild
+wildnum:
+caught = 1
+msg$ = errmsg$()
+resume next
+after_wild:
+on error goto 0
+assert_eq(caught, 1, "a number that overflows a double is refused")
+assert_true(instr(msg$, "out of range"), "and said to be out of range")
+assert_true(instr(msg$, "score"), "naming where in the document it is")
+
+caught = 0
+on error goto wildneg
+bad@ = json_parse@("[1, -1e400]")
+goto after_wildneg
+wildneg:
+caught = 1
+resume next
+after_wildneg:
+on error goto 0
+assert_eq(caught, 1, "the negative one too, and inside an array")
+
+rem The band either side of it must be untouched: 1e308 fits a double, 1e-400
+rem merely underflows to zero (which is a number), and a big plain integer was
+rem already refused by fpjson itself.
+ok@ = json_parse@("[1e308, -1e308, 1e-400, 0, 1.5]")
+assert_eq(json_len(ok@), 5, "the whole representable range still parses")
+assert_near(json_itemn(ok@, 1), 1e308, 1e295, "1e308 is a number")
+assert_near(json_itemn(ok@, 3), 0, 0.0000001, "and 1e-400 underflows to zero")
+assert_true(len(json_stringify$(ok@)), "and the document still renders")

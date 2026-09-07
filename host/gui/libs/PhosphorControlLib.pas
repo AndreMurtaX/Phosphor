@@ -279,6 +279,23 @@ begin
   // Refused, not raised -- gui_error 1 is the answer this package gives every
   // operation a control will not accept. The window is still freed at ResetHandles.
   if GuiInUse(h.Control) then begin GGuiError := 1; Exit(ValInt(0)); end;
+  // A HANDLE WHOSE CONTROL IS ALREADY GONE NAMES NOTHING TO DESTROY. Freeing a form
+  // frees the tree it owns; TGuiHandle.Notification then nils every child handle's
+  // reference, which is the state every other reader of that handle already refuses
+  // -- panel_caption$ answers "" with gui_error 1. control_free alone answered 1
+  // with gui_error 0, because it reported FreeHandle's success and FreeHandle
+  // succeeds on the still-registered WRAPPER whether or not there was a control
+  // under it. So a program that freed a form and then looped over its children was
+  // told it had destroyed every one. The documented answer is the same one the
+  // doubly-freed case already gives: "0 with gui_error() = 1 for a stale, doubly
+  // freed or fabricated handle" (docs/libraries/gui-control.md). The dead wrapper is
+  // still released, exactly as before -- that is housekeeping, not the answer.
+  if h.Control = nil then
+  begin
+    GGuiError := 1;
+    FreeHandle(A[0].Hnd);
+    Exit(ValInt(0));
+  end;
   if (not h.Owns) and (h.Control <> nil) then
   begin
     h.Control.Free;   // a non-owned control is freed here; the owning form frees its own

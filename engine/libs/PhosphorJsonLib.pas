@@ -363,19 +363,26 @@ type
     Data: String;
     Len: SizeInt;
     Spent: Boolean;
+    Wild: Boolean;    // a number in the tree has no JSON text -- see JsonWrite
   end;
+
+  { Why a render can stop short. jtrBudget and jtrWild are BOTH refusals, and
+    the caller must say which: one is "this document is too big for the budget
+    you set", the other is "this document cannot be written as JSON at all". }
+  TJsonTextResult = (jtrOk, jtrBudget, jtrWild);
 
 procedure BufInit(out B: TJsonBuf);
 begin
   B.Data := '';
   B.Len := 0;
   B.Spent := False;
+  B.Wild := False;
 end;
 
 procedure BufAdd(var B: TJsonBuf; const S: String);
 var need, grow: SizeInt;
 begin
-  if (S = '') or B.Spent then Exit;
+  if (S = '') or B.Spent or B.Wild then Exit;
   if not BudgetCharge(Length(S)) then begin B.Spent := True; Exit; end;
   need := B.Len + Length(S);
   if need > Length(B.Data) then
@@ -402,7 +409,7 @@ var
   o: TJSONObject;
   a: TJSONArray;
 begin
-  if B.Spent then Exit;
+  if B.Spent or B.Wild then Exit;
   if N = nil then begin BufAdd(B, 'null'); Exit; end;
   case N.JSONType of
     jtString:
@@ -429,7 +436,7 @@ begin
             BufAdd(B, JsonEscape(o.Names[i]));
             BufAdd(B, '" : ');
             JsonWrite(B, o.Items[i], True, AIndent, ALevel + 1);
-            if B.Spent then Exit;
+            if B.Spent or B.Wild then Exit;
             sep := ',' + #10;
           end;
           BufAdd(B, #10);
@@ -450,7 +457,7 @@ begin
             BufAdd(B, JsonEscape(o.Names[i]));
             BufAdd(B, '":');
             JsonWrite(B, o.Items[i], False, AIndent, 0);
-            if B.Spent then Exit;
+            if B.Spent or B.Wild then Exit;
           end;
           BufAdd(B, '}');
         end;
@@ -470,7 +477,7 @@ begin
             BufAdd(B, sep);
             BufAdd(B, pad);
             JsonWrite(B, a.Items[i], True, AIndent, ALevel + 1);
-            if B.Spent then Exit;
+            if B.Spent or B.Wild then Exit;
             sep := ',' + #10;
           end;
           BufAdd(B, #10);
@@ -485,33 +492,72 @@ begin
           begin
             if i > 0 then BufAdd(B, ', ');
             JsonWrite(B, a.Items[i], False, AIndent, 0);
-            if B.Spent then Exit;
+            if B.Spent or B.Wild then Exit;
           end;
           BufAdd(B, ']');
         end;
       end;
   else
-    // numbers, booleans, null: ASCII, so fpjson's own rendering is safe here and
-    // keeps the output identical to what it has always been.
-    BufAdd(B, N.AsJSON);
+    { NUMBERS, BOOLEANS AND NULL -- ASCII, and that was the whole argument.
+
+      It is true of every value this library can BUILD, because a TValue can only
+      hold a finite Double (FiniteD, in PhosphorValue: "no TValue ever holds a
+      non-finite Double"). It was never true of a value fpjson can hold. Give
+      fpjson an infinity and AsJSON hands back FloatToStr's `+Inf`, right-padded
+      to nineteen columns:
+
+          d@ = json_parse@("[1e400]")
+          println json_stringify$(d@)   ->  [                   +Inf]
+
+      That is not JSON. Every parser rejects it, Phosphor's own included, and
+      json_stringify$ is what feeds file_writealltext and an HTTP body -- so the
+      program writes a document nothing can read back and nothing says a word.
+
+      The door such a value comes through is closed at json_parse@ below, which
+      is where FOREIGN text becomes internal data (the same place the lexer
+      refuses `x = 1e999`). This is the second half of that: a sibling package
+      that builds fpjson trees of its own -- the SQLite one, through
+      JsonRegisterNode -- can put an out-of-range REAL in a tree without passing
+      through the parser, and the renderer must not answer it with text that is
+      not JSON. Refusing here makes "json_stringify$ emits JSON" true of every
+      tree, however the tree was built. }
+    if (N.JSONType = jtNumber) and (TJSONNumber(N).NumberType = ntFloat) and
+       (not IsFiniteD(N.AsFloat)) then
+      B.Wild := True
+    else
+      BufAdd(B, N.AsJSON);
   end;
 end;
 
-{ True = the whole document was rendered. False = the budget stopped it; the
-  caller must report that rather than hand back what it got so far. }
+{ jtrOk = the whole document was rendered. Anything else is a refusal the caller
+  must report rather than hand back what it got so far. }
 function JsonTextTry(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer;
-  out AText: String): Boolean;
+  out AText: String): TJsonTextResult;
 var b: TJsonBuf;
 begin
   BufInit(b);
   JsonWrite(b, N, APretty, AIndent, ALevel);
-  Result := not b.Spent;
-  if Result then AText := BufStr(b) else AText := '';
+  AText := '';
+  if b.Wild then Result := jtrWild
+  else if b.Spent then Result := jtrBudget
+  else
+  begin
+    Result := jtrOk;
+    AText := BufStr(b);
+  end;
 end;
 
 function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
 begin
-  if not JsonTextTry(N, APretty, AIndent, ALevel, Result) then Result := '';
+  if JsonTextTry(N, APretty, AIndent, ALevel, Result) <> jtrOk then Result := '';
+end;
+
+{ Named for the caller, the way BudgetRefusal is, so `on error goto` reads which
+  function stopped and why. }
+function WildRefusal(const AFn: String): TPhosphorError;
+begin
+  Result := MakeError(peRuntime, AFn +
+    ': a number in the document is out of range and has no JSON text');
 end;
 
 { Read any node as a string without raising: null is "", an object/array is its
@@ -600,9 +646,80 @@ begin
   Result := False;
 end;
 
+{ THE NUMBER THAT DOES NOT FIT, and why the whole document is refused for it.
+
+  `1e400` is well-formed JSON text and fpjson parses it happily: StrToFloat says
+  True and hands back +Inf, so the tree holds a Double the rest of the engine has
+  been promised does not exist. PhosphorValue's FiniteD states the invariant --
+  "no TValue ever holds a non-finite Double" -- and it is the sole reason this
+  build can run with the invalid-operation trap unmasked. A parsed tree was the
+  hole in it. Everything downstream then lied in its own way: json_stringify$ and
+  json_pretty$ wrote `+Inf` padded to nineteen columns, which is not JSON and
+  which Phosphor's own parser rejects; json_gets$ and json_value$ answered the
+  same text; only json_getn was caught, by the VM's gate on library returns.
+
+  Refusing the DOCUMENT rather than the member is the treatment this engine
+  already gives every other door foreign text comes through, and both of them are
+  tested:
+
+      x = 1e999            -> the lexer refuses it (tests/negative/25_...)
+      input x  (field "1e999") -> `"1e999" is out of range` and x is unchanged
+                              (tests/classic/16_input_nonfinite.bas, BOTH doors,
+                               console and file)
+
+  A parsed document is the third door and it now answers the same way. The walk
+  is over a tree whose depth JsonNestsTooDeep has already capped at 256, so the
+  recursion here is bounded by the same ceiling the parse was.
+
+  Only ntFloat is asked: an integer node cannot be non-finite, and a plain-digit
+  overflow (`1` and four hundred zeros) is already refused by fpjson itself with
+  "Number is not an integer or real number". Exponent form was the spelling that
+  walked through. }
+function FirstWildNumber(N: TJSONData; const APath: String;
+  out AWhere: String): Boolean;
+var
+  i: Integer;
+  o: TJSONObject;
+begin
+  Result := False;
+  if N = nil then Exit;
+  case N.JSONType of
+    jtNumber:
+      if (TJSONNumber(N).NumberType = ntFloat) and (not IsFiniteD(N.AsFloat)) then
+      begin
+        AWhere := APath;
+        Result := True;
+      end;
+    jtObject:
+      begin
+        o := TJSONObject(N);
+        for i := 0 to o.Count - 1 do
+          if FirstWildNumber(o.Items[i], APath + '.' + o.Names[i], AWhere) then
+            Exit(True);
+      end;
+    jtArray:
+      for i := 0 to N.Count - 1 do
+        if FirstWildNumber(N.Items[i], APath + '[' + IntToStr(i + 1) + ']',
+                           AWhere) then
+          Exit(True);
+  end;
+end;
+
+{ The path FirstWildNumber built, phrased for a person. The root itself has no
+  path, and a name at the top level carries a leading '.' that reads as noise. }
+function WildWhere(const APath: String): String;
+begin
+  if APath = '' then Exit('the number');
+  if APath[1] = '.' then
+    Result := 'the number at ' + Copy(APath, 2, Length(APath) - 1)
+  else
+    Result := 'the number at ' + APath;
+end;
+
 function t_json_parse(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   d: TJSONData;
+  where: String;
   pos: Int64;
 begin
   Result := ValInt(0);
@@ -638,6 +755,16 @@ begin
     // it as an invalid-json error instead of wrapping a nil node in a live handle
     // that would fault the moment it is used.
     Err := MakeError(peRuntime, 'invalid json: empty or whitespace-only input');
+    Exit;
+  end;
+  // The tree is not registered yet, so a refusal here frees it rather than
+  // handing back a live handle onto a document that cannot be read or written.
+  where := '';
+  if FirstWildNumber(d, '', where) then
+  begin
+    d.Free();
+    Err := MakeError(peRuntime, 'invalid json: ' + WildWhere(where) +
+      ' is out of range');
     Exit;
   end;
   Err := NoError();
@@ -867,8 +994,10 @@ var n: TJSONData; txt: String;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
-  if not JsonTextTry(n, False, 2, 0, txt) then
-  begin Err := BudgetRefusal('json_stringify$'); Exit(ValStr('')); end;
+  case JsonTextTry(n, False, 2, 0, txt) of
+    jtrBudget: begin Err := BudgetRefusal('json_stringify$'); Exit(ValStr('')); end;
+    jtrWild:   begin Err := WildRefusal('json_stringify$'); Exit(ValStr('')); end;
+  end;
   Result := ValStr(txt);
 end;
 
@@ -1105,8 +1234,10 @@ begin
     Err := BudgetRefusal('json_pretty$');
     Exit;
   end;
-  if not JsonTextTry(n, True, ind, 0, txt) then
-  begin Err := BudgetRefusal('json_pretty$'); Exit(ValStr('')); end;
+  case JsonTextTry(n, True, ind, 0, txt) of
+    jtrBudget: begin Err := BudgetRefusal('json_pretty$'); Exit(ValStr('')); end;
+    jtrWild:   begin Err := WildRefusal('json_pretty$'); Exit(ValStr('')); end;
+  end;
   Result := ValStr(txt);
 end;
 function t_pnttonum(const Args: array of TValue; out Err: TPhosphorError): TValue;

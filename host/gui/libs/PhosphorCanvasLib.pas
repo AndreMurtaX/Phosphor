@@ -47,35 +47,48 @@ end;
 { ANY surface that has a canvas: an off-screen bitmap@, or a live paintbox@. The
   drawing primitives used to resolve a TBitmap and nothing else, which is why
   paintbox@ could not exist -- the whole immediate-mode API was tied to a buffer.
-  One resolver, two kinds of target, the same calls for both. }
+  One resolver, three kinds of target, the same calls for both.
+
+  RESOLVE ONCE, THEN DISPATCH ON THE CLASS -- the shape PhosphorTreeListLib,
+  PhosphorMenuLib and PhosphorImageLib already use for a handle with several legal
+  kinds. This is not a tidy-up; the probing version broke the defining promise of
+  gui_error(). It asked GuiResolveObj for TBitmap, then TPaintBox, then
+  TCustomControl, writing `GGuiError := 0` between attempts to undo the wrong-class
+  error its own failed probe had just recorded. That blanket zero could not tell
+  the error IT had caused from the one the PROGRAM had recorded earlier, so any
+  successful drawing call on a paint box or a windowed control erased the caller's
+  history -- and the slot is documented sticky: "Nothing clears it but
+  gui_clearerror() -- a later successful call does not" (docs/libraries/gui-core.md),
+  which is what makes "read it once after the whole sequence" a legal shape. Ten
+  handle kinds reached the erasing branch, not the two the report named.
+
+  A resolver that never records a failure it intends to recover from has nothing to
+  erase. The three targets are disjoint -- TBitmap is a TGraphic, TPaintBox a
+  TGraphicControl, TCustomControl a TWinControl -- so one TPersistent resolve and an
+  `is` chain answers exactly what three probes answered, minus the erasure. }
 function Cnv(AId: Int64; out C: TCanvas): Boolean;
 var o: TObject;
 begin
   C := nil;
   Result := False;
   o := nil;
-  if GuiResolveObj(AId, TBitmap, o) then
-  begin
-    C := TBitmap(o).Canvas;
-    Exit(True);
-  end;
-  // GuiResolveObj recorded a wrong-class error for the bitmap attempt; the handle
-  // may still be a perfectly good paint box, so clear it and try again.
-  GGuiError := 0;
-  if GuiResolveObj(AId, TPaintBox, o) then
-  begin
-    C := TPaintBox(o).Canvas;
-    Exit(True);
-  end;
+  // Fabricated, freed, or not a GUI handle at all: recorded by the resolver itself.
+  if not GuiResolveObj(AId, TPersistent, o) then Exit;
+  if o is TBitmap then
+    C := TBitmap(o).Canvas
+  else if o is TPaintBox then
+    C := TPaintBox(o).Canvas
   // Any windowed control that paints itself: a drawgrid@ handed to its own
   // OnDrawCell handler, a stringgrid@, anything else with a surface. TCustomControl
   // publishes Canvas, which is exactly the property this resolver is looking for.
-  GGuiError := 0;
-  if GuiResolveObj(AId, TCustomControl, o) then
+  else if o is TCustomControl then
+    C := TCustomControl(o).Canvas
+  else
   begin
-    C := TCustomControl(o).Canvas;
-    Exit(True);
+    GGuiError := 1;   // a live handle, but nothing that owns a canvas
+    Exit;
   end;
+  Result := True;
 end;
 
 { The points of a polygon or polyline, written "x,y x,y x,y". Whitespace between

@@ -246,6 +246,68 @@ assert_eq(raised, 0, "a date past year 9999 did not raise")
 assert_eq(gui_error(), 1, "it was refused")
 assert_near(calendar_date(cal@), 45000, 1, "and the calendar kept its date")
 
+rem --- a handle whose control is gone is REFUSED, not reported freed --
+rem The two shapes above are exceptions that reached BASIC. This one and
+rem the next are the quieter fault: nothing raises, nothing is refused,
+rem and the program is told something untrue.
+rem
+rem control_free answered 1 with gui_error 0 for a stale child handle. It
+rem was reporting the release of the handle WRAPPER, which survives its
+rem control, rather than the destruction of a control, which had already
+rem happened when the form died. So a program that freed a form and then
+rem looped over its children was told it had destroyed every one, while
+rem every other reader of the same handle answered ""/0 with gui_error 1.
+rem gui-control.md has always said otherwise: "0 with gui_error() = 1 for
+rem a stale, doubly-freed or fabricated handle".
+test_case("faults/a stale child handle is refused by control_free, not reported freed")
+sf@ = form@("stale", 200, 100)
+sp@ = panel@(sf@)
+sb@ = button@(sp@)
+raised = 0
+gui_clearerror()
+assert_eq(control_free(sf@), 1, "the form is freed, and it owned the tree")
+assert_eq(gui_error(), 0, "with nothing recorded")
+gui_clearerror()
+assert_eq(control_free(sp@), 0, "the child handle names nothing left to destroy")
+assert_eq(gui_error(), 1, "and says so")
+gui_clearerror()
+assert_eq(control_width(sp@), 0, "which is the answer control_width already gave")
+assert_eq(gui_error(), 1, "with the same code -- the readers agree now")
+gui_clearerror()
+assert_eq(control_free(sb@), 0, "the grandchild is refused too")
+assert_eq(gui_error(), 1, "one level down makes no difference")
+assert_eq(raised, 0, "and none of it raised")
+
+rem --- a call that SUCCEEDS must not clear the sticky slot ------------
+rem gui-core.md defines the slot: "sticky, like err(). Nothing clears it
+rem but gui_clearerror() -- a later successful call does not", which is
+rem what makes "read it once after the whole sequence" a legal shape.
+rem The canvas resolver used to probe TBitmap, then TPaintBox, then
+rem TCustomControl, writing a blanket zero between attempts to undo the
+rem wrong-class error its own failed probe had recorded. That zero could
+rem not tell its own error from the program's, so a successful drawing
+rem call on any of ten handle kinds turned an earlier real failure into
+rem "none failed". Poisoned with 3 rather than 1 on purpose: 3 tells
+rem "the earlier code survived" apart from "this call recorded one".
+test_case("faults/a successful canvas call leaves gui_error alone")
+pbx@ = paintbox@(f@)
+bmx@ = bitmap@(8, 8)
+nbx@ = label@(f@, "no canvas here")
+raised = 0
+gui_clearerror()
+pz = control_get(f@, "NoSuchPropertyAtAll")
+assert_eq(gui_error(), 3, "an unpublished property records 3")
+canvas_pencolor@(pbx@, 255)
+assert_eq(gui_error(), 3, "a successful draw on a paint box does not erase it")
+canvas_rectangle@(f@, 0, 0, 4, 4)
+assert_eq(gui_error(), 3, "nor one on a windowed control that paints itself")
+canvas_lineto@(bmx@, 3, 3)
+assert_eq(gui_error(), 3, "nor one on a bitmap, which never did")
+gui_clearerror()
+canvas_pencolor@(nbx@, 255)
+assert_eq(gui_error(), 1, "while a control with no canvas is still refused")
+assert_eq(raised, 0, "and none of it raised")
+
 rem --- freeing the object the LCL is standing on ----------------------
 rem LAST ON PURPOSE. Before the fix this ran the handler, freed the form
 rem underneath TCustomForm.Close, and took an access violation as the

@@ -1222,11 +1222,35 @@ begin
     else Result := '%' + core;      // overflow: the classic leading '%'
     Exit;
   end;
-  neg := av < 0;
   fs := DefaultFormatSettings;
   fs.DecimalSeparator := '.';
   fs.ThousandSeparator := #0;
-  numText := FloatToStrF(Abs(av), ffFixed, 18, fracDigits, fs);
+  { AN int% IS LAID OUT FROM ITS OWN DIGITS, for the same reason str$ grew a ':%'
+    slot: AsDouble above is a widening, and above 2^53 the Double has already
+    lost the low digits before any formatter sees it.
+
+      row% = 1234567890123456789
+      println using "####################"; row%   ->  1234567890123456800
+
+    while `println row%` printed all nineteen digits correctly. The field is
+    twenty columns wide and the value fits; nothing overflowed and nothing was
+    reported -- three digits were simply replaced. IntToStr of the Int64 is the
+    exact primitive the rest of the engine already uses for vkInt.
+
+    The sign is taken from the INTEGER, and the magnitude by dropping the minus
+    from its text rather than by Abs(): Abs(Low(Int64)) has no Int64 result. }
+  if V.Kind = vkInt then
+  begin
+    neg := V.Int < 0;
+    numText := IntToStr(V.Int);
+    if neg then Delete(numText, 1, 1);
+    if fracDigits > 0 then numText := numText + '.' + StringOfChar('0', fracDigits);
+  end
+  else
+  begin
+    neg := av < 0;
+    numText := FloatToStrF(Abs(av), ffFixed, 18, fracDigits, fs);
+  end;
   dotPos2 := Pos('.', numText);
   if dotPos2 = 0 then begin intPartStr := numText; fracPartStr := ''; end
   else begin intPartStr := Copy(numText, 1, dotPos2 - 1); fracPartStr := Copy(numText, dotPos2 + 1, MaxInt); end;
@@ -1259,7 +1283,7 @@ function FormatUsing(const Fmt: String; const Vals: array of TValue): String;
 var
   i, j, n, vi: Integer;
   spec, sv: String;
-  width: Integer;
+  width, svLen: Integer;
   fieldSeen: Boolean;
 
   function NextVal: TValue;
@@ -1304,7 +1328,14 @@ begin
       sv := ValFieldStr(NextVal());
       // Copy(), not sv[1]: a Char carries this unit's codepage into the
       // concatenation and destroys any byte >= 128. A one-character SLICE does not.
-      if Length(sv) > 0 then Result := Result + Copy(sv, 1, 1) else Result := Result + ' ';
+      { AND THE SLICE IS ONE CHARACTER, NOT ONE BYTE. Copy(sv,1,1) took the LEAD
+        BYTE of a two-byte character -- `print using "[!]"; "ecole"` with an
+        accented e wrote 5B C3 5D, a lone 0xC3 between the brackets. The comment
+        above was right that a Char must not be concatenated and wrong that a
+        one-byte Copy is therefore safe: docs/language-reference.md:435 defines
+        '!' as "its first character", and stdout gets raw bytes, so the pipe or
+        the file was left holding half a codepoint. }
+      if sv <> '' then Result := Result + Utf8Left(sv, 1) else Result := Result + ' ';
       fieldSeen := True;
       Inc(i);
     end
@@ -1317,8 +1348,17 @@ begin
       begin
         width := j - i + 1;
         sv := ValFieldStr(NextVal());
-        if Length(sv) >= width then sv := Copy(sv, 1, width)
-        else sv := sv + StringOfChar(' ', width - Length(sv));
+        { COLUMNS ARE CHARACTERS. Measuring and cutting this field with Length()
+          and Copy() did both halves wrong at once: a value longer than the field
+          was truncated MID-CODEPOINT (`\  \` with an accented "cafe" emitted
+          "caf" + a lone 0xC3), and a value shorter than it was padded by BYTES,
+          so a four-character accented cell got one pad space where its
+          four-character ASCII neighbour got two and every table with an accent
+          in it came out ragged. rtab$ -- the same job, one function away in
+          StrLib -- has always padded to CpLen; this now agrees with it. }
+        svLen := Utf8Len(sv);
+        if svLen >= width then sv := Utf8Left(sv, width)
+        else sv := sv + StringOfChar(' ', width - svLen);
         Result := Result + sv;
         fieldSeen := True;
         i := j + 1;

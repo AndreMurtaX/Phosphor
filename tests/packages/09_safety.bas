@@ -94,6 +94,50 @@ assert_true(file_exists(z2$), "the archive still closes")
 r2@ = zip_open@(z2$)
 assert_eq(zip_count(r2@), 1, "with the entry that was real")
 
+test_case("zip/a call that did no work does not answer 1")
+rem Three names answered 1 -- "I did it" -- for work they had not done, and the
+rem harm is that a program ACTS on that: a backup reported as taken, a file
+rem believed written. Nothing crashed and nothing was refused, which is why every
+rem suite here stayed green through it.
+rem
+rem zip_compress: FindFirst on a directory that is not there simply matches
+rem nothing, so the entry list came out empty and ZipAllFiles ran on it anyway.
+rem Worse than an empty answer: TZipper.SaveToStream returns at `CheckEntries=0`
+rem having written NOTHING, so the file left behind was 0 bytes -- which this
+rem package's own reader calls corrupt. A caller who mistyped a directory name
+rem was told the backup succeeded and handed an archive nothing can open.
+rem Cleared first, so each assert_false below proves this CALL did not create the
+rem file rather than that nothing ever had. bin/p9b_safe outlives a single run.
+dir_create("bin/p9b_safe/hollow")
+gone% = file_delete("bin/p9b_safe/ghost.zip")
+gone% = file_delete("bin/p9b_safe/hollow.zip")
+gone% = file_delete("bin/p9b_safe/nothing.zip")
+assert_eq(zip_compress("bin/p9b_safe/ghost.zip", "bin/p9b_safe/no_such_dir"), 0, "compressing a directory that is not there FAILS")
+assert_eq(zip_error(), 1, "and says so")
+assert_false(file_exists("bin/p9b_safe/ghost.zip"), "leaving no file that only looks like an archive")
+assert_eq(zip_compress("bin/p9b_safe/hollow.zip", "bin/p9b_safe/hollow"), 0, "and so does a directory with nothing in it")
+assert_false(file_exists("bin/p9b_safe/hollow.zip"), "paszlib cannot write a readable empty archive, so none is claimed")
+
+rem zip_close is where a writer's archive reaches disk, so it is where the caller
+rem learns whether it did. A writer holding no entries answered 1 and left the
+rem same 0-byte file.
+e2@ = zip_create@("bin/p9b_safe/nothing.zip")
+assert_eq(zip_close(e2@), 0, "closing a writer with nothing in it is not a success")
+assert_eq(zip_error(), 1, "and records why")
+assert_false(file_exists("bin/p9b_safe/nothing.zip"), "and writes no file at all")
+
+rem zip_extract hands the name to TUnZipper.UnZipFiles, which treats a name list
+rem as a FILTER -- and a filter matching nothing is not an error to it. So an
+rem entry the archive does not hold answered 1 with zip_error() clear, and the
+rem destination directory was not even created. The sibling zip_read$ gets the
+rem same absent name right, so nothing in the answer told the program.
+r3@ = zip_open@(z2$)
+assert_eq(zip_extract(r3@, "not_in_here.txt", "bin/p9b_safe/deep/dest"), 0, "extracting an entry the archive does not hold FAILS")
+assert_eq(zip_error(), 1, "and records it, exactly as zip_read$ already did")
+assert_eq(zip_extract(r3@, "keep.txt", "bin/p9b_safe/deep/dest"), 1, "while the entry that IS there still extracts")
+assert_true(file_exists("bin/p9b_safe/deep/dest/keep.txt"), "and lands where it was sent")
+zip_close(r3@)
+
 test_case("crt/crt_done answers the number its name and its reference promise")
 rem It returned a string, so `x = crt_done()` died with 'cannot store string into
 rem number variable' -- the documented shutdown call could not be captured.

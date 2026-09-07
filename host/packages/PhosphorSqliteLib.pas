@@ -143,6 +143,7 @@ type
     HandleId: Int64;
     OnRow: Boolean;      // the most recent step landed on a row
     Stepped: Boolean;    // step has been called at least once
+    Done: Boolean;       // a step has reported the end; only sqlite_reset re-opens it
     { The declared type of each column AS THE ROW ARRIVED. sqlite3_column_type
       reports the CURRENT representation, and reading a column as text converts it
       in place -- so sqlite_coltype answered BLOB before a sqlite_getstr$ and TEXT
@@ -190,6 +191,7 @@ begin
   StmtPtr := AStmt;
   OnRow := False;
   Stepped := False;
+  Done := False;
   HandleId := 0;
 end;
 
@@ -296,6 +298,28 @@ end;
 function DoStep(AStmt: TSqliteStmt): Integer;
 var rc, i: Integer;
 begin
+  { AN EXHAUSTED CURSOR STAYS EXHAUSTED, EVERY SUBSEQUENT TIME.
+
+    sqlite3_prepare_v2 gives sqlite3_step an automatic reset: stepping again after
+    SQLITE_DONE silently RE-RUNS the statement from the top. This asked sqlite3
+    and believed the answer, so step 4 of a two-row result handed back row 1 again
+    and sqlite_eof dropped from 1 back to 0. A drain loop still terminated, which
+    is why no suite saw it -- but a second pass over the same handle double-counted
+    every row, a defensive `if sqlite_step(c@) = 1` re-read a result already
+    consumed, and a loop that re-checks an exhausted cursor never ended at all.
+    sqlite_reset is the documented way to "re-run the statement from the top", and
+    it is now the only way; it clears this latch.
+
+    Latched on SQLITE_DONE ONLY. An rc that is neither ROW nor DONE -- SQLITE_BUSY
+    above all -- is a step the caller may legitimately retry, and latching that
+    would answer 0 forever for a cursor that was never finished: a new wrong
+    answer in place of the old one. }
+  if AStmt.Done then
+  begin
+    AStmt.OnRow := False;
+    SetLength(AStmt.RowTypes, 0);
+    Exit(0);
+  end;
   AStmt.Stepped := True;
   rc := sqlite3_step(AStmt.StmtPtr);
   SetLength(AStmt.RowTypes, 0);
@@ -315,7 +339,9 @@ begin
   begin
     AStmt.OnRow := False;
     Result := 0;
-    if rc <> SQLITE_DONE then
+    if rc = SQLITE_DONE then
+      AStmt.Done := True
+    else
     begin
       GLastErr := rc;
       SetErrFromDb(AStmt.Owner);
@@ -682,6 +708,7 @@ begin
   sqlite3_reset(s.StmtPtr);
   s.OnRow := False;
   s.Stepped := False;
+  s.Done := False;     // the one call that re-opens an exhausted cursor -- see DoStep
   Result := ValInt(1);
 end;
 

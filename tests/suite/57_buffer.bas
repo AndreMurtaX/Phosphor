@@ -357,6 +357,68 @@ after_h:
 on error goto 0
 assert_eq(caught%, 1, "an array handle is not a buffer")
 
+test_case("buffer/width 8 checks its range too, and the message names what was passed")
+rem buffer.md states the contract with no width exception: "anything outside it
+rem is a catchable error, never a silent truncation". Width 8 had no check at
+rem all. The cause was that the argument was read through a helper that
+rem SATURATES an out-of-range Double to High(Int64) before any test runs, so at
+rem widths 1/2/4 the right verdict came back naming a number the program never
+rem wrote, and at width 8 -- where the saturated value is a legal Int64 -- it was
+rem written and answered back as though it were the value passed.
+w8@ = buffer_new@(8)
+caught% = 0
+on error goto big8
+z = buffer_setint(w8@, 1, 8, 1e30)
+goto after_big8
+big8:
+caught% = 1
+resume next
+after_big8:
+on error goto 0
+assert_eq(caught%, 1, "1e30 does not fit eight bytes either")
+assert_eq(buffer_getint(w8@, 1, 8), 0, "and nothing was written")
+
+caught% = 0
+on error goto neg8
+z = buffer_setint(w8@, 1, 8, -1e30)
+goto after_neg8
+neg8:
+caught% = 1
+resume next
+after_neg8:
+on error goto 0
+assert_eq(caught%, 1, "nor does -1e30")
+
+rem The message must carry the value the CALLER passed. Before the fix every one
+rem of these said 9223372036854775807, the saturated value, at every width.
+msg$ = ""
+on error goto say4
+z = buffer_setint(w8@, 1, 4, 1e30)
+goto after_say4
+say4:
+msg$ = errmsg$()
+resume next
+after_say4:
+on error goto 0
+assert_true(instr(msg$, "1E30"), "the refusal names 1e30, not the clamp")
+assert_eq(instr(msg$, "9223372036854775807"), 0, "and never a number the program did not write")
+
+rem The other half of the same clamp: 2^63 .. 2^64-1 is INSIDE eight bytes under
+rem the unsigned reading the contract promises, and every value in that band was
+rem being flattened to 2^63-1. 1e19 is exactly representable as a Double and
+rem sits in it.
+assert_near(buffer_setint(w8@, 1, 8, 1e19), 1e19, 1, "1e19 fits eight bytes and is written")
+assert_eq(buffer_get(w8@, 8), 138, "its top byte is 0x8A, not 0x7F")
+assert_eq(buffer_getint(w8@, 1, 8), -8446744073709551616, "and read back signed it is the same pattern")
+
+rem the values that always worked, at the widths that always checked
+assert_eq(buffer_setint(w8@, 1, 8, 1234567890123), 1234567890123, "an ordinary value is untouched")
+assert_eq(buffer_getint(w8@, 1, 8), 1234567890123, "and reads back exactly")
+assert_eq(buffer_setint(w8@, 1, 1, 255), 255, "255 still fits one byte")
+assert_eq(buffer_setint(w8@, 1, 1, -128), -128, "and -128 still does")
+assert_eq(buffer_setint(w8@, 1, 4, 4294967295), 4294967295, "and 2^32-1 four")
+assert_eq(buffer_free(w8@), 1, "freed")
+
 test_case("buffer/free is lenient, because freeing is what a program does defensively")
 rem The shape strings_free settled on: everything else in the package is strict,
 rem because reading past the end is a bug worth stopping for. Freeing twice is not.

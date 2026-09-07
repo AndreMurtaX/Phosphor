@@ -535,9 +535,75 @@ begin Result := DoGetInt(A, False, False, 'buffer_getuint', E); end;
 function f_buffer_getuint_e(const A: array of TValue; out E: TPhosphorError): TValue;
 begin Result := DoGetInt(A, False, A[3].Bl, 'buffer_getuint', E); end;
 
+{ The accepted range for a width, in the four forms the check and its message
+  need. It spans BOTH readings of the width -- -2^(bits-1) for a signed value, up
+  to 2^bits - 1 for an unsigned one, so 200 and -56 both fit one byte. Written
+  out rather than shifted because width 8 breaks both shifts: `Int64(1) shl 63`
+  is already Low(Int64) so negating it is a no-op, and `shl 64` is undefined.
+  The two Doubles bound the same range as a HALF-OPEN interval [lo, hiExcl), and
+  all six numbers here are exactly representable. }
+procedure SetIntRange(AW: Int64; out ALo: Int64; out AHi: QWord;
+  out ALoD, AHiExclD: Double);
+begin
+  case AW of
+    1: begin ALo := -128;        AHi := 255;        ALoD := -128.0;        AHiExclD := 256.0; end;
+    2: begin ALo := -32768;      AHi := 65535;      ALoD := -32768.0;      AHiExclD := 65536.0; end;
+    4: begin ALo := -2147483648; AHi := 4294967295; ALoD := -2147483648.0; AHiExclD := 4294967296.0; end;
+  else
+    begin
+      ALo := Low(Int64);
+      AHi := High(QWord);
+      ALoD := -9223372036854775808.0;
+      AHiExclD := 18446744073709551616.0;
+    end;
+  end;
+end;
+
+function SetIntRefusal(const AWhat: String; AW, ALo: Int64; AHi: QWord;
+  out E: TPhosphorError): TValue;
+begin
+  E := MakeError(peRuntime, 'buffer_setint: ' + AWhat + ' does not fit ' +
+    IntToStr(AW) + ' byte(s) (' + IntToStr(ALo) + '..' + UIntToStr(AHi) + ')');
+  Result := ValInt(0);
+end;
+
+{ THE CLAMP CAME BEFORE THE CHECK, SO THE CHECK WAS CHECKING THE CLAMP.
+
+  ArgI64 SATURATES: a Double at or past 2^63 comes back as High(Int64), one at or
+  past -2^63 as Low(Int64) (it must -- an out-of-range Double->Int64 conversion
+  traps, and the argument comes from the program). Reading the value through it
+  first meant the range test below never saw what the program actually passed:
+
+      buffer_setint(b@, 1, 4, 1e30)
+        -> "buffer_setint: 9223372036854775807 does not fit 4 byte(s)"
+           -- the right verdict naming a number the program never wrote
+
+      buffer_setint(b@, 1, 8, 1e30)   -> 9223372036854775807, WRITTEN, no error
+      buffer_getint(b@, 1, 8)         -> 9223372036854775807
+
+  and the second one is the defect: at width 8 the test was skipped entirely
+  (`if w < 8`), so the saturated value went into the buffer and was answered back
+  as though it were what the caller passed. docs/libraries/buffer.md states the
+  contract with no width exception -- "anything outside it is a catchable error,
+  never a silent truncation".
+
+  The same clamp also swallowed the top half of width 8's OWN range: every value
+  in 2^63 .. 2^64-1 is inside the documented range (both readings of eight bytes)
+  and every one of them was saturated to 2^63-1. buffer_setint(b@, 1, 8, 1e19)
+  wrote 0x7FFFFFFFFFFFFFFF and said 9223372036854775807.
+
+  So the value is now measured in the domain it ARRIVED in. An int% is already an
+  exact Int64 and cannot have been clamped. A Double is rounded the way ArgI64
+  rounds -- but at and above 2^52 a Double is already a whole number, so the
+  rounding step that needs an Int64 is simply not taken, and the comparison runs
+  against exactly representable bounds. Only then is a 64-bit pattern built. }
 function DoSetInt(const A: array of TValue; ABig: Boolean;
   out E: TPhosphorError): TValue;
-var b: TPhosphorBytes; p, w, v, lo, hi: Int64;
+var
+  b: TPhosphorBytes;
+  p, w, iv, lo: Int64;
+  hi, q: QWord;
+  d, rd, loD, hiExclD: Double;
 begin
   Result := ValInt(0);
   if not GetBuf('buffer_setint', A[0], b, E) then Exit;
@@ -545,24 +611,50 @@ begin
   w := ArgI64(A[2]);
   if not CheckWidth('buffer_setint', w, E) then Exit;
   if not CheckRange('buffer_setint', Length(b.Data), p, w, E) then Exit;
-  v := ArgI64(A[3]);
-  if w < 8 then
+  SetIntRange(w, lo, hi, loD, hiExclD);
+
+  if A[3].Kind = vkInt then
   begin
-    // The accepted range spans both readings of the width: -2^(bits-1) for a
-    // signed value, up to 2^bits - 1 for an unsigned one, so both 200 and -56
-    // fit in one byte. Anything outside is a CATCHABLE ERROR, never a silent
-    // truncation -- decisions.md, "integer overflow is a catchable error".
-    lo := -(Int64(1) shl (w * 8 - 1));
-    hi := (Int64(1) shl (w * 8)) - 1;
-    if (v < lo) or (v > hi) then
+    // An int% IS an Int64, exactly; at width 8 every one of them is in range.
+    iv := A[3].Int;
+    if (iv < lo) or ((w < 8) and (iv > Int64(hi))) then
+      Exit(SetIntRefusal(IntToStr(iv), w, lo, hi, E));
+    q := QWord(iv);
+    Result := ValInt(iv);
+  end
+  else
+  begin
+    d := AsDouble(A[3]);
+    // The engine's finiteness invariant says this cannot happen (FiniteD, in
+    // PhosphorValue). It is asked anyway because the alternative to asking is a
+    // comparison against a NaN, which SIGNALS with the trap unmasked.
+    if not IsFiniteD(d) then
+      Exit(SetIntRefusal(ValToStr(A[3]), w, lo, hi, E));
+    if Abs(d) >= 4503599627370496.0 then rd := d   // 2^52: already a whole number
+    else rd := Round(d);                           // in Int64's range, so exact
+    if (rd < loD) or (rd >= hiExclD) then
     begin
-      E := MakeError(peRuntime, 'buffer_setint: ' + IntToStr(v) +
-        ' does not fit ' + IntToStr(w) + ' byte(s) (' + IntToStr(lo) + '..' + IntToStr(hi) + ')');
-      Exit;
+      if (rd >= -9223372036854775808.0) and (rd < 9223372036854775808.0) then
+        Exit(SetIntRefusal(IntToStr(Round(rd)), w, lo, hi, E))
+      else
+        Exit(SetIntRefusal(ValToStr(A[3]), w, lo, hi, E));
+    end;
+    if rd >= 9223372036854775808.0 then
+    begin
+      // 2^63 .. 2^64-1: inside eight bytes, outside Int64. rd - 2^64 lands in
+      // Int64 and the subtraction is exact, and QWord() of that negative value
+      // is the very pattern the unsigned reading wants.
+      q := QWord(Round(rd - 18446744073709551616.0));
+      Result := ValDouble(rd);                     // the value written
+    end
+    else
+    begin
+      iv := Round(rd);
+      q := QWord(iv);
+      Result := ValInt(iv);                        // the value written
     end;
   end;
-  WriteRaw(b, Integer(p), Integer(w), ABig, QWord(v));
-  Result := ValInt(v);                           // the value written
+  WriteRaw(b, Integer(p), Integer(w), ABig, q);
 end;
 
 function f_buffer_setint(const A: array of TValue; out E: TPhosphorError): TValue;

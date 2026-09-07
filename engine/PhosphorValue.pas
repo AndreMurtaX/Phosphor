@@ -34,7 +34,7 @@ unit PhosphorValue;
 interface
 
 uses
-  SysUtils, Math, PhosphorErrors;
+  SysUtils, Math, Types, PhosphorErrors;
 
 type
   { The engine's one output seam. Declared here (a low-level unit) so the VM and
@@ -128,6 +128,42 @@ function IsNumeric(const V: TValue): Boolean; inline;      // vkInt or vkDouble
 function AsDouble(const V: TValue): Double;                // widen int -> double
 function KindName(K: TValueKind): String;
 function ValToStr(const V: TValue): String;                // locale-independent
+
+// The UTF-8 codepoint layer --------------------------------------------------
+{ ONE PLACE THAT KNOWS WHERE A CHARACTER STARTS, AND WHY IT LIVES HERE.
+
+  docs/language-reference.md:372 -- "Strings are 1-based and Unicode-aware
+  (character operations count codepoints)" -- is a promise made by the whole
+  engine, not by one library. Three units have to keep it:
+
+    PhosphorStrLib   len/left$/right$/mid$/reverse$/insert$/delete$/...
+    PhosphorValue    the `string - n` operator, three lines below
+    PhosphorVM       PRINT USING's '!' and '\...\' string fields
+
+  Each of them used to measure and cut with Length() and Copy(), which are BYTE
+  operations, and each produced a string that was not valid UTF-8: `"cafe"-1`
+  with an accented e dropped one byte of a two-byte character and left the lead
+  byte behind, so len() did not fall at all; PRINT USING's '!' wrote half a
+  character to stdout. Only StrLib had a codepoint family, and it was private.
+
+  So the family moves to the unit all three already depend on and nothing is
+  duplicated. This is the ONLY place in the engine that decides where a
+  character begins; a fourth caller reuses it rather than writing a fourth way
+  to walk UTF-8. }
+
+{ Byte index (1-based) of the start of each codepoint, plus a sentinel at
+  Length(S)+1, so codepoint k spans Result[k] .. Result[k+1]-1. Every byte of S
+  belongs to exactly one span, which is the invariant the slicers rely on:
+  Utf8Left(S,k) + Utf8Right(S, Utf8Len(S)-k) is S for every k. }
+function Utf8Starts(const S: String): TInt64DynArray;
+function Utf8Len(const S: String): Integer;
+function Utf8Left(const S: String; ACount: Integer): String;
+function Utf8Right(const S: String; ACount: Integer): String;
+{ The UTF-8 encoding of one codepoint, CLAMPED TO THE ENCODABLE RANGE at both
+  ends. Used by chr$, string$ and the pad family, so a character above U+007F is
+  emitted as its real multi-byte sequence and no argument can make it emit a
+  byte that UTF-8 does not have. }
+function Utf8Char(ACode: Integer): String;
 
 // Finiteness: the invariant, its tests, and its gate --------------------------
 { THE TESTS ARE BIT TESTS, AND THAT IS THE WHOLE POINT.
@@ -602,6 +638,108 @@ begin
   end;
 end;
 
+// --- the UTF-8 codepoint layer ----------------------------------------------
+{ BYTE 1 ALWAYS BEGINS THE FIRST CHARACTER, and that single line is the whole
+  fix for a family of wrong answers.
+
+  This table used to record a start only for a byte that is NOT a continuation
+  byte ($80..$BF). An INTERIOR continuation byte therefore attaches to the
+  character in front of it, which is right -- but a string that BEGINS with one
+  has no character in front, so its leading bytes fell outside every span. The
+  invariant "every byte belongs to exactly one codepoint" quietly failed, and
+  with it everything built on this table:
+
+    s$ = bytemid$("cafe", 5, 1) + "a"   ' a lone 0xA9, then 'a'
+    left$(s$, 0)      -> 0xA9           ' left$(x,0) must be "" for EVERY x
+    insert$(s$,"Z",1) -> A9 5A A9 61    ' 2 bytes in, 4 out: 0xA9 INVENTED
+    reverse$(s$)      -> 61             ' 0xA9 silently dropped
+
+  because Utf8Left(S,0) sliced up to Result[0], which was 2 rather than 1, while
+  Utf8Right returned the whole string -- so the orphan was emitted twice by one
+  and never by the other.
+
+  A string like that is malformed UTF-8, and the language HANDS IT TO YOU: it is
+  what bytemid$ or buffer_slice$ on a chunk boundary returns, and what
+  docs/libraries/regex.md says regex_find$(".", ...) returns for one byte of a
+  multi-byte character. The slicers must stay total on it.
+
+  THE MIRROR. A valid UTF-8 string never starts with a continuation byte, so for
+  every such string byte 1 was already recorded and this produces the identical
+  table it always did. The change is reachable ONLY from a string whose first
+  byte is $80..$BF. }
+function Utf8Starts(const S: String): TInt64DynArray;
+var i, n: Integer;
+begin
+  Result := nil;
+  SetLength(Result, Length(S) + 2);
+  n := 0;
+  if Length(S) > 0 then
+  begin
+    Result[0] := 1;     // whatever byte 1 is, it starts the first character
+    n := 1;
+  end;
+  for i := 2 to Length(S) do
+    if (Ord(S[i]) < $80) or (Ord(S[i]) >= $C0) then   // not a continuation byte
+    begin
+      Result[n] := i;
+      Inc(n);
+    end;
+  Result[n] := Length(S) + 1;   // sentinel
+  SetLength(Result, n + 1);
+end;
+
+function Utf8Len(const S: String): Integer;
+begin
+  Result := Length(Utf8Starts(S)) - 1;
+end;
+
+function Utf8Left(const S: String; ACount: Integer): String;
+var st: TInt64DynArray; n: Integer;
+begin
+  st := Utf8Starts(S);
+  n := Length(st) - 1;
+  if ACount < 0 then ACount := 0;
+  if ACount >= n then Exit(S);
+  Result := Copy(S, 1, st[ACount] - 1);
+end;
+
+function Utf8Right(const S: String; ACount: Integer): String;
+var st: TInt64DynArray; n: Integer;
+begin
+  st := Utf8Starts(S);
+  n := Length(st) - 1;
+  if ACount < 0 then ACount := 0;
+  if ACount >= n then Exit(S);
+  Result := Copy(S, st[n - ACount], MaxInt);
+end;
+
+{ THE TOP GUARD IS THE MIRROR OF THE BOTTOM ONE, and it was missing.
+
+  `Chr($F0 or (c shr 18))` overflows a byte once c reaches 2^21, and Chr takes
+  the low 8 bits of the result: chr$(2147483647) emitted FF BF BF BF. 0xFF
+  CANNOT OCCUR IN UTF-8 at all, at any position, so that is not a wrong
+  character -- it is a string no reader can decode, produced with no error and
+  no round trip (asc() answered 2097151 for the 2147483647 that went in).
+
+  U+10FFFF is the last encodable codepoint, so the range clamps there exactly as
+  it already clamped at 0 below. string$, lfill$, rfill$ and center$ all build
+  runs of padding through this, so an unclamped code produced whole runs of
+  impossible bytes. }
+function Utf8Char(ACode: Integer): String;
+begin
+  if ACode < 0 then ACode := 0;
+  if ACode > $10FFFF then ACode := $10FFFF;
+  if ACode < $80 then Result := Chr(ACode and $FF)
+  else if ACode < $800 then
+    Result := Chr($C0 or (ACode shr 6)) + Chr($80 or (ACode and $3F))
+  else if ACode < $10000 then
+    Result := Chr($E0 or (ACode shr 12)) + Chr($80 or ((ACode shr 6) and $3F)) +
+              Chr($80 or (ACode and $3F))
+  else
+    Result := Chr($F0 or (ACode shr 18)) + Chr($80 or ((ACode shr 12) and $3F)) +
+              Chr($80 or ((ACode shr 6) and $3F)) + Chr($80 or (ACode and $3F));
+end;
+
 { THE GUARD THAT WAS NOT A GUARD.
 
   The comment here used to say NaN answers False "because their comparisons are
@@ -778,7 +916,7 @@ end;
 function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
-  k: Integer;
+  k, cn: Integer;
   d: Double;
 begin
   try
@@ -795,11 +933,20 @@ begin
       if IsError(Result) then Exit;
       // Compare BEFORE narrowing. Round(1e30) raises EInvalidOp, and "remove more
       // characters than the string has" is a clamp, not an error.
+      { AND THE COUNT IS IN CHARACTERS, which is what the line above has always
+        claimed and what the operator did not do. Length() and Copy() are BYTE
+        operations: `"cafe" - 1` with an accented e cut one byte off a two-byte
+        character, so the result ended in a lone $C3 -- invalid UTF-8, len()
+        unchanged at 4, and `t$ = "caf"` false while left$(s$,3) = "caf" was
+        true. Two characters off the same string gave "caf", not "ca".
+        Counting codepoints makes `s$ - n` agree with left$(s$, len(s$) - n),
+        which is the only thing it can honestly mean. }
       d := AsDouble(B);
-      if d >= Length(A.Str) then k := 0
-      else if d <= 0 then k := Length(A.Str)
-      else k := Length(A.Str) - Round(d);
-      R := ValStr(Copy(A.Str, 1, k));
+      cn := Utf8Len(A.Str);
+      if d >= cn then k := 0
+      else if d <= 0 then k := cn
+      else k := cn - Round(d);
+      R := ValStr(Utf8Left(A.Str, k));
       Exit(NoError());
     end;
     Result := NumericPair(A, B, '-');

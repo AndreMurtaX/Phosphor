@@ -449,23 +449,45 @@ begin
     Delete(Result, 1, 3);
 end;
 
-{ Compile a .bas source to a .pbc bytecode file. }
+{ Compile a .bas source to a .pbc bytecode file.
+
+  BOTH file operations answer for themselves. `compile` promises exactly one
+  artifact, and the two ways it can fail to produce one -- the source will not
+  open, the output will not -- used to raise an exception that escaped the verb
+  altogether and ended the process with exit 0 and not one byte on either
+  stream. (Why silence and why zero: see the net around the program body.) A
+  build script that checked the exit code was told the compile had succeeded
+  when nothing whatever had been written, and the next step then packed or ran a
+  stale .pbc. Exit 2 and a sentence naming the path -- the same answer `run
+  --out` has always given the very same failure. }
 function CompileFile(const AInPath, AOutPath: String; ACheck: Boolean): Integer;
 var
   comp: TPhosphorCompiler;
   prog: TProgram;
   fs: TFileStream;
   missing: Integer;
-  report: String;
+  report, source: String;
 begin
   if not FileExists(AInPath) then
   begin
     Writeln(StdErr, 'phosphor: file not found: ', AInPath);
     Exit(2);
   end;
+  { FileExists answered "it is there"; whether it will OPEN is a different
+    question -- another process holding it, a permission, a device that went
+    away between the two calls. }
+  try
+    source := ReadSource(AInPath);
+  except
+    on Ex: Exception do
+    begin
+      Writeln(StdErr, 'phosphor: cannot read ', AInPath, ': ', Ex.Message);
+      Exit(2);
+    end;
+  end;
   comp := TPhosphorCompiler.Create();
   try
-    if not comp.Compile(ReadSource(AInPath), prog) then
+    if not comp.Compile(source, prog) then
     begin
       Writeln(StdErr, Format('phosphor: %s:%d: %s', [AInPath, comp.ErrorLine, comp.ErrorMessage]));
       Exit(1);
@@ -474,8 +496,19 @@ begin
     comp.Free;
   end;
   try
-    fs := TFileStream.Create(AOutPath, fmCreate);
-    try WriteProgram(fs, prog); finally fs.Free; end;
+    { ONLY the write is inside this guard. Widening it to cover the --check pass
+      below would report an unrelated failure as "cannot write to", which is one
+      wrong answer traded for another. }
+    try
+      fs := TFileStream.Create(AOutPath, fmCreate);
+      try WriteProgram(fs, prog); finally fs.Free; end;
+    except
+      on Ex: Exception do
+      begin
+        Writeln(StdErr, 'phosphor: cannot write to ', AOutPath, ': ', Ex.Message);
+        Exit(2);          // the outer finally still frees prog
+      end;
+    end;
     // A WARNING, never a failure. A name this host does not have is not
     // necessarily a mistake: the file may be meant for a host that does have it,
     // which is the whole reason names resolve late. So the .pbc is written and
@@ -523,6 +556,8 @@ var
   eng: TPhosphorEngine;
   fs: TFileStream;
   line: Integer;
+  isPbc: Boolean;
+  source: String;
 begin
   if not FileExists(APath) then
   begin
@@ -549,14 +584,31 @@ begin
     eng.OnOutput := @host.Output;
     eng.OnInput := @host.ReadLine;
     RegisterAllPackages(eng);
-    if IsBytecode(APath) then
+    { OPENING the input is guarded; RUNNING it is deliberately not. An engine
+      crash reported as "cannot read" would be the same wrong answer wearing a
+      different message, so the two are separated: everything that touches the
+      filesystem happens here, and the interpreter runs below, where the net
+      around the program body is the one that answers for it. }
+    try
+      isPbc := IsBytecode(APath);
+      if isPbc then
+        // a precompiled .pbc: run it without the lexer/compiler
+        fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone)
+      else
+        source := ReadSource(APath);
+    except
+      on Ex: Exception do
+      begin
+        Writeln(StdErr, 'phosphor: cannot read ', APath, ': ', Ex.Message);
+        Exit(2);
+      end;
+    end;
+    if isPbc then
     begin
-      // a precompiled .pbc: run it without the lexer/compiler
-      fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
       try line := eng.RunBytecode(fs); finally fs.Free; end;
     end
     else
-      line := eng.Run(ReadSource(APath));
+      line := eng.Run(source);
     if line <> 0 then
     begin
       Writeln(StdErr, Format('phosphor: %s:%d: %s', [APath, line, eng.ErrorMessage]));
@@ -586,6 +638,12 @@ const
   PACK_TRAILER_V2 = 8 + 8 + 4 + 4 + 8;
   { Flags in a v2 trailer. }
   PACK_FLAG_NOCONSOLE = 1;         // let go of the console this process owns
+  { Every flag bit this build knows how to honour. A trailer carrying a bit
+    outside this mask is asking for behaviour this stub cannot deliver, and
+    running the program anyway while quietly ignoring what the file asked for is
+    the same silence the reader below exists to end. The mask is stated once,
+    here, so adding a flag cannot leave the check behind. }
+  PACK_FLAGS_KNOWN: LongWord = PACK_FLAG_NOCONSOLE;
 
 function SelfExePath: String;
 {$IFDEF WINDOWS}
@@ -629,6 +687,7 @@ var
   off: Int64;
   pbcErr, missingReport: String;
   missing: Integer;
+  isPbc: Boolean;
 begin
   if not FileExists(AInPbc) then begin Writeln(StdErr, 'phosphor: file not found: ', AInPbc); Exit(2); end;
 
@@ -636,7 +695,16 @@ begin
   // into a .pbc and `pack` turns a .pbc into an executable. Compiling inside pack
   // made a command whose work is copying bytes able to fail with a syntax error,
   // and hid a step that is worth doing once and packing many times.
-  if not IsBytecode(AInPbc) then
+  try
+    isPbc := IsBytecode(AInPbc);
+  except
+    on Ex: Exception do
+    begin
+      Writeln(StdErr, 'phosphor: cannot read ', AInPbc, ': ', Ex.Message);
+      Exit(2);
+    end;
+  end;
+  if not isPbc then
   begin
     Writeln(StdErr, 'phosphor: pack takes compiled bytecode, and this is not a .pbc: ', AInPbc);
     Writeln(StdErr, '  compile it first, then pack what comes out:');
@@ -647,8 +715,16 @@ begin
 
   payload := TBytesStream.Create();
   try
-    src := TFileStream.Create(AInPbc, fmOpenRead or fmShareDenyNone);
-    try payload.CopyFrom(src, 0); finally src.Free; end;
+    try
+      src := TFileStream.Create(AInPbc, fmOpenRead or fmShareDenyNone);
+      try payload.CopyFrom(src, 0); finally src.Free; end;
+    except
+      on Ex: Exception do
+      begin
+        Writeln(StdErr, 'phosphor: cannot read ', AInPbc, ': ', Ex.Message);
+        Exit(2);          // the outer finally still frees payload
+      end;
+    end;
     // Read it back before embedding it. A .pbc from a different build is refused
     // by the loader at run time; refusing it HERE puts the failure in front of
     // the person who can fix it, instead of whoever is handed the executable.
@@ -677,19 +753,42 @@ begin
       Exit(1);
     end;
     payload.Position := 0;
-    src := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
-    dst := TFileStream.Create(AOutExe, fmCreate);
+    { BOTH streams are opened INSIDE the try/finally now. They used to be created
+      on the two lines above it, so a failure to create the output leaked the
+      stub's handle -- and there was no `except` anywhere on the path, so the
+      failure itself was never reported at all: exit 0, nothing printed, no
+      executable written. }
+    src := nil;
+    dst := nil;
     try
-      dst.CopyFrom(src, 0);                 // the whole stub binary
-      off := dst.Position;                  // the payload starts here
-      if payload.Size > 0 then dst.WriteBuffer(payload.Memory^, payload.Size);
-      WLE64(dst, off);
-      WLE64(dst, payload.Size);
-      WLE32(dst, PayloadChecksum(payload.Memory^, payload.Size));
-      WLE32(dst, AFlags);
-      dst.WriteBuffer(PACK_MAGIC_V2[1], 8);
+      try
+        src := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
+      except
+        on Ex: Exception do
+        begin
+          Writeln(StdErr, 'phosphor: cannot read the stub ', SelfExePath(), ': ', Ex.Message);
+          Exit(2);
+        end;
+      end;
+      try
+        dst := TFileStream.Create(AOutExe, fmCreate);
+        dst.CopyFrom(src, 0);                 // the whole stub binary
+        off := dst.Position;                  // the payload starts here
+        if payload.Size > 0 then dst.WriteBuffer(payload.Memory^, payload.Size);
+        WLE64(dst, off);
+        WLE64(dst, payload.Size);
+        WLE32(dst, PayloadChecksum(payload.Memory^, payload.Size));
+        WLE32(dst, AFlags);
+        dst.WriteBuffer(PACK_MAGIC_V2[1], 8);
+      except
+        on Ex: Exception do
+        begin
+          Writeln(StdErr, 'phosphor: cannot write to ', AOutExe, ': ', Ex.Message);
+          Exit(2);
+        end;
+      end;
     finally
-      src.Free; dst.Free;
+      src.Free; dst.Free;                   // nil-safe, and now reached either way
     end;
   finally
     payload.Free;
@@ -698,8 +797,26 @@ begin
   Result := 0;
 end;
 
-{ True if THIS binary carries an embedded .pbc payload (a valid trailer). }
-function TryReadEmbeddedPayload(out APayload: TBytesStream; out AFlags: LongWord): Boolean;
+type
+  { What the tail of THIS executable says about itself. Three answers, where
+    there used to be two -- and collapsing the last two into one bare `Exit` is
+    what turned a damaged application into an interactive BASIC prompt.
+
+      esNone     no trailer magic at all. A bare stub: be the CLI. This is the
+                 one case where falling through is right, and it stays.
+      esOk       a trailer, and a payload behind it that verifies. Run it.
+      esCorrupt  the magic IS there. The file has positively identified itself
+                 as a packed application -- that is how the offset, size and
+                 checksum were located in the first place -- and what they
+                 describe will not verify. There is nothing to run, and nothing
+                 to fall back TO: the CLI with no arguments is a prompt that
+                 executes whatever is typed and never ends on its own. }
+  TEmbeddedState = (esNone, esOk, esCorrupt);
+
+{ What THIS binary carries in its tail. AWhy is the sentence to print when the
+  answer is esCorrupt. }
+function TryReadEmbeddedPayload(out APayload: TBytesStream; out AFlags: LongWord;
+  out AWhy: String): TEmbeddedState;
 var
   fs: TFileStream;
   total, off, siz: Int64;
@@ -707,13 +824,14 @@ var
   trailer: Int64;
   magic: array[0..7] of Char;
 begin
-  Result := False;
+  Result := esNone;
   APayload := nil;
   AFlags := 0;
+  AWhy := '';
   try
     fs := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
   except
-    Exit;   // cannot read our own file -> just be the CLI
+    Exit;   // nothing has claimed to be packed yet -> just be the CLI
   end;
   try
     total := fs.Size;
@@ -725,19 +843,45 @@ begin
     if magic = PACK_MAGIC_V2 then trailer := PACK_TRAILER_V2
     else if magic = PACK_MAGIC_V1 then trailer := PACK_TRAILER_V1
     else Exit;                                                 // a bare stub -> CLI
-    if total < trailer then Exit;
+
+    { PAST THIS LINE THE FILE HAS SAID WHAT IT IS, so every remaining failure is
+      a damaged packed application and never a bare stub. Not one of them may
+      return esNone. decisions.md asks for a version that is "checked and
+      refused out loud"; a payload behind a magic that WAS recognised was the
+      one case that went unrefused. }
+    if total < trailer then
+    begin
+      AWhy := 'the file is shorter than the trailer it claims to carry';
+      Exit(esCorrupt);
+    end;
     fs.Position := total - trailer;
     off := RLE64(fs); siz := RLE64(fs); ck := RLE32(fs);
     if trailer = PACK_TRAILER_V2 then AFlags := RLE32(fs);
-    if (off < 0) or (siz <= 0) or (off + siz > total - trailer) then Exit;
+    if (off < 0) or (siz <= 0) or (off + siz > total - trailer) then
+    begin
+      AWhy := Format('the trailer places a %d-byte program at offset %d, which does not fit a %d-byte file',
+                     [siz, off, total]);
+      Exit(esCorrupt);
+    end;
+    if (AFlags and not PACK_FLAGS_KNOWN) <> 0 then
+    begin
+      AWhy := 'the trailer asks for options this build does not know ($' +
+              IntToHex(AFlags, 8) + ')';
+      Exit(esCorrupt);
+    end;
     APayload := TBytesStream.Create();
     APayload.Size := siz;
     fs.Position := off;
     fs.ReadBuffer(APayload.Memory^, siz);
     if PayloadChecksum(APayload.Memory^, siz) <> ck then
-    begin APayload.Free; APayload := nil; Exit; end;
+    begin
+      APayload.Free;
+      APayload := nil;
+      AWhy := 'the embedded program does not match the checksum stored with it';
+      Exit(esCorrupt);
+    end;
     APayload.Position := 0;
-    Result := True;
+    Result := esOk;
   finally
     fs.Free;
   end;
@@ -896,7 +1040,23 @@ end;
   and a compile error (2), so a script can tell an interpreter bug from a program
   that was wrong. The report itself is wrapped: after --no-console the standard
   handles may be closed, and a handler that raises while reporting a raise leaves
-  the user with nothing at all. }
+  the user with nothing at all.
+
+  AND HANGING IT ON Application.OnException WAS NOT ENOUGH -- it is reached only
+  through Application.HandleException, and that routine, twenty lines before it
+  ever consults OnException, calls GetCapture: that is `WidgetSet.GetCapture`
+  (lcl/include/winapi.inc:329), and WidgetSet is nil until CreateWidgetset has
+  run. So on any path with no widgetset the guard itself faults, the LCL takes
+  its re-entry break -- `HaltingProgram := true; Halt;` in
+  TApplication.HandleException -- and a bare Halt exits with ExitCode, which is
+  ZERO. `compile` and `pack` never create a widgetset; on a headless Linux box
+  GuiPossible is False and NOTHING does. The guard covered exactly the paths
+  that needed it least, and every other failure was a silent success.
+
+  So Report is also called directly, from a try/except wrapped round the whole
+  program body, where the exception never reaches the LCL at all. Both entries
+  print the same sentence and Halt(3); the OnException one stays because a GUI
+  program's exceptions arrive through the message loop instead. }
 type
   TCrashGuard = class
     class procedure Report(Sender: TObject; E: Exception);
@@ -929,6 +1089,10 @@ begin
   end;
 end;
 
+{ The whole command line, in a routine rather than in the program body, so the
+  body can be nothing but the crash net wrapped round a single call. Every path
+  out of here is a Halt; it does not return. }
+procedure RunCommandLine;
 var
   i, code: Integer;
   arg, filePath, outPath, packIn, packOut: String;
@@ -936,14 +1100,43 @@ var
   packArgs: Integer;
   payload: TBytesStream;
   embFlags: LongWord;
+  embState: TEmbeddedState;
+  embWhy: String;
 begin
-  // FIRST, before anything can raise: take the LCL's modal crash dialog out of
-  // the picture. See TCrashGuard above -- linking Forms is what puts it there,
-  // and this binary links Forms whether or not a window is ever opened.
-  Application.OnException := @TCrashGuard.Report;
-
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
-  if TryReadEmbeddedPayload(payload, embFlags) then
+  embState := TryReadEmbeddedPayload(payload, embFlags, embWhy);
+
+  if embState = esCorrupt then
+  begin
+    { THE MAGIC WAS THERE, so this file has said out loud that it is a packed
+      application -- and what it carries will not verify. Falling through to the
+      CLI used to mean that a corrupted or tampered MyApp.exe, double-clicked by
+      an end user or started by a service, opened an interactive BASIC prompt
+      that runs whatever is typed into it and never ends by itself, while any
+      script that shipped it saw exit 0.
+
+      REFUSING means three things, and it has to mean all three. Say what
+      happened. Do not wait -- no prompt, and never the LCL's modal dialog,
+      because there may be no console and nobody watching. And leave an exit
+      code a caller can act on: 2, which is what this host already answers when
+      it will not run because what it was handed is wrong (a missing file, an
+      output it cannot write, a sandbox root that will not bind). Not 1: that
+      means the BASIC program failed, and this one never started.
+
+      The report is wrapped for the same reason TCrashGuard's is -- a packed
+      --no-console application may have no standard handles left. }
+    try
+      Writeln(StdErr, 'phosphor: this application''s embedded program is corrupt: ', embWhy);
+      Writeln(StdErr, '  ', SelfExePath());
+      Writeln(StdErr, '  refusing to run. Reinstall it, or repack it from the .pbc it was built from.');
+      Flush(StdErr);
+    except
+      // nowhere left to say it; the exit code still carries the news
+    end;
+    Halt(2);
+  end;
+
+  if embState = esOk then
   begin
     // Asked for BEFORE the program runs, so a windowed application launched from
     // a file manager never flashes a console. Anything the program prints then
@@ -954,6 +1147,8 @@ begin
     payload.Free;
     Halt(code);
   end;
+  { esNone falls through on purpose: no magic, so this is a bare stub and the
+    CLI below is the whole point of the binary. }
 
   // `phosphor compile [--check] <in.bas> <out.pbc>` -- compile to bytecode and stop.
   if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
@@ -1120,4 +1315,26 @@ begin
     Halt(RunFile(filePath, outPath))
   else
     Halt(Repl());
+end;
+
+begin
+  // FIRST, before anything can raise: take the LCL's modal crash dialog out of
+  // the picture. See TCrashGuard above -- linking Forms is what puts it there,
+  // and this binary links Forms whether or not a window is ever opened. This
+  // entry catches what arrives through the message loop of a GUI program.
+  Application.OnException := @TCrashGuard.Report;
+  try
+    RunCommandLine();
+  except
+    { AND THIS ENTRY CATCHES EVERYTHING ELSE, which is most of it. The one above
+      is reached through Application.HandleException, which dereferences a nil
+      WidgetSet on any path that never created one -- so `compile` and `pack`,
+      and on a headless machine the entire program, used to die here with no
+      message on either stream and an exit code of 0. A build script was told
+      the artifact had been produced. See TCrashGuard for the whole mechanism.
+
+      Catching the exception HERE means it never reaches the LCL: same sentence,
+      same exit code 3, on every path and on every platform. }
+    on E: Exception do TCrashGuard.Report(nil, E);
+  end;
 end.

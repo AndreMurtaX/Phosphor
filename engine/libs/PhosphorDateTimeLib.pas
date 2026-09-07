@@ -342,16 +342,96 @@ begin
 end;
 
 // --- distances --------------------------------------------------------------
+{ MEASURED ON A CONTINUUM, because a TDateTime is not one.
+
+  This is the third appearance of the defect class this file already documents
+  twice -- at dayoftheyear and at issameday. A TDateTime before 1899-12-30 is
+  negative and FPC stores it SIGN-AND-MAGNITUDE: the date is Trunc(D) and the
+  time of day is Abs(Frac(D)), so noon on 1850-06-15 is -18095.5 where midnight
+  that day is -18095. The time of day moves the number DOWN. Subtract two such
+  numbers and the answer is wrong by twice the time of day:
+
+      a = strtodatetime("1850-06-15 12:00:00")
+      b = strtodatetime("1850-06-16 00:00:00")
+      inchour(a, 12) = b         -> TRUE, bit for bit: the gap is twelve hours
+      hoursbetween(a, b)         -> 36        (this library, before)
+      dayspan(a, b)              -> 1.5
+
+  and for a pair that STRADDLES the epoch it was also asymmetric, which
+  docs/libraries/date-time.md says cannot happen ("Both are non-negative: the
+  order of the arguments does not matter"): hoursbetween(q, p) answered 12 where
+  hoursbetween(p, q) answered 24 for the same two moments.
+
+  The cause is in the RTL and it is not fixable pair by pair. DateUtils.
+  DateTimeDiff (fpc/3.2.2/packages/rtl-objpas/src/inc/dateutil.inc:1354) is a raw
+  `ANow - AThen` plus a blanket half-day fudge applied only when the pair
+  straddles the epoch -- and applied not at all when both dates are negative. The
+  fudge happens to be exactly right when the time of day is 06:00 and wrong
+  everywhere else. (DaysBetween alone escapes the asymmetry half, because it
+  normalises the argument order first -- dateutil.inc:1407, marked "bug 37361".
+  The other fifteen were never given that patch.)
+
+  So the fix has the shape the two earlier ones have: do not subtract the
+  sign-and-magnitude numbers. Linear maps a TDateTime onto a scale where the time
+  of day always moves the number UP -- Int(D) + Abs(Frac(D)) -- which is the same
+  decomposition DecodeDate and DecodeTime use, so it agrees with yearof, dayof,
+  datetimetostr$ and inchour by construction. Both halves are exact: for a
+  TDateTime (|D| < 2^22) the sum needs 53 bits at most, and for D >= 0 it is
+  bit-for-bit D, which is why every distance between two dates at or after the
+  epoch answers exactly what it answered before.
+
+  Int and Frac, not Trunc: both guard at 2^52 and return the argument above it
+  (rtl/x86_64/math.inc:361 and :392), so neither can be handed a Double too big
+  for the cvttsd2si they wrap. Trunc would signal on a program that passed 1e30
+  as a date.
+
+  The sixteen formulas below are then the RTL's own, unchanged and reading from
+  the same constants, so the truncation and the half-millisecond rounding are
+  what they always were. The only thing replaced is the distance they measure. }
+function Linear(const D: TDateTime): Double;
+begin
+  Result := Int(D) + Abs(Frac(D));
+end;
+
+function DistDays(const A, B: TDateTime): Double;
+begin
+  Result := Abs(Linear(A) - Linear(B));
+end;
+
+const
+  // dateutil.inc's own private constant, spelled the same way it spells it.
+  HalfMilliSecond = OneMillisecond / 2;
+
 function t_daysbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DaysBetween(D0(A), D1(A))); end;
+var r: Integer;    // DaysBetween's own return type, so it narrows where it did
+begin
+  E := NoError();
+  r := Trunc(DistDays(D0(A), D1(A)) + HalfMilliSecond);
+  Result := ValInt(r);
+end;
 function t_dayspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(DaySpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A))); end;
 function t_hoursbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(HoursBetween(D0(A), D1(A))); end;
+var r: Int64;
+begin
+  E := NoError();
+  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * HoursPerDay);
+  Result := ValInt(r);
+end;
 function t_minutesbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MinutesBetween(D0(A), D1(A))); end;
+var r: Int64;
+begin
+  E := NoError();
+  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * MinsPerDay);
+  Result := ValInt(r);
+end;
 function t_secondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(SecondsBetween(D0(A), D1(A))); end;
+var r: Int64;
+begin
+  E := NoError();
+  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * SecsPerDay);
+  Result := ValInt(r);
+end;
 
 // --- the clock (no arguments) -----------------------------------------------
 function t_now(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -438,30 +518,54 @@ function t_weeksinyear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(WeeksInYear(D0(A))); end;
 
 // --- more distances ---------------------------------------------------------
+// The same substitution as the five above: the RTL's formula, over Linear's
+// distance instead of DateTimeDiff's. See the long note at t_daysbetween.
 function t_weeksbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(WeeksBetween(D0(A), D1(A))); end;
+var r: Integer;
+begin
+  E := NoError();
+  r := Trunc(DistDays(D0(A), D1(A)) + HalfMilliSecond) div 7;
+  Result := ValInt(r);
+end;
 function t_monthsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MonthsBetween(D0(A), D1(A))); end;
+var r: Integer;
+begin
+  // AExact is False here, as it is in the call this replaces, so it is the
+  // approximate branch -- 30.4375 days to a month, the RTL's own constant.
+  E := NoError();
+  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) / ApproxDaysPerMonth);
+  Result := ValInt(r);
+end;
 function t_yearsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(YearsBetween(D0(A), D1(A))); end;
+var r: Integer;
+begin
+  E := NoError();
+  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) / ApproxDaysPerYear);
+  Result := ValInt(r);
+end;
 function t_millisecondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MilliSecondsBetween(D0(A), D1(A))); end;
+var r: Int64;
+begin
+  E := NoError();
+  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * MSecsPerDay);
+  Result := ValInt(r);
+end;
 
 // --- spans (fractional distances) -------------------------------------------
 function t_hourspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(HourSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) * HoursPerDay); end;
 function t_minutespan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(MinuteSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) * MinsPerDay); end;
 function t_secondspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(SecondSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) * SecsPerDay); end;
 function t_millisecondspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(MilliSecondSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) * MSecsPerDay); end;
 function t_weekspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(WeekSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) / 7); end;
 function t_monthspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(MonthSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) / ApproxDaysPerMonth); end;
 function t_yearspan(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(YearSpan(D0(A), D1(A))); end;
+begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) / ApproxDaysPerYear); end;
 
 function t_millisecondof(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(MilliSecondOf(D0(A))); end;

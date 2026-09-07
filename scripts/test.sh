@@ -91,4 +91,110 @@ else
 fi
 rm -f "$badbas" "$badpbc" "$neverexe"
 
+# H/I: A COMMAND THAT CANNOT WRITE ITS OUTPUT MUST SAY SO. `compile` and `pack`
+#      used to exit 0 with zero bytes on both streams and no file produced, so a
+#      build script that checked the exit code was told the artifact existed and
+#      the next step packed or ran a stale one. Two shapes that fail for two
+#      different reasons, because one of them passing is not the rule.
+hidir="$(mktemp -d)"; mkdir -p "$hidir/adir"
+# Re-declare the trap rather than adding one: a second `trap ... EXIT` REPLACES
+# the first, and silently leaking every file the earlier one was cleaning up is
+# not a trade this script should make for a temp directory.
+trap 'rm -f "$outA" "$outB" "$outC" "$outD" "$pbc" "$packed" "$packedD"; rm -rf "$hidir"' EXIT
+
+check_unwritable() {  # verb infile shape target
+  local verb="$1" infile="$2" shape="$3" target="$4" out code
+  if out="$("$exe" "$verb" "$infile" "$target" 2>&1)"; then code=0; else code=$?; fi
+  if [ "$code" -ne 0 ] && echo "$out" | grep -q "cannot write to" && [ ! -f "$target" ]; then
+    return 0
+  fi
+  echo "        $verb / $shape: exit $code, said '$out'"
+  return 1
+}
+
+okH=0
+check_unwritable compile "$bas" "missing directory"    "$hidir/nodir/x.pbc" || okH=1
+check_unwritable compile "$bas" "output is a directory" "$hidir/adir"       || okH=1
+if [ "$okH" -eq 0 ]; then echo "PASS  H:compile unwritable (exit<>0, names the path, writes nothing)"
+else echo "FAIL  H:compile unwritable output is silent"; fail=1; fi
+
+okI=0
+check_unwritable pack "$pbc" "missing directory"    "$hidir/nodir/app" || okI=1
+check_unwritable pack "$pbc" "output is a directory" "$hidir/adir"     || okI=1
+if [ "$okI" -eq 0 ]; then echo "PASS  I:pack unwritable    (exit<>0, names the path, writes nothing)"
+else echo "FAIL  I:pack unwritable output is silent"; fail=1; fi
+
+# J: A PACKED EXECUTABLE WHOSE PAYLOAD WILL NOT VERIFY MUST REFUSE, NOT PROMPT.
+#    It used to fall through to the CLI, and the CLI with no arguments is an
+#    interactive BASIC prompt that runs whatever is typed and never ends by
+#    itself: a corrupted or tampered app handed a user a shell, and every script
+#    that shipped it saw exit 0.
+#
+#    The damaged files are built by SPLICING two genuinely packed executables, so
+#    no byte pattern has to be guessed: both carry an intact PHOSPBC2 magic --
+#    the file still says "I am a packed application" -- and only the trailer's
+#    description of the payload is wrong.
+basB="$hidir/second.bas"; pbcB="$hidir/second.pbc"; exeB="$hidir/second.run"
+printf '%s\n' 'println "a second program, with different bytes and a different length"' > "$basB"
+"$exe" compile "$basB" "$pbcB"
+"$exe" pack "$pbcB" "$exeB"
+
+sizeA="$(wc -c < "$packed")"
+dmg1="$hidir/damaged_trailer";  dmg2="$hidir/damaged_cksum";  dmg3="$hidir/damaged_flags"
+# B's whole trailer on A's body: a different offset, size and checksum.
+head -c $((sizeA - 32)) "$packed" > "$dmg1"
+tail -c 32 "$exeB"               >> "$dmg1"
+# Only B's checksum word, so nothing but the checksum is wrong. `tail | head`
+# would SIGPIPE tail the moment head had its four bytes, and under `pipefail`
+# that aborts this whole script -- so the slice goes through a file.
+head -c $((sizeA - 16)) "$packed" > "$dmg2"
+tail -c 16 "$exeB"                > "$hidir/tail16"
+head -c 4 "$hidir/tail16"        >> "$dmg2"
+tail -c 12 "$packed"             >> "$dmg2"
+# Flag bits this build has never defined: it cannot honour what the file asks
+# for, and running it anyway while ignoring the request is the same silence.
+head -c $((sizeA - 12)) "$packed" > "$dmg3"
+printf '\377\377\377\377'        >> "$dmg3"
+tail -c 8 "$packed"              >> "$dmg3"
+chmod +x "$dmg1" "$dmg2" "$dmg3"
+
+okJ=0
+check_refused() {  # path what
+  local out code
+  if out="$("$1" < /dev/null 2>&1)"; then code=0; else code=$?; fi
+  # exit 2 is this host's "I will not run: what I was given is wrong", the same
+  # code a missing file, an unwritable --out and an unbindable sandbox answer.
+  if [ "$code" -eq 2 ] && echo "$out" | grep -q corrupt && ! echo "$out" | grep -q REPL; then
+    return 0
+  fi
+  echo "        damaged $2: exit $code, said '$out'"
+  return 1
+}
+check_refused "$dmg1" "trailer"       || okJ=1
+check_refused "$dmg2" "checksum"      || okJ=1
+check_refused "$dmg3" "unknown flags" || okJ=1
+if [ "$okJ" -eq 0 ]; then echo "PASS  J:corrupt payload    (exit 2, says so, never opens a prompt)"
+else echo "FAIL  J:corrupt payload falls through to the CLI"; fail=1; fi
+
+# K: THE MIRROR, and it matters as much as J. NO trailer magic means this file is
+#    a bare stub, and being the CLI is then exactly right -- that is the whole
+#    reason one binary can be both. A refusal that swallowed this case would have
+#    broken `phosphor` itself. Two shapes: the stub as built, and a packed file
+#    truncated so that the magic is gone with it.
+stub="$hidir/truncated"
+head -c $((sizeA - 1)) "$packed" > "$stub"; chmod +x "$stub"
+
+okK=0
+check_is_cli() {  # path what
+  local out code
+  if out="$("$1" < /dev/null 2>&1)"; then code=0; else code=$?; fi
+  if [ "$code" -eq 0 ] && echo "$out" | grep -q REPL; then return 0; fi
+  echo "        $2: exit $code, said '$out'"
+  return 1
+}
+check_is_cli "$exe"  "the stub itself"                   || okK=1
+check_is_cli "$stub" "packed, truncated past its magic"  || okK=1
+if [ "$okK" -eq 0 ]; then echo "PASS  K:no magic is the CLI (a bare stub still opens the REPL)"
+else echo "FAIL  K:a file with no trailer magic no longer behaves as the CLI"; fail=1; fi
+
 exit "$fail"

@@ -184,3 +184,57 @@ assert_eq(dayoftheyear(new_noon), 167, "2024 is a leap year, so the 167th")
 assert_eq(dayoftheyear(strtodate("2024-01-01")), 1, "the first day is 1")
 assert_eq(dayoftheyear(strtodate("2024-12-31")), 366, "and a leap year ends at 366")
 assert_eq(dayoftheyear(strtodate("2023-12-31")), 365, "a common year at 365")
+
+test_case("datetime/a distance across or before 1900 is measured on a continuum")
+rem The same sign-and-magnitude trap as the case above, in the sixteen distance
+rem functions. Every *between and every *span went through DateUtils.
+rem DateTimeDiff, which subtracts the two numbers raw and then adds a blanket
+rem half-day when the pair straddles the epoch -- a fudge that is right only
+rem when the time of day happens to be 06:00, and that is not applied at all
+rem when BOTH dates are negative. The section above pinned issameday and
+rem dayoftheyear before 1900 and never asked a distance, which is why the suite
+rem stayed green while hoursbetween answered 36 for a twelve-hour gap.
+rem
+rem This first pair is the sharpest statement of it: the library's own inchour
+rem says the two moments are twelve hours apart, bit for bit.
+old_a = strtodatetime("1850-06-15 12:00:00")
+old_b = strtodatetime("1850-06-16 00:00:00")
+assert_eq(inchour(old_a, 12), old_b, "twelve hours after old_a IS old_b")
+assert_eq(hoursbetween(old_a, old_b), 12, "so hoursbetween says twelve")
+assert_eq(minutesbetween(old_a, old_b), 720, "and minutesbetween seven hundred and twenty")
+assert_eq(secondsbetween(old_a, old_b), 43200, "and secondsbetween forty-three thousand two hundred")
+assert_eq(millisecondsbetween(old_a, old_b), 43200000, "and millisecondsbetween follows")
+assert_near(dayspan(old_a, old_b), 0.5, 0.0000001, "dayspan answers half a day")
+assert_near(hourspan(old_a, old_b), 12, 0.0000001, "hourspan twelve")
+
+rem Two midnights sixty years apart, one of them before 1900: plain subtraction
+rem of the two numbers is exact here, so it is the answer to match.
+old_e = strtodate("1890-03-15")
+new_f = strtodate("1950-03-15")
+assert_eq(daysbetween(old_e, new_f), 21914, "daysbetween counts every day across the epoch")
+assert_near(dayspan(old_e, new_f), 21914, 0.0000001, "and dayspan agrees with the subtraction")
+assert_eq(daysbetween(new_f, old_e), 21914, "and the order does not matter")
+
+rem date-time.md, on the *between family: "Both are non-negative: the order of
+rem the arguments does not matter." It did matter, for a pair straddling the
+rem epoch -- twelve one way, twenty-four the other, for one day.
+p_half = strtodate("1899-12-30") - 0.5
+q_half = strtodate("1899-12-29") - 0.5
+assert_eq(hoursbetween(q_half, p_half), 24, "one day across the epoch is twenty-four hours")
+assert_eq(hoursbetween(p_half, q_half), 24, "the same however the pair is written")
+assert_near(dayspan(q_half, p_half), 1, 0.0000001, "and one day either way")
+assert_near(dayspan(p_half, q_half), 1, 0.0000001, "in both orders")
+
+rem Below 1899-12-30 the interval (-1, 0) spells the SAME moments as [0, 1):
+rem -0.5 and +0.5 are both 1899-12-30 12:00. The distance between them is
+rem nothing, and DateTimeDiff called it a whole day.
+assert_eq(datetimetostr$(-0.5), datetimetostr$(0.5), "-0.5 and 0.5 are the same moment")
+assert_eq(hoursbetween(-0.5, 0.5), 0, "so nothing separates them")
+assert_near(dayspan(-0.5, 0.5), 0, 0.0000001, "and no part of a day either")
+
+rem the modern side of the distances, which was always right and must stay right
+mod_a = strtodatetime("2024-06-15 12:00:00")
+mod_b = strtodatetime("2024-06-16 00:00:00")
+assert_eq(hoursbetween(mod_a, mod_b), 12, "after 1900 twelve hours is still twelve")
+assert_near(dayspan(mod_a, mod_b), 0.5, 0.0000001, "and half a day still half")
+assert_eq(daysbetween(strtodate("2020-06-15"), strtodate("2021-07-20")), 400, "and a long modern gap is unmoved")

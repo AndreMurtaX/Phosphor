@@ -716,11 +716,568 @@ begin
     Result := 'the number at ' + APath;
 end;
 
+{ ------------------------------------------------------------------------------
+  \uXXXX, DECODED ON THIS SIDE OF THE PARSER -- the reader's half of the
+  hand-written serializer above.
+
+  The serializer was hand-written because fpjson's rendering of a string is not
+  byte-exact. Its READING of one is not either, and for four separate reasons
+  that are all one mechanism: jsonscanner.pp decodes \uXXXX itself, through an
+  ambient code page, into `S : String[4]` -- a four-byte ShortString -- holding a
+  pending escape in `u1` and using ZERO as its "nothing pending" sentinel
+  (jsonscanner.pp:342-370 and MaybeAppendUnicode at :261). Measured against
+  fcl-json 3.2.2, all four on a freshly built binary:
+
+    1. \u0000 IS DROPPED. u1 := 0 is indistinguishable from "no escape pending",
+       so the NUL is never emitted:
+
+           json_sets@(o@, "k", "a" + bytestr$(0) + "b")   ' 61 00 62
+           json_stringify$(o@)   ->  "k" : "a\u0000b"   ' our writer is right
+           json_parse@(that)     ->  61 62                ' one byte gone
+
+       A value the library itself stored could not be read back, and nothing said
+       a word. Every other control byte survived, which is what hid it:
+       \u0001 and \u001f come back intact.
+
+    2. A LONE SURROGATE IS DROPPED. "\ud83d" answered zero bytes, "\ud83dx"
+       answered just the x.
+
+    3. TWO ADJACENT ESCAPES ARE TRUNCATED TO FOUR BYTES, because a PAIR is
+       decoded into that ShortString together:
+
+           "\u0800\u0800"  ->  E0 A0 80 E0     (4 bytes, not 6)
+           "\uffff\uffff"  ->  EF BF BF EF
+           "\u00e9\u0800"  ->  C3 A9 E0 A0
+           "\u0800\ud83d\ude00"  ->  E0 A0 80   (the pair vanished)
+
+       Each of those answers is not merely short, it is not valid UTF-8.
+
+    4. AND WHICH OF ITS TWO BRANCHES RUNS DEPENDS ON DefaultSystemCodePage, a
+       process-wide global no script can see. The two hosts in this repository
+       disagree about the same document, because phosphor.exe links the LCL
+       (which sets the code page to UTF-8) and phosphortest.exe does not:
+
+           "k" : "\u00e9"   phosphor.exe -> C3 A9     phosphortest.exe -> E9
+           "k" : "\u0800"   phosphor.exe -> E0 A0 80  phosphortest.exe -> 3F
+
+       An embedder linking the engine gets whichever answer its own unit list
+       happens to produce. That is not a parser.
+
+  THE FIX, and why it is a rewrite of the TEXT rather than a new parser. fpjson
+  is only wrong about string ESCAPES; its structure, its numbers and its error
+  messages are all wanted as they are. So the escapes are decoded here, and the
+  document is handed on with every string re-spelled in the one dialect fpjson
+  reproduces byte for byte -- measured, every byte 0..255 and every escape form:
+
+      byte $22 -> \"      byte $5C -> \\
+      $08 $09 $0A $0C $0D -> \b \t \n \f \r
+      $02..$1F otherwise  -> \u00xx        (all thirty measured exact)
+      $20..$FF            -> the raw byte  (all measured exact, both hosts)
+
+  Every escape emitted here is therefore below $80, where the two code-page
+  branches agree, and a PAIR of them is two bytes, where the ShortString cannot
+  overflow. Defects 2, 3 and 4 have nowhere left to happen.
+
+  THE ONE BYTE WITH NO SPELLING is $00: \u0000 is what fpjson drops, and a raw
+  NUL ends the scan (its buffer is walked as a PAnsiChar). So $00 travels as a
+  two-escape MARKER, and $01 -- the only byte that marker could be confused with
+  -- travels as another:
+
+      $00 -> \u0001\u0001   which fpjson decodes to  01 01
+      $01 -> \u0001\u0002   which fpjson decodes to  01 02
+
+  That is a prefix code: after a re-spelling, byte $01 in a decoded string ALWAYS
+  opens a two-byte marker and never stands alone, so JsonUnmark's scan is exact
+  rather than heuristic, and it is injective, so two distinct keys cannot collide
+  when they are unmarked.
+
+  THE CONDITION THAT CLAIM RESTS ON, WHICH THE FIRST VERSION DID NOT MEET.
+  "Byte $01 always opens a marker" is a statement about a string THE REWRITE
+  PRODUCED. JsonUnmarkTree finds the strings to undo by SCANNING the parsed tree
+  for a $01, and a sentinel scanned for after the fact cannot tell a byte this
+  unit wrote from a byte that was already in the data. $01 is a byte real data
+  can hold. So the rewrite has to be TOTAL over the string tokens the parser will
+  read -- every one of them, or the unmarker is walking somebody else's bytes.
+
+  It was not total. GetJSON(txt, False) leaves Options empty, and
+  jsonscanner.pp:314 opens a string on '"' OR on a SINGLE QUOTE -- fpjson's own
+  extension, refused only under joStrict, which is not set. The first version
+  knew about '"' alone, so a single-quoted literal was copied through unrewritten
+  while the unmarker still walked what it decoded to. An all-printable-ASCII
+  document with no NUL anywhere in it then manufactured one:
+
+      an object of two members: "note":"caf\u00e9" beside a
+      SINGLE-quoted 'name' whose value is report<01><01>txt
+
+          before   72 65 70 6F 72 74 01 01 74 78 74     (right)
+          after    72 65 70 6F 72 74 00 74 78 74        (a NUL nobody wrote)
+
+  which is this unit's own defect with the arrow reversed, and in a project whose
+  safety story is about paths it is the byte that truncates one. BOTH delimiters
+  are re-spelled now, and both are re-emitted with '"': $22 is spelled \" and the
+  single quote passes through as a raw byte, so a single-quoted literal converts
+  cleanly and fpjson accepts a "-literal everywhere it accepted the other. The
+  same hole was a COMPLETENESS gap in the other direction -- 'a\u0000b' lost its
+  NUL until the rewrite reached inside single quotes -- and one fix closes both.
+
+  ACCEPTANCE IS NOT ALLOWED TO MOVE, and a rewrite is exactly the thing that
+  moves it. Measured over every raw byte 0..31 inside a literal, both delimiters,
+  with and without an unrelated \u escape elsewhere in the document: fpjson
+  refuses exactly ONE of them -- a raw $00, "string exceeds end of line" -- and
+  accepts the other thirty-one verbatim. The rewrite spells a raw $00 as a
+  marker, which would have made such a document accepted when an escape happened
+  to stand elsewhere in it and refused when none did. So a raw $00 inside a
+  literal ABANDONS the rewrite, exactly as a malformed escape does, and fpjson
+  refuses the caller's own bytes with its own message. Bytes $01..$1F are
+  re-spelled and decode back to themselves, so they are accepted as before.
+
+  POSITIONS BELONG TO THE CALLER'S TEXT. fpjson reports "Pos n" against the text
+  it was handed, and that text is not the text the caller wrote: six characters
+  of \u escape stand where one byte will. A 35-character document whose error
+  fpjson puts at Pos 34 became Pos 14. So when the REWRITTEN text fails to parse,
+  the ORIGINAL is parsed again and ITS error is the one reported -- a second
+  parse, on the failure path only.
+
+  AND IT IS CHARGED. One raw $01 byte leaves as twelve characters, so the text
+  handed to GetJSON can be twelve times the document, and with TTxtBuf's doubling
+  and TxtStr's Copy the peak is several times that again. Every byte written is
+  charged one unit, the way BufAdd charges on the writing side. A refusal returns
+  the peLimit from json_parse@ rather than quietly handing the original to
+  GetJSON, because that fallback would answer a document fpjson reads wrongly.
+
+  WHEN IT ENGAGES. Only when the document actually contains a \u escape inside a
+  string -- which is the only case fpjson gets wrong. A document without one is
+  handed to GetJSON untouched, byte for byte, exactly as before, and no marker
+  exists for the walk to undo. A document this cannot re-spell faithfully (an
+  escape the standard does not define, a raw NUL in a literal, an unterminated
+  string) is ALSO handed over untouched, so fpjson raises its own error with its
+  own wording and this change cannot invent one.
+  ------------------------------------------------------------------------------ }
+
+const
+  { The two markers, in one place, so the writer and JsonUnmark cannot drift. }
+  MarkNul = '\u0001\u0001';
+  MarkOne = '\u0001\u0002';
+
+type
+  { A grow-by-doubling byte buffer, so the re-spelling is linear. `Result :=
+    Result + ..` in a loop over the document would be the quadratic append this
+    unit already paid for once in JsonEscape (see the note there). Every size
+    below is Length() of something already in memory.
+
+    Charge says whether the bytes written here are BUDGETED. The re-spelling is
+    charged: it can turn one document byte into twelve, and nothing else on the
+    parse path looks at that. The UNMARKING is not, and deliberately -- it walks
+    a tree fpjson has already built out of text this buffer already paid for, and
+    a refusal in the middle of it would leave a half-undone string, which is a
+    silent wrong answer where a refusal was wanted. }
+  TTxtBuf = record
+    Data: String;
+    Len: SizeInt;
+    Charge: Boolean;
+    Spent: Boolean;
+  end;
+
+procedure TxtInit(out B: TTxtBuf; ACharge: Boolean);
+begin
+  B.Data := '';
+  B.Len := 0;
+  B.Charge := ACharge;
+  B.Spent := False;
+  SetLength(B.Data, 256);
+end;
+
+procedure TxtRoom(var B: TTxtBuf; ANeed: SizeInt);
+var grow: SizeInt;
+begin
+  if ANeed <= Length(B.Data) then Exit;
+  grow := Length(B.Data) * 2;
+  if grow < ANeed then grow := ANeed;
+  SetLength(B.Data, grow);
+end;
+
+procedure TxtAdd(var B: TTxtBuf; const S: String);
+begin
+  if (S = '') or B.Spent then Exit;
+  // One unit per byte written, which is exactly what BufAdd charges on the
+  // writing side of this unit.
+  if B.Charge and not BudgetCharge(Length(S)) then begin B.Spent := True; Exit; end;
+  TxtRoom(B, B.Len + Length(S));
+  Move(S[1], B.Data[B.Len + 1], Length(S));
+  B.Len := B.Len + Length(S);
+end;
+
+{ One byte, stored through an INDEX rather than concatenated: appending a Char to
+  a string that carries the UTF8 code page re-encodes it, which is the whole
+  subject of scripts/check-codepage.py. An indexed store is a byte store. }
+procedure TxtAddByte(var B: TTxtBuf; AByte: Byte);
+begin
+  if B.Spent then Exit;
+  if B.Charge and not BudgetCharge(1) then begin B.Spent := True; Exit; end;
+  TxtRoom(B, B.Len + 1);
+  B.Data[B.Len + 1] := Chr(AByte);
+  B.Len := B.Len + 1;
+end;
+
+function TxtStr(const B: TTxtBuf): String;
+begin
+  Result := Copy(B.Data, 1, B.Len);
+end;
+
+function JsonHexNibble(c: Char; out AVal: Integer): Boolean;
+begin
+  case c of
+    '0'..'9': AVal := Ord(c) - Ord('0');
+    'a'..'f': AVal := Ord(c) - Ord('a') + 10;
+    'A'..'F': AVal := Ord(c) - Ord('A') + 10;
+  else
+    AVal := 0;
+    Exit(False);
+  end;
+  Result := True;
+end;
+
+{ The four hex digits of a \uXXXX at APos. False -- rather than a partial value --
+  when they run off the end or are not hex, so the caller can hand fpjson the
+  original text and let it report the malformed escape itself. }
+function JsonHex4(const S: String; APos: Integer; out AVal: Integer): Boolean;
+var i, n: Integer;
+begin
+  AVal := 0;
+  Result := False;
+  if (APos < 1) or (APos + 3 > Length(S)) then Exit;
+  for i := 0 to 3 do
+  begin
+    if not JsonHexNibble(S[APos + i], n) then begin AVal := 0; Exit; end;
+    AVal := AVal * 16 + n;
+  end;
+  Result := True;
+end;
+
+{ One decoded byte, re-spelled in the dialect fpjson reads back exactly. }
+procedure JsonRespellByte(var B: TTxtBuf; AByte: Byte);
+begin
+  case AByte of
+    0:  TxtAdd(B, MarkNul);
+    1:  TxtAdd(B, MarkOne);
+    8:  TxtAdd(B, '\b');
+    9:  TxtAdd(B, '\t');
+    10: TxtAdd(B, '\n');
+    12: TxtAdd(B, '\f');
+    13: TxtAdd(B, '\r');
+    34: TxtAdd(B, '\"');
+    92: TxtAdd(B, '\\');
+  else
+    if AByte < 32 then TxtAdd(B, '\u00' + LowerCase(IntToHex(AByte, 2)))
+    else TxtAddByte(B, AByte);
+  end;
+end;
+
+{ A codepoint as UTF-8, each byte then re-spelled. U+0000 is one byte here, as
+  the standard says -- it is the MARKER that carries it, not a second encoding. }
+procedure JsonRespellCodepoint(var B: TTxtBuf; ACp: LongWord);
+begin
+  if ACp < $80 then
+    JsonRespellByte(B, ACp)
+  else if ACp < $800 then
+  begin
+    JsonRespellByte(B, $C0 or (ACp shr 6));
+    JsonRespellByte(B, $80 or (ACp and $3F));
+  end
+  else if ACp < $10000 then
+  begin
+    JsonRespellByte(B, $E0 or (ACp shr 12));
+    JsonRespellByte(B, $80 or ((ACp shr 6) and $3F));
+    JsonRespellByte(B, $80 or (ACp and $3F));
+  end
+  else
+  begin
+    JsonRespellByte(B, $F0 or (ACp shr 18));
+    JsonRespellByte(B, $80 or ((ACp shr 12) and $3F));
+    JsonRespellByte(B, $80 or ((ACp shr 6) and $3F));
+    JsonRespellByte(B, $80 or (ACp and $3F));
+  end;
+end;
+
+{ One string literal, from its opening delimiter at APos to just past the
+  matching one. ADelim is that delimiter -- fpjson opens a string on '"' OR on a
+  single quote (jsonscanner.pp:314; the single quote is refused only under
+  joStrict, which is not set here), and a literal this does not rewrite is a
+  literal the unmarker would walk without having written it. See the note above.
+
+  It is always re-emitted with '"': byte $22 is spelled \" and byte $27 passes
+  through raw, so a single-quoted literal converts cleanly and fpjson takes a
+  "-literal everywhere it took the other.
+
+  False means "this literal is not one I can re-spell faithfully" -- an escape
+  the standard does not define, a short \u, a raw NUL (which fpjson refuses, and
+  a rewrite must not make acceptable), or no closing delimiter -- and the caller
+  then abandons the whole rewrite so fpjson sees the original bytes. }
+function JsonRespellLiteral(const AText: String; var APos: Integer;
+  var B: TTxtBuf; ADelim: Char): Boolean;
+var
+  i, hi, lo: Integer;
+  c: Char;
+begin
+  Result := False;
+  i := APos + 1;
+  TxtAddByte(B, 34);
+  while i <= Length(AText) do
+  begin
+    if B.Spent then Exit;
+    c := AText[i];
+    if c = ADelim then
+    begin
+      TxtAddByte(B, 34);
+      APos := i + 1;
+      Exit(True);
+    end;
+    if c <> '\' then
+    begin
+      // The one raw byte fpjson refuses inside a literal, measured over all of
+      // 0..31 in both delimiters: give it back to fpjson to refuse.
+      if c = #0 then Exit;
+      JsonRespellByte(B, Ord(c));
+      Inc(i);
+      Continue;
+    end;
+    if i >= Length(AText) then Exit;
+    case AText[i + 1] of
+      '"':  begin JsonRespellByte(B, 34); Inc(i, 2); end;
+      '''': begin JsonRespellByte(B, 39); Inc(i, 2); end;   // fpjson's own extension
+      '\':  begin JsonRespellByte(B, 92); Inc(i, 2); end;
+      '/':  begin JsonRespellByte(B, 47); Inc(i, 2); end;
+      'b':  begin JsonRespellByte(B, 8);  Inc(i, 2); end;
+      'f':  begin JsonRespellByte(B, 12); Inc(i, 2); end;
+      'n':  begin JsonRespellByte(B, 10); Inc(i, 2); end;
+      'r':  begin JsonRespellByte(B, 13); Inc(i, 2); end;
+      't':  begin JsonRespellByte(B, 9);  Inc(i, 2); end;
+      'u':
+        begin
+          if not JsonHex4(AText, i + 2, hi) then Exit;
+          Inc(i, 6);
+          if (hi >= $D800) and (hi <= $DBFF) and (i + 5 <= Length(AText)) and
+             (AText[i] = '\') and (AText[i + 1] = 'u') and
+             JsonHex4(AText, i + 2, lo) and (lo >= $DC00) and (lo <= $DFFF) then
+          begin
+            // A surrogate PAIR is one codepoint, and the four bytes it needs are
+            // the case fpjson's ShortString could not hold when anything stood
+            // next to it.
+            JsonRespellCodepoint(B,
+              $10000 + (LongWord(hi - $D800) shl 10) + LongWord(lo - $DC00));
+            Inc(i, 6);
+          end
+          else if (hi >= $D800) and (hi <= $DFFF) then
+            // A surrogate with no partner denotes no character and has no UTF-8
+            // spelling. U+FFFD is what the standard's own guidance says to put
+            // there; fpjson dropped it silently, which is the worse of the two.
+            JsonRespellCodepoint(B, $FFFD)
+          else
+            JsonRespellCodepoint(B, LongWord(hi));
+        end;
+    else
+      Exit;   // an escape fpjson will reject: let it do the rejecting
+    end;
+  end;
+end;
+
+{ Is there a \u escape inside a string at all? If not there is nothing fpjson
+  gets wrong, and the document goes to it untouched. The delimiter is tracked --
+  a literal opens on '"' or on a single quote and closes on the SAME one -- so an
+  escape inside a single-quoted literal engages the rewrite too. It used not to,
+  and that was the completeness half of the marker hole: 'a\u0000b' lost its NUL
+  because no rewrite was ever started. }
+function JsonHasUEscape(const AText: String): Boolean;
+var
+  i: Integer;
+  delim: Char;
+  esc: Boolean;
+begin
+  Result := False;
+  delim := #0;                          // #0 = not inside a literal
+  esc := False;
+  for i := 1 to Length(AText) do
+  begin
+    if delim = #0 then
+    begin
+      if (AText[i] = '"') or (AText[i] = '''') then delim := AText[i];
+      Continue;
+    end;
+    if esc then
+    begin
+      if (AText[i] = 'u') or (AText[i] = 'U') then Exit(True);
+      esc := False;
+    end
+    else if AText[i] = '\' then esc := True
+    else if AText[i] = delim then delim := #0;
+  end;
+end;
+
+{ The whole document: every byte outside a string literal copied verbatim, every
+  literal re-spelled -- BOTH delimiters, so no string token reaches the parser
+  un-rewritten and the unmarker's scan is a statement about bytes this code
+  wrote. False leaves AOut empty and means "use the original".
+
+  ABudget separates the two reasons for False: the budget refused (the caller
+  must return peLimit -- falling back to the original would answer a document
+  fpjson reads wrongly) from "this document is not one I can re-spell" (the
+  caller hands fpjson the original and lets it speak). }
+function JsonRespellText(const AText: String; out AOut: String;
+  out ABudget: Boolean): Boolean;
+var
+  b: TTxtBuf;
+  i, runStart: Integer;
+  delim: Char;
+begin
+  AOut := '';
+  Result := False;
+  ABudget := False;
+  TxtInit(b, True);
+  i := 1;
+  runStart := 1;
+  while i <= Length(AText) do
+  begin
+    if (AText[i] <> '"') and (AText[i] <> '''') then begin Inc(i); Continue; end;
+    delim := AText[i];
+    if i > runStart then TxtAdd(b, Copy(AText, runStart, i - runStart));
+    if not JsonRespellLiteral(AText, i, b, delim) then
+    begin
+      ABudget := b.Spent;
+      Exit;
+    end;
+    runStart := i;
+  end;
+  if Length(AText) >= runStart then
+    TxtAdd(b, Copy(AText, runStart, Length(AText) - runStart + 1));
+  if b.Spent then begin ABudget := True; Exit; end;
+  AOut := TxtStr(b);
+  Result := True;
+end;
+
+{ A marker is the only way byte $01 can appear in a string the rewrite PRODUCED,
+  so its presence is the exact test for "this string needs undoing" -- and that
+  is a claim about the rewrite being total over every literal, both delimiters,
+  which is what JsonRespellText now is. It says nothing about a document that was
+  not rewritten, and none is walked. }
+function JsonHasMark(const S: String): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  for i := 1 to Length(S) do
+    if S[i] = #1 then Exit(True);
+end;
+
+function JsonUnmark(const S: String): String;
+var
+  b: TTxtBuf;
+  i: Integer;
+begin
+  // Uncharged: see TTxtBuf. The text this undoes was charged on the way in, and
+  // a refusal halfway through an undo would answer a corrupted string.
+  TxtInit(b, False);
+  i := 1;
+  while i <= Length(S) do
+  begin
+    if (S[i] = #1) and (i < Length(S)) and (S[i + 1] in [#1, #2]) then
+    begin
+      if S[i + 1] = #1 then TxtAddByte(b, 0) else TxtAddByte(b, 1);
+      Inc(i, 2);
+      Continue;
+    end;
+    TxtAddByte(b, Ord(S[i]));
+    Inc(i);
+  end;
+  Result := TxtStr(b);
+end;
+
+{ Undo the markers over the whole tree -- VALUES and member NAMES alike. A name
+  is the case that needs work: fpjson keeps names in a hash and offers no rename,
+  so an object holding a marked name is emptied with Extract (which does NOT free
+  what it removes) and refilled in the same order under the corrected names.
+
+  The recursion is bounded by MaxJsonDepth, which JsonNestsTooDeep has already
+  enforced on this document before the parser was entered. }
+procedure JsonUnmarkTree(N: TJSONData);
+var
+  i: Integer;
+  o: TJSONObject;
+  clean, marked: array of String;
+  kids: array of TJSONData;
+  rename: Boolean;
+begin
+  if N = nil then Exit;
+  case N.JSONType of
+    jtString:
+      if JsonHasMark(TJSONString(N).AsString) then
+        TJSONString(N).AsString := JsonUnmark(TJSONString(N).AsString);
+    jtArray:
+      for i := 0 to N.Count - 1 do JsonUnmarkTree(N.Items[i]);
+    jtObject:
+      begin
+        o := TJSONObject(N);
+        for i := 0 to o.Count - 1 do JsonUnmarkTree(o.Items[i]);
+        rename := False;
+        for i := 0 to o.Count - 1 do
+          if JsonHasMark(o.Names[i]) then rename := True;
+        if not rename then Exit;
+        SetLength(clean, o.Count);
+        SetLength(marked, o.Count);
+        SetLength(kids, o.Count);
+        for i := 0 to o.Count - 1 do
+        begin
+          marked[i] := o.Names[i];
+          clean[i] := JsonUnmark(marked[i]);
+          kids[i] := o.Items[i];
+        end;
+        for i := o.Count - 1 downto 0 do o.Extract(i);
+        for i := 0 to High(clean) do
+          // Add RAISES on a duplicate name -- it does not free the value, which
+          // an earlier draft of this comment claimed: Add(String, TJSONData)
+          // calls DoAdd(aName, AValue, False) (fpjson.pp:3743), and FreeOnError
+          // False means DoError is reached with the node still ours. The parser
+          // already rejects a duplicate member and the unmarking is injective,
+          // so this branch cannot fire; it is kept because a raise inside a
+          // library that returns its errors as values would escape as an
+          // exception, and a collision keeping the name it arrived with is a
+          // smaller wrong than that.
+          if o.IndexOfName(clean[i]) >= 0 then o.Add(marked[i], kids[i])
+          else o.Add(clean[i], kids[i]);
+      end;
+  end;
+end;
+
+{ The message to report when the text handed to GetJSON was the REWRITTEN one and
+  it failed. fpjson counts "Pos n" in the text it was given, and a \u escape is
+  six characters where the byte it denotes is one, so a position taken from the
+  rewrite is a lie about what the caller wrote -- measured, a 35-character
+  document whose real error sits at Pos 34 reported Pos 14. Parse the ORIGINAL
+  again and report ITS error. Two parses, but only on the failure path.
+
+  If the original parses where the rewrite did not, that is a defect in the
+  rewrite and not an error in the caller's document: there is no honest position
+  to report, so the rewritten text's own message stands. }
+function JsonOriginalError(const AOriginal: String; ARespelled: Boolean;
+  const AFallback: String): String;
+var
+  d: TJSONData;
+begin
+  Result := AFallback;
+  if not ARespelled then Exit;
+  d := nil;
+  try
+    d := GetJSON(AOriginal, False);
+    d.Free();                           // Free is nil-safe; GetJSON may answer nil
+  except
+    on E: Exception do Result := E.Message;
+  end;
+end;
+
 function t_json_parse(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   d: TJSONData;
-  where: String;
+  where, txt: String;
   pos: Int64;
+  respelled, budget: Boolean;
 begin
   Result := ValInt(0);
   // Before the parser is entered at all -- see the note above JsonNestsTooDeep.
@@ -731,6 +1288,27 @@ begin
       [MaxJsonDepth, pos]));
     Exit;
   end;
+  // The escapes fpjson decodes wrongly are decoded HERE first -- see the long
+  // note above. Only a document that actually carries a \u escape is rewritten,
+  // and only one this can rewrite faithfully; anything else goes to GetJSON as
+  // the caller wrote it, byte for byte, so its own errors are still its own.
+  txt := Args[0].Str;
+  respelled := False;
+  budget := False;
+  if JsonHasUEscape(txt) then
+  begin
+    respelled := JsonRespellText(Args[0].Str, txt, budget);
+    if budget then
+    begin
+      // The rewrite is charged (one unit per byte written, as BufAdd is) because
+      // a raw $01 leaves as twelve characters. A refusal is a refusal: handing
+      // the original to GetJSON instead would answer, quietly and wrongly, the
+      // one class of document this whole rewrite exists to get right.
+      Err := BudgetRefusal('json_parse@');
+      Exit;
+    end;
+  end;
+  if not respelled then txt := Args[0].Str;
   d := nil;
   try
     // UseUTF8 = FALSE, and the name is the opposite of what it does for us. True
@@ -741,11 +1319,14 @@ begin
     //     Linux   GetJSON(t)        -> 63 61 66 E9        (4 bytes, lossy)
     //             GetJSON(t, False) -> 63 61 66 C3 A9
     //     Windows both               -> 63 61 66 C3 A9
-    d := GetJSON(Args[0].Str, False);
+    d := GetJSON(txt, False);
   except
     on E: Exception do
     begin
-      Err := MakeError(peRuntime, 'invalid json: ' + E.Message);
+      // The position in that message counts characters of TXT. If txt is the
+      // rewrite, that is not the caller's document -- see JsonOriginalError.
+      Err := MakeError(peRuntime, 'invalid json: ' +
+        JsonOriginalError(Args[0].Str, respelled, E.Message));
       Exit;
     end;
   end;
@@ -767,6 +1348,9 @@ begin
       ' is out of range');
     Exit;
   end;
+  // The markers exist only between the rewrite and here, and only if there was
+  // one: a document parsed as it was written carries none and is not walked.
+  if respelled then JsonUnmarkTree(d);
   Err := NoError();
   Result := RegJson(d, True);
 end;

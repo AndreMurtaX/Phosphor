@@ -13,6 +13,11 @@
 # form (fields + files + url-encoded render) and the pure url/html encoders. No
 # network: it routes to phosphorhttptest (the name has "http") and ignores the
 # standing server. Plain-HTTP config needs no external library, so it runs everywhere.
+# 10_sqlite_sandbox is conditional (the same runtime-library gate as 02_sqlite --
+# the skip in both runners keys on "sqlite" in the name): the paths that reach the
+# filesystem from INSIDE a SQL string. ATTACH and VACUUM INTO name files of their
+# own, where a gate on a function's ARGUMENTS never looks, so they are answered by
+# SQLite's own authorizer; sqlite_backup's path is gated where sqlite_open@'s is.
 00_base64
 01_zip
 02_sqlite
@@ -23,3 +28,4 @@
 07_sqlite_full
 08_http_offline
 09_safety
+10_sqlite_sandbox

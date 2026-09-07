@@ -99,6 +99,84 @@
 
     sqlite_backup(db@, path$)       write a standalone copy of the database
     sqlite_vacuum(db@)              compact the database
+
+  THE SANDBOX, AND THE PATHS THAT ARRIVE INSIDE A STRING.
+
+  Two of these functions take a path -- sqlite_open@(path$) and
+  sqlite_backup(db@, path$) -- and both ask PhosphorSandbox.SandboxAllows before
+  acting. That is the easy half, and it is not enough, because SQL NAMES FILES OF
+  ITS OWN:
+
+    sqlite_exec(db@, "attach database '/etc/passwd' as x")   reads AND writes
+    sqlite_exec(db@, "vacuum into 'C:/elsewhere/copy.db'")   writes a full copy
+
+  The path there is not an argument -- it is a few characters inside a query --
+  so a gate on the arguments never sees it. A confined script used that to read
+  any database on the disk and to drop complete copies of its own outside the
+  root, while file_writealltext to the same directory was refused.
+
+  Parsing the SQL would be the wrong answer: SQL has too many spellings and the
+  parser would be wrong for ever. SQLite already has the mechanism -- the
+  AUTHORIZER (sqlite3_set_authorizer), which its own parser consults for every
+  statement -- so this unit installs one on every connection, in-memory ones
+  included, and answers the file questions there. Measured on SQLite 3.49.1 and
+  3.48.0 rather than assumed:
+
+    ATTACH DATABASE 'p' AS x  -> SQLITE_ATTACH with 'p'   (any spelling, any
+                                 case, comments and newlines between the tokens)
+    ATTACH DATABASE ? AS x    -> SQLITE_ATTACH with NULL  (a name we cannot see)
+    VACUUM INTO 'p'           -> SQLITE_ATTACH with 'p', BEFORE the file is made
+    VACUUM                    -> SQLITE_ATTACH with ''    (sqlite's own scratch)
+
+  So VACUUM INTO -- the one that carries a path but is not an ATTACH statement --
+  arrives at the same door, and denying it costs nothing else. What a sandboxed
+  program loses: an ATTACH or a VACUUM INTO naming a path outside the root, a
+  filename given as a BOUND PARAMETER (the authorizer is handed NULL for it, and
+  a name the gate cannot read is a name it must not approve -- inline it with
+  sqlite_quote$ instead), a 'file:' URI, PRAGMA temp_store_directory /
+  data_store_directory pointed out of the root, and PRAGMA data_store_directory
+  moved between preparing an ATTACH and stepping it. Everything inside the root
+  still works: ATTACH, VACUUM INTO, sqlite_backup, plain VACUUM, ':memory:',
+  and relative names of all three.
+
+  THE SAME BASE, AND THE SAME MOMENT. A gate that answers about a different file
+  from the one SQLite opens is no gate at all, and there are two ways for them to
+  drift apart. Both were live escapes; both are closed here rather than argued
+  about, because each was measured against the shipped library:
+
+    THE BASE. SandboxAllows resolves a relative name with ExpandFileName, which
+    is arithmetic over the PROCESS's current directory. SQLite resolves it through
+    its VFS, which on Windows prefers the sqlite3_data_directory global when that
+    is set -- and PRAGMA data_store_directory sets it, for the whole process, on
+    any connection. A script that stepped one level down and pointed the pragma
+    back at the root made '../x.db' mean root/x.db to the gate and root/../x.db to
+    SQLite. So every script-supplied database name is now resolved by SQLITE'S OWN
+    RESOLVER first -- sqlite3_vfs_find(nil)^.xFullPathname, the very call the pager
+    makes on its way to the file -- and the gate judges what comes back. With no
+    data directory set that answer is exactly ExpandFileName's, measured, so
+    nothing legitimate moves.
+
+    THE MOMENT. ATTACH is authorized when the statement is PREPARED and opens its
+    file when the statement is STEPPED; VACUUM INTO is authorized at step. Between
+    a prepare and a step a script can chdir, or move the data directory, and the
+    name the authorizer approved then names a different file -- measured: the file
+    landed one directory above where the callback had been told. So an ATTACH
+    filename approved under a root is REMEMBERED with its statement and asked
+    again at every step, against the base in force then. Which door is answered
+    when:
+
+      sqlite_exec / sqlite_scalar / sqlite_query   prepare and step in one call,
+                                                   no script runs between them
+      sqlite_prepare@ + sqlite_step, ATTACH        prepare AND step
+      sqlite_prepare@ + sqlite_step, VACUUM INTO   step (its callback arrives there)
+      sqlite_open@ / sqlite_backup                 their own argument, before the call
+
+  A build with SQLITE_OMIT_AUTHORIZATION does not export sqlite3_set_authorizer
+  (one is installed on this machine). There the promise cannot be kept, so a
+  SANDBOXED host is refused the connection outright rather than handed one whose
+  SQL is ungoverned; an unsandboxed host is unaffected and behaves exactly as it
+  always did. The same rule covers a build with no sqlite3_vfs_find to ask: under
+  a root an unresolvable name is refused, never guessed at.
 ******************************************************************************}
 unit PhosphorSqliteLib;
 
@@ -108,7 +186,7 @@ unit PhosphorSqliteLib;
 interface
 
 uses
-  SysUtils, Classes, fpjson, SQLite3Dyn,
+  SysUtils, Classes, ctypes, fpjson, SQLite3Dyn,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
   PhosphorSandbox, PhosphorBudget;
 
@@ -120,6 +198,14 @@ var
   GReady: Boolean = False;   // the SQLite runtime library loaded at unit init
   GLastErr: Integer = 0;     // module-level last-error, the ioerror/valcode pattern
   GLastMsg: String = '';
+  { Set by the authorizer when IT refused, so exec/prepare/step can report the
+    package's own words instead of sqlite's "not authorized". Cleared
+    immediately before each call that can prepare or step a statement. }
+  GAuthDenied: Boolean = False;
+  { The ATTACH filename the authorizer APPROVED while preparing, so the statement
+    can carry it and be asked again at step -- see DoStep. '' when there was none
+    (or no sandbox, where there is nothing to re-check). }
+  GAuthPath: String = '';
 
 type
   TSqliteStmt = class;
@@ -144,6 +230,11 @@ type
     OnRow: Boolean;      // the most recent step landed on a row
     Stepped: Boolean;    // step has been called at least once
     Done: Boolean;       // a step has reported the end; only sqlite_reset re-opens it
+    { The ATTACH filename this statement was authorized with, under a sandbox.
+      SQLite opens that file when the statement is STEPPED, not when it was
+      prepared, and the base a relative name resolves against can move in
+      between -- so the question is asked again there. '' = nothing to re-ask. }
+    AuthPath: String;
     { The declared type of each column AS THE ROW ARRIVED. sqlite3_column_type
       reports the CURRENT representation, and reading a column as text converts it
       in place -- so sqlite_coltype answered BLOB before a sqlite_getstr$ and TEXT
@@ -247,6 +338,205 @@ begin
   if Result then AStmt := TSqliteStmt(o) else AStmt := nil;
 end;
 
+{ ONE REFUSAL, WHATEVER DOOR IT CAME THROUGH. sqlite_open@ has answered these
+  words since the day a confined run created a database in C:\Dev; a path refused
+  inside a query, or as sqlite_backup's argument, is the same refusal and says the
+  same thing. SQLITE_CANTOPEN is the code sqlite_open@ already reports, so
+  sqlite_error() reads alike at all four. }
+procedure RefusePath;
+begin
+  GLastErr := 14;   // SQLITE_CANTOPEN
+  GLastMsg := 'refused: the path is outside the sandbox root';
+end;
+
+{ RESOLVE THE NAME THE WAY SQLITE IS ABOUT TO RESOLVE IT.
+
+  SandboxAllows expands a relative name against the PROCESS's current directory.
+  SQLite expands it through its VFS, which on Windows prefers the
+  sqlite3_data_directory global when that is set. PRAGMA data_store_directory
+  sets that global -- process-wide, from any connection, measured -- so the two
+  bases can be made to differ, and then the same '../x.db' is inside the root for
+  the gate and one level above it for SQLite. That was a live escape.
+
+  xFullPathname is the function the pager itself calls on the way to opening a
+  database file, so asking it removes the disagreement by construction rather
+  than by modelling SQLite's rules here and keeping the model right for ever.
+  FPC's binding is a second reason to ask rather than read: sqlite3.inc declares
+  sqlite3_data_directory inside an "ifndef win32", so on Windows the global cannot
+  be read from Pascal at all.
+
+  Measured on 3.48.0, with no data directory set, against a working directory
+  A: 'x.db' -> A\x.db, '../up.db' -> the parent, 'x/../y.db' -> A\y.db -- the
+  same answers ExpandFileName gives, so nothing legitimate moves. With one set,
+  the answer is the data directory, which is the whole point.
+
+  False when there is nothing to ask (no sqlite3_vfs_find in this build, or the
+  call failed): the caller turns that into a refusal under a root.
+
+  The buffer is a fixed local rather than a dynamic array on purpose. Its size is
+  SQLite's, not a script's -- mxPathname is 1040 on the win32 VFS and 512 on the
+  unix one -- and nOut is capped at what the buffer holds, so a VFS claiming an
+  absurd mxPathname makes xFullPathname REFUSE rather than write past the end.
+  It also keeps a gate consulted once per statement off the heap. }
+function SqlFullPath(const AName: String; out AFull: String): Boolean;
+var
+  vfs: psqlite3_vfs;
+  buf: array[0..4095] of AnsiChar;
+  n: Integer;
+begin
+  AFull := '';
+  Result := False;
+  if not Assigned(sqlite3_vfs_find) then Exit;
+  vfs := sqlite3_vfs_find(nil);
+  if (vfs = nil) or (not Assigned(vfs^.FullPathname)) then Exit;
+  n := vfs^.mxPathname + 1;             // what SQLite's own callers pass
+  if n > High(buf) then n := High(buf); // never more than there is room for
+  if n < 2 then Exit;
+  FillChar(buf[0], SizeOf(buf), 0);
+  if vfs^.FullPathname(vfs, PAnsiChar(AName), n, @buf[0]) <> SQLITE_OK then Exit;
+  AFull := PtrStr(PAnsiChar(@buf[0]));
+  Result := AFull <> '';
+end;
+
+{ THE FILE A NAME MEANS, for the gate to judge -- one rule, three doors.
+
+  Result False: the name must not be approved at all. AFull '' with Result True:
+  the name is no file (':memory:', SQLite's anonymous scratch, or a name that
+  cannot be read where there is no root to bound it), so there is nothing to
+  judge. Otherwise AFull is the file SQLite will open.
+
+  Why the answer is handed back instead of judged here: each door asks
+  SandboxAllows in ITS OWN body. scripts/check-sandbox.py reads routine bodies
+  and cannot follow a call, so a door whose guard has moved into a helper reads
+  to that gate as a door with no guard -- and it is the check that catches this
+  entire class. The hard half, resolution, stays in one place; the visible half
+  stays where the primitive is.
+
+  APresent is False when SQLite handed the authorizer NULL -- an ATTACH whose
+  filename is a bound parameter, resolved after the callback has answered. A name
+  that cannot be read cannot be judged, and under a root an unjudged name must
+  not be approved; with no root there is nothing to bound, so it passes as it
+  always has. }
+function SqlTarget(const AName: String; APresent: Boolean; out AFull: String): Boolean;
+begin
+  AFull := '';
+  if not APresent then Exit(not SandboxActive);
+  { '' is SQLite's own anonymous scratch database -- what plain VACUUM attaches,
+    and what `ATTACH '' AS x` makes: a private temporary file with a name nobody
+    chose. ':memory:' is no file at all. Neither is a path a script steered, and
+    IsPerilousPath would refuse the first of them. }
+  if (AName = '') or (AName = ':memory:') then Exit(True);
+  if not SandboxActive then
+  begin
+    { With no root there is nothing to escape from, and the name is judged exactly
+      as it always was: an unsandboxed host is not asked a new question. }
+    AFull := AName;
+    Exit(True);
+  end;
+  { A URI filename resolves by rules the gate does not model (a query string can
+    move the file, name a VFS, or reopen it read-write). URI filenames are OFF
+    unless the library was compiled with SQLITE_USE_URI -- measured: 'file:...'
+    came back "unable to open database" -- but a host drops its own sqlite3 in
+    beside the binary, so under a root they are refused rather than guessed at. }
+  if (Length(AName) >= 5) and SameText(Copy(AName, 1, 5), 'file:') then Exit(False);
+  Result := SqlFullPath(AName, AFull);
+end;
+
+{ The gate, asked about a filename SQLite found inside a statement. }
+function SqlPathAllowed(const AName: String; APresent: Boolean): Boolean;
+var full: String;
+begin
+  Result := SqlTarget(AName, APresent, full);
+  if Result and (full <> '') then Result := SandboxAllows(full, puWrite);
+end;
+
+{ SQLite's own parser, telling us every file its statements are about to name.
+  Installed on every connection by OpenDatabase.
+
+  Everything not about a file answers SQLITE_OK: this is a path gate, not a
+  policy on what SQL may do. It must not raise -- it is called from C, where a
+  Pascal exception has nowhere to go -- so the body is wrapped and an unexpected
+  failure DENIES. }
+function SandboxAuthorizer(pUserData: Pointer; code: cint;
+                           s1, s2, s3, s4: PAnsiChar): cint; cdecl;
+var nm: String;
+begin
+  Result := SQLITE_OK;
+  try
+    case code of
+      SQLITE_ATTACH:
+        { ATTACH DATABASE '<file>', and VACUUM INTO '<file>', which SQLite
+          implements as one: arg1 is the filename, and the callback runs BEFORE
+          the file is opened or created.
+
+          An APPROVED name is remembered as well as approved. For an ATTACH this
+          callback arrives while the statement is PREPARED and the file is opened
+          when it is STEPPED, so the answer is only as good as the base still
+          being what it was; DoStep asks again with the name kept here. (VACUUM
+          INTO's callback arrives at step already -- measured -- so its answer
+          needs no repeat, and it costs nothing to remember it anyway.) }
+        begin
+          nm := PtrStr(s1);
+          if not SqlPathAllowed(nm, s1 <> nil) then
+          begin
+            GAuthDenied := True;
+            Result := SQLITE_DENY;
+          end
+          else if SandboxActive and (s1 <> nil) and (nm <> '') and (nm <> ':memory:') then
+            GAuthPath := nm;
+        end;
+      SQLITE_PRAGMA:
+        { Two pragmas take a directory, and this bounds the DIRECTORY: neither may
+          point outside the root. arg2 nil is a query rather than a set, and ''
+          restores the default.
+
+          It is no longer load-bearing against the desync, and that is deliberate.
+          Round one gated the pragma and believed the base could then not move --
+          but an inside-the-root directory moves it just as far, and the escape
+          survived. Pointing it anywhere inside the root is now HARMLESS, because
+          the gate resolves through the base rather than assuming one: SqlTarget
+          asks SQLite where the file goes, and DoStep asks again at the moment it
+          goes there. What is left here is an ordinary path rule on an ordinary
+          path argument -- temp_store_directory has never been anything else. }
+        if SandboxActive and (s2 <> nil) and (PtrStr(s2) <> '') then
+        begin
+          nm := LowerCase(PtrStr(s1));
+          if ((nm = 'temp_store_directory') or (nm = 'data_store_directory'))
+             and (not SandboxAllows(PtrStr(s2), puWrite)) then
+          begin
+            GAuthDenied := True;
+            Result := SQLITE_DENY;
+          end;
+        end;
+      SQLITE_FUNCTION:
+        { load_extension() names a file and then RUNS it. Nothing here calls
+          sqlite3_enable_load_extension, so SQLite already refuses it -- measured
+          -- but a default someone else chose is not a guarantee this package
+          made, and it is the same class: a path inside a statement. }
+        if SandboxActive and (s2 <> nil) and SameText(PtrStr(s2), 'load_extension') then
+        begin
+          GAuthDenied := True;
+          Result := SQLITE_DENY;
+        end;
+    end;
+  except
+    GAuthDenied := True;
+    Result := SQLITE_DENY;
+  end;
+end;
+
+{ True when the connection may be handed to a script. A build without the
+  authorizer (SQLITE_OMIT_AUTHORIZATION does not export it) can still serve an
+  UNSANDBOXED host exactly as before; a sandboxed one it cannot serve at all,
+  and saying so is better than a cage with a door in the back. }
+function InstallAuthorizer(ADb: psqlite3): Boolean;
+begin
+  Result := False;
+  if Assigned(sqlite3_set_authorizer) then
+    Result := sqlite3_set_authorizer(ADb, @SandboxAuthorizer, nil) = SQLITE_OK;
+  if not Result then Result := not SandboxActive;
+end;
+
 procedure SetErrFromDb(ADb: TSqliteDb);
 begin
   if (ADb <> nil) and (ADb.DbPtr <> nil) then
@@ -264,10 +554,14 @@ begin
   Result := False;
   if (ADb = nil) or (ADb.DbPtr = nil) then Exit;
   msg := nil;
+  GAuthDenied := False;
+  GAuthPath := '';
   rc := sqlite3_exec(ADb.DbPtr, PAnsiChar(ASql), nil, nil, @msg);
   if msg <> nil then sqlite3_free(msg);
   Result := (rc = SQLITE_OK);
-  if not Result then SetErrFromDb(ADb);
+  // A path refused inside the SQL says so in this package's words, not sqlite's.
+  if not Result then
+    if GAuthDenied then RefusePath else SetErrFromDb(ADb);
 end;
 
 function PrepareStmt(ADb: TSqliteDb; const ASql: String; out AStmt: psqlite3_stmt): Boolean;
@@ -275,20 +569,26 @@ var rc: Integer;
 begin
   AStmt := nil;
   if (ADb = nil) or (ADb.DbPtr = nil) then Exit(False);
+  GAuthDenied := False;
+  GAuthPath := '';
   rc := sqlite3_prepare_v2(ADb.DbPtr, PAnsiChar(ASql), -1, @AStmt, nil);
   Result := (rc = SQLITE_OK) and (AStmt <> nil);
   if not Result then
   begin
-    SetErrFromDb(ADb);
+    if GAuthDenied then RefusePath else SetErrFromDb(ADb);
     if AStmt <> nil then begin sqlite3_finalize(AStmt); AStmt := nil; end;
   end;
 end;
 
-{ Register a freshly prepared statement as a child of its database. }
+{ Register a freshly prepared statement as a child of its database. The filename
+  the authorizer approved during THAT prepare travels with it; only a statement
+  handed back to a script needs it, because only there can script code run --
+  a chdir, a pragma -- between the prepare and the step. }
 function RegisterStmt(AOwner: TSqliteDb; AStmt: psqlite3_stmt): TValue;
 var s: TSqliteStmt;
 begin
   s := TSqliteStmt.Create(AOwner, AStmt);
+  s.AuthPath := GAuthPath;
   s.HandleId := RegisterHandle(s);
   AOwner.Children.Add(s);
   Result := ValHandle(s.HandleId);
@@ -320,7 +620,28 @@ begin
     SetLength(AStmt.RowTypes, 0);
     Exit(0);
   end;
+  { THE AUTHORIZER ANSWERED AT PREPARE. SQLITE OPENS THE FILE HERE.
+
+    For an ATTACH those are two different moments, and between them a script may
+    move either base a relative name resolves against -- dir_setcurrent, or
+    PRAGMA data_store_directory, which is a process-wide global. Measured on
+    3.48.0: prepared in A\sub, stepped from A, `attach '../q2.db'` was authorized
+    as A\q2.db and created the file one directory ABOVE A. So the same question is
+    asked again now, against the base in force now, before the step that would
+    create anything. Empty unless a sandbox was active at prepare, so an
+    unsandboxed run and every ordinary cursor pay nothing. }
+  if (AStmt.AuthPath <> '') and (not SqlPathAllowed(AStmt.AuthPath, True)) then
+  begin
+    RefusePath();
+    AStmt.OnRow := False;
+    SetLength(AStmt.RowTypes, 0);
+    Exit(0);
+  end;
   AStmt.Stepped := True;
+  { VACUUM INTO's callback arrives HERE rather than at prepare, so a refusal can
+    land on the step -- and did, reported as sqlite's own "authorization denied"
+    (23) instead of this package's words. Cleared before, read after. }
+  GAuthDenied := False;
   rc := sqlite3_step(AStmt.StmtPtr);
   SetLength(AStmt.RowTypes, 0);
   if rc = SQLITE_ROW then
@@ -341,6 +662,8 @@ begin
     Result := 0;
     if rc = SQLITE_DONE then
       AStmt.Done := True
+    else if GAuthDenied then
+      RefusePath()
     else
     begin
       GLastErr := rc;
@@ -424,18 +747,30 @@ begin
 end;
 
 function OpenDatabase(const APath: String): TValue;
-var p: psqlite3; rc: Integer;
+var p: psqlite3; rc: Integer; full: String;
 begin
   Result := ValHandle(0);
   if not GReady then Exit;
   { THE GUARD LIVES HERE, not only in the registered function, so every caller is
     covered including any added later. ':memory:' is not a path -- sqlite reads it
     as "no file at all" -- so it is the one name that bypasses the check without
-    touching a disk. }
-  if (APath <> ':memory:') and (not SandboxAllows(APath, puWrite)) then
+    touching a disk.
+
+    It asks the SAME question the authorizer asks, through the same resolver, and
+    for the same reason: sqlite3_open resolves a relative name through the VFS
+    too, so a data directory pointed back at the root turned sqlite_open@'s own
+    argument into a file one level outside it. Judging the name the process's
+    working directory spells was never judging the file that gets created.
+
+    '' is refused here where SQL allows it: inside a statement it names SQLite's
+    anonymous scratch database, but as an ARGUMENT it is a path a program
+    computed by accident, and IsPerilousPath has refused it since the day a
+    confined run wrote into C:\Dev. }
+  if (APath <> ':memory:') and
+     ((APath = '') or (not SqlTarget(APath, True, full))
+                   or (not SandboxAllows(full, puWrite))) then
   begin
-    GLastErr := 14;   // SQLITE_CANTOPEN
-    GLastMsg := 'refused: the path is outside the sandbox root';
+    RefusePath();
     Exit;
   end;
   p := nil;
@@ -448,6 +783,20 @@ begin
       GLastMsg := PtrStr(sqlite3_errmsg(p));
       sqlite3_close(p);
     end;
+    Exit;
+  end;
+  { AND THE SECOND DOOR, BEFORE ANY SQL CAN RUN. The check above bounds the file
+    this handle is opened ON; every other file it can reach is named inside a
+    statement -- ATTACH, VACUUM INTO -- where an argument gate never looks. The
+    authorizer is SQLite's own parser answering that question, so it goes on here,
+    on EVERY connection including ':memory:' (the escape that was reported began
+    at sqlite_open@() with no argument at all). }
+  if not InstallAuthorizer(p) then
+  begin
+    sqlite3_close(p);
+    GLastErr := 14;   // SQLITE_CANTOPEN
+    GLastMsg := 'refused: this SQLite build has no authorizer, so a sandboxed ' +
+                'host cannot bound the files SQL names';
     Exit;
   end;
   Result := ValHandle(RegisterHandle(TSqliteDb.Create(p, APath)));
@@ -527,6 +876,12 @@ begin
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
   if sqlite3_step(st) = SQLITE_ROW then Result := ValStr(ColStr(st, 0));
+  { A path refused inside the SQL can be refused at the STEP rather than at the
+    prepare -- VACUUM INTO's callback arrives there -- and this route reported
+    nothing at all for it: no code, no message, an empty answer. PrepareStmt
+    cleared the flag just above, and only the refusal is recorded, so an ordinary
+    step failure still answers exactly what it always answered. }
+  if GAuthDenied then RefusePath();
   sqlite3_finalize(st);
 end;
 
@@ -538,6 +893,12 @@ begin
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
   if sqlite3_step(st) = SQLITE_ROW then Result := ValDouble(sqlite3_column_double(st, 0));
+  { A path refused inside the SQL can be refused at the STEP rather than at the
+    prepare -- VACUUM INTO's callback arrives there -- and this route reported
+    nothing at all for it: no code, no message, an empty answer. PrepareStmt
+    cleared the flag just above, and only the refusal is recorded, so an ordinary
+    step failure still answers exactly what it always answered. }
+  if GAuthDenied then RefusePath();
   sqlite3_finalize(st);
 end;
 
@@ -574,6 +935,12 @@ begin
       Exit(ValStr(''));
     end;
   end;
+  { A path refused inside the SQL can be refused at the STEP rather than at the
+    prepare -- VACUUM INTO's callback arrives there -- and this route reported
+    nothing at all for it: no code, no message, an empty answer. PrepareStmt
+    cleared the flag above and only the first failing step can set it, so the
+    loop has already ended by the time this is read. }
+  if GAuthDenied then RefusePath();
   sqlite3_finalize(st);
   Result := ValStr(r);
 end;
@@ -1084,11 +1451,37 @@ begin Err := NoError(); GLastErr := 0; GLastMsg := ''; Result := ValInt(0); end;
 
 // --- maintenance ------------------------------------------------------------
 function f_backup(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var db: TSqliteDb;
+var db: TSqliteDb; full: String;
 begin
   Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
+  { A PATH ARGUMENT IS A PATH ARGUMENT, whichever language spends it. This one
+    was pasted into VACUUM INTO with no gate at all, so a confined script wrote a
+    complete copy of its database -- every row -- anywhere on the disk, while
+    file_writealltext to the same directory answered 0. The authorizer would
+    catch it now as well (VACUUM INTO reaches it as SQLITE_ATTACH), but the
+    argument is checked here too, where sqlite_open@ checks its own: an
+    argument-shaped hole gets an argument-shaped guard, and the refusal then
+    carries this package's words rather than sqlite's.
+
+    Nothing automatic will notice if this line is deleted. check-sandbox.py
+    scans for OS primitives and its only SQLite one is the literal string
+    'sqlite3_open'; this routine contains no primitive at all, so the gate does
+    not even consider it and reports clean either way. That is what
+    tests/packages/10_sqlite_sandbox.bas is for.
+
+    Resolved through the shared rule before it is judged: the destination goes
+    into VACUUM INTO, which SQLite resolves through its VFS, so a gate that
+    resolved it against the process's working directory instead answered about a
+    different file the moment a data directory was set -- measured, 8192 bytes
+    outside the root. '' is refused here for the reason OpenDatabase gives. }
+  if (Args[1].Str = '') or (not SqlTarget(Args[1].Str, True, full))
+                        or (not SandboxAllows(full, puWrite)) then
+  begin
+    RefusePath();
+    Exit;
+  end;
   // VACUUM INTO writes a fresh, self-contained copy of the whole database.
   Result := ValInt(Ord(ExecSql(db, 'VACUUM INTO ''' + EscapeSql(Args[1].Str) + '''')));
 end;

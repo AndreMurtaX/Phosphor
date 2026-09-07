@@ -196,7 +196,10 @@ else {
         @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
         @{ name='probe_budget';   src='scripts\probe_budget.lpr' },
         @{ name='probe_crt';      src='tests\probe_crt.lpr' },
-        @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' }
+        @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' },
+        # The Lazarus demo's scripting, which has no LCL in it precisely so that
+        # something other than a person can run it. See lazarus/demo/demo_smoke.lpr.
+        @{ name='probe_demo';     src='lazarus\demo\demo_smoke.lpr' }
     )
     foreach ($hp in $hostProbes) {
         $psrc = Join-Path $root $hp.src
@@ -213,6 +216,7 @@ else {
         & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
             "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
             "-Fu$(Join-Path $root 'host\packages')" `
+            "-Fu$(Join-Path $root 'lazarus\demo')" `
             "-FU$unitsDir" "-FE$binDir" "-o$pexe" $psrc | Out-Null
         if (-not (Test-Path $pexe)) { Write-Host ("FAIL  probe: {0}  did not build" -f $hp.name) -ForegroundColor Red; $allOk = $false; continue }
         $pout = Join-Path $tmp 'probe.out'

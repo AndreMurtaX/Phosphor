@@ -51,6 +51,27 @@ if (Test-Path $exe) { Remove-Item $exe -Force }
     (Join-Path $root 'host\gui\phosphorguitest.lpr') | Out-Null
 if (-not (Test-Path $exe)) { throw "phosphorguitest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "gui runner built: $exe" -ForegroundColor DarkGray
+
+# --- and the Lazarus DEMO, which is an LCL application like any embedder's ----
+# What runs the demo's LOGIC is probe_demo in the main suite -- the demo's
+# decisions live in a unit with no LCL in it for exactly that reason. What
+# nothing ran until this line is the WINDOW: the unit that wires six controls,
+# and the program that installs the application's own crash guard before
+# anything can raise. Neither is reached by probe_demo, so without this a demo
+# that stopped compiling would be found by a person opening it -- the defect
+# this project has already paid for twice.
+$demoExe = Join-Path $binDir 'phosphor_demo.exe'
+if (Test-Path $demoExe) { Remove-Item $demoExe -Force }
+& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" -dLCL -dLCLwin32 `
+    "-Fu$(Join-Path $lcl 'win32')" "-Fu$lcl" `
+    "-Fu$(Join-Path $Lazarus 'components\lazutils\lib\x86_64-win64')" `
+    "-Fu$(Join-Path $Lazarus 'packager\units\x86_64-win64')" `
+    "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
+    "-Fu$(Join-Path $root 'lazarus\demo')" `
+    "-FU$unitsDir" "-FE$binDir" "-o$demoExe" `
+    (Join-Path $root 'lazarus\demo\phosphor_demo.lpr') | Out-Null
+if (-not (Test-Path $demoExe)) { throw "the Lazarus demo did not build (fpc exit $LASTEXITCODE)" }
+Write-Host "lazarus demo built: $demoExe" -ForegroundColor DarkGray
 Write-Host ''
 
 # --- run the manifest --------------------------------------------------------

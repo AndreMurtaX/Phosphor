@@ -10,6 +10,30 @@ The worked example this document follows is
 [`host/embed/phosphorembed.lpr`](../host/embed/phosphorembed.lpr) — a host that
 registers a function, prepares a script once, and calls its routines from Pascal.
 
+## Getting the units into your project
+
+Add the Lazarus package once, then depend on it:
+
+```bash
+lazbuild --add-package-link lazarus/phosphor_engine.lpk
+```
+
+**Project → Project Inspector → Add → New Requirement → `phosphor_engine`.** It
+is a *runtime* package — 29 units, no LCL, no components to install into the
+IDE. See [../lazarus/README.md](../lazarus/README.md) for what it does and does
+not carry, and `lazarus/demo/` for a Lazarus application with the whole thing
+wired up, which the suite builds and exercises on every run.
+
+Without Lazarus, three unit paths are the entire requirement:
+
+```
+-Fu<phosphor>/engine -Fu<phosphor>/engine/libs
+```
+
+plus `-Fu<phosphor>/host/packages` if you want the opt-in libraries (zip, gzip,
+http, sqlite, base64, crt) and `-Fu<phosphor>/host/gui/libs` if you want the GUI
+bindings. The engine itself needs neither.
+
 ## The facade — `TPhosphorEngine`
 
 ```pascal

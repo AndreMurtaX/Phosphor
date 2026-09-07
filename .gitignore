@@ -14,6 +14,12 @@ backup/
 *.lps
 *.lpo
 
+# The package's registration unit is GENERATED from the .lpk's own file list and
+# says "Do not edit" in its first line. Committing it would put the list of units
+# in two places, and this project has already been bitten by a second copy of a
+# fact drifting away from the first.
+/lazarus/phosphor_engine.pas
+
 # Claude Code local tooling (dev-process, not part of the product)
 .claude/
 

@@ -120,7 +120,7 @@ done
 # (the value kernel, the execution limits, the embedding API). Each prints ok:/
 # fail: and exits non-zero on a failure.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
   # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.
@@ -129,6 +129,7 @@ for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits
   pexe="$bin/$name"; rm -f "$pexe"
   "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
     -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/host/packages" \
+    -Fu"$root/lazarus/demo" \
     -FU"$units" -FE"$bin" -o"$pexe" \
     "$root/$src" >/dev/null 2>&1
   if [ ! -x "$pexe" ]; then echo "FAIL  probe: $name  did not build"; allok=1; continue; fi

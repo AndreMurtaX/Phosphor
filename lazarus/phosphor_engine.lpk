@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <PathDelim Value="/"/>
+    <Name Value="phosphor_engine"/>
+    <Type Value="RunTime"/>
+    <Author Value="Andre Murta"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <PathDelim Value="/"/>
+      <SearchPaths>
+        <OtherUnitFiles Value="../engine;../engine/libs"/>
+        <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
+      </SearchPaths>
+      <Parsing>
+        <SyntaxOptions>
+          <SyntaxMode Value="ObjFPC"/>
+          <CStyleOperator Value="False"/>
+          <IncludeAssertionCode Value="True"/>
+        </SyntaxOptions>
+      </Parsing>
+      <Other>
+        <CustomOptions Value="-vewn"/>
+      </Other>
+    </CompilerOptions>
+    <Description Value="Phosphor BASIC -- an embeddable BASIC interpreter. The ENGINE only: no LCL, no console, no filesystem host. Add it to a project, create a TPhosphorEngine, point OnOutput somewhere and run a script. See ../../docs/embedding.md."/>
+    <License Value="MIT"/>
+    <Version Major="0" Minor="1"/>
+    <Files Count="29">
+      <Item1>
+        <Filename Value="../engine/PhosphorBudget.pas"/>
+        <UnitName Value="PhosphorBudget"/>
+      </Item1>
+      <Item2>
+        <Filename Value="../engine/PhosphorBytecode.pas"/>
+        <UnitName Value="PhosphorBytecode"/>
+      </Item2>
+      <Item3>
+        <Filename Value="../engine/PhosphorCompiler.pas"/>
+        <UnitName Value="PhosphorCompiler"/>
+      </Item3>
+      <Item4>
+        <Filename Value="../engine/PhosphorEngine.pas"/>
+        <UnitName Value="PhosphorEngine"/>
+      </Item4>
+      <Item5>
+        <Filename Value="../engine/PhosphorErrors.pas"/>
+        <UnitName Value="PhosphorErrors"/>
+      </Item5>
+      <Item6>
+        <Filename Value="../engine/PhosphorHandles.pas"/>
+        <UnitName Value="PhosphorHandles"/>
+      </Item6>
+      <Item7>
+        <Filename Value="../engine/PhosphorLexer.pas"/>
+        <UnitName Value="PhosphorLexer"/>
+      </Item7>
+      <Item8>
+        <Filename Value="../engine/PhosphorOpcodes.pas"/>
+        <UnitName Value="PhosphorOpcodes"/>
+      </Item8>
+      <Item9>
+        <Filename Value="../engine/PhosphorRegistry.pas"/>
+        <UnitName Value="PhosphorRegistry"/>
+      </Item9>
+      <Item10>
+        <Filename Value="../engine/PhosphorSandbox.pas"/>
+        <UnitName Value="PhosphorSandbox"/>
+      </Item10>
+      <Item11>
+        <Filename Value="../engine/PhosphorVM.pas"/>
+        <UnitName Value="PhosphorVM"/>
+      </Item11>
+      <Item12>
+        <Filename Value="../engine/PhosphorValue.pas"/>
+        <UnitName Value="PhosphorValue"/>
+      </Item12>
+      <Item13>
+        <Filename Value="../engine/libs/PhosphorArrayLib.pas"/>
+        <UnitName Value="PhosphorArrayLib"/>
+      </Item13>
+      <Item14>
+        <Filename Value="../engine/libs/PhosphorBufferLib.pas"/>
+        <UnitName Value="PhosphorBufferLib"/>
+      </Item14>
+      <Item15>
+        <Filename Value="../engine/libs/PhosphorCallLib.pas"/>
+        <UnitName Value="PhosphorCallLib"/>
+      </Item15>
+      <Item16>
+        <Filename Value="../engine/libs/PhosphorConfigLib.pas"/>
+        <UnitName Value="PhosphorConfigLib"/>
+      </Item16>
+      <Item17>
+        <Filename Value="../engine/libs/PhosphorDateTimeLib.pas"/>
+        <UnitName Value="PhosphorDateTimeLib"/>
+      </Item17>
+      <Item18>
+        <Filename Value="../engine/libs/PhosphorDictLib.pas"/>
+        <UnitName Value="PhosphorDictLib"/>
+      </Item18>
+      <Item19>
+        <Filename Value="../engine/libs/PhosphorErrLib.pas"/>
+        <UnitName Value="PhosphorErrLib"/>
+      </Item19>
+      <Item20>
+        <Filename Value="../engine/libs/PhosphorHostLib.pas"/>
+        <UnitName Value="PhosphorHostLib"/>
+      </Item20>
+      <Item21>
+        <Filename Value="../engine/libs/PhosphorIoLib.pas"/>
+        <UnitName Value="PhosphorIoLib"/>
+      </Item21>
+      <Item22>
+        <Filename Value="../engine/libs/PhosphorJsonLib.pas"/>
+        <UnitName Value="PhosphorJsonLib"/>
+      </Item22>
+      <Item23>
+        <Filename Value="../engine/libs/PhosphorNumLib.pas"/>
+        <UnitName Value="PhosphorNumLib"/>
+      </Item23>
+      <Item24>
+        <Filename Value="../engine/libs/PhosphorPlatformLib.pas"/>
+        <UnitName Value="PhosphorPlatformLib"/>
+      </Item24>
+      <Item25>
+        <Filename Value="../engine/libs/PhosphorRagLib.pas"/>
+        <UnitName Value="PhosphorRagLib"/>
+      </Item25>
+      <Item26>
+        <Filename Value="../engine/libs/PhosphorRegexLib.pas"/>
+        <UnitName Value="PhosphorRegexLib"/>
+      </Item26>
+      <Item27>
+        <Filename Value="../engine/libs/PhosphorStrLib.pas"/>
+        <UnitName Value="PhosphorStrLib"/>
+      </Item27>
+      <Item28>
+        <Filename Value="../engine/libs/PhosphorStrListLib.pas"/>
+        <UnitName Value="PhosphorStrListLib"/>
+      </Item28>
+      <Item29>
+        <Filename Value="../engine/libs/PhosphorSysLib.pas"/>
+        <UnitName Value="PhosphorSysLib"/>
+      </Item29>
+    </Files>
+    <RequiredPkgs Count="1">
+      <Item1>
+        <PackageName Value="FCL"/>
+      </Item1>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>

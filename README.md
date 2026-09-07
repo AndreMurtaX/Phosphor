@@ -143,6 +143,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/decisions.md](docs/decisions.md) — the frozen language decisions (five value
   types, `@` handles, base-1 indexing, strict boolean, real vs integer division, the
   opt-in execution limits) and the on-disk-bytecode format decisions.
+- [lazarus/README.md](lazarus/README.md) — the Lazarus package and a demo
+  application with the engine embedded in it: five examples, including what your
+  application sees when a bug in its own code faults the interpreter.
 - [CLAUDE.md](CLAUDE.md) — the short form of the above, loaded automatically by Claude
   Code every session: what "done" means here, the invariants, and the traps that have
   already cost time.

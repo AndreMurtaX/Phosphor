@@ -43,6 +43,21 @@ mkdir -p "$units"; rm -f "$exe"
 [ -x "$exe" ] || { echo "phosphorguitest did not build"; exit 1; }
 echo "gui runner built: $exe (DISPLAY=${DISPLAY:-none})"; echo
 
+# --- and the Lazarus DEMO, which is an LCL application like any embedder's ----
+# probe_demo in the main suite runs the demo's LOGIC -- its decisions live in a
+# unit with no LCL in it for exactly that reason. The WINDOW is what nothing ran
+# until this line: the unit that wires six controls, and the program that
+# installs the application's own crash guard before anything can raise.
+demoexe="$bin/phosphor_demo"; rm -f "$demoexe"
+"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
+  -Fu"$lcl/gtk2" -Fu"$lcl" \
+  -Fu"$lazroot/components/lazutils/lib/${cpu}-linux" \
+  -Fu"$lazroot/packager/units/${cpu}-linux" \
+  -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/lazarus/demo" \
+  -FU"$units" -FE"$bin" -o"$demoexe" "$root/lazarus/demo/phosphor_demo.lpr" >/dev/null
+[ -x "$demoexe" ] || { echo "the Lazarus demo did not build"; exit 1; }
+echo "lazarus demo built: $demoexe"; echo
+
 gui="$root/tests/gui"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 

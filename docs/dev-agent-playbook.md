@@ -323,6 +323,67 @@ Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-07 · round 37 · three rounds to close three mechanisms, and the two
+  defects only integration could find.** Seventeen crashes, all in the engine,
+  produced by three design seams with no enforcer. Four lanes, three rounds,
+  twenty-four agents. All four patches merged on the third.
+
+  - **EVERY ROUND CLOSED WHAT IT WAS GIVEN AND INTRODUCED ONE NEW DEFECT OF THE
+    SAME CLASS.** Round one: four patches, three rejected. Round two: four
+    patches, four rejected — a glob rewrite that silently answered wrong for 100
+    of 7225 enumerated inputs, a guard that refused an ordinary non-recursive
+    60-deep call chain, twelve library doors where NaN became a silent 0, and a
+    search cost that refused 19 of 27 searches which together run in 62 ms. All
+    four passed their authors' own tests.
+  - **THE CAUSE IS THE PIN, NOT THE CARE.** A lane asked to fix something
+    REWRITES it, then judges the rewrite against pins the author chose. Round
+    one's subnormal band and round two's glob band were both outside the
+    author's pins, and in both cases the author reported "byte-identical". The
+    glob author sampled 4000 random pairs; an exhaustive walk of the same
+    alphabet found 100 divergences, because the generator drew names from a
+    smaller alphabet than patterns.
+  - **WHAT BROKE THE CYCLE, and it was three rules, not more effort.** (1) SCOPE
+    LOCK: change only what the numbered ask requires; a defect left for the next
+    round is free, one introduced costs a round. (2) PREFER THE REMEDY THE
+    REVIEWER ALREADY MEASURED — the glob fix was swapping two `else if` branches,
+    which its reviewer had already applied and measured at 0 of 7225. (3) PROVE
+    IT ON THE REVIEWER'S HARNESS, NOT YOUR PINS. The harnesses were still on
+    disk, 551 / 114 / 573 / 1594 files. **Run the thing that caught you.**
+  - **A GREP THAT IS TRUE WHEN IT RUNS IS NOT AN INVARIANT.** The stack lane made
+    a `peLimit` from a library call fatal, justified by `grep -rn peLimit engine/
+    host/` finding none in any library. True that hour. The budget lane then gave
+    libraries their own refusals. Both patches were verified in isolation by two
+    reviewers each; together, `probe_budget` went to 205/2. **Lane isolation
+    hides exactly this, so integration is a test, not a formality** — and the fix
+    was to discriminate on PROVENANCE rather than on the code: a ceiling crossed
+    inside a nested activation stays fatal, a library refusing up front stays
+    catchable.
+  - **PIN THE HALF THAT IS NOT SELF-RE-ARMING.** That rule's obvious test — a
+    step budget crossed inside a callback — passes with the rule and without it,
+    because `FSteps` is shared and the outer loop re-fires it an instruction
+    later. It measures nothing. The frame ceiling is the one that genuinely
+    escapes, because `CallUserFunc` restores `FFrameSP`. Measured both ways
+    before the pin was written.
+  - **`SizeOf(Extended)` IS 8 ON WIN64 AND 10 ON LINUX X86-64**, and an untyped
+    float literal in FPC source is an Extended. Comparing a Double against one
+    promotes BOTH, so `r.Num = 1.7976931348623157e308` is false on Linux and true
+    on Windows; and `Power` carries its intermediate in whatever Extended is, so
+    `10 ^ -310` differs in its last digits between the two. Three pins were
+    testing the FPU and the literal parser rather than the engine. Compare
+    against a TYPED `Double` constant, and assert the PROPERTY a check is named
+    for — "is a subnormal, not zero" — rather than a decimal string. All three
+    rounds of review ran on Windows only, and round two's reviewer had said so in
+    writing.
+  - **A FAULT IS NOT AN ERROR, AND ON ERROR MUST NOT SEE ONE.** `opCall`'s net
+    caught every `Exception` and handed it to `ON ERROR` — including an access
+    violation. Resuming a script after one resumes on memory a wild write has
+    already reached, so it answers wrongly instead of dying, which is worse than
+    the crash: a crash is loud. Now `peFatal` (8), never offered to `ON ERROR`,
+    and `ContainFaults` for the host to keep its PROCESS while losing the run.
+    Classifying it needs the RTL, not memory: `EExternal` is the OS/hardware root
+    and `EIntError`/`EMathError` DESCEND FROM IT, so "is EExternal" alone calls a
+    division by zero a state fault.
+
 - **2026-09-06 · round 33 · a suffix that lied, and the two functions that were
   missing because writing them was hard.** The owner asked for `dict_clear@`'s
   suffix to be fixed and for `encodedate`/`incmonth` to be added. Both asks turned

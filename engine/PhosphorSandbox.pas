@@ -15,8 +15,11 @@
        delimiter, so a tree walk starting at '' starts at the ROOT OF THE CURRENT
        DRIVE. A bare root ('/', 'C:\', a UNC share) is refused for the same
        reason -- neither is a directory a program meant to name, and a program
-       that computed one has a bug this must not carry out for it. Reads are not
-       refused: listing a drive root destroys nothing.
+       that computed one has a bug this must not carry out for it. The rule is on
+       the DIRECTORY, not on the string that spells it: 'C:\.', 'C:\dir\..' and
+       '.' from a working directory that is a root are the drive root too, and
+       are refused with it. Reads are not refused: listing a drive root destroys
+       nothing.
 
     2. WITH A ROOT SET, every path -- read, write or delete -- must resolve
        inside it. Resolution expands '.' and '..' and follows symlinks, so
@@ -76,7 +79,91 @@ var
   GRoot: String = '';   // '' = no sandbox; the process-wide setting
 
 // --- rule 1: the paths a destructive call must never be handed ---------------
-function IsPerilousPath(const APath: String): Boolean;
+{ THE RULE IS STRUCTURAL, NOT TEXTUAL, AND IT TOOK THREE SPELLINGS TO LEARN IT.
+
+  It began as a test on the raw string, and each time a new way of WRITING a
+  drive root got through, the string test grew one more case. "C:/" got through
+  because ExcludeTrailingPathDelimiter strips PathDelim and on Windows that is
+  the backslash alone; "C:\\" got through because it strips exactly one; a UNC
+  share root got through because the test counted separators wrongly. Three
+  fixes, all the same shape -- one more pattern -- and so the next spelling got
+  through as well. It did, and there were more of it than of all the others put
+  together: "C:\.", "C:\dir\..", "C:\a\b\..\..", "\.", "\\server\share\..",
+  "\\?\C:\.." and "." from a working directory that IS a root all name a drive
+  or a share root, none of them LOOKS like one, and every one of them was handed
+  to the recursive remover.
+
+  Text cannot win that argument, because the number of ways to write a directory
+  is unbounded. What is bounded is the directory. So the path is RESOLVED first
+  and the test is then structural: with the dot segments collapsed, is what
+  remains nothing but a volume -- a drive, a share, a server -- with no directory
+  under it? "C:\a\b\..\.." and "C:\" get the same answer because they are the
+  same place, and a spelling nobody has thought of yet gets that answer too.
+
+  WHY ExpandFileName AND NOT RealPathOf, which this unit also owns. Read the RTL
+  (rtl/objpas/sysutils/fina.inc, rtl/inc/fexpand.inc): ExpandFileName is
+  DoDirSeparators plus FExpand, and FExpand is string arithmetic over ONE query
+  of the process's own current directory (GetDirIO -> GetDir). It stats nothing,
+  opens nothing, creates nothing. IsPerilousPath therefore stays a question that
+  can be asked of any string without a filesystem anywhere near it -- which is
+  the entire technique this project uses to test a guard standing in front of a
+  recursive delete, and is not a property to trade away. RealPathOf additionally
+  follows symlinks, which costs a FileExists, a DirectoryExists and a
+  FileGetSymLinkTarget for every component, on a guard consulted before every
+  write; and here it would answer no differently, because FollowLinks returns a
+  path unchanged when it is not a link. Rule 2 still resolves links, through
+  RealPathOf, where a link is what matters.
+
+  WHY THE TEXT TEST IS KEPT AS WELL, rather than replaced. ExpandFileName('C:')
+  answers the current directory ON drive C:, not the root of it -- a bare drive
+  letter is the one spelling that resolution makes LESS suspicious, and it is
+  perilous. So the two are OR-ed: the text test refuses a string that names a
+  volume and no directory in it, the structural test refuses every string that
+  leads to one. }
+
+function IsPathSep(const AChar: Char): Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := (AChar = '\') or (AChar = '/');
+  {$ELSE}
+  Result := (AChar = '/');
+  {$ENDIF}
+end;
+
+{ EVERY trailing separator, in every spelling -- not the one PathDelim that
+  ExcludeTrailingPathDelimiter removes. Used on both sides of every comparison
+  below, because ExpandFileName('C:\\') answers 'C:\\' (the doubled separator at
+  a root is not collapsed) while ExtractFileDrive('\\server\') answers
+  '\\server\' WITH its trailing separator: raw, those two would not match. }
+function ChopTrailingSeps(const APath: String): String;
+begin
+  Result := APath;
+  while (Length(Result) > 0) and IsPathSep(Result[Length(Result)]) do
+    Delete(Result, Length(Result), 1);
+end;
+
+{$IFDEF WINDOWS}
+{ The extended and device prefixes spell the same volumes differently: "\\?\C:\"
+  IS "C:\", and "\\?\UNC\srv\shr" IS "\\srv\shr". ExtractFileDrive knows neither,
+  and reports the volume of "\\?\UNC\srv\shr" as "\\?\UNC" -- so a share root
+  read as a folder two levels inside one. Rewritten to the plain spelling before
+  the volume is measured, because the point of this rule is that the same
+  directory gets the same answer however it is written. }
+function UnprefixDevice(const APath: String): String;
+begin
+  Result := APath;
+  if SameText(Copy(Result, 1, 8), '\\?\UNC\') then
+    Result := '\\' + Copy(Result, 9, Length(Result))
+  else if ((Copy(Result, 1, 4) = '\\?\') or (Copy(Result, 1, 4) = '\\.\')) and
+          (Length(Result) >= 6) and (Result[6] = ':') then
+    Result := Copy(Result, 5, Length(Result));
+end;
+{$ENDIF}
+
+{ A volume named with no directory in it: '', a bare separator, 'C:', a UNC
+  server or share root. This is the old textual rule, and it is kept for exactly
+  what resolution cannot see -- see the header comment on 'C:'. }
+function NamesAVolumeOnly(const APath: String): Boolean;
 var
   p: String;
   {$IFDEF WINDOWS}
@@ -87,38 +174,17 @@ begin
   p := Trim(APath);
   if p = '' then Exit(True);                       // '' -> the drive root
   {$IFDEF WINDOWS}
-  { EVERY SEPARATOR, NOT JUST THE NATIVE ONE. ExcludeTrailingPathDelimiter strips
-    PathDelim, which on Windows is '\' alone -- so "C:\" reduced to "C:" and was
-    caught, while "C:/" stayed three characters long and was not. The Windows API
-    accepts both spellings equally, and this project's own documentation tells a
-    reader to prefer the forward slash ("C:/temp") because a backslash in a string
-    literal is an escape. The rule was therefore blind to the spelling it had
-    taught people to use.
-
-    Repeated, because "C://" and "C:\\" are drive roots too: strip until nothing
-    trailing is left. }
   { Both spellings, everywhere: the separator is normalised BEFORE anything is
-    measured, so the rest of this function sees one form. '/' alone still reduces
-    to '' and is still the root. }
+    measured, so the rest of this function sees one form. }
   p := StringReplace(p, '/', '\', [rfReplaceAll]);
-  while (Length(p) > 0) and (p[Length(p)] = '\') do
-    Delete(p, Length(p), 1);
-  {$ELSE}
-  while (Length(p) > 0) and (p[Length(p)] = '/') do
-    Delete(p, Length(p), 1);
   {$ENDIF}
+  p := ChopTrailingSeps(p);
   if p = '' then Exit(True);                       // '/' or '\' alone
   {$IFDEF WINDOWS}
   // 'C:', 'C:\', 'C:/' and 'C://' all reduce to two characters here
   if (Length(p) = 2) and (p[2] = ':') then Exit(True);
-  { A UNC root, in either spelling: \\server and \\server\share alike.
-
-    The comment here used to promise "\\server\share with nothing under it" while
-    the test was `Pos('\', ...) = 0`, which is true only for \\server -- so the
-    share root itself, the one thing on a network that answers to "delete
-    everything", was treated as an ordinary folder. A share root is a drive root
-    with a different spelling. Two components after the slashes is still a root;
-    three is a folder inside one. }
+  { A UNC root, in either spelling: \\server and \\server\share alike. Two
+    components after the slashes is still a root; three is a folder inside one. }
   if (Length(p) > 2) and (p[1] = '\') and (p[2] = '\') then
   begin
     q := Copy(p, 3, Length(p));
@@ -129,6 +195,54 @@ begin
   end;
   {$ENDIF}
   Result := False;
+end;
+
+{ Resolve, then ask the structural question: is the whole of what is left the
+  volume itself? }
+function ResolvesToAVolumeRoot(const APath: String): Boolean;
+var
+  s: String;
+  {$IFDEF WINDOWS}
+  d: String;
+  {$ENDIF}
+begin
+{$IFNDEF WINDOWS}
+  { A BACKSLASH IS AN ORDINARY POSIX FILENAME CHARACTER, and IsPathSep says so --
+    but ExpandFileName does not. It calls DoDirSeparators, which reads
+    AllowDirectorySeparators, and rtl/unix/sysunixh.inc:35 declares that
+    ['\','/'] on Unix TOO. So resolving a path containing a backslash
+    mangles it, and every arrangement of backslashes and dots that reduces to '/'
+    would be called a root: a file literally named '\' became unwritable, measured
+    at 1 deviation in a 90-assertion POSIX sweep.
+
+    The check that follows resolves, so it is the check that must decline. A name
+    with a backslash in it cannot BE a POSIX root -- a root is '/' -- so answering
+    False here loses nothing. The Windows arm is unaffected, where a backslash
+    genuinely is a separator. }
+  if Pos('\', APath) > 0 then Exit(False);
+{$ENDIF}
+  s := ChopTrailingSeps(ExpandFileName(APath));
+  if s = '' then Exit(True);      // '/' where there are no drives to name
+  {$IFDEF WINDOWS}
+  s := ChopTrailingSeps(UnprefixDevice(s));
+  if s = '' then Exit(True);
+  // ExtractFileDrive answers 'C:', '\\server\share' or '\\server'. When that is
+  // the ENTIRE path, the path is a root and nothing else.
+  d := ChopTrailingSeps(ExtractFileDrive(s));
+  if (d <> '') and SameText(d, s) then Exit(True);
+  {$ENDIF}
+  Result := False;
+end;
+
+function IsPerilousPath(const APath: String): Boolean;
+var
+  p: String;
+begin
+  { Trimmed once, here, so both tests judge the same string: "C:\ " with a
+    trailing space is the drive root, and only Trim makes it look like one. }
+  p := Trim(APath);
+  if p = '' then Exit(True);
+  Result := NamesAVolumeOnly(p) or ResolvesToAVolumeRoot(p);
 end;
 
 // --- resolution --------------------------------------------------------------

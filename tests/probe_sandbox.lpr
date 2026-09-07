@@ -98,11 +98,28 @@ begin
   Result := StringReplace(S, '\', '/', [rfReplaceAll]);
 end;
 
+{ The two halves of the perilous-path sweep. Both ASK IsPerilousPath, which is a
+  pure predicate over a string -- no path named below is ever handed to anything
+  that acts. The spelling is quoted into the failure message so a regression says
+  WHICH spelling got through. }
+procedure Peril(const APath, AWhy: String);
+begin
+  Report(IsPerilousPath(APath), 'perilous: ' + AWhy + ' -- "' + APath + '"');
+end;
+
+procedure Ordinary(const APath, AWhy: String);
+begin
+  Report(not IsPerilousPath(APath),
+         'NOT perilous: ' + AWhy + ' -- "' + APath + '"');
+end;
+
 const
   LF = #10;
 
 var
   survived: Boolean;
+  SavedCwd: String;   // restored immediately; see the relative-spelling block
+  RootCwd: String;
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
   Sink := TSink.Create();
@@ -131,38 +148,189 @@ begin
   WriteFile(OutDir + PathDelim + 'sub' + PathDelim + 'deep.txt', 'still here too');
 
   { --- the perilous-path rule, asserted DIRECTLY ---------------------------
-    IsPerilousPath is a pure function, so every one of these can be asked without
-    a filesystem anywhere near it. That matters more here than anywhere else in
+    IsPerilousPath is a pure predicate over a string -- ExpandFileName reads the
+    process's own current directory and nothing else (see the header comment in
+    engine/PhosphorSandbox.pas) -- so every one of these can be asked without a
+    filesystem anywhere near it. That matters more here than anywhere else in
     this probe: the thing being tested is the guard in front of a recursive
     delete, and the way NOT to test it is to run one.
 
-    'C:/' is the case that was open. ExcludeTrailingPathDelimiter strips PathDelim
-    and nothing else, which on Windows is the backslash alone -- so "C:\" reduced
-    to "C:" and was caught, while "C:/" stayed three characters and was not. The
-    Windows API takes both, and this project's own documentation tells a reader to
-    write the forward slash, because a backslash in a string literal is an escape.
-    The rule was blind to the spelling it had taught people to use. }
-  Report(IsPerilousPath(''), 'perilous: the empty path');
-  Report(IsPerilousPath('   '), 'perilous: whitespace only');
+    THE RANGE, NOT A LIST. The rule has lost to a new SPELLING of a drive root
+    three times: "C:/" (ExcludeTrailingPathDelimiter strips PathDelim, and on
+    Windows that is the backslash alone), "C:\\" (it strips exactly one), and the
+    UNC share root (the separator count was wrong). Each fix pinned the spelling
+    that had been found, so the next one walked through -- and the next one was a
+    whole family: everything that reaches a root through '.' and '..'. What is
+    swept below is therefore the RANGE of spellings, not the ones that happened
+    to be reported: both separators and mixed, doubled and trailing, a dot or a
+    dot-dot segment at every position, a climb from one level and from six, UNC
+    and extended-length and device prefixes, case, a trailing space, a long path,
+    and the relative forms further down. If a spelling nobody has written yet
+    reaches a root, the structural rule these pin is what has to catch it. }
+  Peril('', 'the empty path');
+  Peril('   ', 'whitespace only');
   {$IFDEF WINDOWS}
-  Report(IsPerilousPath('C:'), 'perilous: a bare drive letter');
-  Report(IsPerilousPath('C:\'), 'perilous: a drive root with a backslash');
-  Report(IsPerilousPath('C:/'), 'perilous: a drive root with a FORWARD slash');
-  Report(IsPerilousPath('C:\\'), 'perilous: a drive root with two backslashes');
-  Report(IsPerilousPath('C://'), 'perilous: a drive root with two forward slashes');
-  Report(IsPerilousPath(' C:/ '), 'perilous: a drive root with spaces around it');
-  Report(IsPerilousPath('\\server\share'), 'perilous: a UNC share root');
-  Report(IsPerilousPath('//server/share'), 'perilous: a UNC share root, forward slashes');
-  Report(not IsPerilousPath('C:\Users\someone'), 'and an ordinary path is not');
-  Report(not IsPerilousPath('C:/Users/someone'), 'nor is it with forward slashes');
-  Report(not IsPerilousPath('\\server\share\folder'), 'nor a folder on a share');
+  // the volume named with no directory in it
+  Peril('C:', 'a bare drive letter');
+  Peril('C:\', 'a drive root with a backslash');
+  Peril('C:/', 'a drive root with a FORWARD slash');
+  Peril('C:\\', 'a drive root with two backslashes');
+  Peril('C://', 'a drive root with two forward slashes');
+  Peril('C:\/', 'a drive root with one of each');
+  Peril('c:\', 'a lower-case drive letter');
+  Peril('C:\ ', 'a drive root with a trailing space');
+  Peril(' C:/ ', 'a drive root with spaces around it');
+  Peril('\', 'a bare separator');
+  Peril('/', 'a bare forward slash');
+  // the same places reached through '.'
+  Peril('C:\.', 'a drive root as a dot segment');
+  Peril('C:/.', 'the same with a forward slash');
+  Peril('C:\.\', 'a dot segment with a trailing separator');
+  Peril('C:\.\\', 'a dot segment with two trailing separators');
+  Peril('C:\.\.', 'two dot segments');
+  Peril('\.', 'a dot segment off the current drive');
+  Peril('\.\', 'the same with a trailing separator');
+  // and through '..', from every depth
+  Peril('C:\..', 'a drive root climbed past');
+  Peril('C:/..', 'the same with a forward slash');
+  Peril('C:\..\', 'the same with a trailing separator');
+  Peril('C:\..\..', 'climbing twice past a drive root');
+  Peril('\..', 'climbing past the root of the current drive');
+  Peril('/..', 'the same with a forward slash');
+  Peril('C:\dir\..', 'one directory, climbed out of');
+  Peril('C:/dir\..', 'the same with mixed separators');
+  Peril('C:\dir/..', 'mixed the other way');
+  Peril('C:\dir\..\', 'and with a trailing separator');
+  Peril('C:\dir\..\.', 'climbed out of, then a dot segment');
+  Peril('\dir\..', 'the same off the current drive');
+  Peril('C:\Windows\..', 'a real directory, climbed out of');
+  Peril('C:\a\b\..\..', 'two levels climbed out of');
+  Peril('C:\a\b\..\..\..', 'more climbs than there are levels');
+  Peril('C:\a\b\c\d\e\f\..\..\..\..\..\..', 'six levels climbed out of');
+  Peril('C:\Program Files\Common Files\..\..', 'names with spaces in them');
+  Peril('C:\' + StringOfChar('a', 200) + '\..', 'a long name climbed out of');
+  // a share, a server, and the extended and device spellings of a volume
+  Peril('\\server\share', 'a UNC share root');
+  Peril('//server/share', 'a UNC share root, forward slashes');
+  Peril('\\server\share\', 'a UNC share root with a trailing separator');
+  Peril('\\server\share\.', 'a UNC share root as a dot segment');
+  Peril('\\server\share\..', 'a UNC share root climbed past');
+  Peril('\\server\share\dir\..', 'a folder on a share, climbed out of');
+  Peril('\\server\share\a\b\..\..', 'two levels on a share, climbed out of');
+  Peril('\\server', 'a UNC server with no share');
+  Peril('\\server\', 'the same with a trailing separator');
+  Peril('\\?\C:', 'an extended-length drive');
+  Peril('\\?\C:\', 'an extended-length drive root');
+  Peril('\\?\C:\.', 'an extended-length drive root as a dot segment');
+  Peril('\\?\C:\..', 'an extended-length drive root climbed past');
+  Peril('\\?\C:\dir\..', 'a folder under one, climbed out of');
+  Peril('\\?\UNC\server\share', 'an extended-length UNC share root');
+  Peril('\\?\UNC\server\share\..', 'the same, climbed past');
+  Peril('\\.\C:', 'a device-path drive');
+  Peril('\\.\C:\', 'a device-path drive root');
+
+  { --- AND THE MIRROR. A guard that refuses legitimate work is as useless as
+    one that lets everything through, and a structural rule is exactly the kind
+    that over-reaches: every path below is one a real program writes, and every
+    one of them must still be accepted. }
+  Ordinary('C:\Users\someone', 'an ordinary absolute path');
+  Ordinary('C:/Users/someone', 'the same with forward slashes');
+  Ordinary('C:\Users\someone\', 'an ordinary path with a trailing separator');
+  Ordinary('C:\Users\someone\\', 'and with two');
+  Ordinary('C:\a\report.v1.txt', 'a file with dots in its NAME');
+  Ordinary('C:\Users\me\.hidden', 'a name that begins with a dot');
+  Ordinary('C:\Users\me\..hidden', 'a name that begins with two');
+  Ordinary('C:\Users\me\a..b', 'a name with two dots inside it');
+  Ordinary('C:\a\...', 'a directory named "..."');
+  Ordinary('C:\...', 'one of those at the top level');
+  Ordinary('report.v1.txt', 'a bare relative filename');
+  Ordinary('sub\file.txt', 'a relative path');
+  Ordinary('sub/file.txt', 'the same with a forward slash');
+  Ordinary('.\sub\file.txt', 'a relative path that starts with a dot');
+  Ordinary('..\sibling\file.txt', 'one that starts by climbing');
+  Ordinary('C:\a\..\b', 'a path that climbs and comes back down');
+  Ordinary('C:\a\b\..\..\c', 'one that climbs twice and comes back');
+  Ordinary('C:\..\a', 'one that climbs past the root and comes back');
+  Ordinary('\\server\share\folder', 'a folder on a share');
+  Ordinary('\\server\share\folder\', 'the same with a trailing separator');
+  Ordinary('\\server\share\folder\..\sub', 'a sideways move on a share');
+  Ordinary('\\?\C:\Users\me', 'an extended-length ordinary path');
+  Ordinary('\\?\UNC\server\share\folder', 'an extended-length folder on a share');
+  Ordinary('C:\' + StringOfChar('d', 200) + '\leaf.txt', 'a long path');
   {$ELSE}
-  Report(IsPerilousPath('/'), 'perilous: the filesystem root');
-  Report(IsPerilousPath('//'), 'perilous: the root, doubled');
-  Report(IsPerilousPath(' / '), 'perilous: the root with spaces around it');
-  Report(not IsPerilousPath('/home/someone'), 'and an ordinary path is not');
-  Report(not IsPerilousPath('/home/someone/'), 'nor one with a trailing slash');
+  Peril('/', 'the filesystem root');
+  Peril('//', 'the root, doubled');
+  Peril('///', 'the root, tripled');
+  Peril(' / ', 'the root with spaces around it');
+  Peril('/ ', 'the root with a trailing space');
+  Peril('/.', 'the root as a dot segment');
+  Peril('/./', 'the same with a trailing separator');
+  Peril('/./.', 'two dot segments');
+  Peril('/..', 'the root climbed past');
+  Peril('/../..', 'climbed past twice');
+  Peril('/home/..', 'a real directory, climbed out of');
+  Peril('/home/../', 'the same with a trailing separator');
+  Peril('/a/b/../..', 'two levels climbed out of');
+  Peril('/a/b/../../..', 'more climbs than there are levels');
+  Peril('/a/b/c/d/e/f/../../../../../..', 'six levels climbed out of');
+  Peril('/' + StringOfChar('a', 200) + '/..', 'a long name climbed out of');
+
+  { --- AND THE MIRROR: everything a real program writes must still be accepted. }
+  Ordinary('/home/someone', 'an ordinary absolute path');
+  Ordinary('/home/someone/', 'one with a trailing slash');
+  Ordinary('/home/a/report.v1.txt', 'a file with dots in its NAME');
+  Ordinary('/home/me/.hidden', 'a name that begins with a dot');
+  Ordinary('/home/me/a..b', 'a name with two dots inside it');
+  Ordinary('/home/...', 'a directory named "..."');
+  Ordinary('report.v1.txt', 'a bare relative filename');
+  Ordinary('sub/file.txt', 'a relative path');
+  Ordinary('./sub/file.txt', 'a relative path that starts with a dot');
+  Ordinary('../sibling/file.txt', 'one that starts by climbing');
+  Ordinary('/home/a/../b', 'a path that climbs and comes back down');
+  Ordinary('/a/b/../../c', 'one that climbs twice and comes back');
+  Ordinary('/' + StringOfChar('d', 200) + '/leaf.txt', 'a long path');
+  { A BACKSLASH IS AN ORDINARY FILENAME CHARACTER HERE, and the structural rule
+    resolves with ExpandFileName, which treats it as a separator on Unix too --
+    rtl/unix/sysunixh.inc:35 declares AllowDirectorySeparators as ['\','/'] on
+    EVERY platform. So a name made of backslashes and dots reduced to '/' and
+    became perilous: a file literally called '\' stopped being writable. These
+    four are the deviation, and they only fail on the platform where they matter,
+    which is why the Windows-only sweep that preceded them saw nothing. }
+  Ordinary('\', 'a file named with one backslash');
+  Ordinary('..\', 'a backslash after two dots');
+  Ordinary('\..', 'a backslash before two dots');
+  Ordinary('/home/a\b', 'a backslash inside a component');
   {$ENDIF}
+
+  { --- the relative spellings, which only a RESOLVED rule can see -------------
+    '.' is the drive root when the working directory is the drive root, and a
+    textual rule cannot know that. Proven by moving this process's own working
+    directory -- a per-process setting, restored two lines later, that creates,
+    writes and removes nothing -- and then asking the predicate.
+
+    A failure to chdir is reported, not skipped: a skip nobody sees is a pass. }
+  SavedCwd := GetCurrentDir;
+  {$IFDEF WINDOWS}
+  RootCwd := ExtractFileDrive(SavedCwd) + PathDelim;
+  {$ELSE}
+  RootCwd := '/';
+  {$ENDIF}
+  if not SetCurrentDir(RootCwd) then
+    Report(False, 'the probe could not enter ' + RootCwd + ' to test relative spellings')
+  else
+  begin
+    Peril('.', 'a dot, from a working directory that IS a root');
+    Peril('..', 'a dot-dot, from the same');
+    Peril('.' + PathDelim, 'a dot with a trailing separator, from the same');
+    Peril('.' + PathDelim + '.', 'two dot segments, from the same');
+    Peril('..' + PathDelim + '..', 'two climbs, from the same');
+    Ordinary('sub', 'while a plain name under that root is not');
+    Ordinary('a.txt', 'nor a file in it');
+    Ordinary('sub' + PathDelim + 'a.txt', 'nor a file one level down');
+    SetCurrentDir(SavedCwd);
+    Report(SameText(GetCurrentDir, SavedCwd),
+           'and the working directory is put back (now "' + GetCurrentDir + '")');
+  end;
 
   // --- the root is what the host asked for, and the script can read it --------
   RunUnder(RootDir, 'print sandboxroot$()' + LF);
@@ -290,8 +458,51 @@ begin
          'and so is a drive root');
   Report(not SandboxAllows({$IFDEF WINDOWS}'C:\'{$ELSE}'//'{$ENDIF}, puDelete),
          'and the other spelling of it');
+  { The spellings that got through. The gate, not just the predicate: these are
+    the answers dir_delete acts on, and with no --sandbox they are the ONLY thing
+    between a script and the drive root. Asked, never attempted. }
+  Report(not SandboxAllows({$IFDEF WINDOWS}'C:\.'{$ELSE}'/.'{$ENDIF}, puDelete),
+         'and the dot-segment spelling of it');
+  Report(not SandboxAllows({$IFDEF WINDOWS}'C:\dir\..'{$ELSE}'/dir/..'{$ENDIF}, puDelete),
+         'and the spelling that climbs out of a directory into it');
+  Report(not SandboxAllows({$IFDEF WINDOWS}'C:\a\b\..\..'{$ELSE}'/a/b/../..'{$ENDIF}, puDelete),
+         'and the one that climbs two levels into it');
+  {$IFDEF WINDOWS}
+  Report(not SandboxAllows('\\server\share\..', puDelete),
+         'and a share root reached by climbing');
+  Report(not SandboxAllows('\\?\C:\..', puDelete),
+         'and an extended-length drive root reached by climbing');
+  {$ENDIF}
+  Report(not SandboxAllows({$IFDEF WINDOWS}'C:\.'{$ELSE}'/.'{$ENDIF}, puWrite),
+         'a write to one is refused too, not only a delete');
+  Report(SandboxAllows({$IFDEF WINDOWS}'C:\.'{$ELSE}'/.'{$ENDIF}, puRead),
+         'while READING a drive root is still allowed: listing one destroys nothing');
   Report(SandboxAllows(OutDir, puDelete),
          'while an ordinary directory is allowed, so the rule is not refusing everything');
+  Report(SandboxAllows(OutDir + PathDelim + 'sub' + PathDelim + '..' + PathDelim +
+                       'report.v1.txt', puWrite),
+         'and so is a path that climbs and comes back down to a dotted filename');
+
+  { --- THE MIRROR, with a root set: everything a real program does inside it --
+    A rule that resolves paths is exactly the kind that over-reaches, and the
+    cost of over-reaching is a sandbox that refuses the work it was installed to
+    permit. Each of these is a path an ordinary script writes. }
+  SetSandboxRoot(RootDir);
+  Report(SandboxActive, 'a root is set for these');
+  Report(SandboxAllows(RealPathOf(RootDir), puWrite),
+         'the root itself is writable');
+  Report(SandboxAllows(IncludeTrailingPathDelimiter(RealPathOf(RootDir)), puWrite),
+         'and with a trailing separator');
+  Report(SandboxAllows(RealPathOf(RootDir) + PathDelim + 'sub', puWrite),
+         'a subdirectory of it is writable');
+  Report(SandboxAllows(RealPathOf(RootDir) + PathDelim + 'report.v1.txt', puWrite),
+         'a file with dots in its name is writable');
+  Report(SandboxAllows(RealPathOf(RootDir) + PathDelim + 'a' + PathDelim + '..' +
+                       PathDelim + 'b', puWrite),
+         'and a path that climbs and comes back inside');
+  Report(not SandboxAllows(RealPathOf(RootDir) + PathDelim + '..', puWrite),
+         'while one that climbs OUT of the root is still refused');
+  SetSandboxRoot('');
 
   // --- and with no root, the ceiling costs nothing ----------------------------
   RunUnder('', 'print file_writealltext("' + Slash(OutDir) + '/unbounded.txt", "x")' + LF);

@@ -90,6 +90,36 @@ type
 
 { TZipWriter }
 
+{ AN ENTRY NAME MAY NOT BE EMPTY, and the refusal belongs at the ADD -- the same
+  rule, and the same reason, as the missing-file check in AddFile below.
+
+  A stream entry with an empty archive name is one TZipper cannot write, and it
+  says so at the LAST possible moment. TZipper.SaveToFile opens the output with
+  fmCreate -- which truncates whatever archive was already at that path to 0
+  bytes -- and only then calls SaveToStream, which calls GetFileInfo, which
+  raises SErrMissingArchiveName for the entry. So the add answered 1, the caller
+  carried on adding, and zip_close destroyed the whole archive: every good entry
+  in it, and the file that stood there before, left behind as 0 bytes that this
+  package's own reader calls corrupt.
+
+  Only the EMPTY name does this. TZipFileEntry.GetArchiveFileName falls back to
+  the DISK file name when the archive name is empty, so an empty name is fatal
+  exactly when there is no disk name to fall back on -- a string entry. It is
+  refused for zip_addfile too, where it is not fatal but is still wrong: the
+  entry would be stored under the source's full disk path, and SafeEntryName
+  refuses an absolute name on the way out, so the archive would be one this
+  library cannot extract.
+
+  Deliberately NOT SafeEntryName: a '..' segment is a legal thing to WRITE into
+  an archive -- tests/packages/09_safety.bas builds exactly that archive, the way
+  an attacker would, to prove the extractor refuses it. An entry name is judged
+  where it decides a path on disk, which is extraction. }
+procedure CheckEntryName(const AWho, AArchive: String);
+begin
+  if AArchive = '' then
+    raise EInOutError.Create(AWho + ': an entry name may not be empty');
+end;
+
 { THE GUARD IS IN THE CONSTRUCTOR, where the file is actually bound, rather than
   only in the registered function that calls it -- so a caller added later is
   covered without anyone remembering. It RAISES rather than answering: a
@@ -125,12 +155,16 @@ begin
     raise EInOutError.Create('zip_addfile: "' + ADisk + '" is outside the sandbox root');
   if not FileExists(ADisk) then
     raise EInOutError.Create('zip_addfile: "' + ADisk + '" does not exist');
+  CheckEntryName('zip_addfile', AArchive);
   Z.Entries.AddFileEntry(ADisk, AArchive);
 end;
 
 procedure TZipWriter.AddStr(const AContent, AArchive: String);
 var ms: TMemoryStream;
 begin
+  // Asked BEFORE the stream is made, so a refused add allocates nothing and
+  // leaves the writer exactly as it was: the entries already in it still close.
+  CheckEntryName('zip_addstr', AArchive);
   ms := TMemoryStream.Create();
   if Length(AContent) > 0 then ms.WriteBuffer(AContent[1], Length(AContent));
   ms.Position := 0;
@@ -266,14 +300,23 @@ var z: TZipper; sr: TSearchRec; base: String; names: TStringList; i: Integer;
 begin
   Err := NoError();
   Result := ValInt(0);
+  { TWO PATHS, SO TWO QUESTIONS, EACH WITH THE VERB ITS PATH DESERVES. Only
+    Args[1], the source directory, was ever asked about. Args[0] is the archive
+    this WRITES, and it went straight to TZipper.FileName -- so a run confined by
+    --sandbox created a zip anywhere on the disk, and because SaveToFile opens
+    the output with fmCreate, it did so ON TOP of whatever file was already
+    there: an existing 30-byte document came back as a 153-byte archive.
+    Asked before TZipper.Create, so a refusal constructs nothing.
+
+    RECORDED, not just answered: the page promises "0 if srcdir$ is outside the
+    sandbox root or anything fails, with zip_error() set to 1", and this exit
+    left the slot reading clean. }
+  if not SandboxAllows(Args[0].Str, puWrite) then begin ZipErr := 1; Exit(ValInt(0)); end;
+  if not SandboxAllows(Args[1].Str, puRead) then begin ZipErr := 1; Exit(ValInt(0)); end;
   try
     z := TZipper.Create();
     try
       z.FileName := Args[0].Str;
-      // RECORDED, not just answered: the page promises "0 if srcdir$ is outside
-      // the sandbox root or anything fails, with zip_error() set to 1", and this
-      // exit left the slot reading clean.
-      if not SandboxAllows(Args[1].Str, puRead) then begin ZipErr := 1; Exit(ValInt(0)); end;
       { A SOURCE DIRECTORY THAT IS NOT THERE IS A FAILURE, ANSWERED BEFORE ANY FILE
         IS MADE. FindFirst on a directory that does not exist simply matches
         nothing -- and so does FindFirst on a path naming a FILE -- so the entry
@@ -309,7 +352,28 @@ begin
         end;
         names.CustomSort(@CompareNameBytes);
         for i := 0 to names.Count - 1 do
+        begin
+          { ASKED AT EVERY LEVEL, NOT ONLY OF THE ARGUMENT.
+
+            `base` was gated once, as a directory. Each CHILD is a distinct disk
+            path handed to the RTL, and it is not an Args[i], so an enumeration
+            that walks the handler's arguments is structurally blind to it -- the
+            gate's own blind spot, one level down. A file symlink inside the
+            directory pointing outside the root would have its TARGET's content
+            read into the archive, and the script reads it back with zip_read$.
+
+            This is the rule PhosphorIoLib already states twice, at CollectEntries
+            and at DeleteTree: "re-asked at every level of the recursion". And
+            zip_addfile gates the individual path already, so without this line
+            adding one file was refused while archiving its parent succeeded. }
+          if not SandboxAllows(base + names[i], puRead) then
+          begin
+            ZipErr := 1;
+            names.Free;
+            Exit(ValInt(0));
+          end;
           z.Entries.AddFileEntry(base + names[i], names[i]);
+        end;
       finally
         names.Free;
       end;
@@ -399,6 +463,13 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
+  { Args[1] IS A PATH ON DISK TOO -- the directory every entry is written into,
+    and the half of this call nobody asked the gate about. The two guards below
+    are not the same guard: ArchiveIsSafe stops an ENTRY NAME climbing out of the
+    destination, and this stops the DESTINATION ITSELF from being outside the
+    root. An archive full of well-behaved names extracted cleanly into a
+    directory the script had no business writing to, which is the whole escape. }
+  if not SandboxAllows(Args[1].Str, puWrite) then begin ZipErr := 1; Exit; end;
   try
     uz := TUnZipper.Create();
     try
@@ -494,7 +565,32 @@ end;
 
   check-sandbox.py did not report it, and could not: it looks for Pascal
   filesystem primitives, and TZipper/TUnZipper open their own files. The gate has
-  been taught these names too. }
+  been taught these names too.
+
+  AND THEN THE SAME MISTAKE AGAIN, ONE ARGUMENT ACROSS. That fix reached the
+  paths those functions READ and the archives they CREATE by handle, and stopped
+  there. Four routines here take TWO paths, and in every one of them the path
+  left ungated was the DESTINATION: zip_compress's archive, unzip_extract's
+  output directory, zip_extractall's output directory, and zip_quick's archive --
+  whose source, meanwhile, was checked with puWrite, the verb belonging to the
+  other end. The escape survived its own fix, in the direction that writes, and
+  every suite and all seven gates stayed green through it, because a gate that
+  asks whether a ROUTINE mentions SandboxAllows cannot ask whether EVERY path in
+  it was checked.
+
+  So the rule is not "this unit asks the gate", which is a claim about a file. It
+  is: A ROUTINE WITH TWO PATHS ASKS TWICE, each with the verb its own path
+  deserves -- puRead for the one it reads, puWrite for the one it writes. There
+  are eight functions here that name a path on disk, sixteen such arguments
+  between them, and each one is asked about at the point it is bound.
+
+  AN ENTRY NAME IS NOT A DISK PATH ON THE WAY IN. zip_addfile's and zip_addstr's
+  third argument becomes bytes inside the archive; the archive file itself is
+  gated, and writing "../x" into one escapes nothing. On the way OUT it decides
+  where a byte lands, and there it is gated -- SafeEntryName, over every entry,
+  through ArchiveIsSafe, in all three extractors. Both halves are needed: the
+  destination check does not stop zip slip, and SafeEntryName does not stop a
+  destination outside the root. }
 function f_zip_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
@@ -726,6 +822,19 @@ begin
         'destination directory');
       Exit;
     end;
+    { Args[1] is a DESTINATION DIRECTORY on disk, and this routine asked the gate
+      nothing at all -- the only one of the eight path-taking functions here with
+      no SandboxAllows in it. check-sandbox.py never even considered it: it
+      reaches the unzipper through the field r.UZ, so the routine names neither
+      TUnZipper nor any primitive on the gate's list, and a routine the gate does
+      not look at cannot be reported as a hole. Asked in the same order as the
+      sibling zip_extract: the hostile-archive refusal above still comes first,
+      and still comes as an error rather than a quiet 0. }
+    if not SandboxAllows(Args[1].Str, puWrite) then
+    begin
+      ZipErr := 1;
+      Exit;
+    end;
     r.UZ.Files.Clear();               // a prior single-entry op left a filter behind;
     r.UZ.OutputPath := Args[1].Str; // an empty list means "every file"
     r.UZ.UnZipAllFiles;
@@ -742,7 +851,22 @@ var z: TZipper;
 begin
   Err := NoError();
   Result := ValInt(0);
-  if not SandboxAllows(Args[0].Str, puWrite) then begin ZipErr := 1; Exit; end;
+  { THE GATE WAS ASKED ABOUT ONE PATH, AND WITH THE OTHER PATH'S VERB. Args[0] is
+    the file this READS into the archive and was checked with puWrite; Args[1] is
+    the archive it WRITES and was not checked at all. The wrong verb was not
+    harmless either way round: puWrite adds the perilous-path rule to a path that
+    is only read, and leaves the one being written to unguarded. }
+  if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
+  if not SandboxAllows(Args[1].Str, puWrite) then begin ZipErr := 1; Exit; end;
+  { A SOURCE THAT IS NOT THERE IS A FAILURE ANSWERED BEFORE THE OUTPUT IS TOUCHED
+    -- the rule TZipWriter.AddFile already carries, and here it guards data, not
+    just tidiness. SaveToFile opens the archive with fmCreate FIRST and
+    GetFileInfo raises SErrFileDoesNotExist for the missing source AFTER, so a
+    mistyped source name truncated whatever archive stood at the destination to 0
+    bytes and answered 0 with nothing left to reopen. puWrite on Args[0] used to
+    refuse an empty source by accident; this is the check that actually belongs
+    here, and it refuses every missing source, not just the empty spelling. }
+  if not FileExists(Args[0].Str) then begin ZipErr := 1; Exit; end;
   try
     z := TZipper.Create();
     try

@@ -145,6 +145,65 @@ ROOT_ARG = re.compile(
     r'|bs\$'                          # the bare-separator variable this tree uses
     r')')
 
+# The patterns above catch a root only when it LOOKS like one. "C:/.",
+# "C:/dir/.." and "//server/share/.." are the same directories written so that
+# they do not, which is the whole reason the guard in engine/PhosphorSandbox.pas
+# stopped being a textual rule. This gate had the same weakness and gets the same
+# fix: pull the literal argument out and RESOLVE it before judging it.
+LITERAL_ARG = re.compile(r'''dir_delete\s*\(\s*(?:"([^"]*)"|'([^']*)')''')
+
+
+def resolves_to_a_root(text):
+    """Does this path literal name a filesystem root, in ANY spelling?
+
+    The mirror, in Python, of IsPerilousPath: collapse the '.' and '..' segments
+    and ask whether what is left is nothing but a volume -- a drive, a share, a
+    server -- with no directory under it. '..' at the top is clamped, exactly as
+    FExpand clamps it, so "C:/a/../../.." is still the drive root.
+
+    A RELATIVE literal counts only when it is made of nothing but dot segments
+    ('.', '..', './..'), which are a root when the working directory is one.
+    "sub/.." is left alone: where it lands depends on the working directory, and
+    a check that cries wolf teaches people to widen it (see the note on
+    'Picture.LoadFrom' above -- this project has already paid for that once).
+    """
+    p = text.replace('/', '\\')
+    if p.strip() == '':
+        return True
+    low = p.lower()
+    # The extended-length and device spellings of a volume, written plainly:
+    # "\\?\C:\" IS "C:\", and "\\?\UNC\srv\shr" IS "\\srv\shr".
+    if low.startswith('\\\\?\\unc\\') or low.startswith('\\\\.\\unc\\'):
+        p = '\\\\' + p[8:]
+    elif ((low.startswith('\\\\?\\') or low.startswith('\\\\.\\'))
+            and len(p) >= 6 and p[5] == ':'):
+        p = p[4:]
+    rooted = True
+    if len(p) >= 2 and p[1] == ':':               # C:  C:\  C:\dir
+        rest = p[2:]
+    elif p.startswith('\\\\'):                    # \\server  \\server\share
+        seg = [s for s in p[2:].split('\\') if s != '']
+        if len(seg) <= 2:
+            return True                           # a server root or a share root
+        rest = '\\' + '\\'.join(seg[2:])
+    elif p.startswith('\\'):                      # \dir -- the current drive
+        rest = p
+    else:
+        rooted = False                            # relative to somewhere unknown
+        rest = p
+    stack = []
+    for seg in rest.split('\\'):
+        if seg in ('', '.'):
+            continue
+        if seg == '..':
+            if stack:
+                stack.pop()
+            continue
+        stack.append(seg)
+    if stack:
+        return False                              # a real directory survived
+    return rooted or set(p) <= set('.\\ ')
+
 
 def no_root_deletes():
     """A test must never CALL the recursive remover on a drive or filesystem root.
@@ -170,7 +229,14 @@ def no_root_deletes():
                 stripped = line.strip()
                 if stripped.startswith(('rem ', "'", '//', '{', '*')):
                     continue
-                if ROOT_ARG.search(line):
+                hit = ROOT_ARG.search(line)
+                if not hit:
+                    for m in LITERAL_ARG.finditer(line):
+                        lit = m.group(1) if m.group(1) is not None else m.group(2)
+                        if resolves_to_a_root(lit):
+                            hit = m
+                            break
+                if hit:
                     rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
                     bad.append((rel, n, stripped[:88]))
     if bad:

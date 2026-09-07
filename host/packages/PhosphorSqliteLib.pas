@@ -110,7 +110,7 @@ interface
 uses
   SysUtils, Classes, fpjson, SQLite3Dyn,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
-  PhosphorSandbox;
+  PhosphorSandbox, PhosphorBudget;
 
 procedure RegisterSqliteFuncs(Reg: TPhosphorRegistry);
 
@@ -523,6 +523,14 @@ begin
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
   r := '';
+  { A RESULT SET IS A LOOP WITH NO ARGUMENT ON IT. "select * from big" steps a
+    row at a time inside one opCall, and neither the SQL text nor anything else in
+    hand says how many rows that is -- RULE 2, so each row is charged and the loop
+    stops when the run's budget does. (A single sqlite3_step over a
+    non-indexed join can itself run for minutes and is NOT interruptible through
+    this binding: sqlite3_progress_handler is not among the entry points
+    SQLite3Dyn imports. That is stated in scripts/check-budget.py rather than
+    left to be discovered.) }
   while sqlite3_step(st) = SQLITE_ROW do
   begin
     row := '';
@@ -533,6 +541,12 @@ begin
       row := row + ColStr(st, i);
     end;
     r := r + row + #10;
+    if not BudgetCharge(Int64(1) + Length(row)) then
+    begin
+      sqlite3_finalize(st);
+      Err := BudgetRefusal('sqlite_query$');
+      Exit(ValStr(''));
+    end;
   end;
   sqlite3_finalize(st);
   Result := ValStr(r);
@@ -588,9 +602,17 @@ begin
     'name NOT LIKE ''sqlite_%'' ORDER BY name', st) then
   begin
     while sqlite3_step(st) = SQLITE_ROW do
+    begin
       // Add(TJSONData): the plain-string array overload re-encodes any byte >= $80,
       // so a table holding accented text came back mojibake.
       arr.Add(TJSONString.Create(ColStr(st, 0)));
+      if not BudgetCharge(BudgetUnitsPerStep) then
+      begin
+        sqlite3_finalize(st);
+        Err := BudgetRefusal('sqlite_tables@');
+        Exit(ValHandle(JsonRegisterNode(arr, True)));
+      end;
+    end;
     sqlite3_finalize(st);
   end;
   Result := ValHandle(JsonRegisterNode(arr, True));
@@ -613,6 +635,12 @@ begin
       o.Add('notnull', sqlite3_column_int64(st, 3));
       o.Add('pk', sqlite3_column_int64(st, 5));
       arr.Add(o);
+      if not BudgetCharge(BudgetUnitsPerStep) then
+      begin
+        sqlite3_finalize(st);
+        Err := BudgetRefusal('sqlite_columns@');
+        Exit(ValHandle(JsonRegisterNode(arr, True)));
+      end;
     end;
     sqlite3_finalize(st);
   end;
@@ -893,8 +921,19 @@ begin
   if not GetStmt(Args[0].Hnd, s) then Exit;
   arr := TJSONArray.Create();
   if not s.Stepped then DoStep(s);   // a fresh cursor: land on the first row
+  // CHARGED PER ROW, like sqlite_query$ and sqlite_tables@ beside it. This loop
+  // was the one member of the family left out: it accumulates EVERY row of a
+  // query into a JSON array inside one opCall, so a select over a large table
+  // built the whole answer with no ceiling able to look at it. The refusal is
+  // reported rather than swallowed, because a short array is a wrong answer.
   while s.OnRow do
   begin
+    if not BudgetCharge(BudgetUnitsPerStep) then
+    begin
+      arr.Free;
+      Err := BudgetRefusal('sqlite_fetchall@');
+      Exit(ValHandle(0));
+    end;
     arr.Add(BuildRowObject(s));
     DoStep(s);
   end;

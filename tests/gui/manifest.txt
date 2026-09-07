@@ -20,3 +20,5 @@
 16_host_services
 17_event_loop
 18_faults
+19_argord_and_size
+20_file_door_depth

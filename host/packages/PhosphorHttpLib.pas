@@ -84,7 +84,7 @@ interface
 uses
   SysUtils, Classes, Types, StrUtils, base64, fphttpclient, opensslsockets, openssl,
   ssockets, sslsockets, sslbase, resolve, sockets, URIParser,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget;
 
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
 
@@ -190,6 +190,7 @@ var
   var
     c: TPinnedClient;
     resp: TStringStream;
+    remaining: Int64;
   begin
     Result := '';
     AConnected := False;
@@ -199,6 +200,23 @@ var
     try
       c.ConnectIP := AConnectIP;
       c.ConnectTimeout := AConnectMs;         // ms; don't hang forever on a dead IP
+      { A NETWORK WAIT IS A LIBRARY CALL TOO, and it is the one shape the budget
+        can neither size, charge nor judge: how long a server takes is the
+        server's business. The connect side was already bounded at five seconds,
+        but nothing bounded the READ -- a peer that completes the handshake and
+        then trickles one byte a minute held the whole interpreter, inside one
+        opCall, with TimeoutMs set. What CAN be done is to hand the run's
+        remaining time down to the socket, which is what the RTL's IOTimeout
+        takes. With no budget installed BudgetRemainingMs answers 0 and nothing
+        below runs, so an unbudgeted host keeps exactly the timeouts it had. }
+      remaining := BudgetRemainingMs();
+      if remaining > 0 then
+      begin
+        if remaining > High(Integer) then remaining := High(Integer);
+        if c.ConnectTimeout > Integer(remaining) then
+          c.ConnectTimeout := Integer(remaining);
+        c.IOTimeout := Integer(remaining);
+      end;
       if CompareText(AMethod, 'POST') = 0 then
         c.RequestBody := TStringStream.Create(ABody);
       try
@@ -561,20 +579,42 @@ end;
 { ---- pure encoders --------------------------------------------------------- }
 { RFC-3986 percent-encoding: unreserved (A-Z a-z 0-9 - _ . ~) pass through, everything
   else becomes %XX in UPPER hex. A space is %20 (not '+'), a literal '+' is %2B. }
+{ INDEXED, LIKE ITS THREE SIBLINGS, AND FOR THE SECOND REASON AS WELL AS THE
+  FIRST. DoUrlDecode, DoHtmlDecode and DoHtmlEncode all build their answer by
+  indexed assignment into a pre-sized RawByteString -- the comments there explain
+  the codepage reason. This one still appended, and appending a SLICE (rather
+  than a literal) to the function Result is a full copy each time:
+
+      http_urlencode$(string$(60000000, 32))   ' 115484 ms, rc=0 SUCCESS
+
+  Nearly two minutes inside one opCall under a two-second limit. The answer is at
+  most three bytes per input byte, so it is sized once and filled -- linear, and
+  byte-for-byte the same answer. The Copy(S, i, 1) slice stays, in spirit: bytes
+  are moved as bytes, never through a Char under the UTF8 codepage. }
 function DoUrlEncode(const S: String): String;
-var i: Integer; ch: Char;
+var i, k: Integer; ch: Char; hex: String; r: RawByteString;
 begin
-  Result := '';
+  SetLength(r, Length(S) * 3);           // '%XX' is the longest an input byte gets
+  k := 0;
   for i := 1 to Length(S) do
   begin
     ch := S[i];
     if ((ch >= 'A') and (ch <= 'Z')) or ((ch >= 'a') and (ch <= 'z')) or
        ((ch >= '0') and (ch <= '9')) or (ch = '-') or (ch = '_') or
        (ch = '.') or (ch = '~') then
-      Result := Result + Copy(S, i, 1)      // a slice, never the Char itself
+    begin
+      Inc(k); r[k] := ch;
+    end
     else
-      Result := Result + '%' + IntToHex(Ord(ch), 2);
+    begin
+      hex := IntToHex(Ord(ch), 2);
+      Inc(k); r[k] := '%';
+      Inc(k); r[k] := hex[1];
+      Inc(k); r[k] := hex[2];
+    end;
   end;
+  SetLength(r, k);
+  Result := r;
 end;
 
 function HexNibble(ch: Char; out v: Integer): Boolean;
@@ -660,8 +700,38 @@ begin
 end;
 
 { Reverse the five named/numeric entities above; an unknown entity is left verbatim. }
+{ Case-insensitive compare of the ALen bytes at AStart against a literal, with
+  no string built. See the note on the loop below for why that matters. }
+function EntIs(const S: String; AStart, ALen: Integer; const E: String): Boolean;
+var j: Integer; a, b: Char;
+begin
+  Result := False;
+  if ALen <> Length(E) then Exit;
+  for j := 0 to ALen - 1 do
+  begin
+    a := S[AStart + j];
+    if (a >= 'A') and (a <= 'Z') then a := Chr(Ord(a) + 32);
+    b := E[j + 1];
+    if (b >= 'A') and (b <= 'Z') then b := Chr(Ord(b) + 32);
+    if a <> b then Exit;
+  end;
+  Result := True;
+end;
+
+{ LINEAR IS NOT THE SAME AS CHEAP. This loop was already indexed -- it does not
+  copy the answer over and over the way DoUrlEncode did -- and it is linear in the
+  input, which is why the budget gate reads it as bounded. It still spent
+
+      http_htmldecode$(http_htmlencode$(string$(20000000, 60)))   ' 6781 ms, rc=0
+
+  three times its own two-second ceiling inside one opCall, because every single
+  entity built TWO temporary strings (a Copy for the entity, a LowerCase of it)
+  before comparing. Twenty million entities is forty million allocations.
+
+  Comparing the bytes where they lie removes both, and the entity is only ever
+  copied on the path that keeps it. The answer is byte-for-byte unchanged. }
 function DoHtmlDecode(const S: String): String;
-var i, semi, k: Integer; ent, low: String; r: RawByteString;
+var i, semi, k, elen: Integer; r: RawByteString;
 begin
   SetLength(r, Length(S));   // decoding never lengthens the text
   k := 0;
@@ -673,14 +743,14 @@ begin
       semi := PosEx(';', S, i + 1);
       if (semi > 0) and (semi - i <= 10) then
       begin
-        ent := Copy(S, i, semi - i + 1);   // includes the '&' and the ';'
-        low := LowerCase(ent);
-        if low = '&amp;' then begin Inc(k); r[k] := '&'; end
-        else if low = '&lt;' then begin Inc(k); r[k] := '<'; end
-        else if low = '&gt;' then begin Inc(k); r[k] := '>'; end
-        else if low = '&quot;' then begin Inc(k); r[k] := '"'; end
-        else if (low = '&apos;') or (low = '&#39;') or (low = '&#039;') then begin Inc(k); r[k] := ''''; end
-        else RawAppend(r, k, ent);         // unknown entity: leave it as it was
+        elen := semi - i + 1;              // includes the '&' and the ';'
+        if EntIs(S, i, elen, '&amp;') then begin Inc(k); r[k] := '&'; end
+        else if EntIs(S, i, elen, '&lt;') then begin Inc(k); r[k] := '<'; end
+        else if EntIs(S, i, elen, '&gt;') then begin Inc(k); r[k] := '>'; end
+        else if EntIs(S, i, elen, '&quot;') then begin Inc(k); r[k] := '"'; end
+        else if EntIs(S, i, elen, '&apos;') or EntIs(S, i, elen, '&#39;')
+             or EntIs(S, i, elen, '&#039;') then begin Inc(k); r[k] := ''''; end
+        else RawAppend(r, k, Copy(S, i, elen));   // unknown entity: leave it as it was
         i := semi + 1;
         Continue;
       end;
@@ -1139,9 +1209,14 @@ begin
   Err := NoError();
   if not GetForm(Args[0].Hnd, f) then
   begin Result := ValStr(''); gHttpErr := HTTP_EHANDLE; Exit; end;
+  // QUADRATIC APPEND, charged as it goes (RULE 2): one append per field, copying
+  // the whole encoded body each time. 60000 fields -- 60000 cheap VM steps to
+  // add -- took over four minutes here, unbudgeted, at 15 MB.
   s := '';
   for i := 0 to f.Fields.Count - 1 do
   begin
+    if not BudgetAppend(Length(s)) then
+    begin Err := BudgetRefusal('http_formurlencoded$'); Exit(ValStr('')); end;
     if i > 0 then s := s + '&';
     s := s + DoUrlEncode(f.Fields.NameAt(i)) + '=' + DoUrlEncode(f.Fields.ValueAt(i));
   end;

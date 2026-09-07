@@ -71,12 +71,59 @@ begin
   WI32(S, Length(V));
   if Length(V) > 0 then S.WriteBuffer(V[1], Length(V));
 end;
+{ THE LENGTH IS A CLAIM, NOT A FACT, and this used to believe it.
+
+  `SetLength(Result, n)` with the n a corrupt file names commits that many bytes
+  BEFORE a single one has been read: a four-byte edit turning a string length
+  into 2,000,000,000 asked the allocator for 2 GB, on a 343-byte file, and only
+  then failed the read. It was reported as a corrupt file rather than crashing,
+  which is why an earlier pass left it alone -- but "refused after committing
+  2 GB" is a poor kind of refused, and on a machine under memory pressure the
+  allocation is the failure.
+
+  It is fixed by GROWING TO WHAT ARRIVES instead of to what is claimed. The
+  buffer doubles as bytes are actually read, so the memory in hand never exceeds
+  twice the data the stream really had, and a length no file can satisfy costs
+  64 KB before the read fails.
+
+  A CEILING WAS THE WRONG FIX and was deliberately not used: MaxSaneCount would
+  refuse a legitimate .pbc holding a string constant larger than 10 MB, which is
+  unusual but not corrupt. This shape refuses nothing that a stream can actually
+  deliver -- there is no number n for which a valid file now loads differently.
+  It also does not need the stream's Size, so it still works on the non-seekable
+  streams ReadProgram accepts. }
 function RStr(S: TStream): String;
-var n: LongInt;
+const
+  FirstChunk = 65536;
+var
+  n, have, cap, got: LongInt;
 begin
   n := RI32(S);
-  SetLength(Result, n);
-  if n > 0 then S.ReadBuffer(Result[1], n);
+  Result := '';
+  if n < 0 then
+    raise EReadError.CreateFmt('a stored string has length %d', [n]);
+  if n = 0 then Exit;
+  cap := n;
+  if cap > FirstChunk then cap := FirstChunk;
+  SetLength(Result, cap);
+  have := 0;
+  while have < n do
+  begin
+    if have = cap then
+    begin
+      cap := cap * 2;                    // geometric, so this stays O(n) overall
+      if (cap > n) or (cap < 0) then cap := n;
+      SetLength(Result, cap);
+    end;
+    got := S.Read(Result[have + 1], cap - have);
+    if got <= 0 then
+    begin
+      SetLength(Result, have);
+      raise EReadError.CreateFmt('a stored string claims %d bytes and the ' +
+                                 'stream ended after %d', [n, have]);
+    end;
+    Inc(have, got);
+  end;
 end;
 
 procedure WVal(S: TStream; const V: TValue);
@@ -90,11 +137,30 @@ begin
     vkString: WStr(S, V.Str);
   end;
 end;
+{ THE KIND BYTE IS CHECKED HERE AND THE NUMBER IS NOT, AND THE SPLIT IS THE
+  POINT.
+
+  A kind cannot be judged later, because it decides HOW MANY BYTES FOLLOW. The
+  `else` branch used to answer Default(TValue) for an unknown byte and read no
+  payload at all, so every later field in the file was off by up to eight bytes:
+  the rest of the pool, the function table and the DATA section were then decoded
+  from the middle of a value. The file was not refused, it was silently
+  reinterpreted -- and it also left a TValue whose Kind is a number no
+  TValueKind names travelling through the engine. A raise here is caught by
+  ReadProgram and reported as a corrupt file, which is what it is.
+
+  A non-finite DOUBLE is the opposite case: it does not disturb the stream at
+  all, so it can be judged on the finished program, where the offender can be
+  named by index. ValidateProgram sweeps both value pools for it -- see the
+  comment on that function. }
 function RVal(S: TStream): TValue;
-var k: TValueKind;
+var raw: Byte;
 begin
-  k := TValueKind(RU8(S));
-  case k of
+  raw := RU8(S);
+  if raw > Ord(High(TValueKind)) then
+    raise EReadError.CreateFmt('a stored value has kind %d, and this build ' +
+                               'knows 0..%d', [raw, Ord(High(TValueKind))]);
+  case TValueKind(raw) of
     vkDouble: Result := ValDouble(RDbl(S));
     vkInt:    Result := ValInt(RI64(S));
     vkHandle: Result := ValHandle(RI64(S));
@@ -268,6 +334,10 @@ const
   against the same. What cannot be checked statically -- a local slot, which
   depends on the frame -- is at least checked for a negative.
 
+  And everything the VM will COMPUTE ON, which is the half this pass did not have
+  (2026-09-06): every index in the file was bounded and not one VALUE was looked
+  at, so a stored Double could be +Inf or a NaN. See the pool sweep below.
+
   The alternative was bounds-checking every index in the dispatch loop, which
   would cost every program a little to protect against a file almost no program
   loads. Validating once, at the boundary, costs the load and nothing after it.
@@ -308,6 +378,43 @@ begin
   begin AErr := 'corrupt .pbc: negative variable count'; Exit; end;
   if Length(AProg.VarTypes) <> AProg.VarCount then
   begin AErr := 'corrupt .pbc: the variable table does not match its count'; Exit; end;
+
+  { EVERY VALUE, NOT ONLY EVERY INDEX -- the half of this pass that was missing.
+
+    A stored Double is eight raw bytes that RDbl reinterprets, and nothing looked
+    at what they meant. Every OTHER field in the file was bounded and this one
+    was believed, so a single flipped bit -- a truncated download, a bad disk,
+    fifteen seconds with a hex editor -- put +Inf or a NaN into the constant pool
+    of a program that then loaded and ran. The first operator to touch it raised
+    the unmasked invalid-operation trap: exit 217, "unhandled EInvalidOp",
+    nothing `on error goto` could see, nothing an embedding host could survive.
+    A packed .exe carries the same exposure, because the stub loads its payload
+    through this same reader.
+
+    The rule broken is PhosphorValue's founding invariant -- no TValue ever holds
+    a non-finite Double -- and a .pbc is the one input that can break it without
+    passing through the lexer, which checks its literals. So it is checked here.
+
+    THIS SWEEP IS COMPLETE, and the reason is structural rather than a list of
+    places to remember: a TProgram holds TValues in exactly two members, the
+    constant pool and the DATA pool (PhosphorOpcodes, TProgram), and both are
+    walked in full. It does not matter which reader put a value there. }
+  for i := 0 to AProg.Consts.Count - 1 do
+    if not IsFiniteVal(AProg.Consts.Get(i)) then
+    begin
+      AErr := Format('corrupt .pbc: constant %d is %s, which is not a finite ' +
+                     'number and cannot be a Phosphor value',
+                     [i, ValToStr(AProg.Consts.Get(i))]);
+      Exit(False);
+    end;
+  for i := 0 to AProg.DataCount - 1 do
+    if not IsFiniteVal(AProg.DataPool[i]) then
+    begin
+      AErr := Format('corrupt .pbc: DATA item %d is %s, which is not a finite ' +
+                     'number and cannot be a Phosphor value',
+                     [i, ValToStr(AProg.DataPool[i])]);
+      Exit(False);
+    end;
 
   { The widest local table any frame can have. Computed before the instruction
     pass, because that pass bounds every local slot against it. }
@@ -490,9 +597,55 @@ begin
       entry := RI32(AStream);
       pcount := RI32(AStream);
       ltc := RI32(AStream);
+      { THE LOCAL TABLE OF A USER FUNCTION -- the one count and the two enum
+        bytes this reader was still believing.
+
+        Every other count in this function is bounded by MaxSaneCount before it
+        is allocated for, and every other enum byte -- the opcode, the GLOBAL
+        variable type, and (since the pool sweep) the value kind -- is checked
+        against the range this build knows. The local table was neither, and it
+        is read from the same untrusted bytes:
+
+          ltc unbounded   `SetLength(lts, 2000000000)` commits 2 GB from a
+                          four-byte edit, on a 343-byte file, before the read
+                          that fails it (measured 2026-09-07).
+          the type bytes   a 200 here LOADED CLEANLY and put TVarType(200) into
+                          the program. Nothing crashed -- DefaultValue and
+                          StoreCheck both have an `else` -- but every store into
+                          that slot then answers "cannot store number into ?
+                          local", a message about a type no source can spell,
+                          and the value travelling through the engine is an enum
+                          outside its own declared range.
+
+        Both are checked here rather than in ValidateProgram because ltc decides
+        HOW MANY BYTES FOLLOW -- the same reason RVal checks its kind byte at
+        read time -- and once ltc is trusted the type bytes are right there. }
+      if (ltc < 0) or (ltc > MaxSaneCount) then
+      begin
+        AErr := Format('corrupt .pbc: function %d claims %d local slots', [i, ltc]);
+        AProg.Free; AProg := nil; Exit(False);
+      end;
       SetLength(lts, ltc);
-      for j := 0 to ltc - 1 do lts[j] := TVarType(RU8(AStream));
-      rt := TVarType(RU8(AStream));
+      for j := 0 to ltc - 1 do
+      begin
+        raw := RU8(AStream);
+        if raw > Ord(High(TVarType)) then
+        begin
+          AErr := Format('corrupt .pbc: function %d, local slot %d has type %d, ' +
+                         'and this build knows 0..%d',
+                         [i, j, raw, Ord(High(TVarType))]);
+          AProg.Free; AProg := nil; Exit(False);
+        end;
+        lts[j] := TVarType(raw);
+      end;
+      raw := RU8(AStream);
+      if raw > Ord(High(TVarType)) then
+      begin
+        AErr := Format('corrupt .pbc: function %d returns type %d, and this ' +
+                       'build knows 0..%d', [i, raw, Ord(High(TVarType))]);
+        AProg.Free; AProg := nil; Exit(False);
+      end;
+      rt := TVarType(raw);
       AProg.AddUserFunc(fname, entry, pcount, lts, rt);
     end;
 

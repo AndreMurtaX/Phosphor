@@ -73,8 +73,9 @@ unit PhosphorBufferLib;
 interface
 
 uses
-  SysUtils,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorIoLib;
+  SysUtils, Math,
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorIoLib,
+  PhosphorBudget;
 
 procedure RegisterBufferFuncs(Reg: TPhosphorRegistry);
 
@@ -89,7 +90,14 @@ var d: Double;
 begin
   if V.Kind = vkInt then Exit(V.Int);
   d := AsDouble(V);
-  if d <> d then Result := 0                              // NaN
+  { ASK IsNan, DO NOT COMPARE. `d <> d` is the folklore NaN test and it is the
+    wrong one here: an ORDERED comparison of a NaN signals invalid-operation, and
+    with the FPU exception unmasked (which is how this build runs -- see the
+    finiteness handling in PhosphorVM) the test itself RAISES instead of
+    answering False. The opCall net catches it, so it was never fatal, but the
+    program got "Invalid floating point operation" where it should have got a
+    message naming the argument. IsNan is the unordered test and cannot signal. }
+  if IsNan(d) then Result := 0                            // NaN
   else if d >= 9223372036854775808.0 then Result := High(Int64)
   else if d <= -9223372036854775808.0 then Result := Low(Int64)
   else Result := Round(d);
@@ -186,6 +194,15 @@ begin
     E := MakeError(peRuntime, 'buffer_new: size ' + IntToStr(n) + ' exceeds the 1 GiB limit');
     Exit;
   end;
+  // The 1 GiB cap above is an absolute one and applies to every host. This is the
+  // HOST'S cap: a gigabyte allocated and zero-filled inside one opCall is a
+  // second of work an untrusted script should not be able to buy under a budget
+  // that says otherwise. RULE 1 -- the size is the argument.
+  if not BudgetAllows(n) then
+  begin
+    E := BudgetRefusal('buffer_new@');
+    Exit;
+  end;
   E := NoError();
   Result := ValHandle(RegisterHandle(NewBuffer(Integer(n))));
 end;
@@ -245,6 +262,11 @@ begin
   if n > 1073741824 then
   begin
     E := MakeError(peRuntime, 'buffer_resize: size ' + IntToStr(n) + ' exceeds the 1 GiB limit');
+    Exit;
+  end;
+  if not BudgetAllows(n) then
+  begin
+    E := BudgetRefusal('buffer_resize');
     Exit;
   end;
   old := Length(b.Data);
@@ -358,6 +380,28 @@ begin
   Result := ValInt(n);                           // bytes copied
 end;
 
+{ THE SAME NAIVE PRODUCT AS instr, WRITTEN OUT HERE INSTEAD OF BORROWED FROM
+  THE RTL -- and therefore missed by a scan that looked for Pos and PosEx.
+
+      b@ = buffer_fromstr@(string$(20000000, 65))
+      println buffer_indexof(b@, string$(20000, 65) + "B")
+
+  is 20 million times 20001 byte comparisons: it did not return inside a
+  seven-minute watchdog, under MaxSteps=1000000 / TimeoutMs=2000. The two loops
+  below are the cost, and both lengths are in hand before either starts.
+
+  ROUND THREE: priced by the SAME model as instr rather than by a private copy of
+  the worst case. IndexOfFrom breaks its inner loop at the first mismatch exactly
+  as the RTL's Pos does, so BudgetSearchCost describes it too -- and while that
+  worst case stood here, finding a 300-character quotation in a 990 KB buffer was
+  refused ("296910300 units of work and only 255010000 are left") for work that
+  costs nothing. One model, one place, or one door gets fixed and the other does
+  not. }
+function SearchUnits(const AHay, ANeedle: String): Int64;
+begin
+  Result := BudgetSearchCost(AHay, ANeedle);
+end;
+
 function IndexOfFrom(const AHay, ANeedle: String; AFrom: Integer): Integer;
 var i, j, last: Integer; ok: Boolean;
 begin
@@ -379,6 +423,8 @@ var b: TPhosphorBytes;
 begin
   Result := ValInt(0);
   if not GetBuf('buffer_indexof', A[0], b, E) then Exit;
+  if not BudgetAllows(SearchUnits(b.Data, A[1].Str)) then
+  begin E := BudgetRefusal('buffer_indexof'); Exit; end;
   Result := ValInt(IndexOfFrom(b.Data, A[1].Str, 1));
 end;
 

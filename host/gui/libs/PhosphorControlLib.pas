@@ -84,20 +84,39 @@ end;
     ArgOrdIn  for a property whose own type is narrower than Integer, saturating
               into that declared range (Cursor is -32768..32767, TabOrder -1..32767)
 
-  All three answer a value; none of them can raise. }
+  All three answer a value; none of them can raise.
+
+  AND A BOOLEAN IS AN ORDINAL, which is the half of `ArgNum` the move to ArgI64
+  dropped. TValue is a plain record, not a variant one: ValBool(True) fills .Bl and
+  leaves .Num at its default 0.0, and PhosphorValue.ArgI64 reads .Int for a vkInt
+  and .Num for everything else -- so every true the LANGUAGE has arrived here as
+  zero. The old `Round(ArgNum(V))` had `vkBool: Ord(V.Bl)` inside ArgNum and did
+  not; the replacement kept the trap fix and lost the kind, and control_set@'s
+  documented @$? overload -- the ONE registered GUI signature that takes a '?', so
+  the whole of the boolean surface -- wrote False for both answers. Both of the
+  bridge's ordinal branches were hit: `Visible` through ArgOrd32 and `Tag`, which
+  is 64 bits wide, through ArgOrd.
+
+  So the kind is answered here, before the engine's helper is asked, and it is
+  answered in all three -- ArgOrdIn saturates whatever ArgOrd hands it, so it is
+  fixed by delegating rather than by repeating the test. The Int64 edge stays
+  exactly where the trap fix put it: a vkBool never reaches ArgI64, and every other
+  kind still does, so 9223372036854775807 still saturates and still does not trap. }
 function ArgOrd(const V: TValue): Int64;
 begin
+  if V.Kind = vkBool then Exit(Ord(V.Bl));
   Result := ArgI64(V);
 end;
 
 function ArgOrd32(const V: TValue): Integer;
 begin
+  if V.Kind = vkBool then Exit(Ord(V.Bl));
   Result := ArgI32(V);
 end;
 
 function ArgOrdIn(const V: TValue; ALo, AHi: Int64): Int64;
 begin
-  Result := ArgI64(V);
+  Result := ArgOrd(V);
   if Result < ALo then Result := ALo
   else if Result > AHi then Result := AHi;
 end;
@@ -519,7 +538,7 @@ begin
 end;
 
 function f_prop_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; pi: PPropInfo; k: TTypeKind;
+var c: TControl; pi: PPropInfo; k: TTypeKind; n: Int64;
 begin
   E := NoError;
   Result := A[0];   // A[0]=handle, A[1]=name$, A[2]=value
@@ -556,16 +575,33 @@ begin
       // report. It used to become Round(ArgNum(s)) = 0 and be written silently.
       GGuiError := ERR_NO_PROPERTY
     else if (k = tkInt64) or (k = tkQWord) then
+    begin
       // Only these two properties are 64 bits wide (Tag is one, PtrInt on win64),
       // so only these take the Int64 unnarrowed.
-      SetOrdProp(c, pi, ArgOrd(A[2]))
+      n := ArgOrd(A[2]);
+      // AND THE GATE, on both ordinal branches, because a bound a named setter
+      // carries is not a bound until the bridge honours it too. pi^.Name and not
+      // A[1].Str: the CANONICAL property name out of the RTTI record, so "rowcount"
+      // and "RowCount" reach the gate as the one name it tests. See GuiAddPropGate.
+      if not GuiPropGatesAllow(c, pi^.Name, n, E) then Exit;
+      SetOrdProp(c, pi, n);
+      // ... and told afterwards, so a package that CHARGED for this write records
+      // what the object became rather than what was asked for. Inside the try, so
+      // a raising SetOrdProp above skips it -- which is right: nothing changed.
+      GuiPropWasWritten(c, pi^.Name);
+    end
     else if IsOrdKind(k) then
+    begin
       // EVERY OTHER ordinal property is at most 32 bits, and SetOrdProp TRUNCATES
       // rather than clamping: passing it High(Int64) for an Integer property wrote
       // -1. That is the same silent wrap ArgOrd32 exists to stop -- it just reached
       // the property through the bridge instead of through control_left@, and
       // control_set@(h, "Left", 1e19) is one of the calls the report named.
-      SetOrdProp(c, pi, ArgOrd32(A[2]))
+      n := ArgOrd32(A[2]);
+      if not GuiPropGatesAllow(c, pi^.Name, n, E) then Exit;
+      SetOrdProp(c, pi, n);
+      GuiPropWasWritten(c, pi^.Name);
+    end
     else
       GGuiError := ERR_NO_PROPERTY;             // an unsupported property kind
   except

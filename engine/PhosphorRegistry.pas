@@ -42,13 +42,71 @@ type
   TPhosphorHostFunc = function(AVM: TObject; const Args: array of TValue;
                                out Err: TPhosphorError): TValue;
 
+  { What Resolve hands back is not the registered function itself but a METHOD on
+    the registry entry that holds it -- see TRegEntry. The caller writes the same
+    `res.Func(args, e)` it always did; Pascal calls a method pointer with the same
+    syntax as a procedural one, so no call site changed. What it buys is a place
+    that stands between the VM and every one of ~1,200 library functions and can
+    see both the arguments and the error channel. }
+  TResolvedPlainFunc = function(const Args: array of TValue;
+                                out Err: TPhosphorError): TValue of object;
+  TResolvedHostFunc = function(AVM: TObject; const Args: array of TValue;
+                               out Err: TPhosphorError): TValue of object;
+
   { What Resolve found: a plain function, or a host-aware one (never both). The VM
     passes itself to the host-aware kind and only the arguments to the plain kind. }
   TResolvedFunc = record
     Found: Boolean;
     IsHost: Boolean;
-    Func: TPhosphorFunc;
-    HostFunc: TPhosphorHostFunc;
+    Func: TResolvedPlainFunc;
+    HostFunc: TResolvedHostFunc;
+  end;
+
+  TPhosphorRegistry = class;
+
+  { ONE REGISTERED SLOT, AND THE GUARD IN FRONT OF IT.
+
+    THE DEFECT. ArgI32/ArgI64 are the saturating narrowers every library uses to
+    turn a numeric argument into an index, a count or a size, and they are TOTAL:
+    they clamp and report nothing, justified by "the bounds check that follows
+    rejects it". For +/-Inf that holds -- High/Low are outside every domain, and a
+    sweep of 81 library functions found not one silent answer. For a NaN it does
+    not: the narrowed answer is 0, an ordinary in-range count, and eight functions
+    took it and answered a byte 0, a "0", a "Black", a live handle and an empty
+    string with no error at all. Those eight have no domain to bound -- every
+    Int64 is legal to them -- so no return value could ever have carried the
+    fault.
+
+    WHY HERE. This is the one place every one of ~1,200 library functions passes
+    through that can see BOTH the arguments and the error channel. The narrowers
+    cannot report (they return a bare integer); Resolve cannot judge, because it
+    is given the argument KINDS and not the values, and vkDouble says nothing
+    about finiteness. So the narrowers raise a flag and this consumes it.
+
+    WHY NOT SIMPLY REFUSE A NaN ARGUMENT HERE, which needs no flag at all: because
+    it refuses the functions whose whole job is to look at one. `isnan(x)` answers
+    1 for a NaN today, on this build and on the pristine one; `isinfinite`, `str$`
+    and `stri$` answer too. A gate on the argument breaks every one of them, and
+    an exemption list of names inside a generic dispatcher is a thing that rots.
+    The flag reports exactly the event that is wrong -- a NaN was NARROWED -- so a
+    function that merely inspects one is untouched by construction, with nothing
+    to keep in step.
+
+    SAVE, CLEAR, CALL, TEST, RESTORE. The save/restore pair is what makes a
+    re-entrant call safe: a host-aware function (callfunc) runs BASIC, which
+    dispatches again through here, and the inner dispatch must not consume or
+    discard the outer one's pending fault. }
+  TRegEntry = class
+  private
+    FOwner: TPhosphorRegistry;
+    FIndex: Integer;
+    function Report(const AErr: TPhosphorError): TPhosphorError;
+  public
+    constructor Create(AOwner: TPhosphorRegistry; AIndex: Integer);
+    function CallPlain(const Args: array of TValue;
+                       out Err: TPhosphorError): TValue;
+    function CallHost(AVM: TObject; const Args: array of TValue;
+                      out Err: TPhosphorError): TValue;
   end;
 
   { A small hand-rolled string->func map. The registry holds a few dozen entries
@@ -61,12 +119,14 @@ type
     FFuncs: array of TPhosphorFunc;
     FHostFuncs: array of TPhosphorHostFunc;
     FIsHost: array of Boolean;
+    FEntries: array of TRegEntry;   // the guard standing in front of each slot
     FMaxArity: Integer;   // the widest arity anything is registered under
     FWild: array of Integer;   // indices of keys holding a '*' (see Resolve)
     FCount: Integer;
     function IndexOfKey(const AKey: String): Integer;
     function EnsureSlot(const AKey: String): Integer;
   public
+    destructor Destroy; override;
     { ASignature is 'name:codes', e.g. 'assert_eq:nn'. Name is case-insensitive. }
     procedure Add(const ASignature: String; AFunc: TPhosphorFunc);
     { Same, for a host-aware function (one that calls back into BASIC). }
@@ -83,6 +143,79 @@ type
   end;
 
 implementation
+
+constructor TRegEntry.Create(AOwner: TPhosphorRegistry; AIndex: Integer);
+begin
+  inherited Create;
+  FOwner := AOwner;
+  FIndex := AIndex;
+end;
+
+{ The error a narrowed NaN becomes. peRuntime is the code the trap used to arrive
+  as (E6), so a program that already handled this condition still handles it; the
+  wording is FiniteOperand's, so the operand gate and the argument gate speak with
+  one voice. AErr is the function's own error and wins if it set one -- it saw
+  more than this did. }
+function TRegEntry.Report(const AErr: TPhosphorError): TPhosphorError;
+var
+  key: String;
+  c: Integer;
+begin
+  if IsError(AErr) then Exit(AErr);
+  key := FOwner.FKeys[FIndex];
+  c := Pos(':', key);
+  if c > 0 then key := Copy(key, 1, c - 1);
+  Result := MakeError(peRuntime, key + ' was given a value that is not a number');
+end;
+
+function TRegEntry.CallPlain(const Args: array of TValue;
+  out Err: TPhosphorError): TValue;
+var
+  outer: Boolean;
+begin
+  outer := NanNarrowed;      // a pending fault of the call that contains this one
+  SetNanNarrowed(False);
+  try
+    Result := FOwner.FFuncs[FIndex](Args, Err);
+    if NanNarrowed then
+    begin
+      Err := Report(Err);
+      Result := Default(TValue);
+    end;
+  finally
+    SetNanNarrowed(outer);
+  end;
+end;
+
+function TRegEntry.CallHost(AVM: TObject; const Args: array of TValue;
+  out Err: TPhosphorError): TValue;
+var
+  outer: Boolean;
+begin
+  outer := NanNarrowed;
+  SetNanNarrowed(False);
+  try
+    Result := FOwner.FHostFuncs[FIndex](AVM, Args, Err);
+    if NanNarrowed then
+    begin
+      Err := Report(Err);
+      Result := Default(TValue);
+    end;
+  finally
+    SetNanNarrowed(outer);
+  end;
+end;
+
+{ The guards are the registry's own objects; nothing outside holds one, and a
+  TResolvedFunc handed out earlier is only valid while the registry is. }
+destructor TPhosphorRegistry.Destroy;
+var
+  i: Integer;
+begin
+  for i := 0 to FCount - 1 do
+    FEntries[i].Free;
+  inherited Destroy;
+end;
 
 function TPhosphorRegistry.IndexOfKey(const AKey: String): Integer;
 var
@@ -108,8 +241,10 @@ begin
     SetLength(FFuncs, (FCount + 1) * 2);
     SetLength(FHostFuncs, (FCount + 1) * 2);
     SetLength(FIsHost, (FCount + 1) * 2);
+    SetLength(FEntries, (FCount + 1) * 2);
   end;
   FKeys[FCount] := AKey;
+  FEntries[FCount] := TRegEntry.Create(Self, FCount);
   // The widest arity anything is registered under. Resolve enumerates 2^k
   // combinations of int-widening, which is nothing for the six-argument signatures
   // this registry actually holds and 33 million for a call with 25 integer
@@ -151,6 +286,10 @@ begin
   FIsHost[idx] := True;
 end;
 
+{ A KIND, AND ONLY A KIND. 'n' says vkDouble; it says nothing about whether that
+  Double is finite, and it cannot -- Resolve is given kinds, not values, so no
+  amount of work here can tell a NaN from a 3. That is why the finiteness question
+  is answered one step later, at the call itself, by TRegEntry. }
 class function TPhosphorRegistry.CodeOf(K: TValueKind): Char;
 begin
   case K of
@@ -278,8 +417,9 @@ begin
   begin
     Result.Found := True;
     Result.IsHost := FIsHost[bestIdx];
-    Result.Func := FFuncs[bestIdx];
-    Result.HostFunc := FHostFuncs[bestIdx];
+    // The guard, never the raw function. See TRegEntry.
+    Result.Func := @FEntries[bestIdx].CallPlain;
+    Result.HostFunc := @FEntries[bestIdx].CallHost;
   end;
 end;
 

@@ -1,9 +1,18 @@
 {******************************************************************************
   probe_value -- a Pascal unit-test of the five-kind value kernel
 
-  Exercises PhosphorValue directly (no lexer, no VM), because the promotion
+  Exercises PhosphorValue directly -- no lexer, no VM -- because the promotion
   matrix and overflow-as-error are the load-bearing, most-flagged part of the
-  first increment. Prints "ok: N" / "fail: M" and exits non-zero on any failure.
+  first increment.
+
+  WITH ONE SECTION THAT DELIBERATELY DOES USE THE WHOLE ENGINE:
+  CheckLibraryDoorOnNonFinite. Testing this unit in isolation is how a defect of
+  exactly this shape shipped -- every operator answered a NaN correctly and fifty
+  library doors still took one silently, because what a NaN meets first is a
+  library ARGUMENT and not an operator. That claim can only be checked from the
+  outside, so that one section calls in through Prepare + CallFunction.
+
+  Prints "ok: N" / "fail: M" and exits non-zero on any failure.
   Run with --fail to corrupt one expectation and confirm the check can fail.
 ******************************************************************************}
 program probe_value;
@@ -12,12 +21,18 @@ program probe_value;
 {$codepage UTF8}
 
 uses
-  SysUtils, PhosphorErrors, PhosphorValue;
+  SysUtils, Math, PhosphorErrors, PhosphorValue, PhosphorEngine;
 
 var
   Ok: Integer = 0;
   Failed: Integer = 0;
   ProveFail: Boolean = False;
+  { What is being exercised right now. A finiteness regression does not return a
+    wrong answer -- it TRAPS, and a probe that dies mid-run prints no "ok:/fail:"
+    line at all, so the suite can only report that the probe "did not run". That
+    says nothing about which guard broke. The run is wrapped (see the main body)
+    and this names the region the trap came from. }
+  Stage: String = '';
 
 procedure Report(Pass: Boolean; const Name: String);
 begin
@@ -50,12 +65,626 @@ begin
   Report(E.Code = Code, Name + ' (error)');
 end;
 
+{ ----------------------------------------------------------------------------
+  THE FINITENESS INVARIANT, TESTED FROM BOTH ENDS.
+
+  PhosphorValue promises that no TValue ever holds a non-finite Double, and
+  TPhosphorVM.Run cites that promise as its reason for leaving the FPU's
+  INVALID-OPERATION trap unmasked while a program runs. The promise is about
+  PRODUCERS, and producers live all over the engine -- the lexer, INPUT, the
+  .pbc reader, every library that returns a computed number, every host that
+  calls in with arguments of its own. One of them will eventually be wrong.
+
+  So the guarantee this section pins is not "it never gets in". It is: IF one
+  gets in, every exported function of this unit still ANSWERS -- with the right
+  value where there is one, and with a catchable error where there is not.
+  Nothing traps. On 2026-09-06 twenty-one of these calls exited 217 with an
+  unhandled EInvalidOp, including InI64Range, the guard the whole engine
+  converts Doubles to Int64 through, whose own comment said NaN answers False.
+
+  The three poisons are the whole space of non-finite Doubles: a NaN and the two
+  infinities. Each is built from its BITS, because writing 0/0 to make one is
+  itself the trap under test.
+  ---------------------------------------------------------------------------- }
+function PoisonD(k: Integer): Double;
+var q: QWord;
+begin
+  case k of
+    0: q := QWord($7FF8000000000000);   // a quiet NaN
+    1: q := QWord($7FF0000000000000);   // +Infinity
+  else q := QWord($FFF0000000000000);   // -Infinity
+  end;
+  Result := PDouble(@q)^;
+end;
+
+function PoisonName(k: Integer): String;
+begin
+  case k of 0: Result := 'NaN'; 1: Result := '+Inf'; else Result := '-Inf'; end;
+end;
+
+{ The error a non-finite OPERAND must produce: peRuntime for a NaN (there is no
+  numeric answer), peIntOverflow for an infinity (the magnitude is the problem) --
+  the same two codes FiniteD gives when an operation PRODUCES one, so an
+  `on error goto` handler reads one vocabulary either way. }
+function PoisonCode(k: Integer): TPhosphorErrorCode;
+begin
+  if k = 0 then Result := peRuntime else Result := peIntOverflow;
+end;
+
+procedure CheckNonFinite;
+var
+  k: Integer;
+  d: Double;
+  p, two, r: TValue;
+  e: TPhosphorError;
+  i: Int64;
+  nm: String;
+
+  procedure Err(const E2: TPhosphorError; const What: String);
+  begin
+    Report(E2.Code = PoisonCode(k), What + ' refuses ' + nm);
+  end;
+
+begin
+  for k := 0 to 2 do
+  begin
+    d := PoisonD(k);
+    p := ValDouble(d);
+    two := ValDouble(2.0);
+    nm := PoisonName(k);
+
+    // --- the tests themselves, which must not need the thing they test ------
+    Stage := 'the finiteness tests, on ' + nm;
+    Report(not IsFiniteD(d), 'IsFiniteD says ' + nm + ' is not finite');
+    Report(IsNanD(d) = (k = 0), 'IsNanD separates ' + nm + ' from the infinities');
+    Report(not IsFiniteVal(p), 'IsFiniteVal sees through the cell for ' + nm);
+    e := FiniteD('probe', d, r);
+    Report(e.Code = PoisonCode(k), 'FiniteD refuses to build a cell from ' + nm);
+
+    Stage := 'the Double->Int64 guards, on ' + nm;
+    // --- the guards every Double->Int64 conversion in the engine goes through
+    Report(not InI64Range(d), 'InI64Range answers False for ' + nm);
+    i := 99;
+    Report((not TryD2I(d, i)) and (i = 0), 'TryD2I answers False for ' + nm);
+
+    Stage := 'the saturating narrowers, on ' + nm;
+    // --- the SATURATING narrowers keep their documented answers -------------
+    // ...AND RAISE THE FLAG FOR A NaN AND ONLY FOR A NaN. The answers below are
+    // unchanged from the day they were written; what is new is the second half of
+    // each pair. A NaN narrows to 0, which is an ordinary in-range count, so the
+    // saturated value cannot carry the fault and something out of band has to.
+    // An infinity narrows to High/Low, which every domain rejects, so it must NOT
+    // raise the flag -- an infinity that reported here would refuse the +/-Inf
+    // band this unit has always let through.
+    SetNanNarrowed(False);
+    if k = 0 then
+    begin
+      Report(ArgI64(p) = 0, 'ArgI64 answers 0 for NaN');
+      Report(NanNarrowed, 'ArgI64 RAISES NanNarrowed for NaN');
+      SetNanNarrowed(False);
+      Report(ArgI32(p) = 0, 'ArgI32 answers 0 for NaN');
+      Report(NanNarrowed, 'ArgI32 RAISES NanNarrowed for NaN');
+    end
+    else if k = 1 then
+    begin
+      Report(ArgI64(p) = High(Int64), 'ArgI64 saturates high for +Inf');
+      Report(ArgI32(p) = High(Integer), 'ArgI32 saturates high for +Inf');
+      Report(not NanNarrowed, 'neither narrower raises NanNarrowed for +Inf');
+    end
+    else
+    begin
+      Report(ArgI64(p) = Low(Int64), 'ArgI64 saturates low for -Inf');
+      Report(ArgI32(p) = Low(Integer), 'ArgI32 saturates low for -Inf');
+      Report(not NanNarrowed, 'neither narrower raises NanNarrowed for -Inf');
+    end;
+    SetNanNarrowed(False);
+
+    Stage := 'the arithmetic operators, on ' + nm;
+    // --- every arithmetic operator, in EVERY operand position ---------------
+    e := Negate(p, r);                     Err(e, 'unary minus');
+    e := ValAdd(p, two, r);                Err(e, '+ (left)');
+    e := ValAdd(two, p, r);                Err(e, '+ (right)');
+    e := ValSub(p, two, r);                Err(e, '- (left)');
+    e := ValSub(two, p, r);                Err(e, '- (right)');
+    e := ValSub(ValStr('abcd'), p, r);     Err(e, '- (string count)');
+    e := ValMul(p, two, r);                Err(e, '* (left)');
+    e := ValMul(two, p, r);                Err(e, '* (right)');
+    e := ValDivReal(p, two, r);            Err(e, '/ (left)');
+    e := ValDivReal(two, p, r);            Err(e, '/ (right)');
+    e := ValDivInt(p, two, r);             Err(e, '\ (left)');
+    e := ValDivInt(two, p, r);             Err(e, '\ (right)');
+    e := ValMod(p, two, r);                Err(e, 'mod (left)');
+    e := ValMod(two, p, r);                Err(e, 'mod (right)');
+    e := ValPow(p, two, r);                Err(e, '^ (left)');
+    e := ValPow(two, p, r);                Err(e, '^ (right)');
+
+    { The COMPARISON is where this actually killed the process: `if x < 1` on a
+      variable holding a NaN, not the arithmetic. All six operators, both sides. }
+    Stage := 'the comparison operators, on ' + nm;
+    e := ValCompare(coLT, p, ValInt(1), r);  Err(e, '< (left)');
+    e := ValCompare(coLT, ValInt(1), p, r);  Err(e, '< (right)');
+    e := ValCompare(coLE, p, two, r);        Err(e, '<= (left)');
+    e := ValCompare(coGT, p, two, r);        Err(e, '> (left)');
+    e := ValCompare(coGE, p, two, r);        Err(e, '>= (left)');
+    e := ValCompare(coEQ, p, p, r);          Err(e, '= (both)');
+    e := ValCompare(coNE, two, p, r);        Err(e, '<> (right)');
+
+    { The STORE, for each target type that can hold a Double. A variable is where
+      a value outlives the operation that made it, so this is the door that turns
+      one bad value into a program full of them. }
+    Stage := 'the store gate, on ' + nm;
+    e := StoreCheck(vtNumber, p, r);       Err(e, 'a store into a number variable');
+    e := StoreCheck(vtInt, p, r);          Err(e, 'a store into an int% variable');
+    e := StoreCheck(vtAny, p, r);          Err(e, 'a store into a hidden temporary');
+
+    { ...and the three that cannot hold a Double at all still say so, because a
+      finiteness message would be less informative than the type error. }
+    Report(StoreCheck(vtString, p, r).Code = peTypeMismatch,
+           'a store of ' + nm + ' into a string$ is still a type error');
+    Report(StoreCheck(vtBool, p, r).Code = peTypeMismatch,
+           'a store of ' + nm + ' into a bool? is still a type error');
+    Report(StoreCheck(vtHandle, p, r).Code = peTypeMismatch,
+           'a store of ' + nm + ' into a handle@ is still a type error');
+
+    { REPORTED, NOT CRASHED ON. Stringifying is the one operation deliberately
+      left able to see a non-finite: naming a poisoned value is how an error
+      message and a program describe it. It must never be empty and never trap. }
+    Stage := 'stringifying ' + nm;
+    Report(Length(ValToStr(p)) > 0, 'ValToStr names ' + nm);
+    e := ValAdd(ValStr('x='), p, r);
+    Report((not IsError(e)) and (r.Kind = vkString) and (Length(r.Str) > 2),
+           'string + ' + nm + ' still concatenates its text');
+
+    // A non-finite is a NUMBER as far as kind goes; only its value is refused.
+    Report(IsNumeric(p), nm + ' is still numeric by kind');
+  end;
+end;
+
+{ ----------------------------------------------------------------------------
+  AND THE MIRROR: THE FINITE VALUES THE GUARDS MUST NOT REFUSE.
+
+  A guard that answers "error" where a number was the right answer is as serious
+  as the crash it replaced. These pin the values closest to every edge the guard
+  tests -- both sides of the Int64 window, the largest and smallest magnitudes a
+  Double has, negative zero -- and the answers are the ones the engine gave
+  before any of this was added.
+  ---------------------------------------------------------------------------- }
+{ 2^E built from the BITS, exact for every E in [-1074, 1023] -- the subnormals
+  included, where computing it would underflow to the wrong answer. This is the
+  independent oracle the sweep below compares `^` against. }
+function Pow2Bits(const E: Integer): Double;
+var q: QWord;
+begin
+  if E >= -1022 then q := QWord(E + 1023) shl 52
+  else q := QWord(1) shl (E + 1074);
+  Result := PDouble(@q)^;
+end;
+
+function BitsOf(const D: Double): QWord;
+begin
+  Result := PQWord(@D)^;
+end;
+
+{ ----------------------------------------------------------------------------
+  `^` OVER A RANGE, NOT OVER A LIST -- and against an ORACLE, not a table.
+
+  On 2026-09-06 ValPow was rewritten to compute a negative whole power as
+  1.0/Power(base, -expo) instead of Power(base, expo), on the belief that FPC's
+  intpower ends in `1.0/result`. It does not; it reciprocates the BASE
+  (math.pp:1065). The two orderings agree everywhere except where the POSITIVE
+  power overflows: there the reciprocal of +Inf is 0, so the whole subnormal
+  result band silently became zero -- `2 ^ -1074`, `10 ^ -310`, `2 ^ -1030` and
+  8961 other swept answers, with no error and nothing reported. Every pinned
+  value in this probe passed, because every one of them sat outside the band.
+
+  The fix for a list that misses a band is not a longer list. For base 2 the
+  right answer is known exactly for every exponent in the Double's range, so
+  this walks the WHOLE range one step at a time and compares bit for bit:
+
+     -1100..-1075   underflows to exactly zero
+     -1074..1023    exactly 2^E, subnormals included
+      1024..1100    a catchable overflow, never a value
+
+  2200 assertions collapsed into three Reports, each naming the first exponent
+  that disagreed. It fails loudly against the rejected revision (checked: the
+  first mismatch is -1074) and passes against the pristine engine.
+  ---------------------------------------------------------------------------- }
+function FirstWrong(AExp: Integer): String;
+begin
+  if AExp = 32767 then Result := ''
+  else Result := ' (first wrong exponent: ' + IntToStr(AExp) + ')';
+end;
+
+procedure CheckPowOverTheWholeRange;
+var
+  r: TValue;
+  e: TPhosphorError;
+  ex, badZero, badExact, badOvf: Integer;
+begin
+  Stage := 'the ^ range sweep';
+  badZero := 32767; badExact := 32767; badOvf := 32767;
+
+  for ex := -1100 to -1075 do
+  begin
+    e := ValPow(ValDouble(2.0), ValDouble(ex), r);
+    if IsError(e) or (r.Kind <> vkDouble) or (BitsOf(r.Num) <> 0) then
+      if ex < badZero then badZero := ex;
+  end;
+  Report(badZero = 32767,
+         'below the smallest subnormal, 2 ^ e is exactly zero' + FirstWrong(badZero));
+
+  for ex := -1074 to 1023 do
+  begin
+    e := ValPow(ValDouble(2.0), ValDouble(ex), r);
+    if IsError(e) or (r.Kind <> vkDouble) or
+       (BitsOf(r.Num) <> BitsOf(Pow2Bits(ex))) then
+      if ex < badExact then badExact := ex;
+  end;
+  Report(badExact = 32767,
+         '2 ^ e is bit-exact for every representable e, subnormals included' +
+         FirstWrong(badExact));
+
+  for ex := 1024 to 1100 do
+  begin
+    e := ValPow(ValDouble(2.0), ValDouble(ex), r);
+    if e.Code <> peIntOverflow then
+      if ex < badOvf then badOvf := ex;
+  end;
+  Report(badOvf = 32767,
+         'past MaxDouble, 2 ^ e is a catchable overflow' + FirstWrong(badOvf));
+
+  { Three decimal bases from inside the band, spelled the way a program sees
+    them. Base 2 is the one with an exact oracle; these prove the band is right
+    for bases whose powers are not powers of two, and each was measured on the
+    pristine engine. The rejected revision answered 0 for all three. }
+  e := ValPow(ValDouble(10.0), ValDouble(-310.0), r);
+  Report((not IsError(e)) and (ValToStr(r) = '1.00000000000005E-310'),
+         '10 ^ -310 is a subnormal, not zero');
+  e := ValPow(ValDouble(10.0), ValDouble(-320.0), r);
+  Report((not IsError(e)) and (ValToStr(r) = '9.99988867182683E-321'),
+         '10 ^ -320 is a subnormal, not zero');
+  e := ValPow(ValDouble(1.5), ValDouble(-1800.0), r);
+  Report((not IsError(e)) and (ValToStr(r) = '1.08575965143202E-317'),
+         '1.5 ^ -1800 is a subnormal, not zero');
+end;
+
+{ ----------------------------------------------------------------------------
+  THE OPERATORS UNDER A HOSTILE FPU MASK.
+
+  Everything else in this probe runs under the mask TPhosphorVM.Run installs,
+  which is the only configuration the unit's answers were ever defined in. That
+  is a promise made on somebody else's behalf: Run and RunFrom install the mask,
+  and TPhosphorVM.CallUserFunc -- the documented embedding path, Prepare then
+  CallFunction -- does not. Measured on 2026-09-07, before the operators carried
+  a net: `x * 10`, `x ^ 400`, `x + x` and `x / 1e-10` with x = 1e308 each exited
+  217 with an unhandled EOverflow through that door, with every operand finite.
+
+  This runs the same operators with exOverflow REMOVED from the mask -- the FPC
+  default, and what a host that never called Run has -- and requires the same
+  catchable answers. Without TrappedInOperator it does not fail: it kills the
+  probe, which is why the caller wraps it.
+  ---------------------------------------------------------------------------- }
+procedure CheckOperatorsWithOverflowUnmasked;
+var
+  r: TValue;
+  e: TPhosphorError;
+  saved: TFPUExceptionMask;
+begin
+  Stage := 'the operators with overflow UNMASKED';
+  saved := GetExceptionMask();
+  SetExceptionMask(saved - [exOverflow]);
+  try
+    e := ValMul(ValDouble(1e308), ValDouble(10.0), r);
+    CheckErr(e, peIntOverflow, 'unmasked: 1e308 * 10 is reported, not raised');
+    e := ValAdd(ValDouble(1.7976931348623157e308),
+                ValDouble(1.7976931348623157e308), r);
+    CheckErr(e, peIntOverflow, 'unmasked: max + max is reported, not raised');
+    e := ValSub(ValDouble(-1.7976931348623157e308),
+                ValDouble(1.7976931348623157e308), r);
+    CheckErr(e, peIntOverflow, 'unmasked: -max - max is reported, not raised');
+    e := ValDivReal(ValDouble(1e308), ValDouble(1e-10), r);
+    CheckErr(e, peIntOverflow, 'unmasked: 1e308 / 1e-10 is reported, not raised');
+    e := ValPow(ValDouble(1e308), ValDouble(400.0), r);
+    CheckErr(e, peIntOverflow, 'unmasked: 1e308 ^ 400 is reported, not raised');
+    e := ValMod(ValDouble(1e308), ValDouble(1e-308), r);
+    CheckErr(e, peIntOverflow, 'unmasked: 1e308 mod 1e-308 is reported, not raised');
+    // ...and an ordinary computation is untouched by the net.
+    e := ValMul(ValDouble(3.0), ValDouble(4.0), r);
+    CheckDouble(r, 12, 'unmasked: 3 * 4 is still 12');
+    e := ValAdd(ValInt(2), ValInt(3), r);
+    CheckInt(r, 5, 'unmasked: 2 + 3 is still 5');
+  finally
+    SetExceptionMask(saved);
+  end;
+end;
+
+{ ----------------------------------------------------------------------------
+  THE ARGUMENT GATE, THROUGH THE DOCUMENTED HOST DOOR.
+
+  Everything above this point tests PhosphorValue in isolation, and that is
+  exactly how the defect this section pins got shipped. The unit's header used to
+  say a non-finite Double that gets into the value space "is REPORTED by the next
+  operator that meets it" -- and every operator was measured, and the claim was
+  still false, because THE NEXT THING A NaN MEETS IS USUALLY NOT AN OPERATOR. It
+  is ArgI32/ArgI64, which saturate to 0 and report nothing, and 0 is a count that
+  passes every bounds check. Measured 2026-09-07, one process per case, through
+  Prepare + CallFunction: fifty (library function, numeric argument position)
+  doors answered a WRONG VALUE with no error at all -- chr$ a NUL byte, hex$ the
+  string "0", colortostr$ "Black", pointer@ a live handle, space$/left$/mid$ an
+  empty or wrongly-cut string.
+
+  So this section runs the same door. It is the only part of this probe that
+  links the engine, and it is here rather than in a probe of its own because the
+  contract it checks is this unit's: Arg* raises NanNarrowed, and the registry's
+  dispatch is what turns that into a catchable error.
+
+  IT PINS BOTH DIRECTIONS. A refusal that also refused the legitimate cases would
+  be the same mistake in the other direction, so isnan/isinfinite/str$ -- the
+  functions whose whole job is to look at a non-finite number -- are pinned to
+  still see one, +/-Inf is pinned to still saturate, and ordinary arguments are
+  pinned to still work.
+  ---------------------------------------------------------------------------- }
+const
+  DoorSrc =
+    // chr$ answers a RAW BYTE, so the probe reports it as ASCII text rather than
+    // comparing the byte itself: this unit is {$codepage UTF8}, where a Char >= 128
+    // in a literal is not one byte (check-codepage.py exists for that mistake).
+    'function d_chr$(x)'          + LineEnding + '  s$ = chr$(x)'                 + LineEnding +
+                                    '  return "len=" + str$(len(s$)) + " b1=" + str$(byteat(s$, 1))' + LineEnding + 'end function' + LineEnding +
+    'function d_hex$(x)'          + LineEnding + '  return hex$(x)'               + LineEnding + 'end function' + LineEnding +
+    'function d_space$(x)'        + LineEnding + '  return space$(x)'             + LineEnding + 'end function' + LineEnding +
+    'function d_colour$(x)'       + LineEnding + '  return colortostr$(x)'        + LineEnding + 'end function' + LineEnding +
+    'function d_ptr$(x)'          + LineEnding + '  h@ = pointer@(x)'             + LineEnding + '  return "handle"' + LineEnding + 'end function' + LineEnding +
+    'function d_mid$(x)'          + LineEnding + '  return mid$("abcdef", x, 2)'  + LineEnding + 'end function' + LineEnding +
+    'function d_instr$(x)'        + LineEnding + '  return str$(instr("abcdef", "c", x))' + LineEnding + 'end function' + LineEnding +
+    'function d_left$(x)'         + LineEnding + '  return left$("abcdef", x)'    + LineEnding + 'end function' + LineEnding +
+    'function d_isnan$(x)'        + LineEnding + '  return str$(isnan(x))'        + LineEnding + 'end function' + LineEnding +
+    'function d_isinf$(x)'        + LineEnding + '  return str$(isinfinite(x))'   + LineEnding + 'end function' + LineEnding +
+    'function d_str$(x)'          + LineEnding + '  return str$(x)'               + LineEnding + 'end function' + LineEnding +
+    'function d_inner$(x)'        + LineEnding + '  return chr$(x)'               + LineEnding + 'end function' + LineEnding +
+    'function d_clean$(x)'        + LineEnding + '  s$ = chr$(65)'                + LineEnding +
+                                    '  return "len=" + str$(len(s$)) + " b1=" + str$(byteat(s$, 1))' + LineEnding + 'end function' + LineEnding +
+    'function d_after$(x)'        + LineEnding + '  s$ = left$("abcdef", 3)'      + LineEnding + '  return s$ + left$("abcdef", 2)' + LineEnding + 'end function' + LineEnding +
+    'function d_wrap$(x)'         + LineEnding + '  return callfunc$("d_clean$", x)' + LineEnding + 'end function' + LineEnding +
+    'function d_wrapbad$(x)'      + LineEnding + '  return callfunc$("d_inner$", x)' + LineEnding + 'end function' + LineEnding;
+
+procedure CheckLibraryDoorOnNonFinite;
+var
+  eng: TPhosphorEngine;
+  v: TValue;
+
+  { One call through the documented door. AWantErr says whether the engine must
+    report; AWantText is the answer it must give when it must not. }
+  procedure Door(const AFn: String; const X: Double; AWantErr: Boolean;
+                 const AWantText, AName: String);
+  begin
+    v := eng.CallFunction(AFn, [ValDouble(X)]);
+    if AWantErr then
+      Report(IsError(eng.LastError) and (eng.LastError.Code = peRuntime),
+             AName + ' reports catchably')
+    else
+      Report((not IsError(eng.LastError)) and (ValToStr(v) = AWantText),
+             AName + ' still answers ' + AWantText);
+  end;
+
+var
+  nan_, pinf, ninf: Double;
+begin
+  Stage := 'the library argument door';
+  nan_ := PoisonD(0);
+  pinf := PoisonD(1);
+  ninf := PoisonD(2);
+
+  eng := TPhosphorEngine.Create;
+  try
+    if eng.Prepare(DoorSrc) <> 0 then
+    begin
+      Report(False, 'the door probe compiles [' + eng.ErrorMessage + ']');
+      Exit;
+    end;
+    Report(True, 'the door probe compiles');
+
+    // The eight that answered a wrong value silently, plus the four found by
+    // widening the sweep to every numeric argument POSITION rather than only
+    // arity-1 functions. Every one of these was "OK" with no error before.
+    Door('d_chr$',    nan_, True, '', 'chr$(NaN)');
+    Door('d_hex$',    nan_, True, '', 'hex$(NaN)');
+    Door('d_space$',  nan_, True, '', 'space$(NaN)');
+    Door('d_colour$', nan_, True, '', 'colortostr$(NaN)');
+    Door('d_ptr$',    nan_, True, '', 'pointer@(NaN)');
+    Door('d_mid$',    nan_, True, '', 'mid$("abcdef",NaN,2)');
+    Door('d_instr$',  nan_, True, '', 'instr("abcdef","c",NaN)');
+    Door('d_left$',   nan_, True, '', 'left$("abcdef",NaN)');
+
+    // THE OTHER DIRECTION. +/-Inf saturates to High/Low exactly as it always
+    // did -- that band is documented and is NOT the defect -- and the functions
+    // that exist to look at a non-finite number still see one.
+    Door('d_chr$',   pinf, False, 'len=1 b1=255', 'chr$(+Inf)');
+    // chr$(-Inf) splices a NUL byte, exactly as chr$(NaN) used to. It is the
+    // SAME shape of defect one band over, it is in engine/libs (not this
+    // lane's file), and it is pinned here as the behaviour of record so that
+    // whoever fixes it has to come past this line.
+    Door('d_chr$',   ninf, False, 'len=1 b1=0',   'chr$(-Inf)');
+    Door('d_hex$',   pinf, False, '7FFFFFFFFFFFFFFF', 'hex$(+Inf)');
+    Door('d_isnan$', nan_, False, '1', 'isnan(NaN)');
+    Door('d_isnan$', pinf, False, '0', 'isnan(+Inf)');
+    Door('d_isinf$', pinf, False, '1', 'isinfinite(+Inf)');
+    Door('d_isinf$', nan_, False, '0', 'isinfinite(NaN)');
+    Door('d_str$',   nan_, False, 'Nan', 'str$(NaN)');
+
+    // An ordinary argument is untouched, and -- the pin the flag needs -- a call
+    // that follows a reported one is clean. A flag left raised would report the
+    // NEXT library call instead, which is worse than the defect it replaced.
+    Door('d_chr$',   65.0, False, 'len=1 b1=65', 'chr$(65)');
+    Door('d_left$',  3.0,  False, 'abc',    'left$("abcdef",3)');
+    Door('d_chr$',   nan_, True,  '',       'chr$(NaN) again');
+    Door('d_after$', 0.0,  False, 'abcab',  'the call after a reported one');
+
+    // RE-ENTRANCY. callfunc is host-aware: it dispatches through the registry
+    // from INSIDE a registry dispatch. The inner call must not consume or hide
+    // the outer one's state, in either direction.
+    Door('d_wrap$',    nan_, False, 'len=1 b1=65', 'callfunc to a clean function, NaN outside');
+    Door('d_wrapbad$', nan_, True,  '',  'callfunc to a narrowing function');
+    Door('d_after$',   0.0,  False, 'abcab', 'the call after a re-entrant report');
+  finally
+    eng.Free;
+  end;
+end;
+
+procedure CheckFiniteStillWorks;
 var
   r: TValue;
   e: TPhosphorError;
   i: Int64;
+
+  procedure Rng(const AName: String; const X: Double; AWant: Boolean; AWantI: Int64);
+  var got: Int64;
+  begin
+    got := 0;
+    Report((InI64Range(X) = AWant) and (TryD2I(X, got) = AWant) and
+           ((not AWant) or (got = AWantI)),
+           'InI64Range/TryD2I ' + AName);
+  end;
+
+begin
+  // The window is [-2^63, 2^63). Both ends, and the representable value nearest
+  // each of them -- 2^63 itself is out, -2^63 exactly is in.
+  Stage := 'the Int64 window, on finite values';
+  Rng('0', 0.0, True, 0);
+  Rng('-0.0', -0.0, True, 0);
+  Rng('2^52', 4503599627370496.0, True, 4503599627370496);
+  Rng('2^53', 9007199254740992.0, True, 9007199254740992);
+  Rng('the largest Double below 2^63', 9223372036854774784.0, True, 9223372036854774784);
+  Rng('2^63 exactly is outside', 9223372036854775808.0, False, 0);
+  Rng('-2^63 exactly is inside', -9223372036854775808.0, True, Low(Int64));
+  Rng('one Double below -2^63', -9223372036854777856.0, False, 0);
+  Rng('MaxDouble', 1.7976931348623157e308, False, 0);
+  Rng('the smallest denormal', 4.9406564584124654e-324, True, 0);
+  Rng('0.5', 0.5, True, 0);
+  Rng('3.7', 3.7, True, 4);
+  Rng('-3.7', -3.7, True, -4);
+
+  Report(IsFiniteD(1.7976931348623157e308), 'IsFiniteD accepts MaxDouble');
+  Report(IsFiniteD(4.9406564584124654e-324), 'IsFiniteD accepts the smallest denormal');
+  Report(IsFiniteD(-0.0), 'IsFiniteD accepts negative zero');
+  Report(not IsNanD(1.7976931348623157e308), 'IsNanD does not cry wolf on MaxDouble');
+  Report(IsFiniteVal(ValInt(High(Int64))) and IsFiniteVal(ValStr('s')) and
+         IsFiniteVal(ValBool(True)) and IsFiniteVal(ValHandle(1)),
+         'IsFiniteVal accepts every non-double kind');
+
+  Stage := 'the narrowers, on finite values';
+  SetNanNarrowed(False);
+  Report(ArgI64(ValDouble(1e300)) = High(Int64), 'ArgI64 still saturates 1e300 high');
+  Report(ArgI64(ValDouble(-1e300)) = Low(Int64), 'ArgI64 still saturates -1e300 low');
+  Report(ArgI64(ValDouble(3.7)) = 4, 'ArgI64 still rounds 3.7 to 4');
+  Report(ArgI32(ValDouble(7.2)) = 7, 'ArgI32 still rounds 7.2 to 7');
+  Report(ArgI64(ValInt(High(Int64))) = High(Int64), 'ArgI64 still passes an int% through exactly');
+  // The flag is what turns a narrowed NaN into a catchable error at the registry.
+  // A narrowing that met no NaN must leave it down, or every library call after
+  // the first big or fractional argument reports a fault that did not happen.
+  Report(not NanNarrowed, 'no finite narrowing raises NanNarrowed');
+
+  // MaxDouble is the finite value nearest the guard: it must still add (to an
+  // overflow ERROR, not a refusal at the operand), compare, and store.
+  Stage := 'the operators, on the finite values nearest the guard';
+  e := ValAdd(ValDouble(1.7976931348623157e308), ValDouble(1.7976931348623157e308), r);
+  CheckErr(e, peIntOverflow, 'max + max overflows at the RESULT');
+  e := ValCompare(coLT, ValDouble(1e308), ValDouble(1.7976931348623157e308), r);
+  Report((not IsError(e)) and (r.Kind = vkBool) and r.Bl, 'max still compares (bool)');
+  e := ValCompare(coEQ, ValDouble(-0.0), ValDouble(0.0), r);
+  Report((not IsError(e)) and r.Bl, 'negative zero still equals zero (bool)');
+  e := StoreCheck(vtNumber, ValDouble(1.7976931348623157e308), r);
+  Report((not IsError(e)) and (r.Kind = vkDouble) and
+         (r.Num = 1.7976931348623157e308), 'MaxDouble still stores unchanged');
+  e := StoreCheck(vtNumber, ValDouble(4.9406564584124654e-324), r);
+  Report((not IsError(e)) and (r.Num = 4.9406564584124654e-324),
+         'the smallest denormal still stores unchanged');
+  e := StoreCheck(vtInt, ValDouble(3.7), r);
+  Report((not IsError(e)) and (r.Kind = vkInt) and (r.Int = 4),
+         'a Double still rounds into an int% slot');
+  e := StoreCheck(vtInt, ValDouble(1e300), r);
+  CheckErr(e, peIntOverflow, 'a Double too large for an int% still overflows');
+
+  // The operations whose own overflow must still be REPORTED at the result.
+  e := ValMul(ValDouble(1e308), ValDouble(10), r);
+  CheckErr(e, peIntOverflow, '1e308 * 10 overflows');
+  e := ValDivReal(ValDouble(1e308), ValDouble(1e-308), r);
+  CheckErr(e, peIntOverflow, '1e308 / 1e-308 overflows');
+  e := ValMod(ValDouble(1e308), ValDouble(1e-308), r);
+  CheckErr(e, peIntOverflow, '1e308 mod 1e-308 overflows');
+  e := ValPow(ValInt(10), ValInt(400), r);
+  CheckErr(e, peIntOverflow, '10 ^ 400 overflows');
+  e := ValPow(ValInt(0), ValInt(-1), r);
+  CheckErr(e, peDivByZero, '0 ^ -1 is still division by zero');
+  e := ValPow(ValInt(-8), ValDouble(0.5), r);
+  CheckErr(e, peRuntime, '(-8) ^ 0.5 still has no numeric result');
+
+  // ...and the ordinary answers around them, unchanged.
+  e := ValMod(ValDouble(1e30), ValDouble(2.5), r);
+  Report((not IsError(e)) and (r.Kind = vkDouble), '1e30 mod 2.5 still answers');
+  e := ValMod(ValInt(Low(Int64)), ValInt(-1), r);
+  CheckInt(r, 0, 'minint mod -1 is still 0');
+  e := ValPow(ValInt(-2), ValInt(3), r);
+  CheckDouble(r, -8, 'a negative base with a whole exponent still works');
+  e := ValPow(ValInt(0), ValDouble(0.5), r);
+  CheckDouble(r, 0, '0 ^ 0.5 is still zero');
+
+  { NEGATIVE EXPONENTS. These pins are a LIST, and a list is what let a wrong
+    `^` through once already: a revision that computed `1.0/Power(base,-expo)`
+    instead of `Power(base,expo)` passed every one of them and still answered 0
+    for the whole subnormal band, because none of these values lands in it. The
+    range sweep in CheckPowOverTheWholeRange is the check that covers the band;
+    these stay because they pin the OTHER shapes -- a negative base, a
+    fractional exponent, the overflow edge -- with named answers. }
+  e := ValPow(ValInt(2), ValInt(-3), r);
+  CheckDouble(r, 0.125, '2 ^ -3 is still 0.125');
+  e := ValPow(ValInt(-2), ValInt(-3), r);
+  CheckDouble(r, -0.125, '(-2) ^ -3 is still -0.125');
+  e := ValPow(ValDouble(0.5), ValInt(-2), r);
+  CheckDouble(r, 4, '0.5 ^ -2 is still 4');
+  e := ValPow(ValDouble(1e300), ValInt(-2), r);
+  Report((not IsError(e)) and (r.Kind = vkDouble) and (r.Num = 0),
+         'a reciprocal of an overflowed power is still zero');
+  { Compared as TEXT, not against the literal 1e300: 1e-300 is not exactly
+    representable, so its reciprocal is not exactly the Double the literal
+    1e300 parses to. The engine's own locale-independent spelling is the answer
+    a program sees, and it is the one the pristine unit produced. }
+  e := ValPow(ValDouble(1e-300), ValInt(-1), r);
+  Report((not IsError(e)) and (ValToStr(r) = '1E300'), '1e-300 ^ -1 is still 1E300');
+  e := ValPow(ValDouble(1e-300), ValInt(-2), r);
+  CheckErr(e, peIntOverflow, '1e-300 ^ -2 has no finite magnitude');
+  e := ValPow(ValDouble(2.0), ValDouble(-2147483647.0), r);
+  Report((not IsError(e)) and (r.Num = 0), '2 ^ -maxint still underflows to zero');
+  e := ValPow(ValDouble(2.0), ValDouble(-0.5), r);
+  CheckDouble(r, 0.707106781186547, 'a fractional negative exponent still works');
+  e := ValSub(ValStr('abcd'), ValDouble(1e30), r);
+  CheckStr(r, '', 'a huge string-truncation count still clamps to empty');
+  e := ValSub(ValStr('abcd'), ValDouble(-1e30), r);
+  CheckStr(r, 'abcd', 'a hugely negative one still keeps the whole string');
+  e := ValDivInt(ValDouble(1e300), ValInt(2), r);
+  CheckErr(e, peIntOverflow, '1e300 \ 2 is still out of integer range');
+  i := 0;
+  if i <> 0 then ;
+end;
+
+var
+  r: TValue;
+  e: TPhosphorError;
+  i: Int64;
+  savedMask: TFPUExceptionMask;
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
+
+  { EXACTLY THE FPU MASK TPhosphorVM.Run INSTALLS, because this unit's answers
+    are only defined under it. FiniteD reports `1e308 * 10` as a catchable
+    overflow BECAUSE the multiplication is allowed to produce +Inf first; with
+    the trap left unmasked -- FPC's default, and this probe's default until it
+    was set here -- the same line raises EOverflow and kills the probe instead.
+    INVALID-OPERATION and DIVIDE-BY-ZERO stay unmasked on purpose: they are the
+    traps the finiteness invariant claims are unreachable, and a probe that
+    masked them would prove nothing about the claim it exists to test. }
+  savedMask := GetExceptionMask();
+  SetExceptionMask(savedMask + [exOverflow, exUnderflow, exPrecision, exDenormalized]);
 
   // int + int -> int (checked)
   e := ValAdd(ValInt(3), ValInt(4), r);
@@ -107,6 +736,27 @@ begin
   e := ValDivReal(ValInt(1), ValInt(0), r);
   CheckErr(e, peDivByZero, 'div by zero -> error');
 
+  { The finiteness invariant: every entry point total on a non-finite Double, and
+    every finite answer unchanged.
+
+    WRAPPED, because the failure mode here is a TRAP, not a wrong answer. Without
+    this the probe simply dies -- exit 217, no summary line -- and the suite can
+    only say it "did not run", which is exactly the report that says least about
+    a crash. Catching turns it into a named FAILURE that points at the region.
+    Verified by neutralising InI64Range's bit test and watching this fire. }
+  try
+    CheckNonFinite;
+    CheckFiniteStillWorks;
+    CheckPowOverTheWholeRange;
+    CheckOperatorsWithOverflowUnmasked;
+    CheckLibraryDoorOnNonFinite;
+  except
+    on E: Exception do
+      Report(False, 'the process trapped in ' + Stage + ' [' + E.ClassName +
+                    ': ' + E.Message + ']');
+  end;
+
+  SetExceptionMask(savedMask);
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);
   if Failed = 0 then Halt(0) else Halt(1);

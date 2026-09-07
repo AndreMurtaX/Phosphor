@@ -33,7 +33,7 @@ interface
 uses
   SysUtils, Classes,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorIoLib,
-  PhosphorSandbox;
+  PhosphorSandbox, PhosphorBudget;
 
 type
   TPhosphorStringList = class
@@ -64,8 +64,10 @@ type
     procedure DeleteAt(AZero: Integer);
     procedure Exchange(A, B: Integer);
     procedure MoveItem(AFrom, ATo: Integer);
-    procedure Sort;
+    function Sort: Boolean;
     procedure SetText(const S: String);
+    function JoinInto(const ASep: String; ATrailing: Boolean;
+                      out AText: String): Boolean;       // sized once, budget-asked
     function TextStr: String;                            // honours LineBreak/TrailingLineBreak
     procedure SetCommaText(const S: String);
     function CommaTextStr: String;
@@ -183,21 +185,74 @@ begin
   Items[ATo] := t;
 end;
 
-procedure TPhosphorStringList.Sort;
-var i, j: Integer; t: String;
+{ "SMALL LISTS" WAS AN ASSUMPTION, NOT A BOUND.
+
+  This was an insertion sort with the note "small lists". A script does not have
+  to keep the list small, and it does not have to build it an item at a time
+  where the VM's ceilings can see it either -- strings_load reads sixty thousand
+  lines out of a 400 KB file in ONE opCall, and the sort that follows is one more:
+
+      l@ = strings@()
+      strings_load(l@, "60000-lines.txt")
+      strings_sort(l@)         ' 10953 ms, rc=0 SUCCESS, MaxSteps=1000000 TimeoutMs=2000
+
+  Five times over the stated time limit and reported as success. The gate could
+  not see it: the inner loop is a WHILE (which the first version of
+  scripts/check-budget.py never examined) and its bound mentions Count (which the
+  gate reads as "already in memory, therefore bounded") -- true of the memory and
+  false of the TIME, because the work is Count SQUARED.
+
+  Both halves are fixed here. A bottom-up merge sort makes the work n log n --
+  60000 lines now sort in about 25 ms rather than eleven seconds -- and it is
+  stable, which insertion sort was and which strings_sorted relies on. And it is
+  still CHARGED per comparison (RULE 2), because n log n over an arbitrarily long
+  list is still not O(1), and a sort that gives up must say so rather than hand
+  back a half-ordered list: Sort answers False and t_strings_sort reports it. }
+function TPhosphorStringList.Sort: Boolean;
+var
+  buf: array of String;
+  width, lo, mid, hi, i, j, k: Integer;
+  charged: Int64;
 begin
-  // small lists; a simple insertion sort keeps it stable and dependency-free
-  for i := 1 to Count - 1 do
+  Result := True;
+  if Count < 2 then Exit;
+  SetLength(buf, Count);
+  charged := 0;
+  width := 1;
+  while width < Count do
   begin
-    t := Items[i];
-    j := i - 1;
-    while (j >= 0) and (CompareStr(Items[j], t) > 0) do
+    lo := 0;
+    while lo < Count do
     begin
-      Items[j + 1] := Items[j];
-      Dec(j);
+      mid := lo + width;
+      if mid > Count then mid := Count;
+      hi := mid + width;
+      if hi > Count then hi := Count;
+      i := lo; j := mid; k := lo;
+      while (i < mid) or (j < hi) do
+      begin
+        // <= keeps it STABLE: an equal left element goes first, exactly as the
+        // insertion sort's `> 0` test did.
+        if (j >= hi) or ((i < mid) and (CompareStr(Items[i], Items[j]) <= 0)) then
+        begin buf[k] := Items[i]; Inc(i); end
+        else
+        begin buf[k] := Items[j]; Inc(j); end;
+        Inc(k);
+        Inc(charged);
+        if charged >= BudgetClockEvery then
+        begin
+          charged := 0;
+          if not BudgetCharge(BudgetClockEvery) then Exit(False);
+        end;
+      end;
+      lo := hi;
+      if hi >= Count then Break;
     end;
-    Items[j + 1] := t;
+    for i := 0 to Count - 1 do Items[i] := buf[i];
+    if width > Count div 2 then Break;
+    width := width * 2;
   end;
+  if charged > 0 then Result := BudgetCharge(charged);
 end;
 
 procedure TPhosphorStringList.SetText(const S: String);
@@ -226,16 +281,62 @@ end;
 
 { Render every line, joined by LineBreak, with a trailing LineBreak when
   TrailingLineBreak is set -- exactly TStrings.Text. }
-function TPhosphorStringList.TextStr: String;
-var i: Integer;
+{ JOINING A LIST IS ONE opCall, AND IT WAS QUADRATIC.
+
+      l@ = strings@()
+      strings_text(l@, <200000 lines>)
+      println bytelen(strings_text$(l@))   ' 149875 ms, rc=0 SUCCESS
+
+  Two and a half minutes under MaxSteps=1000000 / TimeoutMs=2000, reported as
+  success. `Result := Result + Items[i]` looks like the cheap in-place append FPC
+  usually gives, and for a local appending a literal it is -- measured: 200000
+  appends of a literal to a local take 0 ms. Appending an ARRAY ELEMENT and an
+  object FIELD to the function Result does not get that optimisation, and the
+  cost becomes a full copy per item:
+
+      n= 25000  TextStr=1406 ms   CommaText=1469 ms   GetDelimitedText=0 ms
+      n= 50000  TextStr=10437 ms  CommaText=10922 ms  GetDelimitedText=0 ms
+      n=100000  TextStr=45140 ms  CommaText=38610 ms  GetDelimitedText=0 ms
+
+  -- four times the time for twice the input, which is the signature. Its sibling
+  GetDelimitedText, which appends LOCALS, is flat at every size, so this is not a
+  rule about concatenation, it is a fact about these two routines.
+
+  Both are rewritten the way string$ was: measure the answer once, ask the budget
+  for exactly that many bytes (RULE 1 -- the size IS derivable, it is the sum of
+  the lengths already in the list), allocate once, and Move. Linear, and bounded.
+  The output is byte-for-byte what the loop produced. }
+function TPhosphorStringList.JoinInto(const ASep: String; ATrailing: Boolean;
+  out AText: String): Boolean;
+var i: Integer; total, at, n: Int64;
 begin
-  Result := '';
+  AText := '';
+  Result := True;
+  if Count <= 0 then Exit;
+  total := 0;
   for i := 0 to Count - 1 do
   begin
-    Result := Result + Items[i];
-    if i < Count - 1 then Result := Result + LineBreak
-    else if TrailingLineBreak then Result := Result + LineBreak;
+    total := total + Length(Items[i]);
+    if (i < Count - 1) or ATrailing then total := total + Length(ASep);
   end;
+  if not BudgetAllows(total) then Exit(False);
+  SetLength(AText, total);
+  at := 1;
+  for i := 0 to Count - 1 do
+  begin
+    n := Length(Items[i]);
+    if n > 0 then begin Move(Items[i][1], AText[at], n); at := at + n; end;
+    if (i < Count - 1) or ATrailing then
+    begin
+      n := Length(ASep);
+      if n > 0 then begin Move(ASep[1], AText[at], n); at := at + n; end;
+    end;
+  end;
+end;
+
+function TPhosphorStringList.TextStr: String;
+begin
+  if not JoinInto(LineBreak, TrailingLineBreak, Result) then Result := '';
 end;
 
 procedure TPhosphorStringList.SetCommaText(const S: String);
@@ -254,14 +355,9 @@ begin
 end;
 
 function TPhosphorStringList.CommaTextStr: String;
-var i: Integer;
 begin
-  Result := '';
-  for i := 0 to Count - 1 do
-  begin
-    if i > 0 then Result := Result + ',';
-    Result := Result + Items[i];
-  end;
+  // The same join with a one-character separator and no trailing one.
+  if not JoinInto(',', False, Result) then Result := '';
 end;
 
 { Join with Delimiter, quoting a field (with QuoteChar, doubling embedded quotes)
@@ -649,7 +745,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.Sort();
+  if not l.Sort() then begin Err := BudgetRefusal('strings_sort'); Exit; end;
   Result := ValInt(1);
 end;
 
@@ -705,12 +801,22 @@ begin
   Result := ValInt(l.CapacityGet());
 end;
 
+{ CAPACITY IS AN ALLOCATION WITH A NUMBER ON IT. sl_setcapacity(h, 2000000000)
+  is SetLength over two billion string slots -- sixteen gigabytes on a 64-bit
+  build -- from eleven characters of BASIC, inside one opCall. RULE 1: the size
+  is the argument, so it is asked before it is taken. }
 function t_strings_capacity_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; n: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.CapacitySet(ArgI32(Args[1]));
+  n := ArgI32(Args[1]);
+  if (n > l.Count) and (not BudgetAllows(n - l.Count)) then
+  begin
+    Err := BudgetRefusal('sl_setcapacity');
+    Exit;
+  end;
+  l.CapacitySet(n);
   Result := ValInt(l.CapacityGet());
 end;
 
@@ -725,11 +831,15 @@ begin
 end;
 
 function t_strings_text_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; t: String;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.TextStr());
+  // An empty answer must not be how a refusal looks: a list that is genuinely
+  // empty and a join the budget stopped are different facts.
+  if not l.JoinInto(l.LineBreak, l.TrailingLineBreak, t) then
+  begin Err := BudgetRefusal('strings_text$'); Exit; end;
+  Result := ValStr(t);
 end;
 
 // --- comma text (get/set) ---------------------------------------------------
@@ -743,11 +853,13 @@ begin
 end;
 
 function t_strings_commatext_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; t: String;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.CommaTextStr());
+  if not l.JoinInto(',', False, t) then
+  begin Err := BudgetRefusal('strings_commatext$'); Exit; end;
+  Result := ValStr(t);
 end;
 
 // --- delimited text and its characters --------------------------------------
@@ -951,7 +1063,10 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   l.Sorted := AsDouble(Args[1]) <> 0;
-  if l.Sorted then l.Sort();   // enabling it orders whatever is already there
+  // Enabling it orders whatever is already there -- and that sort is charged
+  // like any other, so this spelling is not a way round the ceiling either.
+  if l.Sorted and (not l.Sort()) then
+  begin Err := BudgetRefusal('strings_sorted'); Exit; end;
   Result := ValInt(1);
 end;
 

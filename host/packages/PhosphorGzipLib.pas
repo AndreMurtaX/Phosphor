@@ -36,7 +36,7 @@ interface
 
 uses
   SysUtils, Classes, zstream,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox, PhosphorBudget;
 
 procedure RegisterGzipFuncs(Reg: TPhosphorRegistry);
 
@@ -44,6 +44,7 @@ implementation
 
 var
   GzipErr: Integer = 0;           // 0 = the last gzip op was clean; 1 = it failed
+  GzipSpent: Boolean = False;     // the last inflate stopped on the execution budget
   Crc32Table: array[0..255] of Cardinal;
 
 // --- CRC32 (IEEE, reflected 0xEDB88320) -- self-contained, no inline note ----
@@ -105,6 +106,7 @@ function RawInflate(const Src: RawByteString): RawByteString;
 var inp, outs: TMemoryStream; ds: Tdecompressionstream; buf: array[0..65535] of Byte; n: LongInt;
 begin
   Result := '';
+  GzipSpent := False;
   inp := TMemoryStream.Create();
   outs := TMemoryStream.Create();
   try
@@ -112,9 +114,21 @@ begin
     inp.Position := 0;
     ds := Tdecompressionstream.Create(inp, True);
     try
+      { A DECOMPRESSION BOMB IS THE SIZE THAT IS NOT DERIVABLE FROM ITS ARGUMENT.
+        Forty kilobytes of gzip expand to ten gigabytes, and the whole expansion
+        happens inside one opCall where no execution ceiling can see it -- the
+        argument says nothing about how big the answer will be, so RULE 1 cannot
+        apply and RULE 2 does: charge each 64 KB block as it comes out and stop
+        when the budget is spent. GzipSpent keeps a truncated result from reading
+        as a successful one. }
       repeat
         n := ds.Read(buf, SizeOf(buf));
         if n > 0 then outs.WriteBuffer(buf, n);
+        if (n > 0) and (not BudgetCharge(n)) then
+        begin
+          GzipSpent := True;
+          Break;
+        end;
       until n < SizeOf(buf);   // a short read means the DEFLATE stream ended
     finally
       ds.Free;
@@ -263,6 +277,12 @@ begin
     if GzipUnwrap(Args[0].Str, body) then
     begin
       plain := RawInflate(body);
+      if GzipSpent then
+      begin
+        Err := BudgetRefusal('gzip_decompress$');
+        GzipErr := 1;
+        Exit(ValStr(''));
+      end;
       Result := ValStr(plain);
       GzipErr := 0;
     end
@@ -318,6 +338,12 @@ begin
        SaveFileStr(Args[1].Str, RawInflate(body)) then
     begin Result := ValInt(1); GzipErr := 0; end
     else begin Result := ValInt(0); GzipErr := 1; end;
+    if GzipSpent then
+    begin
+      Err := BudgetRefusal('gzip_decompressfile');
+      GzipErr := 1;
+      Exit(ValInt(0));
+    end;
   except
     Result := ValInt(0); GzipErr := 1;
   end;

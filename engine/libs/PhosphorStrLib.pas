@@ -19,7 +19,7 @@ interface
 
 uses
   SysUtils, StrUtils, Types, Character,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorBudget;
 
 procedure RegisterStrFuncs(Reg: TPhosphorRegistry);
 
@@ -82,10 +82,18 @@ begin
   Result := Copy(S, st[n - ACount], MaxInt);
 end;
 
-function CpReverse(const S: String): String;
+{ QUADRATIC APPEND, charged. `Result := Result + Copy(...)` in a loop is not an
+  O(1) body, so Length(S) does not bound this the way it bounds a plain scan:
+  unbudgeted, reverse$ of a 160 MB string took 50750 ms under a 2000 ms ceiling
+  and reported success. The cost is fixed by Length(S) before the loop starts, so
+  it is RULE 1 -- priced once, refused whole, never truncated half way. False here
+  means the budget said no; the caller turns that into the peLimit. }
+function CpReverse(const S: String; out AAllowed: Boolean): String;
 var st: TInt64DynArray; i, n: Integer;
 begin
   Result := '';
+  AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
+  if not AAllowed then Exit;
   st := CpStarts(S);
   n := Length(st) - 1;
   for i := n downto 1 do
@@ -146,7 +154,13 @@ begin E := NoError(); Result := ValStr(TrimLeft(s0(A))); end;
 function f_rtrim(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(TrimRight(s0(A))); end;
 function f_reverse(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpReverse(s0(A))); end;
+var r: String; ok: Boolean;
+begin
+  E := NoError();
+  r := CpReverse(s0(A), ok);
+  if not ok then begin E := BudgetRefusal('reverse$'); Exit(ValStr('')); end;
+  Result := ValStr(r);
+end;
 
 // mid$(s, start[, len]) -- 1-based, by codepoint. Without len, to the end.
 function f_mid(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -264,36 +278,249 @@ end;
 function f_stri(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(FloatToStr(AsDouble(A[0]), InvFS)); end;
 
+{ THE THREE STRING BUILDERS, and the two things that were wrong with them.
+
+  (1) THE LOOP. space$ and string$ produce the same shape of answer and only
+  space$ was fast: it calls StringOfChar once, while string$ and mulstring$
+  appended one piece at a time. An append reallocates, so building n characters
+  cost O(n^2) work -- string$(1e18) becomes string$(2147483647) under ArgI32's
+  saturating clamp and then ran for HOURS, with no ceiling able to look at it,
+  because the whole loop lives inside one opCall. Both now size the answer once
+  and fill it, which is what StringOfChar was already doing for their sibling:
+  the answer is identical and the cost is linear.
+
+  (2) THE SIZE. The result's length is n * Length(piece) and both are in hand
+  before a byte is allocated, so this is exactly the case RULE 1 of
+  PhosphorBudget is for -- under a host's budget the operation is refused up
+  front rather than started. With no budget installed BudgetAllows answers True
+  on its first line and these behave as they always did, only faster. }
 function f_space(const A: array of TValue; out E: TPhosphorError): TValue;
 var n: Integer;
-begin E := NoError(); n := ArgI32(A[0]); if n < 0 then n := 0; Result := ValStr(StringOfChar(' ', n)); end;
+begin
+  E := NoError();
+  n := ArgI32(A[0]); if n < 0 then n := 0;
+  if not BudgetAllows(n) then begin E := BudgetRefusal('space$'); Exit(ValStr('')); end;
+  Result := ValStr(StringOfChar(' ', n));
+end;
 function f_string(const A: array of TValue; out E: TPhosphorError): TValue;
-var n, i: Integer; ch, r: String;
+var n, i, cl: Integer; total: Int64; ch, r: String;
 begin
   E := NoError();
   n := ArgI32(A[0]); if n < 0 then n := 0;
   ch := CpUtf8(ArgI32(A[1]));   // the character's full UTF-8 encoding
+  cl := Length(ch);
+  total := Int64(n) * cl;
+  { SIZING ONCE MEANS THE SIZE HAS TO FIT. n saturates at High(Integer) and a
+    codepoint is up to four bytes, so the product reaches 8.6e9 -- a perfectly
+    good Int64 and NOT a good SizeInt on a 32-bit build, where SetLength would
+    take the wrapped value and hand back a block the string header still claims
+    is huge. That is the dim@ defect exactly, and it costs nothing to not have.
+
+    Compiled only where it can be true: on 64-bit High(SizeInt) is High(Int64),
+    the comparison is constant-false, and -vewn refuses the unreachable branch
+    that results. There an over-large allocation still fails the honest way, with
+    EOutOfMemory reported through the VM's net. }
+  {$IFDEF CPU32}
+  if total > High(SizeInt) then
+  begin
+    E := MakeError(peRuntime, 'string$: ' + IntToStr(total) +
+                   ' bytes is past the longest string this build can hold');
+    Exit(ValStr(''));
+  end;
+  {$ENDIF}
+  if not BudgetAllows(total) then begin E := BudgetRefusal('string$'); Exit(ValStr('')); end;
   r := '';
-  for i := 1 to n do r := r + ch;
+  SetLength(r, total);
+  if total > 0 then
+    if cl = 1 then
+      FillChar(r[1], total, Byte(ch[1]))
+    else
+      for i := 0 to n - 1 do Move(ch[1], r[Int64(i) * cl + 1], cl);
   Result := ValStr(r);
 end;
 function f_mulstring(const A: array of TValue; out E: TPhosphorError): TValue;
-var n, i: Integer; r: String;
+var n, i, sl: Integer; total: Int64; s, r: String;
 begin
-  E := NoError(); n := ArgI32(A[1]); r := '';
-  for i := 1 to n do r := r + s0(A);
+  E := NoError();
+  n := ArgI32(A[1]); if n < 0 then n := 0;
+  s := s0(A); sl := Length(s);
+  total := Int64(n) * sl;
+  {$IFDEF CPU32}                        // the same SizeInt ceiling as string$
+  if total > High(SizeInt) then
+  begin
+    E := MakeError(peRuntime, 'mulstring$: ' + IntToStr(total) +
+                   ' bytes is past the longest string this build can hold');
+    Exit(ValStr(''));
+  end;
+  {$ENDIF}
+  if not BudgetAllows(total) then begin E := BudgetRefusal('mulstring$'); Exit(ValStr('')); end;
+  r := '';
+  SetLength(r, total);
+  if total > 0 then
+    for i := 0 to n - 1 do Move(s[1], r[Int64(i) * sl + 1], sl);
   Result := ValStr(r);
 end;
 
+{ THE STRING PRODUCTS, and the reason the gate could not see them.
+
+  scripts/check-budget.py deliberately does NOT taint a String argument: a string
+  is already in memory, so its Length bounds a loop exactly as a container's
+  Count does. That is sound for ONE string and wrong for the PRODUCT of two, and
+  every routine below multiplies two of them:
+
+    - a naive search compares the needle against the haystack at every offset,
+      which is Length(hay) * Length(needle) byte comparisons. FPC's Pos/PosEx are
+      naive (rtl/objpas/sysutils/syspch.inc and the generic sysstr.inc: a scan
+      for the first byte and then a compare loop, no Boyer-Moore), so
+
+          h$ = string$(1000000, 97) : nd$ = string$(20000, 97) + "b"
+          println instr(h$, nd$)          ' 7250 ms, and it SUCCEEDED
+
+      spent seven seconds inside one opCall under a two-second time limit.
+
+    - a replace BUILDS a result whose length is Length(hay) + count * (new - old),
+      and with a one-character needle count is Length(hay). So
+
+          replacestr$(string$(1000000,97), "a", string$(2000,98))
+
+      is two gigabytes from three arguments that are a megabyte between them --
+      422 ms and rc=0 under the ceiling that refuses a one-gigabyte buffer.
+
+  SearchCost prices the search, ReplaceCost prices the search AND the answer, and
+  each is asked before the RTL is called.
+
+  ROUND THREE -- WHY THE PRICE IS NO LONGER Length(hay) * Length(needle).
+
+  Round two charged the true worst case, on the reasoning that a ceiling has to
+  be priced against a worst case. That reasoning is right about the ANSWER's size
+  and wrong about the SEARCH's time, and it broke a band of entirely ordinary
+  work. My reviewer swept document size against needle length and measured:
+
+      doc=100000   needle=4096   REFUSED       doc=1000000  needle=32  REFUSED
+      doc=10000000 needle=8      REFUSED       ("319999008 units of work and
+                                                 only 95358608 are left")
+      ALL 27 SEARCHES, UNBUDGETED, TOGETHER:   62 ms
+
+  19 of 27 refused for 62 ms of work. Concretely: finding a 300-character
+  quotation in a 990 KB document was refused on instr, countstr AND replacestr$
+  under exactly the ceilings docs/embedding.md prescribes.
+
+  The worst case Length(hay)*Length(needle) needs a haystack whose EVERY position
+  starts with the needle's first byte. Ordinary text never does, and the reason
+  it never does is visible in the RTL. FPC's Pos/PosEx (rtl/inc/astrings.inc,
+  read rather than assumed) is a first-byte scan with a CompareByte only where
+  that first byte matches:
+
+      while (i <= MaxLen) do begin
+        inc(i);
+        if (SubStr[1] = pc^) and (CompareByte(Substr[1], pc^, SubLen) = 0) then ...
+        inc(pc);
+      end;
+
+  So the work is Length(hay) first-byte tests, plus at most one full needle
+  comparison per position at which the needle's first byte actually occurs. That
+  count is not a guess and not a sample: it is read off the haystack in one pass,
+  the same order as the search's own floor. Hence
+
+      cost = Length(hay) + hits(hay, needle[1]) * Length(needle)
+
+  This is still an UPPER bound -- CompareByte stops at its first mismatch, so the
+  real search is cheaper -- and it still refuses the amplifier round one found:
+  instr(string$(1000000,97), string$(20000,97)+"b") has its first byte at every
+  one of a million positions, prices at 1.96e10, and is refused, while the same
+  shapes over ordinary text price at Length(hay) plus a few percent.
+
+  TWO THINGS THIS COSTS, both deliberate:
+
+    - The counting pass is itself a pass over the haystack, so it is CHARGED
+      before it is made. A refusal charges nothing (BudgetAllows says why), so
+      without that charge a loop of refused searches would buy an unbounded
+      number of free scans of a large string -- a hole this change would have
+      opened while closing another.
+
+    - With NO budget installed the price is never consulted, so it is not
+      computed either: SearchCost answers 0 and does not scan. An unbudgeted
+      host is exactly as fast as it was before this unit existed. }
+
+{ One naive search, priced by the measured model in PhosphorBudget -- shared
+  with PhosphorBufferLib's hand-written search so the two doors cannot drift. }
+function SearchCost(const AHay, ANeedle: String; ACaseless: Boolean = False): Int64;
+begin
+  Result := BudgetSearchCost(AHay, ANeedle, ACaseless);
+end;
+
+{ Worst-case work for replacing every ANeedle in AHay by ANew: the searches, plus
+  the largest answer that can come out of it. }
+function ReplaceCost(const AHay, ANeedle, ANew: String;
+                     ACaseless: Boolean = False): Int64;
+var hits, grow, outlen: Int64;
+begin
+  Result := SearchCost(AHay, ANeedle, ACaseless);
+  if ANeedle = '' then Exit;                       // the RTL answers AHay unchanged
+  hits := Int64(Length(AHay)) div Int64(Length(ANeedle));
+  grow := Int64(Length(ANew)) - Int64(Length(ANeedle));
+  if grow < 0 then grow := 0;
+  if (grow > 0) and (hits > (High(Int64) - Int64(Length(AHay))) div grow) then
+    outlen := High(Int64)
+  else
+    outlen := Int64(Length(AHay)) + hits * grow;
+  if outlen > Result then Result := outlen;
+end;
+
+{ AND THE ANSWER HAS TO FIT A 32-BIT COUNTER. The RTL sizes the result with
+  `SetLength(Result, Length(S) + aCount * (NewPatLength - PatLength))` where
+  aCount and both lengths are Integer (rtl/objpas/sysutils/syssr.inc, read to be
+  sure rather than assumed), so a product past High(Integer) wraps NEGATIVE and
+  SetLength is handed a nonsense length. That is a size the budget must not be
+  the only thing standing in front of, because an unbudgeted host has no budget:
+  it is refused as a catchable overflow whether or not a ceiling is installed. }
+function ReplaceFitsRtl(const AHay, ANeedle, ANew: String; out AOut: Int64): Boolean;
+var hits, delta: Int64;
+begin
+  AOut := Length(AHay);
+  Result := True;
+  if ANeedle = '' then Exit;
+  hits := Int64(Length(AHay)) div Int64(Length(ANeedle));
+  delta := Int64(Length(ANew)) - Int64(Length(ANeedle));
+  if delta <= 0 then Exit;
+  if hits > High(Int64) div delta then begin AOut := High(Int64); Exit(False); end;
+  AOut := Int64(Length(AHay)) + hits * delta;
+  Result := (hits * delta <= High(Integer)) and (AOut <= High(Integer));
+end;
+
+function DoReplace(const A: array of TValue; const AFn: String; AFlags: TReplaceFlags;
+                   out E: TPhosphorError): TValue;
+var
+  outlen: Int64;
+begin
+  E := NoError();
+  if not ReplaceFitsRtl(s0(A), A[1].Str, A[2].Str, outlen) then
+  begin
+    E := MakeError(peIntOverflow, AFn + ': the result would be ' + IntToStr(outlen) +
+         ' bytes, past the ' + IntToStr(High(Integer)) +
+         ' this replace can address');
+    Exit(ValStr(''));
+  end;
+  if not BudgetAllows(ReplaceCost(s0(A), A[1].Str, A[2].Str,
+                                  rfIgnoreCase in AFlags)) then
+  begin
+    E := BudgetRefusal(AFn);
+    Exit(ValStr(''));
+  end;
+  Result := ValStr(StringReplace(s0(A), A[1].Str, A[2].Str, AFlags));
+end;
+
 function f_replacestr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(StringReplace(s0(A), A[1].Str, A[2].Str, [rfReplaceAll])); end;
+begin Result := DoReplace(A, 'replacestr$', [rfReplaceAll], E); end;
 function f_replacetext(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(StringReplace(s0(A), A[1].Str, A[2].Str, [rfReplaceAll, rfIgnoreCase])); end;
+begin Result := DoReplace(A, 'replacetext$', [rfReplaceAll, rfIgnoreCase], E); end;
 
 function f_countstr(const A: array of TValue; out E: TPhosphorError): TValue;
 var sub: String; c, p: Integer;
 begin
   E := NoError(); sub := A[1].Str; c := 0;
+  if not BudgetAllows(SearchCost(s0(A), sub)) then
+  begin E := BudgetRefusal('countstr'); Exit(ValInt(0)); end;
   if sub <> '' then
   begin
     p := PosEx(sub, s0(A), 1);
@@ -302,7 +529,12 @@ begin
   Result := ValInt(c);
 end;
 function f_containsstr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(Pos(A[1].Str, s0(A)) > 0)); end;
+begin
+  E := NoError();
+  if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
+  begin E := BudgetRefusal('containsstr'); Exit(ValInt(0)); end;
+  Result := ValInt(Ord(Pos(A[1].Str, s0(A)) > 0));
+end;
 
 // startsstr/endsstr take the TEXT first (decisions.md); *text variants are
 // case-insensitive.
@@ -341,12 +573,20 @@ function f_word(const A: array of TValue; out E: TPhosphorError): TValue;
 var parts: TStringArray; idx: Integer;
 begin
   E := NoError(); Result := ValStr('');
+  // SplitBy is a PosEx loop: the same naive product as instr, once per piece.
+  if not BudgetAllows(SearchCost(s0(A), A[2].Str)) then
+  begin E := BudgetRefusal('word$'); Exit(ValStr('')); end;
   parts := SplitBy(s0(A), A[2].Str);
   idx := ArgI32(A[1]);   // 1-based
   if (idx >= 1) and (idx <= Length(parts)) then Result := ValStr(parts[idx - 1]);
 end;
 function f_wordcount(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Length(SplitBy(s0(A), A[1].Str))); end;
+begin
+  E := NoError();
+  if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
+  begin E := BudgetRefusal('wordcount'); Exit(ValInt(0)); end;
+  Result := ValInt(Length(SplitBy(s0(A), A[1].Str)));
+end;
 
 // instr family: 1-based position, 0 when absent.
 { Byte offset -> codepoint position, both 1-based. A byte inside a multi-byte
@@ -373,11 +613,18 @@ begin
 end;
 
 function f_instr2(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(ByteToCp(s0(A), Pos(A[1].Str, s0(A)))); end;
+begin
+  E := NoError();
+  if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
+  begin E := BudgetRefusal('instr'); Exit(ValInt(0)); end;
+  Result := ValInt(ByteToCp(s0(A), Pos(A[1].Str, s0(A))));
+end;
 function f_instr3(const A: array of TValue; out E: TPhosphorError): TValue;
 var start: Integer;
 begin
   E := NoError();
+  if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
+  begin E := BudgetRefusal('instr'); Exit(ValInt(0)); end;
   start := ArgI32(A[2]); if start < 1 then start := 1;
   // The start is a CODEPOINT position, like every other index in the language, so
   // it is translated into a byte offset for the search and the answer translated
@@ -389,6 +636,8 @@ function f_instrrev(const A: array of TValue; out E: TPhosphorError): TValue;
 var t, sub: String; p, last: Integer;
 begin
   E := NoError(); t := s0(A); sub := A[1].Str; last := 0;
+  if not BudgetAllows(SearchCost(t, sub)) then
+  begin E := BudgetRefusal('instrrev'); Exit(ValInt(0)); end;
   if sub <> '' then
   begin
     p := PosEx(sub, t, 1);
@@ -430,18 +679,27 @@ end;
 // mismatch -- so two byte-identical strings would compare UNEQUAL. Building the
 // bytes with Chr() (as chr$ does) keeps the codepage tag consistent. See
 // [[phosphor-project]] on the codepage-tag hazard.
-function Utf8UpperU(const S: String): String;
+{ QUADRATIC APPEND, charged -- the same shape and the same reason as CpReverse.
+  Unbudgeted, aucase$/alcase$ of a 160 MB string took 48984 ms under a 2000 ms
+  ceiling and reported success. Length(S) is an upper bound on the number of
+  appends (UTF8Decode never produces more UTF-16 units than input bytes), so the
+  price is fixed before the loop starts. }
+function Utf8UpperU(const S: String; out AAllowed: Boolean): String;
 var u: UnicodeString; i: Integer;
 begin
-  u := UTF8Decode(S);
   Result := '';
+  AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
+  if not AAllowed then Exit;
+  u := UTF8Decode(S);
   for i := 1 to Length(u) do Result := Result + Utf8Chr(Ord(TCharacter.ToUpper(u[i])));
 end;
-function Utf8LowerU(const S: String): String;
+function Utf8LowerU(const S: String; out AAllowed: Boolean): String;
 var u: UnicodeString; i: Integer;
 begin
-  u := UTF8Decode(S);
   Result := '';
+  AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
+  if not AAllowed then Exit;
+  u := UTF8Decode(S);
   for i := 1 to Length(u) do Result := Result + Utf8Chr(Ord(TCharacter.ToLower(u[i])));
 end;
 
@@ -491,47 +749,79 @@ begin
 end;
 
 function f_alcase(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(Utf8LowerU(s0(A))); end;
+var r: String; ok: Boolean;
+begin
+  E := NoError();
+  r := Utf8LowerU(s0(A), ok);
+  if not ok then begin E := BudgetRefusal('alcase$'); Exit(ValStr('')); end;
+  Result := ValStr(r);
+end;
 function f_aucase(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(Utf8UpperU(s0(A))); end;
+var r: String; ok: Boolean;
+begin
+  E := NoError();
+  r := Utf8UpperU(s0(A), ok);
+  if not ok then begin E := BudgetRefusal('aucase$'); Exit(ValStr('')); end;
+  Result := ValStr(r);
+end;
 
+{ THE PAD FAMILY. Every one of these takes a WIDTH from the program and builds
+  width-minus-length filler, so ltab$("x", 2000000000) is a two-gigabyte
+  allocation asked for by eleven characters of BASIC -- the same derivable size
+  as string$, and the same RULE 1 answer. The PAD is charged, not the whole
+  result: the caller's own string was already in memory before the call. }
 function f_ltab(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, n: Integer;
 begin
   E := NoError(); s := Trim(s0(A)); w := ArgI32(A[1]); n := CpLen(s);
-  if n >= w then Result := ValStr(s) else Result := ValStr(StringOfChar(' ', w - n) + s);
+  if n >= w then Exit(ValStr(s));
+  if not BudgetAllows(w - n) then begin E := BudgetRefusal('ltab$'); Exit(ValStr('')); end;
+  Result := ValStr(StringOfChar(' ', w - n) + s);
 end;
 function f_rtab(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, n: Integer;
 begin
   E := NoError(); s := Trim(s0(A)); w := ArgI32(A[1]); n := CpLen(s);
-  if n >= w then Result := ValStr(s) else Result := ValStr(s + StringOfChar(' ', w - n));
+  if n >= w then Exit(ValStr(s));
+  if not BudgetAllows(w - n) then begin E := BudgetRefusal('rtab$'); Exit(ValStr('')); end;
+  Result := ValStr(s + StringOfChar(' ', w - n));
 end;
 function f_lfill(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, n: Integer;
 begin
   E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Chr(ArgI32(A[2])); n := CpLen(s);
-  if n >= w then Result := ValStr(s) else Result := ValStr(DupeString(f, w - n) + s);
+  if n >= w then Exit(ValStr(s));
+  if not BudgetAllows(Int64(w - n) * Length(f)) then
+  begin E := BudgetRefusal('lfill$'); Exit(ValStr('')); end;
+  Result := ValStr(DupeString(f, w - n) + s);
 end;
 function f_rfill(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, n: Integer;
 begin
   E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Chr(ArgI32(A[2])); n := CpLen(s);
-  if n >= w then Result := ValStr(s) else Result := ValStr(s + DupeString(f, w - n));
+  if n >= w then Exit(ValStr(s));
+  if not BudgetAllows(Int64(w - n) * Length(f)) then
+  begin E := BudgetRefusal('rfill$'); Exit(ValStr('')); end;
+  Result := ValStr(s + DupeString(f, w - n));
 end;
 function f_center2(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, pad, l: Integer;
 begin
   E := NoError(); s := s0(A); w := ArgI32(A[1]); pad := w - CpLen(s);
-  if pad <= 0 then Result := ValStr(s)
-  else begin l := pad div 2; Result := ValStr(StringOfChar(' ', l) + s + StringOfChar(' ', pad - l)); end;
+  if pad <= 0 then Exit(ValStr(s));
+  if not BudgetAllows(pad) then begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
+  l := pad div 2;
+  Result := ValStr(StringOfChar(' ', l) + s + StringOfChar(' ', pad - l));
 end;
 function f_center3(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, pad, l: Integer;
 begin
   E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Chr(ArgI32(A[2])); pad := w - CpLen(s);
-  if pad <= 0 then Result := ValStr(s)
-  else begin l := pad div 2; Result := ValStr(DupeString(f, l) + s + DupeString(f, pad - l)); end;
+  if pad <= 0 then Exit(ValStr(s));
+  if not BudgetAllows(Int64(pad) * Length(f)) then
+  begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
+  l := pad div 2;
+  Result := ValStr(DupeString(f, l) + s + DupeString(f, pad - l));
 end;
 
 function f_isdigits(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -585,7 +875,14 @@ begin
 end;
 
 function f_containstext(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(ContainsText(s0(A), A[1].Str))); end;
+begin
+  E := NoError();
+  // ContainsText upper-cases BOTH strings and then searches, so it is the naive
+  // product plus two copies of the haystack. Same bound, same rule.
+  if not BudgetAllows(SearchCost(s0(A), A[1].Str, True)) then
+  begin E := BudgetRefusal('containstext'); Exit(ValInt(0)); end;
+  Result := ValInt(Ord(ContainsText(s0(A), A[1].Str)));
+end;
 
 function f_strcmp(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(SignI(CompareStr(s0(A), A[1].Str))); end;

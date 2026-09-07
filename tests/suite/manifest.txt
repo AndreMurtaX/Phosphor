@@ -58,3 +58,4 @@
 57_buffer
 58_sandbox
 59_alloc_limits
+60_stack_operands

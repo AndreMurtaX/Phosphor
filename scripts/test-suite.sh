@@ -120,7 +120,7 @@ done
 # (the value kernel, the execution limits, the embedding API). Each prints ok:/
 # fail: and exits non-zero on a failure.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_crt:tests/probe_crt.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
   # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.
@@ -151,6 +151,13 @@ done
 #                      OnBreakpoint, HostServices) or records why it is right to leave
 #                      it nil -- a nil seam answers silently, which is how the GUI host
 #                      of the day shipped answering every INPUT with an empty line
+#   check-budget.py    every library loop or allocation over a quantity the VM cannot
+#                      see -- a count from a script, a directory, a decompressed
+#                      stream, a wait, a regex -- consults engine/PhosphorBudget.pas
+#                      (or is exempt, by name, with a reason). The three execution
+#                      ceilings are tested BETWEEN instructions and a library call is
+#                      one instruction, so without this rule a single regex_find$,
+#                      string$ or pause ran for ever with every ceiling set
 #   check-suffix.py    a registered name's type SUFFIX is the kind its body returns.
 #                      The suffix is the whole return-type system for built-ins and
 #                      nothing enforced it: fifteen registrations lied, across three
@@ -170,7 +177,7 @@ PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
   echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
 else
-  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py check-examples.py check-suffix.py; do
+  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py check-examples.py check-suffix.py check-budget.py; do
     # The comment above says a gate that quietly does not run is worse than no gate,
     # and then this line skipped a gate whose FILE was missing. A deleted gate is
     # exactly the case the sentence was written about.

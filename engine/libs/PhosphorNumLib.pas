@@ -58,9 +58,27 @@ begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValI
   else begin Err := ToIntError('cint'); Result := ValInt(0); end; end;
 function f_frac(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValDouble(Frac(N(Args))); end;
+{ A 64-BIT GUARD MUST NOT BE FOLLOWED BY A 32-BIT NARROWING.
+
+  int() guarded with InI64Range -- an Int64 window -- and then narrowed with
+  Math.Floor, whose result type is INTEGER (rtl/objpas/math.pp:410 declares
+  `function Floor(x : float) : Integer` and :1107 implements it as
+  `Trunc(x)-ord(Frac(x)<0)`, so the Int64 from Trunc is truncated to 32 bits on
+  the way out). Everything between 2^31 and 2^63 therefore passed the guard and
+  came back wrapped, silently and on both platforms:
+
+      int(3e9)   -> -1294967296        int(4294967296) ->  0
+      int(1e15)  -> -1530494976        int(-3e9)       ->  1294967296
+
+  No crash, no error, an answer that is simply wrong -- which is worse. Floor64
+  is the same function with the Int64 result the guard was written for, and its
+  siblings round/fix/cint were already correct because Round and Trunc return
+  Int64. This is the only place in engine/libs where a 64-bit guard met a 32-bit
+  narrowing; scripts/check-budget.py --narrowing is the sweep that says so, and
+  keeps saying so. }
 function f_int(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: Double;
-begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Floor(d)); end   // BASIC INT: floor
+begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Floor64(d)); end   // BASIC INT: floor
   else begin Err := ToIntError('int'); Result := ValInt(0); end; end;
 
 { A domain error, in the library's own words. ln(0), acos(2) and friends raised

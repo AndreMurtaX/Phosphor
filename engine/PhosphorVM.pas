@@ -30,6 +30,97 @@ const
     each level costs process stack rather than heap. Ordinary BASIC recursion is a
     jump inside one interpreter loop and is NOT bounded by this. }
   MaxCallDepth = 256;
+  { How many TValue slots the expression stack may ever hold. The stack doubles on
+    demand and nothing shrank it, so how big it got was a value the PROGRAM chose:
+    a .pbc that runs `DUPN n` in a loop adds n slots a pass, for ever.
+
+    AND THE END OF THAT IS NOT AN EXCEPTION. The obvious assumption is that
+    SetLength eventually raises EOutOfMemory and the only complaint is that it
+    raises it in the dispatch loop, outside every try/except the VM has, so it
+    reaches the host as "unhandled". Measured on 2026-09-06, it does not: asked for
+    96 GB, SetLength COMMITTED it -- the process was watched holding 101,573,304 KB
+    -- and the machine paged itself to a standstill until it was killed by hand. A
+    script cannot be allowed to do that to the box its host runs on.
+
+    The ceiling is deliberately far above anything a program can mean. A TValue is
+    48 bytes, so this is 48 MB of pure operand stack; the deepest expression the
+    parser will accept costs a few dozen slots, and the widest thing the compiler
+    emits -- `a@[i,i,...] += 1`, which pushes the handle and every subscript and
+    then DUPNs the lot -- needs two slots per subscript, so it takes a source line
+    with more than half a million commas to reach it. THAT IS WRITEABLE, and it
+    was written: a generated line of 1 200 000 subscripts crosses the ceiling and
+    is refused cleanly at a 199 MB peak (measured 2026-09-06). The claim this
+    comment used to make -- that such a line was beyond reach -- was wrong, and
+    the ceiling is load-bearing rather than theoretical. Crossing it is a FATAL
+    peLimit, like the step and output budgets and for the same reason: a ceiling a
+    script could catch is a ceiling a script can sit on top of. }
+  MaxStackDepth = 1048576;
+  { How deeply GOSUB may nest. THE SAME UNBOUNDED DOUBLING AS THE VALUE STACK, and
+    a far shorter program reaches it -- `1000 gosub 1000` is three lines of plain
+    BASIC with no crafted bytecode, no operand and no arithmetic. Measured against
+    the build that bounded only the value stack: 260 MB at 0,5 s, 516 MB at 1,0 s,
+    1543 MB at 1,3 s and still doubling when the harness killed it, while the same
+    loop written with `goto` sits at 2,7 MB for ever. FCallStack holds one Integer
+    per level, so this ceiling is 4 MB; the deepest GOSUB nest the suite pins is
+    20 000, and this is fifty times that. }
+  MaxGosubDepth = 1048576;
+  { How deeply BASIC RECURSION may nest, and how many local slots those activation
+    frames may hold between them.
+
+    opCall is a jump inside one interpreter loop -- that is exactly why MaxCallDepth
+    does NOT bound it (see the note there) -- so an ordinary recursive function that
+    never returns grows FFrames with the same unbounded doubling GOSUB had:
+
+        function f(n)
+          return f(n + 1)
+        endfunction
+        println f(1)
+
+    measured at 1020 MB in 3,3 s and still climbing.
+
+    TWO CEILINGS, BECAUSE ONE NUMBER CANNOT PRICE A FRAME. A frame costs a fixed
+    ~157 bytes plus 48 bytes per local slot (measured: 100 000 frames of a
+    one-parameter function peak at 15,7 MB, of a 200-local function at 937,7 MB).
+    Bounding the DEPTH alone would let a wide function buy gigabytes at a depth the
+    ceiling calls acceptable; bounding the SLOTS alone would let a one-slot function
+    run to millions of frames. So BOTH are bounded, independently, at the push:
+    MaxFrameDepth frames, and MaxFrameSlots local slots held by them together
+    (TPhosphorVM.FFrameSlots). Neither ceiling is derived from the program.
+
+    A DERIVED CEILING WAS TRIED FIRST AND REFUSED ORDINARY CODE. Round two enforced
+    `min(MaxFrameDepth, MaxFrameSlots div <widest local table in the PROGRAM>)`, a
+    product that is only tight when the widest function is the one on the stack.
+    When it is not, it is too strict by widest/actual -- 10 000x on the programs
+    below -- and the memory it declines to spend is zero. Three things compounded:
+    the widest table is a property of the whole program, it counts a function that
+    NEED NEVER BE CALLED, and the width can arise silently, because every `for`
+    loop inside a function allocates a hidden local slot (__forN, see
+    PhosphorCompiler's ParseFor). Measured (2026-09-07): 5 242 slots anywhere in
+    the file put the ceiling at exactly 200, the depth this suite pins as
+    legitimate, so an UNCALLED function with 6 000 `for` loops refused an unrelated
+    depth-200 recursion at 174 frames, and 20 000 `for` loops refused a plain
+    NON-RECURSIVE chain f1->f2->...->f60 of sixty distinct one-parameter functions.
+    Counting the slots costs one subtraction and one add per call and answers the
+    question the ceiling is actually asking.
+
+    THE COUNT IS OVER THE FRAMES THE ARRAY HOLDS, NOT THE LIVE PREFIX, and that
+    difference is the whole reason it is a memory bound. A returned frame keeps its
+    Locals array until some later call lands on the same index, so a wide call made
+    one level SHALLOWER each time strands a wide array at every index it used and
+    is never charged for one of them:
+
+        for i = 300 to 1 step -1 : x = down(i) : next   ' down(i) recurses i deep,
+                                                       ' calls wide(), returns
+
+    with 100 000 locals in wide() never has more than ~100 300 slots LIVE -- a
+    tenth of the budget -- and holds 1 378,7 MB when it finishes (measured on the
+    build with no ceiling at all). Charging what is held refuses it after ten
+    iterations; charging only the live prefix would let it run.
+
+    Crossing either ceiling is a FATAL peLimit, for the reason given at
+    MaxStackDepth. }
+  MaxFrameDepth = 262144;
+  MaxFrameSlots = 1048576;
 
 type
   { One activation of a user function: its local frame (parameters first, then
@@ -73,11 +164,26 @@ type
   private
     FStack: array of TValue;
     FSP: Integer;    // points one past the top
+    // Set by Push when the value stack would have to grow past MaxStackDepth. Push
+    // has no way to report -- it is a procedure called from twenty places, several
+    // of them inside the error machinery itself -- so it refuses the growth, drops
+    // the value, and raises the flag; the dispatch loop turns it into a fatal
+    // peLimit at the very next instruction boundary, before anything else runs.
+    FStackLimit: Boolean;
     FVars: array of TValue;
     FCallStack: array of Integer;   // GOSUB return addresses
     FCSP: Integer;
     FFrames: array of TCallFrame;   // user-function activation frames
     FFrameSP: Integer;
+    // Sum of Length(FFrames[i].Locals) over the WHOLE array, live frames and
+    // returned ones alike -- the local slots this VM is actually holding, which is
+    // what MaxFrameSlots bounds. It is maintained at the three places that change
+    // one of those lengths (the two frame pushes and RestoreOverlap) and nowhere
+    // else: it does not depend on FFrameSP, so the paths that move the frame
+    // POINTER wholesale -- a fault dropping to the handler's level, a resume
+    // climbing back, CallUserFunc restoring the level it borrowed -- cannot put it
+    // out of step with the array. See MaxFrameDepth.
+    FFrameSlots: Integer;
     FDataPtr: Integer;              // READ position in the DATA pool
     FProg: TProgram;                // the running program (reachable during a call)
     // ON ERROR state. FErrHandler is the handler pc, or -1 when none is installed.
@@ -111,6 +217,28 @@ type
     // costs heap; CallUserFunc re-enters ExecFrom with a NATIVE call, so recursion
     // through callfunc costs process stack and used to end in a segfault.
     FCallDepth: Integer;
+    { WHERE A peLimit CAME FROM, WHICH DECIDES WHETHER IT IS FATAL.
+
+      A ceiling crossed by the VM is fatal: a script must not be able to catch
+      the limit it is sitting on. A LIBRARY that refuses a job up front because
+      its size is too big is a different event with the same code -- nothing has
+      been spent, nothing has been crossed, and a program that catches it and
+      does something smaller is behaving correctly.
+
+      Both arrive at opCall's library branch as `e.Code = peLimit`, so the code
+      alone cannot tell them apart. This flag can: it is cleared immediately
+      before every library dispatch and set only where a NESTED ACTIVATION of
+      this VM hit a ceiling (CallUserFunc's own two, and a peLimit carried out of
+      the inner ExecFrom). Set means the ceiling was crossed inside; clear means
+      a library said no before starting.
+
+      The rule this replaces read `if e.Code = peLimit then fatal`, justified by
+      a grep -- "peLimit has nine producers and none is in any library" -- that
+      was TRUE WHEN IT WAS RUN and false one patch later, when the budget lane
+      gave the libraries their own refusals. Both patches were verified in
+      isolation and only their integration could show it: probe_budget went to
+      205/2, on the two cases that catch a refusal and continue. }
+    FLimitFromInner: Boolean;
     // Execution limits (set from the engine before Run; 0 = unlimited). Counters
     // are reset per Run. A limit is FATAL -- it aborts with peLimit and cannot be
     // caught by ON ERROR, so a script cannot escape its own ceiling.
@@ -130,6 +258,29 @@ type
     FCharPos: Integer;      // console INPUT$: 1-based cursor into FCharBuf
     procedure Push(const V: TValue);
     function Pop: TValue;
+    { POINT THE VM AT A PROGRAM. The only place FProg is assigned, so that
+      anything derived from the program is derived exactly when the program
+      changes and can never describe a previous one. Nothing is derived here any
+      more -- the frame ceilings used to be, and MaxFrameDepth records what that
+      cost -- but the seam stays, because the next thing that wants a per-program
+      value has one honest place to go and no reason to reach for a cache keyed on
+      the program POINTER, which is wrong for a reason that is easy to miss: a
+      TProgram can be freed and the next one allocated at the same address. }
+    procedure UseProgram(AProg: TProgram);
+    { ENTERING THE VM INSTALLS THE FPU MASK, LEAVING IT PUTS THE HOST'S BACK.
+      Every arithmetic guarantee this engine makes rests on overflow producing
+      +Inf for FiniteD to report rather than raising EOverflow at the instruction
+      -- and it was installed by Run and RunFrom only, so the OTHER two ways into
+      execution ran the same instructions under the host's mask. Through the
+      embedding pattern docs/embedding.md documents (Prepare, then CallFunction)
+      an ordinary `x * 10` on 1e308 died with an unhandled EOverflow at exit 217,
+      while the identical expression inside Run reported "floating point overflow
+      in *" catchably (measured 2026-09-07). Making it a property of ENTERING --
+      four call sites, one rule -- is the point: a fifth entry point added later
+      is wrong in a way a reader can see. Nesting is safe: the mask is a set, the
+      inner install is a no-op, and the inner leave restores the outer's set. }
+    function EnterFPU: TFPUExceptionMask;
+    procedure LeaveFPU(const ASaved: TFPUExceptionMask);
     procedure CloseAllChannels;
     function ValidChannel(ANum: Integer): Boolean;
     // Classic-I/O primitives. Each returns an engine error (NoError on success) so
@@ -233,13 +384,61 @@ begin
   FSP := 0;
   LastError := NoError();
   ErrorLine := 0;
+  // No frames yet, so no local slots held; see MaxFrameDepth.
+  FFrameSlots := 0;
 end;
 
+{ THE VALUE MAY LIVE IN THE ARRAY THIS IS ABOUT TO MOVE.
+
+  V arrives BY REFERENCE (const TValue is passed as a pointer), and a caller is
+  entitled to pass a stack slot: opDupN does, deliberately, because copying each
+  element into a temporary first would be a managed-string refcount per element in
+  the one loop where the count is large. SetLength REALLOCATES -- the old block is
+  released and every pointer into it, V included, dangles -- so `FStack[FSP] := V`
+  read a freed TValue and then refcounted whatever its Str field happened to
+  contain. The comment that used to sit over opDupN's loop defended the INDEX
+  across the reallocation, which never needed defending; the REFERENCE did.
+
+  It is reachable from plain source, with no bytecode to craft:
+
+      a@ = dim@(5)
+      a@[1,1, ... ,1] += 1        (16384 subscripts or more)
+
+  compiles to `DUPN 16385`, whose 16385th push is the one that doubles the stack.
+  Access violation, exit 3, uncatchable, in a process an embedder owns. (2026-09-06.)
+
+  THE FIX IS HERE, NOT AT THE CALL SITE, because "no caller may hold a reference
+  into a structure the callee reallocates" is not a rule twenty call sites can be
+  trusted to keep -- and the next one to break it would be written by someone who
+  had read the reassuring comment. Push is the only routine that grows FStack, so
+  Push is where the reference is made safe: the value is copied out BEFORE the
+  array moves, and only on the doubling. The ordinary push is the else branch and
+  is byte for byte what it was.
+
+  It also refuses to grow past MaxStackDepth; see FStackLimit. }
 procedure TPhosphorVM.Push(const V: TValue);
+var
+  moved: TValue;
+  want: Integer;
 begin
   if FSP = Length(FStack) then
-    SetLength(FStack, Length(FStack) * 2);
-  FStack[FSP] := V;
+  begin
+    want := Length(FStack) * 2;
+    if want < 64 then want := 64;           // (a zero-length stack would never grow)
+    if want > MaxStackDepth then want := MaxStackDepth;
+    if FSP >= want then
+    begin
+      // At the ceiling. Nothing is allocated and nothing is written: the value is
+      // dropped and the dispatch loop stops the program at the next instruction.
+      FStackLimit := True;
+      Exit;
+    end;
+    moved := V;                             // out of the block that is about to go
+    SetLength(FStack, want);
+    FStack[FSP] := moved;
+  end
+  else
+    FStack[FSP] := V;
   Inc(FSP);
 end;
 
@@ -252,6 +451,22 @@ begin
   end;
   Dec(FSP);
   Result := FStack[FSP];
+end;
+
+procedure TPhosphorVM.UseProgram(AProg: TProgram);
+begin
+  FProg := AProg;
+end;
+
+function TPhosphorVM.EnterFPU: TFPUExceptionMask;
+begin
+  Result := GetExceptionMask();
+  SetExceptionMask(Result + [exOverflow, exUnderflow, exPrecision, exDenormalized]);
+end;
+
+procedure TPhosphorVM.LeaveFPU(const ASaved: TFPUExceptionMask);
+begin
+  SetExceptionMask(ASaved);
 end;
 
 destructor TPhosphorVM.Destroy;
@@ -370,7 +585,22 @@ begin
         fs.ThousandSeparator := #0;
         if TryStrToFloat(AField, dv, fs) then
         begin
-          if ATypeCode = 2 then
+          { NON-FINITE IS DECIDED FIRST, BEFORE ANY COMPARISON TOUCHES dv.
+
+            The int% branch below reached InI64Range, whose own comment says "NaN
+            and Inf fail both comparisons, so they answer False" -- true of IEEE
+            predicates, false of the instruction FPC emits for them with
+            exInvalidOp unmasked. See NonFinite. The two messages are kept exactly
+            as they were, so nothing downstream can tell this reordering happened
+            except by not crashing. }
+          if IsNan(dv) or IsInfinite(dv) then
+          begin
+            if ATypeCode = 2 then
+              Result := MakeError(peRuntime, '"' + AField + '" is out of integer range')
+            else
+              Result := MakeError(peRuntime, '"' + AField + '" is out of range');
+          end
+          else if ATypeCode = 2 then
           begin
             if InI64Range(dv) then V := ValInt(Round(dv))
             else Result := MakeError(peRuntime, '"' + AField + '" is out of integer range');
@@ -410,18 +640,66 @@ begin
   end;
 end;
 
+{ IS THIS VALUE A DOUBLE NO COMPARISON MAY TOUCH?
+
+  `d <> d` is the classic NaN self-test and it is WRONG HERE. On x86-64 FPC emits
+  COMISD for a Double comparison, and COMISD signals the invalid-operation
+  exception on a QUIET NaN, not merely a signalling one -- and the engine runs
+  with exInvalidOp UNMASKED (see EnterFPU: only overflow/underflow/precision/
+  denormal are masked, deliberately). So the test written to AVOID a trap IS the
+  trap. Measured 2026-09-07 in a process carrying the VM's own mask: `nan <> nan`
+  raises EInvalidOp before it can answer.
+
+  Every one of these comparisons sits in the dispatch loop or in a helper the
+  dispatch loop calls, outside any try/except, so the raise leaves as "unhandled
+  EInvalidOp", exit 217, and the host's process is gone. A host that hands a NaN
+  to a prepared script -- CallFunction is the documented seam -- reached this from
+  `len(input$(x))`, `eof(x)` and `close #x` alike, all three at exit 217.
+
+  IsNan and IsInfinite read the exponent and mantissa bits (FPC 3.2.2
+  rtl/objpas/math.pp:2265, 2304 -- no FP comparison in either) and cannot raise.
+  Use them. Never let a Double that came from outside the arithmetic kernel meet a
+  comparison, ordered or not, before this has answered False. }
+function NonFinite(const V: TValue): Boolean;
+begin
+  Result := (V.Kind = vkDouble) and (IsNan(V.Num) or IsInfinite(V.Num));
+end;
+
 { A crash-proof Double -> Int32 for the classic-I/O opcodes (file numbers, byte
   counts). Out-of-range or NaN values never reach Round (which would raise): a huge
   magnitude clamps to the Int32 extreme -- for a file number that lands outside
   1..MaxChannel so the channel op reports "out of range", and for a byte count it
-  simply means "as many as there are". }
+  simply means "as many as there are".
+
+  The NaN test comes FIRST and is a bit test, not a comparison; see NonFinite. The
+  three ordered comparisons below are safe only because a NaN has already left. }
 function SafeI32(const V: TValue): Integer;
 var d: Double;
 begin
   d := AsDouble(V);
-  if d <> d then Result := 0                        // NaN
+  if IsNan(d) then Result := 0
   else if d >= 2147483647.0 then Result := High(Integer)
   else if d <= -2147483648.0 then Result := Low(Integer)
+  else Result := Round(d);
+end;
+
+{ The same for a 64-bit quantity -- SEEK's file position, which must not be
+  narrowed to 32 bits (a position past 2 GB would clamp and two offsets would
+  collapse onto one).
+
+  This exists rather than calling PhosphorValue's ArgI64 because that routine
+  still opens with `d <> d`, and opSeekFile is in the dispatch loop with no
+  try/except over it, so the trap described at NonFinite would kill the process
+  through `seek #1, x`. Fixing ArgI64 belongs to the unit that owns it; NOT
+  DEPENDING on that fix belongs here. }
+function SafeI64(const V: TValue): Int64;
+var d: Double;
+begin
+  if V.Kind = vkInt then Exit(V.Int);       // exact: no trip through Double
+  d := AsDouble(V);
+  if IsNan(d) then Result := 0
+  else if d >= 9223372036854775808.0 then Result := High(Int64)
+  else if d <= -9223372036854775808.0 then Result := Low(Int64)
   else Result := Round(d);
 end;
 
@@ -861,6 +1139,21 @@ begin
   end;
 
   av := AsDouble(V);
+  { `av < 0` IS AN ORDERED COMPARISON and PRINT USING is reached with whatever the
+    program -- or a host, through CallFunction -- put in the value. A NaN operand
+    raises EInvalidOp here, inside opPrintUsing, outside any try/except; see
+    NonFinite. A non-finite value has no digits to lay out anyway, so it takes the
+    text PRINT would give it and the field's own padding, and never meets a
+    comparison at all. }
+  if IsNan(av) or IsInfinite(av) then
+  begin
+    core := ValToStr(V);
+    if starFill then padChar := '*' else padChar := ' ';
+    pad := width - Length(core);
+    if pad >= 0 then Result := StringOfChar(padChar, pad) + core
+    else Result := '%' + core;      // overflow: the classic leading '%'
+    Exit;
+  end;
   neg := av < 0;
   fs := DefaultFormatSettings;
   fs.DecimalSeparator := '.';
@@ -1012,7 +1305,7 @@ var
   i: Integer;
   savedMask: TFPUExceptionMask;
 begin
-  FProg := AProg;
+  UseProgram(AProg);
   FSP := 0;
   FCSP := 0;
   FFrameSP := 0;
@@ -1026,10 +1319,12 @@ begin
   FErrSaveValid := False;
   FHalted := False;
   FCallDepth := 0;
+  FLimitFromInner := False;
   FErrCode := 0; FErrMsg := ''; FErrLine := 0;
   FErrStmtPC := 0; FErrStmtSP := 0; FErrStmtFrameSP := 0;
   FSteps := 0;
   FOutputBytes := 0;
+  FStackLimit := False;
   FStartTick := GetTickCount64;
   FTrace := False;
   CloseAllChannels();            // no file channel leaks between programs
@@ -1038,12 +1333,11 @@ begin
   SetLength(FVars, AProg.VarCount);
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
-  savedMask := GetExceptionMask();
-  SetExceptionMask(savedMask + [exOverflow, exUnderflow, exPrecision, exDenormalized]);
+  savedMask := EnterFPU();
   try
     Result := ExecFrom(0, -1);
   finally
-    SetExceptionMask(savedMask);
+    LeaveFPU(savedMask);
   end;
 end;
 
@@ -1052,7 +1346,7 @@ var
   i, had: Integer;
   savedMask: TFPUExceptionMask;
 begin
-  FProg := AProg;
+  UseProgram(AProg);
   LastError := NoError();
   ErrorLine := 0;
   // A fresh expression/call stack per line; everything else -- globals, handles,
@@ -1071,19 +1365,20 @@ begin
   // Each line gets its own execution budget.
   FSteps := 0;
   FOutputBytes := 0;
+  FStackLimit := False;
   FStartTick := GetTickCount64;
-  savedMask := GetExceptionMask();
-  SetExceptionMask(savedMask + [exOverflow, exUnderflow, exPrecision, exDenormalized]);
+  savedMask := EnterFPU();
   try
     Result := ExecFrom(AStartPC, -1);
   finally
-    SetExceptionMask(savedMask);
+    LeaveFPU(savedMask);
   end;
 end;
 
 function TPhosphorVM.ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
 var
   pc, i, argc, ufi, savedRet, dupBase: Integer;
+  slots: Integer;           // the local slots one frame push adds to FFrameSlots
   ins: TInstr;
   a, b, r, v: TValue;
   e: TPhosphorError;
@@ -1121,7 +1416,16 @@ var
         FFrames[FErrHandlerFrameSP + i].CallerStmtPC := FErrSaveFrames[i].CallerStmtPC;
         FFrames[FErrHandlerFrameSP + i].CallerStmtSP := FErrSaveFrames[i].CallerStmtSP;
         FFrames[FErrHandlerFrameSP + i].CallerStmtFrameSP := FErrSaveFrames[i].CallerStmtFrameSP;
+        // This is the third and last place a frame's local table changes size, so
+        // the held-slot count is kept here too; see MaxFrameDepth and FFrameSlots.
+        // No ceiling is applied: these arrays are a copy of frames that were
+        // already inside the budget when the fault took them aside, and refusing
+        // to put them back would break the resume the copy exists for. The total
+        // it restores to can stand ABOVE MaxFrameSlots -- the handler's own frames
+        // above the resume level are still held -- and the next push refuses.
+        Dec(FFrameSlots, Length(FFrames[FErrHandlerFrameSP + i].Locals));
         SetLength(FFrames[FErrHandlerFrameSP + i].Locals, Length(FErrSaveFrames[i].Locals));
+        Inc(FFrameSlots, Length(FErrSaveFrames[i].Locals));
         for j := 0 to High(FErrSaveFrames[i].Locals) do
           FFrames[FErrHandlerFrameSP + i].Locals[j] := FErrSaveFrames[i].Locals[j];
       end;
@@ -1241,6 +1545,35 @@ var
     if (FErrHandler >= 0) and (not FInHandler) and
        (FErrHandlerFrameSP > AStopFrameSP) then
     begin
+      { THE HANDLER IS BOUNDED AGAIN HERE, AT THE USE.
+
+        opSetErrHandler checks its operand against the program that CONTAINS the
+        instruction. That is the right check for a corrupt .pbc and the wrong one
+        for the question asked here, because the handler OUTLIVES its program:
+        FErrHandler and FErrHandlerFuncIdx persist across REPL lines on purpose
+        (RunFrom keeps the ON ERROR state so a session-installed handler survives)
+        while FProg is replaced line by line, and nothing clears them. That is
+        safe today only because PhosphorEngine.ReplRun recompiles FReplSource +
+        the new line, so every program is a strict superset of the last and a
+        prefix index still means the same thing -- a property of the FRONT END,
+        two units away, that this file cannot see and did not choose. A check on
+        the value about to be USED cannot be fooled by that changing, or by a
+        second meaning added to A later. It costs one comparison on the error
+        path. }
+      { The bound is opSetErrHandler's own, to the letter -- `> FProg.Count` for a
+        pc, not `>=`. A handler pc of exactly Count is what the install accepts
+        and what ends the program harmlessly when it is jumped to, so tightening
+        it here would REFUSE something the other check calls legal. A use-site
+        guard that disagrees with its install-site guard is a new bug, not a fix. }
+      if ((FErrHandlerMode = 1) and
+          ((FErrHandlerFuncIdx < 0) or (FErrHandlerFuncIdx >= FProg.Consts.Count))) or
+         ((FErrHandlerMode <> 1) and (FErrHandler > FProg.Count)) then
+      begin
+        LastError := MakeError(peRuntime,
+          'the installed ON ERROR handler does not belong to the running program');
+        ErrorLine := ins.Line;
+        Exit(False);
+      end;
       FErrStmtPC := stmtPC; FErrStmtSP := stmtSP; FErrStmtFrameSP := stmtFrameSP;
       // Copy the overlap aside BEFORE unwinding onto it.
       n := FErrStmtSP - FErrHandlerSP;
@@ -1280,7 +1613,12 @@ var
           LastError := callErr; ErrorLine := FErrLine; Exit(False);
         end;
         if FHalted then Exit(True);          // the handler said END: end the program
-        if (callRet.Kind in [vkInt, vkDouble]) and (AsDouble(callRet) <> 0) then
+        // NonFinite first: `<> 0` on a NaN is a trap, not a test (see NonFinite),
+        // and a handler is free to return one. The answer it stands in for is the
+        // IEEE one -- NaN and +-Inf are both "not zero" -- so a handler returning
+        // one still means abort.
+        if (callRet.Kind in [vkInt, vkDouble]) and
+           (NonFinite(callRet) or (AsDouble(callRet) <> 0)) then
         begin
           LastError := AErr; ErrorLine := FErrLine; Exit(False);   // handler said: abort
         end;
@@ -1359,11 +1697,38 @@ begin
   sTmp := '';
   bTmp := False;
   nTmp := 0;
+  ins := Default(TInstr);   // so the guards below can report a line before the first fetch
   pc := AStartPC;
   stmtPC := AStartPC; stmtSP := FSP; stmtFrameSP := FFrameSP;
   while pc < FProg.Count do
   begin
+    { A NEGATIVE pc IS AN INDEX BEFORE THE PROGRAM, and the loop condition only
+      bounds it from above. Eight places assign pc -- opJump, opJumpIfFalse,
+      opGosub, opReturn (from the GOSUB stack), opCall (a function entry), the ON
+      ERROR install, opResume, and ResumeAtNextStmt (from a frame's ReturnAddr,
+      which is deliberately -1 on a frame the host pushed) -- and each is bounded
+      by a DIFFERENT argument about where its value came from. This is the one
+      place all eight pass through, so the bound is taken once, here, for a cost
+      of one integer compare per instruction. AStartPC is covered too: it is
+      chosen by the host and by UserFuncs[].Entry.
+
+      Fault, not fatal: a program with `on error goto` gets its handler, and the
+      handler pc was checked when it was installed, so the next pc is sound. }
+    if pc < 0 then
+      if Fault(MakeError(peRuntime, 'corrupt bytecode: jumped to instruction ' +
+               IntToStr(pc) + ', before the start of the program')) then Continue else Exit(False);
     ins := FProg.Instr(pc);
+    { The value stack hit MaxStackDepth on some push since the last instruction.
+      Push cannot report (see FStackLimit); it dropped the value rather than
+      allocate, so the stack is short of what the program believes and nothing
+      further may run. }
+    if FStackLimit then
+    begin
+      LastError := MakeError(peLimit, 'value stack limit exceeded (' +
+                             IntToStr(MaxStackDepth) + ' values)');
+      ErrorLine := ins.Line;
+      Exit(False);
+    end;
     Inc(FSteps);
     if (MaxSteps > 0) and (FSteps > MaxSteps) then
     begin
@@ -1380,7 +1745,34 @@ begin
     end;
     case ins.Op of
       opNop: ;
-      opPushConst: Push(FProg.Consts.Get(ins.A));
+      { THE THREE FREQUENT OPERANDS THAT INDEX, BOUNDED WHERE THEY ARE USED.
+
+        TConstPool.Get and the FVars/VarTypes arrays are UNCHECKED reads
+        (PhosphorOpcodes.pas:167 is a bare `Result := FItems[Index]`), so a wrong
+        operand here is a read of whatever lies past the array -- and for
+        STOREVAR a WRITE. ValidateProgram bounds all three, which covers every
+        .pbc; it does NOT cover TPhosphorVM.Run(AProg), a public entry point an
+        embedder can hand a TProgram assembled by hand, and that is the same
+        argument that put the argc/LocalTypes bound at opCall. Round one left
+        these out on the ground that the compiler is not untrusted input and the
+        compare would cost real speed. The speed was then MEASURED, on a loop of
+        200 000 000 instructions built from exactly these opcodes: three runs at
+        28,85 / 29,00 / 29,05 s without the bounds, three at 27,57 / 27,42 /
+        27,40 s with them. Not a cost at all -- the bounded build is if anything
+        marginally faster, which is code layout, not cleverness. The reason for
+        leaving them out was not true, so they are in.
+
+        Written as one UNSIGNED comparison rather than two signed ones: a
+        negative A becomes a huge Cardinal and fails the same test, so the pair
+        of branches the obvious form emits collapses to one. }
+      opPushConst:
+        begin
+          if Cardinal(ins.A) >= Cardinal(FProg.Consts.Count) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: constant ' +
+                     IntToStr(ins.A) + ' is outside the ' +
+                     IntToStr(FProg.Consts.Count) + '-entry pool')) then Continue else Exit(False);
+          Push(FProg.Consts.Get(ins.A));
+        end;
       opPop: Pop();
       opPrint:
         begin
@@ -1409,9 +1801,24 @@ begin
       opAnd:     begin b := Pop(); a := Pop(); case Bin(ValAnd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
       opOr:      begin b := Pop(); a := Pop(); case Bin(ValOr(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
       opNot:     begin a := Pop(); case Bin(ValNot(a, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opLoadVar: Push(FVars[ins.A]);
+      opLoadVar:
+        begin
+          // See the note at opPushConst. FVars is sized to FProg.VarCount by Run
+          // and only ever grows in RunFrom, so VarCount bounds both arrays.
+          if Cardinal(ins.A) >= Cardinal(FProg.VarCount) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: variable ' +
+                     IntToStr(ins.A) + ' is outside the ' +
+                     IntToStr(FProg.VarCount) + ' this program declares')) then Continue else Exit(False);
+          Push(FVars[ins.A]);
+        end;
       opStoreVar:
         begin
+          // Refused BEFORE the pop, so a `resume` retries a statement whose
+          // operand stack is untouched -- the rule opStoreLocal follows.
+          if Cardinal(ins.A) >= Cardinal(FProg.VarCount) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: variable ' +
+                     IntToStr(ins.A) + ' is outside the ' +
+                     IntToStr(FProg.VarCount) + ' this program declares')) then Continue else Exit(False);
           v := Pop();
           e := StoreCheck(FProg.VarTypes[ins.A], v, r);
           if not IsError(e) then
@@ -1474,7 +1881,17 @@ begin
 
         ins.A is also re-checked for a negative: ValidateProgram runs on a LOADED
         program, and a program that came straight from the compiler never passed
-        through it. }
+        through it.
+
+        THE SAME ARGUMENT NAMES THREE MORE OPCODES, and they are checked the same
+        way, at opCall, opBreakpoint and opPrintUsing below. Each takes a COUNT
+        from its own operand and then pops that many values, and the count is what
+        an allocation is sized from. `CALL x, 2000000000` asked SetLength for two
+        billion TValues; it did not fail and did not raise -- it COMMITTED the
+        96 GB and left the machine paging until it was killed by hand (measured
+        2026-09-06; see MaxStackDepth). The bound is FSP in all four cases: there
+        is no honest reading of "pop N values" when the stack does not hold N, and
+        FSP is a run-time fact for the reason spelled out above. }
       opDup2:
         begin
           if FSP < 2 then
@@ -1491,9 +1908,11 @@ begin
             if Fault(MakeError(peRuntime, 'corrupt bytecode: DUPN wants ' +
                      IntToStr(ins.A) + ' values but the stack holds ' +
                      IntToStr(FSP))) then Continue else Exit(False);
-          // Duplicate the top ins.A values in order. base is fixed before the
-          // pushes so a stack reallocation inside Push cannot disturb the source
-          // slots (they sit below the original top and keep their copied values).
+          // Duplicate the top ins.A values in order. dupBase is fixed before the
+          // pushes because the INDEX has to survive a reallocation inside Push --
+          // and so does the REFERENCE `FStack[dupBase + i]` names, which is the
+          // part this comment used to leave out and Push now guarantees. Read the
+          // note over Push before changing either.
           dupBase := FSP - ins.A;
           for i := 0 to ins.A - 1 do
             Push(FStack[dupBase + i]);
@@ -1501,9 +1920,11 @@ begin
       opTrace:
         begin
           // Turn tracing on (a non-zero value) or off (0). A non-numeric value
-          // reads as 0 through AsDouble, so it turns tracing off.
+          // reads as 0 through AsDouble, so it turns tracing off. NonFinite first:
+          // `<> 0` on a NaN raises rather than answering (see NonFinite), and a
+          // non-finite value is "not zero", so it turns tracing ON.
           v := Pop();
-          FTrace := (AsDouble(v) <> 0);
+          FTrace := NonFinite(v) or (AsDouble(v) <> 0);
         end;
       opBreakpoint:
         begin
@@ -1514,6 +1935,14 @@ begin
           // parks the VM, and it never writes back, so every operand VARIABLE the
           // source passed is left untouched (only copies of their values were
           // pushed).
+          //
+          // ins.A operands AND the message, so the stack must hold A + 1 -- which
+          // is also what bounds the SetLength one line down. See the note at the
+          // dups.
+          if (ins.A < 0) or (ins.A >= FSP) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: BREAKPOINT wants ' +
+                     IntToStr(ins.A) + ' operands and a message but the stack holds ' +
+                     IntToStr(FSP) + ' values')) then Continue else Exit(False);
           SetLength(bpOps, ins.A);
           for i := ins.A - 1 downto 0 do
             bpOps[i] := Pop();
@@ -1526,8 +1955,44 @@ begin
           // Mark this clean statement boundary; a fault resumes from here.
           stmtPC := pc; stmtSP := FSP; stmtFrameSP := FFrameSP;
         end;
+      { A MEANS TWO DIFFERENT THINGS AND B SAYS WHICH, so one check cannot cover
+        both -- and the loader's does not try. ValidateProgram bounds A as a pc
+        (-1..Count) for every SETERRHANDLER it sees, which is the RIGHT check when
+        B = 0 and the WRONG one when B = 1, where A is an index into the constant
+        pool. The two ranges overlap without agreeing: in a program of 200
+        instructions and 3 constants, `SETERRHANDLER A=150, B=1` passes the loader
+        untouched, and the first fault then reads Consts.Get(150) -- past the pool,
+        past the array, and refcounts whatever Str field it lands on.
+
+        So the operand is checked HERE, where B is in hand and says what A is. It
+        cannot be moved into the loader without teaching the loader the same case
+        split, and this file cannot reach into that one; a check the VM makes on
+        the value it is about to USE is in any case the one that cannot be fooled
+        by a second meaning added later. SETERRHANDLER runs once per `on error`
+        statement, so the cost is not on any path that matters.
+
+        B itself is bounded too. It was assigned straight into FErrHandlerMode and
+        only ever compared against 1, so B = 7 quietly meant "goto", with A still
+        carrying whatever the file said. }
       opSetErrHandler:
         begin
+          if (ins.B <> 0) and (ins.B <> 1) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: ON ERROR mode ' +
+                     IntToStr(ins.B) + ' is neither goto (0) nor call (1)')) then Continue else Exit(False);
+          if ins.B = 1 then
+          begin
+            // call mode: A is the const-pool index of the handler's NAME.
+            if (ins.A < 0) or (ins.A >= FProg.Consts.Count) then
+              if Fault(MakeError(peRuntime, 'corrupt bytecode: ON ERROR CALL names ' +
+                       'constant ' + IntToStr(ins.A) + ', outside the ' +
+                       IntToStr(FProg.Consts.Count) + '-entry constant pool')) then Continue else Exit(False);
+          end
+          else
+            // goto mode: A is a pc, or any negative for `on error goto 0`.
+            if ins.A > FProg.Count then
+              if Fault(MakeError(peRuntime, 'corrupt bytecode: ON ERROR GOTO ' +
+                       IntToStr(ins.A) + ', outside a program of ' +
+                       IntToStr(FProg.Count) + ' instructions')) then Continue else Exit(False);
           FErrHandlerMode := ins.B;   // 0 = goto a label (A = pc), 1 = call a func (A = name idx)
           if (ins.B = 0) and (ins.A < 0) then
             FErrHandler := -1         // on error goto 0 -- disable
@@ -1567,8 +2032,33 @@ begin
         end;
       opGosub:
         begin
+          { THE GOSUB RETURN STACK IS BOUNDED FOR THE REASON THE VALUE STACK IS.
+            This doubled without a ceiling, and no operand and no crafted bytecode
+            is needed to sit on it -- `1000 gosub 1000` is three lines of source.
+            Measured against the build that bounded only the value stack: 1543 MB
+            in 1,3 s, still doubling, while the same loop with `goto` holds at
+            2,7 MB. See MaxGosubDepth.
+
+            FATAL, not a Fault: it is a resource ceiling like the step and output
+            budgets, and a handler that caught it would be running with the return
+            stack still pinned at the ceiling. The refusal is taken BEFORE the
+            growth, so nothing is allocated on the way out. }
+          if FCSP >= MaxGosubDepth then
+          begin
+            LastError := MakeError(peLimit, 'GOSUB nesting limit exceeded (' +
+                                   IntToStr(MaxGosubDepth) + ' levels)');
+            ErrorLine := ins.Line;
+            Exit(False);
+          end;
           if FCSP = Length(FCallStack) then
-            SetLength(FCallStack, (FCSP + 1) * 2);
+          begin
+            // Clamped so the last doubling lands ON the ceiling instead of one
+            // power of two past it; FCSP < MaxGosubDepth above, so the new length
+            // is always greater than FCSP.
+            i := (FCSP + 1) * 2;
+            if i > MaxGosubDepth then i := MaxGosubDepth;
+            SetLength(FCallStack, i);
+          end;
           FCallStack[FCSP] := pc + 1;   // resume after the GOSUB
           Inc(FCSP);
           pc := ins.A;
@@ -1658,12 +2148,86 @@ begin
       opCall:
         begin
           argc := ins.B;
+          { THE ARGUMENT COUNT IS AN OPERAND, and it sizes two allocations and
+            three loops. ValidateProgram refuses a negative B and stops there; the
+            useful bound is the other end, and it is FSP, which the loader cannot
+            know (the note at the dups says why). `CALL f, 2000000000` used to
+            reach `SetLength(args, 2000000000)` -- 96 GB of TValue -- and the
+            EOutOfMemory raised inside the dispatch loop left the process as
+            "unhandled", uncatchable, with the host's data still in it. }
+          if (argc < 0) or (argc > FSP) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: CALL wants ' +
+                     IntToStr(argc) + ' arguments but the stack holds ' +
+                     IntToStr(FSP) + ' values')) then Continue else Exit(False);
+          // A is the const-pool index of the callee's NAME, and it is read at
+          // four places below. One bound, here, covers all four; see opPushConst.
+          if Cardinal(ins.A) >= Cardinal(FProg.Consts.Count) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: CALL names constant ' +
+                     IntToStr(ins.A) + ', outside the ' +
+                     IntToStr(FProg.Consts.Count) + '-entry pool')) then Continue else Exit(False);
           // A user function shadows the library registry for the same name+arity.
           ufi := FProg.FindUserFunc(FProg.Consts.Get(ins.A).Str, argc);
           if ufi >= 0 then
           begin
+            { AND THE FRAME MUST HOLD THE PARAMETERS. FindUserFunc matches on name
+              AND arity, so argc = ParamCount here -- but the frame is sized from
+              LocalTypes, and nothing in this file says the two agree. A .pbc whose
+              function table claims one parameter and zero locals is refused by
+              ValidateProgram, which is the right place for a fact the file
+              carries; a program built in memory -- by the compiler, or by an
+              embedder assembling a TProgram -- never passes through the loader at
+              all, and this write goes out of bounds without it. }
+            if argc > Length(FProg.UserFuncs[ufi].LocalTypes) then
+              if Fault(MakeError(peRuntime, 'corrupt bytecode: ' +
+                       FProg.UserFuncs[ufi].Name + ' is called with ' + IntToStr(argc) +
+                       ' arguments but its frame holds ' +
+                       IntToStr(Length(FProg.UserFuncs[ufi].LocalTypes)) +
+                       ' locals')) then Continue else Exit(False);
+            { AND THE FRAME STACK IS BOUNDED, for the third time and the same
+              reason. MaxCallDepth bounds RE-ENTRANT calls because those cost
+              process stack; this bounds ORDINARY BASIC RECURSION, which is a jump
+              inside this loop and costs only heap -- and so grew without any
+              ceiling at all. `function f(n) return f(n+1)` reached 1020 MB in
+              3,3 s. Two ceilings, because a frame's price is a fixed part and a
+              per-slot part; see MaxFrameDepth. Fatal, before the growth, as at
+              GOSUB. }
+            if FFrameSP >= MaxFrameDepth then
+            begin
+              LastError := MakeError(peLimit, 'call depth limit exceeded (' +
+                                     IntToStr(MaxFrameDepth) + ' activation frames)');
+              ErrorLine := ins.Line;
+              Exit(False);
+            end;
+            { The slot budget, charged on what the frame array will hold once this
+              call has taken its index -- the slots already at that index are about
+              to be replaced, so they are given back first.
+
+              COMPARED AS `want > budget - held`, NOT `held + want > budget`. The
+              left form never adds two numbers this routine does not control:
+              LocalTypes comes from the program, and a .pbc claiming a local table
+              near High(Integer) would make the sum wrap negative and pass a test
+              it should fail. The right-hand side going negative -- which it does
+              whenever RestoreOverlap has put back more than it took away -- is not
+              a special case here: every non-negative want is then refused, which
+              is exactly what a total already over the budget should do. }
+            slots := Length(FProg.UserFuncs[ufi].LocalTypes);
+            if FFrameSP < Length(FFrames) then
+              Dec(slots, Length(FFrames[FFrameSP].Locals));
+            if slots > MaxFrameSlots - FFrameSlots then
+            begin
+              LastError := MakeError(peLimit, 'local slot limit exceeded (' +
+                                     IntToStr(MaxFrameSlots) + ' slots in ' +
+                                     IntToStr(FFrameSP) + ' activation frames)');
+              ErrorLine := ins.Line;
+              Exit(False);
+            end;
+            Inc(FFrameSlots, slots);
             if FFrameSP = Length(FFrames) then
-              SetLength(FFrames, (FFrameSP + 1) * 2);
+            begin
+              i := (FFrameSP + 1) * 2;
+              if i > MaxFrameDepth then i := MaxFrameDepth;
+              SetLength(FFrames, i);
+            end;
             SetLength(FFrames[FFrameSP].Locals, Length(FProg.UserFuncs[ufi].LocalTypes));
             for i := argc - 1 downto 0 do
               FFrames[FFrameSP].Locals[i] := Pop();
@@ -1695,6 +2259,10 @@ begin
               'no function ' + SignatureOf(FProg.Consts.Get(ins.A).Str, args))) then Continue else Exit(False);
           end;
           e := NoError();
+          // Cleared HERE, at the dispatch, not at the check: a library that calls
+          // back in through CallUserFunc sets it, and only a call that got that far
+          // may claim a ceiling was crossed. See FLimitFromInner.
+          FLimitFromInner := False;
           // The safety net: a library function must never crash the interpreter.
           // Any Pascal exception it raises (e.g. an out-of-range Double->Int64 in a
           // conversion or index argument) is converted to a CATCHABLE engine error,
@@ -1714,6 +2282,31 @@ begin
           end;
           if IsError(e) then
           begin
+            { A BUDGET THAT CAME BACK FROM A NESTED ACTIVATION IS STILL A BUDGET.
+              `callfunc` re-enters the VM through CallByName/CallUserFunc; when
+              the inner ExecFrom aborts on a ceiling, that peLimit arrives here as
+              an ordinary library error and would be handed to Fault -- catchable,
+              which is exactly what a fatal limit must never be. It happens not to
+              have been an escape for the step budget (FSteps is shared, so the
+              outer loop re-fires it one instruction later), but that is an
+              accident of which counter is per-VM and which is per-activation, and
+              the value-stack ceiling stops being self-re-arming the moment
+              CallUserFunc restores the stack it borrowed. Decided on the CODE, so
+              it holds for every ceiling. peLimit has NINE producers in this unit
+              -- output, value stack, steps, time, GOSUB, call depth and local
+              slots in this loop, and the two frame ceilings again in
+              CallUserFunc, which is NOT in this loop -- and `grep -rn peLimit
+              engine/ host/` finds none in any library or host, only the two
+              places that NAME the code. So treating one as fatal here cannot
+              swallow a legitimate library error. (Round two's report said
+              "exactly four producers, all of them the ceilings in this loop",
+              which was assumed rather than counted.) }
+            if (e.Code = peLimit) and FLimitFromInner then
+            begin
+              LastError := e;
+              ErrorLine := ins.Line;
+              Exit(False);
+            end;
             if Fault(e) then Continue else Exit(False);
           end;
           // The finiteness invariant (PhosphorValue, FiniteD) covers library
@@ -1819,17 +2412,26 @@ begin
         begin
           a := Pop();   // the 1-based position (pushed last)
           b := Pop();   // the channel number (pushed first)
-          // ArgI64 for the POSITION. Narrowing it to 32 bits clamped every offset
-          // past 2 GB to 2147483647, so two different positions in a large file
-          // collapsed onto one and `seek #1, lof(1) + 1` landed a gigabyte inside
-          // the file instead of at its end. The channel NUMBER stays 32-bit -- it
-          // is an index into a 255-entry table.
-          e := ChanSeek(SafeI32(b), ArgI64(a));
+          // A 64-BIT NARROWING for the POSITION. Narrowing it to 32 bits clamped
+          // every offset past 2 GB to 2147483647, so two different positions in a
+          // large file collapsed onto one and `seek #1, lof(1) + 1` landed a
+          // gigabyte inside the file instead of at its end. The channel NUMBER
+          // stays 32-bit -- it is an index into a 255-entry table.
+          //
+          // SafeI64, not PhosphorValue's ArgI64: same clamping, but its NaN test
+          // is a bit test rather than the `d <> d` that traps here. See SafeI64.
+          e := ChanSeek(SafeI32(b), SafeI64(a));
           if IsError(e) then if Fault(e) then Continue else Exit(False);
         end;
       // --- formatted output ----------------------------------------------------
       opPrintUsing:
         begin
+          // ins.A values AND the format string, so the stack must hold A + 1 --
+          // the same bound, for the same allocation, as at BREAKPOINT and CALL.
+          if (ins.A < 0) or (ins.A >= FSP) then
+            if Fault(MakeError(peRuntime, 'corrupt bytecode: PRINT USING wants ' +
+                     IntToStr(ins.A) + ' values and a format but the stack holds ' +
+                     IntToStr(FSP) + ' values')) then Continue else Exit(False);
           SetLength(usingVals, ins.A);
           for i := ins.A - 1 downto 0 do usingVals[i] := Pop();
           v := Pop();   // the format string (pushed first)
@@ -1871,6 +2473,7 @@ var
   kinds: array of TValueKind;
   res: TResolvedFunc;
   i: Integer;
+  savedMask: TFPUExceptionMask;
 begin
   { EXISTENCE DECIDES, not the error code. This used to call the routine and fall
     through to the library whenever the answer came back peUnknownFunction -- on
@@ -1903,22 +2506,49 @@ begin
   end;
   Err := NoError();
   // The same safety net opCall puts around a library call: a Pascal exception
-  // from inside a library becomes a catchable engine error, never a crash.
+  // from inside a library becomes a catchable engine error, never a crash. Under
+  // the same FPU mask, too: a library that overflows must report the way it
+  // reports inside Run, not raise a different exception because the host happened
+  // to call in by a different door. See EnterFPU.
+  savedMask := EnterFPU();
   try
-    if res.IsHost then
-      Result := res.HostFunc(Self, Args, Err)
-    else
-      Result := res.Func(Args, Err);
-  except
-    on E: Exception do
-      Err := MakeError(peRuntime, AName + ': ' + E.Message);
+    try
+      if res.IsHost then
+        Result := res.HostFunc(Self, Args, Err)
+      else
+        Result := res.Func(Args, Err);
+    except
+      on E: Exception do
+        Err := MakeError(peRuntime, AName + ': ' + E.Message);
+    end;
+  finally
+    LeaveFPU(savedMask);
+  end;
+  { AND THE FINITENESS GATE THE MASK MAKES NECESSARY.
+
+    Masking overflow is what turns a raise into a +Inf, so a seam that installs
+    the mask and does NOT gate the result is a seam that hands the host an
+    infinity where it used to get an error -- a silent wrong answer, which is
+    worse than the crash it replaced. opCall applies exactly this test to a
+    library result (see the note there); this is the same test on the same values
+    reached by the other door, which is also what "an indirect call means what a
+    direct one means" requires. It names the function that actually overflowed,
+    so `callfunc("exp", 1000)` reports `exp`, as docs/libraries/num.md describes
+    the rule, rather than `callfunc`. }
+  if (not IsError(Err)) and (Result.Kind = vkDouble) and
+     (IsNan(Result.Num) or IsInfinite(Result.Num)) then
+  begin
+    Err := MakeError(peIntOverflow, AName + ' has no finite result for those arguments');
+    Result := Default(TValue);
   end;
 end;
 
 function TPhosphorVM.CallUserFunc(const AName: String; const Args: array of TValue;
   out Err: TPhosphorError): TValue;
 var
-  ufi, i, saved: Integer;
+  ufi, i, saved, savedSP, slots: Integer;
+  savedLimit: Boolean;
+  savedMask: TFPUExceptionMask;
 begin
   Result := Default(TValue);
   Err := NoError();
@@ -1950,9 +2580,47 @@ begin
       ' is more than ' + IntToStr(MaxCallDepth) + ' re-entrant calls in');
     Exit;
   end;
+  // The frame must hold the parameters. This is opCall's check, on opCall's write,
+  // reached the other way -- through the host callback seam rather than through an
+  // instruction -- so it is made here too rather than left to whoever calls in.
+  if Length(Args) > Length(FProg.UserFuncs[ufi].LocalTypes) then
+  begin
+    Err := MakeError(peRuntime, 'corrupt bytecode: ' + AName + ' is called with ' +
+      IntToStr(Length(Args)) + ' arguments but its frame holds ' +
+      IntToStr(Length(FProg.UserFuncs[ufi].LocalTypes)) + ' locals');
+    Exit;
+  end;
+  // opCall's two frame ceilings, on opCall's growth, reached the other way. A host
+  // event dispatcher calls in at whatever depth the VM already stands at, so the
+  // bounds have to be here too; see MaxFrameDepth.
+  if FFrameSP >= MaxFrameDepth then
+  begin
+    Err := MakeError(peLimit, 'call depth limit exceeded (' +
+      IntToStr(MaxFrameDepth) + ' activation frames)');
+    FLimitFromInner := True;   // a ceiling, crossed in here; see FLimitFromInner
+    Exit;
+  end;
+  slots := Length(FProg.UserFuncs[ufi].LocalTypes);
+  if FFrameSP < Length(FFrames) then
+    Dec(slots, Length(FFrames[FFrameSP].Locals));
+  if slots > MaxFrameSlots - FFrameSlots then
+  begin
+    Err := MakeError(peLimit, 'local slot limit exceeded (' +
+      IntToStr(MaxFrameSlots) + ' slots in ' + IntToStr(FFrameSP) +
+      ' activation frames)');
+    FLimitFromInner := True;   // a ceiling, crossed in here; see FLimitFromInner
+    Exit;
+  end;
+  Inc(FFrameSlots, slots);
   saved := FFrameSP;
+  savedSP := FSP;
+  savedLimit := FStackLimit;
   if FFrameSP = Length(FFrames) then
-    SetLength(FFrames, (FFrameSP + 1) * 2);
+  begin
+    i := (FFrameSP + 1) * 2;
+    if i > MaxFrameDepth then i := MaxFrameDepth;
+    SetLength(FFrames, i);
+  end;
   SetLength(FFrames[FFrameSP].Locals, Length(FProg.UserFuncs[ufi].LocalTypes));
   for i := 0 to Length(Args) - 1 do
     FFrames[FFrameSP].Locals[i] := Args[i];
@@ -1968,6 +2636,7 @@ begin
   FFrames[FFrameSP].CallerStmtFrameSP := 0;
   Inc(FFrameSP);
   Inc(FCallDepth);
+  savedMask := EnterFPU();   // this is an entry into execution; see EnterFPU
   try
     if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
     begin
@@ -1980,14 +2649,41 @@ begin
         Result := Pop();   // the routine's return value
     end
     else
+    begin
       Err := LastError;
+      // A ceiling the INNER activation crossed. It travels back to opCall as an
+      // ordinary library error, and this is the only place that still knows it was
+      // not a library saying no. See FLimitFromInner.
+      if Err.Code = peLimit then FLimitFromInner := True;
+    end;
   finally
     // On EVERY exit -- returned, faulted, or unwound by an exception raised deeper
     // in -- the frame level goes back to where it was. Only the failure branch used
     // to do this, so anything that escaped as a Pascal exception left the frame
     // stack permanently deeper than the program believed.
     Dec(FCallDepth);
+    LeaveFPU(savedMask);
     FFrameSP := saved;
+    { AND THE VALUE STACK, WHICH THIS RESTORED FOR THE FRAMES ONLY.
+
+      A call that ends in an error leaves FSP wherever the failed body left it. On
+      the success path the return value has just been popped and FSP is already
+      savedSP, so this is a no-op; on the failure path it is the whole fix. A host
+      dispatching GUI events through this seam LEAKED ONE SLOT PER FAILING EVENT:
+      measured, 400 000 failing callbacks walked the value stack from 3 MB to
+      24 MB, and at 1 048 576 of them it reached the ceiling -- at which point
+      every LATER callback, including one that could not fail, answered "value
+      stack limit exceeded" for ever. Nothing in any script was responsible for
+      either half.
+
+      FStackLimit is RESTORED, not cleared. Clearing it would hide a real ceiling
+      from an outer ExecFrom that is still live on the Pascal stack; restoring the
+      value it had on entry says precisely what is true -- the drop happened above
+      savedSP, in slots that are now gone. The ceiling still ends the program,
+      because a peLimit coming back out of here is refused as fatal at opCall's
+      library branch and by Fault's `on error call` path. }
+    FSP := savedSP;
+    FStackLimit := savedLimit;
   end;
 end;
 

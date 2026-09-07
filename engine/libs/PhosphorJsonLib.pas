@@ -20,7 +20,7 @@ interface
 
 uses
   SysUtils, fpjson, jsonparser,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget;
 
 procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
 
@@ -126,9 +126,32 @@ begin
   Result := True;
 end;
 
+{ THE SAME 64-BIT GUARD, THE SAME 32-BIT NARROWING, IN A DIFFERENT LIBRARY.
+
+  The guard here is `Abs(d) < 9.2e18` -- an Int64 window -- and the constructor
+  underneath it is `TJSONIntegerNumber.Create(AValue: Integer)` (fcl-json's
+  fpjson.pp:263; its field is `FValue : Integer`). Round(d) hands it an Int64 and
+  the compiler narrows it without a word, so every JSON number between 2^31 and
+  2^63 was stored wrapped:
+
+      json_setn@(o@, "big", 3000000000) : println json_stringify$(o@)
+      -> the object rendered "big" as -1294967296
+
+  and json_getn read the wrapped value straight back. Silent corruption of data
+  the program handed us intact. fpjson has TJSONInt64Number for exactly this, so
+  the fix is to pick the node type the value needs rather than the one the
+  smaller range fits. }
 function NumNode(d: Double): TJSONData;
+var v: Int64;
 begin
-  if (Frac(d) = 0) and (Abs(d) < 9.2e18) then Result := TJSONIntegerNumber.Create(Round(d))
+  if (Frac(d) = 0) and (Abs(d) < 9.2e18) then
+  begin
+    v := Round(d);
+    if (v >= Low(Integer)) and (v <= High(Integer)) then
+      Result := TJSONIntegerNumber.Create(Integer(v))
+    else
+      Result := TJSONInt64Number.Create(v);
+  end
   else Result := TJSONFloatNumber.Create(d);
 end;
 
@@ -252,6 +275,21 @@ end;
 { The escapes JSON requires, and no others. Every byte >= $80 passes through
   untouched: UTF-8 in, the same UTF-8 out. Built by appending SLICES, never a
   Char (see scripts/check-codepage.py). }
+{ QUADRATIC APPEND, charged as it goes (RULE 2). This is the worst one in the
+  tree and it was invisible to the gate for two rounds: `Result := Result + ..`
+  fires once per SPECIAL character, so a string of quotes copies the whole answer
+  per character. Measured, unbudgeted: 703 / 2658 / 11526 / 63680 / 200023 ms for
+  25000 / 50000 / 100000 / 200000 / 400000 quotes -- json_stringify$ of a one
+  megabyte string of quotes did not finish in five minutes under a 2000 ms
+  ceiling, at 17 MB of memory, so nothing else would ever have stopped it.
+
+  The size is NOT knowable up front (it is the count of specials, not Length(S)),
+  so this is RULE 2 rather than RULE 1: each append is charged for the bytes it
+  copies. A string with no specials pays for one append and is untouched.
+
+  On refusal the answer is emptied, not truncated -- and the budget LATCHES, so
+  the BufAdd that JsonWrite makes immediately after this call sets B.Spent and
+  json_stringify$/json_pretty$ return the peLimit. }
 function JsonEscape(const S: String): String;
 var
   i, runStart: Integer;
@@ -264,6 +302,7 @@ begin
     c := S[i];
     if (c = '"') or (c = '\') or (c < #32) then
     begin
+      if not BudgetAppend(Length(Result)) then begin Result := ''; Exit; end;
       if i > runStart then Result := Result + Copy(S, runStart, i - runStart);
       case c of
         '"':  Result := Result + '\"';
@@ -280,37 +319,122 @@ begin
     end;
   end;
   if Length(S) >= runStart then
+  begin
+    if not BudgetAppend(Length(Result)) then begin Result := ''; Exit; end;
     Result := Result + Copy(S, runStart, Length(S) - runStart + 1);
+  end;
 end;
 
-function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
+{ An upper bound on the PADDING JsonText can emit: it writes one pad per node and
+  no pad is wider than AIndent times the deepest nesting, so AIndent * ACount *
+  ADepth is never less than what the render will build. Walking the tree costs
+  what rendering it costs, and the tree is already in memory. }
+procedure JsonShape(N: TJSONData; ALevel: Integer; var ACount, ADepth: Int64);
+var
+  i: Integer;
+begin
+  if N = nil then Exit;
+  Inc(ACount);
+  if ALevel > ADepth then ADepth := ALevel;
+  for i := 0 to N.Count - 1 do
+    JsonShape(N.Items[i], ALevel + 1, ACount, ADepth);
+end;
+
+{ RENDERING A DOCUMENT IS ONE opCall, AND IT WAS QUADRATIC TOO.
+
+      s$ = "[" + mulstring$("1,", 100000) + "1]"
+      j@ = json_parse@(s$)
+      println bytelen(json_pretty$(j@, 8))    ' 64985 ms, rc=0 SUCCESS
+
+  Sixty-five seconds under MaxSteps=1000000 / TimeoutMs=2000, reported as
+  success. The round-one guard on json_pretty$ bounded the PADDING -- indent
+  times nodes times depth -- and the padding really was bounded; what was not was
+  `Result := Result + ...` once per member, which copies the whole answer built so
+  far every time. Bounding one term of a cost is not bounding the cost.
+
+  So the renderer now appends into a buffer that grows geometrically, and CHARGES
+  each byte it appends (RULE 2: the size of a rendered tree is not derivable from
+  the handle, but every byte of it passes through here). A render the budget stops
+  sets JSpent, and json_stringify$/json_pretty$ report it rather than handing back
+  a truncated document. The bytes produced are exactly the bytes the append loop
+  produced -- the sweep in scripts/probe_budget.lpr pins that. }
+type
+  TJsonBuf = record
+    Data: String;
+    Len: SizeInt;
+    Spent: Boolean;
+  end;
+
+procedure BufInit(out B: TJsonBuf);
+begin
+  B.Data := '';
+  B.Len := 0;
+  B.Spent := False;
+end;
+
+procedure BufAdd(var B: TJsonBuf; const S: String);
+var need, grow: SizeInt;
+begin
+  if (S = '') or B.Spent then Exit;
+  if not BudgetCharge(Length(S)) then begin B.Spent := True; Exit; end;
+  need := B.Len + Length(S);
+  if need > Length(B.Data) then
+  begin
+    grow := Length(B.Data) * 2;
+    if grow < need then grow := need;
+    if grow < 256 then grow := 256;
+    SetLength(B.Data, grow);
+  end;
+  Move(S[1], B.Data[B.Len + 1], Length(S));
+  B.Len := need;
+end;
+
+function BufStr(const B: TJsonBuf): String;
+begin
+  Result := Copy(B.Data, 1, B.Len);
+end;
+
+procedure JsonWrite(var B: TJsonBuf; N: TJSONData; APretty: Boolean;
+  AIndent, ALevel: Integer);
 var
   i: Integer;
   pad, padIn, sep: String;
   o: TJSONObject;
   a: TJSONArray;
 begin
-  if N = nil then Exit('null');
+  if B.Spent then Exit;
+  if N = nil then begin BufAdd(B, 'null'); Exit; end;
   case N.JSONType of
     jtString:
-      Result := '"' + JsonEscape(TJSONString(N).AsString) + '"';
+      begin
+        BufAdd(B, '"');
+        BufAdd(B, JsonEscape(TJSONString(N).AsString));
+        BufAdd(B, '"');
+      end;
     jtObject:
       begin
         o := TJSONObject(N);
-        if o.Count = 0 then Exit('{}');            // inline, in both modes
+        if o.Count = 0 then begin BufAdd(B, '{}'); Exit; end;   // inline, in both modes
         if APretty then
         begin
           pad := StringOfChar(' ', AIndent * (ALevel + 1));
           padIn := StringOfChar(' ', AIndent * ALevel);
-          Result := '{' + #10;
+          BufAdd(B, '{' + #10);
           sep := '';
           for i := 0 to o.Count - 1 do
           begin
-            Result := Result + sep + pad + '"' + JsonEscape(o.Names[i]) + '" : ' +
-                      JsonText(o.Items[i], True, AIndent, ALevel + 1);
+            BufAdd(B, sep);
+            BufAdd(B, pad);
+            BufAdd(B, '"');
+            BufAdd(B, JsonEscape(o.Names[i]));
+            BufAdd(B, '" : ');
+            JsonWrite(B, o.Items[i], True, AIndent, ALevel + 1);
+            if B.Spent then Exit;
             sep := ',' + #10;
           end;
-          Result := Result + #10 + padIn + '}';
+          BufAdd(B, #10);
+          BufAdd(B, padIn);
+          BufAdd(B, '}');
         end
         else
         begin
@@ -318,14 +442,17 @@ begin
           // ' }', while the array branch below was already compact -- so objects
           // were the inconsistency, not the format. json_pretty$ is the readable
           // rendering; this one is the one that goes over a wire.
-          Result := '{';
+          BufAdd(B, '{');
           for i := 0 to o.Count - 1 do
           begin
-            if i > 0 then Result := Result + ',';
-            Result := Result + '"' + JsonEscape(o.Names[i]) + '":' +
-                      JsonText(o.Items[i], False, AIndent, 0);
+            if i > 0 then BufAdd(B, ',');
+            BufAdd(B, '"');
+            BufAdd(B, JsonEscape(o.Names[i]));
+            BufAdd(B, '":');
+            JsonWrite(B, o.Items[i], False, AIndent, 0);
+            if B.Spent then Exit;
           end;
-          Result := Result + '}';
+          BufAdd(B, '}');
         end;
       end;
     jtArray:
@@ -334,34 +461,57 @@ begin
         if APretty then
         begin
           padIn := StringOfChar(' ', AIndent * ALevel);
-          if a.Count = 0 then Exit('[' + #10 + padIn + ']');
+          if a.Count = 0 then begin BufAdd(B, '[' + #10 + padIn + ']'); Exit; end;
           pad := StringOfChar(' ', AIndent * (ALevel + 1));
-          Result := '[' + #10;
+          BufAdd(B, '[' + #10);
           sep := '';
           for i := 0 to a.Count - 1 do
           begin
-            Result := Result + sep + pad + JsonText(a.Items[i], True, AIndent, ALevel + 1);
+            BufAdd(B, sep);
+            BufAdd(B, pad);
+            JsonWrite(B, a.Items[i], True, AIndent, ALevel + 1);
+            if B.Spent then Exit;
             sep := ',' + #10;
           end;
-          Result := Result + #10 + padIn + ']';
+          BufAdd(B, #10);
+          BufAdd(B, padIn);
+          BufAdd(B, ']');
         end
         else
         begin
-          if a.Count = 0 then Exit('[]');
-          Result := '[';
+          if a.Count = 0 then begin BufAdd(B, '[]'); Exit; end;
+          BufAdd(B, '[');
           for i := 0 to a.Count - 1 do
           begin
-            if i > 0 then Result := Result + ', ';
-            Result := Result + JsonText(a.Items[i], False, AIndent, 0);
+            if i > 0 then BufAdd(B, ', ');
+            JsonWrite(B, a.Items[i], False, AIndent, 0);
+            if B.Spent then Exit;
           end;
-          Result := Result + ']';
+          BufAdd(B, ']');
         end;
       end;
   else
     // numbers, booleans, null: ASCII, so fpjson's own rendering is safe here and
     // keeps the output identical to what it has always been.
-    Result := N.AsJSON;
+    BufAdd(B, N.AsJSON);
   end;
+end;
+
+{ True = the whole document was rendered. False = the budget stopped it; the
+  caller must report that rather than hand back what it got so far. }
+function JsonTextTry(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer;
+  out AText: String): Boolean;
+var b: TJsonBuf;
+begin
+  BufInit(b);
+  JsonWrite(b, N, APretty, AIndent, ALevel);
+  Result := not b.Spent;
+  if Result then AText := BufStr(b) else AText := '';
+end;
+
+function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
+begin
+  if not JsonTextTry(N, APretty, AIndent, ALevel, Result) then Result := '';
 end;
 
 { Read any node as a string without raising: null is "", an object/array is its
@@ -713,11 +863,13 @@ end;
 
 // --- serialize --------------------------------------------------------------
 function t_json_stringify(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var n: TJSONData;
+var n: TJSONData; txt: String;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
-  Result := ValStr(JsonText(n, False, 2, 0));
+  if not JsonTextTry(n, False, 2, 0, txt) then
+  begin Err := BudgetRefusal('json_stringify$'); Exit(ValStr('')); end;
+  Result := ValStr(txt);
 end;
 
 // --- scalar constructors (each scalar is a handle too) ----------------------
@@ -927,15 +1079,35 @@ begin
 end;
 
 // --- pretty rendering; a handle's id as a number ----------------------------
+{ THE INDENT IS AN ARGUMENT, and JsonText multiplies it by the nesting level and
+  hands the product to StringOfChar once per member. json_pretty$(h, 1000000000)
+  on a two-level document is therefore a pair of two-gigabyte pads per member,
+  built inside one opCall. The width is derivable here -- indent times depth is
+  bounded by indent times the node count -- so RULE 1 applies, and a negative
+  indent (which StringOfChar would refuse outright) is clamped the way every
+  other count in this engine is. }
 function t_json_pretty(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var n: TJSONData;
+var n: TJSONData; ind: Integer; cnt, dep, pads, want: Int64; txt: String;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], n, Err) then Exit;
-  if Length(Args) >= 2 then
-    Result := ValStr(JsonText(n, True, ArgI32(Args[1]), 0))
-  else
-    Result := ValStr(JsonText(n, True, 2, 0));
+  ind := 2;
+  if Length(Args) >= 2 then ind := ArgI32(Args[1]);
+  if ind < 0 then ind := 0;
+  cnt := 0; dep := 0;
+  JsonShape(n, 1, cnt, dep);
+  pads := cnt * dep;                         // one pad per node, none deeper than dep
+  if pads <= 0 then want := 0
+  else if ind > High(Int64) div pads then want := High(Int64)
+  else want := Int64(ind) * pads;
+  if not BudgetAllows(want) then
+  begin
+    Err := BudgetRefusal('json_pretty$');
+    Exit;
+  end;
+  if not JsonTextTry(n, True, ind, 0, txt) then
+  begin Err := BudgetRefusal('json_pretty$'); Exit(ValStr('')); end;
+  Result := ValStr(txt);
 end;
 function t_pnttonum(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin

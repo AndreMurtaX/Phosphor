@@ -29,7 +29,7 @@ interface
 
 uses
   SysUtils, Classes, base64,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox, PhosphorBudget;
 
 procedure RegisterBase64Funcs(Reg: TPhosphorRegistry);
 
@@ -156,10 +156,19 @@ end;
 // True if s$ (with any CR/LF removed -- MIME wrapping is tolerated) is a
 // well-formed base64 string: only the base64 alphabet, '=' padding at the end
 // alone, length a multiple of 4. A space, tab or stray byte makes it invalid.
-function IsValidBase64(const AText: String): Boolean;
+{ QUADRATIC APPEND, charged. The CR/LF-stripping loop below is `s := s + Copy(..)`
+  once per byte, which is not an O(1) body, so Length(AText) does not bound it the
+  way it bounds a scan: unbudgeted, base64_valid of a 160 MB string took 78031 ms
+  under a 2000 ms ceiling and answered SUCCESS with islimit FALSE. The cost is
+  fixed by Length(AText) before the loop starts, so it is priced once (RULE 1).
+  AAllowed False means the budget refused; the caller turns that into the peLimit
+  rather than answering "not valid base64", which would be a wrong answer. }
+function IsValidBase64(const AText: String; out AAllowed: Boolean): Boolean;
 var s: String; i, pad: Integer; c: Char;
 begin
   Result := False;
+  AAllowed := BudgetAllows(Int64(Length(AText)) * BudgetUnitsPerAppendedByte);
+  if not AAllowed then Exit;
   s := '';
   for i := 1 to Length(AText) do
     if (AText[i] <> #13) and (AText[i] <> #10) then s := s + Copy(AText, i, 1);
@@ -184,9 +193,12 @@ begin
 end;
 
 function f_b64_valid(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var ok, valid: Boolean;
 begin
   Err := NoError();
-  Result := ValInt(Ord(IsValidBase64(Args[0].Str)));
+  valid := IsValidBase64(Args[0].Str, ok);
+  if not ok then begin Err := BudgetRefusal('base64_valid'); Exit(ValInt(0)); end;
+  Result := ValInt(Ord(valid));
 end;
 
 function f_b64_error(const Args: array of TValue; out Err: TPhosphorError): TValue;

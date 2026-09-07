@@ -43,7 +43,8 @@ interface
 
 uses
   SysUtils, Classes, Zipper,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox,
+  PhosphorBudget;
 
 procedure RegisterZipFuncs(Reg: TPhosphorRegistry);
 
@@ -78,6 +79,7 @@ type
   TZipReader = class
     UZ: TUnZipper;
     FScratch: TMemoryStream;
+    FSpent: Boolean;   // the last ReadEntry was refused by the execution budget
     constructor Create(const APath: String);
     destructor Destroy; override;
     function IndexOf(const AName: String): Integer;
@@ -183,10 +185,20 @@ begin
 end;
 
 function TZipReader.ReadEntry(const AName: String; out AData: String): Boolean;
-var sl: TStringList;
+var sl: TStringList; idx: Integer;
 begin
   Result := False;
   AData := '';
+  FSpent := False;
+  // One entry, one declared size, one RULE 1 question -- asked before UnZipFiles
+  // is entered rather than after the memory is gone. FSpent tells the caller that
+  // False here means "refused", not "no such entry".
+  idx := IndexOf(AName);
+  if (idx >= 0) and (not BudgetAllows(UZ.Entries[idx].Size)) then
+  begin
+    FSpent := True;
+    Exit(False);
+  end;
   FScratch := nil;
   sl := TStringList.Create();
   try
@@ -260,6 +272,15 @@ begin
         if FindFirst(base + '*', faAnyFile, sr) = 0 then
         try
           repeat
+            // The same directory walk IoLib charges, and for the same reason: the
+            // filesystem decides how many iterations this is, not the argument.
+            if not BudgetCharge(BudgetUnitsPerStep) then
+            begin
+              Err := BudgetRefusal('zip_compress');
+              FindClose(sr);
+              names.Free;
+              Exit(ValInt(0));
+            end;
             if (sr.Attr and faDirectory) = 0 then names.Add(sr.Name);
           until FindNext(sr) <> 0;
         finally
@@ -318,6 +339,23 @@ begin
 end;
 
 { True when every entry in an examined unzipper is safe to write. }
+{ THE SIZE AN ARCHIVE DECLARES IT WILL BECOME. Examine has already read the
+  central directory, so the total uncompressed size is known BEFORE a byte is
+  written -- which turns the decompression bomb into a RULE 1 case after all:
+  forty kilobytes that declare ten gigabytes are refused here rather than inside
+  UnZipAllFiles, which is native and cannot be interrupted once entered. The
+  declared size is what a zip's directory claims and a malicious archive may lie,
+  but it can only lie DOWNWARD into a smaller claim, and a smaller claim is the
+  one this check would have let through anyway. }
+function ArchiveFitsBudget(AUz: TUnZipper): Boolean;
+var i: Integer; total: Int64;
+begin
+  total := 0;
+  for i := 0 to AUz.Entries.Count - 1 do
+    total := total + AUz.Entries[i].Size;
+  Result := BudgetAllows(total);
+end;
+
 function ArchiveIsSafe(AUz: TUnZipper): Boolean;
 var i: Integer;
 begin
@@ -344,6 +382,12 @@ begin
         ZipErr := 1;
         Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
           'destination directory (a leading /, a drive letter, or a ".." segment)');
+        Exit;
+      end;
+      if not ArchiveFitsBudget(uz) then
+      begin
+        ZipErr := 1;
+        Err := BudgetRefusal('unzip_extract');
         Exit;
       end;
       uz.UnZipAllFiles;
@@ -536,7 +580,12 @@ begin
   try
     if r.ReadEntry(Args[1].Str, data) then
     begin Result := ValStr(data); ZipErr := 0; end
-    else ZipErr := 1;
+    else
+    begin
+      ZipErr := 1;
+      // A refusal is not a missing entry, and must not read as one.
+      if r.FSpent then Err := BudgetRefusal('zipr_read$');
+    end;
   except
     Result := ValStr('');
     ZipErr := 1;
@@ -560,9 +609,13 @@ begin
   Err := NoError();
   Result := ValStr('');
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
+  // QUADRATIC APPEND, charged as it goes (RULE 2): one append per archive entry,
+  // copying the whole listing each time.
   s := '';
   for i := 0 to r.UZ.Entries.Count - 1 do
   begin
+    if not BudgetAppend(Length(s)) then
+    begin Err := BudgetRefusal('zip_list$'); Exit(ValStr('')); end;
     if i > 0 then s := s + #10;
     s := s + r.UZ.Entries[i].ArchiveFileName;
   end;

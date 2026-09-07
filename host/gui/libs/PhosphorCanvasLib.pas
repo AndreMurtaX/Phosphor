@@ -111,12 +111,35 @@ function I(const V: TValue): Integer;
 begin Result := ArgI32(V); end;
 
 // --- bitmap surface ---------------------------------------------------------
+{ THE TWO NUMBERS ARE AN ALLOCATION, so they are charged before TBitmap is asked.
+
+  SetSize is lazy -- it records the size and commits nothing -- so bitmap@ itself
+  looked harmless and the memory went out the door on the FIRST DRAWING CALL, a
+  line away and under a different name. Measured: bitmap@(20000, 20000) followed by
+  one canvas_fillrect@ committed 2.3 GB with nothing reported; bitmap@(2^31-1,
+  2^31-1) reached the same draw and answered "Out of memory" from inside the LCL,
+  which is at least catchable but names neither the bitmap nor the size.
+
+  Checking at the constructor is what makes the refusal name the size the program
+  actually wrote, and it is the only place both numbers are together.
+
+  A PER-BITMAP CAP WOULD NOT HAVE BEEN ENOUGH, and this is the correction the
+  first version of this guard needed: ten bitmaps of 8192 x 8192, each one INSIDE
+  the cap it was given, came to 2132 MB with exit 0 and gui_error 0. So the bitmap
+  is charged against the host's live total (PhosphorGuiCore's ledger) and credited
+  when its handle is freed -- which is why a program may still make and free as
+  many 393 MB bitmaps as it likes, one at a time. }
 function f_bitmap(const A: array of TValue; out E: TPhosphorError): TValue;
-var b: TBitmap;
+var b: TBitmap; w, h: Integer; need: Int64;
 begin
-  E := NoError;
+  Result := ValHandle(0);
+  w := I(A[0]); h := I(A[1]);
+  need := GuiSurfaceBytes(w, h);
+  if not GuiChargeRoom(Format('bitmap %d x %d', [w, h]), need, 0, E) then Exit;
   b := TBitmap.Create;
-  b.SetSize(I(A[0]), I(A[1]));
+  b.SetSize(w, h);
+  // Cannot be refused: the room was just asked for, and nothing has run since.
+  GuiChargeSet(b, 'bitmap', need, E);
   Result := ValHandle(GuiRegister(b, True));   // owned by its handle
 end;
 function f_bm_width(const A: array of TValue; out E: TPhosphorError): TValue;

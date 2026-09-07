@@ -177,6 +177,45 @@ const
   CatchAndLoop = 'on error goto h' + LF + 'top:' + LF + 'x = x + 1' + LF +
                  'goto top' + LF + 'h:' + LF + 'resume next' + LF;
 
+  { A CEILING CROSSED INSIDE A NESTED ACTIVATION IS STILL FATAL.
+
+    `callfunc` is a library function that re-enters the interpreter, so when the
+    body it runs crosses a ceiling, the peLimit travels back to opCall looking
+    exactly like a library that returned an error -- and opCall's ON ERROR path
+    would have caught it. That was closed by refusing every peLimit at that
+    branch, on a grep that found no library producing one.
+
+    One patch later the budget lane gave the libraries their own refusals
+    (`string$: that would take 2147483647 units of work`), which are catchable BY
+    DESIGN: nothing has been spent and a program that catches one and asks for
+    less is behaving correctly. So the code alone can no longer tell the two
+    apart, and the VM now discriminates on where the peLimit came from.
+
+    This pins the half that has no other test. Its twin -- a library refusal
+    stays catchable -- is pinned by probe_budget's "catching a refusal builds
+    nothing" and "a refused write does not poison the next file_copy", which are
+    the two that went red when the two patches were first integrated.
+
+    IT IS THE FRAME CEILING AND NOT THE STEP BUDGET ON PURPOSE, and it runs with
+    every ceiling at 0 for that reason. FSteps is shared with the outer loop, so
+    a step budget crossed inside a callback RE-FIRES one instruction later and
+    would be fatal with this rule or without it -- a pin on it passes either way
+    and measures nothing. FFrameSP is restored by CallUserFunc, so the frame
+    ceiling is the one that genuinely escapes. Measured both ways before this was
+    written: with the rule, rc=5 code=7 "call depth limit exceeded (262144
+    activation frames)"; with the rule forced False, rc=0 and the program printed
+    its continuation line. }
+  LimitInsideCallfunc =
+    'on error goto h' + LF +
+    'function rec(n)' + LF +
+    '  return rec(n + 1)' + LF +
+    'end function' + LF +
+    'y = callfunc("rec", 1)' + LF +
+    'println "the handler resumed and the program continued"' + LF +
+    'end' + LF +
+    'h:' + LF +
+    'resume next' + LF;
+
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
 
@@ -195,6 +234,11 @@ begin
 
   // A ceiling is fatal: ON ERROR cannot catch it and loop forever.
   Check('ON ERROR cannot escape a limit', CatchAndLoop, 200000, 0, 0, True);
+
+  // ...including one crossed inside a callback that re-entered the interpreter,
+  // which reaches opCall as an ordinary library error. See LimitInsideCallfunc.
+  Check('ON ERROR cannot escape a limit crossed inside callfunc',
+        LimitInsideCallfunc, 0, 0, 0, True);
 
   { --- the front end: a bad FIRST character ---------------------------------
     TLexer.Tokenize gives up the moment it meets a character that cannot start a

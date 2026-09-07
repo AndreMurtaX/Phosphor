@@ -23,6 +23,7 @@ uses
   SysUtils, Classes,
   PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
   PhosphorCompiler, PhosphorVM, PhosphorHandles, PhosphorBytecode, PhosphorSandbox,
+  PhosphorBudget,
   // library packages (engine/libs)
   PhosphorArrayLib, PhosphorDictLib, PhosphorStrListLib, PhosphorStrLib, PhosphorNumLib,
   PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorBufferLib,
@@ -123,7 +124,16 @@ type
     property LastError: TPhosphorError read FLastError;
     { Execution ceilings for running untrusted scripts; 0 (the default) = no limit.
       A ceiling is fatal -- ON ERROR cannot catch it -- so a script cannot escape
-      it. LastError.Code is peLimit when one is hit. }
+      it. LastError.Code is peLimit when one is hit.
+
+      MaxSteps and TimeoutMs reach INSIDE a library call as well. The VM tests
+      them between instructions, and a library call is one instruction, so until
+      PhosphorBudget existed a single regex_find$ or string$ or pause() ran for
+      as long as it liked with every ceiling set. Every entry point below installs
+      the budget for the duration of the run (see PhosphorBudget's header for what
+      a library does with it) and takes it down again afterwards, so the ceilings
+      a host sets are the ceilings it gets. Setting neither leaves the budget
+      inert and every library behaving exactly as it did before. }
     property MaxSteps: Int64 read FMaxSteps write FMaxSteps;
     property MaxOutputBytes: Int64 read FMaxOutputBytes write FMaxOutputBytes;
     property TimeoutMs: Int64 read FTimeoutMs write FTimeoutMs;
@@ -254,15 +264,23 @@ begin
   vm := TPhosphorVM.Create();
   try
     ConfigureVM(vm);
-    if not vm.Run(prog) then
-    begin
-      FLastError := vm.LastError;
-      FErrorMessage := vm.LastError.Message;
-      FErrorLine := vm.ErrorLine;
-      if FErrorLine = 0 then FErrorLine := 1;
-      Exit(FErrorLine);
+    // The ceilings, installed where a library call can also see them. Paired with
+    // BudgetEnd in a finally, because a run that faults must not leave a stale
+    // budget standing over whatever the host does next.
+    BudgetBegin(FMaxSteps, FTimeoutMs);
+    try
+      if not vm.Run(prog) then
+      begin
+        FLastError := vm.LastError;
+        FErrorMessage := vm.LastError.Message;
+        FErrorLine := vm.ErrorLine;
+        if FErrorLine = 0 then FErrorLine := 1;
+        Exit(FErrorLine);
+      end;
+      Result := 0;
+    finally
+      BudgetEnd();
     end;
-    Result := 0;
   finally
     vm.Free;
     prog.Free;
@@ -292,15 +310,20 @@ begin
   vm := TPhosphorVM.Create();
   try
     ConfigureVM(vm);
-    if not vm.Run(prog) then
-    begin
-      FLastError := vm.LastError;
-      FErrorMessage := vm.LastError.Message;
-      FErrorLine := vm.ErrorLine;
-      if FErrorLine = 0 then FErrorLine := 1;
-      Exit(FErrorLine);
+    BudgetBegin(FMaxSteps, FTimeoutMs);
+    try
+      if not vm.Run(prog) then
+      begin
+        FLastError := vm.LastError;
+        FErrorMessage := vm.LastError.Message;
+        FErrorLine := vm.ErrorLine;
+        if FErrorLine = 0 then FErrorLine := 1;
+        Exit(FErrorLine);
+      end;
+      Result := 0;
+    finally
+      BudgetEnd();
     end;
-    Result := 0;
   finally
     vm.Free;
     prog.Free;
@@ -319,16 +342,21 @@ begin
 
   FVM := TPhosphorVM.Create();
   ConfigureVM(FVM);
-  if not FVM.Run(FProg) then   // run the top level once; the VM stays alive after
-  begin
-    FLastError := FVM.LastError;
-    FErrorMessage := FVM.LastError.Message;
-    FErrorLine := FVM.ErrorLine;
-    if FErrorLine = 0 then FErrorLine := 1;
-    Finish();
-    Exit(FErrorLine);
+  BudgetBegin(FMaxSteps, FTimeoutMs);
+  try
+    if not FVM.Run(FProg) then   // run the top level once; the VM stays alive after
+    begin
+      FLastError := FVM.LastError;
+      FErrorMessage := FVM.LastError.Message;
+      FErrorLine := FVM.ErrorLine;
+      if FErrorLine = 0 then FErrorLine := 1;
+      Finish();
+      Exit(FErrorLine);
+    end;
+    Result := 0;
+  finally
+    BudgetEnd();
   end;
-  Result := 0;
 end;
 
 function TPhosphorEngine.CallFunction(const AName: String; const Args: array of TValue): TValue;
@@ -342,7 +370,15 @@ begin
     FErrorMessage := FLastError.Message;
     Exit(Default(TValue));
   end;
-  Result := FVM.CallUserFunc(AName, Args, FLastError);
+  // A call on a prepared VM is a run of its own as far as the ceilings go -- the
+  // VM resets its step counter and start tick per Run, and this is the same
+  // boundary for the library side.
+  BudgetBegin(FMaxSteps, FTimeoutMs);
+  try
+    Result := FVM.CallUserFunc(AName, Args, FLastError);
+  finally
+    BudgetEnd();
+  end;
   if IsError(FLastError) then
   begin
     FErrorMessage := FLastError.Message;
@@ -409,13 +445,20 @@ begin
   FReplSource := cand;
   FReplPC := prog.Count;
   Result := 0;
-  if not FReplVM.RunFrom(prog, startPC) then
-  begin
-    FLastError := FReplVM.LastError;
-    FErrorMessage := FReplVM.LastError.Message;
-    FErrorLine := FReplVM.ErrorLine;
-    if FErrorLine = 0 then FErrorLine := 1;
-    Result := FErrorLine;
+  // Each REPL line gets its own execution budget, matching RunFrom, which resets
+  // the VM's step counter and start tick per line.
+  BudgetBegin(FMaxSteps, FTimeoutMs);
+  try
+    if not FReplVM.RunFrom(prog, startPC) then
+    begin
+      FLastError := FReplVM.LastError;
+      FErrorMessage := FReplVM.LastError.Message;
+      FErrorLine := FReplVM.ErrorLine;
+      if FErrorLine = 0 then FErrorLine := 1;
+      Result := FErrorLine;
+    end;
+  finally
+    BudgetEnd();
   end;
   // Safe only now: the VM no longer refers to the previous program, and every value
   // that came out of its constant pool is reference-counted in the globals.

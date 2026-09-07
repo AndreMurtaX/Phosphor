@@ -19,7 +19,8 @@ interface
 
 uses
   SysUtils, Classes,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox,
+  PhosphorBudget;
 
 type
   { A raw byte buffer as a handle object, for file_readallbytes@/writeallbytes.
@@ -35,6 +36,43 @@ implementation
 
 var
   GIoError: Integer;   // last IO error code; ioerror()/iostrerror$() read it
+  GWalkSpent: Boolean; // a tree walk stopped because the run's budget ran out
+
+{ A DIRECTORY WALK IS A LOOP THE VM CANNOT SEE. CollectEntries, DeleteTree and
+  CopyTree each recurse over as many entries as the filesystem holds, all inside
+  ONE opCall, so dir_getfiles$ over a large tree runs for as long as the tree is
+  big with every execution ceiling set. Unlike string$ the size is NOT derivable
+  from the arguments -- only the filesystem knows -- so this is RULE 2 of
+  PhosphorBudget: charge per entry and stop when the budget says stop.
+
+  An entry costs a directory syscall plus a path build, worth rather more than one
+  interpreted instruction, so it is priced at BudgetUnitsPerStep -- one step each.
+  The million-step budget docs/embedding.md prescribes therefore buys a million
+  directory entries, which no legitimate listing comes near.
+
+  A walk that stops early must never read as a walk that finished, so it sets
+  GWalkSpent and every entry point below reports it as the peLimit it is. }
+function WalkStep: Boolean;
+begin
+  if GWalkSpent then Exit(False);
+  Result := BudgetCharge(BudgetUnitsPerStep);
+  if not Result then GWalkSpent := True;
+end;
+
+procedure WalkBegin;
+begin
+  GWalkSpent := False;
+end;
+
+function WalkRefused(const AFn: String; out Err: TPhosphorError): Boolean;
+begin
+  Result := GWalkSpent;
+  if Result then
+  begin
+    Err := BudgetRefusal(AFn);
+    GIoError := 3;
+  end;
+end;
 
 // --- raw whole-file text (no BOM, no newline translation) -------------------
 function WriteAllBytes(const APath, AContent: String): Boolean;
@@ -44,6 +82,13 @@ begin
   // Asked HERE and not at each caller: a t_ function added later inherits the
   // guard by calling this, and cannot forget it.
   if not SandboxAllows(APath, puWrite) then Exit;
+  // One byte written is one unit, like one byte read: a file_writealltext$ of a
+  // gigabyte is a gigabyte of work inside one opCall whichever way it flows.
+  if not BudgetAllows(Length(AContent)) then
+  begin
+    GWalkSpent := True;
+    Exit;
+  end;
   try
     fs := TFileStream.Create(APath, fmCreate);
     try
@@ -57,6 +102,18 @@ begin
   end;
 end;
 
+{ A WHOLE FILE IS A SIZE THE ARGUMENTS DO NOT NAME -- BUT THE FILESYSTEM DOES.
+
+  file_readalltext$ of a twelve-gigabyte file finished in 1437 ms having
+  committed twelve gigabytes inside one opCall, under the same ceiling that
+  refuses a one-gibibyte buffer. The path says nothing about the size, so the
+  first version's grep for "a loop over a script-supplied count" could not see
+  it; but the size is in hand the moment the stream is open, one line BEFORE the
+  SetLength that commits it. That makes it a RULE 1 shape after all -- ask, then
+  allocate -- and one byte of file is one unit, the same unit as everywhere else.
+
+  It is asked HERE and not at each caller for the same reason SandboxAllows is:
+  a t_ function added later inherits the guard by calling this. }
 function ReadAllBytes(const APath: String; out AContent: String): Boolean;
 var fs: TFileStream; len: Int64;
 begin
@@ -68,6 +125,11 @@ begin
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
       len := fs.Size;
+      if not BudgetAllows(len) then
+      begin
+        GWalkSpent := True;
+        Exit;
+      end;
       SetLength(AContent, len);
       if len > 0 then fs.ReadBuffer(AContent[1], len);
     finally
@@ -82,13 +144,17 @@ end;
 function t_file_writealltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  WalkBegin();
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, Args[1].Str)));
+  if WalkRefused('file_writealltext', Err) then Result := ValInt(0);
 end;
 function t_file_readalltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
   Err := NoError();
+  WalkBegin();
   if ReadAllBytes(Args[0].Str, s) then GIoError := 0 else GIoError := 2;  // 2 ~ not found
+  if WalkRefused('file_readalltext$', Err) then Exit(ValStr(''));
   Result := ValStr(s);
 end;
 function t_file_exists(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -112,14 +178,18 @@ end;
 function t_savetext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  WalkBegin();
   WriteAllBytes(Args[0].Str, Args[2].Str);
+  if WalkRefused('savetext$', Err) then Exit(ValStr(''));
   Result := ValStr(Args[0].Str);
 end;
 function t_opentext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
   Err := NoError();
+  WalkBegin();
   ReadAllBytes(Args[0].Str, s);
+  if WalkRefused('opentext$', Err) then Exit(ValStr(''));
   Result := ValStr(s);
 end;
 
@@ -203,33 +273,84 @@ begin
   Result := CompareStr(AList[AIndex1], AList[AIndex2]);
 end;
 
+{ THE TREE'S OTHER BACKTRACKING MATCHER, and it was the shape RULE 3 exists for.
+
+  The first version of this was a RECURSIVE star-backtracker: on a '*' it called
+  itself once for every remaining position. That is the same exponential the
+  regex judge refuses, reached through the filesystem API instead of the regex
+  one -- and it was reachable two ways, directly as path_matchespattern and from
+  inside CollectEntries, whose per-entry charge is O(1) while the per-entry match
+  was O(2^n). Twenty stars against a forty-character name did not return:
+
+      n$ = string$(40, 97)
+      p$ = mulstring$("*a", 20) + "*b"
+      println path_matchespattern(n$, p$)   ' still running after 20 s
+
+  It is now the classic greedy matcher with ONE remembered star, which is the
+  standard linear-space wildcard algorithm and provably answers the same thing:
+  with only '*' and '?' there is never a reason to try an earlier star again once
+  a later one has been placed, so remembering the most recent star and resuming
+  one character further is complete. The worst case falls from 2^n to n*m.
+
+  n*m is still not O(1), so it is CHARGED as it goes (RULE 2 of PhosphorBudget):
+  the counter is the number of character comparisons actually made, and a run
+  whose budget is spent stops and says so through GWalkSpent, exactly as the
+  directory walk does. With no budget installed BudgetCharge answers True on its
+  first line and this is a plain matcher again. }
 function MatchGlob(const AName, APattern: String; ACaseSensitive: Boolean): Boolean;
-var n, p: String;
-  function M(ni, pi: Integer): Boolean;
-  begin
-    while pi <= Length(p) do
-    begin
-      if p[pi] = '*' then
-      begin
-        while (pi <= Length(p)) and (p[pi] = '*') do Inc(pi);
-        if pi > Length(p) then Exit(True);
-        while ni <= Length(n) do
-        begin
-          if M(ni, pi) then Exit(True);
-          Inc(ni);
-        end;
-        Exit(False);
-      end
-      else if (ni <= Length(n)) and ((p[pi] = '?') or (p[pi] = n[ni])) then
-      begin Inc(ni); Inc(pi); end
-      else Exit(False);
-    end;
-    Result := ni > Length(n);
-  end;
+var
+  n, p: String;
+  ni, pi, starPi, starNi, ln, lp: Integer;
+  ticks: Int64;
 begin
   if ACaseSensitive then begin n := AName; p := APattern; end
   else begin n := LowerCase(AName); p := LowerCase(APattern); end;
-  Result := M(1, 1);
+  ln := Length(n);
+  lp := Length(p);
+  ni := 1; pi := 1;
+  starPi := 0; starNi := 0;
+  ticks := 0;
+  while ni <= ln do
+  begin
+    Inc(ticks);
+    if ticks >= BudgetClockEvery then
+    begin
+      ticks := 0;
+      if GWalkSpent then Exit(False);
+      if not BudgetCharge(BudgetClockEvery) then
+      begin
+        GWalkSpent := True;
+        Exit(False);
+      end;
+    end;
+    // '*' is tested FIRST. Round two tested the literal/'?' comparison first,
+    // and a pattern '*' landing on a name byte that is itself '*' was consumed
+    // as a literal pair with no star remembered: path_matchespattern("*a","*")
+    // answered 0. A name may legally contain '*' (dir_getfiles$ on Linux), so
+    // the star branch must win the tie. 100 of 7225 length-0..3 cases over
+    // {a,b,*,?} were wrong before this reordering; 0 of 7225 after it.
+    if (pi <= lp) and (p[pi] = '*') then
+    begin
+      starPi := pi;
+      starNi := ni;
+      Inc(pi);
+    end
+    else if (pi <= lp) and ((p[pi] = '?') or (p[pi] = n[ni])) then
+    begin
+      Inc(ni); Inc(pi);
+    end
+    else if starPi > 0 then
+    begin
+      // Resume the last star one character further along the name.
+      pi := starPi + 1;
+      Inc(starNi);
+      ni := starNi;
+    end
+    else
+      Exit(False);
+  end;
+  while (pi <= lp) and (p[pi] = '*') do Inc(pi);
+  Result := pi > lp;
 end;
 
 // --- directory listing ------------------------------------------------------
@@ -244,6 +365,7 @@ begin
   if FindFirst(base + '*', faAnyFile, sr) = 0 then
   begin
     repeat
+      if not WalkStep() then Break;
       if (sr.Name = '.') or (sr.Name = '..') then Continue;
       if (sr.Attr and faDirectory) <> 0 then
       begin
@@ -307,7 +429,9 @@ end;
 function CopyFileBytes(const ASrc, ADst: String): Boolean;
 var s: String;
 begin
-  Result := ReadAllBytes(ASrc, s) and WriteAllBytes(ADst, s);
+  // ReadAllBytes charges the read; the write is the same bytes back out.
+  Result := ReadAllBytes(ASrc, s) and BudgetCharge(Length(s)) and WriteAllBytes(ADst, s);
+  if GWalkSpent then Result := False;
 end;
 procedure DeleteTree(const ADir: String);
 var sr: TSearchRec; base: String;
@@ -319,6 +443,7 @@ begin
   if FindFirst(base + '*', faAnyFile, sr) = 0 then
   begin
     repeat
+      if not WalkStep() then Break;
       if (sr.Name = '.') or (sr.Name = '..') then Continue;
       if (sr.Attr and faDirectory) <> 0 then DeleteTree(base + sr.Name)
       else DeleteFile(base + sr.Name);
@@ -339,6 +464,7 @@ begin
   if FindFirst(sbase + '*', faAnyFile, sr) = 0 then
   begin
     repeat
+      if not WalkStep() then Break;
       if (sr.Name = '.') or (sr.Name = '..') then Continue;
       if (sr.Attr and faDirectory) <> 0 then CopyTree(sbase + sr.Name, dbase + sr.Name)
       else CopyFileBytes(sbase + sr.Name, dbase + sr.Name);
@@ -371,7 +497,12 @@ begin
   Result := ValInt(Ord(DirectoryExists(Args[0].Str)));
 end;
 function t_dir_isempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(ListToStr(Args[0].Str, '*', True, True, False) = '')); end;
+begin
+  Err := NoError();
+  WalkBegin();
+  Result := ValInt(Ord(ListToStr(Args[0].Str, '*', True, True, False) = ''));
+  if WalkRefused('dir_isempty', Err) then Result := ValInt(0);
+end;
 function t_dir_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   ok: Boolean;
@@ -394,7 +525,9 @@ begin
   begin
     // The local tree walker reports nothing, so ask the filesystem the question
     // the caller actually has: is the directory gone?
+    WalkBegin();
     DeleteTree(Args[0].Str);
+    if WalkRefused('dir_delete', Err) then Exit(ValInt(0));
     ok := not DirectoryExists(Args[0].Str);
   end
   else
@@ -408,7 +541,9 @@ begin
   Err := NoError();
   if Length(Args) >= 2 then pat := Args[1].Str else pat := '*';
   rec := (Length(Args) >= 3) and (AsDouble(Args[2]) <> 0);
+  WalkBegin();
   Result := ValStr(ListToStr(Args[0].Str, pat, True, False, rec));
+  if WalkRefused('dir_getfiles$', Err) then Result := ValStr('');
 end;
 function t_dir_getdirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var pat: String; rec: Boolean;
@@ -416,14 +551,18 @@ begin
   Err := NoError();
   if Length(Args) >= 2 then pat := Args[1].Str else pat := '*';
   rec := (Length(Args) >= 3) and (AsDouble(Args[2]) <> 0);
+  WalkBegin();
   Result := ValStr(ListToStr(Args[0].Str, pat, False, True, rec));
+  if WalkRefused('dir_getdirectories$', Err) then Result := ValStr('');
 end;
 function t_dir_getentries(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var pat: String;
 begin
   Err := NoError();
   if Length(Args) >= 2 then pat := Args[1].Str else pat := '*';
+  WalkBegin();
   Result := ValStr(ListToStr(Args[0].Str, pat, True, True, False));
+  if WalkRefused('dir_getentries$', Err) then Result := ValStr('');
 end;
 function t_dir_getparent(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep: Integer;
@@ -446,7 +585,12 @@ begin
   Result := ValInt(Ord(SetCurrentDir(Args[0].Str)));
 end;
 function t_dir_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(CopyTree(Args[0].Str, Args[1].Str))); end;
+begin
+  Err := NoError();
+  WalkBegin();
+  Result := ValInt(Ord(CopyTree(Args[0].Str, Args[1].Str)));
+  if WalkRefused('dir_copy', Err) then Result := ValInt(0);
+end;
 function t_dir_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
@@ -463,7 +607,12 @@ begin
   begin GIoError := 3; Result := ValInt(0); Exit; end;
   if (Length(Args) >= 3) and (AsDouble(Args[2]) = 0) and FileExists(Args[1].Str) then
   begin Result := ValInt(0); Exit; end;   // no overwrite, target exists
+  // EVERY entry point that reaches a charged helper clears the flag first. Not
+  // doing so is not merely a missing report: GWalkSpent LATCHES, so one refusal
+  // anywhere would make every later file_copy answer 0 for the rest of the run.
+  WalkBegin();
   Result := ValInt(Ord(CopyFileBytes(Args[0].Str, Args[1].Str)));
+  if WalkRefused('file_copy', Err) then Result := ValInt(0);
 end;
 function t_file_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -473,7 +622,12 @@ begin
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
 function t_file_createempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(WriteAllBytes(Args[0].Str, ''))); end;
+begin
+  Err := NoError();
+  WalkBegin();
+  Result := ValInt(Ord(WriteAllBytes(Args[0].Str, '')));
+  if WalkRefused('file_createempty', Err) then Result := ValInt(0);
+end;
 function t_file_getsize(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var fs: TFileStream;
 begin
@@ -488,8 +642,13 @@ function t_file_appendalltext(const Args: array of TValue; out Err: TPhosphorErr
 var s: String;
 begin
   Err := NoError();
+  // An append is a whole read AND a whole write: the file is charged twice, once
+  // by each half, which is what it actually costs.
+  WalkBegin();
   ReadAllBytes(Args[0].Str, s);
+  if WalkRefused('file_appendalltext', Err) then Exit(ValInt(0));
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, s + Args[1].Str)));
+  if WalkRefused('file_appendalltext', Err) then Result := ValInt(0);
 end;
 
 // --- bytes (a handle-backed buffer) -----------------------------------------
@@ -497,18 +656,22 @@ function t_file_readallbytes(const Args: array of TValue; out Err: TPhosphorErro
 var b: TPhosphorBytes;
 begin
   Err := NoError();
+  WalkBegin();
   b := TPhosphorBytes.Create();
   ReadAllBytes(Args[0].Str, b.Data);
   Result := ValHandle(RegisterHandle(b));
+  if WalkRefused('file_readallbytes@', Err) then ;   // the handle is still valid, empty
 end;
 function t_file_writeallbytes(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   // A bogus handle writes nothing (0) rather than obeying.
   Err := NoError();
+  WalkBegin();
   if (Args[1].Kind = vkHandle) and IsHandle(Args[1].Hnd) and (HandleObj(Args[1].Hnd) is TPhosphorBytes) then
     Result := ValInt(Ord(WriteAllBytes(Args[0].Str, TPhosphorBytes(HandleObj(Args[1].Hnd)).Data)))
   else
     Result := ValInt(0);
+  if WalkRefused('file_writeallbytes', Err) then Result := ValInt(0);
 end;
 
 // --- timestamps: files are real (FileSetDate/FileAge); dirs are in-process --
@@ -582,7 +745,12 @@ var cs: Boolean;
 begin
   Err := NoError();
   cs := (Length(Args) >= 3) and (AsDouble(Args[2]) <> 0);   // 2-arg form is lenient
+  // The direct route into MatchGlob. It is charged like the walk that also
+  // reaches it, and a match that stopped short must not read as a match that
+  // answered False -- that is the difference between "no" and "I gave up".
+  WalkBegin();
   Result := ValInt(Ord(MatchGlob(Args[0].Str, Args[1].Str, cs)));
+  if WalkRefused('path_matchespattern', Err) then Result := ValInt(0);
 end;
 function HasValidChars(const S: String; AForFile: Boolean): Boolean;
 var i: Integer; c: Char;

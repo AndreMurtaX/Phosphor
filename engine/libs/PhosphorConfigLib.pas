@@ -20,7 +20,8 @@ interface
 
 uses
   SysUtils, Classes, IniFiles,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox,
+  PhosphorBudget;
 
 procedure RegisterConfigFuncs(Reg: TPhosphorRegistry);
 
@@ -117,12 +118,17 @@ begin
   if S = '' then Result := 'General' else Result := S;
 end;
 
+{ QUADRATIC APPEND, charged as it goes (RULE 2). One append per section or key,
+  and the answer is copied each time, so an ini with many keys costs O(n * total)
+  where the walk that produced the list cost O(n). BudgetSpent() is what the two
+  callers report; the half-built answer is never returned. }
 function JoinList(L: TStrings): String;
 var i: Integer;
 begin
   Result := '';
   for i := 0 to L.Count - 1 do
   begin
+    if not BudgetAppend(Length(Result)) then begin Result := ''; Exit; end;
     if i > 0 then Result := Result + #10;
     Result := Result + L[i];
   end;
@@ -325,6 +331,8 @@ begin
   try
     c.Ini.ReadSections(l);
     Result := ValStr(JoinList(l));
+    if BudgetSpent() then
+    begin Err := BudgetRefusal('cfg_sections$'); Result := ValStr(''); end;
   finally
     l.Free;
   end;
@@ -338,6 +346,8 @@ begin
   try
     c.Ini.ReadSection(Args[1].Str, l);
     Result := ValStr(JoinList(l));
+    if BudgetSpent() then
+    begin Err := BudgetRefusal('cfg_keys$'); Result := ValStr(''); end;
   finally
     l.Free;
   end;

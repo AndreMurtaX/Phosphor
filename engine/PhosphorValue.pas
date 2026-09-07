@@ -111,6 +111,12 @@ type
   TVarType = (vtNumber, vtString, vtInt, vtHandle, vtBool, vtAny);
 
 // Constructors ---------------------------------------------------------------
+// ValDouble is the RAW cell constructor: it stores what it is given and checks
+// NOTHING, because FiniteD is built on it and something has to be able to make
+// the cell before the gate can judge it. Anything that computes or reads a
+// Double from outside the engine -- a deserialiser, a host API, a library that
+// returns a computed number -- must go through FiniteD (below) instead, or the
+// value space stops meeting the invariant the whole unit rests on.
 function ValDouble(const X: Double): TValue;
 function ValInt(const X: Int64): TValue;
 function ValStr(const S: String): TValue;
@@ -123,7 +129,36 @@ function AsDouble(const V: TValue): Double;                // widen int -> doubl
 function KindName(K: TValueKind): String;
 function ValToStr(const V: TValue): String;                // locale-independent
 
+// Finiteness: the invariant, its tests, and its gate --------------------------
+{ THE TESTS ARE BIT TESTS, AND THAT IS THE WHOLE POINT.
+
+  A Double's exponent field is all ones for exactly two things: Infinity (zero
+  fraction) and NaN (any other). Reading those bits is an integer operation, so
+  it cannot signal. Asking the same question with a COMPARISON can, and did --
+  see InI64Range below for the crash that taught it.
+
+  IsFiniteD says "an ordinary number": neither NaN nor +/-Infinity. IsNanD
+  separates the two cases when a caller needs different words for them. Neither
+  ever raises, for any of the 2^64 bit patterns a Double can hold. }
+function IsFiniteD(const D: Double): Boolean;
+function IsNanD(const D: Double): Boolean;
+{ True unless V is a vkDouble holding a non-finite Double. Every other kind --
+  int, string, handle, bool -- is finite by construction and answers True. }
+function IsFiniteVal(const V: TValue): Boolean;
+{ THE FINITENESS GATE, and the ONE supported way to put a computed or a read
+  Double into a TValue. On a finite X it fills R and answers NoError; on Inf or
+  NaN it leaves R empty and answers the catchable error the engine reports for
+  that condition. Public so that every producer outside this unit -- the
+  deserialiser, a host API, a library returning a computed Double -- can be one
+  call away from meeting the invariant. }
+function FiniteD(const AOp: String; const X: Double; out R: TValue): TPhosphorError;
+
 // Arithmetic kernel (each returns an error; on success Result = NoError) ------
+{ R MUST NOT ALIAS A OR B. `const` passes a TValue by reference and every
+  operator begins by clearing R, so `ValAdd(x, y, x)` zeroes the operand it is
+  about to read and answers for 0 instead. The VM never does this (it pops into
+  separate locals), and this is written down because a probe written while
+  reviewing these functions did, and quietly reported half its cases as safe. }
 function Negate(const A: TValue; out R: TValue): TPhosphorError;
 function ValAdd(const A, B: TValue; out R: TValue): TPhosphorError;
 function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -148,9 +183,13 @@ function DefaultValue(T: TVarType): TValue;
 function StoreCheck(T: TVarType; const V: TValue; out Coerced: TValue): TPhosphorError;
 
 // True if D can be rounded/truncated into an Int64 without FPC's Round/Trunc/Floor
-// raising EInvalidOp. NaN and +/-Inf answer False (their comparisons are all False),
-// so a caller guards a Double->Int64 conversion with this and reports overflow as a
-// catchable error instead of crashing the process.
+// raising EInvalidOp. NaN and +/-Inf answer False -- BY THE BIT TEST, which is
+// checked first and cannot signal, NOT by "their comparisons are all False". That
+// reasoning was written here, is wrong, and is what this whole guard layer exists
+// to correct: the comparison's VALUE would indeed be False, but on a NaN the
+// INSTRUCTION signals invalid-operation before there is a value, and that trap is
+// unmasked while a program runs. A caller guards a Double->Int64 conversion with
+// this and reports overflow as a catchable error instead of crashing the process.
 function InI64Range(const D: Double): Boolean;
 // Round D into an Int64, answering False instead of raising when it does not fit.
 // USE THIS, never a bare Round/Trunc, on any Double that came from a program: an
@@ -163,8 +202,43 @@ function TryD2I(const D: Double; out I: Int64): Boolean;
 // type's limit, so the bounds check that follows rejects it instead of being handed
 // a wrapped-around value that looks valid. NaN answers 0.
 // Use these, never `ArgI32(v)`, on anything a program supplied.
+//
+// NaN STILL ANSWERS 0, AND THAT IS WHY THESE ALSO RAISE A FLAG. The saturation
+// above is justified by "the bounds check that follows rejects it", and nobody had
+// ever checked that such a check exists. For +/-Inf it does and the justification
+// holds: High/Low sit outside every domain a library accepts, and a sweep of 81
+// single-numeric-argument library functions with +/-Inf, one process per case
+// through the documented host door, found not one silent answer. For a NaN the
+// justification is FALSE. 0 is an ordinary in-range count, and the same sweep
+// measured eight functions taking it and answering:
+//
+//   chr$ -> a byte 0 (a NUL spliced into a string)   bytestr$ -> a byte 0
+//   hex$ / bin$ / oct$ -> "0"                        colortostr$ -> "Black"
+//   pointer@ -> a live handle                        space$ -> ""
+//
+// where every one of them used to report a catchable error. NONE of the eight has
+// a domain to bound -- every Int64 is a legal argument to them -- so no return
+// value of this function can ever carry the fault. It has to be reported OUT OF
+// BAND, and that is what NanNarrowed below is for.
+//
+// A FLAG AND NOT AN EXCEPTION, deliberately. Making these raise would report at
+// every library call, because opCall wraps those in a net -- but the VM also calls
+// ArgI64 directly at opSeekFile, outside any net. Measured: `seek #1, x` with a
+// NaN x reports "seek: position must be 1 or more" catchably today (it was exit
+// 217 before this unit's bit test replaced `d <> d`), and a raise would put it
+// straight back to exit 217. A flag costs that site nothing.
 function ArgI32(const V: TValue): Integer;
 function ArgI64(const V: TValue): Int64;
+
+// THE FLAG ArgI32/ArgI64 RAISE, and its contract: it means "an Arg* narrowing has
+// met a NaN since this was last cleared", nothing more. It is per-thread, it is
+// never cleared by the narrowers themselves, and reading it does not clear it.
+// The consumer is TPhosphorRegistry's dispatch, which clears it before every
+// library call and turns a raised flag into a catchable error naming that
+// function -- so the report lands on the call that narrowed, and a narrowing with
+// no consumer (opSeekFile) simply keeps its old, total behaviour.
+function NanNarrowed: Boolean;
+procedure SetNanNarrowed(AValue: Boolean);
 
 // Checked Int64 primitives (exposed so libraries can test overflow-as-error) -
 function TryAddI64(const A, B: Int64; out R: Int64): Boolean;
@@ -174,8 +248,58 @@ function TryNegI64(const A: Int64; out R: Int64): Boolean;
 
 implementation
 
+type
+  { The same eight bytes seen as a number and as bits. Assigning a Double into
+    it is a MOVE, not an arithmetic operation, so it never signals -- which is
+    what lets the tests below look at a NaN without touching it. }
+  TDoubleBits = packed record
+    case Boolean of
+      False: (D: Double);
+      True:  (Q: QWord);
+  end;
+
+const
+  ExpMask   = QWord($7FF0000000000000);   // the exponent field, all ones
+  FracMask  = QWord($000FFFFFFFFFFFFF);   // the fraction field
+
 var
   InvariantFS: TFormatSettings;
+
+threadvar
+  { See NanNarrowed in the interface. Per-thread because two engines on two
+    threads must not read each other's narrowings, and because this unit was
+    thread-safe before this flag existed (its only other global, InvariantFS, is
+    written once at initialization and read-only afterwards) and has to stay so. }
+  FNanNarrowed: Boolean;
+
+function NanNarrowed: Boolean;
+begin
+  Result := FNanNarrowed;
+end;
+
+procedure SetNanNarrowed(AValue: Boolean);
+begin
+  FNanNarrowed := AValue;
+end;
+
+function IsFiniteD(const D: Double): Boolean;
+var b: TDoubleBits;
+begin
+  b.D := D;
+  Result := (b.Q and ExpMask) <> ExpMask;
+end;
+
+function IsNanD(const D: Double): Boolean;
+var b: TDoubleBits;
+begin
+  b.D := D;
+  Result := ((b.Q and ExpMask) = ExpMask) and ((b.Q and FracMask) <> 0);
+end;
+
+function IsFiniteVal(const V: TValue): Boolean;
+begin
+  Result := (V.Kind <> vkDouble) or IsFiniteD(V.Num);
+end;
 
 function ValDouble(const X: Double): TValue;
 begin
@@ -196,8 +320,24 @@ var d: Double;
 begin
   if V.Kind = vkInt then Exit(V.Int);     // exact: no trip through Double
   d := AsDouble(V);
-  if d <> d then Result := 0                                  // NaN
-  else if d >= 9223372036854775808.0 then Result := High(Int64)
+  { `d <> d` WAS THE NaN TEST HERE, and it is the bug this whole guard layer is
+    about: the VALUE compares unequal to itself, but the INSTRUCTION that asks
+    signals invalid-operation first, and that trap is unmasked while a program
+    runs. So the line documented as "NaN answers 0" killed the process instead.
+    The bit test cannot signal, and answers the same 0.
+
+    AND THE 0 IS RECORDED, because it is a value the caller's bounds check
+    accepts. Removing the trap removed the only report eight library functions
+    ever had; the flag is that report, and it costs this function one store on a
+    path a correct program never takes. See NanNarrowed in the interface. }
+  if IsNanD(d) then
+  begin
+    FNanNarrowed := True;
+    Exit(0);
+  end;
+  // Past the NaN, ordered comparison is safe again: an infinity compares
+  // cleanly, and saturates to the limit it is on the far side of.
+  if d >= 9223372036854775808.0 then Result := High(Int64)
   else if d <= -9223372036854775808.0 then Result := Low(Int64)
   else Result := Round(d);
 end;
@@ -223,21 +363,171 @@ end;
 
   which is what makes it safe to leave the invalid-operation trap unmasked while
   a program runs: Inf and NaN cannot enter the value space, so they cannot reach
-  a later operation and raise there. }
+  a later operation and raise there.
+
+  THAT INVARIANT IS A CLAIM ABOUT PRODUCERS, AND IT WAS BEING MADE ON TRUST. It
+  holds only if every route into the value space passes through here, and the
+  routes are not all in this file: the lexer (a literal), the .pbc reader (eight
+  bytes from a file), INPUT (text from a user), a library's computed result, and
+  a host calling into the engine with arguments of its own. Each has to gate its
+  own door -- and one of them, the constant pool, was not gating it, so a single
+  flipped bit in a shipped .pbc put a NaN into a program and the first `if x < 1`
+  killed the process.
+
+  A door left open must therefore not be fatal. The invariant is defended from
+  BOTH ends: this gate keeps a non-finite Double out of every result, and
+  FiniteOperand (below) keeps one out of every operand, so a value that gets in
+  anyway is reported by the next OPERATOR that meets it instead of trapping in
+  it. The unmasked trap stays unmasked, and stays unreachable.
+
+  AN OPERATOR IS NOT THE ONLY THING A NaN CAN MEET, AND SAYING OTHERWISE WAS
+  THIS UNIT'S OWN WORST CLAIM. What it usually meets first is a LIBRARY
+  ARGUMENT -- ArgI32/ArgI64 -- and those are total by contract: they saturate and
+  report nothing. Measured 2026-09-07 through the documented host door, one
+  process per case: of 81 single-numeric-argument library functions given a NaN,
+  eight answered a wrong value with no error at all, because the NaN reached a
+  narrower and not an operator. That third defence is now written down where it
+  belongs (see ArgI32/ArgI64 and NanNarrowed), and this paragraph exists so the
+  claim above is never again read as covering doors it does not cover. }
 function FiniteD(const AOp: String; const X: Double; out R: TValue): TPhosphorError;
 begin
-  if IsNan(X) then
+  if IsFiniteD(X) then
   begin
-    R := Default(TValue);
-    Exit(MakeError(peRuntime, AOp + ' has no numeric result'));
+    R := ValDouble(X);
+    Exit(NoError());
   end;
-  if IsInfinite(X) then
-  begin
-    R := Default(TValue);
-    Exit(MakeError(peIntOverflow, 'floating point overflow in ' + AOp));
-  end;
-  R := ValDouble(X);
+  R := Default(TValue);
+  if IsNanD(X) then
+    Result := MakeError(peRuntime, AOp + ' has no numeric result')
+  else
+    Result := MakeError(peIntOverflow, 'floating point overflow in ' + AOp);
+end;
+
+{ THE OPERAND GATE -- the other half of the invariant, and the half that was
+  missing.
+
+  FiniteD keeps a non-finite Double out of the RESULT of an operation. Nothing
+  kept one out of an OPERAND, and the gate is worthless without it: a value that
+  entered the space some other way -- a .pbc constant pool, a host handing the
+  engine an argument -- reaches an operator that then executes `Inf - Inf` or
+  `NaN < 1` and takes the whole process down before FiniteD is ever called. The
+  crash is not in the arithmetic; it is in the COMPARISON, and no result check
+  can be reached from behind one.
+
+  So every operator below asks this first, and answers a catchable error with
+  the same code FiniteD would have used for the same condition: peRuntime for a
+  NaN, peIntOverflow for an infinity. `on error goto` sees one vocabulary either
+  way.
+
+  THE GATE IS THE PRIMARY DEFENCE AND THE NET BELOW IS THE SECOND ONE, and they
+  are not alternatives. The gate is what gives a good message -- "^ was given a
+  value that is not a number" instead of "invalid floating point operation" --
+  and it is what removes the poison instead of postponing it. The net exists for
+  the case the gate cannot see: an FPU trap raised by an operation on two
+  perfectly finite operands. See TrappedInOperator. }
+function FiniteOperand(const AOp: String; const V: TValue): TPhosphorError;
+begin
   Result := NoError();
+  if V.Kind <> vkDouble then Exit;
+  if IsFiniteD(V.Num) then Exit;
+  if IsNanD(V.Num) then
+    Result := MakeError(peRuntime, AOp + ' was given a value that is not a number')
+  else
+    Result := MakeError(peIntOverflow, AOp + ' was given an infinite value');
+end;
+
+function FiniteOperands(const AOp: String; const A, B: TValue): TPhosphorError;
+begin
+  Result := FiniteOperand(AOp, A);
+  if IsError(Result) then Exit;
+  Result := FiniteOperand(AOp, B);
+end;
+
+{ THE NET, AND WHY THIS UNIT NEEDS ONE EVEN THOUGH ITS OPERATORS ARE TOTAL.
+
+  The unit header promises that errors are RETURNED, never raised. Until this
+  function existed that promise was CONDITIONAL on an FPU mask installed by a
+  different unit: TPhosphorVM.Run and RunFrom add exOverflow to the mask, which
+  is what turns `1e308 * 10` into +Inf for FiniteD to report. TPhosphorVM's
+  callback entry point does not install it, so the DOCUMENTED EMBEDDING PATTERN
+  (docs/embedding.md: Prepare, then CallFunction) runs the very same operators
+  with overflow UNMASKED. Measured on 2026-09-07, one case per process:
+
+    x * 10        EOverflow, exit 217, unhandled
+    x ^ 400       EOverflow, exit 217, unhandled
+    x + x         EOverflow, exit 217, unhandled
+    x / 1e-10     EOverflow, exit 217, unhandled
+
+  all with x = 1e308 and every operand finite -- so the operand gate is not
+  even reached, and there is no NaN anywhere in the story. The same expressions
+  inside Run report `floating point overflow in *` catchably. One engine, two
+  behaviours, decided by which door the host came in.
+
+  A unit cannot promise "never raises" and then rely on a mask its caller
+  happened to install. So the arithmetic operators carry a net, and the net
+  answers the SAME error the masked path answers -- peIntOverflow with FiniteD's
+  own wording -- so the two doors agree instead of differing.
+
+  WHAT IT DOES NOT DO. It does not replace the operand gate: a net cannot say
+  which operand was bad, and it would leave the poison in the value space for
+  the next operator to trap on. Every message a program actually sees still
+  comes from the gate; this only ever fires where the gate has nothing to look
+  at. Nor does it recover the VALUE an unmasked underflow or inexact would have
+  produced -- the trap fires before the result exists, so there is nothing to
+  return but an error.
+
+  ITS SCOPE IS exOverflow, and that is a deliberate limit rather than an
+  oversight. Overflow is the one FPU trap FPC leaves unmasked by default, so it
+  is the one a host actually meets. UNDERFLOW, DENORMAL and INEXACT are masked
+  both by FPC's startup default and by Run, and a host that unmasks them has a
+  process in which FPC's own FloatToStr cannot format a Double -- measured
+  2026-09-07: with exPrecision unmasked, a bare `AsDouble(ValInt(High(Int64)))`
+  exits 217, before any operator is entered. The net turns the operators' share
+  of that into a catchable error (with EInvalidOp's wording, which is what FPC
+  reports an inexact trap as); it does not and cannot make the configuration
+  work. ValCompare, AsDouble and TryD2I stay outside the net for the same
+  reason -- see the comment on ValCompare.
+
+  COST, MEASURED RATHER THAN ASSUMED. 3,000,000 iterations of a loop that does
+  nothing but arithmetic (`x = x * c`, `s = s + x`, `n = n + 1`), best of eleven
+  runs of bin\phosphor.exe:
+
+    no net                                     4.771 s
+    net in a wrapper around each operator      5.139 s   (+7.7%)
+    net inside each operator's own body        4.892 s   (+2.5%)
+
+  Which is why it is written the third way. The first way is the tidier diff and
+  costs three times as much: the extra CALL is most of the price, not the try
+  block -- FPC 3.2.2 on x86_64-win64 uses table-driven SEH, so entering a try
+  emits no instructions. 2.5% on a loop that is 100% arithmetic is the ceiling,
+  not the typical cost; a program that also touches strings, files or the
+  registry pays proportionally less. }
+{ IT CATCHES ARITHMETIC FAULTS AND NOTHING ELSE. Each operator's handler names
+  EMathError (EInvalidOp, EZeroDivide, EOverflow, EUnderflow) and EIntError
+  (EDivByZero, ERangeError, EIntOverflow) -- sysutilh.inc:143-153 -- and not
+  their common ancestor and not Exception.
+
+  A net that caught Exception would also swallow EOutOfMemory from a string
+  concatenation, EAccessViolation, and EStackOverflow, and report each of them
+  as "+ could not be computed". Those are not arithmetic faults, they are not
+  this unit's to answer for, and turning them into a catchable BASIC error would
+  let a program carry on inside a process that is already broken. They propagate
+  exactly as they did before the net existed: to opCall's net if a library call
+  is on the stack, and to the host otherwise. }
+function TrappedInOperator(const AOp: String; E: Exception;
+                           out R: TValue): TPhosphorError;
+begin
+  R := Default(TValue);
+  if E is EOverflow then
+    // FiniteD's exact wording for the same condition, so `on error goto` reads
+    // one vocabulary whether the mask was installed or not.
+    Result := MakeError(peIntOverflow, 'floating point overflow in ' + AOp)
+  else if E is EZeroDivide then
+    Result := MakeError(peDivByZero, 'division by zero in ' + AOp)
+  else if E is EInvalidOp then
+    Result := MakeError(peRuntime, AOp + ' has no numeric result')
+  else
+    Result := MakeError(peRuntime, AOp + ' could not be computed: ' + E.Message);
 end;
 
 function ValInt(const X: Int64): TValue;
@@ -294,6 +584,11 @@ begin
   end;
 end;
 
+{ TOTAL BY DESIGN, INCLUDING ON A VALUE THE INVARIANT FORBIDS. FloatToStr reads
+  the exponent bits rather than comparing, so it answers 'Nan' / '+Inf' / '-Inf'
+  instead of signalling, and this is the ONE operation deliberately left able to
+  see a non-finite Double: reporting a poisoned value is how a program and an
+  error message name it. Every arithmetic operator refuses it instead. }
 function ValToStr(const V: TValue): String;
 begin
   case V.Kind of
@@ -307,11 +602,24 @@ begin
   end;
 end;
 
+{ THE GUARD THAT WAS NOT A GUARD.
+
+  The comment here used to say NaN answers False "because their comparisons are
+  all False". That is true of the VALUE and false of the INSTRUCTION. An ordered
+  compare against a NaN raises INVALID-OPERATION, and the VM leaves that trap
+  unmasked precisely BECAUSE this function is supposed to be safe -- so the one
+  routine every Double->Int64 conversion in the engine is guarded by was itself
+  the crash: InI64Range(NaN) exited 217 with an unhandled EInvalidOp, and every
+  caller written to be safe because it calls TryD2I inherited it.
+
+  The fix is to answer the non-finite cases from the BITS, before any comparison
+  runs. The answer is unchanged -- NaN and both infinities are still False, and
+  every finite Double still gets exactly the comparison it got before. }
 function InI64Range(const D: Double): Boolean;
 begin
+  if not IsFiniteD(D) then Exit(False);
   // 2^63 (= 9223372036854775808) and -2^63 are both exactly representable as a
-  // Double; a value strictly inside [-2^63, 2^63) rounds to an Int64 safely. NaN
-  // and Inf fail both comparisons, so they answer False.
+  // Double; a value strictly inside [-2^63, 2^63) rounds to an Int64 safely.
   Result := (D >= -9223372036854775808.0) and (D < 9223372036854775808.0);
 end;
 
@@ -387,57 +695,84 @@ begin
 end;
 
 // --- arithmetic -------------------------------------------------------------
+{ EVERY ARITHMETIC OPERATOR FROM HERE TO ValPow HAS THE SAME SHAPE: its whole
+  body sits inside `try ... except on E: EMathError ... on E: EIntError ... end`,
+  each arm calling TrappedInOperator. Those two classes and NOT their common
+  ancestor and NOT Exception -- an earlier draft of this sentence said
+  `on E: Exception`, which would have told a reader that an EAccessViolation
+  raised under an operator is swallowed and reported as "+ could not be computed".
+  It is not; see TrappedInOperator's second comment for why that matters.
+  The frame is around the WHOLE body on purpose -- that is what makes the claim
+  checkable by reading rather than by enumerating: there is no instruction in
+  the operator that is outside it, so no future edit can add an FP operation
+  that escapes the net. Each `Exit(...)` inside still returns exactly the error
+  it returned before; Exit from a try block is ordinary control flow, not an
+  exception. See TrappedInOperator for why the net exists and what it costs. }
 function Negate(const A: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
 begin
-  R := Default(TValue);
-  case A.Kind of
-    vkInt:
-      if TryNegI64(A.Int, n) then
-        R := ValInt(n)
-      else
-        Exit(MakeError(peIntOverflow, 'integer overflow negating ' + IntToStr(A.Int)));
-    vkDouble:
-      Exit(FiniteD('unary minus', -A.Num, R));
-  else
-    Exit(MakeError(peTypeMismatch, 'unary minus needs a number, got ' + KindName(A.Kind)));
+  try
+    R := Default(TValue);
+    Result := FiniteOperand('unary minus', A);
+    if IsError(Result) then Exit;
+    case A.Kind of
+      vkInt:
+        if TryNegI64(A.Int, n) then
+          R := ValInt(n)
+        else
+          Exit(MakeError(peIntOverflow, 'integer overflow negating ' + IntToStr(A.Int)));
+      vkDouble:
+        Exit(FiniteD('unary minus', -A.Num, R));
+    else
+      Exit(MakeError(peTypeMismatch, 'unary minus needs a number, got ' + KindName(A.Kind)));
+    end;
+    Result := NoError();
+  except
+    on E: EMathError do Result := TrappedInOperator('unary minus', E, R);
+    on E: EIntError  do Result := TrappedInOperator('unary minus', E, R);
   end;
-  Result := NoError();
 end;
 
 function ValAdd(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
 begin
-  R := Default(TValue);
-  // The kind of a '+' is decided by its LEFT operand -- the same rule the parser
-  // uses for the first token of an expression. A string on the left makes '+'
-  // concatenation: the right side is coerced to its text (a number via its str$
-  // form) and the two are joined. A number on the left makes '+' arithmetic, so
-  // a string on the RIGHT is a type mismatch, not a silent concatenation -- the
-  // reverse of a working `"text" + n` (see tests/suite/41_syntax_string_plus_number).
-  if A.Kind = vkString then
-  begin
-    R := ValStr(ValToStr(A) + ValToStr(B));
-    Exit(NoError());
-  end;
-  if B.Kind = vkString then
-    Exit(MakeError(peTypeMismatch,
-      'cannot add text to a number; a ''+'' that begins with a number is ' +
-      'arithmetic -- put the text first, or convert with str$'));
-  Result := NumericPair(A, B, '+');
-  if IsError(Result) then Exit;
-  if BothInt(A, B) then
-  begin
-    if TryAddI64(A.Int, B.Int, n) then
-      R := ValInt(n)
+  try
+    R := Default(TValue);
+    // The kind of a '+' is decided by its LEFT operand -- the same rule the parser
+    // uses for the first token of an expression. A string on the left makes '+'
+    // concatenation: the right side is coerced to its text (a number via its str$
+    // form) and the two are joined. A number on the left makes '+' arithmetic, so
+    // a string on the RIGHT is a type mismatch, not a silent concatenation -- the
+    // reverse of a working `"text" + n` (see tests/suite/41_syntax_string_plus_number).
+    if A.Kind = vkString then
+    begin
+      R := ValStr(ValToStr(A) + ValToStr(B));
+      Exit(NoError());
+    end;
+    if B.Kind = vkString then
+      Exit(MakeError(peTypeMismatch,
+        'cannot add text to a number; a ''+'' that begins with a number is ' +
+        'arithmetic -- put the text first, or convert with str$'));
+    Result := NumericPair(A, B, '+');
+    if IsError(Result) then Exit;
+    Result := FiniteOperands('+', A, B);
+    if IsError(Result) then Exit;
+    if BothInt(A, B) then
+    begin
+      if TryAddI64(A.Int, B.Int, n) then
+        R := ValInt(n)
+      else
+        Exit(MakeError(peIntOverflow,
+          'integer overflow: ' + IntToStr(A.Int) + ' + ' + IntToStr(B.Int)));
+    end
     else
-      Exit(MakeError(peIntOverflow,
-        'integer overflow: ' + IntToStr(A.Int) + ' + ' + IntToStr(B.Int)));
-  end
-  else
-    Exit(FiniteD('+', AsDouble(A) + AsDouble(B), R));
+      Exit(FiniteD('+', AsDouble(A) + AsDouble(B), R));
+  except
+    on E: EMathError do Result := TrappedInOperator('+', E, R);
+    on E: EIntError  do Result := TrappedInOperator('+', E, R);
+  end;
 end;
 
 function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -446,84 +781,119 @@ var
   k: Integer;
   d: Double;
 begin
-  R := Default(TValue);
-  // 'string - n' truncates the last n characters (the string keeps the rest).
-  if A.Kind = vkString then
-  begin
-    if not IsNumeric(B) then
-      Exit(MakeError(peTypeMismatch, 'cannot subtract ' + KindName(B.Kind) + ' from a string'));
-    // Compare BEFORE narrowing. Round(1e30) raises EInvalidOp, and "remove more
-    // characters than the string has" is a clamp, not an error.
-    d := AsDouble(B);
-    if d >= Length(A.Str) then k := 0
-    else if d <= 0 then k := Length(A.Str)
-    else k := Length(A.Str) - Round(d);
-    R := ValStr(Copy(A.Str, 1, k));
-    Exit(NoError());
-  end;
-  Result := NumericPair(A, B, '-');
-  if IsError(Result) then Exit;
-  if BothInt(A, B) then
-  begin
-    if TrySubI64(A.Int, B.Int, n) then
-      R := ValInt(n)
+  try
+    R := Default(TValue);
+    // 'string - n' truncates the last n characters (the string keeps the rest).
+    if A.Kind = vkString then
+    begin
+      if not IsNumeric(B) then
+        Exit(MakeError(peTypeMismatch, 'cannot subtract ' + KindName(B.Kind) + ' from a string'));
+      // The right operand is a COUNT, so it is arithmetic and gets the same gate
+      // as any other: the comparisons two lines down are ordered, and an ordered
+      // comparison against a NaN signals before it can answer.
+      Result := FiniteOperand('-', B);
+      if IsError(Result) then Exit;
+      // Compare BEFORE narrowing. Round(1e30) raises EInvalidOp, and "remove more
+      // characters than the string has" is a clamp, not an error.
+      d := AsDouble(B);
+      if d >= Length(A.Str) then k := 0
+      else if d <= 0 then k := Length(A.Str)
+      else k := Length(A.Str) - Round(d);
+      R := ValStr(Copy(A.Str, 1, k));
+      Exit(NoError());
+    end;
+    Result := NumericPair(A, B, '-');
+    if IsError(Result) then Exit;
+    Result := FiniteOperands('-', A, B);
+    if IsError(Result) then Exit;
+    if BothInt(A, B) then
+    begin
+      if TrySubI64(A.Int, B.Int, n) then
+        R := ValInt(n)
+      else
+        Exit(MakeError(peIntOverflow,
+          'integer overflow: ' + IntToStr(A.Int) + ' - ' + IntToStr(B.Int)));
+    end
     else
-      Exit(MakeError(peIntOverflow,
-        'integer overflow: ' + IntToStr(A.Int) + ' - ' + IntToStr(B.Int)));
-  end
-  else
-    Exit(FiniteD('-', AsDouble(A) - AsDouble(B), R));
+      Exit(FiniteD('-', AsDouble(A) - AsDouble(B), R));
+  except
+    on E: EMathError do Result := TrappedInOperator('-', E, R);
+    on E: EIntError  do Result := TrappedInOperator('-', E, R);
+  end;
 end;
 
 function ValMul(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
 begin
-  R := Default(TValue);
-  Result := NumericPair(A, B, '*');
-  if IsError(Result) then Exit;
-  if BothInt(A, B) then
-  begin
-    if TryMulI64(A.Int, B.Int, n) then
-      R := ValInt(n)
+  try
+    R := Default(TValue);
+    Result := NumericPair(A, B, '*');
+    if IsError(Result) then Exit;
+    Result := FiniteOperands('*', A, B);
+    if IsError(Result) then Exit;
+    if BothInt(A, B) then
+    begin
+      if TryMulI64(A.Int, B.Int, n) then
+        R := ValInt(n)
+      else
+        Exit(MakeError(peIntOverflow,
+          'integer overflow: ' + IntToStr(A.Int) + ' * ' + IntToStr(B.Int)));
+    end
     else
-      Exit(MakeError(peIntOverflow,
-        'integer overflow: ' + IntToStr(A.Int) + ' * ' + IntToStr(B.Int)));
-  end
-  else
-    Exit(FiniteD('*', AsDouble(A) * AsDouble(B), R));
+      Exit(FiniteD('*', AsDouble(A) * AsDouble(B), R));
+  except
+    on E: EMathError do Result := TrappedInOperator('*', E, R);
+    on E: EIntError  do Result := TrappedInOperator('*', E, R);
+  end;
 end;
 
 function ValDivReal(const A, B: TValue; out R: TValue): TPhosphorError;
 begin
-  R := Default(TValue);
-  Result := NumericPair(A, B, '/');
-  if IsError(Result) then Exit;
-  if AsDouble(B) = 0 then
-    Exit(MakeError(peDivByZero, 'division by zero'));
-  // The slash is ALWAYS real division: int / int is a double.
-  Exit(FiniteD('/', AsDouble(A) / AsDouble(B), R));
+  try
+    R := Default(TValue);
+    Result := NumericPair(A, B, '/');
+    if IsError(Result) then Exit;
+    // Before the `= 0` below: that is an ordered compare too, and a NaN divisor
+    // signalled there rather than reaching the division at all.
+    Result := FiniteOperands('/', A, B);
+    if IsError(Result) then Exit;
+    if AsDouble(B) = 0 then
+      Exit(MakeError(peDivByZero, 'division by zero'));
+    // The slash is ALWAYS real division: int / int is a double.
+    Exit(FiniteD('/', AsDouble(A) / AsDouble(B), R));
+  except
+    on E: EMathError do Result := TrappedInOperator('/', E, R);
+    on E: EIntError  do Result := TrappedInOperator('/', E, R);
+  end;
 end;
 
 function ValDivInt(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   ai, bi, q: Int64;
 begin
-  R := Default(TValue);
-  Result := NumericPair(A, B, '\');
-  if IsError(Result) then Exit;
-  if A.Kind = vkInt then ai := A.Int
-  else if not TryD2I(A.Num, ai) then
-    Exit(MakeError(peIntOverflow, ValToStr(A) + ' is out of integer range'));
-  if B.Kind = vkInt then bi := B.Int
-  else if not TryD2I(B.Num, bi) then
-    Exit(MakeError(peIntOverflow, ValToStr(B) + ' is out of integer range'));
-  if bi = 0 then
-    Exit(MakeError(peDivByZero, 'integer division by zero'));
-  if (ai = Low(Int64)) and (bi = -1) then
-    Exit(MakeError(peIntOverflow, 'integer overflow in \'));
-  q := ai div bi;
-  R := ValInt(q);
+  try
+    R := Default(TValue);
+    Result := NumericPair(A, B, '\');
+    if IsError(Result) then Exit;
+    Result := FiniteOperands('\', A, B);
+    if IsError(Result) then Exit;
+    if A.Kind = vkInt then ai := A.Int
+    else if not TryD2I(A.Num, ai) then
+      Exit(MakeError(peIntOverflow, ValToStr(A) + ' is out of integer range'));
+    if B.Kind = vkInt then bi := B.Int
+    else if not TryD2I(B.Num, bi) then
+      Exit(MakeError(peIntOverflow, ValToStr(B) + ' is out of integer range'));
+    if bi = 0 then
+      Exit(MakeError(peDivByZero, 'integer division by zero'));
+    if (ai = Low(Int64)) and (bi = -1) then
+      Exit(MakeError(peIntOverflow, 'integer overflow in \'));
+    q := ai div bi;
+    R := ValInt(q);
+  except
+    on E: EMathError do Result := TrappedInOperator('\', E, R);
+    on E: EIntError  do Result := TrappedInOperator('\', E, R);
+  end;
 end;
 
 function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
@@ -531,33 +901,40 @@ var
   ai, bi: Int64;
   q: Double;
 begin
-  R := Default(TValue);
-  Result := NumericPair(A, B, 'mod');
-  if IsError(Result) then Exit;
-  if BothInt(A, B) then
-  begin
-    if B.Int = 0 then
-      Exit(MakeError(peDivByZero, 'mod by zero'));
-    // Low(Int64) mod -1 is mathematically 0, but x86 computes the remainder with
-    // the same idiv as the quotient -- and THAT overflows and traps. ValDivInt has
-    // guarded this since it was written; mod never did, so it killed the process.
-    if (A.Int = Low(Int64)) and (B.Int = -1) then
-      R := ValInt(0)
+  try
+    R := Default(TValue);
+    Result := NumericPair(A, B, 'mod');
+    if IsError(Result) then Exit;
+    Result := FiniteOperands('mod', A, B);
+    if IsError(Result) then Exit;
+    if BothInt(A, B) then
+    begin
+      if B.Int = 0 then
+        Exit(MakeError(peDivByZero, 'mod by zero'));
+      // Low(Int64) mod -1 is mathematically 0, but x86 computes the remainder with
+      // the same idiv as the quotient -- and THAT overflows and traps. ValDivInt has
+      // guarded this since it was written; mod never did, so it killed the process.
+      if (A.Int = Low(Int64)) and (B.Int = -1) then
+        R := ValInt(0)
+      else
+        R := ValInt(A.Int mod B.Int);
+    end
     else
-      R := ValInt(A.Int mod B.Int);
-  end
-  else
-  begin
-    if AsDouble(B) = 0 then
-      Exit(MakeError(peDivByZero, 'mod by zero'));
-    // The quotient stays a DOUBLE. Trunc() narrowed it to Int64 and raised
-    // EInvalidOp -- killing the process -- for any pair whose quotient exceeded
-    // Int64 range, e.g. `1e30 mod 2.5`. Int() truncates within Double, so there is
-    // no range to exceed and the remainder is simply computed.
-    q := Int(AsDouble(A) / AsDouble(B));
-    ai := 0; bi := 0; // silence "unused" on some paths
-    if (ai <> 0) or (bi <> 0) then ;
-    Exit(FiniteD('mod', AsDouble(A) - q * AsDouble(B), R));
+    begin
+      if AsDouble(B) = 0 then
+        Exit(MakeError(peDivByZero, 'mod by zero'));
+      // The quotient stays a DOUBLE. Trunc() narrowed it to Int64 and raised
+      // EInvalidOp -- killing the process -- for any pair whose quotient exceeded
+      // Int64 range, e.g. `1e30 mod 2.5`. Int() truncates within Double, so there is
+      // no range to exceed and the remainder is simply computed.
+      q := Int(AsDouble(A) / AsDouble(B));
+      ai := 0; bi := 0; // silence "unused" on some paths
+      if (ai <> 0) or (bi <> 0) then ;
+      Exit(FiniteD('mod', AsDouble(A) - q * AsDouble(B), R));
+    end;
+  except
+    on E: EMathError do Result := TrappedInOperator('mod', E, R);
+    on E: EIntError  do Result := TrappedInOperator('mod', E, R);
   end;
 end;
 
@@ -567,11 +944,32 @@ end;
   The VM masks overflow, underflow, precision and denormal, and deliberately
   leaves INVALID-OPERATION and DIVIDE-BY-ZERO unmasked, on the premise that
   neither can arise from a finite value space. Power breaks that premise from
-  inside: for a whole exponent it ends in `1.0/intpower`, which is literally
-  1.0/0.0 when the base is zero and the exponent negative; for any other exponent
-  it computes exp(e * ln(b)), and ln of a negative base raises. Neither result
-  ever reaches FiniteD, so the finiteness gate downstream cannot help -- the
-  process was already dead. `0 ^ -1` and `(-8) ^ 0.5` each killed it.
+  inside, and WHERE it breaks it was read out of the RTL rather than guessed --
+  C:\lazarus\fpc\3.2.2\source\rtl\objpas\math.pp, `power` at line 1044 and
+  `intpower` at 1057:
+
+      power:    if (abs(exponent)<=maxint) and (frac(exponent)=0.0) then
+                  result:=intpower(base,trunc(exponent))
+                else
+                  result:=exp(exponent * ln (base));
+      intpower: if exponent<0 then
+                  base:=1.0/base;          // the BASE, not the result
+
+  So a whole negative exponent divides by the BASE, once, up front: `0 ^ -1` is
+  literally 1.0/0.0 and raises EZeroDivide. Any non-whole exponent goes to
+  exp(e*ln(b)), and ln of a negative base raises EInvalidOp. Neither result ever
+  reaches FiniteD, so the finiteness gate downstream cannot help -- the process
+  was already dead. `0 ^ -1` and `(-8) ^ 0.5` each killed it, and the two guards
+  below are what stop them.
+
+  THERE IS NO `1.0/result` IN THIS RTL, and an earlier revision of this function
+  was rejected for assuming there was: it replaced Power(base, negative) with
+  1.0/Power(base, positive), which is a DIFFERENT computation -- the positive
+  power overflows to +Inf where the reciprocated base does not, and 1.0/+Inf is
+  0. It silently answered 0 for the entire subnormal result band, 8964 swept
+  values including `2 ^ -1074` and `10 ^ -310`. The branch is gone; a negative
+  whole exponent is handed to Power exactly as it always was. If this ever needs
+  revisiting, OPEN math.pp FIRST -- the comment above quotes what is there.
 
   The third case is subtler and was found by probing rather than reported: Power
   takes its intpower path only for an exponent that fits an Integer, so a NEGATIVE
@@ -585,35 +983,69 @@ var
   base, expo, mag: Double;
   negative: Boolean;
 begin
-  R := Default(TValue);
-  Result := NumericPair(A, B, '^');
-  if IsError(Result) then Exit;
-  base := AsDouble(A);
-  expo := AsDouble(B);
+  try
+    R := Default(TValue);
+    Result := NumericPair(A, B, '^');
+    if IsError(Result) then Exit;
+    // Every domain test below is an ordered comparison, so the operands have to be
+    // finite before the FIRST of them runs -- the checks that make this operator
+    // safe were themselves the unsafe part on a non-finite input.
+    Result := FiniteOperands('^', A, B);
+    if IsError(Result) then Exit;
+    base := AsDouble(A);
+    expo := AsDouble(B);
 
-  if (base = 0) and (expo < 0) then
-    Exit(MakeError(peDivByZero,
-      'division by zero: ' + ValToStr(A) + ' ^ ' + ValToStr(B)));
+    if (base = 0) and (expo < 0) then
+      Exit(MakeError(peDivByZero,
+        'division by zero: ' + ValToStr(A) + ' ^ ' + ValToStr(B)));
 
-  if (base < 0) and (expo <> Int(expo)) then
-    Exit(MakeError(peRuntime,
-      '^ has no numeric result: ' + ValToStr(A) + ' ^ ' + ValToStr(B) +
-      ' (a negative base needs a whole-number exponent)'));
+    if (base < 0) and (expo <> Int(expo)) then
+      Exit(MakeError(peRuntime,
+        '^ has no numeric result: ' + ValToStr(A) + ' ^ ' + ValToStr(B) +
+        ' (a negative base needs a whole-number exponent)'));
 
-  if (base < 0) and (Abs(expo) > MaxInt) then
-  begin
-    mag := Power(-base, expo);
-    // Above 2^53 consecutive integers are no longer representable, so every
-    // Double that large is even and the result is positive.
-    negative := (Abs(expo) <= 9007199254740992.0) and Odd(Trunc(expo));
-    if negative then mag := -mag;
-    Exit(FiniteD('^', mag, R));
+    if (base < 0) and (Abs(expo) > MaxInt) then
+    begin
+      mag := Power(-base, expo);
+      // Above 2^53 consecutive integers are no longer representable, so every
+      // Double that large is even and the result is positive.
+      negative := (Abs(expo) <= 9007199254740992.0) and Odd(Trunc(expo));
+      if negative then mag := -mag;
+      Exit(FiniteD('^', mag, R));
+    end;
+
+    // '^' is always a double (2 ^ 0.5 is meaningful).
+    // A NEGATIVE EXPONENT IS PASSED STRAIGHT THROUGH -- see the header comment:
+    // intpower reciprocates the base before it multiplies, which is the ordering
+    // that keeps `2 ^ -1074` at the smallest subnormal instead of underflowing an
+    // intermediate to zero. Rewriting this as a reciprocal of the positive power
+    // is the one change this function must never take again.
+    Exit(FiniteD('^', Power(base, expo), R));
+  except
+    on E: EMathError do Result := TrappedInOperator('^', E, R);
+    on E: EIntError  do Result := TrappedInOperator('^', E, R);
   end;
-
-  // '^' is always a double (2 ^ 0.5 is meaningful).
-  Exit(FiniteD('^', Power(base, expo), R));
 end;
 
+{ ValCompare is deliberately left WITHOUT a net, and the reason is narrower than
+  "a comparison cannot signal" -- which is true of the compare instruction and
+  not of this function.
+
+  With both operands finite (the gate below sees to that), the FP instructions
+  this function can execute are an ordered compare of two Doubles, which signals
+  nothing, and -- on the mixed int/double path -- an Int64-to-Double widening,
+  whose only possible exception is INEXACT. Inexact is masked by FPC's own
+  startup default and again by TPhosphorVM.Run, so under every mask this engine
+  or its compiler installs, ValCompare cannot raise.
+
+  MEASURED, not assumed: with exPrecision deliberately UNMASKED,
+  `ValCompare(coLT, ValInt(High(Int64)), ValDouble(1.5))` exits 217 with
+  EInvalidOp (FPC reports the inexact trap under that class). So does a bare
+  `AsDouble(ValInt(High(Int64)))`, and so does `TryD2I(3.7)`. That configuration
+  is out of scope on purpose: in it, FPC's own FloatToStr cannot format a
+  Double, so nothing in this unit -- netted or not -- would be usable anyway.
+  The net exists for exOVERFLOW, which FPC leaves UNMASKED by default and which
+  a host reaches through TPhosphorVM.CallUserFunc; see TrappedInOperator. }
 function ValCompare(Op: TCmpOp; const A, B: TValue; out R: TValue): TPhosphorError;
 var
   c: Integer;
@@ -631,6 +1063,19 @@ begin
   end
   else if IsNumeric(A) and IsNumeric(B) then
   begin
+    { A COMPARISON IS WHERE THIS CLASS ACTUALLY KILLED THE PROCESS -- not the
+      arithmetic, the compare. `if x < 1`, on a variable holding a NaN that
+      arrived in a .pbc constant pool, was exit 217 with an unhandled EInvalidOp,
+      past `on error goto`, in the two lines below.
+
+      A comparison also has no honest answer to give here: the -1/0/1 collapse
+      cannot express "unordered", so quietly answering False for every operator
+      would leave a poisoned value inside a program that believes it tested it.
+      The refusal IS the report. The gate sits in this branch only, so comparing
+      a number with a string still says what it always said -- that is a type
+      error whatever the number is. }
+    Result := FiniteOperands('comparison', A, B);
+    if IsError(Result) then Exit;
     if AsDouble(A) < AsDouble(B) then c := -1
     else if AsDouble(A) > AsDouble(B) then c := 1
     else c := 0;
@@ -742,6 +1187,26 @@ var
 begin
   Coerced := V;
   Result := NoError();
+  { THE STORE IS THE OTHER DOOR INTO THE VALUE SPACE. A variable is where a value
+    OUTLIVES the operation that made it, so a non-finite Double stored into one is
+    a poisoned cell any later expression can pick up -- and the fault would then
+    be reported at some unrelated line that merely reads the variable. Rejecting
+    it here names the value at the assignment that tried it.
+
+    Only the three types that CAN hold a Double are asked. Storing one into a
+    string$, a bool? or a handle@ is a type error whatever the number is, and
+    that message says more than this one would. }
+  if (V.Kind = vkDouble) and (T in [vtNumber, vtInt, vtAny]) and
+     (not IsFiniteD(V.Num)) then
+  begin
+    // The same two codes FiniteOperand and FiniteD use for the same two
+    // conditions, so a handler reads one vocabulary wherever the fault surfaces.
+    if IsNanD(V.Num) then
+      Exit(MakeError(peRuntime,
+        ValToStr(V) + ' is not a number and cannot be stored'));
+    Exit(MakeError(peIntOverflow,
+      ValToStr(V) + ' is not a finite number and cannot be stored'));
+  end;
   case T of
     vtNumber: ok := (V.Kind = vkInt) or (V.Kind = vkDouble);
     vtInt:

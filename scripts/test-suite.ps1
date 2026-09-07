@@ -194,6 +194,7 @@ else {
         @{ name='probe_limits';   src='tests\probe_limits.lpr' },
         @{ name='probe_bytecode'; src='tests\probe_bytecode.lpr' },
         @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
+        @{ name='probe_budget';   src='scripts\probe_budget.lpr' },
         @{ name='probe_crt';      src='tests\probe_crt.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' }
     )
@@ -243,6 +244,13 @@ else {
 #                      leave it nil -- a nil seam answers silently, which is how
 #                      the GUI host of the day shipped answering every INPUT with an
 #                      empty line; it has since been merged into phosphor
+#   check-budget.py    every library loop or allocation over a quantity the VM cannot
+#                      see -- a count from a script, a directory, a decompressed
+#                      stream, a wait, a regex -- consults engine/PhosphorBudget.pas
+#                      (or is exempt, by name, with a reason). The three execution
+#                      ceilings are tested BETWEEN instructions and a library call is
+#                      one instruction, so without this rule a single regex_find$,
+#                      string$ or pause ran for ever with every ceiling set
 #   check-suffix.py    a registered name's type SUFFIX is the kind its body returns.
 #                      The suffix is the whole return-type system for built-ins and
 #                      nothing enforced it: fifteen registrations lied, across three
@@ -264,7 +272,7 @@ if (-not $py) {
     Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
     $allOk = $false
 } else {
-    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py')) {
+    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py', 'check-budget.py')) {
         $gp = Join-Path $here $gate
         # The comment above says a gate that quietly does not run is worse than no
         # gate, and then this line skipped a gate whose FILE was missing -- exactly

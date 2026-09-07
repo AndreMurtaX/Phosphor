@@ -73,6 +73,8 @@ ALLOWED = {
     # table, and a helper that inspects an already-open archive.
     'PhosphorZipLib.pas:RegisterZipFuncs': 'the registration table; opens nothing',
     'PhosphorZipLib.pas:ArchiveIsSafe': 'inspects an already-open TUnZipper, binds no path',
+    'PhosphorZipLib.pas:ArchiveFitsBudget': 'the size half of the same inspection: adds up the '
+        'declared entry sizes of an already-open TUnZipper and binds no path',
 }
 
 SCAN_DIRS = [

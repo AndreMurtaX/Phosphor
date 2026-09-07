@@ -22,7 +22,8 @@ unit PhosphorArrayLib;
 interface
 
 uses
-  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles,
+  PhosphorBudget;
 
 type
   { An N-dimensional, 1-based array of TValue whose element kind is numeric,
@@ -179,6 +180,26 @@ begin
     Err := MakeError(peIntOverflow, Format(
       'array is too large: %d elements of %d bytes each is past the %d-byte limit',
       [total, SizeOf(TValue), High(Int64)]));
+    Exit;
+  end;
+  // AND THE BUDGET, for the sizes that DO fit. The two checks above are about
+  // representability -- they refuse only what cannot be addressed at all. A
+  // dim@(50000000) is perfectly representable, allocates 2.4 GB and spends
+  // seconds filling it with the default value, inside ONE opCall that no ceiling
+  // in the VM can see. RULE 1: the element count is derivable from the arguments
+  // right here, so ask before allocating rather than after.
+  //
+  // ONE UNIT IS ONE BYTE, HERE AS EVERYWHERE. The first version charged the
+  // ELEMENT count while string$ and buffer_new@ charged BYTES, so under one and
+  // the same ceiling buffer_new@(1073741824) was refused and dim@(255000000) --
+  // which commits 12.2 GB, forty-eight bytes an element -- was allowed. A unit
+  // that means a different amount of work in each library is not a ceiling, it
+  // is four ceilings; the multiplication is what makes it one.
+  // (`bytes` is the CHECKED product from the guard immediately above, not a
+  // fresh multiplication that could wrap on its own.)
+  if not BudgetAllows(bytes) then
+  begin
+    Err := BudgetRefusal('dim@');
     Exit;
   end;
   Result := ValHandle(RegisterHandle(TPhosphorArray.Create(AKind, dims)));

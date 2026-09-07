@@ -83,22 +83,110 @@ end;
   So rowcount 0 IS checked and colcount 0 is not -- which is exactly the case the
   report arrived with, "empty a grid that has a header row". Guessing symmetry here
   is what left that one still aborting after the first attempt at this guard. }
-procedure GridSetColCount(G: TCustomGrid; N: Integer);
+{ A COUNT IS ALSO AN ALLOCATION, and that is a different refusal from the header
+  invariant above -- the LCL is perfectly willing to build the grid, which is the
+  problem. Measured on this tree: stringgrid_rowcount@(g@, 20000000) committed
+  2.5 GB in two seconds with nothing reported at all, and the drawgrid spelling did
+  the same. So the size is gated FIRST, as a catchable error naming the cost, and
+  only then does the header rule get its say as gui_error 1. The two are kept
+  apart on purpose: a grid that refused to lose its header still has a grid, and a
+  grid that was never built does not.
+
+  IT IS PRICED BY ROWS, NOT BY CELLS, and getting that wrong the first time made
+  this guard refuse ordinary grids while admitting the expensive one. Measured on
+  this tree, one probe per process over an 11 MB floor:
+
+      100 x  21,000   2.1 M cells    21 MB     <- a cell-product bound REFUSED this
+       50 x  50,000   2.5 M cells    33 MB     <- and this
+       20 x 150,000   3.0 M cells    52 MB     <- and this
+        1 x 2,000,000 2.0 M cells   305 MB     <- and ALLOWED this, 14x dearer
+
+  A row costs ~155 bytes and a cell ~10, so a row is fifteen cells and the cell
+  product is simply the wrong shape. GuiGridBytes prices both terms; a 21,000-row
+  hundred-column sheet is now 28 MB and passes, and the tall column is priced at
+  what it actually costs.
+
+  AND THE COUNT IS RE-CHARGED AFTER THE WRITE, not before it: only the write knows
+  whether it happened (the header rule above may refuse it, and the LCL may raise),
+  and a charge for a grid that was never resized is a false refusal waiting to
+  happen. GridRecharge reads the grid back rather than trusting the value it gated.
+
+  Both take E because a caller cannot report what it is not told. }
+procedure GridRecharge(G: TCustomGrid);
+var e2: TPhosphorError;
 begin
+  // Cannot refuse: this records what the grid already IS. Room was asked for
+  // before the write, and nothing has grown since.
+  GuiChargeSet(G, 'grid', GuiGridBytes(TGridAccess(G).ColCount,
+                                       TGridAccess(G).RowCount), e2);
+end;
+
+procedure GridSetColCount(G: TCustomGrid; N: Integer; out E: TPhosphorError);
+begin
+  if not GuiChargeRoom(Format('grid %d columns x %d rows', [N, TGridAccess(G).RowCount]),
+                       GuiGridBytes(N, TGridAccess(G).RowCount),
+                       GuiObjectBytes(G), E) then Exit;
   if (N >= 1) and GridWouldRefuse(N, TGridAccess(G).RowCount,
                                   TGridAccess(G).FixedCols, TGridAccess(G).FixedRows) then
     GGuiError := 1
   else
     TGridAccess(G).ColCount := N;
+  GridRecharge(G);
 end;
 
-procedure GridSetRowCount(G: TCustomGrid; N: Integer);
+procedure GridSetRowCount(G: TCustomGrid; N: Integer; out E: TPhosphorError);
 begin
+  if not GuiChargeRoom(Format('grid %d columns x %d rows', [TGridAccess(G).ColCount, N]),
+                       GuiGridBytes(TGridAccess(G).ColCount, N),
+                       GuiObjectBytes(G), E) then Exit;
   if (N >= 0) and GridWouldRefuse(TGridAccess(G).ColCount, N,
                                   TGridAccess(G).FixedCols, TGridAccess(G).FixedRows) then
     GGuiError := 1
   else
     TGridAccess(G).RowCount := N;
+  GridRecharge(G);
+end;
+
+{ THE SAME BOUND, ON THE OTHER WAY IN. control_set@ writes any published property
+  by name, and TStringGrid/TDrawGrid publish RowCount and ColCount -- so
+  control_set@(g@, "RowCount", 20000000) reached the allocation above with the two
+  functions above sitting unused beside it, and was killed at 2.5 GB like the
+  named spelling. A guard with a second door is not a guard; this is that door.
+
+  Installed from the unit's initialization, so LINKING this package is what arms
+  it -- there is no registration call to forget and no order to get wrong. The name
+  arrives canonical from the RTTI record (see PhosphorGuiCore.GuiAddPropGate), so
+  SameText here is comparing against the one spelling the LCL published, not
+  against whatever the program typed. FixedRows and FixedCols need no gate: they
+  cannot exceed a count, and the LCL raises on the attempt, which the bridge
+  already catches. }
+function GridPropGate(AObject: TObject; const AProp: String; AValue: Int64;
+                      out E: TPhosphorError): Boolean;
+begin
+  E := NoError;
+  Result := True;
+  if not (AObject is TCustomGrid) then Exit;
+  if SameText(AProp, 'ColCount') then
+    Result := GuiChargeRoom(Format('grid %d columns x %d rows',
+                                   [AValue, TGridAccess(AObject).RowCount]),
+                            GuiGridBytes(AValue, TGridAccess(AObject).RowCount),
+                            GuiObjectBytes(AObject), E)
+  else if SameText(AProp, 'RowCount') then
+    Result := GuiChargeRoom(Format('grid %d columns x %d rows',
+                                   [TGridAccess(AObject).ColCount, AValue]),
+                            GuiGridBytes(TGridAccess(AObject).ColCount, AValue),
+                            GuiObjectBytes(AObject), E);
+end;
+
+{ The gate's other half. The bridge calls this after SetOrdProp actually landed, so
+  the ledger records the shape the grid REALLY has -- including the case where the
+  header rule or the LCL refused the write and it still has the old one. Every
+  ordinal write to a grid re-reads it; that is cheap and it cannot drift. }
+procedure GridPropWritten(AObject: TObject; const AProp: String);
+begin
+  if AObject is TCustomGrid then
+    if SameText(AProp, 'ColCount') or SameText(AProp, 'RowCount') then
+      GridRecharge(TCustomGrid(AObject));
 end;
 
 procedure GridSetFixedCols(G: TCustomGrid; N: Integer);
@@ -223,13 +311,13 @@ end;
 
 function f_dg_colcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetColCount(TDrawGrid(c), ArgI32(A[1])); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetColCount(TDrawGrid(c), ArgI32(A[1]), E); end;
 function f_dg_colcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).ColCount); end;
 function f_dg_rowcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetRowCount(TDrawGrid(c), ArgI32(A[1])); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then GridSetRowCount(TDrawGrid(c), ArgI32(A[1]), E); end;
 function f_dg_rowcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).RowCount); end;
@@ -271,11 +359,11 @@ begin
 end;
 
 function f_colcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetColCount(TStringGrid(c), ArgI32(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetColCount(TStringGrid(c), ArgI32(A[1]), E); Result := A[0]; end;
 function f_colcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).ColCount) else Result := ValInt(0); end;
 function f_rowcount_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetRowCount(TStringGrid(c), ArgI32(A[1])); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then GridSetRowCount(TStringGrid(c), ArgI32(A[1]), E); Result := A[0]; end;
 function f_rowcount_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).RowCount) else Result := ValInt(0); end;
 function f_fixedrows_set(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -330,5 +418,10 @@ begin
   Reg.Add('stringgrid_cell$:@nn', @f_cell_get);
   Reg.Add('stringgrid_clear@:@', @f_clear);
 end;
+
+initialization
+  // Linking the package arms the bridge's gate -- see GridPropGate.
+  GuiAddPropGate(@GridPropGate);
+  GuiAddPropWritten(@GridPropWritten);
 
 end.

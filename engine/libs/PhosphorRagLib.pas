@@ -36,7 +36,7 @@ interface
 uses
   SysUtils, Classes, StrUtils, fpjson,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
-  PhosphorSandbox;
+  PhosphorSandbox, PhosphorBudget;
 
 procedure RegisterRagFuncs(Reg: TPhosphorRegistry);
 
@@ -103,6 +103,7 @@ type
     function DetectLibraryHints(const AQuery: String): TStrArr;
     function ScoreDocument(ADocIdx: Integer; const AAn: TRagAnalysis): Double;
   public
+    FSpent: Boolean;        // the last Rebuild stopped on the execution budget
     constructor Create(const ABasePath: String);
     procedure Rebuild;
     function DocumentCount: Integer;
@@ -303,9 +304,15 @@ begin
     Result.Id := LowerCase(ChangeFileExt(ExtractFileName(AFullPath), ''));
 end;
 
+{ A REBUILD READS EVERY .md IN A FOLDER AND PARSES ITS HEADER, inside one opCall,
+  so a folder with a hundred thousand documents is a hundred thousand file opens
+  that no execution ceiling in the VM can look at. RULE 2: charge per document.
+  FSpent says the index is PARTIAL, so rag_rebuild@ can report the peLimit rather
+  than hand back a silently short index. }
 procedure TPhosphorRag.Rebuild;
 var sr: TSearchRec; base: String; doc: TRagDoc;
 begin
+  FSpent := False;
   SetLength(FDocs, 0);
   if not SandboxAllows(FBasePath, puRead) then Exit;
   if not DirectoryExists(FBasePath) then Exit;   // an empty/missing folder = no docs, not a fault
@@ -313,6 +320,8 @@ begin
   if FindFirst(base + '*.md', faAnyFile, sr) = 0 then
   begin
     repeat
+      // A document costs a file open and a header parse: one step each.
+      if not BudgetCharge(BudgetUnitsPerStep) then begin FSpent := True; Break; end;
       if (sr.Attr and faDirectory) <> 0 then Continue;
       doc := ParseHeader(base + sr.Name);
       if doc.Id = '' then Continue;
@@ -507,10 +516,23 @@ end;
 
 // ---- scoring (multi-signal, no embeddings) ---------------------------------
 //   tag x3.0 + title x2.5 + function x5.0 + id x3.0 + library-hint x10 + lang boost
+{ RETRIEVAL IS A LOOP THE VM CANNOT SEE EITHER, and only Rebuild was charged.
+
+  rag_retrieve$ scores every indexed document against every keyword of the query,
+  then insertion-sorts the survivors -- documents squared -- all inside one
+  opCall. Rebuild charging per document bounds how many documents there can be;
+  it does not bound what retrieval then does with them, and a retrieval may be
+  run any number of times over an index built once.
+
+  So the same RULE 2 charge, in the same shape and latching the same FSpent, goes
+  on the scoring pass and on the sort. The Pos calls inside this routine are then
+  bounded by what these charges allow: they compare a query keyword against a
+  tag, a title or an id, never against a document body. }
 function TPhosphorRag.ScoreDocument(ADocIdx: Integer; const AAn: TRagAnalysis): Double;
 var doc: TRagDoc; score: Double; tagHits, titleHits, funcHits, idHits, i, j: Integer;
     normTag, lowId, lowTitle, kw, lfn, ldf, stripped: String;
 begin
+  if not BudgetCharge(BudgetUnitsPerStep) then FSpent := True;
   doc := FDocs[ADocIdx];
   score := 0;
   lowId := LowerCase(doc.Id);
@@ -622,8 +644,15 @@ begin
     if curTokens >= AMaxTokens then sb.Add('... (truncated for token budget)');
     // Join with explicit LF (never TStringList.Text: that appends a platform
     // line ending, which would drift between Windows and Linux).
+    // QUADRATIC APPEND, charged as it goes (RULE 2), latching the same FSpent the
+    // rest of this unit uses so the retrieval reports rather than answering short.
     Result := '';
-    for i := 0 to sb.Count - 1 do Result := Result + sb[i] + #10;
+    for i := 0 to sb.Count - 1 do
+    begin
+      if not BudgetAppend(Length(Result)) then
+      begin FSpent := True; Result := ''; Break; end;
+      Result := Result + sb[i] + #10;
+    end;
   finally
     sb.Free;
   end;
@@ -637,6 +666,7 @@ var an: TRagAnalysis; budget, i, j, tokensUsed, docTokens, remaining, sel: Integ
     content: String; res: TRagResult;
 begin
   Result := nil;
+  FSpent := False;              // this retrieval's own verdict, not the last one's
   if AMaxTokens <= 0 then AMaxTokens := FMaxTokens;
   budget := AMaxTokens;
   an := AnalyzeQuery(AQuery);
@@ -655,15 +685,19 @@ begin
     end;
   end;
 
-  // Sort by score descending (insertion sort -- stable, tiny n).
+  // Sort by score descending (insertion sort -- stable). "Tiny n" was an
+  // assumption: n is however many documents scored above the floor, which is
+  // however many the index holds, so the inner loop is charged like the rest.
   for i := 1 to High(scoreVal) do
   begin
     td := scoreVal[i]; ti := scoreIdx[i]; j := i - 1;
     while (j >= 0) and (scoreVal[j] < td) do
     begin
+      if not BudgetCharge(1) then begin FSpent := True; Break; end;
       scoreVal[j + 1] := scoreVal[j]; scoreIdx[j + 1] := scoreIdx[j]; Dec(j);
     end;
     scoreVal[j + 1] := td; scoreIdx[j + 1] := ti;
+    if FSpent then Break;
   end;
 
   // Phase 2: select within the token budget (a highly-relevant over-budget doc
@@ -859,9 +893,13 @@ end;
 function RenderResults(ARag: TPhosphorRag; const AResults: TRagResultArr; AWithScore, AWithTruncNote: Boolean): String;
 var i: Integer; doc: TRagDoc; title: String;
 begin
+  // QUADRATIC APPEND, charged as it goes (RULE 2): one append per result, and
+  // each copies the whole rendering so far.
   Result := '';
   for i := 0 to High(AResults) do
   begin
+    if not BudgetAppend(Length(Result)) then
+    begin ARag.FSpent := True; Result := ''; Exit; end;
     doc := ARag.FDocs[AResults[i].DocIdx];
     if Result <> '' then Result := Result + #10 + #10;
     if AWithScore then
@@ -906,8 +944,11 @@ function t_rag_rebuild(const Args: array of TValue; out Err: TPhosphorError): TV
 var r: TPhosphorRag;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then r.Rebuild();
   Result := Args[0];   // return the handle so calls can chain
+  if not AsRag(Args[0], r) then Exit;
+  r.Rebuild();
+  // A partial index must not read as a finished one.
+  if r.FSpent then Err := BudgetRefusal('rag_rebuild@');
 end;
 
 function t_rag_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -929,7 +970,12 @@ var r: TPhosphorRag;
 begin
   Err := NoError();
   if AsRag(Args[0], r) then
-    Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, 0), False, True))
+  begin
+    Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, 0), False, True));
+    // A retrieval that stopped short must not read as one that found nothing
+    // relevant -- the same distinction rag_rebuild@ already makes.
+    if r.FSpent then begin Err := BudgetRefusal('rag_retrieve$'); Result := ValStr(''); end;
+  end
   else Result := ValStr('');
 end;
 
@@ -938,7 +984,10 @@ var r: TPhosphorRag;
 begin
   Err := NoError();
   if AsRag(Args[0], r) then
-    Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, ArgI32(Args[2])), False, False))
+  begin
+    Result := ValStr(RenderResults(r, r.RetrieveList(Args[1].Str, ArgI32(Args[2])), False, False));
+    if r.FSpent then begin Err := BudgetRefusal('rag_retrieve_budget$'); Result := ValStr(''); end;
+  end
   else Result := ValStr('');
 end;
 
@@ -948,6 +997,7 @@ begin
   Err := NoError();
   if not AsRag(Args[0], r) then begin Result := ValStr('[]'); Exit; end;
   results := r.RetrieveList(Args[1].Str, 0);
+  if r.FSpent then begin Err := BudgetRefusal('rag_retrieve_json$'); Exit(ValStr('[]')); end;
   arr := TJSONArray.Create();
   try
     for i := 0 to High(results) do
@@ -981,7 +1031,11 @@ function t_rag_functions(const Args: array of TValue; out Err: TPhosphorError): 
 var r: TPhosphorRag;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then Result := ValStr(RenderResults(r, r.FindByFunctions(Args[1].Str), False, False))
+  if AsRag(Args[0], r) then
+  begin
+    Result := ValStr(RenderResults(r, r.FindByFunctions(Args[1].Str), False, False));
+    if r.FSpent then begin Err := BudgetRefusal('rag_functions$'); Result := ValStr(''); end;
+  end
   else Result := ValStr('');
 end;
 
@@ -989,7 +1043,11 @@ function t_rag_tags(const Args: array of TValue; out Err: TPhosphorError): TValu
 var r: TPhosphorRag;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then Result := ValStr(RenderResults(r, r.FindByTags(Args[1].Str), True, False))
+  if AsRag(Args[0], r) then
+  begin
+    Result := ValStr(RenderResults(r, r.FindByTags(Args[1].Str), True, False));
+    if r.FSpent then begin Err := BudgetRefusal('rag_tags$'); Result := ValStr(''); end;
+  end
   else Result := ValStr('');
 end;
 

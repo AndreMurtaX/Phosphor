@@ -21,7 +21,7 @@ interface
 
 uses
   SysUtils,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget;
 
 procedure RegisterPlatformFuncs(Reg: TPhosphorRegistry);
 
@@ -173,7 +173,20 @@ begin
   if (secs <> secs) or (secs <= 0) then ms := 0
   else if secs >= High(Integer) / 1000.0 then ms := High(Integer)
   else ms := Round(secs * 1000);
-  if ms > 0 then Sleep(ms);
+  // A WAIT IS THE PUREST FORM OF THE HOLE. Sleep is one library call inside one
+  // opCall, and the VM tests its wall-clock ceiling only between instructions --
+  // so pause(1e9) slept for 24 days with TimeoutMs set to two seconds, and the
+  // host that set it never got control back. BudgetSleep waits in 20 ms slices
+  // and looks at the deadline between them (RULE 2), so the wait ends when the
+  // run's time does; under a step-only budget the milliseconds are priced against
+  // the step allowance instead. With no budget installed it is exactly Sleep(ms),
+  // which is what every trusted host has always had.
+  if ms > 0 then
+    if not BudgetSleep(ms) then
+    begin
+      Err := BudgetRefusal('pause');
+      Exit(ValInt(0));
+    end;
   Result := ValInt(0);
 end;
 

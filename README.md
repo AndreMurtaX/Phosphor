@@ -143,6 +143,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/decisions.md](docs/decisions.md) — the frozen language decisions (five value
   types, `@` handles, base-1 indexing, strict boolean, real vs integer division, the
   opt-in execution limits) and the on-disk-bytecode format decisions.
+- [CLAUDE.md](CLAUDE.md) — the short form of the above, loaded automatically by Claude
+  Code every session: what "done" means here, the invariants, and the traps that have
+  already cost time.
 - [docs/dev-agent-playbook.md](docs/dev-agent-playbook.md) — the hardened rules and
   round-by-round retrospective from the autonomous build loop that completed the oracle.
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)

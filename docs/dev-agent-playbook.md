@@ -161,8 +161,10 @@ Rules, in order of how easily they are got wrong:
 - **`TUnZipper.Files` is a STICKY filter** across calls: `UnZipFiles(list)` leaves the
   list in `FFiles`, and a later `UnZipAllFiles` then treats a non-empty `FFiles` as
   "only these" — a reused reader silently extracts just the last filter. `UZ.Files.Clear`
-  before `UnZipAllFiles`. (And a predicate returns 1/0, not a Pascal bool — `assert_true`
-  carries a message only on its `:n$` overload; there is no `assert_*:?$`.)
+  before `UnZipAllFiles`. (And a predicate returns 1/0, not a Pascal bool.
+  `assert_true` today has all four forms — `:n`, `:n$`, `:?`, `:?$`
+  (`tests/PhosphorTestLib.pas:344`); `assert_int` is `:%%` ONLY, and a third
+  argument to it raises `no function assert_int:%%$` and halts the file.)
 - **objfpc mode has NO `case`-of-string.** `case s of 'amp': …` does not compile; use an
   `if/else-if` chain over the (lowercased) string. Bites entity/keyword decoders.
 - **A name/value bag needs TWO parallel `TStringList`s, not `Values[]`.** `TStringList`

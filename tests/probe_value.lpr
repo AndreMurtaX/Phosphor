@@ -23,6 +23,22 @@ program probe_value;
 uses
   SysUtils, Math, PhosphorErrors, PhosphorValue, PhosphorEngine;
 
+const
+  { TYPED Double constants, because an untyped float literal in FPC source is an
+    Extended -- 80 bits on Linux x86-64, 64 on Win64 -- and comparing a Double
+    against one promotes both, so the comparison asks about the compiler's
+    literal parser rather than about this engine. Three assertions were written
+    the inline way, were green on Windows and red on Linux, and this is the fix. }
+  MaxD: Double            = 1.7976931348623157e308;
+  SmallestDenormD: Double = 4.9406564584124654e-324;
+  SmallestNormalD: Double = 2.2250738585072014e-308;
+  { The true values the three subnormal power checks approach. The answer differs
+    in its last digits between the two platforms and both are correct to the
+    precision a subnormal has; see the comment at those checks. }
+  Ref10m310: Double  = 1e-310;
+  Ref10m320: Double  = 1e-320;
+  Ref15m1800: Double = 1.0857596514320163e-317;
+
 var
   Ok: Integer = 0;
   Failed: Integer = 0;
@@ -33,6 +49,17 @@ var
     says nothing about which guard broke. The run is wrapped (see the main body)
     and this names the region the trap came from. }
   Stage: String = '';
+
+{ A power that must land inside the subnormal band: no error, a Double, not zero,
+  below the smallest NORMAL double, and within 1e-12 relative of the true value.
+  The regression these guard against answered 0, whose relative error is 1. }
+function SubnormalNear(const E: TPhosphorError; const V: TValue;
+                       const ATrue: Double): Boolean;
+begin
+  Result := (not IsError(E)) and (V.Kind = vkDouble) and (V.Num <> 0.0) and
+            (Abs(V.Num) < SmallestNormalD) and
+            (Abs(V.Num - ATrue) <= 1e-12 * Abs(ATrue));
+end;
 
 procedure Report(Pass: Boolean; const Name: String);
 begin
@@ -335,16 +362,25 @@ begin
 
   { Three decimal bases from inside the band, spelled the way a program sees
     them. Base 2 is the one with an exact oracle; these prove the band is right
-    for bases whose powers are not powers of two, and each was measured on the
-    pristine engine. The rejected revision answered 0 for all three. }
-  e := ValPow(ValDouble(10.0), ValDouble(-310.0), r);
-  Report((not IsError(e)) and (ValToStr(r) = '1.00000000000005E-310'),
+    for bases whose powers are not powers of two. The rejected revision answered
+    0 for all three, and that is what these must keep catching.
+
+    THEY ARE NOT PINNED TO AN EXACT DECIMAL STRING, and the first version of them
+    was. `10 ^ -310` answers 1.00000000000005E-310 on Win64 and
+    9.9999999999999694E-311 on Linux x86-64 -- both correct to the precision a
+    subnormal has, and they differ because SizeOf(Extended) is 8 on Win64 and 10
+    on Linux, so FPC's Power carries its intermediate in 80 bits there and in 64
+    here. The exact-string form was green on Windows, red on Linux, and pinned a
+    property of the FLOATING-POINT UNIT rather than of this engine. What the
+    check is named for -- a subnormal, not zero -- is what it now asserts:
+    non-zero, below the smallest NORMAL double, and within 1e-12 relative of the
+    true value. Answering 0 is a relative error of 1, so the regression these
+    exist for is still caught with room to spare. }
+  Report(SubnormalNear(ValPow(ValDouble(10.0), ValDouble(-310.0), r), r, Ref10m310),
          '10 ^ -310 is a subnormal, not zero');
-  e := ValPow(ValDouble(10.0), ValDouble(-320.0), r);
-  Report((not IsError(e)) and (ValToStr(r) = '9.99988867182683E-321'),
+  Report(SubnormalNear(ValPow(ValDouble(10.0), ValDouble(-320.0), r), r, Ref10m320),
          '10 ^ -320 is a subnormal, not zero');
-  e := ValPow(ValDouble(1.5), ValDouble(-1800.0), r);
-  Report((not IsError(e)) and (ValToStr(r) = '1.08575965143202E-317'),
+  Report(SubnormalNear(ValPow(ValDouble(1.5), ValDouble(-1800.0), r), r, Ref15m1800),
          '1.5 ^ -1800 is a subnormal, not zero');
 end;
 
@@ -593,11 +629,17 @@ begin
   Report((not IsError(e)) and (r.Kind = vkBool) and r.Bl, 'max still compares (bool)');
   e := ValCompare(coEQ, ValDouble(-0.0), ValDouble(0.0), r);
   Report((not IsError(e)) and r.Bl, 'negative zero still equals zero (bool)');
-  e := StoreCheck(vtNumber, ValDouble(1.7976931348623157e308), r);
+  { AGAINST A TYPED Double CONSTANT, NEVER AN INLINE LITERAL. An untyped float
+    literal in FPC source is an Extended, which is 80 bits on Linux x86-64 and 64
+    on Win64; comparing a Double against one promotes BOTH to Extended, and
+    1.7976931348623157e308 in 80 bits is not the Double nearest it. The inline
+    form was green on Windows and red on Linux for exactly that reason, and it
+    was testing the compiler's literal parser, not this store. }
+  e := StoreCheck(vtNumber, ValDouble(MaxD), r);
   Report((not IsError(e)) and (r.Kind = vkDouble) and
-         (r.Num = 1.7976931348623157e308), 'MaxDouble still stores unchanged');
-  e := StoreCheck(vtNumber, ValDouble(4.9406564584124654e-324), r);
-  Report((not IsError(e)) and (r.Num = 4.9406564584124654e-324),
+         (r.Num = MaxD), 'MaxDouble still stores unchanged');
+  e := StoreCheck(vtNumber, ValDouble(SmallestDenormD), r);
+  Report((not IsError(e)) and (r.Num = SmallestDenormD),
          'the smallest denormal still stores unchanged');
   e := StoreCheck(vtInt, ValDouble(3.7), r);
   Report((not IsError(e)) and (r.Kind = vkInt) and (r.Int = 4),

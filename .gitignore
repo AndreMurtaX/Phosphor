@@ -20,6 +20,11 @@ backup/
 # fact drifting away from the first.
 /lazarus/phosphor_engine.pas
 
+# lazbuild writes its own package-link registry into whatever directory it was
+# run from. It is per-machine state (it holds absolute paths to this checkout),
+# not part of the project.
+/packagefiles.xml
+
 # Claude Code local tooling (dev-process, not part of the product)
 .claude/
 

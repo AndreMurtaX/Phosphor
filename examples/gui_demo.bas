@@ -1,6 +1,18 @@
 rem ===============================================================
 rem Phosphor BASIC -- interactive GUI demo.
-rem   Run it:   phosphor run examples/gui_demo.bas
+rem
+rem THIS PROGRAM DOES NOT RETURN. app_run() below is a message loop: it opens a
+rem window and blocks until a person closes it. Run it by hand, from a desktop,
+rem when you want to SEE it -- never from a script, a test or an agent, and never
+rem with a timeout you were not prepared to wait out. examples/manifest.txt marks
+rem this file "compile" for exactly that reason: the runner compiles it and does
+rem not execute it. On 2026-09-07 a review agent ran it directly and sat blocked
+rem for eleven minutes behind a window nobody was watching, because the line
+rem below used to say "Run it:" and nothing said what running it costs.
+rem
+rem   See it:   phosphor run examples/gui_demo.bas     (from a desktop, by hand)
+rem   Check it: it is compiled by scripts/test-examples.ps1 / .sh
+rem
 rem A GUI program needs no flag and no second binary: phosphor brings the
 rem widgetset up itself wherever a graphical session is reachable.
 rem A window with a menu, a few controls, a live canvas drawing, and

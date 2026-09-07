@@ -317,11 +317,120 @@ Two mechanical parts of that, both paid for:
 
 ---
 
+## What the 2026-09-06 gauntlet left open
+
+The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-07
+the crashes, the seven security and data-loss findings, and 17 of the 21 wrong
+answers are closed on both operating systems. **Nineteen remain, and they are
+listed here rather than in a task tracker because this project has learned that a
+backlog nobody can find is a backlog that does not exist.**
+
+Some may already be closed by later work: the budget landed after the sweep ran,
+and it plausibly reaches both hangs. **Verify before fixing** -- closing something
+already closed is how a patch introduces a defect.
+
+**Four wrong answers, in the front end.** A GOTO inside a function body escapes
+the activation; a CONST silently shadows a parameter; a source file truncated
+inside a string literal compiles; SELECT CASE keeps its subject in a program-wide
+hidden global. A patch exists for all four and was held back: three are clean, but
+its GOTO refusal is over-broad -- its reviewer measured three constructs that
+answer correctly on pristine HEAD and are refused by it. Narrow that one and the
+other three land with it.
+
+**Two hangs and a breakage, all in the GUI host.** BREAK inside a function defined
+in a loop body binds to the enclosing loop and jumps out of the frame; app_quit()
+does not wake app_run(), which then blocks for ever unless another message happens
+to arrive; and closing one window permanently disables every later app_run() in
+the process, even with other windows open.
+
+**Six blind spots in the gates, and each one means a gate reports a pass it did
+not earn.** test-packages silently skips the whole SQLite corpus (85 assertions)
+on a Windows box where SQLite works. check-suffix.py hardcodes the parameter name
+`Args`, so it is blind to 180 of the 443 GUI registrations, and it cannot see a
+computed registration at all -- 63 are neither judged nor counted.
+test-suite.{ps1,sh} never build bin/phosphor.exe but run check-examples.py, which
+compiles every doc example with it. check-seams.py's SEAM_TYPES is a hardcoded
+literal, so a seam of a new type is invisible. check-codepage.py scans line by
+line, so the statement it flags is invisible when wrapped across two lines.
+
+**Three test gaps.** The sandbox's strongest claim -- a link planted inside the
+root -- is never asserted on Windows. tests/packages has no
+manifest-covers-directory check, so an unlisted .bas never runs and PACKAGES OK is
+printed anyway. coverage.py counts tests/negative/*.bas -- programs the suite
+requires to be REJECTED -- as coverage.
+
+**Three documentation errors**, each of the kind a gate should have caught: the
+lexer's header states the opposite of what the lexer does about a doubled quote;
+docs/libraries/sys.md says 22 functions where 40 are registered; and
+docs/libraries/gzip.md states a 19-byte stream that is 20 bytes at every level.
+
+---
+
 ## Retrospective log (appended each round)
 
 Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
+
+- **2026-09-07 · round 38 · the twenty-one wrong answers, the seven escapes, and the
+  briefing that finally stopped costing a round.** The gauntlet's remaining classes,
+  closed in two councils. The process finding is the headline: the three rules that
+  round 37 derived from two failed rounds were put in the FIRST briefing this time,
+  and six of seven lanes were accepted first pass, against three of four rejected
+  before. **A rule learned from a failure is worth what it costs only if it moves
+  into the brief.**
+
+  - **A CLASS DISGUISED AS SIX DEFECTS, AND THE CAUSE WAS A FUNCTION'S SCOPE.** Six
+    of the twenty-one wrong answers were UTF-8 operations counting bytes. The
+    reason the class kept coming back is that the codepoint-aware family was
+    PRIVATE to PhosphorStrLib while two of its three callers -- ValSub in
+    PhosphorValue, FormatUsing in PhosphorVM -- live in other units and could not
+    reach it. Each grew its own byte walk. Ask where a duplicated idea's owner
+    lives before writing the sixth copy of it.
+  - **TWO ENCODERS THAT DISAGREED.** Only one of the two UTF-8 encoders had the
+    bottom guard, so `chr$(-1)` and `lfill$(...,-1)` answered differently, one of
+    them with a byte that cannot occur in UTF-8. A second copy is not a duplicate;
+    it is a second answer.
+  - **A GREP THAT IS TRUE WHEN IT RUNS IS NOT AN INVARIANT** (round 37's lesson,
+    paid for again at integration): the stack lane made a library `peLimit` fatal
+    on a grep finding none in any library; the budget lane then gave libraries
+    their own refusals. Both verified in isolation by two reviewers each; together,
+    `probe_budget` went 205/2. **Integration is a test, not a formality**, and the
+    fix was to discriminate on PROVENANCE rather than on the error code.
+  - **A RULE STATED AS TEXT ALWAYS LOSES TO A NEW SPELLING.** The perilous-path
+    guard was textual and `C:\.`, `C:\dir\..` and `\\server\share\..` walked
+    through it -- the SECOND spelling to do so. Made structural (resolve, then ask
+    whether the volume is the whole of what is left), and the sweep against the
+    pristine unit answered 86/45: forty-five spellings of a root were not
+    recognised as one, and a reviewer's independent sweep found 56 more.
+  - **READING THE RTL FOR ONE PLATFORM IS NOT READING IT.** That same fix was
+    correct on Windows and broke POSIX, because `AllowDirectorySeparators` is
+    `['\','/']` on Unix TOO (`rtl/unix/sysunixh.inc:35`), so `ExpandFileName`
+    mangles a legal POSIX filename containing a backslash. Only a native run found
+    it.
+  - **AN ENUMERATION THAT COUNTS ARGUMENTS IS BLIND TO A DIRECTORY WALK.** The zip
+    lane correctly diagnosed a gate that counts ROUTINES, then shipped an
+    enumeration that counts ARGUMENTS -- and `zip_compress` hands each enumerated
+    CHILD to the RTL as a disk path that is not an `Args[i]`. PhosphorIoLib already
+    said the rule twice: re-asked at every level of the recursion.
+  - **A MARKER MUST NOT BE A BYTE THAT OCCURS IN DATA.** A JSON fix rewrote the
+    source text with `#1` sentinels and unmarked afterwards by scanning for them --
+    so a document carrying `#1` of its own came back corrupted, and an
+    all-printable-ASCII document became a NUL-injection primitive. A sentinel
+    scanned for after the fact cannot tell what it produced from what was already
+    there.
+  - **THE GATE AND THE THING IT GUARDS MUST SHARE A BASE.** SQLite's
+    `PRAGMA data_store_directory` moves the base a relative filename resolves
+    against; the gate kept resolving against the process CWD. Every call in the
+    escape was one the gate allowed. The remedy was to stop MODELLING the
+    resolver and call it -- `sqlite3_vfs_find(nil)^.FullPathname`, the function the
+    pager itself uses.
+  - **THE DESTRUCTIVE-DEFECT RULE HELD, UNDER TEST.** Eight agents across two
+    councils closed four sandbox escapes and three data-loss defects, and every one
+    reported running NO destructive repro. The technique that made it possible is
+    the pure probe: `probe_sandbox` asks `IsPerilousPath` and `SandboxAllows` about
+    131 spellings and touches no filesystem at all. **A guard that can only be
+    tested by letting it fail is a guard that will not be tested.**
 
 - **2026-09-07 · round 37 · three rounds to close three mechanisms, and the two
   defects only integration could find.** Seventeen crashes, all in the engine,

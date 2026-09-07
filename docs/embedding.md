@@ -141,8 +141,67 @@ if eng.LastError.Code <> peNone then
 
 Codes (`PhosphorErrors`): `peNone` 0, `peIntOverflow` 1, `peDivByZero` 2,
 `peTypeMismatch` 3, `peUnknownFunction` 4, `peSyntax` 5, `peRuntime` 6, `peLimit`
-7. A script can also handle its own errors with `ON ERROR` (see
+7, `peFatal` 8. A script can also handle its own errors with `ON ERROR` (see
 [roadmap-phase3.md](roadmap-phase3.md)).
+
+### When the interpreter itself takes a fault
+
+Codes 1 to 6 describe something the **program** did. `peLimit` describes a
+ceiling **you** set. `peFatal` is different in kind: it says something happened
+**to the interpreter** — an access violation, a stack overflow, a corrupt heap.
+
+`ON ERROR` is never offered a `peFatal`, and `err()` never returns 8 inside a
+script. That is deliberate, and it is the one design choice here worth
+understanding, because the engine is perfectly capable of offering it:
+
+> By the time an access violation fires, a wild write has **already landed**, and
+> nothing in the exception says where or what it hit. A script that catches it
+> and carries on answers wrongly instead of dying — and a wrong answer nobody is
+> told about is worse than a crash, because a crash is loud.
+
+So a fault always ends the run. What you choose is whether it also ends your
+**process**:
+
+```pascal
+eng.ContainFaults := True;
+if eng.Run(src) = 0 then
+  { fine }
+else if eng.LastError.Code = peFatal then
+begin
+  Log('the script engine faulted: ' + eng.ErrorMessage);
+  SaveEverything();          // your user's work is still here
+  ShutDownCleanly();
+end
+else
+  ShowMessage('script error: ' + eng.ErrorMessage);
+```
+
+`ContainFaults` is **off by default**, because it changes what escapes `Run` and
+a host that would rather fail fast should keep failing fast. With it off, the
+Pascal exception travels out of `Run` into your application — which, in a Lazarus
+program, means the LCL's default handler and its **modal crash dialog**. On a
+machine with nobody in front of it, a modal dialog is a *hang*: no message, no
+exit code, nothing in a log. That is worse than the crash it replaced.
+
+**So do at least one of these two things, whichever fits your application.**
+Either set `ContainFaults` and handle `peFatal` as above, or install your own
+handler before anything can raise — this is what `phosphor.exe` itself does, in
+`host/console/phosphor.lpr`:
+
+```pascal
+{ FIRST, before anything can raise: take the LCL's modal crash dialog out of the
+  picture. Linking Forms is what puts it there, and a binary links Forms whether
+  or not it ever opens a window. }
+Application.OnException := @TCrashGuard.Report;   // log, then Halt -- never a dialog
+```
+
+One caveat that is not a limitation so much as an honest boundary: **the engine
+instance is spent afterwards.** A contained fault unwound Pascal frames the
+interpreter still believed in, so its value stack, frame stack and handles are in
+whatever state the unwinding left them. A later `Run` on the same instance
+answers `peFatal` immediately without executing anything. Containment buys you
+the process, not the interpreter — build a new engine if you want to go on
+scripting.
 
 ## Running untrusted scripts — limits
 

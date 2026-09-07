@@ -26,7 +26,8 @@ program probe_limits;
 {$codepage UTF8}
 
 uses
-  SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes;
+  SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes,
+  PhosphorValue, PhosphorRegistry, PhosphorVM;
 
 var
   Ok: Integer = 0;
@@ -216,6 +217,124 @@ const
     'h:' + LF +
     'resume next' + LF;
 
+{ ----------------------------------------------------------------------------
+  A FAULT IN THE INTERPRETER IS NOT AN ERROR IN THE PROGRAM.
+
+  Every other check in this file is about a ceiling the SCRIPT crossed. These are
+  about something that happened TO the interpreter -- an access violation, a
+  stack overflow, a corrupt heap -- and the engine now answers three separate
+  questions about one:
+
+    is it offered to ON ERROR?              never, whatever else is true
+    does it end the run?                    always
+    does it end the PROCESS?                only if ContainFaults is False
+
+  The first is the one worth arguing about, and the argument is in peFatal: a
+  wild write has already landed by the time the exception fires, so a script that
+  catches it and carries on answers wrongly instead of dying, and a wrong answer
+  nobody is told about is worse than a crash. So ON ERROR is not offered it even
+  though the engine is perfectly able to offer it.
+
+  The faults here are RAISED ON PURPOSE by a test-only library function and a
+  test-only output callback -- one inside opCall's net, one outside it, because
+  those are two different code paths and only the second one needs ContainFaults.
+  Neither lives in the shipped engine.
+---------------------------------------------------------------------------- }
+
+function t_boom(const A: array of TValue; out E: TPhosphorError): TValue;
+begin
+  Result := ValInt(0);
+  E := NoError();
+  raise EAccessViolation.Create('a deliberate fault from a library function');
+end;
+
+function t_convert(const A: array of TValue; out E: TPhosphorError): TValue;
+begin
+  Result := ValInt(0);
+  E := NoError();
+  { THE MIRROR. A value error from a library must stay catchable -- this is the
+    direction a guard written in a hurry breaks, and it has broken twice in this
+    project already. }
+  raise EConvertError.Create('an ordinary bad argument');
+end;
+
+var
+  BoomOnOutput: Boolean = False;
+
+type
+  { A CLASS because OnOutput is a method pointer (`of object`) and a free
+    procedure cannot be assigned to one -- the same trap phosphorguitest hit with
+    Application.OnException, and it costs a compile error rather than anything
+    silent. }
+  TFaultingOutput = class
+    class procedure Emit(const S: String);
+  end;
+
+class procedure TFaultingOutput.Emit(const S: String);
+begin
+  { Raised from a HOST CALLBACK, which the dispatch loop calls outside opCall's
+    try/except -- so this one leaves ExecFrom as a Pascal exception and is the
+    case ContainFaults exists for. }
+  if BoomOnOutput then
+    raise EAccessViolation.Create('a deliberate fault from a host callback');
+end;
+
+{ Run ASource with the fault library registered; report what came back. }
+procedure CheckFault(const AName, ASource: String; AContain, AFaultOnOutput: Boolean;
+  AWantCode: TPhosphorErrorCode; AWantRc0: Boolean);
+var
+  eng: TPhosphorEngine;
+  rc: Integer;
+  raised: Boolean;
+begin
+  eng := TPhosphorEngine.Create();
+  raised := False;
+  try
+    eng.ContainFaults := AContain;
+    eng.Registry.Add('boom:', @t_boom);
+    eng.Registry.Add('badarg:', @t_convert);
+    BoomOnOutput := AFaultOnOutput;
+    if AFaultOnOutput then eng.OnOutput := @TFaultingOutput.Emit;
+    try
+      rc := eng.Run(ASource);
+    except
+      on E: Exception do begin raised := True; rc := -1; end;
+    end;
+    BoomOnOutput := False;
+    if AWantRc0 then
+      Report((not raised) and (rc = 0), AName)
+    else
+      Report((not raised) and (rc <> 0) and (eng.LastError.Code = AWantCode),
+             AName);
+  finally
+    eng.Free;
+  end;
+end;
+
+{ The same, but asserting that the exception DOES escape -- the default. }
+procedure CheckFaultEscapes(const AName, ASource: String);
+var
+  eng: TPhosphorEngine;
+  escaped: Boolean;
+begin
+  eng := TPhosphorEngine.Create();
+  escaped := False;
+  try
+    eng.ContainFaults := False;
+    BoomOnOutput := True;
+    eng.OnOutput := @TFaultingOutput.Emit;
+    try
+      eng.Run(ASource);
+    except
+      on E: EAccessViolation do escaped := True;
+    end;
+    BoomOnOutput := False;
+    Report(escaped, AName);
+  finally
+    eng.Free;
+  end;
+end;
+
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
 
@@ -239,6 +358,36 @@ begin
   // which reaches opCall as an ordinary library error. See LimitInsideCallfunc.
   Check('ON ERROR cannot escape a limit crossed inside callfunc',
         LimitInsideCallfunc, 0, 0, 0, True);
+
+  { --- a fault in the interpreter; see the section above --------------------- }
+
+  // Inside opCall's net. The net catches it either way -- what changed is that it
+  // is no longer offered to ON ERROR, and no longer wears peRuntime.
+  CheckFault('a library fault is peFatal, not a catchable peRuntime',
+             'x = boom()' + LF, False, False, peFatal, False);
+  CheckFault('...and ON ERROR is not offered it',
+             'on error goto h' + LF + 'x = boom()' + LF +
+             'println "resumed"' + LF + 'end' + LF + 'h:' + LF +
+             'resume next' + LF, False, False, peFatal, False);
+
+  // THE MIRROR, and the direction this project has broken twice: an ordinary
+  // value error from the same seam must still be catchable and still peRuntime.
+  CheckFault('a library VALUE error is still catchable by ON ERROR',
+             'on error goto h' + LF + 'x = badarg()' + LF +
+             'end' + LF + 'h:' + LF + 'resume next' + LF,
+             False, False, peNone, True);
+  CheckFault('...and uncaught it is still an ordinary peRuntime',
+             'x = badarg()' + LF, False, False, peRuntime, False);
+
+  // Outside the net: a host callback. Contained, this is a failed Run and
+  // nothing reaches the host.
+  CheckFault('a host-callback fault is contained when asked',
+             'println "hello"' + LF, True, True, peFatal, False);
+
+  // And NOT contained by default -- the exception escapes Run exactly as it
+  // always did, so a host that wants to fail fast still does.
+  CheckFaultEscapes('a host-callback fault still escapes when not asked',
+                    'println "hello"' + LF);
 
   { --- the front end: a bad FIRST character ---------------------------------
     TLexer.Tokenize gives up the moment it meets a character that cannot start a

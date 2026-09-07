@@ -28,8 +28,31 @@ type
     peUnknownFunction = 4,  // no registry overload matches name + argument kinds
     peSyntax          = 5,
     peRuntime         = 6,
-    peLimit           = 7   // a host execution limit was hit (steps/time/output);
+    peLimit           = 7,  // a host execution limit was hit (steps/time/output);
                             // fatal by design -- ON ERROR cannot catch it
+    { THE INTERPRETER ITSELF TOOK A FAULT, AND EXECUTION IS OVER.
+
+      Every other code on this list describes something the PROGRAM did: it
+      divided by zero, it named a function that is not there, it overflowed. This
+      one describes something that happened TO the interpreter -- an access
+      violation, a stack overflow, a corrupt heap -- and the difference is not a
+      matter of degree.
+
+      A value error leaves the process intact, which is why handing it to ON
+      ERROR and continuing is correct. A state fault means memory has ALREADY
+      been written somewhere it should not have been, and nothing in the
+      exception says where or what it hit. Resuming the script on top of that
+      trades a loud death for a silent wrong answer, which is the worse of the
+      two: the program keeps running and its results cannot be trusted.
+
+      So ON ERROR never sees this code. err() never returns 8 inside a script.
+      It exists for the HOST, which reads it from LastError after Run returns
+      False, so an application embedding the engine can tell "the script had an
+      error nobody handled" from "the interpreter was hurt" -- and, with
+      TPhosphorEngine.ContainFaults set, can say so, save the user's work and
+      shut down on its own terms instead of meeting the LCL's modal crash dialog
+      on a machine with nobody in front of it. }
+    peFatal           = 8
   );
 
   TPhosphorError = record

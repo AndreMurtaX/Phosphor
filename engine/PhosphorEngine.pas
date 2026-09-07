@@ -51,6 +51,7 @@ type
     FMaxSteps: Int64;
     FMaxOutputBytes: Int64;
     FTimeoutMs: Int64;
+    FContainFaults: Boolean;
     FVM: TPhosphorVM;       // the live VM in the prepared (embedding) mode
     FProg: TProgram;        // its compiled program
     FReplVM: TPhosphorVM;   // the live VM of a REPL session
@@ -137,6 +138,30 @@ type
     property MaxSteps: Int64 read FMaxSteps write FMaxSteps;
     property MaxOutputBytes: Int64 read FMaxOutputBytes write FMaxOutputBytes;
     property TimeoutMs: Int64 read FTimeoutMs write FTimeoutMs;
+    { KEEP THE HOST'S PROCESS ALIVE WHEN THE INTERPRETER TAKES A FAULT.
+
+      The ceilings above bound what a script may SPEND. This bounds what a defect
+      may COST. Off by default, because it changes what escapes Run and a host
+      that wants to fail fast should keep failing fast.
+
+      Set it and an access violation, a stack overflow or a corrupt heap inside
+      execution stops being a Pascal exception on its way out of the engine: Run
+      answers False with LastError.Code = peFatal and the exception's class and
+      message. Nothing reaches the host's exception handler, so a Lazarus
+      application never meets the LCL's modal crash dialog -- which on a machine
+      with nobody in front of it is a hang, and gives neither message nor exit
+      code. The application chooses what to do: tell the user, save their work,
+      close down.
+
+      What it does NOT do, deliberately: give the fault to ON ERROR. A script
+      resuming on memory a wild write has already reached answers wrongly instead
+      of dying, and a wrong answer nobody is told about is the worse outcome. See
+      peFatal in PhosphorErrors.
+
+      The engine instance is spent afterwards either way -- a later Run answers
+      peFatal without executing anything. Containment buys the process, not the
+      interpreter, so a host that wants to carry on scripting builds a new one. }
+    property ContainFaults: Boolean read FContainFaults write FContainFaults;
     { The FOURTH ceiling, and the only one that bounds WHERE rather than how long.
       '' (the default) = no sandbox: every path a script names reaches the real
       filesystem, which is what a trusted script wants and what every host did
@@ -246,6 +271,7 @@ begin
   AVM.MaxSteps := FMaxSteps;
   AVM.MaxOutputBytes := FMaxOutputBytes;
   AVM.TimeoutMs := FTimeoutMs;
+  AVM.ContainFaults := FContainFaults;
 end;
 
 function TPhosphorEngine.Run(const ASource: String): Integer;

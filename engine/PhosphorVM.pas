@@ -19,6 +19,25 @@ uses
   SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
   PhosphorSandbox;
 
+{ IS THIS EXCEPTION EVIDENCE THAT MEMORY IS ALREADY DAMAGED?
+
+  Read from the RTL rather than assumed, because the hierarchy is a trap. FPC
+  3.2.2 makes EExternal the root of the OS/hardware family in
+  rtl/objpas/sysutils/sysutilh.inc:130 -- and EIntError and EMathError
+  DESCEND FROM IT (:142, :149). So "is EExternal" alone calls a division by zero
+  a state fault. The two math families are subtracted for that reason.
+
+  What remains under EExternal is the real list: EAccessViolation (and EBusError
+  under it), EStackOverflow, EPrivilege, EControlC, EExternalException. Added by
+  name from the other side of the tree: EInvalidPointer, a corrupt heap, which is
+  EHeapMemoryError and not EExternal at all.
+
+  EOutOfMemory is DELIBERATELY NOT HERE, though it is its sibling under
+  EHeapMemoryError: an allocation that fails has failed cleanly and nothing was
+  written. A script that catches it and asks for less is behaving correctly, so
+  it stays an ordinary catchable error. }
+function IsStateFault(E: Exception): Boolean;
+
 const
   { Classic file-I/O channel numbers run 1..MaxChannel (#0 is not used). The cap
     keeps the channel table a fixed, cheap array; classic BASICs cap far lower. }
@@ -239,6 +258,15 @@ type
       isolation and only their integration could show it: probe_budget went to
       205/2, on the two cases that catch a refusal and continue. }
     FLimitFromInner: Boolean;
+    { CONTAINMENT: does a fault end the RUN, or the PROCESS? See ContainFaults. }
+    FContainFaults: Boolean;
+    { Set once a state fault has been contained. This VM is not reusable after
+      one: the fault unwound Pascal frames the interpreter still believed in, so
+      FSP, FFrameSP and every handle the run owned are in whatever state the
+      unwinding left them. Running again would be building on that, which is the
+      very thing containment exists to avoid -- so a later Run refuses in one
+      line instead. The host keeps its process; it does not keep this engine. }
+    FFaulted: Boolean;
     // Execution limits (set from the engine before Run; 0 = unlimited). Counters
     // are reset per Run. A limit is FATAL -- it aborts with peLimit and cannot be
     // caught by ON ERROR, so a script cannot escape its own ceiling.
@@ -279,6 +307,9 @@ type
       four call sites, one rule -- is the point: a fifth entry point added later
       is wrong in a way a reader can see. Nesting is safe: the mask is a set, the
       inner install is a no-op, and the inner leave restores the outer's set. }
+    { Turn a caught state fault into a failed Run. Sets FFaulted, so this VM is
+      done, and answers False for the caller to return. }
+    function ContainFault(E: Exception): Boolean;
     function EnterFPU: TFPUExceptionMask;
     procedure LeaveFPU(const ASaved: TFPUExceptionMask);
     procedure CloseAllChannels;
@@ -368,6 +399,25 @@ type
     { True once the program has run END. A host that re-enters the VM (a GUI event
       bridge, a callback) must check this after the call and stop: END means the
       PROGRAM is over, not just the routine that said it. }
+    { WHAT HAPPENS WHEN THE INTERPRETER ITSELF TAKES A FAULT.
+
+      False (the default, and what every version before this did): the Pascal
+      exception travels out of Run into the host, which is where a Lazarus
+      application meets the LCL's default handler and its modal dialog -- on a
+      machine with nobody in front of it, a dialog is a HANG, which is worse than
+      a crash because it gives no message and no exit code.
+
+      True: the fault is caught at the edge of execution and turned into an
+      ordinary failed Run -- Result False, LastError carrying peFatal and the
+      exception's class and message. Nothing is raised at the host. ON ERROR is
+      NOT offered it and never will be; see peFatal for why resuming a script on
+      damaged memory is the worse of the two outcomes. The host gets what it
+      actually needs: a chance to tell the user, save their work, and shut down
+      on its own terms.
+
+      This engine instance is finished either way -- FFaulted makes the next Run
+      refuse. Containment buys the PROCESS, not the interpreter. }
+    property ContainFaults: Boolean read FContainFaults write FContainFaults;
     property Halted: Boolean read FHalted;
     property ErrCode: Integer read FErrCode;
     property ErrMessage: String read FErrMsg;
@@ -376,6 +426,13 @@ type
   end;
 
 implementation
+
+function IsStateFault(E: Exception): Boolean;
+begin
+  if E = nil then Exit(False);
+  if (E is EIntError) or (E is EMathError) then Exit(False);   // value errors
+  Result := (E is EExternal) or (E is EInvalidPointer);
+end;
 
 constructor TPhosphorVM.Create;
 begin
@@ -456,6 +513,17 @@ end;
 procedure TPhosphorVM.UseProgram(AProg: TProgram);
 begin
   FProg := AProg;
+end;
+
+function TPhosphorVM.ContainFault(E: Exception): Boolean;
+begin
+  FFaulted := True;
+  { The CLASS is in the message on purpose. "Invalid floating point operation"
+    and "Access violation" are different news for whoever reads the log, and by
+    the time a host sees this the stack that produced it is gone. }
+  LastError := MakeError(peFatal, E.ClassName + ': ' + E.Message);
+  if ErrorLine = 0 then ErrorLine := FErrLine;
+  Result := False;
 end;
 
 function TPhosphorVM.EnterFPU: TFPUExceptionMask;
@@ -1305,6 +1373,13 @@ var
   i: Integer;
   savedMask: TFPUExceptionMask;
 begin
+  if FFaulted then
+  begin
+    LastError := MakeError(peFatal,
+      'this interpreter took a fault and cannot run again; create a new one');
+    ErrorLine := 0;
+    Exit(False);
+  end;
   UseProgram(AProg);
   FSP := 0;
   FCSP := 0;
@@ -1335,7 +1410,17 @@ begin
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
   savedMask := EnterFPU();
   try
-    Result := ExecFrom(0, -1);
+    try
+      Result := ExecFrom(0, -1);
+    except
+      // See ContainFaults. Only a STATE fault is contained, and only when the
+      // host asked for it; anything else travels on exactly as it always did.
+      on E: Exception do
+        if FContainFaults and IsStateFault(E) then
+          Result := ContainFault(E)
+        else
+          raise;
+    end;
   finally
     LeaveFPU(savedMask);
   end;
@@ -1346,6 +1431,13 @@ var
   i, had: Integer;
   savedMask: TFPUExceptionMask;
 begin
+  if FFaulted then
+  begin
+    LastError := MakeError(peFatal,
+      'this interpreter took a fault and cannot run again; create a new one');
+    ErrorLine := 0;
+    Exit(False);
+  end;
   UseProgram(AProg);
   LastError := NoError();
   ErrorLine := 0;
@@ -1369,7 +1461,15 @@ begin
   FStartTick := GetTickCount64;
   savedMask := EnterFPU();
   try
-    Result := ExecFrom(AStartPC, -1);
+    try
+      Result := ExecFrom(AStartPC, -1);
+    except
+      on E: Exception do
+        if FContainFaults and IsStateFault(E) then
+          Result := ContainFault(E)
+        else
+          raise;
+    end;
   finally
     LeaveFPU(savedMask);
   end;
@@ -2277,6 +2377,29 @@ begin
             on ex: Exception do
             begin
               r := Default(TValue);
+              { NOT EVERY EXCEPTION IS AN ERROR THE PROGRAM CAN BE TOLD ABOUT.
+
+                This net used to convert ALL of them to a catchable peRuntime,
+                and for a bad argument -- a conversion, a range, a division --
+                that is exactly right and stays. But it also handed an ACCESS
+                VIOLATION to ON ERROR, and resuming a script after one means
+                resuming on memory a wild write has already reached. The script
+                then keeps going and answers wrongly, which is worse than the
+                crash it replaced: a crash is loud.
+
+                A state fault therefore ends execution here, before Fault is
+                consulted, and carries peFatal so the host can tell it apart from
+                a script error nobody handled. Whether the PROCESS survives is a
+                separate question, answered by ContainFaults at the entry. }
+              if IsStateFault(ex) then
+              begin
+                LastError := MakeError(peFatal,
+                  ex.ClassName + ' in ' + FProg.Consts.Get(ins.A).Str +
+                  ': ' + ex.Message);
+                ErrorLine := ins.Line;
+                FFaulted := True;
+                Exit(False);
+              end;
               e := MakeError(peRuntime, ex.Message);
             end;
           end;
@@ -2638,6 +2761,7 @@ begin
   Inc(FCallDepth);
   savedMask := EnterFPU();   // this is an entry into execution; see EnterFPU
   try
+   try
     if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
     begin
       // A HALT is not a return. opRetFunc never ran, so there is no return value on
@@ -2656,6 +2780,22 @@ begin
       // not a library saying no. See FLimitFromInner.
       if Err.Code = peLimit then FLimitFromInner := True;
     end;
+   except
+     { THE HOST-CALLBACK DOOR IS AN ENTRY INTO EXECUTION TOO, and it is the one a
+       GUI application actually uses: a button click calls a BASIC function
+       through here. Containing at Run alone would leave exactly the case the
+       option was built for -- an event handler faulting inside the host's own
+       message loop -- travelling on to the LCL. See ContainFaults. }
+     on E: Exception do
+       if FContainFaults and IsStateFault(E) then
+       begin
+         ContainFault(E);
+         Err := LastError;
+         Result := Default(TValue);
+       end
+       else
+         raise;
+   end;
   finally
     // On EVERY exit -- returned, faulted, or unwound by an exception raised deeper
     // in -- the frame level goes back to where it was. Only the failure branch used

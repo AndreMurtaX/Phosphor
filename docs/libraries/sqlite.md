@@ -41,6 +41,52 @@ pattern `ioerror()` and `http_error()` follow. The consequence is worth stating
 plainly: `sqlite_scalar$()` answering `""` may mean *no rows*, *a NULL*, *an empty
 string*, or *the query was nonsense* — only `sqlite_error()` separates them.
 
+## Under a sandbox
+
+Two of these functions take a path — `sqlite_open@(path$)` and
+`sqlite_backup(db@, path$)` — and both ask the
+[sandbox](../embedding.md#the-filesystem-sandbox) before acting. **That is not the
+interesting half.** SQL names files of its own:
+
+```basic
+sqlite_exec(db@, "attach database '/etc/passwd' as x")   ' reads AND writes
+sqlite_exec(db@, "vacuum into 'C:/elsewhere/copy.db'")   ' writes a whole copy
+```
+
+The path there is not an argument, it is a few characters inside a query, so a
+gate on arguments never sees it. Parsing the SQL would be the wrong answer — SQL
+has too many spellings and the parser would be wrong for ever — so this package
+installs **SQLite's own authorizer** on every connection and answers the file
+questions there, using SQLite's own resolver to work out which file a name means.
+
+**With no `--sandbox` root set, nothing changes.** Everything below applies only
+to a host that set one.
+
+What still works inside the root: `ATTACH`, `VACUUM INTO`, `sqlite_backup`, plain
+`VACUUM`, `:memory:`, and relative names of all three.
+
+What a sandboxed program loses:
+
+| refused | why |
+|---|---|
+| `ATTACH` or `VACUUM INTO` naming a path outside the root | the point of the root |
+| a filename given as a **bound parameter** | the authorizer is handed `NULL` for it, and a name the gate cannot read is a name it must not approve — inline it with `sqlite_quote$` instead |
+| a `file:` URI | it can carry a path and options past the plain-path rule |
+| `PRAGMA temp_store_directory` / `data_store_directory` pointed outside the root | they move where relative names land |
+| `PRAGMA data_store_directory` moved between preparing an `ATTACH` and stepping it | the name the authorizer approved would then mean a different file |
+
+A refusal is an ordinary catchable error: `sqlite_error()` is `14` and
+`sqlite_errormsg$()` is `refused: the path is outside the sandbox root`. It arrives at
+whichever moment SQLite asks — `ATTACH` is judged when a statement is **prepared**,
+`VACUUM INTO` when it is **stepped** — and every route reports it the same way,
+including `sqlite_exec`, `sqlite_prepare@` + `sqlite_step`, `sqlite_scalar$`,
+`sqlite_scalar` and `sqlite_query$`.
+
+One consequence worth knowing before you meet it: a build of SQLite compiled with
+`SQLITE_OMIT_AUTHORIZATION` cannot be policed this way, so a **sandboxed** host is
+refused the connection outright rather than handed one whose SQL nobody is
+watching. An unsandboxed host is unaffected.
+
 ## Functions
 
 ### Connection

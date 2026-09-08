@@ -61,10 +61,15 @@ Phosphor/
     test-suite / -classic / -examples / -packages / -gui   the five corpora,
                         each in a .ps1 and a .sh that run the same goldens.
     coverage.py check-examples.py check-suffix.py check-sandbox.py
-    check-seams.py check-codepage.py    the gates test-suite runs after the
-                        corpora: every built-in tested AND documented, every doc
-                        example compiled, every suffix honest, every filesystem
-                        call asking the sandbox first.
+    check-seams.py check-codepage.py check-budget.py
+                        the SEVEN gates test-suite runs after the corpora: every
+                        built-in tested AND documented, every doc example
+                        compiled, every suffix honest, every filesystem call
+                        asking the sandbox first, every host answering for every
+                        seam, no Char concatenated into a code-page string, and
+                        every loop over a script-supplied count consulting the
+                        budget. coverage.py counts this many against what
+                        test-suite actually runs.
   docs/
     architecture.md     this file.
     decisions.md        frozen language & on-disk-bytecode decisions.

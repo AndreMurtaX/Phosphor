@@ -197,6 +197,7 @@ def main():
     all_libs = libs + sorted(glob.glob(os.path.join(ROOT, 'host', 'gui', 'libs', '*.pas')))
     missing_pages = []
     undescribed = []
+    header_bad = []
     described = 0
     lib_count = 0
     for lib in all_libs:
@@ -206,19 +207,52 @@ def main():
         lib_count += 1
         page = os.path.join(libdir, lib_slug(lib) + '.md')
         try:
-            text = open(page, encoding='utf-8', errors='ignore').read().lower()
+            raw = open(page, encoding='utf-8', errors='ignore').read()
+            text = raw.lower()
         except OSError:
             missing_pages.append((os.path.basename(lib), os.path.relpath(page, ROOT)))
             undescribed.extend((lib_slug(lib), n) for n in sorted(names))
             continue
+        # EACH PAGE'S OWN HEADER COUNT, WHICH USED TO BE CHECKED NOWHERE.
+        #
+        # The `claims` table further down holds counts stated in README.md and
+        # architecture.md, written out entry by entry. FORTY more counts live in
+        # these pages -- one per library, in the header line -- and a hand-written
+        # table covering two of forty-two places is a SAMPLE, not a gate. sys.md
+        # said 22 where its unit registers 40, and had said so since 2026-09-06;
+        # the other thirty-nine were right by luck, because nothing compared them.
+        #
+        # This is a rule instead: every page states its own count, and every count
+        # is compared with what its unit registers. A page that stops STATING one
+        # fails too -- the same discipline the claims table uses, because a check
+        # that quietly stops checking is worse than no check at all.
+        hm = re.search(r'·\s*([0-9]+)\s+functions', raw)
+        if hm is None:
+            header_bad.append((os.path.relpath(page, ROOT), None, len(names)))
+        elif int(hm.group(1)) != len(names):
+            header_bad.append((os.path.relpath(page, ROOT),
+                               int(hm.group(1)), len(names)))
         for n in sorted(names):
             if n in text:
                 described += 1
             else:
                 undescribed.append((lib_slug(lib), n))
     print()
+    if header_bad:
+        print("A LIBRARY PAGE'S OWN HEADER COUNT IS WRONG:")
+        for rel, claimed, actual in header_bad:
+            if claimed is None:
+                print(f"  {rel}: states no count, so this gate is no longer "
+                      f"checking it (its unit registers {actual})")
+            else:
+                print(f"  {rel}: says {claimed} functions, its unit registers "
+                      f"{actual}")
+        rc = 1
+    print()
     print(f"library pages: {described}/{described + len(undescribed)} names described"
-          f" across {lib_count} libraries")
+          f" across {lib_count} libraries"
+          + ("" if header_bad else
+             "; every page's header count matches its unit"))
     if missing_pages:
         print("LIBRARIES WITH NO PAGE:")
         for src, page in missing_pages:
@@ -314,12 +348,36 @@ def main():
                                     txt, re.M))
         return len(names)
 
+    def gates_test_suite_runs():
+        # THE NUMBER OF GATES, WHICH THIS FILE IS ONE OF.
+        #
+        # README's own paragraph used to end by saying that nothing checked its
+        # gate list, and named that as the reason check-suffix.py and
+        # check-examples.py had joined the suite and been documented nowhere. It
+        # predicted itself: check-budget.py joined on 2026-09-07 and the heading
+        # still said six. Counted from the runner rather than from a literal here,
+        # so the next gate to join cannot be missed the same way.
+        rp = os.path.join(ROOT, 'scripts', 'test-suite.ps1')
+        txt = open(rp, encoding='utf-8', errors='ignore').read()
+        m = re.search(r"foreach\s*\(\s*\$gate\s+in\s+@\(([^)]*)\)", txt)
+        if m is None:
+            return None
+        return len(re.findall(r"'([^']+\.py)'", m.group(1)))
+
     NUM = r'([0-9]+|[A-Za-z]+)'
     claims = [
         ('README.md',
          NUM + r'\s+built-in\s+functions',
          len(all_names),
          'built-in functions'),
+        ('README.md',
+         r'##\s+The\s+' + NUM + r'\s+source gates',
+         gates_test_suite_runs(),
+         'source gates in the heading'),
+        ('README.md',
+         r'`test-suite`\s+runs\s+' + NUM + r'\s+Python checks',
+         gates_test_suite_runs(),
+         'source gates in the prose'),
         ('README.md',
          NUM + r'\s+opt-in host packages',
          registered_packages('host', 'packages', '*.pas'),

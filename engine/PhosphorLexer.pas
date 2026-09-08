@@ -6,8 +6,15 @@
   Tokenizes UTF-8 source. Numbers carry their kind (an integer literal lexes to
   tkInt, a decimal to tkDouble), so the value model's int%/Double distinction
   starts at the very first stage. String literals are sliced as raw UTF-8 bytes
-  with no transcoding; a doubled quote "" inside a literal yields one quote (the
-  only escape, since '\' is now integer division). Identifiers carry an optional
+  with no transcoding. A doubled quote "" inside a literal yields one quote, AND a
+  backslash escape set is accepted as well -- \n \t \r \0 \a \b \f \v \\ \" -- which the
+  scanner below implements and tests/suite/46_string_escapes.bas is the authority
+  for. THIS PARAGRAPH SAID THE OPPOSITE UNTIL 2026-09-08: it claimed the doubled
+  quote was the only escape, "since '\' is now integer division". That was the
+  frozen decision, and the oracle import SUPERSEDED it on 2026-09-02 -- see
+  docs/decisions.md:155, which records the supersession the comment never got.
+  Outside a string literal '\' is still integer division, which is why a Windows
+  path written as a literal needs its separators doubled. Identifiers carry an optional
   trailing type suffix ($ % @ ?) as part of the name; names are case-insensitive.
 ******************************************************************************}
 unit PhosphorLexer;

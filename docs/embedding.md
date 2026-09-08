@@ -243,6 +243,34 @@ When one is hit, the run aborts and `eng.LastError.Code` is `peLimit`. The
 ceilings are cumulative over a prepared session (`Prepare` + all its
 `CallFunction`s); re-`Prepare` to reset the counters.
 
+### The ceilings reach inside a library call, too
+
+Those three used to be tested only **between instructions**, which left the hole
+they were meant to close: a library call is one instruction, so anything that ran
+long *inside* one escaped all three. A host that set exactly the ceilings above
+still hung for ever on a forty-character string handed to a backtracking regex.
+
+Since 2026-09-07 a library operation that can run long **consults the same
+ceilings while it runs**, and an operation whose size its arguments already fix
+**refuses up front** instead of starting:
+
+```basic
+x$ = string$(1000000000000000000, 65)   ' refused immediately, not attempted
+println regex_find$("(a+)+$", "aaaa...!")   ' refused: the pattern can backtrack
+```
+
+Two things follow for you. First, **a refusal of this kind is an ordinary
+catchable error, not a fatal ceiling** — `err()` is `7`, the message names the
+function and the size it declined, and `resume next` continues. Nothing has been
+spent, so a script that catches it and asks for something smaller is behaving
+correctly. Second, it only happens **when you set a ceiling**: a host that leaves
+all three at `0` behaves exactly as it always did, and pays nothing.
+
+The rule is kept honest by `scripts/check-budget.py`, one of the seven source
+gates: a loop or an allocation over a script-supplied count must consult the
+budget or be listed as exempt with a reason. Prose rots; this project has learned
+that twice.
+
 Those three bound how **long** a script runs. The fourth bounds **where** it
 writes.
 

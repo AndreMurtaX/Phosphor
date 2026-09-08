@@ -359,10 +359,19 @@ manifest-covers-directory check, so an unlisted .bas never runs and PACKAGES OK 
 printed anyway. coverage.py counts tests/negative/*.bas -- programs the suite
 requires to be REJECTED -- as coverage.
 
-**Three documentation errors**, each of the kind a gate should have caught: the
-lexer's header states the opposite of what the lexer does about a doubled quote;
-docs/libraries/sys.md says 22 functions where 40 are registered; and
-docs/libraries/gzip.md states a 19-byte stream that is 20 bytes at every level.
+~~**Three documentation errors**~~ — CLOSED 2026-09-08, and two of them became
+rules rather than edits. The lexer's header claimed a doubled quote was the only
+escape, "since '' is now integer division", which docs/decisions.md:155 records
+as SUPERSEDED on 2026-09-02; it now names the escape set the scanner implements.
+sys.md said 22 functions where its unit registers 40, and coverage.py's count
+check was a hand-written table covering README and architecture.md -- two of
+forty-two places, which is a sample and not a gate; it now derives every library
+page's header count from that page's own unit, and a page that stops STATING one
+fails too. gzip.md said a 19-byte empty stream; measured, it is 20 (and 23 at
+level 0). README's gate heading said six where the suite runs seven -- and the
+paragraph under it had PREDICTED that, saying nothing checked the list and naming
+the last two gates that had joined unannounced; coverage.py now counts the gates
+test-suite actually runs.
 
 ---
 

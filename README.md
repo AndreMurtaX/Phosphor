@@ -154,18 +154,19 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)
   · [docs/roadmap.md](docs/roadmap.md).
 
-## The six source gates
+## The seven source gates
 
-After the acceptance corpus, `test-suite` runs six Python checks over the *source* —
+After the acceptance corpus, `test-suite` runs seven Python checks over the *source* —
 invariants no compiler can check and no golden happens to cover. They run in the
 suite rather than in the build, because building should not need Python but passing
 should mean the invariants hold; and a missing interpreter **fails** the run instead
-of skipping them, since a gate that quietly does not run reads as a pass. Unlike the
-function totals above, *nothing checks this list* — `coverage.py` gates four named
-claims and the number of gates is not one of them — which is how `check-suffix.py`
-and `check-examples.py` joined the suite on 2026-09-06 and were named nowhere here.
-It is verified the only way it can be: by reading `scripts/test-suite.ps1` and
-`scripts/test-suite.sh`, which run the same six on both platforms.
+of skipping them, since a gate that quietly does not run reads as a pass. This paragraph used to end by
+saying that *nothing checks this list*, and that this was how `check-suffix.py` and
+`check-examples.py` joined the suite on 2026-09-06 and were named nowhere here. It
+predicted itself: `check-budget.py` joined on 2026-09-07 and the heading still said
+six. **`coverage.py` now counts the gates `scripts/test-suite.ps1` actually runs and
+fails if this number disagrees**, so the next one to join cannot be missed the same
+way. `scripts/test-suite.sh` runs the same seven on Linux.
 
 | gate | what it refuses to let through |
 | ---- | ------------------------------ |

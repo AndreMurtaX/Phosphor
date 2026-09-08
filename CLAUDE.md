@@ -101,9 +101,22 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   path — the guard runs before the recursive branch.
 - **A golden `.expected` records a COUNT.** If it changes, read the run and confirm every
   assertion passed before touching it. Never regenerate from a failing run.
-- **`$?` after a pipeline measures the pipe.** Capture the exit code on its own line. And
-  never gate on `cmd | grep -q`: `grep -q` exits at the first match and SIGPIPEs upstream,
-  so it reads non-zero *even when it matched* — an intermittent false SKIP.
+- **An exit code answers the question the tool asked, not the one you meant.** Three
+  spellings of the same trap, each of which has produced a false report here:
+  - **`$?` after a pipeline measures the pipe.** Capture the exit code on its own line.
+  - **`cmd | grep -q` is not a gate**: `grep -q` exits at the first match and SIGPIPEs
+    upstream, so it reads non-zero *even when it matched* — an intermittent false SKIP.
+  - **Windows `ping` exits 0 when a ROUTER answers** "destination host unreachable", so
+    `ping host && echo up` says up for a machine that is off. Ask the port instead:
+    `Test-NetConnection -ComputerName h -Port 22` (or just try the `ssh`). On 2026-09-08
+    this reported a powered-off VM as online, one message after I had correctly said it
+    was down.
+- **And a filter can hide the answer as easily as an exit code can.** Piping a run
+  through `grep` for the line you expect shows nothing when the tool instead printed an
+  error you did not expect — which reads like a silent pass. `scripts/test-suite.sh`
+  refuses an argument it does not know for exactly this reason, and says so in a comment
+  that begins "it already cost a false report once"; minutes later a `grep` of mine hid
+  that refusal. When a command prints nothing, look at its exit code before believing it.
 - **Pascal is case-insensitive:** a local `b` shadows a parameter `B`, a local `d1`
   shadows a function `D1`. Rename the local.
 - **objfpc mode has no `case`-of-string.** Use an `if`/`else if` chain.

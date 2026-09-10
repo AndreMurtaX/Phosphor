@@ -671,20 +671,52 @@ introduces a defect.
 ### Wrong answers (20)
 
 21. **engine/PhosphorVM.pas:1632** [high] -- `resume next` on the last statement of a block leaves the block: the `else` arm runs after the `then` arm (block AND inline one-line form), the next `case` arm runs, and a for/while/repeat loop is abandoned after one pass
-22. **engine/PhosphorVM.pas:2810** [high] -- A stale FHalted makes CallUserFunc discard every later return value (0, LastError=peNone) after any `end` -- including the top-level `end` the language reference recommends -- and TPhosphorEngine exposes no way to detect it
+22. ~~**engine/PhosphorVM.pas:2810** [high]~~ -- CLOSED 2026-09-10, and it was
+   WORSE THAN REPORTED. The finding says "after any `end`". Measured: a script
+   written the way docs/language-reference.md teaches -- top level, then `end`,
+   then the functions -- had its FIRST `CallFunction` answer 0, and a `$` function
+   handed the host a `vkDouble`. The documented idiom and the documented embedding
+   flow met at a flag nobody cleared, so the worked example only passed because it
+   had no `end` in it.
+
+   THE CLASS: `opHalt` sets FHalted and only ONE of the three entry points into
+   execution cleared it. `Run` did; `RunFrom` (a REPL line) did not; `CallUserFunc`
+   did not, and read the flag AFTER running a body -- so a halt raised by a
+   previous call was taken to mean "this call halted", the body ran with all its
+   side effects, and the real return value was dropped by the finally's
+   `FSP := savedSP` with Err left NoError.
+
+   All three answered. `RunFrom` clears it, because `end` ends the LINE that ran
+   it and the prompt is still there. `Prepare` calls the new
+   `TPhosphorVM.EndOfTopLevel` after a top level that completed, because the top
+   level finishing is not the program being over. `CallUserFunc` refuses BEFORE
+   pushing a frame, so nothing runs at all, and `TPhosphorEngine.Halted` lets a
+   host ask rather than be told. The two meanings of `end` are now written down in
+   both documents that teach it.
 23. **engine/libs/PhosphorNumLib.pas:49** [high] -- round/fix/cint/int discard an exact int% through AsDouble: silently wrong for values above 2^53 that a Double cannot hold, and a spurious overflow error for every int% >= 9223372036854775296
 24. **host/gui/libs/PhosphorCanvasLib.pas:271** [high] -- canvas_polyline@ and canvas_polygon@ pass NumPts = n-1 to the LCL, dropping the final vertex; a two-point polyline draws nothing and reports success
 25. **engine/PhosphorBudget.pas:975** [medium] -- BudgetPatternBounded refuses a repeated alternation of 17+ branches because the branch table only tracks 16, giving up toward "refuse" where its two siblings and its own documented contract give up toward "allow" -- ^[a-q]+$ is allowed while ^(a|b|...|q)+$ is refused
 26. **engine/PhosphorBytecode.pas:478** [medium] -- A .pbc whose user function starts one past the last instruction passes validation and runs as a silent no-op with exit code 0
 27. **engine/PhosphorCompiler.pas:722** [medium] -- Label-resolution diagnostics (undefined label, duplicate label) carry no line: PhosphorCompiler.pas:722 and :609 pass a literal 0, which PhosphorEngine.pas:246 clamps to a confident, wrong "line 1"
-28. **engine/PhosphorVM.pas:1500** [medium] -- `end` typed at the REPL leaves FHalted set, so every later session line aborts silently at its first library call (dropping the result and the enclosing assignment/print)
+28. ~~**engine/PhosphorVM.pas:1500** [medium]~~ -- CLOSED 2026-09-10 with 22: the
+   same flag, the same cause, a different door. `RunFrom` resets the step counter,
+   the output counter and the clock for each line and did not reset this. The tell
+   was that it broke almost invisibly -- `println "plain"` still worked and
+   `println len("abc")` printed nothing and reported success, because opCall checks
+   the flag after each library call and leaves the line as though it had finished.
+   `tests/classic/16_repl_after_end.repl` is that exact pair.
 29. **engine/PhosphorValue.pas:1077** [medium] -- Float `mod` computes a - b*Int(a/b), so above 2^53 it silently answers 0 instead of the remainder (1e16 mod 3 = 0, 1e17 mod 3 = 0), breaks 0 <= |r| < |b| on wide exponent spreads (1.5 mod 1e-300 is negative), and raises a spurious overflow when the quotient overflows (1e200 mod 1e-200) -- and tests/suite/51_arith_faults.bas:78 pins one of the wrong answers
 30. **engine/libs/PhosphorBufferLib.pas:718** [medium] -- buffer_setsng writes the narrowed bytes before checking them, so an unrepresentable value leaves +/-Inf in the buffer behind the raised error -- unlike buffer_setint, which refuses before WriteRaw
 31. **engine/libs/PhosphorConfigLib.pas:197** [medium] -- cfg_setn@/cfg_setns@ store numbers through a 15-digit FloatToStr, so they do not round-trip (the finding stands; the proposed 17-digit remedy is a no-op on win64 and must be replaced)
 32. **engine/libs/PhosphorDateTimeLib.pas:134** [medium] -- Below-range TDateTime is unvalidated in the date-taking functions: four week functions halt with the RTL's own words, daysinmonth fabricates 31 from an in-constant out-of-bounds read, and datetostr$ renders an unparseable 0000-00-00 -- the mirror of the top end, which correctly clamps
 33. **engine/libs/PhosphorRagLib.pas:393** [medium] -- Every query byte >= 128 becomes a space in ExtractKeywords (PhosphorRagLib.pas:393), so rag_retrieve$/rag_retrieve_json$/rag_retrieve_budget$ and DetectIntent silently return nothing for non-Latin scripts and truncate accented Latin words
 34. **engine/libs/PhosphorStrLib.pas:554** [medium] -- containstext says a needle occurs where startstext/endstext say it does not, on equal-length strings: the "ignoring case" family folds by two incompatible rules (SysUtils byte-table vs platform AnsiUpperCase), and the folding half also differs between Windows and Linux
-35. **host/gui/libs/PhosphorGuiCore.pas:649** [medium] -- GuiCallBack has no Halted guard on entry: a handler dispatched after `end` (onclose after a halting onclosequery, or the rest of the pending queue in app_run) runs a full BASIC body on a halted VM
+35. ~~**host/gui/libs/PhosphorGuiCore.pas:649** [medium]~~ -- CLOSED 2026-09-10 by
+   22, at the door instead of at this caller. `CallUserFunc` now refuses on a
+   halted VM before it pushes a frame, so a handler dispatched after `end` runs
+   NOTHING -- and every other caller of that seam gets the same guard, which is
+   why it went there and not here. GuiCallBack still reads `AVM.Halted` after the
+   call to leave the message loop; that part was already right.
 36. **engine/PhosphorCompiler.pas:2264** [low] -- A `const` declaration never checks the literal against the name's suffix (`const i% = 1.5` keeps 1.5, `const s$ = 5` holds an Int64) -- one of two unchecked bindings, the other being user-function parameter binding
 37. **engine/PhosphorLexer.pas:461** [low] -- `engine/PhosphorLexer.pas:461` appends a bare `Char` into a `{$codepage UTF8}` string, so every source byte >= 128 is destroyed to a literal `?` -- the message is byte-identical to the one a real ASCII `?` produces
 38. **engine/libs/PhosphorStrLib.pas:562** [low] -- isnumeric answers 1 for "inf", "nan", "INF" and "1e999" -- it tests the parse, not the value, so it approves strings the engine's finiteness invariant forbids val from returning

@@ -60,6 +60,7 @@ type
     FReplPC: Integer;       // first instruction of the NEXT line
     function CompileSource(const ASource: String; out AProg: TProgram): Boolean;
     procedure ConfigureVM(AVM: TPhosphorVM);
+    function GetHalted: Boolean;
     function GetSandboxRoot: String;
     procedure SetSandboxRootProp(const AValue: String);
   public
@@ -175,6 +176,13 @@ type
       PROCESS-WIDE, unlike the other three: a library function is a plain callback
       with no VM to ask, so two engines in one process share one root. Setting it
       from a host with several engines sets it for all of them. }
+    { True once a CALLBACK has run END -- the script saying its work is finished.
+      A prepared session is not halted by the `end` that closes its own top level;
+      see TPhosphorVM.EndOfTopLevel. Once this is True every CallFunction is
+      refused with peRuntime rather than answered with a default, so a host that
+      checks LastError already learns of it; this is here for one that would
+      rather ask before calling. Prepare a script again to start over. }
+    property Halted: Boolean read GetHalted;
     property SandboxRoot: String read GetSandboxRoot write SetSandboxRootProp;
   end;
 
@@ -249,6 +257,11 @@ begin
   finally
     comp.Free;
   end;
+end;
+
+function TPhosphorEngine.GetHalted: Boolean;
+begin
+  Result := (FVM <> nil) and FVM.Halted;
 end;
 
 function TPhosphorEngine.GetSandboxRoot: String;
@@ -379,6 +392,15 @@ begin
       Finish();
       Exit(FErrorLine);
     end;
+    { The top level is done, and that is not the program being over.
+
+      docs/language-reference.md teaches `end` before a block of functions, and the
+      paragraph above this one keeps the VM alive so the host can call those
+      functions. Both are right and they used to meet at a flag nobody cleared: a
+      script written the documented way had EVERY CallFunction answer 0 -- not
+      after some later halt, but from the first call, with LastError NoError and a
+      `$` function handing back a Double. }
+    FVM.EndOfTopLevel();
     Result := 0;
   finally
     BudgetEnd();

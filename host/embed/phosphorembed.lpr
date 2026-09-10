@@ -33,24 +33,37 @@ end;
 
 // --- the user's script: defines routines the host will call ------------------
 const
+  { WRITTEN THE WAY docs/language-reference.md TEACHES IT: the top level does its
+    setup and then says `end`, "handy before a block of subroutines or functions".
+
+    That one word used to break every call below it. Prepare runs the top level and
+    keeps the VM alive, `end` set a halted flag, and CallUserFunc read that flag
+    AFTER running a body -- so `total` ran, its answer was thrown away, and the
+    host got 0 with LastError NoError. From the FIRST call, not after some later
+    halt. The example avoided it only because it had no `end`, which is exactly how
+    a worked example stops being worth anything. }
   UserScript =
+    'greeting$ = "hello, "'                              + #10 +
+    'println "ready"'                                    + #10 +
+    'end'                                                + #10 +
+    ''                                                   + #10 +
     'function total(qty, unit)'                          + #10 +
     '  net = qty * unit'                                 + #10 +
     '  return net - net * host_discount()'               + #10 +   // calls the host fn
     'end function'                                       + #10 +
     ''                                                   + #10 +
     'function greet$(name$)'                             + #10 +
-    '  return "hello, " + name$'                         + #10 +
+    '  return greeting$ + name$'                         + #10 +   // a top-level global
     'end function'                                       + #10 +
     ''                                                   + #10 +
     'function boom()'                                    + #10 +
     '  return 1 / 0'                                     + #10 +   // fails when called
     'end function'                                       + #10 +
     ''                                                   + #10 +
-    // Top level, so it runs during Prepare: whatever a script PRINTS reaches the
-    // host through OnOutput, and nowhere else. An embedder that installs no seam
-    // gets nothing -- silently -- which is why this file now installs one.
-    'println "ready"'                                    + #10;
+    'function finished()'                                + #10 +
+    '  println "the script is done"'                     + #10 +
+    '  end'                                              + #10 +   // a CALLBACK saying END
+    'end function'                                       + #10;
 
 var
   Ok: Integer = 0;
@@ -128,6 +141,34 @@ begin
     //    total() left `net` set; a second Prepare would be needed to reset.
     v := eng.CallFunction('no_such_function', []);
     Report(eng.LastError.Code = peUnknownFunction, 'an unknown routine is reported, not run');
+
+    // 8. AND WHAT HAPPENS WHEN THE SCRIPT SAYS IT IS DONE.
+    //    `end` in a callback means the PROGRAM is over, not just that routine --
+    //    unlike the `end` that closed the top level above, which merely ended the
+    //    top level and left this session perfectly callable. A host has to be able
+    //    to tell the two apart, so: nothing is refused until a callback halts, and
+    //    everything is refused afterwards, out loud.
+    Report(not eng.Halted, 'the top level saying END did not halt the SESSION');
+    sink.Text := '';
+    v := eng.CallFunction('finished', []);
+    Report(eng.LastError.Code = peNone, 'a callback that runs END is not an error');
+    Report(sink.Text = 'the script is done' + #10, 'and its body ran, up to the END');
+    Report(eng.Halted, 'but the session is halted now, and the host can ask');
+
+    v := eng.CallFunction('total', [ValInt(3), ValInt(100)]);
+    Report(eng.LastError.Code = peRuntime,
+           'A CALL AFTER END IS REFUSED, not answered with a default');
+    Report(Pos('has run END', eng.ErrorMessage) > 0, 'and the message says why');
+    Report(Abs(v.Num) < 1E-9, 'the value is a default, as it must be');
+    sink.Text := '';
+    Report(sink.Text = '', 'and NOTHING ran: no output, no side effect');
+
+    // 9. Preparing again starts over -- that is the way back.
+    rc := eng.Prepare(UserScript);
+    Report(rc = 0, 'the same script prepares again');
+    Report(not eng.Halted, 'and the new session is not halted');
+    v := eng.CallFunction('total', [ValInt(3), ValInt(100)]);
+    Report(Abs(v.Num - 270) < 1E-9, 'and calling into it works again');
   finally
     eng.Free;   // Finish() frees the prepared VM and its handles
   end;

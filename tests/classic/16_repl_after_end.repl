@@ -1,0 +1,21 @@
+rem `end` ends the LINE that ran it, not the session. The prompt is still there
+rem and the person is still typing, so the next line must run normally.
+rem
+rem It used to poison the session, and almost invisibly: RunFrom reset the step
+rem counter, the output counter and the clock for each new line, but not the
+rem halted flag -- only Run cleared that, and the REPL does not go through Run.
+rem opCall then checks the flag AFTER each library call and leaves the line as if
+rem it had succeeded, so a line with no library call still worked while a line
+rem with one printed NOTHING and reported success. That is the pair below:
+rem `println "plain"` was always fine; `println len("abc")` was the broken half.
+x% = 41
+println x% + 1
+end
+println "plain text still prints"
+println len("abc")
+y% = x% + 1
+println "and the session kept its variables: " + str$(y%)
+function twice(n)
+return n * 2
+endfunction
+println "and can still define and call: " + str$(twice(21))

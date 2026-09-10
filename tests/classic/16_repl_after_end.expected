@@ -1,0 +1,8 @@
+Phosphor BASIC 0.0.1 -- REPL. Variables and functions persist across lines.
+Type a multi-line block and it waits for the terminator. Ctrl+Z then Enter to quit.
+phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> 42
+phosphor> phosphor> plain text still prints
+phosphor> 3
+phosphor> phosphor> and the session kept its variables: 42
+phosphor>      ...>      ...> phosphor> and can still define and call: 42
+phosphor> 

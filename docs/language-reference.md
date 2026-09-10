@@ -59,7 +59,10 @@ println x
 ```
 
 An explicit `end` stops the program early (handy before a block of subroutines or
-functions — see below).
+functions — see below). It ends the *program*, not the routine that says it: a
+host that has called into the script gets no return value from that call and can
+make no further ones until it prepares the script again. Ending only a routine is
+what `return` is for.
 
 ---
 

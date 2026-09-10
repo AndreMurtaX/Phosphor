@@ -74,6 +74,17 @@ numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
   Each `CallFunction` runs over the same live globals and handles the script set
   up. A second `Prepare` (or `Finish`) discards the previous one.
 
+  **`end` means two different things and the difference is the one an embedder
+  has to know.** A script's top level ends with `end` more often than not — the
+  language reference teaches it as the way to stop before a block of functions —
+  and that ends the *top level*, nothing more: `Prepare` returns `0` and every
+  routine it defined is callable. But `end` reached inside a routine YOU called
+  means the script has decided its work is finished. That call returns a default
+  value with no error, because `end` is not `return` and there is nothing to
+  return; every later `CallFunction` is then refused outright with `peRuntime`
+  and a message that says so. `eng.Halted` reports it if you would rather ask
+  than be told, and `Prepare` again is the way back.
+
 - **Precompiled bytecode:** `eng.RunBytecode(stream)` runs a `.pbc` compiled
   earlier (`phosphor compile a.bas a.pbc`), with no lexer or compiler involved.
   Give it a `TFileStream` over the file, or a `TBytesStream` over an embedded

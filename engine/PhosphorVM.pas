@@ -418,7 +418,19 @@ type
       This engine instance is finished either way -- FFaulted makes the next Run
       refuse. Containment buys the PROCESS, not the interpreter. }
     property ContainFaults: Boolean read FContainFaults write FContainFaults;
+    { True once the program has run END. Read it after a callback: END means the
+      PROGRAM is over, not just the routine that said it, and CallUserFunc refuses
+      every later call rather than running one and discarding its answer. }
     property Halted: Boolean read FHalted;
+    { The top level finishing is NOT the program being over.
+
+      `end` before a block of subroutines is the idiom the language reference
+      teaches, and Prepare runs the top level once and keeps the VM alive for the
+      host to call into -- so the two documented halves met at a flag that made
+      every later call answer 0. Prepare says so here, once, after a top level that
+      completed. Nothing else may call this: a callback that halts really has ended
+      the program, and clearing that would be the defect wearing the other face. }
+    procedure EndOfTopLevel;
     property ErrCode: Integer read FErrCode;
     property ErrMessage: String read FErrMsg;
     property ErrLine: Integer read FErrLine;
@@ -1487,6 +1499,13 @@ begin
   FSP := 0;
   FCSP := 0;
   FFrameSP := 0;
+  { AND A FRESH HALT. `end` ends the LINE that ran it, not the session: the prompt
+    is still there and the person is still typing. Run cleared this and RunFrom did
+    not, so `end` at the REPL poisoned every later line -- and did it almost
+    invisibly, because opCall's post-call check (`if FHalted then Exit(True)`) makes
+    the line abort at its FIRST LIBRARY CALL and report success. `println "x"` still
+    worked; `println len("x")` printed nothing and answered rc 0. }
+  FHalted := False;
   had := Length(FVars);
   if AProg.VarCount > had then
   begin
@@ -2608,6 +2627,11 @@ begin
   Result := True;
 end;
 
+procedure TPhosphorVM.EndOfTopLevel;
+begin
+  FHalted := False;
+end;
+
 procedure TPhosphorVM.ClearError;
 begin
   FErrCode := 0;
@@ -2718,6 +2742,24 @@ begin
   if FProg = nil then
   begin
     Err := MakeError(peRuntime, 'no program is running');
+    Exit;
+  end;
+  { A HALTED SESSION ANSWERS, IT DOES NOT PRETEND.
+
+    This used to run the body and then throw the answer away: the flag was read
+    AFTER execution, so a halt raised by a PREVIOUS call was taken to mean "this
+    call halted". The body ran -- with all its side effects -- the real return
+    value left by opRetFunc was dropped by the finally's FSP := savedSP, and Err
+    stayed NoError. A host following docs/embedding.md saw a successful call
+    returning 0, for ever, with no way to tell: TPhosphorEngine did not expose
+    Halted either.
+
+    Refused here, BEFORE the frame is pushed, so nothing runs at all. `end` means
+    the program is over; the honest answer to "call this function" is no. }
+  if FHalted then
+  begin
+    Err := MakeError(peRuntime, 'the script has run END; this session is over -- ' +
+      'Prepare it again before calling into it');
     Exit;
   end;
   ufi := FProg.FindUserFunc(AName, Length(Args));

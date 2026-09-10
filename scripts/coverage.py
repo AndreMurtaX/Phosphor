@@ -92,9 +92,22 @@ def registered_names(path):
     return names
 
 def load_corpus():
+    """Every program that is RUN, which is not every program in tests/.
+
+    tests/negative/*.bas are programs the suite requires to be REJECTED -- they
+    exist to prove a refusal, and not one of them ever executes. Counting a name
+    mentioned in one as "exercised by a test" credits a function for appearing in
+    a program that must fail, which is the opposite of coverage. It was hiding
+    exactly one: arr_free was called nowhere else in the tree, so the only thing
+    proving it worked was a file asserting that it does not.
+
+    A name that appears ONLY here is therefore uncovered, and this gate says so.
+    """
     text = ''
     for p in glob.glob(os.path.join(ROOT, 'tests', '**', '*.bas'), recursive=True) + \
              glob.glob(os.path.join(ROOT, 'examples', '*.bas')):
+        if os.sep + 'negative' + os.sep in p:
+            continue
         text += open(p, encoding='utf-8', errors='ignore').read().lower()
     return text
 

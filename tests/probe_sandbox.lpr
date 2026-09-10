@@ -417,11 +417,53 @@ begin
     FpUnlink(PChar(RootDir + PathDelim + 'door'));
   end;
   {$ELSE}
-  // Not a silent skip: creating a symlink on Windows needs SeCreateSymbolicLink,
-  // which this machine does not grant. It goes to STDOUT with a "skip:" prefix,
-  // which the suite runners print alongside ok:/fail: -- a skip nobody sees is a
-  // pass, and this one is not a pass.
-  Writeln('skip: symlink escape (needs a symlink; Windows creation is privileged)');
+  { A JUNCTION, WHICH IS THE WINDOWS SHAPE OF THE SAME ATTACK.
+
+    This used to be a skip, with the reason that creating a SYMLINK on Windows
+    needs SeCreateSymbolicLink and this machine does not grant it. That reason is
+    true and it was the wrong conclusion, because a symlink is not the only door:
+    a DIRECTORY JUNCTION redirects a directory just as well, `mklink /J` creates
+    one with NO special privilege, and it is therefore the form a confined script
+    or a careless user is actually able to make.
+
+    So the strongest claim the sandbox makes -- that a link planted INSIDE the
+    root and pointing out of it is refused, because every component of the path
+    as WRITTEN is inside and only resolving it shows otherwise -- is now asserted
+    on Windows too, against the link Windows lets anyone create.
+
+    Measured before this was written, with bin\phosphor.exe --sandbox over a
+    junction: read answered empty, write answered 0, listing answered empty, and
+    nothing appeared in the target directory. The behaviour was already right;
+    nothing on this platform said so.
+
+    If mklink fails anyway -- a policy, a different volume, a filesystem without
+    reparse points -- it is still a SKIP with the reason, never a silent pass. }
+  if ExecuteProcess(GetEnvironmentVariable('ComSpec'),
+                    ['/c', 'mklink', '/J',
+                     RootDir + PathDelim + 'door', OutDir]) <> 0 then
+    Writeln('skip: junction escape (mklink /J refused; no reparse point to test)')
+  else if not DirectoryExists(RootDir + PathDelim + 'door') then
+    Report(False, 'mklink reported success but planted no junction')
+  else
+  begin
+    Check('a read through a junction out of the root is refused',
+          'print file_readalltext$("' + Slash(RootDir) + '/door/victim.txt")' + LF, '');
+    Check('a write through a junction out of the root is refused',
+          'print file_writealltext("' + Slash(RootDir) + '/door/through.txt", "x")' + LF, '0');
+    Report(not FileExists(OutDir + PathDelim + 'through.txt'),
+           'and nothing was written through it');
+    Check('a listing through a junction out of the root is refused',
+          'print dir_getfiles$("' + Slash(RootDir) + '/door")' + LF, '');
+    Report(FileExists(OutDir + PathDelim + 'victim.txt'),
+           'and the tree the junction points at is untouched');
+    { RemoveDir on a junction removes the LINK, not the directory it names --
+      that is what makes it safe to undo here. The target is asserted intact
+      immediately above, so a reader can see the difference was checked rather
+      than assumed. }
+    RemoveDir(RootDir + PathDelim + 'door');
+    Report(DirectoryExists(OutDir),
+           'and removing the junction left the target directory alone');
+  end;
   {$ENDIF}
 
   // --- the scratch places answer inside the root ------------------------------

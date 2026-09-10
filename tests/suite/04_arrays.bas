@@ -76,3 +76,37 @@ inner@[1] = 123
 parr_set@(p@, 1, inner@)
 got@ = parr_get@(p@, 1)
 assert_eq(narr_get(got@, 1), 123, "round trip through a pointer array")
+
+test_case("array/free")
+rem arr_free was covered by NOTHING until 2026-09-10. The only file naming it
+rem was tests/negative/04_fabricated_arr_free.bas -- a program the suite requires
+rem to be REJECTED -- and coverage.py counted that as coverage, so a function
+rem whose only proof was a file asserting that it FAILS read as exercised.
+rem
+rem What the page promises (docs/libraries/array.md:89): it releases the array,
+rem revokes the handle and answers 1; freeing the same handle twice is the error
+rem "not a valid array handle", not a quiet 0; and ids are never reused within a
+rem run, so a stale handle stays detectably stale. The first half is asserted
+rem here; the second half is the negative test, which is where a refusal belongs.
+f@ = dim@(3)
+f@[1] = 41
+assert_eq(narr_get(f@, 1), 41, "the array works before it is freed")
+assert_eq(arr_free(f@), 1, "arr_free answers 1")
+rem And the revocation, proven POSITIVELY rather than by a file that must be
+rem rejected: the handle is caught being refused, inside a program that runs.
+freedcode = 0
+freedmsg$ = ""
+reached = 0
+on error goto freed
+dead = narr_get(f@, 1)
+reached = 1
+on error goto 0
+assert_eq(reached, 1, "resume next carried on past the refused read")
+assert_eq(freedcode, 6, "a revoked handle is a catchable runtime error")
+assert_true(instr(freedmsg$, "not a valid array handle") > 0, "and it says so")
+goto skipfreed
+freed:
+  freedcode = err()
+  freedmsg$ = errmsg$()
+  resume next
+skipfreed:

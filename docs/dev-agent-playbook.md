@@ -321,8 +321,8 @@ Two mechanical parts of that, both paid for:
 
 The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-10
 the crashes, the seven security and data-loss findings, all 21 wrong answers and
-all six gate blind spots are closed on both operating systems. **Six remain, and
-they are
+all six gate blind spots and all three test gaps are closed on both operating
+systems. **Three remain, and they are
 listed here rather than in a task tracker because this project has learned that a
 backlog nobody can find is a backlog that does not exist.**
 
@@ -415,11 +415,35 @@ names file, line, function and operand.
 
 **All six gate blind spots are closed.**
 
-**Three test gaps.** The sandbox's strongest claim -- a link planted inside the
-root -- is never asserted on Windows. tests/packages has no
-manifest-covers-directory check, so an unlisted .bas never runs and PACKAGES OK is
-printed anyway. coverage.py counts tests/negative/*.bas -- programs the suite
-requires to be REJECTED -- as coverage.
+~~**Three test gaps**~~ -- ALL CLOSED 2026-09-10.
+
+The sandbox's strongest claim -- a link planted INSIDE the root and pointing out
+of it, where every component of the path as written is inside and only resolving
+it shows otherwise -- was asserted on Unix and skipped on Windows, because
+creating a SYMLINK there needs SeCreateSymbolicLink. True, and the wrong
+conclusion: a directory JUNCTION redirects a directory just as well, `mklink /J`
+makes one with no privilege at all, and it is therefore the form a confined
+script or a careless user can actually create. Six assertions now run on Windows
+(probe_sandbox 131 -> 137) and the skip line is gone. Proven to measure something
+by disabling link-following in the sandbox: the read comes back with the contents
+of the file OUTSIDE the root, the write answers 1, four assertions go red.
+
+No manifest-driven corpus checked that its manifest covered its DIRECTORY. A file
+containing `assert_int(1, 2)` -- an assertion that cannot pass -- was dropped into
+tests/packages and the runner printed PACKAGES OK. **scripts/check-manifests.py**
+is the eighth gate and checks both directions across all four manifest-driven
+corpora: a .bas nothing lists is a test nothing runs, and a listing with no file
+behind it is a skip nobody asked for. Duplicate entries too, which read as two
+passes. tests/classic and tests/negative are named in NO_MANIFEST with the reason
+rather than left out silently.
+
+coverage.py counted tests/negative/*.bas -- programs the suite requires to be
+REJECTED -- as coverage. It was crediting exactly one function: `arr_free`
+appeared nowhere else in the tree, so the only thing proving it worked was a file
+asserting that it does NOT. The corpus now excludes negatives, which dropped the
+figure to 714/715 and named the hole; tests/suite/04_arrays.bas exercises it for
+real, including catching the revocation with `on error` inside a running program
+rather than by a file that must fail. Back to 715/715, honestly.
 
 ~~**Three documentation errors**~~ — CLOSED 2026-09-08, and two of them became
 rules rather than edits. The lexer's header claimed a doubled quote was the only

@@ -154,9 +154,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)
   · [docs/roadmap.md](docs/roadmap.md).
 
-## The seven source gates
+## The eight source gates
 
-After the acceptance corpus, `test-suite` runs seven Python checks over the *source* —
+After the acceptance corpus, `test-suite` runs eight Python checks over the *source* —
 invariants no compiler can check and no golden happens to cover. They run in the
 suite rather than in the build, because building should not need Python but passing
 should mean the invariants hold; and a missing interpreter **fails** the run instead

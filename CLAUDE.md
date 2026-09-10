@@ -33,7 +33,7 @@ bar.
 
 ```powershell
 powershell -NoProfile -File scripts\build.ps1        # clean build + boundary check
-powershell -NoProfile -File scripts\test-suite.ps1   # suite + probes + 7 gates
+powershell -NoProfile -File scripts\test-suite.ps1   # suite + probes + 8 gates
 powershell -NoProfile -File scripts\test-classic.ps1 # also: -examples -packages -gui
 powershell -NoProfile -File scripts\test.ps1
 ```
@@ -129,7 +129,7 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
 
 ## The gates, and why they exist
 
-`scripts/test-suite.ps1` runs seven Python gates. Each exists because a rule stated in prose
+`scripts/test-suite.ps1` runs eight Python gates. Each exists because a rule stated in prose
 turned out to be false and nothing could tell:
 
 | gate | the rule it enforces |
@@ -141,6 +141,7 @@ turned out to be false and nothing could tell:
 | `check-examples.py` | every ```basic block in the docs compiles |
 | `check-suffix.py` | a registered name's suffix is the kind its body returns |
 | `check-budget.py` | a loop or an allocation over a script-supplied count consults the budget, or is exempt with a reason |
+| `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test |
 
 **If reordering, renaming or deleting something would break an invariant *silently*, the
 check belongs in a script.** A completeness claim in prose is a promise; a gate is the

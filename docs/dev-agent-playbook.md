@@ -649,6 +649,33 @@ introduces a defect.
 
 ### Killed by the refuters (13, kept so they are not re-found)
 
+Three of these were security-adjacent, so the integrator re-read the refutations
+rather than trusting the count. All three hold, each on a measurement the finder
+had not made -- but two leave a residual that is worth more than the finding was,
+and one of those is NEW, found by the refuter while killing the claim:
+
+- **`gzip_decompress$` drops every member but the first of a CONCATENATED gzip
+  stream, and no page says so.** The CRC/ISIZE claim it was found under is
+  correctly refused -- `docs/libraries/gzip.md:41-43` states that the trailer is
+  "stripped and not verified" and gives the reason -- but multi-member silence is
+  undocumented and the finder's proposed remedy (compare against `Length(Src)-8`)
+  would have refused every legitimate concatenated stream. **Open, low.**
+- **`scripts/test-gui.sh:66` matches a bare `gtk` and an unanchored `cannot
+  open`.** The claim that this swallows real failures is measurably false: on the
+  actual gtk2 session a failing run writes 59 bytes matching none of those tokens
+  and the run exits 1, twice measured. But the pattern is wider than the one
+  string it has to match, and anchoring it to `cannot open display` is a one-line
+  hardening. **Open, low.** The finder's own proposed anchor (`^Gtk-WARNING`) is
+  wrong and would turn a legitimate skip into a false failure -- the real line
+  begins `(phosphorguitest:NNNN):`.
+- **HTTPS verification is chain-only; the hostname is not checked.** Refused as a
+  defect and correctly so: it is disclosed in the unit header, in
+  `docs/libraries/http.md` and in `docs/roadmap-net.md:79`, which proposes the
+  identical `X509_check_host` remedy nine days earlier. It is a scheduled roadmap
+  step, not a discrepancy between code and documentation. Nothing to fix; it does
+  need doing.
+
+
 - `engine/PhosphorCompiler.pas:1323` -- The two-word `else if` the language reference promises is a syntax error in the one-line IF form, because the lexer merges it into `elseif` and the inline branch only looks for `else`
 - `engine/PhosphorVM.pas:2802` -- TimeoutMs on a prepared session is a wall-clock fuse lit at Prepare -- it counts the host's idle time, and disagrees with the library-side budget, which restarts on every call
 - `scripts/check-suffix.py:53` -- check-suffix.py cannot see a `%` name that returns a Double, because it maps `%` and no-suffix to the same kind -- and dict_get%, documented as `-> int`, returns 1.5

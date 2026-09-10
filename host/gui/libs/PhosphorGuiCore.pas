@@ -516,6 +516,41 @@ function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
   A program tests one with instr(mods$, "C") > 0. }
 function GuiModsStr(Shift: TShiftState): String;
 
+{ THE ONE WAY OUT OF app_run's LOOP, and the only thing that may take it.
+
+  Setting the flag is not enough, which is the whole of the defect this closes.
+  app_run blocks inside Application.HandleMessage, which dispatches the pending
+  queue and then waits in Idle(Wait=True) for a message that may never arrive. A
+  flag set from a timer callback is therefore read only if something ELSE happens
+  to wake the loop -- and with no window shown, nothing does. Measured: a timer
+  that stops itself and then calls app_quit() hung 5 runs out of 5.
+
+  So leaving is a flag AND a wake. The wake goes through the LCL's own mechanism
+  rather than a platform message: QueueAsyncCall ends by calling WakeMainThread,
+  which the widgetset assigns (win32object.inc:160), and the queued no-op also
+  gives AppProcessMessages something to dispatch -- so the loop makes a pass and
+  re-reads the flag even where the wake itself is a no-op.
+
+  form_show@'s closer calls this too, for the LAST window only; see
+  PhosphorFormLib. Application.Terminate is never used: it sets a flag the LCL
+  gives no public way to clear, so it turns "give me back control" into a one-way
+  door for the whole process. }
+{ Is any window OTHER than AExcept still on screen?
+
+  Answered HERE because the answer needs TGuiHandle, which is this unit's. The
+  handle registry does not hold a TForm -- GuiRegister wraps every object in a
+  TGuiHandle so it can be told when the object dies -- so a caller walking
+  HandleAt() and testing `is TForm` finds nothing, ever. That is what the first
+  version of the last-window check did, and closing one of two shown forms still
+  left the message loop.
+
+  Screen.CustomForms was tried before that and is also wrong here: measured
+  headless, a form the script had shown was not in it. The registry is where this
+  host's own windows live, which is the set the question is about. }
+function GuiOtherFormShown(AExcept: TObject): Boolean;
+
+procedure GuiLeaveLoop;
+
 procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
 
 implementation
@@ -614,12 +649,25 @@ begin
   Result := AVM.CallUserFunc(AHandler, AArgs, err);
   if IsError(err) then
     GGuiError := 2;   // a handler that failed is recorded, not raised
-  // A handler that says END means the program is over. The engine records that
-  // instead of quietly ending only the handler's own activation, so the window it
-  // was clicked in has to go too -- otherwise `end` in a click handler is a
-  // statement that does nothing, which is a worse answer than the bug it replaced.
+  { A handler that says END means the program is over. The engine records that
+    instead of quietly ending only the handler's own activation, so the window it
+    was clicked in has to go too -- otherwise `end` in a click handler is a
+    statement that does nothing, which is a worse answer than the bug it replaced.
+
+    IT LEAVES THE LOOP; IT DOES NOT TERMINATE THE APPLICATION. This was the third
+    caller of Application.Terminate in the GUI, and the same objection applies to
+    it as to the other two: that flag has no public way to be cleared, so a host
+    running one script after another -- which is the whole embedding story -- got
+    a dead GUI for every script after the first one that said `end` in a handler.
+    Found while fixing the other two rather than reported, and closed with them
+    because it is the same mechanism and not a third bug.
+
+    Nothing is lost by the narrower answer: AVM.Halted is already set, so when
+    this library call returns, the dispatch loop sees it and ends the program.
+    Leaving the message loop is exactly what has to happen here; ending the
+    process is what happens next, on its own. }
   if AVM.Halted then
-    Application.Terminate;
+    GuiLeaveLoop;
 end;
 
 function TGuiEventBridge.Call(const AArgs: array of TValue): TValue;
@@ -1409,8 +1457,46 @@ begin
 end;
 
 // --- app_* : the message loop, for the interactive host ---------------------
+type
+  { QueueAsyncCall wants a method, so the no-op needs an owner. It does nothing
+    on purpose: the value is in the POSTING, which wakes the loop and gives it a
+    pass to make. }
+  TLoopWaker = class
+    procedure Nudge(Data: PtrInt);
+  end;
+
 var
-  GAppQuit: Boolean = False;   // set by app_quit, read by the loop below
+  GAppQuit: Boolean = False;   // set by GuiLeaveLoop, read by the loop below
+  GWaker: TLoopWaker = nil;
+
+procedure TLoopWaker.Nudge(Data: PtrInt);
+begin
+  // Deliberately empty. See GuiLeaveLoop.
+end;
+
+function GuiOtherFormShown(AExcept: TObject): Boolean;
+var
+  i: Integer;
+  o: TObject;
+begin
+  Result := False;
+  for i := 1 to HandleCount do
+  begin
+    o := HandleAt(i);
+    if (o is TGuiHandle) and (TGuiHandle(o).Control <> nil) and
+       (TGuiHandle(o).Control <> AExcept) and
+       (TGuiHandle(o).Control is TForm) and
+       TForm(TGuiHandle(o).Control).Visible then
+      Exit(True);
+  end;
+end;
+
+procedure GuiLeaveLoop;
+begin
+  GAppQuit := True;
+  if GWaker = nil then GWaker := TLoopWaker.Create;
+  Application.QueueAsyncCall(@GWaker.Nudge, 0);
+end;
 
 function f_app_run(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -1425,7 +1511,32 @@ begin
   // leaves the application usable either way.
   GAppQuit := False;
   while (not GAppQuit) and (not Application.Terminated) do
-    Application.HandleMessage;
+  begin
+    { DISPATCH AND WAIT ARE SPLIT, AND THE FLAG IS READ BETWEEN THEM.
+
+      This used to be one call to Application.HandleMessage, which is
+      AppProcessMessages followed by Idle(Wait=True) with nothing in between --
+      and that is where app_quit() was lost. A script's app_quit runs inside a
+      dispatched event: the timer fires during AppProcessMessages, the callback
+      sets the flag, and HandleMessage then walks straight into Idle and blocks
+      in AppWaitMessage for a message that, with no window shown, never comes.
+      The flag was set, correct, and unread. Measured: the loop hung 5 runs out
+      of 5, and instrumenting the callback showed it had run and quit had been
+      called.
+
+      Waking it from app_quit does not fix it either, and that was tried: Idle
+      does ProcessAsyncCallQueue BEFORE AppWaitMessage (application.inc:471), so
+      a queued nudge is consumed on the way IN to the wait rather than releasing
+      it. The wake is kept in GuiLeaveLoop for the host that calls app_quit from
+      outside a dispatched event, but it is not what closes this.
+
+      Reading the flag between the two is. Nothing is polled and nothing is
+      slept: Idle still blocks exactly as before whenever the loop should keep
+      running. }
+    Application.ProcessMessages;
+    if GAppQuit or Application.Terminated then Break;
+    Application.Idle(True);
+  end;
   Result := ValInt(0);
 end;
 function f_app_processmessages(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1440,7 +1551,8 @@ begin
   // Leave the loop; do NOT terminate the application. "Stop showing this window
   // and give me back control" is what a script means here, and terminating made
   // that a one-way door for the whole process.
-  GAppQuit := True;
+  // Setting the flag alone was not enough: the loop had to be WOKEN to read it.
+  GuiLeaveLoop;
   Result := ValInt(0);
 end;
 

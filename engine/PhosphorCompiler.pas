@@ -445,7 +445,7 @@ end;
 
 procedure TPhosphorCompiler.ParseFunction;
 var
-  ln, entry, jOver, paramCount, i, ufIdx: Integer;
+  ln, entry, jOver, paramCount, i, ufIdx, savedLoopDepth: Integer;
   funcName: String;
   retType: TVarType;
   ltypes: array of TVarType;
@@ -509,7 +509,31 @@ begin
   for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];
   ufIdx := FProg.AddUserFunc(funcName, entry, paramCount, ltypes, retType);
 
+  { A LOOP OUTSIDE THE FUNCTION IS NOT THIS FUNCTION'S LOOP.
+
+    ParseStatement accepts a `function` anywhere a statement may appear, and
+    ParseBlockUntil calls ParseStatement -- so a function can be DEFINED inside a
+    loop body. Its own body is then compiled with FLoopDepth still counting the
+    enclosing loop, and a `break` in it went to AddBreak on that loop's fixup
+    list. PatchBreaks later pointed the jump at the instruction after `endwhile`.
+
+    Calling the function then jumped there with the function's activation frame
+    still pushed, and the statements after the loop ran again -- and again. The
+    reported program printed its tail 262,146 times in six seconds and never
+    stopped: no error, no exit, nothing to read.
+
+    This is the GOTO defect of 2026-09-09 wearing different syntax, and the same
+    sentence closes both: THE COMPILER MUST SCOPE CONTROL-FLOW TARGETS TO THE
+    FUNCTION BEING COMPILED. A body compiled at depth zero has no loop to bind
+    to, so `break` and `continue` in one are refused by the check that already
+    exists -- "'break' outside a loop" -- rather than silently retargeted.
+
+    Restored afterwards, because the enclosing loop is still being compiled and
+    its own `break` must keep working. }
+  savedLoopDepth := FLoopDepth;
+  FLoopDepth := 0;
   ParseBlockUntil(['endfunction']);
+  FLoopDepth := savedLoopDepth;
   if FFailed then Exit;
   // The body can ADD locals -- a FOR bound is one -- and the type table was taken
   // before the body was parsed, so those slots were missing from it. The frame is

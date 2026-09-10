@@ -60,7 +60,30 @@ begin
   if UserBridge <> nil then
     UserBridge.FireClose(Sender, CloseAction);   // the program sees it first
   CloseAction := caHide;
-  Application.Terminate;
+
+  { CLOSING A WINDOW ENDS THE LOOP ONLY WHEN IT WAS THE LAST WINDOW.
+
+    Two things were wrong on one line, and both are documented the other way.
+
+    It called Application.Terminate, which sets a flag the LCL gives no public
+    way to clear -- so once ANY window had been closed, every later app_run() in
+    that process returned instantly having dispatched nothing. The playbook's
+    round 28 records this exact defect as fixed for app_quit, and it was: the fix
+    landed in app_quit and this second caller kept doing it. gui-core.md says of
+    app_quit "It leaves the application usable -- a later app_run() enters the
+    loop normally", and that has to be true of closing a window too.
+
+    And it fired for ANY form, not the last one. gui-core.md scopes termination
+    to "closing the LAST window", so a program showing two windows lost its
+    message loop when the user closed either of them -- with the other still open
+    and, from the user's side, still expected to work.
+
+    So: leave the loop through GuiLeaveLoop, which sets the flag the loop reads
+    and does not touch Application.Terminated -- and only when nothing else is
+    still shown. The form being closed is excluded from the count because
+    CloseAction has only just been set and it is still Visible here. }
+  if not GuiOtherFormShown(Sender) then
+    GuiLeaveLoop;
 end;
 
 function TFormCloser.Handler: TCloseEvent;

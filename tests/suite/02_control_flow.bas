@@ -145,6 +145,59 @@ h = -1
 2000 h = 5
 assert_eq(h, 5, "the skipped line must not run")
 
+
+test_case("control/break is scoped to the function being compiled")
+rem A function can be DEFINED inside a loop body -- ParseStatement accepts one
+rem wherever a statement may appear. Its body used to be compiled with the
+rem ENCLOSING loop still counted, so a `break` in it was fixed up to jump past
+rem that loop, with the function's frame still pushed: the tail of the program
+rem ran for ever. tests/negative/31 pins the refusal. These pin what must stay
+rem legal, because zeroing the depth for a function body would be easy to do in
+rem a way that took the working cases with it.
+assert_eq(firstover(3), 4, "break in a loop the function declares itself")
+assert_eq(evens(6), 12, "and continue in one")
+brk = 0
+while brk < 100
+  brk += 1
+  if brk = 5 then
+    break
+  end if
+endwhile
+assert_eq(brk, 5, "break in an ordinary top-level loop")
+rem THE ONE THAT PROVES THE DEPTH IS RESTORED and not merely discarded: this
+rem loop's own break must still find this loop, even though its body defines a
+rem function in between.
+outer = 0
+while outer < 100
+  function definedinside()
+    return 0
+  endfunction
+  outer += 1
+  if outer = 7 then
+    break
+  end if
+endwhile
+assert_eq(outer, 7, "an outer loop whose body defines a function still breaks")
+
+function firstover(limit) local i
+  for i = 1 to 100
+    if i > limit then
+      break
+    end if
+  next
+  return i
+endfunction
+
+function evens(n) local i, s
+  for i = 1 to n
+    if (i mod 2) <> 0 then
+      continue
+    end if
+    s = s + i
+  next
+  return s
+endfunction
+
 end
 
 1000 g = 42

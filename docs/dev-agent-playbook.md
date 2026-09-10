@@ -321,8 +321,9 @@ Two mechanical parts of that, both paid for:
 
 The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-10
 the crashes, the seven security and data-loss findings, all 21 wrong answers and
-all six gate blind spots and all three test gaps are closed on both operating
-systems. **Three remain, and they are
+every one of the 59 is closed on both operating systems. **The list below is
+kept as the record of what was found and what it cost; nothing on it is open.**
+It was written when nineteen remained, and they are
 listed here rather than in a task tracker because this project has learned that a
 backlog nobody can find is a backlog that does not exist.**
 
@@ -350,11 +351,50 @@ and refusing it at compile time is what cost the first version its twelve correc
 programs. **The repair belongs in the VM**, which can see at fault time what the
 compiler cannot -- that a handler jump crossed a frame boundary.
 
-**Two hangs and a breakage, all in the GUI host.** BREAK inside a function defined
-in a loop body binds to the enclosing loop and jumps out of the frame; app_quit()
-does not wake app_run(), which then blocks for ever unless another message happens
-to arrive; and closing one window permanently disables every later app_run() in
-the process, even with other windows open.
+~~**Two hangs and a breakage**~~ -- ALL CLOSED 2026-09-10, which empties the
+2026-09-06 sweep's backlog.
+
+BREAK inside a function DEFINED in a loop body bound to the enclosing loop.
+ParseStatement accepts a `function` wherever a statement may appear, so the body
+was compiled with the enclosing loop still counted and `break` was fixed up to
+jump past it -- with the function's frame still pushed, so the tail of the
+program ran again and again. 262,146 lines in six seconds, no error, no exit.
+This is the GOTO defect of 2026-09-09 in different syntax and one sentence closes
+both: **the compiler must scope control-flow targets to the function being
+compiled.** ParseFunction saves, zeroes and restores the loop depth; `break` in a
+function body meets the check that already existed. tests/negative/31 pins the
+refusal, four assertions in 02_control_flow pin what must stay legal -- including
+an outer loop whose body DEFINES a function, which is what proves the depth is
+restored rather than discarded.
+
+app_quit() did not wake app_run(). The loop was one call to
+Application.HandleMessage -- AppProcessMessages, then Idle(Wait=True) -- with
+**nothing in between**, and a script's app_quit always runs inside a dispatched
+event. The flag was set, correct, and unread while the loop blocked in
+AppWaitMessage for a message that with no window shown never came. Waking it does
+NOT fix this and was tried first: Idle runs ProcessAsyncCallQueue BEFORE the wait
+(application.inc:471), so a queued nudge is consumed on the way in. **Reading the
+flag between dispatch and wait is what closes it.** Nothing is polled and nothing
+is slept.
+
+Closing ANY window called Application.Terminate, so two things were wrong on one
+line. Termination is documented as belonging to the LAST window, and that flag
+has no public way to be cleared -- round 28 records that exact defect as fixed
+for app_quit, and it was; the fix landed there and this second caller kept doing
+it. Closing is now GuiLeaveLoop, and only when nothing else is still shown.
+Finding the other windows took two wrong answers worth recording:
+Screen.CustomForms does not hold a form this host showed headless, and the handle
+registry holds a TGuiHandle WRAPPER, so walking it and testing `is TForm` finds
+nothing ever. GuiCore answers it, because unwrapping is its business.
+
+A THIRD caller of Application.Terminate was found while fixing those two and
+closed with them: `end` inside an event handler. Same poison, same host running
+one script after another. AVM.Halted is already set, so leaving the loop is all
+that was needed; ending the process happens on its own.
+
+tests/gui/21_loop_lifecycle.bas pins all four, and the fourth is the mirror:
+closing the LAST window must still end the loop, or one hang has been traded for
+another.
 
 **Blind spots in the gates, and each one means a gate reports a pass it did not
 earn.** ~~test-packages silently skips the whole SQLite corpus on a Windows box

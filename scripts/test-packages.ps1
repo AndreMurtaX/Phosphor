@@ -67,9 +67,19 @@ $manifest = Get-Content (Join-Path $pkg 'manifest.txt') |
     ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
 $tmp = [System.IO.Path]::GetTempPath()
 
-# A package needing an external runtime library is skipped where it is absent.
-$sqliteAvail = (Test-Path (Join-Path $binDir 'sqlite3.dll')) -or
-               (Test-Path (Join-Path $env:SystemRoot 'System32\sqlite3.dll'))
+# A package needing an external runtime library is skipped where it is absent --
+# and the question is put to the RUNNER, not to a list of directories.
+#
+# This used to be `Test-Path bin\sqlite3.dll -or Test-Path System32\sqlite3.dll`,
+# and on the machine it was written on both were false while the loader found a
+# copy on the PATH. So 02_sqlite, 07_sqlite_full and 10_sqlite_sandbox -- 169
+# assertions, including the whole sandbox corpus for a security fix -- were
+# skipped behind a yellow line that reads like ordinary output, and PACKAGES OK
+# was printed anyway. A guess about where a library lives is not a gate; asking
+# the binary that has to load it is. The OpenSSL branch below has always done it
+# this way.
+& $exe '--sqlite-check' *> $null
+$sqliteAvail = ($LASTEXITCODE -eq 0)
 
 $allOk = $true
 foreach ($name in $manifest) {

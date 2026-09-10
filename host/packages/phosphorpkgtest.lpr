@@ -49,9 +49,23 @@ var
   path: String;
   rc, i: Integer;
 begin
+  { --sqlite-check : report (via exit code) whether THIS binary can load the
+    SQLite runtime, so the suite can library-gate the sqlite corpus on what the
+    runner can actually do (exit 0 = available). The same shape phosphorhttptest
+    has used for OpenSSL all along.
+
+    It replaces a guess. Both runners used to look for a library FILE in a list
+    of directories they had thought of -- two on Windows, seven plus ldconfig on
+    Linux -- and the Windows list missed the PATH, where this machine's copy
+    lives. Three corpora and 169 assertions were skipped behind a yellow SKIP
+    line while PACKAGES OK was printed, for as long as the guess existed. A gate
+    that asks the wrong question answers confidently. }
+  if ParamStr(1) = '--sqlite-check' then
+    Halt(Ord(not SqliteAvailable));
+
   if ParamCount < 1 then
   begin
-    Writeln(StdErr, 'usage: phosphorpkgtest <file.bas>');
+    Writeln(StdErr, 'usage: phosphorpkgtest <file.bas> | --sqlite-check');
     Halt(2);
   end;
   path := ParamStr(1);

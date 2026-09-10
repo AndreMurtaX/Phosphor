@@ -190,6 +190,19 @@ uses
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
   PhosphorSandbox, PhosphorBudget;
 
+{ WHETHER THE RUNTIME LIBRARY LOADED, asked rather than guessed.
+
+  A test runner has to decide whether to run this package's corpus or skip it,
+  and the honest question is "can THIS binary load SQLite" -- not "does a file
+  called sqlite3.dll sit in one of the two places I thought of". The runner used
+  to guess by path and got it wrong on the machine this was written on: three
+  corpora, 169 assertions, skipped behind a yellow SKIP line that reads like
+  ordinary output, while PACKAGES OK was printed anyway. The OpenSSL gate in the
+  same runner already asked its binary; this makes the two consistent.
+
+  phosphorpkgtest --sqlite-check exits 0 when this answers True. }
+function SqliteAvailable: Boolean;
+
 procedure RegisterSqliteFuncs(Reg: TPhosphorRegistry);
 
 implementation
@@ -1494,6 +1507,11 @@ begin
   if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'VACUUM')));
 end;
 
+function SqliteAvailable: Boolean;
+begin
+  Result := GReady;
+end;
+
 procedure RegisterSqliteFuncs(Reg: TPhosphorRegistry);
 begin
   // connection
@@ -1570,9 +1588,12 @@ begin
 end;
 
 initialization
-  // Load the SQLite runtime library once. On a box without it (this Windows dev
-  // machine) TryInitializeSqlite returns -1 without raising: GReady stays False,
-  // sqlite_available() answers 0, and the package test skips. We do NOT release
+  // Load the SQLite runtime library once. On a box without it TryInitializeSqlite
+  // returns -1 without raising: GReady stays False,
+  // sqlite_available() answers 0, and the package test skips. (This comment used
+  // to name "this Windows dev machine" as such a box. It is not one -- the loader
+  // finds a sqlite3.dll on the PATH here, and the RUNNER's path guess was what
+  // could not see it.) We do NOT release
   // it at finalization -- the OS reclaims it at process exit, and releasing early
   // would unload the library before PhosphorHandles frees any lingering database
   // (whose destructor calls sqlite3_close).

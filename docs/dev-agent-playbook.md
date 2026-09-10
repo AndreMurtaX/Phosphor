@@ -319,9 +319,10 @@ Two mechanical parts of that, both paid for:
 
 ## What the 2026-09-06 gauntlet left open
 
-The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-09
-the crashes, the seven security and data-loss findings, and all 21 wrong answers
-are closed on both operating systems. **Twelve remain, and they are
+The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-10
+the crashes, the seven security and data-loss findings, all 21 wrong answers and
+the first gate blind spot are closed on both operating systems. **Eleven remain,
+and they are
 listed here rather than in a task tracker because this project has learned that a
 backlog nobody can find is a backlog that does not exist.**
 
@@ -355,9 +356,17 @@ does not wake app_run(), which then blocks for ever unless another message happe
 to arrive; and closing one window permanently disables every later app_run() in
 the process, even with other windows open.
 
-**Six blind spots in the gates, and each one means a gate reports a pass it did
-not earn.** test-packages silently skips the whole SQLite corpus (85 assertions)
-on a Windows box where SQLite works. check-suffix.py hardcodes the parameter name
+**Blind spots in the gates, and each one means a gate reports a pass it did not
+earn.** ~~test-packages silently skips the whole SQLite corpus on a Windows box
+where SQLite works~~ -- CLOSED 2026-09-10, and it was worse than recorded: THREE
+corpora and **169** assertions, not 85, including 10_sqlite_sandbox, the entire
+corpus for the SQLite half of the security work. The runner guessed by path --
+two directories on Windows, ldconfig plus seven on Linux -- and the Windows guess
+missed the PATH, where this machine's copy lives. Both sides now ASK the binary
+(`phosphorpkgtest --sqlite-check`), which is what the OpenSSL branch in the same
+file had always done. All 169 pass and match their goldens; no defect was hiding.
+**A guess about where a library lives is not a gate.** Five remain:
+check-suffix.py hardcodes the parameter name
 `Args`, so it is blind to 180 of the 443 GUI registrations, and it cannot see a
 computed registration at all -- 63 are neither judged nor counted.
 test-suite.{ps1,sh} never build bin/phosphor.exe but run check-examples.py, which

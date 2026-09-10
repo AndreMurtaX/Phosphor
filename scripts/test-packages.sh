@@ -47,21 +47,23 @@ manifest="$(grep -vE '^[[:space:]]*#' "$pkg/manifest.txt" | tr '\n' ' ')"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
 
-# A package needing an external runtime library is skipped where it is absent.
+# A package needing an external runtime library is skipped where it is absent --
+# and the question is put to the RUNNER, not to a list of directories.
+#
+# This used to be an ldconfig scan plus seven candidate paths. That is a better
+# guess than the Windows side had, and it happened to be right here -- but it is
+# still a guess about where a library lives rather than a question to the binary
+# that has to load it. The Windows list missed the PATH and skipped 169
+# assertions behind a yellow line while PACKAGES OK was printed. Both sides now
+# ask, which is what the OpenSSL gate has always done.
+#
+# NOT `cmd | grep -q`: under `set -o pipefail`, grep -q exits at the first match
+# and SIGPIPEs the upstream, so the pipeline reads non-zero even ON a match. The
+# exit code is captured on its own line for the same reason.
 sqlite_avail=0
-# Deterministic gate, NO `cmd | grep -q` (under `set -o pipefail`, grep -q exits at the
-# first match and SIGPIPEs the upstream, so the pipeline reads non-zero even ON a match
-# -- an intermittent false SKIP). Capture ldconfig into a var and test it, then fall
-# back to a direct file check: present means present, every run.
-ldout="$(ldconfig -p 2>/dev/null || true)"
-case "$ldout" in *libsqlite3.so*) sqlite_avail=1 ;; esac
-if [ "$sqlite_avail" -eq 0 ]; then
-  for f in /usr/lib/x86_64-linux-gnu/libsqlite3.so* /lib/x86_64-linux-gnu/libsqlite3.so* \
-           /usr/lib/libsqlite3.so* /lib/libsqlite3.so* /usr/local/lib/libsqlite3.so* \
-           /usr/lib64/libsqlite3.so* /lib64/libsqlite3.so*; do
-    [ -e "$f" ] && { sqlite_avail=1; break; }
-  done
-fi
+"$exe" --sqlite-check >/dev/null 2>&1
+rc=$?
+[ "$rc" -eq 0 ] && sqlite_avail=1
 
 for name in $manifest; do
   case "$name" in

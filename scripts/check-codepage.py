@@ -147,6 +147,50 @@ def strip_block_comments(src):
     return ''.join(out)
 
 
+# A WRAPPED STATEMENT IS STILL ONE STATEMENT.
+#
+# This gate used to read `src.splitlines()` and run ACC over each line alone, so
+# the expression a `:=` accumulates was read only as far as the end of the line
+# it started on. Pascal does not care where a statement breaks, and this codebase
+# wraps long ones freely, so
+#
+#     s := s +
+#          Chr(b);
+#
+# is exactly the defect the gate exists to find, spelled across two lines, and it
+# was invisible -- while the identical statement on ONE line was reported. A gate
+# whose reach depends on where the author pressed Enter is not a gate.
+#
+# The join is deliberately NARROW. Running ACC over the whole unit with DOTALL
+# was tried first and is wrong: `[^;]+` then runs to the next semicolon, which in
+# an if/else chain is the end of the WHOLE chain, so Utf8Char -- the one function
+# that must build raw bytes, and does it correctly -- was reported as a defect.
+# The shape actually being missed is a line that CANNOT stand alone: one ending
+# in a binary operator, an assignment, a comma or an open paren. Only those are
+# joined to the line below, and the reported line number stays the line the
+# statement STARTED on.
+CONTINUES = re.compile(r'(?:[+\-*/,(]|:=|\bor\b|\band\b)\s*$', re.I)
+
+
+def logical_lines(src):
+    """(line number where it started, text) for each statement, wraps joined."""
+    out = []
+    pending, start = None, 0
+    for i, line in enumerate(src.split('\n'), 1):
+        bare = line.split('//')[0]
+        if pending is None:
+            pending, start = bare, i
+        else:
+            pending += ' ' + bare.strip()
+        if CONTINUES.search(pending.rstrip()):
+            continue                      # the statement is not finished
+        out.append((start, pending))
+        pending = None
+    if pending is not None:
+        out.append((start, pending))
+    return out
+
+
 def scan(path):
     raw = open(path, encoding='utf-8', errors='ignore').read()
     if 'codepage utf8' not in raw.lower():
@@ -155,8 +199,8 @@ def scan(path):
     kinds = declared_types(src)
     original = raw.splitlines()
     out, routine = [], '(unit level)'
-    for i, line in enumerate(src.splitlines(), 1):
-        bare = line.split('//')[0]
+    for i, line in logical_lines(src):
+        bare = line
         m = ROUTINE.match(bare)
         if m:
             routine = m.group(1)

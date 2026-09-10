@@ -35,11 +35,49 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NOTATION = '```basic notation'
 
 
+SOURCE_DIRS = [
+    ('engine',), ('engine', 'libs'),
+    ('host', 'console'), ('host', 'packages'), ('host', 'gui', 'libs'),
+]
+
+
+def newest_source():
+    """When the compiler this gate uses was last changed, and which file did it."""
+    newest, who = 0.0, None
+    for parts in SOURCE_DIRS:
+        d = os.path.join(ROOT, *parts)
+        for pat in ('*.pas', '*.lpr'):
+            for f in glob.glob(os.path.join(d, pat)):
+                t = os.path.getmtime(f)
+                if t > newest:
+                    newest, who = t, os.path.relpath(f, ROOT)
+    return newest, who
+
+
 def phosphor():
     """The binary to compile with. Built by scripts/build; a missing one is a
-    FAILURE and not a skip -- a gate that quietly does not run reads as a pass."""
+    FAILURE and not a skip -- a gate that quietly does not run reads as a pass.
+
+    AND SO IS A STALE ONE, which is the harder half. scripts/test-suite does not
+    build bin/phosphor.exe -- that is scripts/build's job -- but it RUNS this
+    gate, so after an engine edit the gate would compile every documentation
+    example with the compiler as it was BEFORE the edit and report a pass on it.
+    That is the same trap CLAUDE.md records for bin/phosphortest.exe, which is
+    built by the test runners and not by build.ps1, and which produced four wrong
+    conclusions in one day by being run unrebuilt.
+
+    A binary older than the newest source it was built from is therefore an
+    ERROR, not a warning: it says which file is newer, so the reader knows the
+    answer is to build rather than to look for a defect. It does not build the
+    binary itself -- a gate that repairs what it is measuring cannot report on
+    it."""
     exe = os.path.join(ROOT, 'bin', 'phosphor.exe' if os.name == 'nt' else 'phosphor')
-    return exe if os.path.isfile(exe) else None
+    if not os.path.isfile(exe):
+        return None, None
+    newest, who = newest_source()
+    if newest > os.path.getmtime(exe):
+        return None, who
+    return exe, None
 
 
 def docfiles():
@@ -67,9 +105,15 @@ def blocks(path):
 
 
 def main():
-    exe = phosphor()
+    exe, stale = phosphor()
     if not exe:
-        print('FAIL  check-examples: no phosphor binary -- run scripts/build first')
+        if stale:
+            print('FAIL  check-examples: bin/phosphor is OLDER than %s' % stale)
+            print('      It would compile every example with the compiler as it')
+            print('      was before that edit, and report a pass on it. Run')
+            print('      scripts/build first.')
+        else:
+            print('FAIL  check-examples: no phosphor binary -- run scripts/build first')
         return 1
 
     tmp = tempfile.mkdtemp(prefix='phosphor-examples-')

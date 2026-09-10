@@ -39,10 +39,56 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The seam types the engine exposes as assignable properties. Read from the source
-# rather than listed here, so a seam added to TPhosphorEngine cannot be missed.
-SEAM_TYPES = ('TPhosphorOutputProc', 'TPhosphorInputProc',
-              'TPhosphorBreakpointProc', 'THostServices')
+# THE SEAM TYPES, DERIVED FROM THE SOURCE.
+#
+# The comment that stood here said "read from the source rather than listed here,
+# so a seam added to TPhosphorEngine cannot be missed" -- and the next line was a
+# hand-written list of four names. The comment described the gate somebody meant
+# to write; the code was the gate that got written, and a seam of a NEW type was
+# invisible to it. That is the same doc-versus-code drift these gates exist to
+# catch, occurring inside one of them.
+#
+# What a seam IS, structurally: a METHOD POINTER the host assigns -- `procedure
+# (...) of object` or `function (...) of object` -- or a RECORD whose fields are
+# all method pointers, which is how THostServices bundles four of them. Both are
+# read out of the engine's own type declarations, so a fifth kind added tomorrow
+# is picked up the day it is added rather than the day someone remembers.
+# The parameter list is consumed AS A WHOLE before anything else is matched,
+# because a Pascal parameter list contains semicolons of its own:
+#
+#     TPhosphorBreakpointProc = procedure(const AMessage: String; ALine: Integer;
+#                                         const AOperands: array of TValue) of object;
+#
+# A `[^;]*?` between the keyword and `of object` stops at the first of those and
+# never reaches the tail, so this type -- the one seam with more than one
+# parameter -- was the one the pattern could not see. The gate caught that itself,
+# by reporting OnBreakpoint as a seam that no longer exists.
+METHOD_PTR = re.compile(
+    r'(?is)\b([A-Za-z_]\w*)\s*=\s*(?:procedure|function)\s*'
+    r'(?:\([^)]*\))?[^;]*?\bof\s+object\s*;')
+RECORD_DECL = re.compile(
+    r'(?is)\b([A-Za-z_]\w*)\s*=\s*record\b(.*?)\bend\s*;')
+
+
+def seam_types():
+    """Every type on which a host can hang an implementation."""
+    ptrs, records = set(), {}
+    for f in sorted(glob.glob(os.path.join(ROOT, 'engine', '*.pas'))):
+        src = open(f, encoding='utf-8', errors='ignore').read()
+        ptrs.update(m.group(1) for m in METHOD_PTR.finditer(src))
+        for m in RECORD_DECL.finditer(src):
+            records[m.group(1)] = m.group(2)
+    out = set(ptrs)
+    for name, body in records.items():
+        fields = re.findall(r'^\s*\w+\s*:\s*([A-Za-z_]\w*)\s*;', body, re.M)
+        # An EMPTY record is not a bundle of seams; requiring at least one field
+        # keeps `record end` from reading as one vacuously.
+        if fields and all(t in ptrs for t in fields):
+            out.add(name)
+    return out
+
+
+SEAM_TYPES = tuple(sorted(seam_types()))
 
 # reason == None means "must be assigned". A string means "deliberately not
 # assigned, because ...". Keys are "<host file>:<seam>".

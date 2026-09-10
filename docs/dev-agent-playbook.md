@@ -321,8 +321,8 @@ Two mechanical parts of that, both paid for:
 
 The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-10
 the crashes, the seven security and data-loss findings, all 21 wrong answers and
-the first gate blind spot are closed on both operating systems. **Eleven remain,
-and they are
+all six gate blind spots are closed on both operating systems. **Six remain, and
+they are
 listed here rather than in a task tracker because this project has learned that a
 backlog nobody can find is a backlog that does not exist.**
 
@@ -381,11 +381,39 @@ same registry, and an array a registration names but the file does not declare i
 REPORTED rather than skipped. Both proven by planting: a `$`-named GUI function
 returning `A[0]` (a handle) is caught with file, line and signature where the old
 gate exited 0 saying "every one returns what its name says"; a renamed array
-fails the gate by name. **Three remain:**
-test-suite.{ps1,sh} never build bin/phosphor.exe but run check-examples.py, which
-compiles every doc example with it. check-seams.py's SEAM_TYPES is a hardcoded
-literal, so a seam of a new type is invisible. check-codepage.py scans line by
-line, so the statement it flags is invisible when wrapped across two lines.
+fails the gate by name.
+
+~~test-suite never builds bin/phosphor.exe but runs check-examples.py~~ -- CLOSED
+2026-09-10. Building it is scripts/build's job and stays there; what the gate
+lacked was a way to NOTICE. It now refuses a binary OLDER than the newest engine
+source and says which file is newer, so an engine edit followed by the suite is a
+loud failure instead of every documentation example being compiled by yesterday's
+compiler and reported as a pass. The same trap CLAUDE.md records for
+phosphortest.exe, which cost four wrong conclusions in one day.
+
+~~check-seams.py's SEAM_TYPES is a hardcoded literal~~ -- CLOSED 2026-09-10, and
+the comment ABOVE the list already claimed it was "read from the source rather
+than listed here, so a seam added to TPhosphorEngine cannot be missed". The
+comment described the gate somebody meant to write; the code was the one that got
+written. A seam is now derived structurally: a method pointer (`of object`)
+declared under engine/, or a record whose fields are all method pointers. Proven
+by planting a new seam type and property -- the old gate exits 0 reporting "5
+seams filled", the new one names every host that leaves it nil. The gate also
+caught the first version of its own derivation, which missed
+TPhosphorBreakpointProc because a Pascal parameter list contains semicolons.
+
+~~check-codepage.py scans line by line~~ -- CLOSED 2026-09-10. A line that cannot
+stand alone -- ending in an operator, an assignment, a comma or an open paren --
+is joined to the next, and the report keeps the line the statement STARTED on.
+The join is deliberately NARROW: running the pattern over the whole unit with
+DOTALL was tried first and is wrong, because the expression then runs to the next
+semicolon, which in an if/else chain is the end of the whole chain -- and
+Utf8Char, the one function that must build raw bytes and does it correctly, was
+reported as a defect. Proven by planting `Result := Result +` / `c;` across two
+lines: the old gate says "no char-into-string concatenation found", the new one
+names file, line, function and operand.
+
+**All six gate blind spots are closed.**
 
 **Three test gaps.** The sandbox's strongest claim -- a link planted inside the
 root -- is never asserted on Windows. tests/packages has no

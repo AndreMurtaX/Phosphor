@@ -251,18 +251,26 @@ foreach ($d in @(@($dmg1,'trailer'), @($dmg2,'checksum'), @($dmg3,'unknown flags
 if ($okJ) { Write-Host "PASS  J:corrupt payload    (exit 2, says so, never opens a prompt)" -ForegroundColor Green }
 else { Write-Host "FAIL  J:corrupt payload falls through to the CLI" -ForegroundColor Red }
 
-# K. THE MIRROR, and it matters as much as J. NO trailer magic means this file is
-#    a bare stub, and being the CLI is then exactly right -- that is the whole
-#    reason one binary can be both. A refusal that swallowed this case would have
-#    broken `phosphor` itself. Two shapes: the stub as built, and a packed file
-#    truncated so that the magic is gone with it.
-$stub = Join-Path $tmp 'phosphor_truncated.exe'
-$trunc = New-Object byte[] ($bytesA.Length - 1)
-[Array]::Copy($bytesA, $trunc, $trunc.Length)
-[IO.File]::WriteAllBytes($stub, $trunc)
+# K. THE MIRROR, and it matters as much as J. A file that carries NO evidence of
+#    being packed -- no mark in its middle and no magic in its tail -- is a bare
+#    stub, and being the CLI is then exactly right: that is the whole reason one
+#    binary can be both. A refusal that swallowed this case would have broken
+#    `phosphor` itself.
+#
+#    THE SECOND SHAPE USED TO BE "a packed file truncated past its magic", AND
+#    THAT EXPECTATION WAS THE DEFECT. A truncated application is a damaged
+#    application, not a bare stub; it is refused in L below, and this letter now
+#    holds two files that genuinely carry no program: the stub as built, and the
+#    stub with trailing bytes that are not a trailer -- the shape a resource
+#    appender or an installer footer leaves behind.
+$stubBytes = [IO.File]::ReadAllBytes($exe)
+$stubJunk  = Join-Path $tmp 'phosphor_stub_plus_junk.exe'
+$junkTail  = [Text.Encoding]::ASCII.GetBytes('not a trailer, just some bytes riding along')
+$fsK = [IO.File]::Create($stubJunk)
+try { $fsK.Write($stubBytes, 0, $stubBytes.Length); $fsK.Write($junkTail, 0, $junkTail.Length) } finally { $fsK.Close() }
 
 $okK = $true
-foreach ($k in @(@($exe,'the stub itself'), @($stub,'packed, truncated past its magic'))) {
+foreach ($k in @(@($exe,'the stub itself'), @($stubJunk,'the stub with non-trailer bytes appended'))) {
     cmd /c "`"$($k[0])`" < NUL > `"$hiOut`" 2>&1"
     $code = $LASTEXITCODE
     $text = Get-Content -Raw $hiOut
@@ -277,5 +285,197 @@ foreach ($k in @(@($exe,'the stub itself'), @($stub,'packed, truncated past its 
 if ($okK) { Write-Host "PASS  K:no magic is the CLI (a bare stub still opens the REPL)" -ForegroundColor Green }
 else { Write-Host "FAIL  K:a file with no trailer magic no longer behaves as the CLI" -ForegroundColor Red }
 
+# L. A TRUNCATED PACKED APPLICATION IS A DAMAGED APPLICATION, NOT A BARE STUB.
+#    J covers every corruption that leaves the TAIL intact, because the tail was
+#    the only place a file said "I am a packed application". Truncation -- an
+#    interrupted copy or download, a partial write, an antivirus that cuts a file
+#    short, and the commonest corruption there is -- removes exactly those bytes,
+#    so the reader found no magic, answered "bare stub" and RunCommandLine opened
+#    the REPL with exit 0: a damaged MyApp.exe handing a user a BASIC prompt that
+#    runs whatever is typed into it, which is word for word what J exists to
+#    refuse. The stub now carries a compiled-in mark in its MIDDLE, where
+#    truncation cannot reach, holding the length the packer finished with.
+#
+#    Each shape asserts its own REASON, not just "corrupt": a refusal that fired
+#    for the wrong branch would pass a message-blind check while proving nothing.
+function New-Truncated([string] $path, [int] $drop) {
+    $fs = [IO.File]::Create($path)
+    try { $fs.Write($bytesA, 0, $bytesA.Length - $drop) } finally { $fs.Close() }
+}
+$trunc4  = Join-Path $tmp 'phosphor_trunc4.exe'
+$trunc1  = Join-Path $tmp 'phosphor_trunc1.exe'
+$noMagic = Join-Path $tmp 'phosphor_nomagic.exe'
+New-Truncated $trunc4 4
+New-Truncated $trunc1 1
+# The magic overwritten IN PLACE: the same length, so only the mark can tell.
+$fsL = [IO.File]::Create($noMagic)
+try {
+    $fsL.Write($bytesA, 0, $bytesA.Length - 8)
+    $fsL.Write([Text.Encoding]::ASCII.GetBytes('XXXXXXXX'), 0, 8)
+} finally { $fsL.Close() }
+
+$okL = $true
+foreach ($t in @(@($trunc4,'truncated by 4','truncated'),
+                 @($trunc1,'truncated by 1','truncated'),
+                 @($noMagic,'magic overwritten in place','overwritten'))) {
+    cmd /c "`"$($t[0])`" < NUL > `"$hiOut`" 2>&1"
+    $code = $LASTEXITCODE
+    $text = Get-Content -Raw $hiOut
+    if ($null -eq $text) { $text = '' }
+    $good = ($code -eq 2) -and ($text -like '*corrupt*') -and
+            ($text -like "*$($t[2])*") -and ($text -notlike '*REPL*')
+    if (-not $good) {
+        $okL = $false
+        Write-Host ("        {0}: exit {1}, said '{2}'" -f $t[1], $code,
+                    ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    }
+}
+# AND THE MIRROR OF L, or the length check would be free to refuse everything: an
+# intact packed application must still run after being copied somewhere else,
+# byte-exact against the same golden as A-D.
+$movedApp = Join-Path $tmp 'phosphor_moved_app.exe'
+Copy-Item $packExe $movedApp -Force
+$outL = Join-Path $tmp 'phosphor_hello.L.actual'
+cmd /c "`"$movedApp`" < NUL > `"$outL`""
+$movedCode = $LASTEXITCODE
+if ($movedCode -ne 0) {
+    $okL = $false
+    Write-Host ("        an intact packed app, copied elsewhere, exited {0}" -f $movedCode) -ForegroundColor DarkGray
+} elseif (-not (Test-Golden 'L:packed, moved ' $outL $expectedBytes)) { $okL = $false }
+if ($okL) { Write-Host "PASS  L:truncated payload  (exit 2, says truncated, never opens a prompt)" -ForegroundColor Green }
+else { Write-Host "FAIL  L:a truncated packed application falls through to the CLI" -ForegroundColor Red }
+
+# M. `--sandbox ""` MUST REFUSE, exactly as `--sandbox "   "` already did.
+#    '' is the encoding for "no sandbox was asked for" AND what an operator hands
+#    over when they write `phosphor --sandbox "$RUNDIR" untrusted.bas` with RUNDIR
+#    unset. BindSandbox used the VALUE to decide whether the flag had been given,
+#    so the empty argument ran the script COMPLETELY UNCONFINED, silently, exit 0
+#    -- the outcome that routine's own comment says it exists to prevent -- while
+#    the whitespace spelling of the same intent was correctly refused.
+#
+#    THE EMPTY ARGUMENT HAS TO REACH THE PROGRAM, and PowerShell 5.1 DROPS an
+#    empty string when it calls a native binary: `& $exe '--sandbox' '' $bas`
+#    arrives as `--sandbox <bas>`, which is refused too -- for the wrong reason,
+#    naming the .bas as the root. It is therefore spelled through cmd, and the
+#    refusal is matched on the double space that only an EMPTY value can produce.
+$sbxDir = Join-Path $tmp 'phosphor_sandbox_arg'
+New-Item -ItemType Directory -Force $sbxDir | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $sbxDir 'cage') | Out-Null
+$sbxBas = Join-Path $sbxDir 'escape.bas'
+Set-Content -LiteralPath $sbxBas -Encoding ascii -Value @(
+    'println "sandboxroot=[" + sandboxroot$() + "]"',
+    'n = file_writealltext("escaped_outside.txt", "ESCAPED")',
+    'println "write outside -> " + str$(n)'
+)
+$sbxEscaped = Join-Path $sbxDir 'escaped_outside.txt'
+$sbxOut = Join-Path $tmp 'phosphor_sandbox_arg.txt'
+
+function Invoke-InDir([string] $tail) {
+    cmd /c "cd /d `"$sbxDir`" && `"$exe`" $tail < NUL > `"$sbxOut`" 2>&1"
+    $script:sbxCode = $LASTEXITCODE
+    $t = Get-Content -Raw $sbxOut
+    if ($null -eq $t) { $t = '' }
+    return $t
+}
+
+if (Test-Path $sbxEscaped) { Remove-Item $sbxEscaped -Force }
+$mText = Invoke-InDir '--sandbox "" escape.bas'
+# Two spaces before the dash: the root printed back is the empty string, which is
+# the case under test. A swallowed filename would print the filename there.
+$okM1 = ($sbxCode -eq 2) -and ($mText -like '*cannot establish the sandbox root  --*') -and
+        ($mText -notlike '*sandboxroot=*') -and (-not (Test-Path $sbxEscaped))
+
+# The whitespace spelling, which was right all along and must stay right.
+if (Test-Path $sbxEscaped) { Remove-Item $sbxEscaped -Force }
+$mText2 = Invoke-InDir '--sandbox "   " escape.bas'
+$okM2 = ($sbxCode -eq 2) -and ($mText2 -like '*cannot establish the sandbox root*') -and
+        (-not (Test-Path $sbxEscaped))
+
+# AND THE DOCUMENTED DEFAULT MUST NOT MOVE. No --sandbox is no sandbox: the
+# script runs unconfined and the write succeeds. A guard that refused this would
+# have broken `phosphor` itself, exactly as a refusal in K would have.
+if (Test-Path $sbxEscaped) { Remove-Item $sbxEscaped -Force }
+$mText3 = Invoke-InDir 'escape.bas'
+# .Contains, not -like: '[]' is an empty character class in the wildcard language
+# and -like throws WildcardPatternException on it.
+$okM3 = ($sbxCode -eq 0) -and ($mText3.Contains('sandboxroot=[]')) -and
+        ($mText3 -like '*write outside -> 1*') -and (Test-Path $sbxEscaped)
+
+# And a real root still confines rather than refuses: the run succeeds, the write
+# outside it does not.
+if (Test-Path $sbxEscaped) { Remove-Item $sbxEscaped -Force }
+$mText4 = Invoke-InDir '--sandbox cage escape.bas'
+$okM4 = ($sbxCode -eq 0) -and ($mText4 -like '*cage*') -and
+        ($mText4 -like '*write outside -> 0*') -and (-not (Test-Path $sbxEscaped))
+
+$okM = $okM1 -and $okM2 -and $okM3 -and $okM4
+if ($okM) { Write-Host "PASS  M:--sandbox `"`" refused (empty argument never runs unconfined)" -ForegroundColor Green }
+else {
+    Write-Host "FAIL  M:--sandbox argument handling" -ForegroundColor Red
+    Write-Host ("        empty={0} whitespace={1} default-unconfined={2} real-root={3}" -f $okM1, $okM2, $okM3, $okM4) -ForegroundColor DarkGray
+    Write-Host ("        empty said: {0}" -f ($mText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+}
+
+# N. `--out ""` MUST REFUSE, for the same reason M does and one `else if` down
+#    the same argument loop. TConsoleHost.Create guards with `if AOutPath <> ''`,
+#    so '' encodes "no --out was asked for" as well as what `--out "$LOG"` hands
+#    over with LOG unset: the flag VANISHED and the program's output went to the
+#    terminal at exit 0 with nothing said -- while `--out "   "` was refused on
+#    Windows and honoured on Linux. Three answers to one intent.
+#    Spelled through cmd for the same reason M is: PowerShell 5.1 drops an empty
+#    native argument, and a dropped one would leave `--out job.bas` and consume
+#    the script name -- a refusal for the wrong reason, which is not a pass.
+$outDir = Join-Path $tmp 'phosphor_out_arg'
+New-Item -ItemType Directory -Force $outDir | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $outDir 'cage') | Out-Null
+$outBas = Join-Path $outDir 'job.bas'
+Set-Content -LiteralPath $outBas -Encoding ascii -Value 'println "SECRET-OUTPUT"'
+$outLog = Join-Path $tmp 'phosphor_out_arg.txt'
+$outReal = Join-Path $outDir 'real.txt'
+
+function Invoke-OutDir([string] $tail) {
+    cmd /c "cd /d `"$outDir`" && `"$exe`" $tail < NUL > `"$outLog`" 2>&1"
+    $script:outCode = $LASTEXITCODE
+    $t = Get-Content -Raw $outLog
+    if ($null -eq $t) { $t = '' }
+    return $t
+}
+
+if (Test-Path $outReal) { Remove-Item $outReal -Force }
+$nText = Invoke-OutDir '--out "" job.bas'
+$okN1 = ($outCode -eq 2) -and ($nText -like '*--out needs a path*') -and
+        ($nText -notlike '*SECRET-OUTPUT*') -and (-not (Test-Path $outReal))
+
+# ...and with a sandbox bound too, which is where it was worst: the operator had
+# asked for confinement AND for a log, and got a wide-open terminal instead.
+$nText2 = Invoke-OutDir '--sandbox cage --out "" job.bas'
+$okN2 = ($outCode -eq 2) -and ($nText2 -like '*--out needs a path*') -and
+        ($nText2 -notlike '*SECRET-OUTPUT*')
+
+# AND THE DOCUMENTED DEFAULT MUST NOT MOVE. No --out is stdout.
+$nText3 = Invoke-OutDir 'job.bas'
+$okN3 = ($outCode -eq 0) -and ($nText3 -like '*SECRET-OUTPUT*')
+
+# And a real path still redirects rather than being refused: the file is written
+# and nothing reaches the terminal. A guard that refused this would have broken
+# block A, which is what block A is there to catch.
+if (Test-Path $outReal) { Remove-Item $outReal -Force }
+$nText4 = Invoke-OutDir '--out real.txt job.bas'
+$okN4 = ($outCode -eq 0) -and ($nText4 -notlike '*SECRET-OUTPUT*') -and (Test-Path $outReal) -and
+        ((Get-Content -Raw $outReal) -like '*SECRET-OUTPUT*')
+
+# The sentence the empty case now gives is the one --out-with-nothing-after-it
+# already gave. Pinned so the two cannot drift apart.
+$nText5 = Invoke-OutDir '--out'
+$okN5 = ($outCode -eq 2) -and ($nText5 -like '*--out needs a path*')
+
+$okN = $okN1 -and $okN2 -and $okN3 -and $okN4 -and $okN5
+if ($okN) { Write-Host "PASS  N:--out `"`" refused    (empty argument never silently unredirects)" -ForegroundColor Green }
+else {
+    Write-Host "FAIL  N:--out argument handling" -ForegroundColor Red
+    Write-Host ("        empty={0} empty-with-sandbox={1} default-stdout={2} real-path={3} no-value={4}" -f $okN1, $okN2, $okN3, $okN4, $okN5) -ForegroundColor DarkGray
+    Write-Host ("        empty said: {0}" -f ($nText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+}
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
-    $okH -and $okI -and $okJ -and $okK) { exit 0 } else { exit 1 }
+    $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN) { exit 0 } else { exit 1 }

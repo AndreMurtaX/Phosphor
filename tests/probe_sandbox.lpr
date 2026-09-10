@@ -98,6 +98,62 @@ begin
   Result := StringReplace(S, '\', '/', [rfReplaceAll]);
 end;
 
+{ PLANT A LINK -- a POSIX symlink, a Windows directory junction. Two shapes of one
+  thing, and the shape is what the sandbox cares about: a directory entry that
+  names ANOTHER directory, which no amount of string arithmetic can see through.
+  Both are creatable by an unprivileged process, which is what makes them the
+  attack a confined script can actually mount (a Windows SYMLINK needs
+  SeCreateSymbolicLink and is therefore NOT the interesting case).
+
+  FileGetAttr, not DirectoryExists, decides whether it landed: DirectoryExists
+  answers False for a junction whose target the RTL cannot stat -- a bare drive
+  root, or a target that is not there -- and those are two of the four planted
+  below. }
+function PlantLink(const ALink, ATarget: String): Boolean;
+begin
+  {$IFDEF UNIX}
+  FpSymlink(PChar(ATarget), PChar(ALink));
+  {$ELSE}
+  { The one-string form, so mklink's own chatter can be redirected: it prints a
+    LOCALISED success line, and four of them in the middle of a probe's output is
+    noise a reader has to learn to ignore. }
+  ExecuteProcess(GetEnvironmentVariable('ComSpec'),
+                 '/c mklink /J "' + ALink + '" "' + ATarget + '" >NUL 2>&1');
+  {$ENDIF}
+  Result := FileGetAttr(ALink) <> -1;
+end;
+
+{$IFDEF WINDOWS}
+{ DOES FPC DECODE A TARGET FOR THIS ENTRY? Only for IO_REPARSE_TAG_MOUNT_POINT
+  and IO_REPARSE_TAG_SYMLINK; every other tag answers slrNoSymLink, which is
+  False here -- and FileGetSymLinkTarget RAISES when it cannot stat a target it
+  did decode, which is why this is wrapped. }
+function Decodable(const APath: String): Boolean;
+var
+  t: RawByteString;
+begin
+  t := '';
+  try
+    Result := FileGetSymLinkTarget(RawByteString(APath), t) and (t <> '');
+  except
+    Result := False;
+  end;
+end;
+{$ENDIF}
+
+{ Remove THE LINK and never what it names. RemoveDir on a junction removes the
+  reparse point; FpUnlink removes the symlink. Every use below asserts the target
+  is still standing afterwards, so the difference is checked and not assumed --
+  and one of these links names a drive root. }
+procedure PullLink(const ALink: String);
+begin
+  {$IFDEF UNIX}
+  FpUnlink(PChar(ALink));
+  {$ELSE}
+  RemoveDir(ALink);
+  {$ENDIF}
+end;
+
 { The two halves of the perilous-path sweep. Both ASK IsPerilousPath, which is a
   pure predicate over a string -- no path named below is ever handed to anything
   that acts. The spelling is quoted into the failure message so a regression says
@@ -118,8 +174,17 @@ const
 
 var
   survived: Boolean;
+  linkPeril, linkGate: Boolean;   // read before the link is pulled, reported after
+  volPeril, volWrite, volSub: Boolean;  // likewise, for the drive-root link in (g)
   SavedCwd: String;   // restored immediately; see the relative-spelling block
   RootCwd: String;
+  seg, deep: String;  // the too-many-components sweep
+  thru: String;       // a path spelled through a link
+  i: Integer;
+  {$IFDEF WINDOWS}
+  wapps, odd: String;
+  wsr: TSearchRec;
+  {$ENDIF}
 begin
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
   Sink := TSink.Create();
@@ -131,11 +196,24 @@ begin
   // what a failure here means -- and a test whose next run inherits them reports
   // the old damage instead of today's state. Cleared through Pascal, by name.
   DeleteFile(IncludeTrailingPathDelimiter(GetTempDir(False)) + 'escaped.txt');
+  DeleteFile(IncludeTrailingPathDelimiter(GetTempDir(False)) + 'linkesc.txt');
   DeleteFile(OutDir + PathDelim + 'chan.txt');
   DeleteFile(OutDir + PathDelim + 'new.txt');
+  DeleteFile(OutDir + PathDelim + 'nul.txt');
   DeleteFile(OutDir + PathDelim + 'unbounded.txt');
   DeleteFile(OutDir + PathDelim + 'through.txt');
+  DeleteFile(RootDir + PathDelim + 'ok.txt');
+  DeleteFile(RootDir + PathDelim + 'linkesc.txt');
   RemoveDir(OutDir + PathDelim + 'made');
+  { The links a FAILED run may have left behind. PullLink removes the link and
+    never its target -- FpUnlink on a symlink, RemoveDir on a junction -- so this
+    is safe to run against names that may be ordinary directories, links, or
+    nothing at all, which is exactly what is not known here. }
+  PullLink(RootDir + PathDelim + 'indoor');
+  PullLink(RootDir + PathDelim + 'outdoor');
+  PullLink(RootDir + PathDelim + 'nowhere');
+  PullLink(RootDir + PathDelim + 'rootdoor');
+  RemoveDir(RootDir + PathDelim + 'inner');
   {$IFDEF UNIX}
   FpUnlink(PChar(RootDir + PathDelim + 'door'));
   {$ENDIF}
@@ -302,6 +380,33 @@ begin
   Ordinary('/home/a\b', 'a backslash inside a component');
   {$ENDIF}
 
+  { --- A NUL BYTE, WHICH ENDS THE PATH FOR THE KERNEL AND NOT FOR A STRING TEST
+    FPC hands a path to CreateFileW and to fpOpen as a PChar, and both stop at
+    the first #0, while every test in the unit measured the whole of the string.
+    So 'C:\' + #0 + 'x' was measured as an ordinary directory named x and went
+    through the guard that stands in front of the recursive remover, and with a
+    root set '<outside>.txt' + #0 + '/../<root>/decoy' resolved back INSIDE the
+    root here and opened OUTSIDE it there -- read, write and delete of a single
+    file all escaped that way, measured end to end further down.
+
+    Trim is no help and the two lines below say why: #0 <= ' ', so Trim strips
+    one only at the ENDS. 'C:\' + #0 was therefore already refused while
+    'C:\' + #0 + 'x' was not, which is the whole shape of the hole: a rule that
+    happens to catch the spelling nobody would write and misses the one an
+    attacker does. Pure predicates -- nothing named here is opened. }
+  Peril(#0, 'a path that is nothing but a NUL');
+  Peril('  ' + #0 + '  ', 'a NUL among spaces');
+  Peril(RootDir + #0 + PathDelim + '..', 'a NUL in the middle of an ordinary path');
+  {$IFDEF WINDOWS}
+  Peril('C:\' + #0, 'a drive root with a NUL after it');
+  Peril('C:\' + #0 + 'x', 'a drive root with a NUL and a NAME after it');
+  Peril('C:\Windows' + #0, 'a real directory with a NUL after it');
+  {$ELSE}
+  Peril('/' + #0, 'the filesystem root with a NUL after it');
+  Peril('/' + #0 + 'x', 'the filesystem root with a NUL and a NAME after it');
+  Peril('/home' + #0, 'a real directory with a NUL after it');
+  {$ENDIF}
+
   { --- the relative spellings, which only a RESOLVED rule can see -------------
     '.' is the drive root when the working directory is the drive root, and a
     textual rule cannot know that. Proven by moving this process's own working
@@ -360,6 +465,46 @@ begin
         'print file_delete("' + Slash(OutDir) + '/victim.txt")' + LF, '0');
   Report(FileExists(OutDir + PathDelim + 'victim.txt'),
          'and the file survived the refusal');
+
+  { --- THE SAME THREE, WITH A NUL WHERE THE KERNEL STOPS READING --------------
+    Every path below is the SPELLING ABOVE, plus a NUL, plus a tail that walks
+    back inside the root. The tail is what the gate used to resolve; the prefix
+    is what CreateFileW and fpOpen open. The three assertions above and these
+    three name the same three files, and before the fix these three answered the
+    opposite of them: rc=1 with the byte landing outside, the outside file's
+    contents read back through a sandboxed read, and the outside file deleted.
+
+    THE TAIL HAS TO REACH ALL THE WAY BACK IN, and getting that wrong is how a
+    test passes on both sides of the defect it was written for. The first draft
+    of these three climbed ONE level -- '<outside>/nul.txt/../<root>/decoy.txt' --
+    which lands in '<outside>/<root>', not in the root, so the gate refused them
+    for the ordinary reason and all three passed against the UNFIXED unit. Two
+    levels is what reaches the root; measured by removing the fix and watching
+    them fail.
+
+    chr$(0) is how a script builds one, and it is the only way it can -- a NUL
+    cannot appear in a source literal. Nothing is aimed anywhere but this probe's
+    own victim tree. }
+  Check('a write whose path hides a NUL is refused',
+        'z$ = chr$(0)' + LF +
+        'print file_writealltext("' + Slash(OutDir) + '/nul.txt" + z$ + "/../../' +
+        'phosphor_probe_root/decoy.txt", "PWNED")' + LF, '0');
+  Report(not FileExists(OutDir + PathDelim + 'nul.txt'),
+         'and no file was written at the part before the NUL');
+
+  Check('a read whose path hides a NUL answers empty',
+        'z$ = chr$(0)' + LF +
+        'print file_readalltext$("' + Slash(OutDir) + '/victim.txt" + z$ + "/../../' +
+        'phosphor_probe_root/decoy.txt")' + LF, '');
+  Report(FileExists(OutDir + PathDelim + 'victim.txt'),
+         'and the file it refused to read is still there');
+
+  Check('file_delete whose path hides a NUL is refused',
+        'z$ = chr$(0)' + LF +
+        'print file_delete("' + Slash(OutDir) + '/victim.txt" + z$ + "/../../' +
+        'phosphor_probe_root/x.txt")' + LF, '0');
+  Report(FileExists(OutDir + PathDelim + 'victim.txt'),
+         'and the file survived that refusal too');
 
   // THE ONE THAT MATTERS. A recursive delete aimed outside the root, answered 0
   // and carried out on nothing.
@@ -466,6 +611,309 @@ begin
   end;
   {$ENDIF}
 
+  { --- WHAT '..' DOES AFTER A LINK, AND WHAT THE LINK ITSELF IS ---------------
+
+    The block above proves a link out of the root is not a way through it. These
+    four are the two things it took a link to find out, and both are one defect:
+    THE GATE JUDGED A DIFFERENT PATH THAN THE KERNEL OPENS.
+
+    1. '..' AFTER A LINK. Resolution used to call ExpandFileName first, and
+       FExpand is string arithmetic over one GetDir -- it stats nothing. So
+       '<root>/outdoor/..' was reduced to '<root>' BEFORE any link was consulted,
+       the gate said "inside", and the Linux kernel (path_resolution(7), which
+       applies '..' to the LINK TARGET's directory) put the byte one level above
+       the target. Measured on the Linux VM against the unfixed unit: rc=1, and
+       the file landed outside the root.
+
+       Windows collapses '..' lexically too, so THERE the kernel would have kept
+       that write inside the cage and this assertion is stricter than the
+       platform. Deliberately: the rule this unit states is one rule on both
+       machines -- a link planted inside the root is not a way out of it -- and
+       the price of the stricter answer is a spelling nobody writes on purpose.
+       The mirror below is what guards against paying more than that.
+
+    2. A LINK THE PLATFORM WILL NOT FOLLOW. `mklink /J rootdoor "C:\"` needs no
+       privilege and makes a directory that IS the drive root. FPC will not name
+       its target: FileGetSymLinkTargetInt reads '\??\C:\' and then validates it
+       with FindFirstFileExW, which fails on a bare root, so the target is thrown
+       away and the answer is "not a link". Both string rules therefore called it
+       an ordinary folder called rootdoor, and dir_delete would have handed it to
+       a recursive remover that Windows walks straight through into C:\. A
+       junction whose target is not there at all takes the same branch, so it is
+       pinned beside it.
+
+    NOTHING DESTRUCTIVE RUNS WHILE ANY OF THESE LINKS EXISTS. The drive-root one
+    is measured with IsPerilousPath and SandboxAllows -- pure queries, which is
+    the method CLAUDE.md prescribes for a guard in front of a recursive delete --
+    it is pulled on the very next line, and the line after that asserts the root
+    it named is still there. }
+  ForceDirectories(RootDir + PathDelim + 'inner');
+
+  { (a) THE MIRROR FIRST. A link that stays INSIDE the root, followed by '..',
+    is ordinary work and must still be allowed. A walk that refuses this is the
+    failure mode this project names before any other. }
+  if not PlantLink(RootDir + PathDelim + 'indoor', RootDir + PathDelim + 'inner') then
+    Writeln('skip: link inside the root (this platform would not plant one)')
+  else
+  begin
+    SetSandboxRoot(RootDir);
+    Report(SandboxAllows(RootDir + PathDelim + 'indoor' + PathDelim + '..' +
+                         PathDelim + 'ok.txt', puWrite),
+           'a link INSIDE the root, then "..", is still allowed');
+    Report(not IsPerilousPath(RootDir + PathDelim + 'indoor'),
+           'and an ordinary link is not perilous either');
+    SetSandboxRoot('');
+    Check('and a write through it succeeds',
+          'print file_writealltext("' + Slash(RootDir) + '/indoor/../ok.txt", "x")' + LF, '1');
+    Report(FileExists(RootDir + PathDelim + 'ok.txt'),
+           'landing exactly where the kernel puts it');
+    PullLink(RootDir + PathDelim + 'indoor');
+    Report(DirectoryExists(RootDir + PathDelim + 'inner'),
+           'and pulling that link left its target directory alone');
+  end;
+
+  { (b) the same shape, aimed OUT of the root }
+  if not PlantLink(RootDir + PathDelim + 'outdoor', OutDir) then
+    Writeln('skip: link out of the root (this platform would not plant one)')
+  else
+  begin
+    Check('a write through a link and THEN ".." is refused',
+          'print file_writealltext("' + Slash(RootDir) + '/outdoor/../linkesc.txt", "x")' + LF,
+          '0');
+    Report(not FileExists(IncludeTrailingPathDelimiter(GetTempDir(False)) + 'linkesc.txt'),
+           'and nothing was written beside the link''s TARGET, where the kernel aims');
+    Report(not FileExists(RootDir + PathDelim + 'linkesc.txt'),
+           'nor inside the root, where collapsing the spelling used to aim');
+    SetSandboxRoot(RootDir);
+    Report(not SandboxAllows(RootDir + PathDelim + 'outdoor' + PathDelim + '..' +
+                             PathDelim + 'linkesc.txt', puWrite),
+           'and the gate itself says so, not only the run');
+    SetSandboxRoot('');
+    PullLink(RootDir + PathDelim + 'outdoor');
+    Report(FileExists(OutDir + PathDelim + 'victim.txt'),
+           'and pulling that link left the tree it named alone');
+  end;
+
+  { (c) a link whose target the platform will not name -- here because it does
+    not exist. Same branch as the drive-root junction, with nothing at stake. }
+  if not PlantLink(RootDir + PathDelim + 'nowhere',
+                   OutDir + PathDelim + 'no_such_target_at_all') then
+    Writeln('skip: dangling link (this platform would not plant one)')
+  else
+  begin
+    { THE PERILOUS HALF IS A QUESTION ABOUT A DIRECTORY, and the two platforms
+      disagree about whether this entry is one -- measured, not assumed. A
+      Windows junction reports $410, directory AND reparse point, even when its
+      target is missing, so the rule that guards the recursive remover must
+      answer for it. A dangling POSIX symlink reports faSymLink and NOT
+      faDirectory, because LinuxToWinAttr sets that bit from a stat of the
+      TARGET (rtl/unix/sysutils.pp:633) -- and a link that is not a directory
+      cannot be a volume root, so calling it perilous would only refuse the
+      legitimate deletion of a broken link. The containment half below is what
+      actually stops the write, and that is asserted on both. }
+    {$IFDEF WINDOWS}
+    Report(IsPerilousPath(RootDir + PathDelim + 'nowhere'),
+           'a link the platform will not follow is not judged an ordinary directory');
+    {$ENDIF}
+    SetSandboxRoot(RootDir);
+    Report(not SandboxAllows(RootDir + PathDelim + 'nowhere' + PathDelim + 'x.txt',
+                             puWrite),
+           'and nothing is written THROUGH one, because where it goes is unknown');
+    SetSandboxRoot('');
+    PullLink(RootDir + PathDelim + 'nowhere');
+  end;
+
+  { (d) THE FINDING ITSELF: a link whose target is a volume root. Queries only;
+    the link is pulled before anything is reported, so the window in which it
+    exists contains two predicate calls and nothing else. }
+  if not PlantLink(RootDir + PathDelim + 'rootdoor',
+                   {$IFDEF WINDOWS}'C:\'{$ELSE}'/'{$ENDIF}) then
+    Writeln('skip: drive-root link (this platform would not plant one)')
+  else
+  begin
+    linkPeril := IsPerilousPath(RootDir + PathDelim + 'rootdoor');
+    linkGate := not SandboxAllows(RootDir + PathDelim + 'rootdoor', puDelete);
+    PullLink(RootDir + PathDelim + 'rootdoor');
+    Report(linkPeril, 'a link whose target is a VOLUME ROOT is perilous');
+    Report(linkGate, 'and no destructive call may be handed it');
+    Report(FileGetAttr(RootDir + PathDelim + 'rootdoor') = -1,
+           'and the link itself is gone again');
+    Report(DirectoryExists({$IFDEF WINDOWS}'C:\'{$ELSE}'/'{$ENDIF}),
+           'while the root it named is exactly where it was');
+  end;
+
+  { (e) A COMPONENT NAME CONTAINING A BACKSLASH -- the second spelling of the
+    '..'-counted-at-the-wrong-depth escape, and the one the ORDER fix did not
+    close because it reused the splitter.
+
+    On POSIX a backslash is an ordinary filename byte: 'a\b' is ONE directory to
+    the kernel. The gate split on it anyway, on the grounds that
+    rtl/unix/sysunixh.inc:35 has ExpandFileName doing so -- so the gate counted
+    TWO components where the kernel counts one, and every '..' after it was
+    applied one level too deep. Measured through the real host on the VM before
+    the fix: '<root>/a\b/../../ESCAPED.txt' was judged INSIDE the root, and the
+    byte landed in the root's parent.
+
+    THE MIRROR IS ASSERTED FIRST AND ON BOTH PLATFORMS, because the two platforms
+    disagree about what the same string MEANS and that is the whole point: on
+    Windows a backslash IS a separator, so there '<root>\a\b\..\..' really is the
+    root and must stay allowed. The escape half is POSIX-only for the same
+    reason -- it is not an escape where the byte is a separator. }
+  ForceDirectories(RootDir + PathDelim + 'a' + PathDelim + 'b');
+  SetSandboxRoot(RootDir);
+  Report(SandboxAllows(RootDir + PathDelim + 'a' + PathDelim + 'b' + PathDelim +
+                       '..' + PathDelim + '..' + PathDelim + 'ok2.txt', puWrite),
+         'two real components then two ".." lands back in the root');
+  {$IFNDEF WINDOWS}
+  { MADE WITH THE SYSCALL, NOT WITH ForceDirectories -- which is the finding in
+    miniature. ForceDirectories reaches ExtractFilePath, which reads
+    AllowDirectorySeparators, and rtl/unix/sysunixh.inc:35 declares that ['\','/']
+    on Unix: so the RTL splits 'a\b' in two and makes a directory named 'a' with
+    a 'b' in it, and the test would then have been measuring something else
+    entirely. FpMkdir passes the bytes to the kernel, which is the only thing here
+    that agrees with the kernel by construction. DirectoryExists does not munge
+    separators (rtl/unix/sysutils.pp fpstat's the name as given), so it can be
+    trusted to confirm it. }
+  FpMkdir(PChar(RootDir + '/a\b'), &755);
+  if not DirectoryExists(RootDir + '/a\b') then
+    Writeln('skip: a directory named with a backslash (this platform would not make one)')
+  else
+  begin
+    { The kernel sees ONE component, so two ".." leave the root. }
+    Report(not SandboxAllows(RootDir + '/a\b/../../ESCAPED.txt', puWrite),
+           'a component whose NAME holds a backslash is one component, not two');
+    Report(not SandboxAllows(RootDir + '/a\b/../../secret.txt', puRead),
+           'and a read through that shape does not leak either');
+    Report(RealPathOf(RootDir + '/a\b/../../ESCAPED.txt') <>
+           RealPathOf(RootDir + PathDelim + 'ESCAPED.txt'),
+           'because the walk no longer resolves it to a path inside the root');
+    { THE MIRROR, POSIX side: ONE ".." after that same name stays in the root and
+      must still be ordinary work. }
+    Report(SandboxAllows(RootDir + '/a\b/../ok3.txt', puWrite),
+           'while ONE ".." after it is still inside the root, and allowed');
+    Report(not IsPerilousPath(RootDir + '/a\b'),
+           'and a directory whose name holds a backslash is not perilous');
+    { ... but a name with a backslash that CLIMBS TO THE ROOT OF THE FILESYSTEM is,
+      which the gate could not see while it was declining to resolve such names. }
+    Report(IsPerilousPath(RootDir + '/a\b/../../../../../../../../../../../..'),
+           'though one that climbs all the way to "/" is');
+    FpRmdir(PChar(RootDir + '/a\b'));   // the syscall again, for the same reason
+  end;
+  {$ENDIF}
+  SetSandboxRoot('');
+  RemoveDir(RootDir + PathDelim + 'a' + PathDelim + 'b');
+  RemoveDir(RootDir + PathDelim + 'a');
+
+  { (f) AN ENTRY THAT EXISTS, CARRIES A REPARSE TAG, AND GOES NOWHERE ELSE.
+    FPC decodes exactly two reparse tags (rtl/win/sysutils.pp:468-499,
+    IO_REPARSE_TAG_MOUNT_POINT and IO_REPARSE_TAG_SYMLINK); for every other tag
+    it answers slrNoSymLink, which the same RTL turns into "the entry exists"
+    at :558-565. A Store app alias, a WOF-compressed file, a dehydrated OneDrive
+    placeholder are all of that kind, and the kernel opens exactly the path the
+    walk resolved -- there is nothing to guard against. Calling them unknown
+    refused reading, writing and deleting perfectly ordinary files: measured at
+    42 of the 62 entries in %LOCALAPPDATA%\Microsoft\WindowsApps.
+
+    Nothing here is created: the probe LOOKS for such an entry on the machine and
+    says so when it finds none. Every call is a query. }
+  {$IFDEF WINDOWS}
+  wapps := GetEnvironmentVariable('LOCALAPPDATA') + '\Microsoft\WindowsApps';
+  odd := '';
+  if DirectoryExists(wapps) then
+    if FindFirst(wapps + '\*', faAnyFile, wsr) = 0 then
+    begin
+      repeat
+        if (wsr.Name <> '.') and (wsr.Name <> '..') and (odd = '') and
+           ((FileGetAttr(wapps + '\' + wsr.Name) and $400) <> 0) and
+           FileExists(wapps + '\' + wsr.Name) and
+           not Decodable(wapps + '\' + wsr.Name) then
+          odd := wapps + '\' + wsr.Name;
+      until FindNext(wsr) <> 0;
+      FindClose(wsr);
+    end;
+  if odd = '' then
+    Writeln('skip: no undecodable reparse point on this machine to ask about')
+  else
+  begin
+    SetSandboxRoot(wapps);
+    Report(SandboxAllows(odd, puRead),
+           'an ordinary file carrying a tag FPC cannot decode is still readable');
+    Report(SandboxAllows(odd, puWrite),
+           'and writable, because the kernel opens the path the walk resolved');
+    Report(not IsPerilousPath(odd), 'and it is not a volume root');
+    Report(SameText(RealPathOf(odd), odd),
+           'and the walk answered it unchanged, which is what the kernel does');
+    SetSandboxRoot('');
+  end;
+  {$ENDIF}
+
+  { (g) A ROOT REACHED THROUGH A LINK THE PLATFORM WILL NOT FOLLOW.
+    The containment rule carries a written carve-out for this -- a link at or
+    above the root is shared by both sides of the comparison, so refusing there
+    would kill every write in a sandbox rooted under a volume mount point. The
+    perilous rule runs FIRST and had no such carve-out, so it did exactly what
+    that comment forbids.
+
+    The link is a drive-root one again, and the root aimed through it is a
+    directory THAT ALREADY EXISTS -- asserted on the line before, so
+    SetSandboxRoot's ForceDirectories branch is never reached and nothing is
+    created through it. Queries only; the link is pulled and its target checked. }
+  if not PlantLink(OutDir + PathDelim + 'volgate',
+                   {$IFDEF WINDOWS}'C:\'{$ELSE}'/'{$ENDIF}) then
+    Writeln('skip: volume-root link for the root-under-a-mount-point case')
+  else
+  begin
+    thru := OutDir + PathDelim + 'volgate' +
+            Copy(RootDir, Length(ExtractFileDrive(RootDir)) + 1, Length(RootDir));
+    if not DirectoryExists(thru) then
+      Writeln('skip: the root is not reachable through that link on this machine')
+    else
+    begin
+      SetSandboxRoot(thru);
+      volPeril := IsPerilousPath(thru);
+      volWrite := SandboxAllows(thru, puWrite);
+      volSub := SandboxAllows(thru + PathDelim + 'inner', puWrite);
+      SetSandboxRoot('');
+      Report(not volPeril,
+             'a root reached THROUGH an unfollowable link is not itself perilous');
+      Report(volWrite, 'and the host may still write in the cage it installed');
+      Report(volSub, 'including a directory that already exists inside it');
+    end;
+    PullLink(OutDir + PathDelim + 'volgate');
+    Report(FileGetAttr(OutDir + PathDelim + 'volgate') = -1,
+           'and that link is gone again too');
+    Report(DirectoryExists({$IFDEF WINDOWS}'C:\'{$ELSE}'/'{$ENDIF}),
+           'with the volume it named untouched');
+  end;
+
+  { (h) THE ROOT IS RESOLVED BY THE SAME RULE AS EVERY PATH JUDGED AGAINST IT.
+    SetSandboxRoot used to make the root absolute with ExpandFileName -- the very
+    textual '..'-collapse the walk was rebuilt to stop doing. An operator root
+    spelled '<D>/lnk/..', where lnk points at '<D>/deep/jt', therefore installed
+    '<D>' while every path was compared against it by a walk that says
+    '<D>/deep': a cage one level WIDER than the operator named. }
+  ForceDirectories(OutDir + PathDelim + 'deep' + PathDelim + 'jt');
+  ForceDirectories(OutDir + PathDelim + 'sibling');
+  if not PlantLink(OutDir + PathDelim + 'rolnk',
+                   OutDir + PathDelim + 'deep' + PathDelim + 'jt') then
+    Writeln('skip: link for the root-resolution-order case')
+  else
+  begin
+    thru := OutDir + PathDelim + 'rolnk' + PathDelim + '..';
+    Report(SameText(SetSandboxRoot(thru), RealPathOf(thru)),
+           'the root installed is the one the walk answers, not the collapsed one');
+    Report(not SandboxAllows(OutDir + PathDelim + 'sibling' + PathDelim + 'x.txt',
+                             puWrite),
+           'so a sibling of the link''s TARGET is outside the cage, as named');
+    Report(SandboxAllows(OutDir + PathDelim + 'deep' + PathDelim + 'jt' +
+                         PathDelim + 'x.txt', puWrite),
+           'while the directory the operator did name is inside it');
+    SetSandboxRoot('');
+    PullLink(OutDir + PathDelim + 'rolnk');
+    Report(DirectoryExists(OutDir + PathDelim + 'deep' + PathDelim + 'jt'),
+           'and pulling that link left its target standing');
+  end;
+
   // --- the scratch places answer inside the root ------------------------------
   RunUnder(RootDir, 'print temppath$()' + LF);
   Report(Pos(LowerCase(RealPathOf(RootDir)), LowerCase(Answer)) = 1,
@@ -544,6 +992,24 @@ begin
          'and a path that climbs and comes back inside');
   Report(not SandboxAllows(RealPathOf(RootDir) + PathDelim + '..', puWrite),
          'while one that climbs OUT of the root is still refused');
+
+  { --- MORE COMPONENTS THAN THE WALK CAN HOLD ---------------------------------
+    The resolver splits a path into a fixed array and used to DROP whatever did
+    not fit, in silence -- so a path long enough resolved to a PREFIX of itself,
+    the gate judged an ancestor of the file the kernel would open, and a '..' in
+    the part that was dropped could climb anywhere. Same divergence as a NUL,
+    further along the string. What cannot be judged is refused; what merely goes
+    deep is not. }
+  seg := PathDelim;
+  seg := seg + 'd';
+  deep := RealPathOf(RootDir);
+  for i := 1 to 200 do deep := deep + seg;
+  Report(SandboxAllows(deep + PathDelim + 'leaf.txt', puWrite),
+         'a path 200 components deep inside the root is allowed');
+  for i := 1 to 200 do deep := deep + seg;
+  Report(not SandboxAllows(deep + PathDelim + 'leaf.txt', puWrite),
+         'while one the walk cannot hold whole is refused rather than guessed at');
+
   SetSandboxRoot('');
 
   // --- and with no root, the ceiling costs nothing ----------------------------
@@ -559,8 +1025,13 @@ begin
   DeleteFile(OutDir + PathDelim + 'victim.txt');
   DeleteFile(OutDir + PathDelim + 'sub' + PathDelim + 'deep.txt');
   RemoveDir(OutDir + PathDelim + 'sub');
+  RemoveDir(OutDir + PathDelim + 'sibling');
+  RemoveDir(OutDir + PathDelim + 'deep' + PathDelim + 'jt');
+  RemoveDir(OutDir + PathDelim + 'deep');
   RemoveDir(OutDir);
   DeleteFile(RootDir + PathDelim + 'inside.txt');
+  DeleteFile(RootDir + PathDelim + 'ok.txt');
+  RemoveDir(RootDir + PathDelim + 'inner');
 
   Sink.Free;
 

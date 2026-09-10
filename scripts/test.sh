@@ -176,13 +176,22 @@ check_refused "$dmg3" "unknown flags" || okJ=1
 if [ "$okJ" -eq 0 ]; then echo "PASS  J:corrupt payload    (exit 2, says so, never opens a prompt)"
 else echo "FAIL  J:corrupt payload falls through to the CLI"; fail=1; fi
 
-# K: THE MIRROR, and it matters as much as J. NO trailer magic means this file is
-#    a bare stub, and being the CLI is then exactly right -- that is the whole
-#    reason one binary can be both. A refusal that swallowed this case would have
-#    broken `phosphor` itself. Two shapes: the stub as built, and a packed file
-#    truncated so that the magic is gone with it.
-stub="$hidir/truncated"
-head -c $((sizeA - 1)) "$packed" > "$stub"; chmod +x "$stub"
+# K: THE MIRROR, and it matters as much as J. A file that carries NO evidence of
+#    being packed -- no mark in its middle and no magic in its tail -- is a bare
+#    stub, and being the CLI is then exactly right: that is the whole reason one
+#    binary can be both. A refusal that swallowed this case would have broken
+#    `phosphor` itself.
+#
+#    THE SECOND SHAPE USED TO BE "a packed file truncated past its magic", AND
+#    THAT EXPECTATION WAS THE DEFECT. A truncated application is a damaged
+#    application, not a bare stub; it is refused in L below, and this letter now
+#    holds two files that genuinely carry no program: the stub as built, and the
+#    stub with trailing bytes that are not a trailer -- the shape a resource
+#    appender or an installer footer leaves behind.
+stubjunk="$hidir/stub_plus_junk"
+cat "$exe" > "$stubjunk"
+printf 'not a trailer, just some bytes riding along' >> "$stubjunk"
+chmod +x "$stubjunk"
 
 okK=0
 check_is_cli() {  # path what
@@ -192,9 +201,193 @@ check_is_cli() {  # path what
   echo "        $2: exit $code, said '$out'"
   return 1
 }
-check_is_cli "$exe"  "the stub itself"                   || okK=1
-check_is_cli "$stub" "packed, truncated past its magic"  || okK=1
+check_is_cli "$exe"      "the stub itself"                             || okK=1
+check_is_cli "$stubjunk" "the stub with non-trailer bytes appended"    || okK=1
 if [ "$okK" -eq 0 ]; then echo "PASS  K:no magic is the CLI (a bare stub still opens the REPL)"
 else echo "FAIL  K:a file with no trailer magic no longer behaves as the CLI"; fail=1; fi
+
+# L: A TRUNCATED PACKED APPLICATION IS A DAMAGED APPLICATION, NOT A BARE STUB.
+#    J covers every corruption that leaves the TAIL intact, because the tail was
+#    the only place a file said "I am a packed application". Truncation -- an
+#    interrupted copy or download, a partial write, an antivirus that cuts a file
+#    short, and the commonest corruption there is -- removes exactly those bytes,
+#    so the reader found no magic, answered "bare stub" and RunCommandLine opened
+#    the REPL with exit 0: a damaged application handing a user a BASIC prompt
+#    that runs whatever is typed into it, which is word for word what J exists to
+#    refuse. The stub now carries a compiled-in mark in its MIDDLE, where
+#    truncation cannot reach, holding the length the packer finished with.
+#
+#    Each shape asserts its own REASON, not just "corrupt": a refusal that fired
+#    for the wrong branch would pass a message-blind check while proving nothing.
+trunc4="$hidir/trunc4"; trunc1="$hidir/trunc1"; nomagic="$hidir/nomagic"
+head -c $((sizeA - 4)) "$packed" > "$trunc4"
+head -c $((sizeA - 1)) "$packed" > "$trunc1"
+# The magic overwritten IN PLACE: the same length, so only the mark can tell.
+head -c $((sizeA - 8)) "$packed" > "$nomagic"; printf 'XXXXXXXX' >> "$nomagic"
+chmod +x "$trunc4" "$trunc1" "$nomagic"
+
+okL=0
+check_refused_because() {  # path what needle
+  local out code
+  if out="$("$1" < /dev/null 2>&1)"; then code=0; else code=$?; fi
+  # [[ ]] rather than `echo | grep -q`: grep -q exits at its first match and
+  # SIGPIPEs what feeds it, which under `pipefail` reads non-zero even when it
+  # matched -- a trap this project has already paid for twice.
+  if [ "$code" -eq 2 ] && [[ "$out" == *corrupt* ]] && [[ "$out" == *"$3"* ]] \
+     && [[ "$out" != *REPL* ]]; then
+    return 0
+  fi
+  echo "        $2: exit $code, said '$out'"
+  return 1
+}
+check_refused_because "$trunc4"  "truncated by 4"             truncated   || okL=1
+check_refused_because "$trunc1"  "truncated by 1"             truncated   || okL=1
+check_refused_because "$nomagic" "magic overwritten in place" overwritten || okL=1
+
+# AND THE MIRROR OF L, or the length check would be free to refuse everything: an
+# intact packed application must still run after being copied somewhere else,
+# byte-exact against the same golden as A-D.
+movedapp="$hidir/moved_app"; outL="$hidir/L.actual"
+cp "$packed" "$movedapp"; chmod +x "$movedapp"
+if "$movedapp" < /dev/null > "$outL"; then mcode=0; else mcode=$?; fi
+if [ "$mcode" -eq 0 ] && cmp -s "$outL" "$expected"; then
+  echo "PASS  L:packed, moved  ($(wc -c <"$outL") bytes match golden)"
+else
+  echo "        an intact packed app, copied elsewhere: exit $mcode"; okL=1
+fi
+if [ "$okL" -eq 0 ]; then echo "PASS  L:truncated payload  (exit 2, says truncated, never opens a prompt)"
+else echo "FAIL  L:a truncated packed application falls through to the CLI"; fail=1; fi
+
+# M: `--sandbox ""` MUST REFUSE, exactly as `--sandbox "   "` already did.
+#    '' is the encoding for "no sandbox was asked for" AND what an operator hands
+#    over when they write `phosphor --sandbox "$RUNDIR" untrusted.bas` with RUNDIR
+#    unset. BindSandbox used the VALUE to decide whether the flag had been given,
+#    so the empty argument ran the script COMPLETELY UNCONFINED, silently, exit 0
+#    -- the outcome that routine's own comment says it exists to prevent -- while
+#    the whitespace spelling of the same intent was correctly refused.
+sbxdir="$hidir/sandbox_arg"
+mkdir -p "$sbxdir/cage"
+# No backslash anywhere in this heredoc, and none possible: a backslash in a .bas
+# literal is an escape, and a heredoc would mangle it on the way in besides.
+cat > "$sbxdir/escape.bas" <<'EOF'
+println "sandboxroot=[" + sandboxroot$() + "]"
+n = file_writealltext("escaped_outside.txt", "ESCAPED")
+println "write outside -> " + str$(n)
+EOF
+sbxescaped="$sbxdir/escaped_outside.txt"
+
+# The answers come back in GLOBALS, and the call is never wrapped in a command
+# substitution: `m=$(sbx_run ...)` would run the function in a SUBSHELL, so the
+# exit code it recorded would be thrown away with that subshell and `set -u`
+# would abort on the next read. Measured on the Linux VM, where it did.
+sbxout=''; sbxcode=0
+sbx_run() {  # args... -> $sbxout and $sbxcode
+  if sbxout="$(cd "$sbxdir" && "$exe" "$@" < /dev/null 2>&1)"; then sbxcode=0; else sbxcode=$?; fi
+}
+
+okM=0
+rm -f "$sbxescaped"
+sbx_run --sandbox "" escape.bas
+# TWO SPACES before the dash: the root printed back is the empty string, which is
+# the case under test. A shell that dropped the empty argument would leave the
+# .bas name there instead, and the refusal would be right for the wrong reason.
+if [ "$sbxcode" -eq 2 ] && [[ "$sbxout" == *"cannot establish the sandbox root  --"* ]] \
+   && [[ "$sbxout" != *sandboxroot=* ]] && [ ! -e "$sbxescaped" ]; then :; else
+  echo "        --sandbox \"\": exit $sbxcode, said '$sbxout'"; okM=1
+fi
+
+# The whitespace spelling, which was right all along and must stay right.
+rm -f "$sbxescaped"
+sbx_run --sandbox "   " escape.bas
+if [ "$sbxcode" -eq 2 ] && [[ "$sbxout" == *"cannot establish the sandbox root"* ]] \
+   && [ ! -e "$sbxescaped" ]; then :; else
+  echo "        --sandbox \"   \": exit $sbxcode, said '$sbxout'"; okM=1
+fi
+
+# AND THE DOCUMENTED DEFAULT MUST NOT MOVE. No --sandbox is no sandbox: the
+# script runs unconfined and the write succeeds. A guard that refused this would
+# have broken `phosphor` itself, exactly as a refusal in K would have.
+rm -f "$sbxescaped"
+sbx_run escape.bas
+if [ "$sbxcode" -eq 0 ] && [[ "$sbxout" == *"sandboxroot=[]"* ]] \
+   && [[ "$sbxout" == *"write outside -> 1"* ]] && [ -e "$sbxescaped" ]; then :; else
+  echo "        no --sandbox: exit $sbxcode, said '$sbxout'"; okM=1
+fi
+
+# And a real root still confines rather than refuses: the run succeeds, the write
+# outside it does not.
+rm -f "$sbxescaped"
+sbx_run --sandbox cage escape.bas
+if [ "$sbxcode" -eq 0 ] && [[ "$sbxout" == *cage* ]] \
+   && [[ "$sbxout" == *"write outside -> 0"* ]] && [ ! -e "$sbxescaped" ]; then :; else
+  echo "        --sandbox cage: exit $sbxcode, said '$sbxout'"; okM=1
+fi
+
+if [ "$okM" -eq 0 ]; then echo 'PASS  M:--sandbox "" refused (empty argument never runs unconfined)'
+else echo 'FAIL  M:--sandbox argument handling'; fail=1; fi
+
+# N. `--out ""` MUST REFUSE, for the same reason M does and one `else if` down
+#    the same argument loop. TConsoleHost.Create guards with `if AOutPath <> ''`,
+#    so '' encodes "no --out was asked for" as well as what `--out "$LOG"` hands
+#    over with LOG unset: the flag VANISHED and the program's output went to the
+#    terminal at exit 0 with nothing said -- while `--out "   "` was refused on
+#    Windows and honoured on Linux. Three answers to one intent.
+outdir="$hidir/out_arg"
+mkdir -p "$outdir/cage"
+cat > "$outdir/job.bas" <<'EOF'
+println "SECRET-OUTPUT"
+EOF
+outreal="$outdir/real.txt"
+
+# Globals again, and never a command substitution around the call -- see sbx_run
+# above for the subshell that ate an exit code on the Linux VM.
+outout=''; outcode=0
+out_run() {  # args... -> $outout and $outcode
+  if outout="$(cd "$outdir" && "$exe" "$@" < /dev/null 2>&1)"; then outcode=0; else outcode=$?; fi
+}
+
+okN=0
+rm -f "$outreal"
+out_run --out "" job.bas
+if [ "$outcode" -eq 2 ] && [[ "$outout" == *"--out needs a path"* ]] \
+   && [[ "$outout" != *SECRET-OUTPUT* ]] && [ ! -e "$outreal" ]; then :; else
+  echo "        --out \"\": exit $outcode, said '$outout'"; okN=1
+fi
+
+# ...and with a sandbox bound too, which is where it was worst: the operator had
+# asked for confinement AND for a log, and got a wide-open terminal instead.
+out_run --sandbox cage --out "" job.bas
+if [ "$outcode" -eq 2 ] && [[ "$outout" == *"--out needs a path"* ]] \
+   && [[ "$outout" != *SECRET-OUTPUT* ]]; then :; else
+  echo "        --sandbox cage --out \"\": exit $outcode, said '$outout'"; okN=1
+fi
+
+# AND THE DOCUMENTED DEFAULT MUST NOT MOVE. No --out is stdout.
+out_run job.bas
+if [ "$outcode" -eq 0 ] && [[ "$outout" == *SECRET-OUTPUT* ]]; then :; else
+  echo "        no --out: exit $outcode, said '$outout'"; okN=1
+fi
+
+# And a real path still redirects rather than being refused: the file is written
+# and nothing reaches the terminal. A guard that refused this would have broken
+# block A, which is what block A is there to catch.
+rm -f "$outreal"
+out_run --out real.txt job.bas
+# Read the file rather than `... | grep -q`: CLAUDE.md records grep -q SIGPIPEing
+# its upstream and reading non-zero even when it matched.
+if [ "$outcode" -eq 0 ] && [[ "$outout" != *SECRET-OUTPUT* ]] && [ -e "$outreal" ] \
+   && [[ "$(cat "$outreal")" == *SECRET-OUTPUT* ]]; then :; else
+  echo "        --out real.txt: exit $outcode, said '$outout'"; okN=1
+fi
+
+# The sentence the empty case now gives is the one --out-with-nothing-after-it
+# already gave. Pinned so the two cannot drift apart.
+out_run --out
+if [ "$outcode" -eq 2 ] && [[ "$outout" == *"--out needs a path"* ]]; then :; else
+  echo "        --out with no value: exit $outcode, said '$outout'"; okN=1
+fi
+
+if [ "$okN" -eq 0 ]; then echo 'PASS  N:--out "" refused    (empty argument never silently unredirects)'
+else echo 'FAIL  N:--out argument handling'; fail=1; fi
 
 exit "$fail"

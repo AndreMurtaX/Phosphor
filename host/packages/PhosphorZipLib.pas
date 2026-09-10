@@ -33,6 +33,15 @@
 
   Failures are answered (0 / "" / false) and recorded in zip_error(), never
   raised, matching the engine's I/O contract.
+
+  THE ONE DELIBERATE EXCEPTION IS A HOSTILE ARCHIVE. The three extractors RAISE
+  rather than answer when they refuse an archive outright -- an entry name that
+  escapes the destination, two headers that spell one entry two different ways,
+  or an entry that is a symbolic link -- because a refusal answered as 0 reads
+  like an ordinary failure and a caller that ignores it goes on believing the
+  archive was merely empty. An archive that could not be READ is not in that
+  class: a deleted, renamed or locked file is an ordinary failure and is still
+  answered 0 with zip_error() = 1.
 ******************************************************************************}
 unit PhosphorZipLib;
 
@@ -457,8 +466,216 @@ begin
       Exit(False);
 end;
 
+type
+  { REACHES THE PROTECTED TZipFileEntry.HdrPos -- the offset of an entry's LOCAL
+    FILE HEADER, which Examine has already taken from the central directory and
+    corrected from a zip64 extra field (zipper.pp:2583, 2626). Nothing else in
+    paszlib exposes it, and the check below needs exactly the offset
+    TUnZipper.ReadZipHeader will seek to, not one of its own guessing.
+
+    Derived from TFullZipFileEntry rather than from TZipFileEntry so the cast is
+    a downcast between RELATED types: with the wider base FPC issues "Class types
+    'TFullZipFileEntry' and '...' are not related", and a warning is a defect
+    here. }
+  TZipEntryCracker = class(TFullZipFileEntry);
+
+{ THE NAME A ZIP ENTRY IS EXTRACTED UNDER IS NOT THE NAME IT ADVERTISES.
+
+  ArchiveIsSafe above judges AUz.Entries[i].ArchiveFileName, which
+  TUnZipper.Examine filled from the CENTRAL DIRECTORY (zipper.pp:2590).
+  Extraction then re-reads the LOCAL FILE HEADER and OVERWRITES both names
+  (zipper.pp:2317-2318, inside ReadZipHeader, which UnZipOneFile calls FIRST at
+  2787); GetOutputFileName builds the path from Item.DiskFileName (2762) and
+  FOutputPath (2782), and OpenOutput ForceDirectories that path and opens it with
+  fmCreate (2255-2259). So the string that was judged is not the string that
+  decides where the byte lands. An archive advertising `harmless.txt` in its
+  central directory and carrying `../../../../ESCAPED.txt` in its local header
+  wrote outside the destination AND outside the sandbox root, and all three
+  extractors answered 1 with zip_error() = 0.
+
+  The sandbox cannot cover for it: TUnZipper opens the output file itself, which
+  is the blind spot recorded in the comment at the head of the handle section.
+
+  WHICH HOOK -- MEASURED, NOT REASONED. None fires between ReadZipHeader and
+  OpenOutput. OnStartFile runs at the END of OpenOutput (zipper.pp:2266), after
+  fmCreate has already created the file, so a refusal there still leaves a byte
+  outside the destination. OnCreateStream fires early enough but sets
+  IsCustomStream (2793), and that DROPS FOutputPath from the path entirely
+  (2779-2784) -- it would break every honest destination, which is why the
+  proposal that named it warned about it in the same breath. What is available
+  before any byte is written is the archive itself, so the local file headers are
+  read here, up front, and the names extraction will actually use are judged:
+
+    * every local name must pass SafeEntryName, and
+    * it must be BYTE-IDENTICAL to the name the central directory advertised.
+
+  THE SECOND HALF IS NOT REDUNDANT. An archive whose two names merely DISAGREE is
+  lying about itself even when both names are harmless: unzip_entry$, zip_list$,
+  zip_exists and zip_entrysize all answer from the central directory while
+  zip_extract writes under the local one, so a caller told "keep.txt" gets a file
+  named something else and no channel says so. The disagreement is refused in its
+  own right, which also means this guard does not have to be as clever as
+  SafeEntryName -- any spelling that reaches a different place than the one
+  advertised is a different string, and a different string is refused.
+
+  AND A NAME IS NOT THE ONLY THING AN ENTRY CAN BE. An entry whose attributes
+  mark it a UNIX SYMBOLIC LINK is extracted by paszlib as a link whose TARGET is
+  the entry's decompressed content (zipper.pp:2818-2825, fpSymlink) -- a string
+  no name check ever looks at. An archive can then carry a link `dir` aimed at
+  `../../../..` and a following entry `dir/x`, both names impeccable, and the
+  second entry's byte lands wherever the first one pointed: measured on Linux,
+  outside the destination AND outside the sandbox root, with unzip_extract
+  answering 1 and zip_error() 0. Windows never reaches it (paszlib forces
+  IsLink := False off UNIX, zipper.pp:2799-2804), which is precisely why a
+  Windows-green suite could not see it. Nothing in this package extracts a link
+  on purpose, so every link entry is refused, on both operating systems: the
+  refusal is a judgement about the archive, not about the host. IsLink reads
+  Attributes, which Examine takes from the CENTRAL directory (zipper.pp:2596)
+  and ReadZipHeader never overwrites -- so unlike the name, this is already the
+  copy that decides.
+
+  AND THE COMPARISON ITSELF WAS MEASURED against this FPC (3.2.2) rather than
+  assumed: ArchiveFileName holds the filename field's bytes UNCHANGED -- for a
+  name carrying a byte >= 128, with the EFS language-encoding flag both set and
+  clear. The one transform paszlib applies is SetArchiveFileName's
+  DirectorySeparator -> '/' (zipper.pp:3186-3190), mirrored below. The compare is
+  then made over BYTES: '=' on two strings whose dynamic code pages differ
+  CONVERTS them rather than comparing them.
+
+  AUnreadable SEPARATES AN I/O FAILURE FROM A REFUSAL. The archive is re-opened
+  here, and an archive that has been deleted, renamed or locked since it was
+  opened cannot be read -- which is a failure, not an accusation. This unit's
+  header promises that failures are ANSWERED (0 / "" / false) and recorded in
+  zip_error(), never raised, with zip slip the one deliberate exception; a raise
+  on a vanished file breaks that promise and misdiagnoses it besides, telling a
+  script its archive escaped the destination when the file simply went away. So
+  the callers raise on a refusal and answer 0 on an unreadable archive, and this
+  flag is how they tell the two apart. }
+function ArchiveLocalNamesAreSafe(AEntries: TFullZipFileEntries;
+  const APath: String; out AWhy: String; out AUnreadable: Boolean): Boolean;
+var
+  fs: TFileStream;
+  i: Integer;
+  fsize: Int64;
+  local, central: RawByteString;
+
+  { The fixed 30-byte part of a local file header, then its filename field.
+    Assembled byte by byte so this does not depend on the machine's endianness --
+    paszlib reads the record and byte-swaps it on a big-endian target instead. }
+  function ReadLocalName(AHdrPos: Int64; out AName: RawByteString): Boolean;
+  var hdr: array[0..29] of Byte; n: Integer;
+  begin
+    Result := False;
+    AName := '';
+    // fsize, not fs.Size: the property is a seek-to-end and a seek-back, and
+    // asking it once per entry made repeated single-entry extraction from a
+    // 5000-entry archive twice as slow. The length is read once, above.
+    if (AHdrPos < 0) or (AHdrPos + 30 > fsize) then Exit;
+    fs.Seek(AHdrPos, soBeginning);
+    if fs.Read(hdr[0], 30) <> 30 then Exit;
+    // 'PK'#3#4
+    if (hdr[0] <> $50) or (hdr[1] <> $4B) or
+       (hdr[2] <> $03) or (hdr[3] <> $04) then Exit;
+    n := hdr[26] or (hdr[27] shl 8);   // Filename_Length: a Word, so at most 65535
+    if n = 0 then Exit;                // an entry with no name is not one to write
+    SetLength(AName, n);
+    if fs.Read(AName[1], n) <> n then begin AName := ''; Exit; end;
+    Result := True;
+  end;
+
+begin
+  Result := False;
+  AWhy := '';
+  AUnreadable := False;
+  if AEntries.Count = 0 then Exit(True);
+  { The archive is opened AGAIN, by path, so the gate is asked again -- every
+    caller here has already asked, and the rule this unit carries is that the
+    question belongs at the point the path is bound, not at the point someone
+    remembered. }
+  if not SandboxAllows(APath, puRead) then
+  begin
+    AWhy := 'the archive is outside the sandbox root';
+    Exit;
+  end;
+  { One seek and one bounded read per entry, over an entry count the ARCHIVE
+    chose: charged before the pass, the same way ArchiveFitsBudget charges the
+    expansion it is about to allow. }
+  if not BudgetAllows(AEntries.Count) then
+  begin
+    AWhy := 'the execution budget refuses an archive of ' +
+            IntToStr(AEntries.Count) + ' entries';
+    Exit;
+  end;
+  { A LINK IS NOT A FILE, AND ITS TARGET IS NOT A NAME. Judged before the archive
+    is even opened, so this refusal is a property of the archive and never an
+    outcome of I/O. See the note on symbolic links above. }
+  for i := 0 to AEntries.Count - 1 do
+    if AEntries[i].IsLink then
+    begin
+      AWhy := 'entry ' + IntToStr(i + 1) + ' is a symbolic link, and the place a ' +
+              'link points is not a name this library can check';
+      Exit;
+    end;
+  try
+    fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+  except
+    { An archive this cannot re-read is one it cannot vouch for -- but it is a
+      FAILURE, not a refusal, and the caller must answer 0 rather than raise. }
+    AUnreadable := True;
+    AWhy := 'the archive could not be re-read to check its local file headers';
+    Exit;
+  end;
+  try
+    fsize := fs.Size;
+    for i := 0 to AEntries.Count - 1 do
+    begin
+      if not ReadLocalName(TZipEntryCracker(AEntries[i]).HdrPos, local) then
+      begin
+        AWhy := 'entry ' + IntToStr(i + 1) + ' has no readable local file header';
+        Exit;
+      end;
+      if not SafeEntryName(local) then
+      begin
+        AWhy := 'the local file header of entry ' + IntToStr(i + 1) +
+                ' names a path that escapes the destination directory';
+        Exit;
+      end;
+      { MIRRORS SetArchiveFileName (zipper.pp:3182-3190), which rewrites the
+        host separator to '/' before storing the central name -- so a central
+        name that reached paszlib holding a '\' is stored with a '/' while the
+        local header's raw bytes still hold the '\', and the two would differ
+        for a reason the archive never chose.
+
+        GUARDED BY AN IFNDEF UNIX RATHER THAN BY `if DirectorySeparator <> '/'`.
+        DirectorySeparator is a CONSTANT per target, so that test folds at
+        compile time and on Linux the body became dead: "PhosphorZipLib.pas(591,9)
+        Warning: unreachable code", and `bash scripts/build.sh` exited 1 on a
+        tree that built clean on Windows. Off UNIX the separator is '\' and the
+        replacement is exactly the one the runtime test asked for; on UNIX it is
+        '/' already and the statement was always a no-op. }
+      {$IFNDEF UNIX}
+      local := StringReplace(local, DirectorySeparator, '/', [rfReplaceAll]);
+      {$ENDIF}
+      central := AEntries[i].ArchiveFileName;
+      // The name is deliberately NOT quoted into this message: it is attacker
+      // bytes, and every unit in this tree sets the UTF8 code page.
+      if (Length(local) <> Length(central)) or
+         ((Length(local) > 0) and
+          (CompareByte(local[1], central[1], Length(local)) <> 0)) then
+      begin
+        AWhy := 'entry ' + IntToStr(i + 1) + ' advertises one name in the central ' +
+                'directory and carries another in its local file header';
+        Exit;
+      end;
+    end;
+    Result := True;
+  finally
+    fs.Free;
+  end;
+end;
+
 function f_unzip_extract(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var uz: TUnZipper;
+var uz: TUnZipper; why: String; unread: Boolean;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -481,6 +698,19 @@ begin
         ZipErr := 1;
         Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
           'destination directory (a leading /, a drive letter, or a ".." segment)');
+        Exit;
+      end;
+      { AND THE NAMES EXTRACTION WILL ACTUALLY USE, which are not the ones the
+        line above judged. See ArchiveLocalNamesAreSafe. }
+      if not ArchiveLocalNamesAreSafe(uz.Entries, uz.FileName, why, unread) then
+      begin
+        ZipErr := 1;
+        { A VANISHED ARCHIVE IS ANSWERED, NOT RAISED. Only a judgement about the
+          archive's contents earns the deliberate exception to this unit's
+          "failures are answered" rule; an archive that could not be re-read is
+          an ordinary failure and keeps the 0 / zip_error() = 1 it always had. }
+        if not unread then
+          Err := MakeError(peRuntime, 'archive refused: ' + why);
         Exit;
       end;
       if not ArchiveFitsBudget(uz) then
@@ -757,7 +987,7 @@ begin
 end;
 
 function f_zip_extract(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var r: TZipReader; sl: TStringList;
+var r: TZipReader; sl: TStringList; why: String; unread: Boolean;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -771,6 +1001,19 @@ begin
         ZipErr := 1;
         Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
           'destination directory');
+        Exit;
+      end;
+      { AND THE NAMES EXTRACTION WILL ACTUALLY USE. The name list handed to
+        UnZipFiles is matched against the CENTRAL directory (zipper.pp:2850), so
+        this call is doubly exposed: the entry it picks and the path it writes
+        are chosen from two different strings. See ArchiveLocalNamesAreSafe. }
+      if not ArchiveLocalNamesAreSafe(r.UZ.Entries, r.UZ.FileName, why, unread) then
+      begin
+        ZipErr := 1;
+        // An archive that vanished between zip_open@ and here is answered, not
+        // raised -- see the same guard in f_unzip_extract.
+        if not unread then
+          Err := MakeError(peRuntime, 'archive refused: ' + why);
         Exit;
       end;
       // Args[2] is a DESTINATION DIRECTORY on disk. ArchiveIsSafe above stops an
@@ -809,7 +1052,7 @@ begin
 end;
 
 function f_zip_extractall(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var r: TZipReader;
+var r: TZipReader; why: String; unread: Boolean;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -820,6 +1063,16 @@ begin
       ZipErr := 1;
       Err := MakeError(peRuntime, 'archive refused: an entry name escapes the ' +
         'destination directory');
+      Exit;
+    end;
+    { AND THE NAMES EXTRACTION WILL ACTUALLY USE. See ArchiveLocalNamesAreSafe. }
+    if not ArchiveLocalNamesAreSafe(r.UZ.Entries, r.UZ.FileName, why, unread) then
+    begin
+      ZipErr := 1;
+      // An archive that vanished between zip_open@ and here is answered, not
+      // raised -- see the same guard in f_unzip_extract.
+      if not unread then
+        Err := MakeError(peRuntime, 'archive refused: ' + why);
       Exit;
     end;
     { Args[1] is a DESTINATION DIRECTORY on disk, and this routine asked the gate

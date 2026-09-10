@@ -18,6 +18,15 @@
 # filesystem from INSIDE a SQL string. ATTACH and VACUUM INTO name files of their
 # own, where a gate on a function's ARGUMENTS never looks, so they are answered by
 # SQLite's own authorizer; sqlite_backup's path is gated where sqlite_open@'s is.
+# 11_zipslip is the zip-slip corpus: the name an entry is EXTRACTED under is the
+# one in its LOCAL FILE HEADER, not the one the central directory advertises, and
+# nothing here could build an archive where the two differ -- zip_create@ writes
+# the same name into both. So that file builds its malicious archives itself,
+# byte by byte, and aims the escape into its own bin/p9b_zipslip tree. It also
+# carries the second spelling of the same escape -- an entry whose ATTRIBUTES
+# say symbolic link, whose target is its content and so is no name at all --
+# and the over-refusal half, including that an archive which merely went away
+# is still answered 0 rather than accused of escaping.
 00_base64
 01_zip
 02_sqlite
@@ -29,3 +38,4 @@
 08_http_offline
 09_safety
 10_sqlite_sandbox
+11_zipslip

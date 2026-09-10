@@ -79,6 +79,21 @@ var
     creates, so `run`, the REPL and an embedded payload are bounded alike. }
   GSandboxDir: String = '';
 
+  { WHETHER --sandbox WAS GIVEN, which is not the same fact as what it said.
+
+    '' is the encoding for "no sandbox was asked for" AND the value an operator
+    hands over when they write `phosphor --sandbox "$RUNDIR" untrusted.bas` with
+    RUNDIR unset -- the commonest shell mistake there is. BindSandbox read the
+    VALUE to decide whether the flag had been given, so those two meanings were
+    indistinguishable and the empty argument ran completely unconfined, silently,
+    exit 0. `--sandbox "   "` was refused correctly the whole time, because
+    whitespace survives to SetSandboxRoot and comes back '' from there instead:
+    two spellings of one intent, opposite answers.
+
+    Presence is its own fact, so it is recorded as one rather than inferred from
+    a value that cannot carry it. }
+  GSandboxGiven: Boolean = False;
+
 { Defined further down, beside the crash guard; declared here because all three
   places that build an engine come before it. }
 procedure BindSandbox(AEng: TPhosphorEngine); forward;
@@ -626,6 +641,9 @@ end;
 // fixed trailer at the very end (PE and ELF both ignore trailing bytes). The stub
 // reads its own tail at startup; if the trailer's magic is there, it runs the
 // embedded payload. Same phosphor binary: bare it is the CLI, packed it is an app.
+//
+// AND IT ALSO CARRIES A MARK IN ITS MIDDLE, because the tail alone was not enough
+// to answer "am I a packed application?". See GPackMark below.
 
 const
   { The magic IS the version. A packed file carries the stub that made it, so a v1
@@ -644,6 +662,108 @@ const
     the same silence the reader below exists to end. The mask is stated once,
     here, so adding a flag cannot leave the check behind. }
   PACK_FLAGS_KNOWN: LongWord = PACK_FLAG_NOCONSOLE;
+
+  { THE STUB'S SELF-MARK, and why a trailer could not do this job.
+------------------------------------------------------------------------------
+    Everything that said "this file is a packed application" lived in the last
+    32 bytes. Truncation -- an interrupted copy or download, a partial write, an
+    antivirus that cuts a file short -- removes exactly those bytes, so the
+    reader found no magic, answered "a bare stub", and RunCommandLine fell
+    through to `Halt(Repl())`: a damaged MyApp.exe opened an interactive BASIC
+    prompt that runs whatever is typed into it and never ends by itself, while
+    any script that shipped it saw exit 0. That is word for word the outcome the
+    esCorrupt branch was added to refuse; it covered a bad offset, a bad size, an
+    unknown flag bit and a checksum mismatch -- every corruption that leaves the
+    TAIL intact -- and truncation is the commonest corruption there is.
+
+    THREE CHEAPER ANSWERS WERE MEASURED FIRST, and all three are false:
+
+      * "something in the stub already says packed". It did not. `pack` copies
+        the running binary byte for byte, and the whole stub region of a packed
+        application compared byte-identical to bin/phosphor.exe. There was
+        nothing to read.
+      * "refuse the REPL when stdin is not a terminal". It closes nothing and
+        breaks what works: the harm case is a damaged app double-clicked or
+        started by a service, where stdin IS a console, so the prompt still
+        opens; while `phosphor < NUL` and `echo 'println 6*7' | phosphor` are
+        both live, tested CLI uses that it would refuse. And StdinIsConsole is a
+        hard-coded False on every non-Windows build (see above), so the rule
+        would refuse the REPL on every Linux machine.
+      * "compare the size on disk with a size the packer recorded". Right idea,
+        nowhere to put it: everything the packer wrote past the payload was the
+        trailer, at the very end, which is the part truncation takes. It becomes
+        true only once there is somewhere in the MIDDLE to record it -- which is
+        this mark, so the size is recorded here and the comparison is made.
+
+    HOW IT WORKS. GPackMark is initialised DATA, so it is present in the built
+    binary at a fixed offset that the loader maps verbatim. `pack` copies the
+    stub, finds those 16 bytes in the copy (searching for the bytes the RUNNING
+    process holds, so no second compiled-in copy of the bare tag exists to be
+    found twice), and overwrites them with PACK_MARK_PACKED followed by the
+    finished file's length. At startup the stub reads its own global -- no file
+    access, nothing that can be cut off -- and a binary that finds the packed tag
+    knows it is an application before it has looked at one byte of its tail. A
+    missing or overwritten trailer is then esCorrupt, and falling through to the
+    REPL needs an UNMARKED binary, which is the only file that is genuinely a
+    bare stub.
+
+    Bytes, not a string literal: the codepage UTF8 directive at the top of this
+    file would re-encode every byte >= 128 in a literal. A Byte array is immune,
+    and scripts/check-codepage.py has nothing to object to here. }
+  PACK_MARK_TAG_LEN = 16;          // the tag
+  PACK_MARK_LEN     = 24;          // ...and an LE64 total file size behind it
+  { $A7 $3C $D9 $5E "Pack" "edAp" $17 $B4 $6D $E2 -- readable in a hex editor,
+    high-entropy at both ends so it cannot turn up in the binary by accident. }
+  PACK_MARK_PACKED: array[0..PACK_MARK_TAG_LEN - 1] of Byte =
+    ($A7, $3C, $D9, $5E, $50, $61, $63, $6B, $65, $64, $41, $70, $17, $B4, $6D, $E2);
+
+var
+  { NOT a const: a typed constant under the J- directive is read-only data the
+    compiler may place wherever it likes, and this has to be an addressable,
+    initialised global that lands in the image as bytes. The value is the BARE
+    tag -- $A7 $3C $D9 $5E "Phos" "Stub" $17 $B4 $6D $E2 -- plus eight zero bytes
+    where the packer writes the finished length. A binary carrying THIS is a bare
+    stub and the CLI is what it should be. }
+  GPackMark: array[0..PACK_MARK_LEN - 1] of Byte =
+    ($A7, $3C, $D9, $5E, $50, $68, $6F, $73, $53, $74, $75, $62, $17, $B4, $6D, $E2,
+     0, 0, 0, 0, 0, 0, 0, 0);
+
+{ What this binary knows about itself WITHOUT reading its own tail: was it packed,
+  and if so how long did the packer say the finished file would be? }
+function StubWasPacked(out ATotal: Int64): Boolean;
+var i: Integer;
+begin
+  ATotal := 0;
+  Result := CompareByte(GPackMark[0], PACK_MARK_PACKED[0], PACK_MARK_TAG_LEN) = 0;
+  if not Result then Exit;
+  for i := 7 downto 0 do
+    ATotal := (ATotal shl 8) or GPackMark[PACK_MARK_TAG_LEN + i];   // little-endian
+end;
+
+{ Where the running process's own mark sits inside a copy of that same process's
+  file. Negative when it is not there EXACTLY once: none means the mark did not
+  survive into the image and a packed file could never identify itself, twice
+  means the packer cannot know which copy the loader will map, and writing an
+  application that might not be able to tell it had been damaged is the defect
+  this whole mark exists to close. Both are refusals, not warnings -- but they
+  are DIFFERENT refusals to read, so they are different answers: -1 not found,
+  -2 found more than once. Telling an operator "cannot find" about a mark that
+  was found twice is a false sentence, and the only thing this path gives them
+  is that sentence. }
+function FindPackMark(const ABytes; ACount: Int64): Int64;
+var p: PByte; i: Int64;
+begin
+  Result := -1;
+  if ACount < PACK_MARK_LEN then Exit;
+  p := @ABytes;
+  for i := 0 to ACount - PACK_MARK_LEN do
+    if (p[i] = GPackMark[0]) and
+       (CompareByte(p[i], GPackMark[0], PACK_MARK_TAG_LEN) = 0) then
+    begin
+      if Result >= 0 then Exit(-2);      // twice is as bad as never
+      Result := i;
+    end;
+end;
 
 function SelfExePath: String;
 {$IFDEF WINDOWS}
@@ -682,9 +802,9 @@ function  RLE32(S: TStream): LongWord;     begin S.ReadBuffer(Result, 4); Result
 function PackFile(const AInPbc, AOutExe: String; AFlags: LongWord): Integer;
 var
   prog: TProgram;
-  payload: TBytesStream;
+  payload, stub: TBytesStream;
   src, dst: TFileStream;
-  off: Int64;
+  off, markAt, finished: Int64;
   pbcErr, missingReport: String;
   missing: Integer;
   isPbc: Boolean;
@@ -760,9 +880,16 @@ begin
       executable written. }
     src := nil;
     dst := nil;
+    stub := nil;
     try
       try
         src := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
+        { The stub goes through MEMORY rather than straight down the copy, because
+          the mark has to be located in it and a scan wants the bytes in one
+          piece. It is this executable: a few megabytes, once, in a verb whose
+          whole job is copying a few megabytes. }
+        stub := TBytesStream.Create();
+        stub.CopyFrom(src, 0);
       except
         on Ex: Exception do
         begin
@@ -770,9 +897,23 @@ begin
           Exit(2);
         end;
       end;
+      { LOCATED BEFORE THE OUTPUT EXISTS. A stub whose mark cannot be found writes
+        no file at all, rather than a half-made application on disk that would
+        have been unable to tell it had been damaged. }
+      markAt := FindPackMark(stub.Memory^, stub.Size);
+      if markAt < 0 then
+      begin
+        if markAt = -2 then
+          Writeln(StdErr, 'phosphor: this binary''s own pack mark appears more than once in the stub:')
+        else
+          Writeln(StdErr, 'phosphor: cannot find this binary''s own pack mark in the stub:');
+        Writeln(StdErr, '  ', SelfExePath());
+        Writeln(StdErr, '  refusing to write an application that could not tell it had been truncated.');
+        Exit(2);
+      end;
       try
         dst := TFileStream.Create(AOutExe, fmCreate);
-        dst.CopyFrom(src, 0);                 // the whole stub binary
+        if stub.Size > 0 then dst.WriteBuffer(stub.Memory^, stub.Size);  // the whole stub binary
         off := dst.Position;                  // the payload starts here
         if payload.Size > 0 then dst.WriteBuffer(payload.Memory^, payload.Size);
         WLE64(dst, off);
@@ -780,6 +921,15 @@ begin
         WLE32(dst, PayloadChecksum(payload.Memory^, payload.Size));
         WLE32(dst, AFlags);
         dst.WriteBuffer(PACK_MAGIC_V2[1], 8);
+        { THE MARK IS STAMPED LAST, because half of what it records is the
+          finished LENGTH -- the fact that tells a truncated copy from an intact
+          one. Seeking back overwrites 24 bytes in the middle of a file whose
+          size is already settled, and the trailer's checksum covers the payload
+          only, so nothing written above is disturbed. }
+        finished := dst.Position;
+        dst.Position := markAt;
+        dst.WriteBuffer(PACK_MARK_PACKED[0], PACK_MARK_TAG_LEN);
+        WLE64(dst, finished);
       except
         on Ex: Exception do
         begin
@@ -788,7 +938,7 @@ begin
         end;
       end;
     finally
-      src.Free; dst.Free;                   // nil-safe, and now reached either way
+      src.Free; dst.Free; stub.Free;         // nil-safe, and now reached either way
     end;
   finally
     payload.Free;
@@ -802,15 +952,18 @@ type
     there used to be two -- and collapsing the last two into one bare `Exit` is
     what turned a damaged application into an interactive BASIC prompt.
 
-      esNone     no trailer magic at all. A bare stub: be the CLI. This is the
+      esNone     nothing identifies this file as packed -- no mark in its middle
+                 and no magic in its tail. A bare stub: be the CLI. This is the
                  one case where falling through is right, and it stays.
       esOk       a trailer, and a payload behind it that verifies. Run it.
-      esCorrupt  the magic IS there. The file has positively identified itself
-                 as a packed application -- that is how the offset, size and
-                 checksum were located in the first place -- and what they
-                 describe will not verify. There is nothing to run, and nothing
-                 to fall back TO: the CLI with no arguments is a prompt that
-                 executes whatever is typed and never ends on its own. }
+      esCorrupt  the file has positively identified itself as a packed
+                 application -- through the magic in its tail, which is how the
+                 offset, size and checksum were located in the first place, OR
+                 through the compiled-in mark in its middle, which is how a file
+                 whose tail is GONE still says what it is -- and what it carries
+                 will not verify. There is nothing to run, and nothing to fall
+                 back TO: the CLI with no arguments is a prompt that executes
+                 whatever is typed and never ends on its own. }
   TEmbeddedState = (esNone, esOk, esCorrupt);
 
 { What THIS binary carries in its tail. AWhy is the sentence to print when the
@@ -819,36 +972,74 @@ function TryReadEmbeddedPayload(out APayload: TBytesStream; out AFlags: LongWord
   out AWhy: String): TEmbeddedState;
 var
   fs: TFileStream;
-  total, off, siz: Int64;
+  total, off, siz, wantTotal: Int64;
   ck: LongWord;
   trailer: Int64;
+  marked: Boolean;
   magic: array[0..7] of Char;
 begin
   Result := esNone;
   APayload := nil;
   AFlags := 0;
   AWhy := '';
+  { ASKED BEFORE ANYTHING IS READ FROM DISK, because the answer is compiled in.
+    See GPackMark: a packed application carries the packed tag and the
+    length the packer finished with, and a bare stub carries neither. Nothing
+    below can take that away from it. }
+  marked := StubWasPacked(wantTotal);
   try
     fs := TFileStream.Create(SelfExePath(), fmOpenRead or fmShareDenyNone);
   except
-    Exit;   // nothing has claimed to be packed yet -> just be the CLI
+    { A stub that cannot open its own file has nothing to run either way -- but
+      only a MARKED one is an application, and an application that cannot reach
+      its own program must not answer with a prompt. }
+    if marked then
+    begin
+      AWhy := 'this application cannot open its own file to reach the program inside it';
+      Exit(esCorrupt);
+    end;
+    Exit;   // nothing has claimed to be packed -> just be the CLI
   end;
   try
     total := fs.Size;
-    if total < PACK_TRAILER_V1 then Exit;
+    { THE LENGTH THE PACKER RECORDED, checked before one byte of the tail is
+      trusted. This is the whole truncation case: an interrupted copy, a partial
+      write or an antivirus that cut the file short leaves a file that is exactly
+      this binary and exactly this program, and shorter than the packer said. The
+      tail cannot answer for that, because the tail is what went missing. }
+    if marked and (total <> wantTotal) then
+    begin
+      if total < wantTotal then
+        AWhy := Format('the file has been truncated: %d bytes, where the application packed here is %d',
+                       [total, wantTotal])
+      else
+        AWhy := Format('the file has grown since it was packed: %d bytes, where the application packed here is %d',
+                       [total, wantTotal]);
+      Exit(esCorrupt);
+    end;
+    if total < PACK_TRAILER_V1 then Exit;   // marked cannot reach here: the length matched
     // The magic is the last 8 bytes whichever version this is, so it is read
     // FIRST and decides how much trailer to read back.
     fs.Position := total - 8;
     fs.ReadBuffer(magic[0], 8);
     if magic = PACK_MAGIC_V2 then trailer := PACK_TRAILER_V2
     else if magic = PACK_MAGIC_V1 then trailer := PACK_TRAILER_V1
+    else if marked then
+    begin
+      { Right length, right mark, no magic: the tail was overwritten in place
+        rather than cut off. Same answer -- there is a program here and the file
+        no longer says where. }
+      AWhy := 'the trailer that records where its program lives has been overwritten';
+      Exit(esCorrupt);
+    end
     else Exit;                                                 // a bare stub -> CLI
 
     { PAST THIS LINE THE FILE HAS SAID WHAT IT IS, so every remaining failure is
       a damaged packed application and never a bare stub. Not one of them may
       return esNone. decisions.md asks for a version that is "checked and
       refused out loud"; a payload behind a magic that WAS recognised was the
-      one case that went unrefused. }
+      one case that went unrefused -- and a file whose magic was CUT OFF was the
+      next, which is why the mark above is asked first. }
     if total < trailer then
     begin
       AWhy := 'the file is shorter than the trailer it claims to carry';
@@ -1009,11 +1200,19 @@ end;
 
   Reading the root back is what makes this checkable -- the engine reports the
   root actually in force, so "asked for one, got none" is a state the host can
-  see. }
+  see.
+
+  AND THE QUESTION IS "WAS THE FLAG GIVEN", NOT "IS THE VALUE NON-EMPTY". This
+  line used to ask `GSandboxDir <> ''`, which reads the value to decide whether
+  the operator asked for anything -- and '' is also how "no sandbox" is spelled,
+  so `--sandbox ""` (an unset shell variable) skipped the check entirely and got
+  exactly the unconfined, silent, exit-0 run this routine exists to prevent,
+  while `--sandbox "   "` was refused. GSandboxGiven carries the fact the value
+  could not. }
 procedure BindSandbox(AEng: TPhosphorEngine);
 begin
   AEng.SandboxRoot := GSandboxDir;
-  if (GSandboxDir <> '') and (AEng.SandboxRoot = '') then
+  if GSandboxGiven and (AEng.SandboxRoot = '') then
   begin
     Writeln(StdErr, 'phosphor: cannot establish the sandbox root ', GSandboxDir,
                     ' -- refusing to run unconfined');
@@ -1115,6 +1314,14 @@ begin
       that runs whatever is typed into it and never ends by itself, while any
       script that shipped it saw exit 0.
 
+      THE MAGIC IS NO LONGER THE ONLY WAY IT CAN SAY SO. A file truncated past
+      its own trailer has lost the magic with everything else, and it used to
+      answer "bare stub" for exactly that reason -- so the commonest corruption
+      there is walked through the guard written for corruption. The compiled-in
+      mark (see GPackMark) is in the middle of the file, where truncation
+      cannot reach it, and a marked binary whose length or tail is wrong arrives
+      here too.
+
       REFUSING means three things, and it has to mean all three. Say what
       happened. Do not wait -- no prompt, and never the LCL's modal dialog,
       because there may be no console and nobody watching. And leave an exit
@@ -1147,8 +1354,8 @@ begin
     payload.Free;
     Halt(code);
   end;
-  { esNone falls through on purpose: no magic, so this is a bare stub and the
-    CLI below is the whole point of the binary. }
+  { esNone falls through on purpose: no mark and no magic, so this is a bare stub
+    and the CLI below is the whole point of the binary. }
 
   // `phosphor compile [--check] <in.bas> <out.pbc>` -- compile to bytecode and stop.
   if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
@@ -1282,6 +1489,11 @@ begin
         Halt(2);
       end;
       GSandboxDir := ParamStr(i);
+      { RECORDED HERE, where the flag is actually seen. Whatever ParamStr gives
+        back -- a directory, whitespace, or the empty string an unset shell
+        variable expands to -- the operator asked to be confined, and BindSandbox
+        answers for whether that took. }
+      GSandboxGiven := True;
     end
     else if arg = '--out' then
     begin
@@ -1292,6 +1504,21 @@ begin
         Halt(2);
       end;
       outPath := ParamStr(i);
+      { THE SAME SHAPE AS --sandbox ABOVE, ONE BRANCH DOWN, and it had the same
+        hole: TConsoleHost.Create guards with `if AOutPath <> ''`, so '' is the
+        encoding for "no --out was asked for" as well as what `--out "$LOG"`
+        hands over when LOG is unset. The flag vanished and the program's output
+        went to the terminal, at exit 0, with nothing said -- while `--out "   "`
+        was refused on Windows and honoured on Linux: three answers to one intent.
+        REFUSED HERE rather than carried down on a presence flag, because unlike
+        a sandbox root there is nothing an empty path could ever open: the
+        operator did not give a path, which is exactly what the branch above
+        already says when --out is last on the line. }
+      if outPath = '' then
+      begin
+        Writeln(StdErr, 'phosphor: --out needs a path');
+        Halt(2);
+      end;
     end
     else if filePath = '' then
       filePath := arg

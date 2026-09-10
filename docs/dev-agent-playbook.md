@@ -855,6 +855,31 @@ introduces a defect.
    finding was about a set presented as complete and one more item would have left
    it just as complete-looking. What a script CANNOT do is stated with them: no
    library in `engine/` or `host/` spawns a process.
+
+   AND ON THE SAME DAY THE ENGINE HALF FOLLOWED. `TPhosphorVM.MaxMemoryBytes` is a
+   fourth ceiling, measured as GROWTH from the heap the run began with -- so it
+   bounds the script and not the application, which an absolute measurement would
+   not: a host already holding 300 MB would refuse every script under a 32 MB
+   ceiling before it ran a line. `opAdd` asks it before it concatenates, which is
+   the one instruction whose result size is known in advance and the one
+   `PhosphorBudget.pas` named as the hole; a check beside the wall clock in the
+   step loop catches everything the pre-check cannot size.
+
+   THE CHEAP QUESTION IS ASKED FIRST. `GetFPCHeapStatus` is about 39 ns here,
+   twelve times a short concatenation, so consulting it in front of every `+`
+   would tax every string-building script for a ceiling only large allocations can
+   cross. Below 64 KB a concatenation pays one integer test; measured against the
+   pristine build, string-heavy work with no ceiling set is unchanged within
+   noise.
+
+   Five checks in `probe_limits` (30 -> 39 assertions), and four mutations prove
+   they bite: `RoomFor` always yes, the pre-check disabled, the backstop disabled,
+   and the base measured from zero rather than from the run. Two of them were
+   holes in my first draft. The backstop check "passed" while measuring nothing,
+   because adding one `chunk$` a thousand times stores a thousand REFERENCES to
+   one buffer -- AnsiStrings are refcounted -- and the growth-not-absolute check
+   passed both ways because its script was four lines and the periodic check only
+   looks every 4096 steps.
 59. ~~**CLAUDE.md:51** [low]~~ -- CLOSED 2026-09-10. Both short forms carried the
    same gap: CLAUDE.md:51 and this file's own section-2 bullet listed four codes
    where the alphabet is five. Both now read `n % $ @ ?`, and both say `#` is never

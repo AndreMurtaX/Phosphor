@@ -54,12 +54,19 @@
   is not O(1) makes it a poor proxy for work; the VM's TimeoutMs does stop such
   a run, but only after the allocation has been made.
 
-  This is not closed, and it is not closable from this unit: the fix belongs in
-  engine/PhosphorVM.pas (opAdd) or engine/PhosphorValue.pas (ValAdd), where the
-  size of the result is known before the concatenation happens, and neither file
-  is in this change's scope. A host that must bound total memory today has to
-  bound the PROCESS -- a job object on Windows, an rlimit or cgroup on Linux --
-  and should not read RULE 1 as doing it.
+  CLOSED ON 2026-09-10, where this note said it would have to be: engine/
+  PhosphorVM.pas, at opAdd, where the size of the result is known before the
+  concatenation happens. TPhosphorVM.MaxMemoryBytes is a fourth ceiling beside
+  MaxSteps, MaxOutputBytes and TimeoutMs, measured as GROWTH from the heap this
+  run started with, so it bounds the script rather than the host. opAdd asks it
+  before it concatenates when the growth is worth measuring, and a check beside
+  the wall clock in the step loop catches everything smaller.
+
+  RULE 1 STILL DOES NOT BOUND MEMORY, and nothing above changed: it is still one
+  library call about its own arguments. The two ceilings answer different
+  questions and a host wants both. And a ceiling is not a quota -- an allocation
+  already under way cannot be interrupted -- so a host that must cap the PROCESS
+  absolutely still wants a job object on Windows or an rlimit or cgroup on Linux.
 
   INERT UNLESS THE HOST ASKED FOR A BOUND. BudgetBegin(0, 0) -- which is what a
   host that sets no ceilings gets -- makes every consultation below answer "go

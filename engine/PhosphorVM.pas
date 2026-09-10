@@ -138,6 +138,14 @@ const
 
     Crossing either ceiling is a FATAL peLimit, for the reason given at
     MaxStackDepth. }
+  { BELOW THIS, A CONCATENATION IS NOT WORTH ASKING THE HEAP ABOUT.
+    GetFPCHeapStatus is about 39 ns and a short concatenation about 3, so an
+    unconditional query would be a tax on every string-building script to catch a
+    ceiling only large allocations can cross. 64 KB is well under any ceiling a
+    host would set and well over the size at which the query stops mattering next
+    to the copy it precedes. Smaller growth accumulates into the periodic check in
+    the step loop, beside the wall clock. }
+  MemCheckFrom = 65536;
   MaxFrameDepth = 262144;
   MaxFrameSlots = 1048576;
 
@@ -272,6 +280,7 @@ type
     // caught by ON ERROR, so a script cannot escape its own ceiling.
     FSteps: Int64;
     FOutputBytes: Int64;
+    FHeapBase: PtrUInt;     // heap in use when this run began; see MaxMemoryBytes
     FStartTick: QWord;
     // Debug tracing, set by the TRACE statement (opTrace). BREAKPOINT reports the
     // frame through OnBreakpoint only while this is on; off, it is a pure no-op.
@@ -369,6 +378,21 @@ type
     MaxSteps: Int64;        // instruction budget (the answer to an infinite loop)
     MaxOutputBytes: Int64;  // total bytes emitted through OnOutput
     TimeoutMs: Int64;       // wall-clock ceiling in milliseconds
+    { HOW MUCH HEAP THIS RUN MAY ADD, and the fourth ceiling because the other
+      three do not bound memory at all -- which the budget unit says in its own
+      header and no ceiling acted on.
+
+      MaxSteps counts INSTRUCTIONS, and one instruction whose cost is O(n) makes
+      it a poor proxy: measured under the ceilings docs/embedding.md prescribes,
+      `s$ = string$(200000000, 97)` is allowed and then three `s$ = s$ + s$` reach
+      1.6 GB of string and 14.7 GB of peak, in three instructions out of a
+      million, rc 0. TimeoutMs does stop such a run -- after the allocation. And
+      the budget's RULE 1 is asked at the opCall seam by a LIBRARY about its own
+      arguments, so `+` was never in front of it: it is opAdd, a VM instruction.
+
+      Measured from the heap as this run STARTS, so it bounds what the SCRIPT
+      adds and does not depend on how much the host was already holding. }
+    MaxMemoryBytes: Int64;
     constructor Create;
     destructor Destroy; override;   // closes any file channels left open
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)
@@ -1453,6 +1477,7 @@ begin
   FOutputBytes := 0;
   FStackLimit := False;
   FStartTick := GetTickCount64;
+  FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
   FTrace := False;
   CloseAllChannels();            // no file channel leaks between programs
   FInBuf := ''; FInPos := 1;
@@ -1518,6 +1543,7 @@ begin
   FOutputBytes := 0;
   FStackLimit := False;
   FStartTick := GetTickCount64;
+  FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
   savedMask := EnterFPU();
   try
     try
@@ -1532,6 +1558,16 @@ begin
   finally
     LeaveFPU(savedMask);
   end;
+end;
+
+{ How many bytes this value adds to a concatenation, WITHOUT building its text.
+  A string contributes its own bytes; anything else contributes its str$ form,
+  which is at most a handful -- 32 is a generous bound and the exactness does not
+  matter, because the caller is deciding whether a growth is worth measuring and
+  then measuring the heap itself. }
+function TextLenOf(const V: TValue): Int64;
+begin
+  if V.Kind = vkString then Result := Length(V.Str) else Result := 32;
 end;
 
 function TPhosphorVM.ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
@@ -1554,6 +1590,7 @@ var
   sTmp: String;             // scratch for the classic-I/O handlers
   bTmp: Boolean;
   nTmp: Int64;
+  growth: Int64;            // bytes a concatenation is about to add; MaxMemoryBytes
 
   { Put back what the handler ran on top of, and stand at the failing statement's
     level again. Without this the resume re-exposed slots the handler had since
@@ -1833,6 +1870,31 @@ var
                           ' locals of this function');
   end;
 
+  { WOULD ADDING AGrowth BYTES CROSS THE MEMORY CEILING? False = it would, and a
+    fatal peLimit is set, so the caller must Exit(False).
+
+    THE CHEAP QUESTION IS ASKED FIRST AND THE EXPENSIVE ONE ALMOST NEVER.
+    GetFPCHeapStatus costs about 39 ns on this machine -- twelve times a short
+    string concatenation, measured -- so consulting it in front of every `+` would
+    be a tax on every string-building script for the sake of a ceiling that only
+    large allocations can cross. Callers therefore ask only when the growth is
+    worth asking about (MemCheckFrom), and the periodic check in the step loop
+    catches an accumulation of small ones. }
+  function RoomFor(AGrowth: Int64): Boolean;
+  var
+    used: PtrUInt;
+  begin
+    Result := True;
+    if MaxMemoryBytes <= 0 then Exit;
+    used := GetFPCHeapStatus().CurrHeapUsed;
+    if used < FHeapBase then Exit;   // the host freed under us; nothing to charge
+    if Int64(used - FHeapBase) + AGrowth <= MaxMemoryBytes then Exit;
+    LastError := MakeError(peLimit, 'memory limit exceeded (' +
+      IntToStr(MaxMemoryBytes) + ' bytes)');
+    ErrorLine := ins.Line;
+    Result := False;
+  end;
+
   { Emit output, enforcing the output-byte ceiling. False = the ceiling was hit
     (a fatal peLimit is set; the caller must Exit(False)). }
   function EmitOutput(const S: String): Boolean;
@@ -1895,6 +1957,13 @@ begin
       ErrorLine := ins.Line;
       Exit(False);
     end;
+    { The backstop for everything the pre-check cannot size: a million small
+      concatenations, an array that grows, a tree that is built. It fires AFTER
+      the allocation that crossed the line, so it bounds a run rather than
+      preventing every overshoot -- which is exactly what the wall clock beside
+      it does, and for the same reason. }
+    if (MaxMemoryBytes > 0) and ((FSteps and $FFF) = 0) and (not RoomFor(0)) then
+      Exit(False);
     if (TimeoutMs > 0) and ((FSteps and $FFF) = 0) and
        (GetTickCount64 - FStartTick > QWord(TimeoutMs)) then
     begin
@@ -1944,7 +2013,20 @@ begin
           if not EmitOutput(ValToStr(v) + #10) then Exit(False);
         end;
       opNeg:     begin a := Pop(); case Bin(Negate(a, r), r) of 1: Continue; 2: Exit(False); end; end;
-      opAdd:     begin b := Pop(); a := Pop(); case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
+      opAdd:
+        begin
+          b := Pop(); a := Pop();
+          { The one instruction whose result size is known before it is built, and
+            the one the budget unit's header names as the hole. A '+' whose LEFT
+            operand is a string concatenates; anything else is arithmetic and
+            allocates nothing worth counting. }
+          if (MaxMemoryBytes > 0) and (a.Kind = vkString) then
+          begin
+            growth := Int64(Length(a.Str)) + TextLenOf(b);
+            if (growth >= MemCheckFrom) and (not RoomFor(growth)) then Exit(False);
+          end;
+          case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end;
+        end;
       opSub:     begin b := Pop(); a := Pop(); case Bin(ValSub(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
       opMul:     begin b := Pop(); a := Pop(); case Bin(ValMul(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;
       opDivReal: begin b := Pop(); a := Pop(); case Bin(ValDivReal(a, b, r), r) of 1: Continue; 2: Exit(False); end; end;

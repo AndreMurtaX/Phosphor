@@ -245,14 +245,23 @@ If the script is not yours, bound it before running. Each ceiling is `0`
 cannot catch it, so a script cannot escape its own limit:
 
 ```pascal
-eng.MaxSteps       := 1000000;   // instruction budget (bounds an infinite loop)
-eng.MaxOutputBytes := 64 * 1024; // total bytes emitted through OnOutput
-eng.TimeoutMs      := 2000;      // wall-clock ceiling
+eng.MaxSteps       := 1000000;        // instruction budget (bounds an infinite loop)
+eng.MaxOutputBytes := 64 * 1024;      // total bytes emitted through OnOutput
+eng.TimeoutMs      := 2000;           // wall-clock ceiling
+eng.MaxMemoryBytes := 256*1024*1024;  // heap this script may ADD while it runs
 ```
 
 When one is hit, the run aborts and `eng.LastError.Code` is `peLimit`. The
 ceilings are cumulative over a prepared session (`Prepare` + all its
 `CallFunction`s); re-`Prepare` to reset the counters.
+
+`MaxMemoryBytes` is measured from where the heap stood when the run began, so it
+bounds what the **script** adds and not how much your application was already
+holding. It is a ceiling and not a quota: an allocation already under way cannot
+be interrupted, so it stops the *next* one rather than preventing every
+overshoot. For an absolute bound on the process you still want a job object on
+Windows or an rlimit or cgroup on Linux — but without it, three instructions
+could take 14.7 GB and report success, and now they cannot.
 
 **Four more ceilings are fixed rather than yours to set**, and they are why an
 unbounded recursion ends in a message instead of in the process dying. Ordinary
@@ -295,9 +304,9 @@ gates: a loop or an allocation over a script-supplied count must consult the
 budget or be listed as exempt with a reason. Prose rots; this project has learned
 that twice.
 
-Those three bound how **long** a script runs. The fourth bounds **where** it
-writes. Neither pair is a wall, and what the four leave open is listed after
-them.
+Three of those bound how **long** a script runs and the fourth bounds how much
+**heap** it adds; `SandboxRoot`, below, bounds **where** it writes. None of them
+is a wall, and what they leave open is listed after them.
 
 ## The filesystem sandbox
 
@@ -407,16 +416,19 @@ without asking the gate first.
 A ceiling nobody names reads as a ceiling that is there. Everything below is
 outside all four of them.
 
-- **Memory.** `MaxSteps` counts *instructions*, and an instruction whose cost is
-  not O(1) is a poor proxy for work. The library budget refuses
-  `string$(1600000000, 97)` before it starts — but `s$ = s$ + s$`, three times
-  over a 200 MB string, is three instructions out of a million, and it built the
-  same 1.6 GB in 5032 ms at a 14.7 GB peak and answered `rc = 0`, under exactly
-  the ceilings prescribed above. `+` is `opAdd`, a VM instruction rather than a
-  library call, so no budget is ever asked about it. A host that must bound
-  memory has to bound the **process**: a job object on Windows, an rlimit or a
-  cgroup on Linux. `engine/PhosphorBudget.pas` says so in its own header, and it
-  is not closed.
+- ~~**Memory.**~~ **Closed on 2026-09-10 by `MaxMemoryBytes`,** and this entry is
+  kept because it explains what that ceiling is for. `MaxSteps` counts
+  *instructions*, and an instruction whose cost is not O(1) is a poor proxy for
+  work. The library budget refuses `string$(1600000000, 97)` before it starts —
+  but `s$ = s$ + s$`, three times over a 200 MB string, is three instructions out
+  of a million, and it built the same 1.6 GB in 5032 ms at a 14.7 GB peak and
+  answered `rc = 0`, under exactly the ceilings prescribed above. `+` is `opAdd`,
+  a VM instruction rather than a library call, so no *library* budget is ever
+  asked about it; `opAdd` now asks the memory ceiling itself, before it
+  concatenates, because that is the one instruction whose result size is known in
+  advance. What remains open is the *absolute* bound: a ceiling stops the next
+  allocation, not the one already running, so a host that must cap the process
+  still wants a job object on Windows or an rlimit or cgroup on Linux.
 
 - **The instruction already running.** `MaxSteps` is tested before every
   instruction, but `TimeoutMs` is only sampled every 4096 of them, and neither

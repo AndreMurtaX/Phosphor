@@ -65,6 +65,42 @@ begin
   end;
 end;
 
+{ The memory ceiling, which needs its own runner because it is the only one of
+  the four whose interesting cases are about SIZE rather than about time. AWant is
+  the fragment the message must carry, or '' for a run that must succeed. }
+procedure CheckMem(const AName, ASource: String; AMemBytes: Int64;
+  const AWant: String; AHostHolds: Integer = 0);
+var
+  eng: TPhosphorEngine;
+  rc: Integer;
+  ballast: String;
+begin
+  { AHostHolds is memory the HOST is already sitting on when the run begins. The
+    ceiling is about what the SCRIPT adds, so it must make no difference -- and
+    measuring absolute heap instead of growth is a one-line change that no other
+    check here can see. An application holding 300 MB of its own data would
+    otherwise refuse every script under a 32 MB ceiling before it ran a line. }
+  ballast := '';
+  if AHostHolds > 0 then ballast := StringOfChar('B', AHostHolds);
+  eng := TPhosphorEngine.Create();
+  try
+    eng.MaxMemoryBytes := AMemBytes;
+    eng.TimeoutMs := 60000;   { so a runaway case fails the probe instead of hanging it }
+    rc := eng.Run(ASource);
+    if AWant = '' then
+      Report(rc = 0, AName + ' (expected success, got ' + eng.ErrorMessage + ')')
+    else
+      Report((rc <> 0) and (eng.LastError.Code = peLimit) and
+             (Pos(AWant, eng.ErrorMessage) > 0),
+             AName + ' (expected a limit saying "' + AWant + '", got code ' +
+             IntToStr(Ord(eng.LastError.Code)) + ' ' + eng.ErrorMessage + ')');
+  finally
+    eng.Free;
+  end;
+  if Length(ballast) <> AHostHolds then
+    Report(False, AName + ' (the ballast was collected under the check)');
+end;
+
 { Compile ASource and require that it is REJECTED -- Compile returns False, the
   message contains AWantFragment, and NOTHING IS RAISED.
 
@@ -546,6 +582,66 @@ begin
 
   { A ceiling that refuses must not pay for refusing; see the note on the check. }
   CheckRefusedGraftDoesNotLeak;
+
+  { THE FOURTH CEILING. The other three bound how LONG a script runs, and the
+    budget unit's own header says in terms that none of them bounds memory: RULE 1
+    is asked at the opCall seam by a LIBRARY about its own arguments, and `+` is
+    not a library call. Three instructions out of a million reached 1.6 GB of
+    string and 14.7 GB of peak with rc 0. }
+
+  { The shape the finding names: double a string, one O(n) instruction at a time. }
+  CheckMem('memory ceiling: doubling is refused before it allocates',
+           's$ = string$(2000000, 97)' + LF +
+           'for i% = 1 to 6' + LF + '  s$ = s$ + s$' + LF + 'next' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+
+  { UNLIMITED IS STILL UNLIMITED. 0 is the default and must change nothing: a
+    ceiling that a host did not ask for would be the failure mode this project
+    names first. }
+  CheckMem('and the same run is untouched with no ceiling set',
+           's$ = string$(2000000, 97)' + LF +
+           'for i% = 1 to 6' + LF + '  s$ = s$ + s$' + LF + 'next' + LF,
+           0, '');
+
+  { THE BACKSTOP. Memory that grows through a library, one call at a time, with no
+    single allocation large enough for the pre-check to look at. A FRESH string per
+    turn: adding one `chunk$` a thousand times stores a thousand references to one
+    buffer -- AnsiStrings are refcounted -- and the heap barely moves, which is how
+    the first version of this check passed while measuring nothing. }
+  CheckMem('memory ceiling: growth with no large concatenation is caught too',
+           'L@ = strings@()' + LF +
+           'for i% = 1 to 4000' + LF +
+           '  n = strings_add(L@, string$(65536, 65))' + LF +
+           'next' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+
+  { THE CEILING IS ABOUT THE SCRIPT, NOT ABOUT THE PROCESS. Same script, same
+    ceiling, with the host already holding 64 MB of its own. }
+    { The loop is not decoration: the periodic check fires every 4096 steps, so a
+      four-line script finishes before one ever looks at the heap. A first draft
+      had no loop and could not tell the two spellings apart. }
+  CheckMem('a ceiling bounds what the SCRIPT adds, not what the host holds',
+           's$ = string$(4000000, 97)' + LF +
+           'for i% = 1 to 5000' + LF + '  n = n + 1' + LF + 'next' + LF +
+           'if len(s$) <> 4000000 then' + LF + '  x = 1 / 0' + LF + 'end if' + LF,
+           32 * 1024 * 1024, '', 64 * 1024 * 1024);
+
+  { AND ORDINARY WORK UNDER THE CEILING IS UNTOUCHED. }
+  CheckMem('ordinary string building under the ceiling is not refused',
+           's$ = ""' + LF +
+           'for i% = 1 to 20000' + LF + '  s$ = s$ + "x"' + LF + 'next' + LF +
+           'if len(s$) <> 20000 then' + LF + '  x = 1 / 0' + LF + 'end if' + LF,
+           32 * 1024 * 1024, '');
+
+  { FATAL, like the other three: a script cannot catch its way out of its own
+    ceiling. The handler below would swallow an ordinary error. }
+  CheckMem('ON ERROR cannot escape the memory ceiling',
+           'on error goto oops' + LF +
+           's$ = string$(2000000, 97)' + LF +
+           'for i% = 1 to 6' + LF + '  s$ = s$ + s$' + LF + '  n = n + 1' + LF +
+           'next' + LF +
+           'goto fin' + LF + 'oops:' + LF + 'resume next' + LF + 'fin:' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

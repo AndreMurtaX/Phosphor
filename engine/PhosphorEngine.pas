@@ -49,6 +49,7 @@ type
     FErrorAtEof: Boolean;
     FLastError: TPhosphorError;
     FMaxSteps: Int64;
+    FMaxMemoryBytes: Int64;
     FMaxOutputBytes: Int64;
     FTimeoutMs: Int64;
     FContainFaults: Boolean;
@@ -139,6 +140,24 @@ type
     property MaxSteps: Int64 read FMaxSteps write FMaxSteps;
     property MaxOutputBytes: Int64 read FMaxOutputBytes write FMaxOutputBytes;
     property TimeoutMs: Int64 read FTimeoutMs write FTimeoutMs;
+    { THE FOURTH CEILING, and the one the other three do not imply. They bound how
+      LONG a script runs; this bounds how much HEAP it adds while running, measured
+      from where the heap stood when the run began -- so it is about the script and
+      not about how much your application was already holding.
+
+      Without it, `s$ = string$(200000000, 97)` is refused by the work budget while
+      three `s$ = s$ + s$` build 1.6 GB of string and 14.7 GB of peak in three
+      instructions, and the run reports success. MaxSteps counts instructions and
+      an instruction whose cost is O(n) defeats it; TimeoutMs stops such a run only
+      after the allocation is made.
+
+      0 (the default) is unlimited and costs one integer test per concatenation.
+      Like the other three it is FATAL: ON ERROR cannot catch it. It is a ceiling,
+      not a quota -- it does not prevent every overshoot, because a single
+      allocation already under way cannot be interrupted; it stops the NEXT one.
+      A host that must bound the process absolutely still wants a job object on
+      Windows or an rlimit or cgroup on Linux. }
+    property MaxMemoryBytes: Int64 read FMaxMemoryBytes write FMaxMemoryBytes;
     { KEEP THE HOST'S PROCESS ALIVE WHEN THE INTERPRETER TAKES A FAULT.
 
       The ceilings above bound what a script may SPEND. This bounds what a defect
@@ -284,6 +303,7 @@ begin
   AVM.MaxSteps := FMaxSteps;
   AVM.MaxOutputBytes := FMaxOutputBytes;
   AVM.TimeoutMs := FTimeoutMs;
+  AVM.MaxMemoryBytes := FMaxMemoryBytes;
   AVM.ContainFaults := FContainFaults;
 end;
 

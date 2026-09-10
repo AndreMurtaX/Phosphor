@@ -571,8 +571,9 @@ begin
         WOF-compressed file, a dehydrated OneDrive placeholder, a dedup stub.
         There is no divergence to guard against: the kernel opens exactly the path
         the walk has already built. Calling them unknown refused reading, writing
-        and deleting perfectly ordinary files -- measured on eight of the ten
-        entries in %LOCALAPPDATA%\Microsoft\WindowsApps.
+        and deleting perfectly ordinary files -- measured on 42 of the 62 entries
+        in %LOCALAPPDATA%\Microsoft\WindowsApps, which is every reparse point in
+        it.
 
         The link this walk cannot follow -- a junction to a bare drive root, a
         dangling one -- never reaches here: the RTL fails to stat its target, so

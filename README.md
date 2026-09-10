@@ -58,17 +58,35 @@ bin\phosphor.exe run hello.bas
 
 ```
 phosphor run  <file.bas>            run a program
+phosphor run  <file.bas> --out <path>         send the program's output to a file
 phosphor --no-console <file.bas>    run with no console window (see below)
 phosphor compile [--check] <in.bas> <out.pbc> compile to portable .pbc bytecode
 phosphor pack [--no-console] <in.pbc> <out>   standalone executable (from bytecode)
+phosphor --sandbox <dir> <file.bas> confine every path the script names to <dir>
 phosphor                            an interactive REPL (state persists)
 phosphor --version | --help | --diag
 ```
 
+**`--sandbox` is the only bound this host puts on a script, and it fails closed.**
+A root that will not bind is never an unconfined run: `phosphor` prints `cannot
+establish the sandbox root <dir> -- refusing to run unconfined` and exits 2. That
+covers the empty string as well as whitespace, so `phosphor --sandbox "$RUNDIR"
+untrusted.bas` with `RUNDIR` unset is refused rather than run wide open.
+
+What it confines is every path the *script* names. The operator's own `--out`
+path is not confined: it is opened before the root is bound, so `--sandbox cage
+--out ../outside.txt` writes outside the cage — the operator named that path, as
+they named the root. An empty `--out` is refused rather than quietly dropped,
+`phosphor: --out needs a path` and exit 2, because `--out "$LOG"` with `LOG`
+unset used to print to the terminal and exit 0. The three ceilings that bound how
+**long** a script runs are the embedder's to set, and this host sets none of them:
+[docs/embedding.md](docs/embedding.md) has those, and says what all four ceilings
+together still do not bound.
+
 **One binary, and it decides at startup.** `phosphor` links the LCL and asks a
 single question when it starts: is a graphical session reachable? If it is, it brings
 the widgetset up and registers the 426 LCL GUI functions alongside everything else; if
-is not, it registers none of them and is a plain console interpreter. A GUI program
+it is not, it registers none of them and is a plain console interpreter. A GUI program
 therefore needs no flag and no second file, and a `.bas` that never opens a window runs
 identically on a desktop, over a pipe, in CI and on a headless server.
 
@@ -166,7 +184,7 @@ saying that *nothing checks this list*, and that this was how `check-suffix.py` 
 predicted itself: `check-budget.py` joined on 2026-09-07 and the heading still said
 six. **`coverage.py` now counts the gates `scripts/test-suite.ps1` actually runs and
 fails if this number disagrees**, so the next one to join cannot be missed the same
-way. `scripts/test-suite.sh` runs the same seven on Linux.
+way. `scripts/test-suite.sh` runs the same eight on Linux.
 
 | gate | what it refuses to let through |
 | ---- | ------------------------------ |
@@ -176,6 +194,8 @@ way. `scripts/test-suite.sh` runs the same seven on Linux.
 | `check-seams.py` | a host that neither fills an engine seam (`OnOutput`, `OnInput`, `OnBreakpoint`, `HostServices`) nor records why leaving it nil is right. A nil seam answers silently. |
 | `check-suffix.py` | a registered name whose type suffix is not the kind its body returns. The suffix *is* the return-type system for built-ins, and fifteen registrations lied. |
 | `check-examples.py` | a `basic` code block in the docs that does not compile. `coverage.py` already refuses a block calling a function that does not exist; it cannot refuse one whose names are all real and whose syntax is wrong. |
+| `check-budget.py` | a library loop or allocation over a script-supplied count that never consults `PhosphorBudget` — or is exempt without a stated reason. A library call is one instruction, so the three time ceilings cannot see inside it. |
+| `check-manifests.py` | a `.bas` in a manifest-driven corpus that the manifest does not name, and a name in a manifest with no file behind it. The runners read the manifest and nothing read the directory, so an unlisted test simply never ran and the runner printed OK. |
 
 ## Layout
 
@@ -189,7 +209,7 @@ way. `scripts/test-suite.sh` runs the same seven on Linux.
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs — and they are RUN: `test-examples` byte-compares each to a golden (a windowed one is compiled, since the compiler needs no display). |
-| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the six source gates described above.|
+| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the eight source gates described above.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

@@ -25,16 +25,36 @@ its entry list by the time the handle comes back, so counting and listing are fr
 The design stance is the engine's I/O contract: **a failure is an answer**, not an
 exception. Every function here returns `0`, `""` or a zero handle when it cannot do
 what was asked, and records that in a single slot you read with `zip_error()` —
-`0` means the last operation was clean. There is one deliberate exception, below.
+`0` means the last operation was clean. There is one deliberate exception, below,
+and it is for a *hostile* archive rather than a failed one. An archive that
+simply cannot be read — deleted, renamed or locked between the opening and the
+extracting — is an ordinary failure and answers `0` with `zip_error()` set, as
+everything else here does.
 
-The exception is **zip slip**. An entry name decides where a byte lands on disk,
-and it comes from whoever built the archive, so `unzip_extract`, `zip_extract` and
+A hostile archive takes three shapes, and the first is **zip slip**. An entry name
+decides where a byte lands on disk, and it comes from whoever built the archive,
+so `unzip_extract`, `zip_extract` and
 `zip_extractall` first check every name in the archive: a leading `/` or `\`, a
 Windows drive letter, or a `..` *path segment* gets the whole archive refused, and
 that refusal is **raised as a runtime error**, not answered as `0`. A caller who
 ignores return values must not be able to carry on believing it unpacked a tree.
 Dots inside a file name (`my..notes.txt`) are not a path escape and extract
-normally. Two more things worth knowing before you are surprised by them:
+normally.
+
+A zip stores each name **twice**: once in the central directory, which is what
+listing and counting read, and once in the entry's own local file header, which is
+what extraction actually writes under. Both are checked. An archive whose two
+spellings of a name disagree at all is refused as well, harmless names included —
+one that says one thing and does another is not one this library will unpack.
+That also refuses a legacy archive spelling the same name in two single-byte
+character sets, OEM locally and ANSI centrally; the two spellings genuinely reach
+different files, so the archive is refused rather than guessed at.
+
+An entry whose attributes mark it a **symbolic link** is refused too, on both
+operating systems. A link's target is its content and not its name, so no name
+check can see where it points, and no function here is meant to create one.
+
+Two more things worth knowing before you are surprised by them:
 `zip_compress` takes only the files **directly in** the directory, not
 subdirectories, and it sorts entry names byte-wise so the same folder produces the
 same entry order on NTFS and ext4 alike; and `zip_addfile` checks that the file
@@ -49,7 +69,7 @@ file take the whole archive down later inside `zip_close`.
 | function | what it answers |
 | --- | --- |
 | `zip_compress(zip$, srcdir$) → num` | `1` after writing `zip$` from the files sitting directly in `srcdir$` (subdirectories are not descended into; names are sorted byte-wise, so the entry order is identical on every filesystem). `0` if `srcdir$` is outside the sandbox root or anything fails, with `zip_error()` set to `1` |
-| `unzip_extract(zip$, destdir$) → num` | `1` after extracting every entry under `destdir$`. `0` when the archive is missing or corrupt. If any entry name escapes `destdir$`, it **raises** a runtime error and writes nothing at all — not even the well-behaved entries |
+| `unzip_extract(zip$, destdir$) → num` | `1` after extracting every entry under `destdir$`. `0` when the archive is missing or corrupt. If any entry name escapes `destdir$`, if an entry's local file header names it differently from the central directory, or if any entry is a symbolic link, it **raises** a runtime error and writes nothing at all — not even the well-behaved entries. An archive that merely could not be read is answered `0`, not raised |
 | `unzip_count(zip$) → num` | how many entries the archive holds. `0` for a missing or corrupt file *and* `zip_error()` set to `1` — that flag is the only thing separating a broken archive from a genuinely empty one, which is the whole question this function is asked |
 | `unzip_entry$(zip$, n) → str` | the name of the `n`-th entry, **1-based**. `""` with `zip_error()` set to `1` for an index outside the archive, or for an archive that could not be read: an out-of-range index is a refusal, not an empty name |
 
@@ -72,8 +92,8 @@ file take the whole archive down later inside `zip_close`.
 | `zip_list$(z@) → str` | every entry name, joined by a single newline (`chr$(10)`), in archive order. `""` for an archive with no entries and `""` for a handle that is not a reader — the two are told apart by `zip_error()` |
 | `zip_entrysize(z@, name$) → num` | the entry's **uncompressed** size in bytes. `0` with `zip_error()` set to `1` when there is no such entry, or when `z@` is not a reader |
 | `zip_read$(z@, name$) → str` | the entry's content decompressed straight into a string, never touching the disk. `""` with `zip_error()` set to `1` when the entry is absent, unreadable, or `z@` is not a reader — an entry that really is empty answers `""` with the error slot clear |
-| `zip_extract(z@, name$, dir$) → num` | `1` after writing that one entry under the **directory** `dir$`, keeping its path inside the archive (`doc/x.txt` lands at `dir$/doc/x.txt`). `0` when the entry is missing or `z@` is not a reader; **raises** if any name in the archive escapes `dir$` |
-| `zip_extractall(z@, dir$) → num` | `1` after recreating the whole tree under `dir$`, regardless of any single-entry extraction done earlier on the same handle. `0` when `z@` is not a reader; **raises**, writing nothing, on an archive that escapes |
+| `zip_extract(z@, name$, dir$) → num` | `1` after writing that one entry under the **directory** `dir$`, keeping its path inside the archive (`doc/x.txt` lands at `dir$/doc/x.txt`). `0` when the entry is missing, when `z@` is not a reader, or when the archive could not be re-read; **raises** if any name in the archive escapes `dir$`, if a local file header names an entry differently from the central directory, or if any entry is a symbolic link |
+| `zip_extractall(z@, dir$) → num` | `1` after recreating the whole tree under `dir$`, regardless of any single-entry extraction done earlier on the same handle. `0` when `z@` is not a reader, and `0` for an archive that could not be re-read; **raises**, writing nothing, on an archive that escapes, whose local file headers disagree with its central directory, or that carries a symbolic link |
 
 ### Closing, and what went wrong
 

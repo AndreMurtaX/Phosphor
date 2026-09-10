@@ -24,7 +24,7 @@ IDE. See [../lazarus/README.md](../lazarus/README.md) for what it does and does
 not carry, and `lazarus/demo/` for a Lazarus application with the whole thing
 wired up, which the suite builds and exercises on every run.
 
-Without Lazarus, three unit paths are the entire requirement:
+Without Lazarus, two unit paths are the entire requirement:
 
 ```
 -Fu<phosphor>/engine -Fu<phosphor>/engine/libs
@@ -243,11 +243,24 @@ When one is hit, the run aborts and `eng.LastError.Code` is `peLimit`. The
 ceilings are cumulative over a prepared session (`Prepare` + all its
 `CallFunction`s); re-`Prepare` to reset the counters.
 
+**Four more ceilings are fixed rather than yours to set**, and they are why an
+unbounded recursion ends in a message instead of in the process dying. Ordinary
+BASIC recursion stops at 262,144 activation frames, and at 1,048,576 local slots
+held by those frames together — a frame costs a fixed part plus a per-slot part,
+and one number cannot bound both. The expression stack stops at 1,048,576 values.
+A callback that re-enters the interpreter — `callfunc`, a GUI event, an `on error
+call` handler — stops at 256, because those levels cost process stack rather than
+heap. The first three are fatal in the same way as the three above; the re-entry
+one arrives as an ordinary catchable runtime error. Before they existed,
+`function f(n) return f(n + 1)` reached 1020 MB in 3.3 s, and a `.pbc` that
+pushed in a loop was handed 96 GB by `SetLength` rather than the out-of-memory
+exception everyone assumes is waiting there.
+
 ### The ceilings reach inside a library call, too
 
-Those three used to be tested only **between instructions**, which left the hole
-they were meant to close: a library call is one instruction, so anything that ran
-long *inside* one escaped all three. A host that set exactly the ceilings above
+The three you set used to be tested only **between instructions**, which left the
+hole they were meant to close: a library call is one instruction, so anything
+that ran long *inside* one escaped all three. A host that set exactly the ceilings above
 still hung for ever on a forty-character string handed to a backtracking regex.
 
 Since 2026-09-07 a library operation that can run long **consults the same
@@ -266,13 +279,14 @@ spent, so a script that catches it and asks for something smaller is behaving
 correctly. Second, it only happens **when you set a ceiling**: a host that leaves
 all three at `0` behaves exactly as it always did, and pays nothing.
 
-The rule is kept honest by `scripts/check-budget.py`, one of the seven source
+The rule is kept honest by `scripts/check-budget.py`, one of the eight source
 gates: a loop or an allocation over a script-supplied count must consult the
 budget or be listed as exempt with a reason. Prose rots; this project has learned
 that twice.
 
 Those three bound how **long** a script runs. The fourth bounds **where** it
-writes.
+writes. Neither pair is a wall, and what the four leave open is listed after
+them.
 
 ## The filesystem sandbox
 
@@ -284,21 +298,49 @@ call is refused.
 
 ```pascal
 eng.SandboxRoot := '/var/tmp/run-42';   // '' (the default) = unbounded
+if eng.SandboxRoot = '' then            // it did not take -- do not run the script
+  raise Exception.Create('no sandbox root');
 ```
 
 What "resolve inside" means, exactly: the path is made absolute against the
-working directory, `.` and `..` are collapsed, and symlinks are followed on every
-component that exists. So `../../etc/passwd` and a link planted inside the root
-are both outside it, and both are refused.
+working directory, split into components the way the **kernel** splits them, and
+then walked from left to right, each component's symlinks followed *before* the
+next component is applied. A `..` therefore comes off what the link resolved to,
+and not off the spelling.
 
-Three details worth knowing before you rely on it:
+Both halves of that walk were paid for. Resolution used to collapse `..`
+textually before following any link, and the Linux kernel does the opposite
+(path_resolution(7)), so `<root>/link/..` left the root while the gate said it
+had not. The splitter was the second half: the RTL reads a backslash as a
+separator on Unix and the kernel does not, so a directory named `a\b` was two
+components to the gate and one to Linux, and every `..` after it was applied at
+the wrong depth — the same escape, still live after the order was fixed. On
+Windows either slash separates, on POSIX only `/`. So `../../etc/passwd`, a link
+planted inside the root, a link followed by `..`, and a directory literally named
+`a\b` followed by `..` are all outside the root, and all refused.
+
+Four details worth knowing before you rely on it:
+
+- **Read the root back, and refuse to run if it is empty.** Assigning creates the
+  directory when it is not there, resolves it through symlinks, and leaves the
+  root `''` when it could not be made — which is also how "no sandbox" is spelled,
+  so an assignment that failed is indistinguishable from one you never wrote, and
+  the script gets the whole filesystem. Nothing raises. `phosphor --sandbox` makes
+  exactly this check and exits 2 (`cannot establish the sandbox root <dir> --
+  refusing to run unconfined`); an embedder has to make it too. What reading it
+  back answers is the root actually installed, which is the resolved absolute
+  path and not the string you assigned.
 
 - **A refusal is a value, not an exception.** `file_writealltext` answers `0`,
   `file_readalltext$` answers `""`, `dir_getfiles$` answers `""`, `dir_delete`
-  answers `0` and `ioerror()` reports it. The one exception is `OPEN`, which has
-  no return value to answer with and so fails the run with a catchable runtime
-  error. This is the same house rule the rest of the library follows: a call that
-  could not do what it was asked says so in its answer.
+  answers `0`. Two of those four also record the refusal in `ioerror()` —
+  `file_readalltext$` sets `2`, `dir_delete` sets `3` — while `file_writealltext`
+  and `dir_getfiles$` leave the slot holding whatever the previous call put in
+  it, so read it immediately after the call that refused or not at all. The one
+  exception is `OPEN`, which has no return value to answer with and so fails the
+  run with a catchable runtime error. This is the same house rule the rest of the
+  library follows: a call that could not do what it was asked says so in its
+  answer.
 
 - **The scratch directories move inside the root.** With a root set, `temppath$`,
   `tempfilename$`, `homepath$`, `documentspath$` and `cfg_path$` all answer a
@@ -320,9 +362,88 @@ success — because `DirectoryExists("")` is `False`, so the post-check read the
 disaster as a clean removal. An empty path, `/`, `C:\` and a UNC share root are
 now refused by `dir_delete`, `dir_create` and every other write, root or no root.
 
+Three more shapes are refused with them, each one a way the gate and the kernel
+were reading different paths. A path holding a **NUL byte** is refused outright:
+the gate reads the whole string and `CreateFileW`/`fpOpen` stop at the first
+`#0`, so the two judged different files. It is the one shape here refused for a
+**read** as well — no caller can mean a name with a NUL in it, so this refuses
+rather than guess where to cut. A **directory the guard cannot identify** is
+refused: `mklink /J x "C:\"` makes a directory that *is* the drive root, and
+FPC's `FileGetSymLinkTarget` will not say so. Unable to say is not permission. It
+is not licence to refuse either — an entry the platform resolves to the very path
+already computed, such as a Store app alias, a compressed or cloud-backed file or
+any reparse tag FPC declines to decode, is an ordinary file and is allowed, and
+refusing those was this guard's own first over-refusal. And a path of **more than
+256 components** is refused, because the walk cannot hold it: what it resolved is
+then a prefix of what the kernel would open, and a `..` in the part that did not
+fit could climb anywhere.
+
+What that costs, measured on this machine with a warm cache: with a root set the
+gate resolves the path **once** per call, and the two rules share the one walk.
+With no root set a **read** touches no disk at all. A write or a delete asks the
+filesystem one question first — does this path name a directory — which is about
+20 us; when the answer is yes it walks the path as well, because the rule above
+cannot see through a junction without looking, and that is 175 us for a
+three-component path and 825 us for a twelve-component one, since every component
+is asked about in turn. Before these rules existed all of it was nothing.
+
 `scripts/check-sandbox.py` is what keeps this true as the library grows: it fails
 the acceptance suite if any routine a script can reach touches the filesystem
 without asking the gate first.
+
+## What the four ceilings do not bound
+
+A ceiling nobody names reads as a ceiling that is there. Everything below is
+outside all four of them.
+
+- **Memory.** `MaxSteps` counts *instructions*, and an instruction whose cost is
+  not O(1) is a poor proxy for work. The library budget refuses
+  `string$(1600000000, 97)` before it starts — but `s$ = s$ + s$`, three times
+  over a 200 MB string, is three instructions out of a million, and it built the
+  same 1.6 GB in 5032 ms at a 14.7 GB peak and answered `rc = 0`, under exactly
+  the ceilings prescribed above. `+` is `opAdd`, a VM instruction rather than a
+  library call, so no budget is ever asked about it. A host that must bound
+  memory has to bound the **process**: a job object on Windows, an rlimit or a
+  cgroup on Linux. `engine/PhosphorBudget.pas` says so in its own header, and it
+  is not closed.
+
+- **The instruction already running.** `MaxSteps` is tested before every
+  instruction, but `TimeoutMs` is only sampled every 4096 of them, and neither
+  interrupts the instruction underway. A program that never reaches 4096
+  instructions is therefore not bounded in wall-clock time at all — which is how
+  the three concatenations above finished at 5032 ms under a 2000 ms ceiling. A
+  library call that can run long consults the ceilings itself while it runs; a VM
+  instruction such as `opAdd` does not.
+
+- **The network.** `SandboxRoot` is a filesystem ceiling and nothing else, so the
+  `http` package reaches the internet whatever the root is. A host that does not
+  want a script online does not register the package. `http_ca_file$` is the one
+  place a path leaves the gate: it records a filename that OpenSSL, not this
+  engine, later opens.
+
+- **The GUI.** A host that registers the GUI packages gives the script windows,
+  and no ceiling closes them. The GUI calls that touch a *file* ask the gate like
+  everything else; opening a window is not a file.
+
+- **The machine around the script.** `environ$`, `paramstr$` and
+  `dir_getcurrent$` answer for the host's environment, command line and working
+  directory whether a root is set or not — reading them is not writing. The
+  working directory matters twice over, because it is what a relative path is
+  resolved against before it is judged.
+
+- **The host's own files.** The gate answers for paths the *script* names. What
+  the host opens itself is the host's business: `phosphor --out <path>` is opened
+  before the root is bound, and writes wherever the operator pointed it.
+
+- **A second thread.** The root and the library budget are both process-wide, so
+  two scripts running at once in two threads share one of each and the last host
+  to set one wins. Scripts at different trust levels belong in different
+  processes.
+
+What is *not* on that list is worth saying as plainly: **a script cannot start a
+process.** Nothing in `engine/` or `host/` spawns one — there is no `exec`, no
+`shell`, no `system` — so the filesystem, the network and the GUI are the whole
+of a script's reach outside its own memory.
 
 ## Output and input
 

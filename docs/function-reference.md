@@ -59,7 +59,7 @@ headings came to match neither. Every heading now gives **both**, in this order:
   value kind it stores.
 
 Across the seventeen engine libraries and the six packages that is **715 names /
-826 registry entries**. `scripts/coverage.py` prints the names column per library
+828 registry entries**. `scripts/coverage.py` prints the names column per library
 from the same source, and it gates the 715 where README states it. The entries
 column has no gate: it is counted off the `Reg.Add`/`Reg.AddHost` lines, which is how
 four of the headings below were found to be wrong under *either* reading.
@@ -85,7 +85,7 @@ absent.
 
 # Engine libraries (always available)
 
-## Str — strings (64 names / 67 registry entries)
+## Str — strings (64 names / 69 registry entries)
 
 Case, length, codepoint-aware slicing, trimming, search, replace, radix and
 number conversion, padding/justification, word and line splitting, predicates and

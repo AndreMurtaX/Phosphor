@@ -145,17 +145,38 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    word before the magic so `pack --no-console` can travel with the file; the
    magic IS the version, the reader accepts both and refuses anything else, and a
    packed file always carries the stub that made it (see README, "The console is
-   kept by default — PE and ELF both ignore trailing bytes). At startup the stub reads its own
-   tail (`GetModuleFileNameW` / `/proc/self/exe`); if the trailer's magic is there
+   kept by default"); PE and ELF both ignore trailing bytes. At startup the stub
+   reads its own compiled-in pack mark first and then its tail
+   (`GetModuleFileNameW` / `/proc/self/exe`); if the trailer's magic is there
    and the checksum matches, it runs the embedded bytecode and ignores its CLI
    arguments — so the SAME `phosphor` binary is the CLI tool bare and a standalone
-   app once packed (on Unix the packed file is `chmod +x`'d). The AV/dropper caveat
+   app once packed (on Unix the packed file is `chmod +x`'d). If the mark says
+   "packed" while the file's length or trailer disagrees, it refuses with exit 2
+   rather than opening the REPL. That is the 2026-09-10 defect closed: a truncated
+   application lost its only self-identification along with its tail, and was
+   handed back to the user as a BASIC prompt at exit 0. The AV/dropper caveat
    is stated plainly in [decisions.md](decisions.md) ("On-disk bytecode"). **Gate
    met:** `test.{ps1,sh}` add a third path — compile `hello.bas`, pack the `.pbc`
    (`pack` takes bytecode, not source, since 2026-09-06), run the standalone
    executable with no arguments, byte-compare to the same golden as the `--out` and
-   stdout paths (all three flip under `-ProveFailure`); verified on Windows and
-   Linux. `-B -vewn` clean.
+   stdout paths. FIVE paths flip under `-ProveFailure` now: `--out`, stdout, packed,
+   packed `--no-console`, and (2026-09-10) an intact packed application copied
+   elsewhere, which is block L's mirror — there so that the truncation length check
+   cannot quietly start refusing packed applications that are fine. Those five
+   print six FAIL lines, not five: block L's summary line shares its flag with the
+   mirror, so a corrupted golden reddens the whole block while its three refusal
+   shapes still pass. **Those five paths are `test.ps1` only** -- `scripts/test.sh`
+   has no prove mode at all, so on Linux the goldens are compared but nothing
+   proves the comparison can fail. That is finding 51 of the 2026-09-10 gauntlet
+   and it is open. The blocks themselves run and pass on both. `-B -vewn` clean.
+
+   **One expectation was reversed on purpose, and that belongs on the record**,
+   because a reader comparing against git history would otherwise find an
+   inversion with nothing to explain it. Block K of `test.{ps1,sh}` used to assert
+   that a packed executable truncated past its magic *opens the REPL at exit 0* —
+   the defect, written down as an expectation. Its second shape is now the stub
+   with non-trailer bytes appended, a file that genuinely carries no program; the
+   truncated shapes moved to block L, where they are asserted to be refused.
 
 
 6. **The filesystem ceiling — `SandboxRoot`.** *DONE (2026-09-06).* Step 2 claimed
@@ -172,15 +193,20 @@ Each step names its gate (exit criteria) and its cost of deferral. As in phases
    three: `TPhosphorEngine.SandboxRoot`, `''` by default, costing nothing when
    unset. With a root set, every path a script names — `file_*`, `dir_*`,
    `open … as #n`, the string-list and RAG loaders, and the `zip`/`gzip`/`base64`
-   packages — is made absolute, has `.`/`..` collapsed and its symlinks followed,
-   and must land inside the root or the call is refused. A refusal is a **value**
-   (`0`, `""`, and `ioerror()`), not an exception, except `OPEN`, which has no
+   packages — is made absolute, split into components the way the kernel splits
+   them, and resolved one component at a time with links followed before the next
+   component is applied, so `.` and `..` act on what the links resolved to. What
+   the walk answers must land inside the root or the call is refused. A refusal
+   is a **value** (`0`, `""`, and `ioerror()`), not an exception, except `OPEN`,
+   which has no
    return value and so fails the run catchably. With a root set the platform's
    scratch places (`temppath$`, `tempfilename$`, `homepath$`, `documentspath$`,
    `cfg_path$`) answer **inside** it, so a script that uses them runs unchanged
    and contained rather than failing on its first write; `sandboxroot$()` reports
    the root and nothing registered can change it. One rule holds with **no root at
-   all**: an empty path or a bare filesystem root is never written to or deleted.
+   all**: a destructive call is never handed a path the gate cannot vouch for —
+   an empty path, a bare filesystem root, a path with a NUL byte in it, or a
+   directory the platform will not identify.
 
    **The part that is not the feature.** A rule enforced at every call site is a
    rule that rots one new function at a time, so `scripts/check-sandbox.py` is the

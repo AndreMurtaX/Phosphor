@@ -48,8 +48,9 @@ Same names with `.sh` on Linux.
   `windows`, `unix`, sockets, `Data.DB`. Output leaves through one seam: `OnOutput`.
   Terminal, GUI and network are host concerns.
 - **Libraries register through the `:`-signature registry** — `Reg.Add('name:sig', @fn)`,
-  or `AddHost` for VM-aware ones. Codes: `n` numeric, `$` string, `@` handle, `?` bool;
-  repeat for arity; a zero-arg function is `'name:'`.
+  or `AddHost` for VM-aware ones. Codes: `n` numeric (a Double, or an `int%` widened
+  into one), `%` an exact `int%` that does not widen, `$` string, `@` handle, `?`
+  bool. `#` is never a code. Repeat for arity; a zero-arg function is `'name:'`.
 - **The suffix on a name IS its return type** (none=Double, `$`, `%`=Int64, `@`=handle,
   `?`=bool) — and the registry never checked it against the body. Fifteen names lied
   before `scripts/check-suffix.py` existed. The suffix on the *function's own name*
@@ -156,6 +157,13 @@ The failure modes are known, named, and keep recurring. Watch for them in your o
   walked through; a sandbox guard put on one of a function's two path arguments. When a
   class recurs, write the check — `check-codepage.py` found eleven sites where a manual
   hunt had reported five.
+- **Checking a different copy of the value than the one that acts.** The sandbox gate
+  read the whole path where the kernel stops at the first `#0`; its splitter counted
+  `a\b` as two components where Linux counts one; `SafeEntryName` judged the name a zip
+  entry ADVERTISES while extraction wrote under the name it CARRIES. Every suite and all
+  eight gates stayed green through all three. Find the read that DECIDES and judge that
+  one — and when a library re-reads the value inside the call you are guarding, measure
+  which hook fires where instead of picking the one that sounds late enough.
 - **A guard that refuses something legitimate,** or worse, silently answers something
   wrong. A finiteness patch turned an entire band of correct subnormal results into `0`
   and passed its own byte-identical diff, because every pinned value sat outside the

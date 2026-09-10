@@ -39,10 +39,17 @@ working files in the temp directory runs unchanged and contained rather than
 failing on its first write. Redirecting beats refusing. `sandboxroot$()` reports
 the cage but cannot open it — there is no registered setter, only the host, in
 Pascal, can set or clear a root. One consequence surprises people: a **relative**
-path is resolved against the *process working directory* before it is checked, and
-`--sandbox` does not change that directory, so `mkdir("inside_ok")` is refused
-unless the process already runs inside the root. Build working paths from
+path is resolved against the *process working directory* before it is checked,
+and `--sandbox` does not change that directory, so `mkdir("inside_ok")` is
+refused unless the process already runs inside the root. Build working paths from
 `temppath$()` and they are inside by construction.
+
+An operator who asks for a cage and does not get one is never handed an
+unconfined run instead. When `--sandbox` names a root that will not bind,
+`phosphor` prints `cannot establish the sandbox root <dir> -- refusing to run
+unconfined` and exits 2, and that covers the empty argument as well as
+whitespace: `phosphor --sandbox "$RUNDIR" untrusted.bas` with `RUNDIR` unset used
+to run wide open, silently, at exit 0.
 
 ## Functions
 

@@ -226,13 +226,21 @@ The eventual goal (a later phase) is the Clipper/PyInstaller/AutoIt model:
 compile a script to bytecode, append the bytecode to a copy of the VM to make a
 single executable, and have it read its own tail at startup. PE and ELF both
 ignore bytes after the last section, so the payload rides at the end behind a
-trailer (magic signature, offset, size, format version, checksum). The magic IS
+trailer (magic signature, offset, size, format version, checksum) — and the stub
+also carries a 24-byte **mark** in its own initialised data, which `pack`
+overwrites with a "packed" sentinel and the finished file's length. The magic IS
 the format version: `PHOSPBC1` was offset/size/checksum, `PHOSPBC2` (2026-09-06)
 adds a 32-bit flags word before the magic, the first flag being "release the
 console this process owns" so `pack --no-console` can be baked into the file. A
-reader takes the last eight bytes first, decides how much trailer to read from
-what it finds, and refuses a magic it does not know. The binary's
-own path is `ParamStr(0)` on Windows and `/proc/self/exe` on Linux.
+reader asks its own compiled-in mark first, because everything in the tail can be
+TRUNCATED away and truncation is the commonest corruption there is: a file that
+had lost its magic used to answer "bare stub" and open the REPL. Only then does it
+take the last eight bytes, decide how much trailer to read from what it finds, and
+refuse a magic it does not know. A marked binary whose length or trailer is wrong
+is refused out loud, exit 2; falling through to the CLI now requires an *unmarked*
+binary, which is the only file that is genuinely a bare stub. Applications packed
+before 2026-09-10 carry no mark and keep the old failure mode — repack them. The
+binary's own path is `ParamStr(0)` on Windows and `/proc/self/exe` on Linux.
 
 Plan9Basic's `TInstr` already nearly serializes:
 
@@ -302,6 +310,12 @@ of control", and a 521-global program that Phosphor runs fine is proof the proxy
 is the wrong measure. The real question — *is this script consuming more than the
 host allows?* — is answered by the opt-in limits the host actually controls, not
 by a fixed number baked into the language.
+
+Those three bound time and output, and `SandboxRoot` bounds where a script
+writes. **Memory is outside all four**, and so are the network, the GUI and the
+machine around the process — [embedding.md](embedding.md), "What the four
+ceilings do not bound", is where that is set out, because a set of ceilings
+presented as complete is read as complete.
 
 ---
 

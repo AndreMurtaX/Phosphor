@@ -64,9 +64,41 @@ So:
   **one seam**: `OnOutput`. Input/terminal/GUI/network are host concerns.
 - **Libraries plug in through the `:`-signature registry.** A function is
   `Reg.Add('name:sigcodes', @fn)`; VM-aware ones use `AddHost` and cast `AVM` to
-  `TPhosphorVM`. Type codes: `n` numeric (int%|double), `$` string, `@` handle, `?`
-  bool, `nn`/`$$`/… for arity. Read a numeric arg with `AsDouble(Args[i])` (handles
-  int%↔double); a zero-arg fn is `'name:'`.
+  `TPhosphorVM`. Type codes: `n` numeric (a Double, or an `int%` widened into one),
+  `%` an exact `int%` slot that does not widen, `$` string, `@` handle, `?` bool,
+  `nn`/`$$`/… for arity; `#` is never a code. Read a numeric arg with
+  `AsDouble(Args[i])` (handles int%↔double); a zero-arg fn is `'name:'`.
+- **THE GATE AND THE KERNEL MUST BE HANDED THE SAME PATH, AND EVERY WAY THEY CAN
+  READ IT DIFFERENTLY IS THE SAME DEFECT.** Five instances so far, each of which
+  passed every suite: a byte the kernel stops at (`#0`), an order of operations
+  (`..` collapsed before links were followed, where path_resolution(7) does the
+  opposite), a SEPARATOR, an entry no string test can see through (a junction to a
+  drive root), and a length the walk could not hold. The separator is the RTL's
+  doing and it is everywhere: a backslash is an ordinary name byte on POSIX and
+  `AllowDirectorySeparators` says otherwise, which reaches `ExpandFileName`,
+  `ExtractFilePath`, `ForceDirectories`, `IncludeTrailingPathDelimiter` and
+  `ExcludeTrailingPathDelimiter` alike. The
+  instance-versus-class lesson has a sharp edge here: one round fixed the ORDER and
+  reused the SPLITTER, and the same escape was still live; the next fixed the
+  splitter and the `..` branch still popped components with `ExtractFilePath`, which
+  a new test caught and reading had not.
+- **THE STRING YOU VALIDATE MUST BE THE STRING THAT DECIDES.** A zip entry carries
+  its name twice; `SafeEntryName` was asked about the copy the archive ADVERTISES
+  and extraction wrote under the copy it CARRIES, so a byte landed outside the
+  sandbox root while every suite and all eight gates stayed green. When a library
+  re-reads a value between your check and its use — and paszlib re-reads it inside
+  the very call you are guarding — find the read that decides, and judge that one.
+  MEASURE WHICH HOOK FIRES WHERE: the remedy that suggests itself (`OnCreateStream`)
+  fires early enough but changes how the library builds the path, and the one that
+  sounds later-and-safer (`OnStartFile`) fires after the file has already been
+  created. AND THEN THE NAME WAS NOT THE ONLY THING THAT DECIDED: an entry whose
+  ATTRIBUTES say symbolic link is extracted with its CONTENT as the link target, and
+  a target is not a name, so the same escape had a second spelling the name guard
+  passed. It lands only on Linux — paszlib forces `IsLink := False` off UNIX — so a
+  Windows-green suite could not see it, and a reviewer who built on the VM found it
+  in one run. When you close an escape, ask what ELSE the library does with an entry
+  besides writing it under its name; and when a defect has an OS-conditional code
+  path, the second machine is not a formality.
 - **Test-only stand-ins belong to the test runner, not the shipped engine.** A probe
   class / helper used only by an oracle file goes in `tests/PhosphorTestLib.pas` (which
   the runner registers), never in an engine `engine/libs/*` unit — the console/host
@@ -165,6 +197,12 @@ Rules, in order of how easily they are got wrong:
   `assert_true` today has all four forms — `:n`, `:n$`, `:?`, `:?$`
   (`tests/PhosphorTestLib.pas:344`); `assert_int` is `:%%` ONLY, and a third
   argument to it raises `no function assert_int:%%$` and halts the file.)
+- **A CONSTANT-FOLDED CONDITION IS DEAD CODE ON ONE TARGET AND LIVE ON THE OTHER.**
+  `if DirectorySeparator <> '/'` is a compile-time constant per target: on Linux FPC
+  reports the body as unreachable and `-vewn` fails the build, while Windows compiles
+  it clean. Guard a separator-dependent statement with `{$IFNDEF UNIX}`, not with a
+  runtime test — and do not reach for a local variable to defeat the folding, because
+  the build is `-O2`.
 - **objfpc mode has NO `case`-of-string.** `case s of 'amp': …` does not compile; use an
   `if/else-if` chain over the (lowercased) string. Bites entity/keyword decoders.
 - **A name/value bag needs TWO parallel `TStringList`s, not `Values[]`.** `TStringList`
@@ -200,6 +238,13 @@ Rules, in order of how easily they are got wrong:
   the very failure the gate guards. Capture into a var and test it (`x="$(cmd)"; case
   "$x" in *libX*) …`), and back it with a direct file check (`for f in …/libX.so*; do
   [ -e "$f" ] && …`). Never gate a test on a `cmd | grep -q` pipeline.
+- **A SCRIPT'S OWN FLAG SPELLING IS PART OF THE MEASUREMENT.** `scripts/test-classic.sh`
+  takes `--prove` **or** `-ProveFailure` (line 65 accepts both); `scripts/test-examples.sh`
+  takes `--prove-failure` and nothing else. So `--prove-failure` handed to `test-classic.sh`,
+  and either of the other two handed to `test-examples.sh`, is not an error — the argument is ignored, the suite runs normally and
+  exits 0, and the run is indistinguishable from a ProveFailure that worked. Only
+  reading the output for the words ProveFailure prints, and finding NOTHING, catches
+  it. Check the flag in the script before quoting its exit code.
 - **Every build script must SURFACE the `-vewn` output and FAIL on any warning/note** —
   never pipe the build to `/dev/null` and check only that the binary exists. A note can
   hide in a **host package** (e.g. a CRT unit) that the engine's own suite build never
@@ -533,15 +578,57 @@ introduces a defect.
 
 ### Security and sandbox escape (5)
 
-1. **engine/PhosphorSandbox.pas:310** [high] -- On Linux a symlink inside the sandbox root plus '..' escapes it for read, write AND recursive delete: RealPathOf collapses '..' textually before following any link, so the gate judges a different path than the syscall opens
-2. **engine/PhosphorSandbox.pas:378** [high] -- A NUL byte in a path defeats the sandbox: the gate judges the whole string, the OS opens the prefix (read/write/delete of a single file escape; the dir_delete-walks-a-drive-root consequence is overstated -- the same truncation neuters the walk's deletes)
-3. **host/console/phosphor.lpr:1016** [high] -- `--sandbox ""` (an empty argument, e.g. an unset shell variable) runs the script completely unconfined, silently, exit 0
-4. **host/packages/PhosphorZipLib.pas:456** [high] -- Zip slip: SafeEntryName judges the central-directory name, paszlib extracts under the local file header's name -- a byte lands outside the destination and outside the sandbox root (reproduced; the proposed OnCreateStream remedy would itself break the destination path)
-5. **host/console/phosphor.lpr:845** [medium] -- A truncated packed application loses the tail that is its only self-identification, so TryReadEmbeddedPayload answers esNone and phosphor.lpr:845 falls through to the interactive REPL with exit 0 -- the outcome the esCorrupt guard was written to refuse
+1. ~~**engine/PhosphorSandbox.pas:310** [high]~~ -- CLOSED 2026-09-10. Resolution is
+   one LEFT-TO-RIGHT walk now: each component's links are followed before the next
+   component is applied, so a `..` comes off what the link resolved to. The
+   splitter is the kernel's as well -- on POSIX only `/` separates, because a
+   backslash there is an ordinary filename byte and reading it as a separator let a
+   `..` be counted against the wrong depth. Both halves were needed and the second
+   was found by a test, not by reading: the fix for the ORDER reused the SPLITTER,
+   and the same escape was still live. See the invariant in section 2.
+2. ~~**engine/PhosphorSandbox.pas:378** [high]~~ -- CLOSED 2026-09-10. A path holding
+   a `#0` is refused outright, for a READ as well as a write, in both the perilous
+   rule and the gate: no caller can mean a name with a NUL in it, so this refuses
+   rather than guess where to cut.
+3. ~~**host/console/phosphor.lpr:1016** [high]~~ -- CLOSED 2026-09-10. The question
+   is "was the flag given", not "is the value non-empty" -- `GSandboxGiven` carries
+   the fact the value could not, because `''` is how "no sandbox" is spelled too.
+   `--sandbox ""` now prints `phosphor: cannot establish the sandbox root <dir> --
+   refusing to run unconfined` and exits 2, exactly as `--sandbox "   "` already
+   did. `--out ""` had the same shape one branch down and is refused with it.
+4. ~~**host/packages/PhosphorZipLib.pas:456** [high]~~ -- CLOSED 2026-09-10. The
+   local file headers are read up front and the names extraction will actually use
+   are judged: each must pass `SafeEntryName` AND be byte-identical to the name the
+   central directory advertised. A link entry is refused outright on both operating
+   systems -- its target is its content, which no name check can see. An archive
+   that merely could not be re-read is answered `0`, not accused. See the invariant
+   in section 2.
+5. ~~**host/console/phosphor.lpr:845** [medium]~~ -- CLOSED 2026-09-10. The stub
+   carries a 24-byte mark in its own initialised data, where truncation cannot
+   reach, holding the length the packer finished with; a marked binary whose length
+   or trailer disagrees exits 2 with the reason. Falling through to the CLI now
+   requires an UNMARKED binary, which is the only file that is genuinely a bare
+   stub. Applications packed before this date carry no mark and keep the old failure
+   mode -- repack them.
 
 ### Data loss (9)
 
-6. **engine/PhosphorSandbox.pas:245** [high] -- A junction whose target is a drive root is unresolved by both sandbox rules on Windows: IsPerilousPath calls it ordinary AND the containment rule lets the recursive remover walk out of the sandbox through it
+6. ~~**engine/PhosphorSandbox.pas:245** [high]~~ -- CLOSED 2026-09-10. A path this
+   unit cannot resolve to ONE directory is refused rather than assumed ordinary:
+   the walk records the link it could not follow, and both rules read that. Unable
+   to say is not permission -- but it is not licence to refuse either, and the
+   first spelling of this fix refused 42 of the 62 entries in
+   `%LOCALAPPDATA%\Microsoft\WindowsApps` -- every reparse point in it -- so an
+   entry the platform resolves to the very path already built (a Store app alias, a
+   compressed or cloud-backed file, any reparse tag FPC declines to decode) is
+   ordinary and is allowed. **Both of those numbers were wrong here first**: the
+   review measured 42 of 62, the source comment said "eight of the ten", and this
+   page copied the comment rather than the measurement. Corrected in both places.
+   The cost is in `docs/embedding.md` and is not one number: a read with no root
+   set touches no disk, a write to a path that is not a directory is one
+   `FileGetAttr` (~20 us), and a write or delete NAMING A DIRECTORY -- every
+   `dir_create`, every `dir_delete`, which is what this rule exists for -- walks
+   every component, 175 us at depth three and 825 us at depth twelve.
 7. **engine/libs/PhosphorIoLib.pas:622** [high] -- On Linux file_move overwrites an existing target file and reports 1; dir_move does the same onto an existing EMPTY directory -- docs/libraries/io.md:59,102 promise 0 in both cases (Windows refuses; the refusal is an accident of MoveFileW)
 8. **engine/libs/PhosphorJsonLib.pas:1311** [high] -- A tail fpjson ignores disarms the \u re-spelling: unmatched quote or apostrophe after the value silently restores all four fpjson escape defects on a document json_parse@ accepts with rc=0
 9. **engine/libs/PhosphorStrLib.pas:516** [high] -- replacetext$ returns wrong answers and silently drops trailing bytes whenever the haystack contains a character whose uppercase has a different UTF-8 byte length
@@ -632,12 +719,36 @@ introduces a defect.
 
 ### Documentation errors (6)
 
-58. **docs/embedding.md:230** [high] -- embedding.md (and decisions.md:296, architecture.md:158) present the three ceilings plus SandboxRoot as the complete set of bounds on an untrusted script and never say memory is outside all of them; PhosphorBudget.pas:40-63 says so in the source and no doc carries it -- measured: 400,000,000 bytes built by one opAdd in 1203 ms, 3.6 GB peak, rc=0
-59. **CLAUDE.md:51** [low] -- CLAUDE.md:51's registry argument-code list is missing `%`, one of the five codes in the real alphabet, and contradicts docs/decisions.md:175 and PhosphorRegistry.pas
-60. **docs/embedding.md:27** [low] -- docs/embedding.md:27 says "three unit paths are the entire requirement" above a block that lists two; two are in fact sufficient (2 required, 2 optional, 4 possible -- never 3)
-61. **docs/embedding.md:269** [low] -- Gate-count drift in the docs: docs/embedding.md:269 says "seven source gates", and README.md:169 ("the same seven on Linux") and README.md:192 ("the six source gates described above") plus README's 6-row gate table are also stale -- the suite runs eight
-62. **docs/embedding.md:298** [low] -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run
-63. **docs/function-reference.md:88** [low] -- function-reference.md:88 still says Str has 67 registry entries and line 62 says 826 total; 103491e added stri$:% and str$:% (69 and 828 now) without touching the page, and the entries column has no gate to notice
+58. ~~**docs/embedding.md:230** [high]~~ -- CLOSED 2026-09-10. embedding.md has a
+   section of its own now, "What the four ceilings do not bound", and memory leads
+   it with the measurement out of `PhosphorBudget.pas` and the remedy that is
+   actually available (bound the PROCESS -- job object, rlimit, cgroup). The other
+   two sites point at it rather than repeating it: decisions.md:311 and
+   architecture.md:158. The section also carries the network, the GUI, the
+   environment, the host's own `--out` file and a second thread, because the
+   finding was about a set presented as complete and one more item would have left
+   it just as complete-looking. What a script CANNOT do is stated with them: no
+   library in `engine/` or `host/` spawns a process.
+59. ~~**CLAUDE.md:51** [low]~~ -- CLOSED 2026-09-10. Both short forms carried the
+   same gap: CLAUDE.md:51 and this file's own section-2 bullet listed four codes
+   where the alphabet is five. Both now read `n % $ @ ?`, and both say `#` is never
+   a code, as `PhosphorRegistry.pas` and decisions.md:175 do.
+60. ~~**docs/embedding.md:27** [low]~~ -- CLOSED 2026-09-10. It says two, which is
+   what the block under it lists.
+61. ~~**docs/embedding.md:269** [low]~~ -- CLOSED 2026-09-10. embedding.md:269,
+   README.md's "same seven on Linux" and its "six source gates described above" all
+   say eight, and the README table gained the two rows it was missing --
+   `check-budget.py` and `check-manifests.py`. The README heading and its prose
+   count were already right, because `coverage.py` gates exactly those two numbers.
+   Everything a gate does not read is what drifted, which is the whole argument for
+   gates.
+62. **docs/embedding.md:298** [low] -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run. **The sentence was corrected on 2026-09-10** to name which two report the refusal (`file_readalltext$` sets 2, `dir_delete` sets 3) and to say the other two leave the slot alone; the finding stays OPEN because the better fix is probably in `PhosphorIoLib.pas`, where a refused write could set 3 like `file_delete` next door does, and that is a code change this documentation pass may not make.
+63. ~~**docs/function-reference.md:88** [low]~~ -- CLOSED 2026-09-10, and the numbers
+   were counted off the source rather than taken from the finding: Str is 64 names /
+   69 entries, the page's twenty-three headings now sum to 828, and 715 names is
+   unchanged because `stri$` and `str$` were already names -- 103491e added an
+   arity to each, not a function. The entries column still has no gate, so it will
+   drift again the same way.
 
 ### Cross-OS divergence (1)
 

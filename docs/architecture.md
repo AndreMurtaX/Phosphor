@@ -155,15 +155,18 @@ minefield otherwise.
    [roadmap-phase2.md](roadmap-phase2.md) and [gui-components.md](gui-components.md).
 3. **Done.** Robust and deployable, all five steps: the catchable language-level
    error model (`ON ERROR` / `resume` / `resume next`, re-entrant across calls),
-   execution limits so a host can run untrusted scripts safely — `MaxSteps`,
-   `MaxOutputBytes` and `TimeoutMs`, each `0` by default meaning unlimited and
-   costing nothing, plus a fixed call-depth ceiling, the documented embedding API
-   with `phosphorembed` as a third consumer, the on-disk bytecode (`.pbc`, validated
-   on load rather than trusted), and the self-extracting deployment stub --
-   `phosphor compile app.bas app.pbc` then `phosphor pack app.pbc app.exe` appends
-   the payload to the stub binary, so the same
+   execution limits so a host can bound how long an untrusted script runs —
+   `MaxSteps`, `MaxOutputBytes` and `TimeoutMs`, each `0` by default meaning
+   unlimited and costing nothing, plus a fixed call-depth ceiling, the documented
+   embedding API with `phosphorembed` as a third consumer, the on-disk bytecode
+   (`.pbc`, validated on load rather than trusted), and the self-extracting
+   deployment stub -- `phosphor compile app.bas app.pbc` then `phosphor pack
+   app.pbc app.exe` appends the payload to the stub binary, so the same
    binary is the CLI bare and the application packed. See
    [roadmap-phase3.md](roadmap-phase3.md), which carries the per-step record.
+   Those limits and `SandboxRoot` are ceilings and not a wall: what they do not
+   bound — memory first — is listed in [embedding.md](embedding.md), "What the
+   four ceilings do not bound".
 
 ## One host, and how it can be both
 

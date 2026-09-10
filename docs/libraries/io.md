@@ -27,7 +27,12 @@ answers `0` and stays standing; `dir_create` answers whether the directory exist
 afterwards, so creating one that is already there answers `1`. Both refuse an empty
 path or a bare filesystem root before touching anything — `dir_delete("", 1)` once
 resolved the empty string to the root of the current drive and deleted from there,
-answering success.
+answering success. Two more shapes are refused the same way, and neither is a
+spelling of a root. A path with a NUL byte in it, because the gate reads the whole
+string while the OS stops at the first one — that one is refused for a **read** as
+well. And a directory the platform will not identify: a symlink or a junction
+whose target it declines to name. A link the platform *can* follow is followed and
+allowed, so "the path is a link" is not on this list.
 
 The path half is **pure string work**: no file has to exist, nothing is checked
 against the disk, and `/` and `\` both separate on every platform, so a path

@@ -539,8 +539,8 @@ function GuiModsStr(Shift: TShiftState): String;
 
   Answered HERE because the answer needs TGuiHandle, which is this unit's. The
   handle registry does not hold a TForm -- GuiRegister wraps every object in a
-  TGuiHandle so it can be told when the object dies -- so a caller walking
-  HandleAt() and testing `is TForm` finds nothing, ever. That is what the first
+  TGuiHandle so it can be told when the object dies -- so a caller walking the
+  live handles and testing `is TForm` finds nothing, ever. That is what the first
   version of the last-window check did, and closing one of two shown forms still
   left the message loop.
 
@@ -1476,18 +1476,24 @@ end;
 
 function GuiOtherFormShown(AExcept: TObject): Boolean;
 var
+  id: Int64;
   i: Integer;
   o: TObject;
 begin
   Result := False;
-  for i := 1 to HandleCount do
+  id := FirstLiveHandle();
+  { Counted by LiveHandleCount rather than run to the list's end: this is called
+    from a form's OnClose, so it walks a structure that is being taken apart. }
+  for i := 1 to LiveHandleCount() do
   begin
-    o := HandleAt(i);
+    if id = 0 then Break;
+    o := HandleObj(id);
     if (o is TGuiHandle) and (TGuiHandle(o).Control <> nil) and
        (TGuiHandle(o).Control <> AExcept) and
        (TGuiHandle(o).Control is TForm) and
        TForm(TGuiHandle(o).Control).Visible then
       Exit(True);
+    id := NextLiveHandle(id);
   end;
 end;
 

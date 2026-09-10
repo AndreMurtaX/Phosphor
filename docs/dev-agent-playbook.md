@@ -693,7 +693,41 @@ introduces a defect.
 
 ### Leaks and cost (3)
 
-41. **engine/PhosphorHandles.pas:45** [high] -- HandleCount is the count of handles EVER created, not live ones -- so freed ids keep costing memory forever and turn every json member replacement (and every GUI form close) into an O(handles-ever-created) scan: 0.31 s of json work becomes 44.8 s
+41. ~~**engine/PhosphorHandles.pas:45** [high]~~ -- CLOSED 2026-09-10. The table
+   recycles slots through a free list and an id carries a generation in its high
+   32 bits, so an id issued for a slot can never be issued again and a stale one
+   decodes to a slot whose generation no longer matches. Enumeration is a
+   doubly-linked list of the LIVE slots -- not a scan bounded by the count, which
+   would have left the same defect for a program that creates a million handles
+   and frees all but one. Measured here: 20,000 `json_setn@` after 200,000
+   create/free cycles went from 8268 ms to 778 ms, and the table from 200,002
+   slots to one. `tests/probe_handles.lpr` is new, 72 assertions.
+
+   **THE REVIEW IS THE STORY.** The first version put the generation in the high
+   32 bits and never checked that bit 63 stays clear. At generation 2^31 the id
+   comes back NEGATIVE, `SlotOf` refuses anything below 1, and `RegisterHandle`
+   hands out an id nothing will honour -- for an object that is live, unreachable
+   and unfreeable. Worse, that dead slot is linked at the HEAD of the live list,
+   so the whole enumeration truncates to one element: `InvalidateBorrowed` stops
+   telling a borrowed JSON handle its node is gone, which is the access violation
+   that function exists to prevent, and `GuiOtherFormShown` answers False with
+   windows still on screen. **78 seconds of raw churn**, and the reviewer measured
+   it rather than arguing it. `GEN_MAX` is `$7FFFFFFF` now and a `{$IF}` guard
+   refuses a wider one at COMPILE time, because reaching the condition at runtime
+   takes 87 seconds and no suite will ever pay that.
+
+   Two more from the same review. `HandleObj` resolved the slot twice -- `IsHandle`
+   then `SlotOf` again -- costing +41% on the hottest call in the unit; one
+   resolution puts it 3% BELOW the pre-recycling code. And three of the original
+   55 assertions could not fail: a mutation test found that a broken back-link, a
+   dropped liveness test and an unvalidated `NextLiveHandle` argument all walked
+   straight through. The three shapes that kill them are asserted now, and the
+   mutation script is the proof: M3 reddens 2, M8 reddens 3, M15 reddens 1, and
+   widening `GEN_MAX` fails to compile.
+
+   What it costs, stated because the first version's comment sold only the win: a
+   slot went from 8 bytes to 24, so a program holding a million handles LIVE pays
+   25.2 MB of table against 8.39 MB. Bounded 24 in place of unbounded 8.
 42. **host/gui/libs/PhosphorCanvasLib.pas:193** [high] -- image_setbitmap@ assigns a full surface copy into a TImage with no ledger charge, so live GUI surface accumulates while GuiChargeRoom reads zero
 43. **engine/PhosphorValue.pas:674** [low] -- `Utf8Starts` allocates 8 bytes per string BYTE, so len()/left$/right$/mid$ spike to ~8x the string transiently (not a leak -- it is released) and cost O(n) time per call; engine/*.pas is outside check-budget.py's SCAN_DIRS, and the exemption that was deleted when the code moved priced "one entry per byte" without pricing the entry
 

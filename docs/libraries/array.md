@@ -159,11 +159,17 @@ Two things worth noticing:
   per arity or per value kind, and every one of those entries points at the same
   variadic implementation. `arr_set@` alone accounts for nine of them: three index
   counts times three value kinds.
-- **Handles are ids, not addresses.** A handle is a 1-based index into the engine's
-  registry (`engine/PhosphorHandles.pas`), which is what lets every function here
-  answer `not a valid array handle` for a fabricated or freed one instead of
-  dereferencing whatever it was given — recoverable on Windows, a hard crash on
-  Linux and Android.
+- **Handles are ids, not addresses.** A handle is an opaque `Int64` issued by the
+  engine's registry (`engine/PhosphorHandles.pas`), which is what lets every
+  function here answer `not a valid array handle` for a fabricated or freed one
+  instead of dereferencing whatever it was given — recoverable on Windows, a hard
+  crash on Linux and Android. The first handles of a run are 1, 2, 3, and it is
+  tempting to read an id as a row number. It is not one: since 2026-09-10 the
+  registry recycles the storage a freed handle used, and an id carries a
+  generation alongside the slot so that recycling cannot reissue it. A program
+  that creates and frees many handles will see large ids, and that is the
+  never-reused promise being kept rather than broken. Do not compute with a
+  handle, compare two of them, or store one across a run.
 - The language side of arrays — the bracket syntax, `a@[i] += 1`, and how an array
   handle moves through variables and function arguments — is described in
   [language-reference.md](../language-reference.md); the one-line catalogue entry

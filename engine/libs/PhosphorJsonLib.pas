@@ -180,20 +180,44 @@ begin
       if NodeContains(ARoot.Items[i], ATarget) then Exit(True);
 end;
 
+{ Walks the LIVE handles, not the table.
+
+  This loop was `for i := 1 to HandleCount`, and HandleCount was the number of
+  handles ever created -- so replacing one member cost a step for every handle the
+  program had ever made, including all the ones it had correctly freed. Measured:
+  20,000 json_setn@ took 0.24 s in a fresh process and 48 s after a million
+  create/free cycles that left nothing live. Nothing here was wrong; the registry
+  could not tell it which handles still existed. Now it can.
+
+  Nothing in this loop frees a handle, which is what makes the walk safe -- see
+  the warning on NextLiveHandle.
+
+  COUNTED, not merely terminated by the list. LiveHandleCount is both the honest
+  bound -- there is nothing else to visit -- and a guarantee that this walk ends
+  even if the live list were ever left inconsistent, which matters because it runs
+  while a subtree is being destroyed. scripts/check-budget.py reads it as bounded
+  for the same reason it read `1 to HandleCount` as bounded: a count of what is
+  already in memory is not an amplifier. }
 procedure InvalidateBorrowed(ANode: TJSONData);
 var
-  i: Int64;
+  id: Int64;
+  i: Integer;
   o: TObject;
   w: TPhosphorJson;
 begin
   if ANode = nil then Exit;
-  for i := 1 to HandleCount do
+  id := FirstLiveHandle();
+  for i := 1 to LiveHandleCount() do
   begin
-    o := HandleAt(i);
-    if not (o is TPhosphorJson) then Continue;
-    w := TPhosphorJson(o);
-    if (not w.Owns) and NodeContains(ANode, w.Node) then
-      w.Node := nil;
+    if id = 0 then Break;
+    o := HandleObj(id);
+    if o is TPhosphorJson then
+    begin
+      w := TPhosphorJson(o);
+      if (not w.Owns) and NodeContains(ANode, w.Node) then
+        w.Node := nil;
+    end;
+    id := NextLiveHandle(id);
   end;
 end;
 

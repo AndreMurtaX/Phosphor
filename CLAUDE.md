@@ -78,6 +78,11 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   `rem` above.
 - **A backslash in a string literal is an escape.** `"\2"` is a rejected unknown escape;
   `"\\"` collapses to one. Keep paths and cited expressions out of `msg$`, or double them.
+- **`resume next` on the LAST statement of a block leaves the block.** A loop whose
+  failing call is the last line of its body runs ONE pass and stops, and reports
+  success. This is gauntlet finding 7 and it is OPEN, so until it is fixed, put a
+  statement after the call you expect to fail -- a counter is enough. It cost two
+  wrong readings of a leak probe on 2026-09-10, both of them green.
 
 ## Traps that have already cost real time
 
@@ -120,13 +125,34 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   that refusal. When a command prints nothing, look at its exit code before believing it.
 - **Pascal is case-insensitive:** a local `b` shadows a parameter `B`, a local `d1`
   shadows a function `D1`. Rename the local.
+- **A `{` inside a `{ }` comment NESTS it** -- `Comment level 2 found`, a warning,
+  and this project's bar is zero warnings, so it fails the build. Writing about
+  JSON or about a Pascal block in a comment is how you hit it. Describe the shape
+  in words, or use `(* *)` for that comment.
+- **A default parameter whose default is the UNSAFE value hides an omission.**
+  `RegJson(..., ALevel: Integer = 1)` -- 1 is what a ROOT has, so a borrow site
+  that forgot the argument silently claimed to be at the top of its tree. A review
+  measured that the omission passed every runner on both OSes at one door and was
+  caught at another, which is worse than uncovered because it reads as covered.
+  Make it required and the omission is a compile error.
+- **`fpc` will reuse a `.ppu` written in the same filesystem tick as the `.pas`.**
+  This is the stale-binary trap one level down, and it makes a MUTATION TEST report
+  false survivors: a reviewer saw five, and `-B` turned one of them straight back
+  into CAUGHT. Always pass `-B` when you rebuild to test a deliberate break.
+- **Mutating an engine source without rebuilding `bin/phosphor.exe` makes
+  `check-examples.py` refuse for staleness** -- and in a runner summary that reads
+  exactly like the gate catching your mutation. Rebuild both binaries, then read
+  the failure.
 - **objfpc mode has no `case`-of-string.** Use an `if`/`else if` chain.
 - **Read the RTL instead of guessing about it.** `C:\lazarus\fpc\3.2.2\source`. A patch
   was lost to an assumption about `intpower` (it reciprocates the *base*, not the result)
   that one grep would have settled; `Math.Floor` returns a 32-bit Integer behind a 64-bit
   guard; `IsSameDay` is wrong for negative TDateTime.
-- **Bash heredocs mangle backslashes.** Write patch scripts with the Write tool, or
-  rewrite so no escape is needed.
+- **NEVER write a patch script through a bash heredoc. Use the Write tool.** Not
+  "prefer" -- never. A quoted heredoc still ate a backslash on 2026-09-10, in a
+  script patching a Pascal string that contained one, and the failure surfaced as
+  an anchor that did not match rather than as anything mentioning quoting. If a
+  literal backslash has to appear in a patch script, spell it `chr(92)`.
 
 ## The gates, and why they exist
 

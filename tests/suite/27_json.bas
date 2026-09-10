@@ -365,7 +365,10 @@ on error goto 0
 assert_eq(buildcaught, 1, "building past the ceiling one level at a time is refused")
 assert_true(instr(buildmsg$, "nest more than 256"), "and the reason names the ceiling")
 assert_true(built < 400, "the loop did not finish")
-assert_true(built > 200, "but it got most of the way there before refusing")
+rem EXACTLY 255, not "most of the way". A band is not a bound: with `> 200` a
+rem ceiling silently lowered from 256 to 220 -- 36 levels of over-refusal --
+rem passes every runner on both operating systems. Measured.
+assert_true(built = 255, "and it refused at exactly the 256th level")
 
 rem The scalar doors are the same gate: a value that adds no nesting is still a
 rem level, and the deepest node cannot take one.
@@ -392,3 +395,90 @@ next
 x@ = json_pushn@(tip@, 42)
 assert_eq(json_len(ok@), 1, "a ten-deep tree still builds")
 assert_true(len(json_stringify$(ok@)) > 20, "and still renders")
+
+test_case("json/a node reached by a path knows how deep it is")
+rem json_path@ descends one level PER SEGMENT, so its handle must record the
+rem parent's level plus the segment count -- not plus one. Neutering that count
+rem let a 254-deep subtree graft onto a node at real depth 100, and every runner
+rem on both operating systems stayed green. The boundary is the assertion: at
+rem level 100 a subtree of depth 156 lands exactly on 256 and one of 157 does not.
+proot@ = json_object@()
+ptip@ = proot@
+ppath$ = "k"
+for i% = 1 to 99
+  pn@ = json_object@()
+  x@ = json_set@(ptip@, "k", pn@)
+  ptip@ = json_get@(ptip@, "k")
+  if i% < 99 then
+    ppath$ = ppath$ + ".k"
+  end if
+next
+
+rem A subtree of depth 156, built once and cloned for each attempt.
+sub156@ = json_array@()
+stip@ = sub156@
+for i% = 1 to 155
+  sn@ = json_array@()
+  x@ = json_push@(stip@, sn@)
+  stip@ = json_item@(stip@, 1)
+next
+
+bypath@ = json_path@(proot@, ppath$)
+fitcaught = 0
+on error goto fitbad
+x@ = json_set@(bypath@, "fits", sub156@)
+goto after_fit
+fitbad:
+fitcaught = 1
+resume next
+after_fit:
+on error goto 0
+assert_eq(fitcaught, 0, "a subtree that lands exactly on the ceiling is accepted")
+
+rem One deeper, through the SAME handle, must not be.
+sub157@ = json_array@()
+x@ = json_push@(sub157@, sub156@)
+overcaught = 0
+overmsg$ = ""
+on error goto overbad
+x@ = json_set@(bypath@, "over", sub157@)
+goto after_over
+overbad:
+overcaught = 1
+overmsg$ = errmsg$()
+resume next
+after_over:
+on error goto 0
+assert_eq(overcaught, 1, "one level deeper through the same handle is refused")
+assert_true(instr(overmsg$, "nest more than 256"), "for the ceiling, and it says so")
+
+rem And the same node reached the OTHER way answers identically. Two routes to
+rem one node that disagreed about its depth would be the bypass this pins.
+bychain@ = ptip@
+chaincaught = 0
+on error goto chainbad
+x@ = json_set@(bychain@, "over2", sub157@)
+goto after_chain
+chainbad:
+chaincaught = 1
+resume next
+after_chain:
+on error goto 0
+assert_eq(chaincaught, 1, "and the same node reached by json_get@ agrees")
+
+test_case("json/merge charges the TARGET's depth, not the source's")
+rem json_merge@ reading JsonLevelOf(Args[1]) instead of Args[0] measures the
+rem wrong tree, and survives every runner. The deep target above is what tells
+rem the two apart: its level is 100, the source's is 1.
+msrc@ = json_object@()
+x@ = json_set@(msrc@, "deep", sub157@)
+mcaught = 0
+on error goto mbad
+x@ = json_merge@(bypath@, msrc@)
+goto after_m
+mbad:
+mcaught = 1
+resume next
+after_m:
+on error goto 0
+assert_eq(mcaught, 1, "merging a member too deep for the target is refused")

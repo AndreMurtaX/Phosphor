@@ -668,6 +668,32 @@ introduces a defect.
    Measuring only the SOURCE's depth would have looked sufficient and was not: it
    stops the doubling trick and misses a plain loop that nests one level at a time,
    which is the shape the finding says an ordinary script hits by accident.
+
+   THE REVIEW ACCEPTED THE CODE AND REJECTED THE TESTS, which is the useful half.
+   No bypass, no over-refusal (599 lines of legitimate JSON work byte-identical to
+   the pristine build), no leak, no measurable cost. But FIVE mutations survived
+   all four runners: dropping the level at `json_get@` (though the same omission at
+   `json_item@` was caught -- covered by accident at one door and not the other),
+   neutering `JsonPathSegments`, pointing `json_merge@` at the source's level,
+   deleting the two `V.Free` calls on refusal (4.2 GB against 13.9 MB), and
+   lowering the graft ceiling from 256 to 220 -- 36 levels of silent over-refusal
+   that `assert_true(built > 200)` could not see.
+
+   All five are pinned now. `RegJson`'s level lost its default, so the omission is
+   a compile error rather than a test's problem; the band became
+   `built = 255`; three assertions pin the path level, the merge level and the
+   agreement of two routes to one node; and the leak, which no assertion can see,
+   is a check in `probe_limits` -- run the same work at 200 refusals and at 10,000
+   and compare what is still allocated once the engine is freed. 4,948 KB with the
+   Free, 245,573 KB without.
+
+   WRITING THAT LEAK CHECK COST TWO GREEN RUNS, and the reason is worth more than
+   the check. It measured 200 refusals against 1, because `resume next` on the LAST
+   statement of a block leaves the block -- finding 7 of this very sweep, still
+   open -- so the loop ran one pass and reported success. It passed with both Free
+   calls deleted, twice, before the refusal count was printed. A probe that cannot
+   fail is the thing this round is about, and it very nearly shipped inside the
+   fix for it.
 17. ~~**engine/libs/PhosphorJsonLib.pas:1789** [high]~~ -- CLOSED 2026-09-10 by
    REFUSING, not by snapshotting. `s.Count` was read once and `s` dereferenced
    every turn; merging an object into its own ancestor makes `SetMember` free the

@@ -88,7 +88,21 @@ begin
   if Result then ANode := TPhosphorJson(o).Node;
 end;
 
-function RegJson(N: TJSONData; AOwns: Boolean; ALevel: Integer = 1): TValue;
+{ ALevel IS REQUIRED, and it used to default to 1.
+
+  1 is the value a ROOT has, so the default was the unsafe one: a borrow site that
+  forgot to pass a level registered a node claiming to be at the top of its own
+  tree, and the ceiling below could then be walked straight past. A review measured
+  exactly that -- dropping the level at json_get@ let a script build 401 levels
+  with every runner on both operating systems still green, while the identical
+  omission at json_item@ happened to be caught. A class covered by accident at one
+  door and not at the other is worse than one covered nowhere, because it reads as
+  covered.
+
+  Required, the omission is a compile error. The exported JsonRegisterNode keeps
+  its default: a sibling package registering a tree of its own really does have a
+  root, and it is not reaching into anyone's borrowed node. }
+function RegJson(N: TJSONData; AOwns: Boolean; ALevel: Integer): TValue;
 begin
   Result := ValHandle(JsonRegisterNode(N, AOwns, ALevel));
 end;
@@ -328,7 +342,13 @@ end;
   so the check sits on the two functions every one of them goes through, and they
   take the target's Level and answer False rather than grafting. The refused node
   is FREED here: the caller built or cloned it before asking, and a refusal that
-  leaked would be a worse bug than the one being refused. }
+  leaked would be a worse bug than the one being refused.
+
+  EVERY SCRIPT-DRIVEN GRAFT, precisely. Two Add calls in this unit do not come
+  through here, and are safe for reasons of their own: JsonUnmarkTree's
+  Extract-then-Add renames a member and preserves the tree's shape exactly, and
+  t_json_keys builds a fresh array of plain strings, which is depth two. Neither
+  can be handed a node a script chose. }
 function SetMember(O: TJSONObject; ALevel: Integer; const K: String;
   V: TJSONData; out Err: TPhosphorError): Boolean;
 var idx: Integer;
@@ -708,10 +728,10 @@ end;
 
 // --- constructors -----------------------------------------------------------
 function t_json_object(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegJson(TJSONObject.Create(), True); end;
+begin Err := NoError(); Result := RegJson(TJSONObject.Create(), True, 1); end;
 
 function t_json_array(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegJson(TJSONArray.Create(), True); end;
+begin Err := NoError(); Result := RegJson(TJSONArray.Create(), True, 1); end;
 
 { THE NESTING CEILING FOR PARSED JSON, and why it is measured on the TEXT rather
   than counted inside the parser.
@@ -1507,7 +1527,7 @@ begin
   // one: a document parsed as it was written carries none and is not walked.
   if respelled then JsonUnmarkTree(d);
   Err := NoError();
-  Result := RegJson(d, True);
+  Result := RegJson(d, True, 1);   // a freshly parsed document is its own root
 end;
 
 // --- object mutation --------------------------------------------------------
@@ -1745,13 +1765,13 @@ end;
 
 // --- scalar constructors (each scalar is a handle too) ----------------------
 function t_json_null(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegJson(TJSONNull.Create(), True); end;
+begin Err := NoError(); Result := RegJson(TJSONNull.Create(), True, 1); end;
 function t_json_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegJson(TJSONBoolean.Create(AsDouble(Args[0]) <> 0), True); end;
+begin Err := NoError(); Result := RegJson(TJSONBoolean.Create(AsDouble(Args[0]) <> 0), True, 1); end;
 function t_json_number(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegJson(NumNode(AsDouble(Args[0])), True); end;
+begin Err := NoError(); Result := RegJson(NumNode(AsDouble(Args[0])), True, 1); end;
 function t_json_string(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegJson(TJSONString.Create(Args[0].Str), True); end;
+begin Err := NoError(); Result := RegJson(TJSONString.Create(Args[0].Str), True, 1); end;
 
 // --- scalar readers ---------------------------------------------------------
 function t_json_value(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1908,7 +1928,7 @@ begin
   // agreeing on one platform is not a behaviour worth keeping.
   // a fresh array of plain strings: depth 2, which no ceiling can refuse
   for i := 0 to o.Count - 1 do arr.Add(TJSONString.Create(o.Names[i]));
-  Result := RegJson(arr, True);   // a new owned array
+  Result := RegJson(arr, True, 1);   // a new owned array, and its own root
 end;
 
 // --- paths: boolean, a handle -----------------------------------------------
@@ -1939,7 +1959,7 @@ var n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], n, Err) then Exit;
-  Result := RegJson(n.Clone, True);
+  Result := RegJson(n.Clone, True, 1);   // a clone owns itself: a new root
 end;
 { THE TWO TREES MUST BE DISJOINT, and this used to read freed memory when they
   were not.

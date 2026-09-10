@@ -65,6 +65,11 @@ Non-objects are refused with `json value is not an object`.
 puts on a document it is handed, and since 2026-09-10 it is the same ceiling on a
 tree a script *builds*: a write that would nest deeper is refused with `json:
 this would nest more than 256 levels deep`, whichever door it came through. The
+two count slightly differently and it is worth knowing which: the parse scan
+counts **containers**, so a document of 256 nested brackets with a scalar inside
+is accepted and is 257 levels tall, while the build doors count that scalar as a
+level and stop at 256. Such a tree renders, clones and tears down cleanly; it
+simply cannot be grafted anywhere. The
 reason is not tidiness. fpjson parses recursively, walks recursively, and — the
 part that surprises — *destroys* recursively, so a deep tree spends the process
 stack twice and dies in teardown, after the program's output is already complete

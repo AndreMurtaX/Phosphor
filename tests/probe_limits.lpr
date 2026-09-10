@@ -280,6 +280,93 @@ begin
 end;
 
 { Run ASource with the fault library registered; report what came back. }
+{ A REFUSAL THAT LEAKS IS A WORSE BUG THAN WHAT IT REFUSES, and no .bas
+  assertion can see one.
+
+  The JSON graft gates (PhosphorJsonLib, SetMember and AddItem) free the node they
+  refuse, because the caller has already CLONED it by the time the gate is asked --
+  `AddItem(a, level, v.Clone, Err)`. Deleting those two Free calls leaves every
+  assertion in tests/suite/27_json.bas green and every runner on both operating
+  systems at exit 0, while the process climbs to 4.2 GB against the 13.9 MB it
+  holds to now. Measured, by the review that asked for this check.
+
+  So the question is asked the only way it can be: run the SAME work twice with
+  different refusal counts and watch the heap high-water. A gate that frees is flat
+  in the count; one that leaks is linear in it. The bound is deliberately loose --
+  the leak is two orders of magnitude past it, and a tight bound here would be a
+  probe that fails on a busy machine. }
+procedure CheckRefusedGraftDoesNotLeak;
+const
+  { Build to the ceiling, then offer a 601-node subtree over and over. Every offer
+    is cloned, refused, and must be freed. }
+  Sc =
+    'root@ = json_array@()' + LF +
+    'cur@ = root@' + LF +
+    'for i% = 1 to 255' + LF +
+    '  n@ = json_array@()' + LF +
+    '  x@ = json_push@(cur@, n@)' + LF +
+    '  cur@ = json_item@(cur@, 1)' + LF +
+    'next' + LF +
+    'sub@ = json_array@()' + LF +
+    'for i% = 1 to 600' + LF +
+    '  x@ = json_pushn@(sub@, i%)' + LF +
+    'next' + LF +
+    'refused = 0' + LF +
+    'seen = 0' + LF +
+    'on error goto oops' + LF +
+    'for r% = 1 to REPS' + LF +
+    '  x@ = json_push@(cur@, sub@)' + LF +
+    { NOT THE LAST STATEMENT IN THE BODY, and that is load-bearing. `resume next`
+      on the last statement of a block leaves the BLOCK -- gauntlet finding 7,
+      still open as this is written -- so with the push last the loop ran ONE pass
+      and this check measured 200 refusals against 1 instead of 200 against 10,000.
+      It went green with both Free calls deleted, twice, before the count was
+      printed and the script was found to be the thing that was wrong. }
+    '  seen = seen + 1' + LF +
+    'next' + LF +
+    'goto done' + LF +
+    'oops:' + LF +
+    'refused = refused + 1' + LF +
+    'resume next' + LF +
+    'done:' + LF +
+    'on error goto 0' + LF;
+var
+  eng: TPhosphorEngine;
+  small, big: PtrUInt;
+  rc: Integer;
+
+  function RunWith(AReps: Integer): PtrUInt;
+  var
+    src: String;
+  begin
+    src := StringReplace(Sc, 'REPS', IntToStr(AReps), [rfReplaceAll]);
+    eng := TPhosphorEngine.Create();
+    try
+      rc := eng.Run(src);
+      Report(rc = 0, 'the refusal run at ' + IntToStr(AReps) + ' completed');
+    finally
+      eng.Free();
+    end;
+    { CurrHeapUsed, sampled AFTER the engine is freed -- so what is still held is
+      what nobody owns. MaxHeapUsed was the first spelling and it does not answer
+      this: it is a high-water over the whole process, and the tree the script
+      builds legitimately dwarfs the difference the leak makes at these counts.
+      The check went green with both Free calls deleted, which is how it was
+      caught before it shipped. }
+    Result := GetFPCHeapStatus().CurrHeapUsed;
+  end;
+
+begin
+  small := RunWith(200);
+  big := RunWith(10000);
+  { 9,800 more refusals of a 601-node subtree, and every one of them freed. What
+    is still allocated once the engine is gone must not scale with the count. }
+  Report(big < small + (16 * 1024 * 1024),
+         'a refused graft frees what it refused (still held after the engine went: ' +
+         IntToStr(big div 1024) + ' KB against ' + IntToStr(small div 1024) +
+         ' KB, over 9,800 more refusals)');
+end;
+
 procedure CheckFault(const AName, ASource: String; AContain, AFaultOnOutput: Boolean;
   AWantCode: TPhosphorErrorCode; AWantRc0: Boolean);
 var
@@ -456,6 +543,9 @@ begin
                 Repeated('endif' + LF, 64));
   CheckAccepted('64 parentheses and a few signs still compile',
                 'x = ' + Repeated('(', 64) + '---1' + Repeated(')', 64) + LF);
+
+  { A ceiling that refuses must not pay for refusing; see the note on the check. }
+  CheckRefusedGraftDoesNotLeak;
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

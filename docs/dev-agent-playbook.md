@@ -640,9 +640,43 @@ introduces a defect.
 
 ### Crashes (4)
 
-15. **engine/libs/PhosphorJsonLib.pas:633** [high] -- JsonNestsTooDeep opens a string literal only on `"` (line 633), so an unmatched `"` inside a single-quoted value desynchronises the scan and bypasses the 256-level ceiling entirely -- a 300-deep document parses, and a 400 KB one segfaults the process with no diagnostic
-16. **engine/libs/PhosphorJsonLib.pas:1682** [high] -- json_push@/json_set@ charge no depth: a build-side tree of any depth crashes the recursive teardown (exit 3) after the program's output is complete, and segfaults json_stringify$ -- reachable from a plain linear loop, not only the doubling trick
-17. **engine/libs/PhosphorJsonLib.pas:1789** [high] -- json_merge@ uses `s` after free when the source is a descendant of the target whose member name collides with the target key that owns it (engine/libs/PhosphorJsonLib.pas:1788-1790)
+15. ~~**engine/libs/PhosphorJsonLib.pas:633** [high]~~ -- CLOSED 2026-09-10. The
+   scan holds its opening delimiter in a `Char` and closes on the SAME one, which
+   is what `JsonHasUEscape` and `JsonRespellText` have done all along and say so in
+   their own comments. This was the third scanner and the only one that had not
+   been brought along -- the completeness half of one defect, three times. The
+   hostile document and the same nesting without its prefix now get the identical
+   refusal, which is what makes it a bypass rather than a difference of opinion
+   about the document; and a single-quoted key still parses, because the scan
+   learned the delimiter, not to refuse it.
+16. ~~**engine/libs/PhosphorJsonLib.pas:1682** [high]~~ -- CLOSED 2026-09-10, and
+   the gate went where the graft happens rather than on the doors. THIRTEEN
+   functions add a node to a tree; guarding thirteen doors is how this project has
+   written defects before, so `SetMember` and a new `AddItem` take the target's
+   level and answer False, and every door goes through one of them. A refused node
+   is freed there -- the caller had already built or cloned it, and a refusal that
+   leaked would be worse than what it refused.
+
+   THE HARD PART WAS KNOWING HOW DEEP THE TARGET IS. fpjson nodes carry no parent
+   pointer, and measuring the owning tree per graft would turn a loop of N pushes
+   into O(N squared). So `TPhosphorJson` records a `Level` when the handle is
+   BORROWED -- one addition, and exact, because a live node's depth never changes:
+   nothing here re-parents a node (every graft clones) and deleting an ancestor
+   frees the node and empties the handle. `json_path@` adds one level per segment,
+   not one in total.
+
+   Measuring only the SOURCE's depth would have looked sufficient and was not: it
+   stops the doubling trick and misses a plain loop that nests one level at a time,
+   which is the shape the finding says an ordinary script hits by accident.
+17. ~~**engine/libs/PhosphorJsonLib.pas:1789** [high]~~ -- CLOSED 2026-09-10 by
+   REFUSING, not by snapshotting. `s.Count` was read once and `s` dereferenced
+   every turn; merging an object into its own ancestor makes `SetMember` free the
+   very node `s` points at, and `InvalidateBorrowed` protects HANDLES, not this
+   library's own local. Snapshotting the pairs first would have stopped the crash
+   and left a defined result nobody asked for -- the source flattened into the
+   target as a side effect of destroying it. Overlapping trees have no merge that
+   means anything, so both directions and the degenerate self-merge are refused as
+   a value, using the `NodeContains` the borrow machinery already had.
 18. **engine/libs/PhosphorStrLib.pas:860** [high] -- center$ with a saturating negative width wraps `pad := w - CpLen(s)` in 32-bit arithmetic and builds a 2 GiB string instead of returning the string unchanged (wrong answer + unbounded allocation, not a crash)
 
 ### Hangs (2)

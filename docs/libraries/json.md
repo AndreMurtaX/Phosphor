@@ -61,6 +61,16 @@ Every one answers **the object it was given**, so writes chain and a failed writ
 is reported as an error rather than by a return value you have to test.
 Non-objects are refused with `json value is not an object`.
 
+**Nothing may take a tree past 256 levels.** That is the ceiling `json_parse@`
+puts on a document it is handed, and since 2026-09-10 it is the same ceiling on a
+tree a script *builds*: a write that would nest deeper is refused with `json:
+this would nest more than 256 levels deep`, whichever door it came through. The
+reason is not tidiness. fpjson parses recursively, walks recursively, and — the
+part that surprises — *destroys* recursively, so a deep tree spends the process
+stack twice and dies in teardown, after the program's output is already complete
+and correct. 256 is far past anything a person or a serializer writes; .NET's
+JSON reader stops at 64.
+
 | function | what it answers |
 | --- | --- |
 | `json_setn@(o@, key$, n) → handle` | `o@`, with `key$` set to a number. An existing member of that name is replaced, not duplicated |
@@ -70,7 +80,7 @@ Non-objects are refused with `json value is not an object`.
 | `json_set@(o@, key$, v@) → handle` | `o@`, with `key$` set to a **clone** of `v@`. That is how a nested object or array is attached |
 | `json_setval@(o@, key$, value) → handle` | the same, with the JSON kind chosen from the value's runtime kind (number, string, bool, handle). This is what a `{ }` literal compiles into; a handle that is not a JSON value is an error |
 | `json_remove@(o@, key$) → handle` | `o@` without `key$`. A key that was not there is **not** an error — the answer is the same object either way, so removal is idempotent |
-| `json_merge@(dst@, src@) → handle` | `dst@` with a clone of each of `src@`'s members copied in, overwriting on a name collision. `src@` is untouched. Either side not an object is an error |
+| `json_merge@(dst@, src@) → handle` | `dst@` with a clone of each of `src@`'s members copied in, overwriting on a name collision. `src@` is untouched. Either side not an object is an error, and so is **overlap** — one value inside the other, or the two being the same value: a merge that would destroy its own source has no result worth naming |
 
 ### Objects — reading
 

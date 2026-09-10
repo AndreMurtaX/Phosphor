@@ -202,3 +202,193 @@ assert_eq(json_len(ok@), 5, "the whole representable range still parses")
 assert_near(json_itemn(ok@, 1), 1e308, 1e295, "1e308 is a number")
 assert_near(json_itemn(ok@, 3), 0, 0.0000001, "and 1e-400 underflows to zero")
 assert_true(len(json_stringify$(ok@)), "and the document still renders")
+
+rem ---------------------------------------------------------------
+rem THREE CRASHES: the process dying, not an error a script could catch.
+rem Every one of them was found by the 2026-09-10 gauntlet and every one
+rem is a door that let a tree deeper than MaxJsonDepth reach fpjson's
+rem recursive parser, its recursive walkers, or its recursive DESTRUCTOR.
+rem Quotes are built with chr$ throughout, so nothing here depends on how
+rem this file's own literals are escaped.
+rem ---------------------------------------------------------------
+
+test_case("json/a single-quoted value cannot hide the nesting")
+rem The depth scan opened a literal only on a double quote. fpjson opens one on a
+rem single quote too, so a document could hand the scan an ODD number of double
+rem quotes: the one inside a single-quoted value turned the scan ON, the one
+rem opening the next key turned it OFF, and every bracket after that was read as
+rem text. depth never rose, the ceiling was never reached, and the parser recursed
+rem until the process died -- exit 127 at 50,000 levels, a segmentation fault with
+rem no diagnostic at all at 200,000.
+q$ = chr$(34)
+sq$ = chr$(39)
+opens$ = ""
+closes$ = ""
+for i% = 1 to 300
+  opens$ = opens$ + "["
+  closes$ = closes$ + "]"
+next
+hostile$ = "{" + sq$ + "x" + sq$ + ":" + sq$ + q$ + sq$ + "," + q$ + "y" + q$ + ":" + opens$ + closes$ + "}"
+plain$ = "{" + q$ + "y" + q$ + ":" + opens$ + closes$ + "}"
+
+deepcaught = 0
+deepmsg$ = ""
+on error goto deepbad
+bad@ = json_parse@(hostile$)
+goto after_deep
+deepbad:
+deepcaught = 1
+deepmsg$ = errmsg$()
+resume next
+after_deep:
+on error goto 0
+assert_eq(deepcaught, 1, "the hostile document is refused")
+assert_true(instr(deepmsg$, "nests more than 256"), "for nesting, and it says so")
+
+rem THE CONTROL: the same nesting with no single-quoted prefix was always refused.
+rem Both must now give the same answer, which is what makes this a bypass and not
+rem a difference of opinion about the document.
+plaincaught = 0
+plainmsg$ = ""
+on error goto plainbad
+bad@ = json_parse@(plain$)
+goto after_plain
+plainbad:
+plaincaught = 1
+plainmsg$ = errmsg$()
+resume next
+after_plain:
+on error goto 0
+assert_eq(plaincaught, 1, "and so is the same nesting without the prefix")
+assert_true(instr(plainmsg$, "nests more than 256"), "with the same reason")
+
+rem AND SINGLE QUOTES STILL PARSE. The scan learned the delimiter; it did not
+rem learn to refuse it. A guard that refused something legitimate would be the
+rem failure mode this project names first.
+sqok@ = json_parse@("{" + sq$ + "a" + sq$ + ":1," + sq$ + "b" + sq$ + ":" + sq$ + "two" + sq$ + "}")
+assert_eq(json_getn(sqok@, "a"), 1, "a single-quoted key still parses")
+assert_eq(json_gets$(sqok@, "b"), "two", "and a single-quoted value")
+
+test_case("json/merge refuses two values that overlap")
+rem json_merge@ evaluated the source's Count once and then dereferenced the source
+rem on every turn. Merging an object into its own ancestor means one of the
+rem source's names collides with the target key that OWNS the source: SetMember
+rem finds it, empties every borrowed handle onto it, and then FREES it -- and the
+rem library's own local still pointed there. An access violation, deterministic.
+ov@ = json_object@()
+inner@ = json_object@()
+x@ = json_setn@(inner@, "b", 1)
+x@ = json_setn@(inner@, "c", 2)
+x@ = json_setn@(inner@, "d", 3)
+x@ = json_set@(ov@, "b", inner@)
+sub@ = json_get@(ov@, "b")
+mergecaught = 0
+mergemsg$ = ""
+on error goto mergebad
+x@ = json_merge@(ov@, sub@)
+goto after_merge
+mergebad:
+mergecaught = 1
+mergemsg$ = errmsg$()
+resume next
+after_merge:
+on error goto 0
+assert_eq(mergecaught, 1, "merging a value with something inside it is refused")
+assert_true(instr(mergemsg$, "overlap"), "and the reason is that they overlap")
+assert_eq(json_getn(json_get@(ov@, "b"), "c"), 2, "and the target is untouched")
+
+rem The other direction, and the degenerate one, are the same answer.
+mergecaught = 0
+on error goto mergebad2
+x@ = json_merge@(sub@, ov@)
+goto after_merge2
+mergebad2:
+mergecaught = 1
+resume next
+after_merge2:
+on error goto 0
+assert_eq(mergecaught, 1, "so is merging the other way round")
+
+mergecaught = 0
+on error goto mergebad3
+x@ = json_merge@(ov@, ov@)
+goto after_merge3
+mergebad3:
+mergecaught = 1
+resume next
+after_merge3:
+on error goto 0
+assert_eq(mergecaught, 1, "and so is merging a value with itself")
+
+rem AND AN HONEST MERGE STILL WORKS -- two trees that share nothing.
+ma@ = json_object@()
+x@ = json_setn@(ma@, "keep", 1)
+mb@ = json_object@()
+x@ = json_sets@(mb@, "add", "yes")
+x@ = json_merge@(ma@, mb@)
+assert_eq(json_getn(ma@, "keep"), 1, "an honest merge keeps what was there")
+assert_eq(json_gets$(ma@, "add"), "yes", "and takes what was offered")
+
+test_case("json/a tree a SCRIPT builds cannot pass the ceiling either")
+rem MaxJsonDepth was asked exactly one question, in json_parse@, and everything a
+rem script BUILT walked around it. A plain loop nesting a fragment in a fragment
+rem reached depth 131072: the program printed its complete and correct output and
+rem then died in teardown with an unhandled stack overflow and exit 3, handing the
+rem shell a failure for a run that had succeeded. json_stringify$ on the same tree
+rem was a segmentation fault.
+root@ = json_array@()
+cur@ = root@
+built = 0
+buildcaught = 0
+buildmsg$ = ""
+on error goto buildbad
+rem `resume next` continues INSIDE the loop, at the line after the one that
+rem failed -- so the flag is read there and the loop is left deliberately. A first
+rem draft let it run on to 400 and caught "array index out of bounds" from the
+rem item@ after a refused push, which is a test passing for the wrong reason.
+for i% = 1 to 400
+  nxt@ = json_array@()
+  x@ = json_push@(cur@, nxt@)
+  if buildcaught = 1 then
+    break
+  end if
+  cur@ = json_item@(cur@, 1)
+  built = built + 1
+next
+goto after_build
+buildbad:
+buildcaught = 1
+buildmsg$ = errmsg$()
+resume next
+after_build:
+on error goto 0
+assert_eq(buildcaught, 1, "building past the ceiling one level at a time is refused")
+assert_true(instr(buildmsg$, "nest more than 256"), "and the reason names the ceiling")
+assert_true(built < 400, "the loop did not finish")
+assert_true(built > 200, "but it got most of the way there before refusing")
+
+rem The scalar doors are the same gate: a value that adds no nesting is still a
+rem level, and the deepest node cannot take one.
+scalarcaught = 0
+on error goto scalarbad
+x@ = json_pushn@(cur@, 1)
+goto after_scalar
+scalarbad:
+scalarcaught = 1
+resume next
+after_scalar:
+on error goto 0
+assert_eq(scalarcaught, 1, "and so is a plain number at the deepest node")
+
+rem AND ORDINARY NESTING IS UNTOUCHED. Ten deep is what a real document looks
+rem like, and the whole point of the ceiling is that it never meets one.
+ok@ = json_array@()
+tip@ = ok@
+for i% = 1 to 10
+  n2@ = json_array@()
+  x@ = json_push@(tip@, n2@)
+  tip@ = json_item@(tip@, 1)
+next
+x@ = json_pushn@(tip@, 42)
+assert_eq(json_len(ok@), 1, "a ten-deep tree still builds")
+assert_true(len(json_stringify$(ok@)) > 20, "and still renders")

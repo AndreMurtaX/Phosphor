@@ -36,7 +36,10 @@ function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): Str
   another tree). JsonNodeFromHandle validates a handle id and hands back its
   node. One wrapper, one owner -- exactly the pattern IoLib/StrListLib share for
   their byte-buffer type. }
-function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean): Int64;
+{ ALevel is how deep ANode sits in its own tree -- 1 for a root, which is what a
+  sibling package building a tree of its own always has. See TPhosphorJson.Level. }
+function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean;
+  ALevel: Integer = 1): Int64;
 function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
 
 implementation
@@ -47,6 +50,16 @@ type
   TPhosphorJson = class
     Node: TJSONData;
     Owns: Boolean;
+    { HOW DEEP THIS NODE SITS IN ITS OWN TREE. 1 for a root; a borrowed child is
+      its parent's Level + 1.
+
+      fpjson nodes carry no parent pointer, so there is no way to ask a node how
+      deep it is -- and without that, a build door cannot tell whether what it is
+      about to graft would push the tree past MaxJsonDepth. Recording it when the
+      handle is BORROWED costs one addition and is exact, because a live node's
+      depth never changes: nothing here re-parents a node (every graft clones),
+      and deleting an ancestor frees the node and empties the handle. }
+    Level: Integer;
     destructor Destroy; override;
   end;
 
@@ -56,12 +69,13 @@ begin
   inherited Destroy();
 end;
 
-function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean): Int64;
+function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean; ALevel: Integer): Int64;
 var w: TPhosphorJson;
 begin
   w := TPhosphorJson.Create();
   w.Node := ANode;
   w.Owns := AOwns;
+  w.Level := ALevel;
   Result := RegisterHandle(w);
 end;
 
@@ -74,9 +88,51 @@ begin
   if Result then ANode := TPhosphorJson(o).Node;
 end;
 
-function RegJson(N: TJSONData; AOwns: Boolean): TValue;
+function RegJson(N: TJSONData; AOwns: Boolean; ALevel: Integer = 1): TValue;
 begin
-  Result := ValHandle(JsonRegisterNode(N, AOwns));
+  Result := ValHandle(JsonRegisterNode(N, AOwns, ALevel));
+end;
+
+{ How deep the node this handle names sits in its tree. Only ever called after a
+  Get* has already accepted the handle, so a stranger cannot reach it. }
+function JsonLevelOf(const V: TValue): Integer;
+var o: TObject;
+begin
+  Result := 1;
+  o := HandleObj(V.Hnd);
+  if o is TPhosphorJson then Result := TPhosphorJson(o).Level;
+end;
+
+{ How deep the tree under N is: 1 for a scalar or an empty container, 1 + the
+  deepest child otherwise. Counted no further than ACap, so this is bounded even
+  if it is ever handed a tree that got past the doors below. }
+function JsonDepthOf(N: TJSONData; ACap: Integer): Integer;
+var
+  i, d: Integer;
+begin
+  Result := 1;
+  if (N = nil) or (ACap <= 1) then Exit;
+  if not (N.JSONType in [jtObject, jtArray]) then Exit;
+  for i := 0 to N.Count - 1 do
+  begin
+    d := 1 + JsonDepthOf(N.Items[i], ACap - 1);
+    if d > Result then
+    begin
+      Result := d;
+      if Result >= ACap then Exit(ACap);
+    end;
+  end;
+end;
+
+{ How many path segments a json_*_path spelling names, so a node reached through
+  one gets the level it actually sits at rather than its parent's plus one. }
+function JsonPathSegments(const APath: String): Integer;
+var
+  i: Integer;
+begin
+  Result := 1;
+  for i := 1 to Length(APath) do
+    if APath[i] = '.' then Inc(Result);
 end;
 
 function GetNode(const V: TValue; out N: TJSONData; out Err: TPhosphorError): Boolean;
@@ -169,6 +225,26 @@ end;
   Before any node is freed, every borrowed handle pointing at it OR AT ANYTHING
   INSIDE IT is emptied, so the read that follows is a clean "stale handle" error
   instead of a crash. Owned handles are left alone: they hold their own trees. }
+const
+  { How deep a JSON tree may be, everywhere: what json_parse@ refuses in a
+    document and what the two graft gates below refuse in a tree a script builds.
+    The reasoning for the number, and the measurements behind it, are in the long
+    note above JsonNestsTooDeep. }
+  MaxJsonDepth = 256;
+
+{ Would grafting AAdd under a target at ALevel take the tree past the ceiling?
+  A refusal sets Err; the caller frees what it built. }
+function GraftTooDeep(ALevel: Integer; AAdd: TJSONData;
+  out Err: TPhosphorError): Boolean;
+begin
+  Result := ALevel + JsonDepthOf(AAdd, MaxJsonDepth + 1) > MaxJsonDepth;
+  if Result then
+    Err := MakeError(peRuntime, Format(
+      'json: this would nest more than %d levels deep', [MaxJsonDepth]))
+  else
+    Err := NoError();
+end;
+
 function NodeContains(ARoot, ATarget: TJSONData): Boolean;
 var i: Integer;
 begin
@@ -236,9 +312,32 @@ begin
   if idx >= 0 then Result := O.Items[idx];
 end;
 
-procedure SetMember(O: TJSONObject; const K: String; V: TJSONData);
+{ THE DEPTH CEILING IS ENFORCED HERE, AND IN AddItem, AND NOWHERE ELSE.
+
+  MaxJsonDepth used to be asked exactly one question, in t_json_parse, and the
+  comment above it explains what it is for: fpjson's parser recurses, and so does
+  its DESTRUCTOR, so a document's nesting is spent on the process stack twice.
+  Everything a script BUILDS bypassed that. A plain loop that nests a fragment in
+  a fragment reached depth 131072 with ~131k nodes; the program printed its
+  complete and correct output and then died in teardown with an unhandled
+  EStackOverflow and exit 3, handing the shell a failure for a run that had
+  succeeded. json_stringify$ on the same tree was a segmentation fault.
+
+  Thirteen doors add a node to a tree. Guarding thirteen doors is how this project
+  has written defects before -- one more spelling walks through the fourteenth --
+  so the check sits on the two functions every one of them goes through, and they
+  take the target's Level and answer False rather than grafting. The refused node
+  is FREED here: the caller built or cloned it before asking, and a refusal that
+  leaked would be a worse bug than the one being refused. }
+function SetMember(O: TJSONObject; ALevel: Integer; const K: String;
+  V: TJSONData; out Err: TPhosphorError): Boolean;
 var idx: Integer;
 begin
+  if GraftTooDeep(ALevel, V, Err) then
+  begin
+    V.Free;
+    Exit(False);
+  end;
   idx := O.IndexOfName(K);
   if idx >= 0 then
   begin
@@ -246,6 +345,20 @@ begin
     O.Delete(idx);
   end;
   O.Add(K, V);
+  Result := True;
+end;
+
+{ The array half of the same gate. }
+function AddItem(A: TJSONArray; ALevel: Integer; V: TJSONData;
+  out Err: TPhosphorError): Boolean;
+begin
+  if GraftTooDeep(ALevel, V, Err) then
+  begin
+    V.Free;
+    Exit(False);
+  end;
+  A.Add(V);
+  Result := True;
 end;
 
 { Read any node as a number without ever raising. A number is exact; a bool is
@@ -624,9 +737,10 @@ begin Err := NoError(); Result := RegJson(TJSONArray.Create(), True); end;
   unbounded recursion on input the program did not write is a defect, not a
   feature. json_parse@ is the one function in this library whose input is foreign
   by definition (a file, an HTTP body), and 256 is far past anything a person or a
-  serializer emits: .NET's JSON reader stops at 64. }
-const
-  MaxJsonDepth = 256;
+  serializer emits: .NET's JSON reader stops at 64.
+
+  MaxJsonDepth itself was MOVED UP on 2026-09-10, to sit just above the graft gate
+  that now also reads it. This note stays where it was written. }
 
 { True when AText nests deeper than ALimit, with APos set to the character that
   crossed it. Brackets inside a string literal are text, not structure, so the
@@ -634,27 +748,44 @@ const
   to the parser, which reports them far better than a depth scan could. Only
   nesting counts, so a long FLAT document -- 100k sibling elements -- is
   unaffected however long it gets, exactly as a long non-nested expression is. }
+{ THE DELIMITER IS TRACKED, and this scanner was the last of three to learn it.
+
+  fpjson opens a string on a double quote OR on a single quote -- the single quote
+  is refused only under joStrict, which t_json_parse does not set, so an object
+  whose key is written in single quotes really does parse. This scan opened one
+  only on the double quote, so a document could hand it an ODD number of them: a
+  double quote inside a single-quoted value flipped the scan into a string, the one
+  opening the next key flipped it out, and every bracket after that was read as
+  text. depth never
+  rose, the 256-level ceiling was never reached, and GetJSON was handed the
+  document to recurse over -- 50,000 levels was EStackOverflow with exit 127, and
+  200,000 was a segmentation fault with no diagnostic at all.
+
+  JsonHasUEscape and JsonRespellText both hold the opening delimiter in a Char for
+  exactly this reason, and say so in their own comments. This one was not brought
+  along: the completeness half of the same defect, a third time. }
 function JsonNestsTooDeep(const AText: String; ALimit: Integer;
   out APos: Int64): Boolean;
 var
   i, depth: Int64;
-  inStr, esc: Boolean;
+  delim: Char;
+  esc: Boolean;
 begin
   APos := 0;
   depth := 0;
-  inStr := False;
+  delim := #0;                          // #0 = not inside a literal
   esc := False;
   for i := 1 to Length(AText) do
   begin
-    if inStr then
+    if delim <> #0 then
     begin
       if esc then esc := False
       else if AText[i] = '\' then esc := True
-      else if AText[i] = '"' then inStr := False;
+      else if AText[i] = delim then delim := #0;   // the SAME one closes it
       Continue;
     end;
     case AText[i] of
-      '"': inStr := True;
+      '"', '''': delim := AText[i];
       '[', '{':
         begin
           Inc(depth);
@@ -1385,7 +1516,8 @@ var o: TJSONObject;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  SetMember(o, Args[1].Str, NumNode(AsDouble(Args[2])));
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str,
+                   NumNode(AsDouble(Args[2])), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_sets(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1393,7 +1525,8 @@ var o: TJSONObject;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  SetMember(o, Args[1].Str, TJSONString.Create(Args[2].Str));
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str,
+                   TJSONString.Create(Args[2].Str), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_setb(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1401,7 +1534,8 @@ var o: TJSONObject;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  SetMember(o, Args[1].Str, TJSONBoolean.Create(AsDouble(Args[2]) <> 0));
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str,
+                   TJSONBoolean.Create(AsDouble(Args[2]) <> 0), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_remove(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1456,7 +1590,7 @@ begin
     Err := MakeError(peRuntime, 'no such json member');
     Exit;
   end;
-  Result := RegJson(m, False);   // borrowed: belongs to the parent tree
+  Result := RegJson(m, False, JsonLevelOf(Args[0]) + 1);   // borrowed from the parent tree
 end;
 function t_json_has(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var o: TJSONObject;
@@ -1481,7 +1615,7 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  a.Add(NumNode(AsDouble(Args[1])));
+  if not AddItem(a, JsonLevelOf(Args[0]), NumNode(AsDouble(Args[1])), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_pushs(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1492,7 +1626,7 @@ begin
   // Add(TJSONData), not Add(String). The String overload re-encodes a byte >= $80
   // on the way in -- measured: a five-byte value became seven -- while handing it
   // an explicitly built node stores exactly what it was given.
-  a.Add(TJSONString.Create(Args[1].Str));
+  if not AddItem(a, JsonLevelOf(Args[0]), TJSONString.Create(Args[1].Str), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_len(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1667,7 +1801,8 @@ var o: TJSONObject;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  SetMember(o, Args[1].Str, TJSONNull.Create());
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str,
+                   TJSONNull.Create(), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1676,7 +1811,8 @@ begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
   if not GetNode(Args[2], v, Err) then Exit;
-  SetMember(o, Args[1].Str, v.Clone);   // clone: the object owns its own copy
+  // clone: the object owns its own copy
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str, v.Clone, Err) then Exit;
   Result := Args[0];
 end;
 
@@ -1686,7 +1822,7 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  a.Add(TJSONBoolean.Create(AsDouble(Args[1]) <> 0));
+  if not AddItem(a, JsonLevelOf(Args[0]), TJSONBoolean.Create(AsDouble(Args[1]) <> 0), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_pushnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1694,7 +1830,7 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  a.Add(TJSONNull.Create());
+  if not AddItem(a, JsonLevelOf(Args[0]), TJSONNull.Create(), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_push(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1703,7 +1839,7 @@ begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
   if not GetNode(Args[1], v, Err) then Exit;
-  a.Add(v.Clone);
+  if not AddItem(a, JsonLevelOf(Args[0]), v.Clone, Err) then Exit;
   Result := Args[0];
 end;
 
@@ -1728,7 +1864,7 @@ begin
     Err := MakeError(peRuntime, 'json array index out of bounds');
     Exit;
   end;
-  Result := RegJson(a.Items[z], False);   // borrowed child
+  Result := RegJson(a.Items[z], False, JsonLevelOf(Args[0]) + 1);   // borrowed child
 end;
 
 // --- object removal by key, array by position and pop -----------------------
@@ -1770,6 +1906,7 @@ begin
   // introduces on a Windows code page -- and therefore produced the wrong answer
   // where the code page is UTF-8 and nothing was lost in the first place. Two bugs
   // agreeing on one platform is not a behaviour worth keeping.
+  // a fresh array of plain strings: depth 2, which no ceiling can refuse
   for i := 0 to o.Count - 1 do arr.Add(TJSONString.Create(o.Names[i]));
   Result := RegJson(arr, True);   // a new owned array
 end;
@@ -1793,7 +1930,7 @@ begin
     Err := MakeError(peRuntime, 'no such json path');
     Exit;
   end;
-  Result := RegJson(n, False);   // borrowed
+  Result := RegJson(n, False, JsonLevelOf(Args[0]) + JsonPathSegments(Args[1].Str));   // borrowed
 end;
 
 // --- clone (deep) and merge -------------------------------------------------
@@ -1804,14 +1941,43 @@ begin
   if not GetNode(Args[0], n, Err) then Exit;
   Result := RegJson(n.Clone, True);
 end;
+{ THE TWO TREES MUST BE DISJOINT, and this used to read freed memory when they
+  were not.
+
+  `s.Count` was evaluated once and `s` dereferenced on every turn. Merging an
+  object into its own ancestor means one of the source's names collides with the
+  target key that OWNS the source: SetMember finds that member, correctly empties
+  every borrowed handle onto it, and then Delete FREES it -- which is the node `s`
+  points at. `s` is a raw local that nothing updates, so the next turn read
+  `s.Names[i]` out of a destroyed TJSONObject. InvalidateBorrowed exists to protect
+  HANDLES; it cannot protect this library's own local.
+
+  Measured: an object holding one member "b", itself an object with members "b",
+  "c" and "d", merged with its own "b" -- an access violation, deterministically.
+  The one-member spelling answered 0 and looked fine, because the loop ended
+  before the bad read, which is how this stayed invisible.
+
+  Snapshotting the pairs first would make it not crash, and would leave a defined
+  result nobody asked for: the source flattened into the target as a side effect of
+  destroying it. Overlapping trees have no merge that means anything, so both
+  directions are refused as a value -- the source inside the target, the target
+  inside the source, and the two being the same object. NodeContains, which the
+  borrow machinery already uses, answers both questions. }
 function t_json_merge(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var t, s: TJSONObject; i: Integer;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], t, Err) then Exit;
   if not GetObj(Args[1], s, Err) then Exit;
+  if NodeContains(t, s) or NodeContains(s, t) then
+  begin
+    Err := MakeError(peRuntime,
+      'json_merge@: the two values overlap -- one is inside the other, or they ' +
+      'are the same value');
+    Exit;
+  end;
   for i := 0 to s.Count - 1 do
-    SetMember(t, s.Names[i], s.Items[i].Clone);
+    if not SetMember(t, JsonLevelOf(Args[0]), s.Names[i], s.Items[i].Clone, Err) then Exit;
   Result := Args[0];
 end;
 
@@ -1884,7 +2050,7 @@ begin
   if not GetArr(Args[0], a, Err) then Exit;
   node := ValueToNode(Args[1], Err);
   if node = nil then Exit;
-  a.Add(node);
+  if not AddItem(a, JsonLevelOf(Args[0]), node, Err) then Exit;
   Result := Args[0];
 end;
 function t_json_setval(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1894,7 +2060,7 @@ begin
   if not GetObj(Args[0], o, Err) then Exit;
   node := ValueToNode(Args[2], Err);
   if node = nil then Exit;
-  SetMember(o, Args[1].Str, node);
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str, node, Err) then Exit;
   Result := Args[0];
 end;
 

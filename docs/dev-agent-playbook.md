@@ -365,10 +365,23 @@ two directories on Windows, ldconfig plus seven on Linux -- and the Windows gues
 missed the PATH, where this machine's copy lives. Both sides now ASK the binary
 (`phosphorpkgtest --sqlite-check`), which is what the OpenSSL branch in the same
 file had always done. All 169 pass and match their goldens; no defect was hiding.
-**A guess about where a library lives is not a gate.** Five remain:
-check-suffix.py hardcodes the parameter name
-`Args`, so it is blind to 180 of the 443 GUI registrations, and it cannot see a
-computed registration at all -- 63 are neither judged nor counted.
+**A guess about where a library lives is not a gate.**
+
+~~check-suffix.py hardcodes the parameter name `Args`, and cannot see a computed
+registration at all~~ -- BOTH CLOSED 2026-09-10, and the first was bigger than
+recorded. Of the 407 handler bodies under host/gui/libs, **352 call the parameter
+`A`**, 54 call it `Args` and one calls it `AArgs`; every `A[0]` was unreadable, so
+the gate resolved 1031 of 1232 and called the other 201 indeterminate. The name is
+written on each routine's own header and is now read from there: **1206 of 1260**,
+44 indeterminate, and not one of the newly-visible registrations was lying. The
+computed ones -- `Names[s] + ':$'`, `OptPaths[i] + ':'` -- were neither judged NOR
+COUNTED, so they were absent from the one line anybody reads; the arrays are read
+with the same two patterns coverage.py uses, so the two gates now enumerate the
+same registry, and an array a registration names but the file does not declare is
+REPORTED rather than skipped. Both proven by planting: a `$`-named GUI function
+returning `A[0]` (a handle) is caught with file, line and signature where the old
+gate exited 0 saying "every one returns what its name says"; a renamed array
+fails the gate by name. **Three remain:**
 test-suite.{ps1,sh} never build bin/phosphor.exe but run check-examples.py, which
 compiles every doc example with it. check-seams.py's SEAM_TYPES is a hardcoded
 literal, so a seam of a new type is invisible. check-codepage.py scans line by

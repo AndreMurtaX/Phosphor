@@ -62,6 +62,30 @@ CTOR_KIND = {'ValInt': NUMBER, 'ValDouble': NUMBER, 'ValNum': NUMBER,
 # and leaving AddHost out would have exempted a whole class from the rule by
 # accident rather than by decision.
 REG = re.compile(r"""Reg\.Add(?:Host)?\(\s*'([^']+)'\s*,\s*@(\w+)\s*\)""")
+
+# --- registrations whose NAME is computed -------------------------------------
+# Two libraries register a family by walking a const array of spellings:
+#
+#     Reg.AddHost(Names[s] + ':$', @f_calln);
+#     Reg.Add(OptPaths[i] + ':', @t_emptypath);
+#
+# REG above sees neither, because there is no literal name to see -- and this gate
+# did not merely fail to JUDGE them, it did not COUNT them either, so they were
+# absent from the "N of M resolved" line that is the only thing anybody reads. A
+# registration nothing counts cannot be reported as unjudged.
+#
+# The arrays are READ, not transcribed, with the same two patterns coverage.py
+# uses for the same job -- so the two gates enumerate the same registry rather
+# than two hand-kept approximations of it. An array a computed registration names
+# and the file does not declare is REPORTED, never skipped.
+CONST_STR_ARRAY = re.compile(
+    r"(?is)\b([A-Za-z_]\w*)\s*:\s*array\s*\[[^\]]*\]\s*of\s+String\s*=\s*\((.*?)\)\s*;")
+COMPUTED_REG = re.compile(
+    r"Reg\.Add(?:Host)?\(\s*([A-Za-z_]\w*)\s*\[[^\]]*\]\s*\+\s*'([^']*)'"
+    r"(?:\s*\+\s*(\w+))?\s*,\s*@(\w+)\s*\)")
+
+UNRESOLVED = []      # (file, array) a computed registration names but does not declare
+
 # A routine header. Pascal has no block markers a regex can trust, so a body is
 # taken as the text between one header and the NEXT one -- which makes the header
 # pattern load-bearing: anything it fails to recognise is not a boundary, and the
@@ -161,20 +185,41 @@ def bodies(text):
     return out
 
 
-def kind_of(expr, argsig):
+ARGS_PARAM = re.compile(r'\(\s*const\s+(\w+)\s*:\s*array\s+of\s+TValue', re.I)
+
+
+def args_param_of(body):
+    """What THIS routine calls its argument array.
+
+    Hardcoding `Args` here was a blind spot with a number on it: of the 407
+    handler bodies under host/gui/libs, 352 call the parameter `A`, 54 call it
+    `Args` and one calls it `AArgs`. Every expression of the form `A[0]` was
+    unreadable, so the gate resolved nothing for them and counted them as
+    indeterminate -- reported on by nothing, which reads exactly like a pass.
+
+    The name is not a convention to be assumed; it is written on the routine's
+    own header, so it is read from there. Falls back to `Args` for a body whose
+    header this cannot see, which keeps the old behaviour rather than inventing
+    a new one."""
+    m = ARGS_PARAM.search(body)
+    return m.group(1) if m else 'Args'
+
+
+def kind_of(expr, argsig, pname='Args'):
     """The kind of one expression, or None when it cannot be told."""
     c = re.match(r'(Val\w+)\s*\(', expr)
     if c:
         return CTOR_KIND.get(c.group(1))
-    a = re.match(r'Args\[\s*(\d+)\s*\]\s*$', expr)
+    q = re.escape(pname)
+    a = re.match(q + r'\[\s*(\d+)\s*\]\s*$', expr)
     if a and int(a.group(1)) < len(argsig):
         return ARG_KIND.get(argsig[int(a.group(1))])
-    if re.match(r'Args\[\s*High\(Args\)\s*\]\s*$', expr) and argsig:
+    if re.match(q + r'\[\s*High\(' + q + r'\)\s*\]\s*$', expr) and argsig:
         return ARG_KIND.get(argsig[-1])
     return None
 
 
-def returned_kinds(body, argsig, helpers=None):
+def returned_kinds(body, argsig, helpers=None, pname=None):
     """The kind of the LAST `Result :=` in the body, which is this codebase's
     success path.
 
@@ -190,6 +235,9 @@ def returned_kinds(body, argsig, helpers=None):
     number return, and arr_set:@n$ (which promises a number and answers the
     string it wrote) passed the gate on the strength of its own error path. The
     last assignment is the answer a successful call gives back."""
+    if pname is None:
+        pname = args_param_of(body)
+    q = re.escape(pname)
     kinds = set()
     sure = True
     last = None
@@ -200,12 +248,12 @@ def returned_kinds(body, argsig, helpers=None):
         if c and c.group(1) in CTOR_KIND:
             kinds.add(CTOR_KIND[c.group(1)])
             continue
-        a = re.match(r'Args\[\s*(\d+)\s*\]\s*$', expr)
+        a = re.match(q + r'\[\s*(\d+)\s*\]\s*$', expr)
         if a:
             i = int(a.group(1))
             kinds.add(ARG_KIND.get(argsig[i], None) if i < len(argsig) else None)
             continue
-        if re.match(r'Args\[\s*High\(Args\)\s*\]\s*$', expr):
+        if re.match(q + r'\[\s*High\(' + q + r'\)\s*\]\s*$', expr):
             kinds.add(ARG_KIND.get(argsig[-1], None) if argsig else None)
             continue
         sure = False          # a helper call, a variable, something else
@@ -215,7 +263,7 @@ def returned_kinds(body, argsig, helpers=None):
     # Re-read ONLY the last assignment; the scan above is kept just for its side
     # effect of finding `last`.
     kinds = set()
-    k = kind_of(last, argsig)
+    k = kind_of(last, argsig, pname)
     if k is None and helpers is not None:
         # ONE level of indirection: `Result := DoDim(akNumeric, Args, Err);` is
         # the house shape for a family of names sharing one worker, and leaving
@@ -226,7 +274,10 @@ def returned_kinds(body, argsig, helpers=None):
         call = re.match(r'(\w+)\s*\(', last)
         if call and call.group(1) in helpers:
             inner = helpers[call.group(1)]
-            got = {kind_of(m.group(1).strip(), argsig)
+            # The HELPER has its own header and its own parameter name; reading
+            # the caller's would make `A[0]` unreadable inside a worker that
+            # calls it `Args`, and the other way round.
+            got = {kind_of(m.group(1).strip(), argsig, args_param_of(inner))
                    for m in re.finditer(r'Result\s*:=\s*([^;]+);', inner)}
             if len(got) == 1 and None not in got:
                 k = got.pop()
@@ -250,15 +301,32 @@ def main():
         # no longer read as one.
         text = mask_comments(raw)
         fns = bodies(text)
-        for m in REG.finditer(text):
-            spec, impl = m.group(1), m.group(2)
+        # Every registration this file makes: the literal ones, and the computed
+        # ones expanded from the array they walk.
+        regs = [(mm.group(1), mm.group(2), mm.start()) for mm in REG.finditer(text)]
+        arrays = {mm.group(1): re.findall(r"'((?:[^']|'')*)'", mm.group(2))
+                  for mm in CONST_STR_ARRAY.finditer(text)}
+        for mm in COMPUTED_REG.finditer(text):
+            arr, tail, extra, cimpl = mm.groups()
+            if arr not in arrays:
+                UNRESOLVED.append((os.path.relpath(path, ROOT), arr))
+                continue
+            # A trailing VARIABLE in the signature (the `wild` in
+            # `Names[s] + ':$' + wild`) is a run-time argument spelling this gate
+            # cannot know. The NAME is still fully determined, and the name is
+            # what carries the suffix, so the registration is counted and judged
+            # against an argsig this marks unknown rather than dropped.
+            for nm in arrays[arr]:
+                regs.append((nm + tail + ('*' if extra else ''), cimpl, mm.start()))
+
+        for spec, impl, at in regs:
             if ':' not in spec:
                 continue
             name, argsig = spec.split(':', 1)
             body = fns.get(impl)
             if body is None:
                 continue                      # registered from another unit
-            line = text[:m.start()].count('\n') + 1
+            line = text[:at].count('\n') + 1
             # fns rides along: it is this file's other functions, the only
             # helper candidates a `Result := Worker(...)` can name.
             seen[(spec, path, line)] = (name, argsig, body, fns)
@@ -297,6 +365,18 @@ def main():
     # Say how many were actually JUDGED, not just how many were looked at. A gate
     # that reports 1230 while resolving 967 of them is overstating its own reach,
     # and the number a reader trusts should be the smaller one.
+    # AN ARRAY A COMPUTED REGISTRATION NAMES AND THE FILE DOES NOT DECLARE is a
+    # failure, not a skip. Silence here would put the gate back where it started:
+    # registrations it cannot see and does not say it cannot see.
+    if UNRESOLVED:
+        print('A COMPUTED REGISTRATION NAMES AN ARRAY THIS FILE DOES NOT DECLARE:')
+        for rel, arr in sorted(set(UNRESOLVED)):
+            print('  %s: %s -- moved, renamed, or declared in another unit' % (rel, arr))
+        print('')
+        print('Those registrations are neither counted nor judged while this')
+        print('stands. Point the pattern at the array, or say here why it cannot be.')
+        return 1
+
     print('suffixes: %d of %d registrations resolved, every one returns what its '
           'name says (%d indeterminate and reported on by nothing)'
           % (judged, len(seen), len(seen) - judged))

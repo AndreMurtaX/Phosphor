@@ -55,6 +55,7 @@ $fpcExe   = Resolve-Fpc
 $binDir   = Join-Path $root 'bin'
 $unitsDir = Join-Path $binDir 'units\x86_64-win64'
 $exe      = Join-Path $binDir 'phosphortest.exe'
+$suiteDirForStale = Join-Path $root 'tests\suite'
 New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
@@ -64,6 +65,32 @@ if (Test-Path $exe) { Remove-Item $exe -Force }
     (Join-Path $root 'host\console\phosphortest.lpr') | Out-Null
 if (-not (Test-Path $exe)) { throw "phosphortest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "runner built: $exe" -ForegroundColor DarkGray
+
+# THE RUNNER MUST REFUSE TO ANSWER WHEN IT IS OLDER THAN THE ENGINE, and this is
+# where that gets proved, because this is the one moment we know the binary IS
+# fresh. build.ps1 does not build this file; running it after an engine edit ran
+# old code and answered confidently with it, four times in one session and once
+# more on 2026-09-10. RefuseIfStale in phosphortest.lpr turns that into exit 3.
+#
+# The BINARY's timestamp is moved back, never a source file's: bin/ is a build
+# artifact and the next compile overwrites it, so an interruption here cannot
+# leave anything tracked changed. Restored immediately either way.
+$stampWas = (Get-Item $exe).LastWriteTime
+try {
+    (Get-Item $exe).LastWriteTime = $stampWas.AddHours(-2)
+    # Both streams redirected INSIDE cmd, the same way Run-One does it and for the
+    # same reason: PowerShell 5.1 wraps a native command's stderr in ErrorRecords
+    # and reads $? as false even on exit 0, so `2>&1` here turned a working guard
+    # into a NativeCommandError that killed the run.
+    cmd /c "`"$exe`" `"$(Join-Path $suiteDirForStale '00_harness.bas')`" > `"$env:TEMP\ph_stale.out`" 2> `"$env:TEMP\ph_stale.err`""
+    $staleRc = $LASTEXITCODE
+} finally {
+    (Get-Item $exe).LastWriteTime = $stampWas
+}
+if ($staleRc -ne 3) {
+    throw "phosphortest ran with a back-dated binary (exit $staleRc, expected 3) -- the staleness guard is not working, so a stale runner would answer silently again"
+}
+Write-Host "runner refuses to answer when stale (exit 3)" -ForegroundColor DarkGray
 Write-Host ''
 
 # --- run the manifest --------------------------------------------------------

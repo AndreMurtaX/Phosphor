@@ -7,7 +7,8 @@
   the assertion tally. The summary goes to stdout as raw LF-terminated bytes (so
   the golden compare is byte-exact and platform-independent); failure detail and
   engine errors go to stderr. Exit code: 0 all passed, 1 assertions failed,
-  2 the file did not compile/run.
+  2 the file did not compile/run, 3 THIS BINARY IS OLDER THAN THE ENGINE and
+  refuses to answer (see RefuseIfStale).
 
   Modelled on Plan9Basic's tests/Plan9BasicTest.dpr, but the engine here is the
   five-kind pipeline and the runner is deliberately minimal.
@@ -40,6 +41,87 @@ begin
     Delete(Result, 1, 3);
 end;
 
+{ THE TRAP THIS CLOSES, which is the most expensive one in the project.
+
+  scripts/build.ps1 builds phosphor.exe. It does NOT build this binary -- the TEST
+  RUNNERS do. So "I built" is not true of the file you are about to run, and
+  running it after an engine edit runs OLD CODE and answers confidently with it.
+  CLAUDE.md has warned about this since it fired four times in one session and
+  produced a wrong conclusion every time; on 2026-09-10 it fired again, on the
+  author of that warning, and cost twenty minutes of investigating a "hang" that
+  was a fix already working in a binary nobody had rebuilt.
+
+  A rule written in prose that has already failed six times is not a rule. So the
+  binary answers the question itself: if any source it is built from is newer than
+  the binary, it REFUSES rather than reports. A silent wrong answer becomes a loud
+  one, which is the whole trade.
+
+  Three details worth keeping:
+
+  - The comparison errs toward RUNNING. FileAge is a DOS timestamp with two-second
+    granularity, and only strictly-newer counts, so a source saved in the same
+    tick as the build reads as equal and is allowed. The trap is minutes wide;
+    seconds do not matter, and a guard that refuses a fresh binary would be worse
+    than the defect.
+  - It says nothing when it cannot tell. A binary somewhere other than <root>/bin,
+    or a checkout with no engine/ beside it, is not this repository and gets no
+    opinion.
+  - It is not in phosphor.exe. That one ships, and a shipped interpreter has no
+    business reading a source tree that is not there. This runner never ships. }
+function NewestIn(const ADir, AMask: String; var ANewest: LongInt; var AWho: String): Boolean;
+var
+  sr: TSearchRec;
+  full: String;
+  age: LongInt;
+begin
+  Result := False;
+  if FindFirst(IncludeTrailingPathDelimiter(ADir) + AMask, faAnyFile, sr) <> 0 then Exit;
+  try
+    repeat
+      if (sr.Attr and faDirectory) = 0 then
+      begin
+        full := IncludeTrailingPathDelimiter(ADir) + sr.Name;
+        age := FileAge(full);
+        if age > ANewest then
+        begin
+          ANewest := age;
+          AWho := full;
+          Result := True;
+        end;
+      end;
+    until FindNext(sr) <> 0;
+  finally
+    FindClose(sr);
+  end;
+end;
+
+procedure RefuseIfStale;
+var
+  exe, root, who: String;
+  exeAge, newest: LongInt;
+begin
+  exe := ParamStr(0);
+  exeAge := FileAge(exe);
+  if exeAge < 0 then Exit;                    // cannot tell: say nothing
+  root := ExtractFilePath(ExcludeTrailingPathDelimiter(ExtractFilePath(exe)));
+  if root = '' then Exit;
+  if not DirectoryExists(root + 'engine') then Exit;   // not this repository
+  newest := -1;
+  who := '';
+  NewestIn(root + 'engine', '*.pas', newest, who);
+  NewestIn(root + 'engine' + PathDelim + 'libs', '*.pas', newest, who);
+  NewestIn(root + 'tests', '*.pas', newest, who);
+  NewestIn(root + 'host' + PathDelim + 'console', '*.lpr', newest, who);
+  if newest <= exeAge then Exit;
+  Writeln(StdErr, 'phosphortest: this runner is OLDER than the engine it was built from.');
+  Writeln(StdErr, '  runner : ', exe, '  (', DateTimeToStr(FileDateToDateTime(exeAge)), ')');
+  Writeln(StdErr, '  newer  : ', who, '  (', DateTimeToStr(FileDateToDateTime(newest)), ')');
+  Writeln(StdErr, '  scripts/build.ps1 does not build this binary -- the test runners do.');
+  Writeln(StdErr, '  Run the suite instead: scripts/test-suite.ps1  (or .sh on Linux).');
+  Writeln(StdErr, '  Refusing to answer with code nobody rebuilt.');
+  Halt(3);
+end;
+
 procedure WriteSummary;
 var
   s: String;
@@ -54,6 +136,7 @@ var
   path: String;
   rc, i: Integer;
 begin
+  RefuseIfStale();
   if ParamCount < 1 then
   begin
     Writeln(StdErr, 'usage: phosphortest <file.bas>');

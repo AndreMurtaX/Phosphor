@@ -29,7 +29,26 @@ mkdir -p "$units"; rm -f "$exe"
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -FU"$units" -FE"$bin" -o"$exe" \
   "$root/host/console/phosphortest.lpr" >/dev/null
 [ -x "$exe" ] || { echo "phosphortest did not build"; exit 1; }
-echo "runner built: $exe"; echo
+echo "runner built: $exe"
+
+# THE RUNNER MUST REFUSE TO ANSWER WHEN IT IS OLDER THAN THE ENGINE, proved here
+# because this is the one moment we know it is fresh. build.sh does not build this
+# file; running it after an engine edit ran old code and answered confidently with
+# it. RefuseIfStale in phosphortest.lpr turns that into exit 3.
+#
+# The BINARY's timestamp is moved back, never a source file's: bin/ is a build
+# artifact and the next compile overwrites it. Restored immediately either way.
+touch -r "$exe" "$exe.stamp"
+touch -d '2 hours ago' "$exe"
+"$exe" "$root/tests/suite/00_harness.bas" >/dev/null 2>&1
+stale_rc=$?
+touch -r "$exe.stamp" "$exe"
+rm -f "$exe.stamp"
+if [ "$stale_rc" -ne 3 ]; then
+  echo "phosphortest ran with a back-dated binary (exit $stale_rc, expected 3) -- the staleness guard is not working"
+  exit 1
+fi
+echo "runner refuses to answer when stale (exit 3)"; echo
 
 suite="$root/tests/suite"; neg="$root/tests/negative"
 # Single-source manifest, shared with test-suite.ps1 so Windows/Linux never drift.

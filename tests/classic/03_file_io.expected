@@ -8,3 +8,6 @@ record: 42/gamma
 after append: 5
 head: [alpha]
 deleted: 1
+ch7: [<0>]
+ch8: [<1>]
+cleaned: 2

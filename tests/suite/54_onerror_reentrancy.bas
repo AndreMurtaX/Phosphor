@@ -293,3 +293,173 @@ function downrec(n) local i, s
   next
   return s
 endfunction
+
+test_case("select/a SELECT's subject belongs to the activation, not the program")
+rem The FOR bound above, one construct along, and the same defect: the subject is
+rem evaluated ONCE into a hidden temporary and reloaded before every case test, so
+rem it has to survive the case EXPRESSIONS -- and a case expression is an
+rem arbitrary expression that can call a function that re-enters this same SELECT.
+rem While that temporary was a program-wide global the inner activation overwrote
+rem it, and the outer SELECT then compared the INNER subject against its own
+rem remaining labels. selre(2) answered -1; the same logic as an if/elseif chain,
+rem and the same SELECT with the call hoisted out of the label, both answer 2.
+rem
+rem The subject is typed vtAny and now lives in a frame slot, so the string case
+rem is here as well: it is the only kind of value that reaches that slot which a
+rem FOR bound never could.
+assert_eq(selre(1), -1, "the level that genuinely matches no label")
+assert_eq(selre(2), 2, "case 2 still matches after a case expression re-entered")
+assert_eq(selre(3), 3, "and case 3, one level deeper again")
+assert_eq(selstr$("a"), "?", "the string subject that matches nothing")
+assert_eq(selstr$("b"), "B", "and one that matches after the same re-entry")
+
+rem ---------------------------------------------------------------
+rem A JUMP OUT OF A FUNCTION IS REFUSED ONLY IF IT DOES NOT COME BACK.
+rem
+rem There is no label inside a function -- labels are recorded by the
+rem top-level loop alone -- so every jump from inside one names a
+rem label outside it. The first version of that check refused all of
+rem them, and its reviewer measured twelve programs that answer
+rem correctly WITHOUT the check and were refused WITH it.
+rem
+rem These pin the ones that must stay legal, because a jump that
+rem RETURNS leaves nothing behind: gosub, on <expr> gosub, and an
+rem `on error goto` handler installed inside a function body. The
+rem shapes that never come back are pinned as refusals: plain goto
+rem in tests/negative/28, on <expr> goto in tests/negative/30. They
+rem need two files because they reach the check from two different
+rem procedures.
+rem
+rem The last pair is the argument in one line: the same loop body
+rem answers 10 whether its handler sits in the function that faults
+rem or in the caller one frame up. Where the handler is installed is
+rem not what makes it work, so refusing one of the two placements was
+rem refusing a placement, not a defect.
+rem ---------------------------------------------------------------
+
+gtot = 0
+assert_eq(gacc(3), 3, "a gosub inside a function reaches a top-level sub")
+assert_eq(gacc(4), 4, "and again, from a second call")
+assert_eq(gtot, 7, "the sub saw both visits")
+assert_eq(grec(3), 6, "a gosub from a RECURSIVE function")
+assert_eq(glog$, "3,2,1,0,", "at every level of the recursion")
+assert_eq(gpick(1), 11, "on <expr> gosub, first label")
+assert_eq(gpick(2), 22, "on <expr> gosub, second label")
+assert_eq(ghand(), 5, "a handler installed INSIDE a function body runs")
+assert_eq(gretry(), 5, "and plain resume retries the failing statement")
+assert_eq(ginner(), 10, "an error raised inside a for, handled from in-function")
+assert_eq(gouter(), 10, "and the same body with the handler one frame UP agrees")
+
+
+function selre(n)
+  select case n
+  case selg(n)
+    return 1
+  case 2
+    return 2
+  case 3
+    return 3
+  endselect
+  return -1
+endfunction
+
+function selg(n)
+  if n > 1 then return selre(n - 1)
+  return 99
+endfunction
+
+function selstr$(s$)
+  select case s$
+  case selgs$(s$)
+    return "first"
+  case "b"
+    return "B"
+  case "c"
+    return "C"
+  endselect
+  return "?"
+endfunction
+
+function selgs$(s$)
+  if s$ = "b" then return selstr$("a")
+  return "zzz"
+endfunction
+
+
+function gacc(n)
+  gcur = n
+  gosub gaddit
+  return gcur
+endfunction
+
+function grec(n)
+  gcur = n
+  gosub gnote
+  if n <= 0 then return 0
+  return n + grec(n - 1)
+endfunction
+
+function gpick(k)
+  gr = 0
+  on k gosub gone, gtwo
+  return gr
+endfunction
+
+function ghand()
+  on error goto gh
+  gx = 1 / 0
+  return 5
+endfunction
+
+function gretry()
+  gd = 0
+  on error goto gh2
+  gx = 10 / gd
+  return gx
+endfunction
+
+function ginner() local i, s
+  on error goto gh
+  for i = 1 to 3
+    s = s - 10 / (i - 2)
+  next
+  return s
+endfunction
+
+function gouterbody() local i, s
+  for i = 1 to 3
+    s = s - 10 / (i - 2)
+  next
+  return s
+endfunction
+
+function gouter()
+  on error goto gh
+  return gouterbody()
+endfunction
+
+
+end
+
+gaddit:
+gtot = gtot + gcur
+return
+
+gnote:
+glog$ = glog$ + str$(gcur) + ","
+return
+
+gone:
+gr = 11
+return
+
+gtwo:
+gr = 22
+return
+
+gh:
+resume next
+
+gh2:
+gd = 2
+resume

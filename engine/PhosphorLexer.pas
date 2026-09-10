@@ -179,6 +179,7 @@ var
   T: TToken;
   s: String;
   hasDot: Boolean;
+  strClosed: Boolean;
   iv: Int64;
 begin
   len := Length(FSrc);
@@ -289,6 +290,24 @@ begin
       Inc(FPos); // opening quote
       s := '';
       runStart := FPos;
+      // WHETHER THE CLOSING QUOTE WAS EVER SEEN, tracked rather than inferred.
+      // The loop below has three exits and only two of them used to be
+      // examined: the `Break` after a closing quote, and the two error paths.
+      // The THIRD is the loop condition simply going false -- the source ran
+      // out while the literal was still open -- and it fell straight through to
+      // the Push below and produced a perfectly ordinary tkString. Worse, the
+      // pending run since `runStart` is flushed only AT a quote or an escape,
+      // so the token's text was empty as well: the last statement of a
+      // truncated file silently became `println ""`.
+      //
+      // It cannot be inferred from FPos afterwards, which is why it is a flag: a
+      // literal whose closing quote is the final byte of the file also leaves
+      // FPos = len + 1, and that one is correct.
+      //
+      // The bare-#10 path below already calls this same file an error, so the
+      // only thing that decided between "unterminated string" and silent
+      // success was whether the file happened to end with a newline.
+      strClosed := False;
       while FPos <= len do
       begin
         if FSrc[FPos] = '"' then
@@ -303,6 +322,7 @@ begin
           else
           begin
             Inc(FPos); // closing quote
+            strClosed := True;
             Break;
           end;
         end
@@ -346,6 +366,12 @@ begin
         end
         else
           Inc(FPos);
+      end;
+      if not strClosed then
+      begin
+        FErr := 'unterminated string';
+        FErrLine := startLine;
+        Exit(False);
       end;
       T := Default(TToken);
       T.Kind := tkString;

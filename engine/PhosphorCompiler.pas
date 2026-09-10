@@ -30,6 +30,36 @@ uses
   SysUtils, PhosphorValue, PhosphorOpcodes, PhosphorLexer;
 
 type
+  { WHERE A STATEMENT'S HIDDEN TEMPORARY LIVES, and it is not a property of the
+    statement -- it is a property of what the statement is INSIDE.
+
+    Six constructs need a scratch cell the program cannot name: the FOR bound,
+    the SELECT subject, the ON <expr> GOTO selector, the channel of INPUT #n and
+    PRINT #n, and SWAP's two. Every one of them was a hidden GLOBAL, one per
+    statement in the whole program, and every one of them can be re-entered:
+    each holds its value across an expression the program supplies, and that
+    expression may call a function that reaches the same statement again. The
+    inner activation then overwrote the outer one's cell, and the outer one
+    carried on with the inner value -- silently, and only ever wrongly.
+
+    Commit c042d1a found this at the FOR bound ("a FOR loop's upper bound
+    belongs to the activation, not the program") and fixed FOR by hand. The
+    other five were the same defect and kept it: `select case n / case g(n)`
+    where g re-enters f took the WRONG branch, because the tests for the
+    remaining labels compared the inner subject against the outer labels.
+
+    So the rule is stated once, here, where the cell is allocated: a temporary
+    belongs to the ACTIVATION. Inside a function it is a frame slot, which
+    recursion gives a fresh copy of; at top level there is no activation to
+    belong to and nothing that can re-enter, so it stays a hidden global. A
+    caller cannot get this wrong by accident any more, because NewHidden is the
+    only way to make one and EmitStoreHidden/EmitLoadHidden are the only way to
+    reach it. }
+  THiddenSlot = record
+    Idx: Integer;
+    IsLocal: Boolean;
+  end;
+
   TPhosphorCompiler = class
   private
     FLex: TLexer;
@@ -75,6 +105,9 @@ type
     function CurIsTerm(const ATerms: array of String): Boolean;
     function VarIndex(const AName: String): Integer;
     function NewHiddenVar(AType: TVarType): Integer;
+    function NewHidden(AType: TVarType): THiddenSlot;         // see THiddenSlot
+    procedure EmitStoreHidden(const ASlot: THiddenSlot; ALine: Integer);
+    procedure EmitLoadHidden(const ASlot: THiddenSlot; ALine: Integer);
     function LocalIndex(const AName: String): Integer;
     function ConstIndex(const AName: String): Integer;
     procedure AddLocal(const AName: String);
@@ -90,7 +123,7 @@ type
     procedure PatchBreaks(ATarget: Integer);
     procedure PatchConts(ATarget: Integer);
     procedure RecordLabel(const AName: String; APos: Integer);
-    procedure AddGoto(AInstr: Integer; const AName: String);
+    procedure AddGoto(AInstr: Integer; const AName: String; AReturns: Boolean);
     procedure ResolveGotos;
     procedure ParseExpr;
     procedure ParseOr;
@@ -126,7 +159,7 @@ type
     procedure ParsePrintFile(AAddNewline: Boolean);   // print #n [, item[; item...]]
     procedure ParsePrintUsing(AAddNewline: Boolean);  // print using fmt$; args
     procedure EmitReadTarget(APos: Integer);   // SWAP: emit code that reads an lvalue
-    procedure EmitWriteTarget(APos, ATempVar: Integer); // SWAP: assign a temp into an lvalue
+    procedure EmitWriteTarget(APos: Integer; const ATemp: THiddenSlot); // SWAP: assign a temp into an lvalue
     procedure SkipTarget;         // SWAP: advance the lexer past one lvalue
     function  InputTypeCode(const AName: String): Integer;
     procedure ParseStatement;      // the depth-guarded door; calls the body below
@@ -262,6 +295,48 @@ begin
   FVarTypes[Result] := AType;   // override the suffix-derived type
 end;
 
+{ A temporary for the activation, or for the program when there is no activation.
+  See THiddenSlot for what this exists to prevent.
+
+  The name is generated from the same FHidden counter either way, so it can
+  collide with nothing a program can write (an identifier cannot begin with '_'
+  here) and with no other temporary. Inside a function it becomes a frame slot:
+  ParseFunction rewrites the local-type table from FLocalCount AFTER the body is
+  parsed, precisely so slots the body adds are sized in, and the FOR bound
+  already relied on that. The type is set outright, exactly as NewHiddenVar sets
+  it for a global, because a generated name has no suffix to derive one from and
+  a SELECT subject or a SWAP temporary is vtAny. }
+function TPhosphorCompiler.NewHidden(AType: TVarType): THiddenSlot;
+var name: String;
+begin
+  if FInFunction then
+  begin
+    name := '__h' + IntToStr(FHidden);
+    Inc(FHidden);
+    AddLocal(name);
+    Result.Idx := FLocalCount - 1;
+    Result.IsLocal := True;
+    FLocalTypes[Result.Idx] := AType;   // override the suffix-derived type
+  end
+  else
+  begin
+    Result.Idx := NewHiddenVar(AType);
+    Result.IsLocal := False;
+  end;
+end;
+
+procedure TPhosphorCompiler.EmitStoreHidden(const ASlot: THiddenSlot; ALine: Integer);
+begin
+  if ASlot.IsLocal then FProg.Emit(opStoreLocal, ASlot.Idx, 0, ALine)
+  else FProg.Emit(opStoreVar, ASlot.Idx, 0, ALine);
+end;
+
+procedure TPhosphorCompiler.EmitLoadHidden(const ASlot: THiddenSlot; ALine: Integer);
+begin
+  if ASlot.IsLocal then FProg.Emit(opLoadLocal, ASlot.Idx, 0, ALine)
+  else FProg.Emit(opLoadVar, ASlot.Idx, 0, ALine);
+end;
+
 function TPhosphorCompiler.LocalIndex(const AName: String): Integer;
 var i: Integer;
 begin
@@ -304,17 +379,27 @@ end;
 procedure TPhosphorCompiler.EmitStoreVar(const AName: String; ALine: Integer);
 var li: Integer;
 begin
+  // THE INNER BINDING IS ASKED FIRST, and that order is the whole point: a
+  // parameter or a `local` of the CURRENT function is a frame slot and shadows
+  // anything of the same name outside it. See EmitLoadVar.
+  li := LocalIndex(AName);
+  if li >= 0 then
+  begin
+    FProg.Emit(opStoreLocal, li, 0, ALine);
+    Exit;
+  end;
   // A name declared `const' is a fixed value, not a slot -- writing to it (by
   // '=', a compound op, READ, or a FOR variable) is a compile error, so a const
-  // and a like-named variable can never quietly coexist.
+  // and a like-named GLOBAL can never quietly coexist. Asked second, so
+  // `size = size + 1` inside `function area(size)` is an ordinary parameter
+  // update and no longer reports `cannot assign to constant size` at a line the
+  // author wrote as one.
   if ConstIndex(AName) >= 0 then
   begin
     Fail('cannot assign to constant ' + AName, ALine);
     Exit;
   end;
-  li := LocalIndex(AName);
-  if li >= 0 then FProg.Emit(opStoreLocal, li, 0, ALine)
-  else FProg.Emit(opStoreVar, VarIndex(AName), 0, ALine);
+  FProg.Emit(opStoreVar, VarIndex(AName), 0, ALine);
 end;
 
 function TPhosphorCompiler.CompoundOp(K: TTokenKind): TOpcode;
@@ -510,8 +595,86 @@ begin
   Inc(FLabelCount);
 end;
 
-procedure TPhosphorCompiler.AddGoto(AInstr: Integer; const AName: String);
+{ EVERY JUMP TO A LABEL IS REGISTERED HERE, so the one thing that is true of all
+  of them is checked here once rather than at each of the eight sites that jump.
+
+  A LABEL IS ALWAYS PROGRAM-LEVEL. RecordLabel is reached from exactly one place
+  -- the top-level loop in Compile -- and a function body never passes through
+  it: ParseFunction consumes the body with ParseBlockUntil. So there is no such
+  thing as a label inside a function, and a `goto` written in a function body can
+  only ever name a label OUTSIDE it. The jump is not "surprising"; it is
+  meaningless, and the compiler emitted it anyway.
+
+  WHAT IT DID INSTEAD. The activation was simply abandoned. `c = a + esc()` with
+  a `goto` in esc's body left the assignment half-done -- c kept its old value,
+  the operand `a` stayed on the stack and the frame was never popped -- and the
+  program exited 0 with no diagnostic. Through `callfunc` it was worse: the
+  escape happens inside the frame-bounded ExecFrom of CallUserFunc, so the rest
+  of the program ran INSIDE the call and then a SECOND time after it returned.
+  Every side effect after the label -- a written row, a sent line -- happened
+  twice, silently. And repeating it leaks a frame per call.
+
+  So: refused, the way `break` outside a loop and an orphan `next` already are.
+  It costs nothing legitimate. `on error goto 0` does not come through here (it
+  names no label, and disabling a handler inside a function stays legal), nor
+  does `on error call`, which docs/libraries/err.md already names as THE form to
+  use inside a function -- in those words, and for this exact reason. The prose
+  was right; nothing enforced it. }
+procedure TPhosphorCompiler.AddGoto(AInstr: Integer; const AName: String;
+  AReturns: Boolean);
 begin
+  { REFUSED ONLY IF THE JUMP DOES NOT COME BACK, and AReturns is what says so.
+
+    There is no such thing as a label inside a function -- labels are recorded in
+    one place, Compile's top-level loop, which a function body never passes
+    through -- so every jump from inside one names a label outside it. That much
+    is true of all eight call sites. What is NOT true of all eight is that
+    leaving is a defect.
+
+    A `goto` leaves and never returns: the operand stays on the stack, the frame
+    is never popped, and through callfunc the tail of the program runs twice.
+    That is the defect this check was added for.
+
+    `gosub`, `on <expr> gosub` and `on error goto <label>` RETURN INTO THE
+    ACTIVATION, and on the tree before this check they worked. The first version
+    refused them too, and its reviewer measured twelve programs that answer
+    correctly without the check and were refused with it -- gosub to a shared
+    sub, from a recursive function, across 501 live frames; `on k gosub`; a
+    handler with `resume next`, with `resume`, with an error raised in a nested
+    call, one handler per function, `erl()` inside a `for`. Two of those are
+    byte-identical to the same program with the handler installed at TOP level,
+    which is the documented pattern: the in-function form is not a quirk, it is
+    the same handler in a different place.
+
+    So the discriminator is the opcode, and it is the sharpest one this site can
+    have -- but it is a BOUND, NOT AN EQUIVALENCE, and saying otherwise would be
+    a promise the code does not keep. opJump PROVABLY never returns: plain `goto`
+    and `on <expr> goto`, refused. opGosub and opSetErrHandler return WHEN THEIR
+    TARGET DOES, and the target is a top-level label whose body this site cannot
+    see. A subroutine that ends in `goto` instead of `return`, and a handler that
+    never reaches `resume`, both abandon the activation exactly as `goto` does --
+    `on error goto h` inside a function whose handler falls through to the end of
+    the program still runs the tail TWICE under callfunc, which is byte for byte
+    the wrong answer of this defect's own repro. Measured on both OSes.
+
+    That is not a regression: the tree before this check behaves identically, and
+    refusing it here is exactly what cost the first version of this guard its
+    twelve correct programs. But it is the same defect through another door, and
+    closing it belongs to the VM, which can see at fault time what this site
+    cannot -- that a handler jump crossed a frame boundary. Refuse only what is
+    provably wrong; record the rest rather than imply it is gone.
+
+    A label written inside a function stays unreachable either way, but the two
+    forms say so differently: `on error goto h` with `h:` in the body is allowed
+    through and gets `undefined label h` from ResolveGotos, while `goto skip`
+    with `skip:` in the body is refused here first and gets the message below. }
+  if FInFunction and (not AReturns) then
+  begin
+    Fail('a jump to label ' + AName + ' would leave the function body and never ' +
+         'come back; every label belongs to the program, not to a function -- ' +
+         'use ''return'', or ''gosub'' if you meant to come back', FLex.Cur().Line);
+    Exit;
+  end;
   if FGotoCount = Length(FGotoInstr) then
   begin
     SetLength(FGotoInstr, (FGotoCount + 1) * 2);
@@ -621,7 +784,20 @@ begin
           FBool := False;
         end
         else if FLex.Peek().Kind = tkLParen then begin FLex.Advance(); ParseCall(t.StrVal, t.Line); end
-        else if ConstIndex(t.StrVal) >= 0 then
+        // A CONST IS AN OUTER BINDING AND A LOCAL SHADOWS IT. This test used to
+        // stand alone, ahead of the only branch that consults LocalIndex, so a
+        // global `const size = 10` was substituted for the parameter of
+        // `function area(size)`: the argument was thrown away, `area(3)`
+        // answered 100 instead of 9, and the parameter was dead code with
+        // nothing reported. Globals never behaved that way -- EmitLoadVar has
+        // always asked LocalIndex first -- so a const was the one outer name a
+        // parameter could not shadow. The guard makes it behave like the global
+        // it resembles; the two orders differ only where the name IS a
+        // parameter or `local` of the function being compiled, which is exactly
+        // the broken case. A const and a like-named local in DIFFERENT
+        // functions never met here at all (LocalIndex answers -1 outside the
+        // current function, and -1 outright at top level), and still do not.
+        else if (LocalIndex(t.StrVal) < 0) and (ConstIndex(t.StrVal) >= 0) then
         begin
           FProg.Emit(opPushConst, FProg.Consts.Add(FConstVals[ConstIndex(t.StrVal)]), 0, t.Line);
           FLex.Advance();
@@ -766,17 +942,18 @@ end;
   the end so the following labels are not re-tested. }
 procedure TPhosphorCompiler.ParseOnGoto;
 var
-  ln, tmp, idx, jNext, j: Integer;
+  ln, idx, jNext, j: Integer;
+  tmp: THiddenSlot;
   isGosub: Boolean;
   labelName: String;
   endJumps: array of Integer;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance();                       // 'on'
-  tmp := NewHiddenVar(vtNumber);
+  tmp := NewHidden(vtNumber);           // the activation's, not the program's
   ParseExpr();                          // the selector
   if FFailed then Exit;
-  FProg.Emit(opStoreVar, tmp, 0, ln);
+  EmitStoreHidden(tmp, ln);
   if IsKeyword('gosub') then isGosub := True
   else if IsKeyword('goto') then isGosub := False
   else begin Fail('expected ''goto'' or ''gosub'' after ''on <expr>''', FLex.Cur().Line); Exit; end;
@@ -788,19 +965,19 @@ begin
     else if FLex.Cur().Kind = tkIdent then labelName := FLex.Cur().StrVal
     else begin Fail('''on'' needs a list of labels', FLex.Cur().Line); Exit; end;
     FLex.Advance();
-    FProg.Emit(opLoadVar, tmp, 0, ln);
+    EmitLoadHidden(tmp, ln);
     FProg.Emit(opPushConst, FProg.Consts.Add(ValInt(idx)), 0, ln);
     FProg.Emit(opEQ, 0, 0, ln);
     jNext := FProg.Emit(opJumpIfFalse, 0, 0, ln);   // selector <> idx: next test
     if isGosub then
     begin
-      j := FProg.Emit(opGosub, 0, 0, ln); AddGoto(j, labelName);
+      j := FProg.Emit(opGosub, 0, 0, ln); AddGoto(j, labelName, True);
       SetLength(endJumps, Length(endJumps) + 1);
       endJumps[High(endJumps)] := FProg.Emit(opJump, 0, 0, ln);   // after return, jump to end
     end
     else
     begin
-      j := FProg.Emit(opJump, 0, 0, ln); AddGoto(j, labelName);
+      j := FProg.Emit(opJump, 0, 0, ln); AddGoto(j, labelName, False);
     end;
     FProg.Patch(jNext, FProg.Count);
     Inc(idx);
@@ -833,9 +1010,9 @@ begin
     FLex.Advance();
   end
   else if FLex.Cur().Kind = tkInt then
-    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, IntToStr(FLex.Cur().IntVal)); FLex.Advance(); end
+    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, IntToStr(FLex.Cur().IntVal), True); FLex.Advance(); end
   else if FLex.Cur().Kind = tkIdent then
-    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, FLex.Cur().StrVal); FLex.Advance(); end
+    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, FLex.Cur().StrVal, True); FLex.Advance(); end
   else
     Fail('''on error goto'' needs a label or 0', FLex.Cur().Line);
 end;
@@ -1216,12 +1393,12 @@ end;
 
 procedure TPhosphorCompiler.ParseFor;
 var
-  ln, endVar, condStart, jFalse, incPoint, afterLoop: Integer;
+  ln, condStart, jFalse, incPoint, afterLoop: Integer;
+  endVar: THiddenSlot;
   step: TValue;
   down: Boolean;
   neg: Boolean;
-  endIsLocal: Boolean;
-  vname, endName: String;
+  vname: String;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'for'
@@ -1236,20 +1413,13 @@ begin
   FLex.Advance();
   // The bound lives where the loop lives: a LOCAL slot inside a function, so a
   // recursive call gets its own, and a hidden global at top level, where nothing
-  // can re-enter to overwrite it. See the note above this procedure.
-  endIsLocal := FInFunction;
-  if endIsLocal then
-  begin
-    endName := '__for' + IntToStr(FHidden);
-    Inc(FHidden);
-    AddLocal(endName);
-    endVar := LocalIndex(endName);
-  end
-  else
-    endVar := NewHiddenVar(vtNumber);
+  // can re-enter to overwrite it. See the note above this procedure -- and
+  // THiddenSlot, which is now where that rule is stated and applied, for the
+  // five other temporaries that needed it and did not have it. This site kept
+  // its own copy of the decision until then; it emits what it always did.
+  endVar := NewHidden(vtNumber);
   ParseExpr();                                     // end value
-  if endIsLocal then FProg.Emit(opStoreLocal, endVar, 0, ln)
-  else FProg.Emit(opStoreVar, endVar, 0, ln);
+  EmitStoreHidden(endVar, ln);
 
   // STEP: optional numeric literal (possibly negative); default +1
   step := ValInt(1);
@@ -1277,8 +1447,7 @@ begin
   PushLoop();
   condStart := FProg.Count;
   EmitLoadVar(vname, ln);
-  if endIsLocal then FProg.Emit(opLoadLocal, endVar, 0, ln)
-  else FProg.Emit(opLoadVar, endVar, 0, ln);
+  EmitLoadHidden(endVar, ln);
   if down then FProg.Emit(opGE, 0, 0, ln) else FProg.Emit(opLE, 0, 0, ln);
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
   ParseBlockUntil(['next']);
@@ -1298,18 +1467,36 @@ begin
   FLex.Advance();
 end;
 
+{ THE SUBJECT IS EVALUATED ONCE AND RELOADED BEFORE EVERY CASE TEST, so it has to
+  survive the case EXPRESSIONS -- and a case expression is an arbitrary
+  expression, which may call a function that re-enters this same SELECT. While
+  the subject was a hidden global that re-entry overwrote it, and the outer
+  SELECT then tested the INNER subject against its own remaining labels:
+
+    function f(n)
+      select case n
+      case g(n)      <- g(2) calls f(1), whose SELECT overwrites the subject
+        return 1
+      case 2         <- this compared 1 against 2 and missed
+    ...
+
+  f(2) answered -1 where the same logic as an if/elseif chain, and the same
+  SELECT with the call hoisted out of the label, both answer 2. Now the subject
+  is a THiddenSlot, so inside a function it is a frame slot the inner activation
+  cannot reach. }
 procedure TPhosphorCompiler.ParseSelect;
 var
-  ln, selVar, jNext, endTarget, i: Integer;
+  ln, jNext, endTarget, i: Integer;
+  selVar: THiddenSlot;
   endFixups: array of Integer;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'select'
   if not IsKeyword('case') then begin Fail('expected ''case'' after ''select''', FLex.Cur().Line); Exit; end;
   FLex.Advance(); // 'case'
-  selVar := NewHiddenVar(vtAny);
+  selVar := NewHidden(vtAny);
   ParseExpr();                                 // the subject
-  FProg.Emit(opStoreVar, selVar, 0, ln);
+  EmitStoreHidden(selVar, ln);
   endFixups := nil;
 
   while not FFailed do
@@ -1325,7 +1512,7 @@ begin
       Break;
     end;
     // case <value>
-    FProg.Emit(opLoadVar, selVar, 0, ln);
+    EmitLoadHidden(selVar, ln);
     ParseExpr();
     FProg.Emit(opEQ, 0, 0, ln);
     jNext := FProg.Emit(opJumpIfFalse, 0, 0, ln);
@@ -1403,7 +1590,8 @@ end;
   not prompt. File forms (`input #f, ...`) read the channel's buffer. }
 procedure TPhosphorCompiler.ParseInput(AIsLine: Boolean);
 var
-  ln, chTmp, tc: Integer;
+  ln, tc: Integer;
+  chTmp: THiddenSlot;
   vname: String;
   isFile, hasPrompt: Boolean;
 begin
@@ -1415,14 +1603,17 @@ begin
     FLex.Advance();                       // '#'
     ParseExpr();                          // the file number
     if FFailed then Exit;
-    chTmp := NewHiddenVar(vtNumber);
-    FProg.Emit(opStoreVar, chTmp, 0, ln);
+    // The channel is held across the variable list, and an INPUT # inside a
+    // function is reachable again from anything that list touches; see
+    // THiddenSlot.
+    chTmp := NewHidden(vtNumber);
+    EmitStoreHidden(chTmp, ln);
     Expect(tkComma, '","');
     if FFailed then Exit;
   end
   else
   begin
-    chTmp := 0;
+    chTmp.Idx := 0; chTmp.IsLocal := False;   // unused: the console path reads no channel
     hasPrompt := (FLex.Cur().Kind = tkString) and (FLex.Peek().Kind in [tkSemicolon, tkComma]);
     if hasPrompt then
     begin
@@ -1456,7 +1647,7 @@ begin
     FLex.Advance();
     if isFile then
     begin
-      FProg.Emit(opLoadVar, chTmp, 0, ln);
+      EmitLoadHidden(chTmp, ln);
       if AIsLine then FProg.Emit(opFileLine, 0, 0, ln)
       else FProg.Emit(opFileField, tc, 0, ln);
     end
@@ -1537,24 +1728,26 @@ end;
 { PRINT #n [, item[(;|,) item]...] -- writes items to a file channel (';' adjacent,
   ',' a tab). PRINTLN #n adds a trailing newline; PRINT #n does not. }
 procedure TPhosphorCompiler.ParsePrintFile(AAddNewline: Boolean);
-var ln, chTmp: Integer;
+var ln: Integer; chTmp: THiddenSlot;
 begin
   ln := FLex.Cur().Line;   // Cur = '#'
   FLex.Advance();          // '#'
   ParseExpr();             // the file number
   if FFailed then Exit;
-  chTmp := NewHiddenVar(vtNumber);
-  FProg.Emit(opStoreVar, chTmp, 0, ln);
+  // Held across every item printed, and an item is an arbitrary expression that
+  // can re-enter this same statement; see THiddenSlot.
+  chTmp := NewHidden(vtNumber);
+  EmitStoreHidden(chTmp, ln);
   if FLex.Cur().Kind = tkComma then FLex.Advance();   // the comma after #n
   while (not FFailed) and not (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) do
   begin
-    FProg.Emit(opLoadVar, chTmp, 0, ln);
+    EmitLoadHidden(chTmp, ln);
     ParseExpr();
     if FFailed then Exit;
     FProg.Emit(opPrintFile, 0, 0, ln);
     if FLex.Cur().Kind = tkComma then
     begin
-      FProg.Emit(opLoadVar, chTmp, 0, ln);
+      EmitLoadHidden(chTmp, ln);
       FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(#9)), 0, ln);
       FProg.Emit(opPrintFile, 0, 0, ln);
       FLex.Advance();
@@ -1566,7 +1759,7 @@ begin
   end;
   if AAddNewline then
   begin
-    FProg.Emit(opLoadVar, chTmp, 0, ln);
+    EmitLoadHidden(chTmp, ln);
     FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(#10)), 0, ln);
     FProg.Emit(opPrintFile, 0, 0, ln);
   end;
@@ -1646,7 +1839,7 @@ begin
   end;
 end;
 
-procedure TPhosphorCompiler.EmitWriteTarget(APos, ATempVar: Integer);
+procedure TPhosphorCompiler.EmitWriteTarget(APos: Integer; const ATemp: THiddenSlot);
 var name: String; ln, nidx: Integer;
 begin
   FLex.Reset(APos);
@@ -1661,20 +1854,20 @@ begin
     while (not FFailed) and (FLex.Cur().Kind = tkComma) do
     begin FLex.Advance(); ParseExpr(); Inc(nidx); end;
     Expect(tkRBracket, ''']''');
-    FProg.Emit(opLoadVar, ATempVar, 0, ln);   // the value to store
+    EmitLoadHidden(ATemp, ln);                // the value to store
     FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set@')), 1 + nidx + 1, ln);
     FProg.Emit(opPop, 0, 0, ln);              // discard arr_set's returned handle
   end
   else
   begin
-    FProg.Emit(opLoadVar, ATempVar, 0, ln);
+    EmitLoadHidden(ATemp, ln);
     FLex.Advance();               // the name
     EmitStoreVar(name, ln);
   end;
 end;
 
 procedure TPhosphorCompiler.ParseSwap;
-var m1, m2, mEnd, t1, t2: Integer;
+var m1, m2, mEnd: Integer; t1, t2: THiddenSlot;
 begin
   FLex.Advance();   // 'swap'
   m1 := FLex.Mark();
@@ -1686,12 +1879,14 @@ begin
   SkipTarget();
   if FFailed then Exit;
   mEnd := FLex.Mark();
-  t1 := NewHiddenVar(vtAny);
-  t2 := NewHiddenVar(vtAny);
+  // Both temporaries live across the two index expressions and the two writes;
+  // an index expression can re-enter this same SWAP. See THiddenSlot.
+  t1 := NewHidden(vtAny);
+  t2 := NewHidden(vtAny);
   EmitReadTarget(m1);  if FFailed then Exit;
-  FProg.Emit(opStoreVar, t1, 0, FLex.Cur().Line);
+  EmitStoreHidden(t1, FLex.Cur().Line);
   EmitReadTarget(m2);  if FFailed then Exit;
-  FProg.Emit(opStoreVar, t2, 0, FLex.Cur().Line);
+  EmitStoreHidden(t2, FLex.Cur().Line);
   EmitWriteTarget(m1, t2);  if FFailed then Exit;
   EmitWriteTarget(m2, t1);  if FFailed then Exit;
   FLex.Reset(mEnd);
@@ -1855,9 +2050,9 @@ begin
     begin
       FLex.Advance();
       if FLex.Cur().Kind = tkInt then
-        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal)); FLex.Advance(); end
+        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal), False); FLex.Advance(); end
       else if FLex.Cur().Kind = tkIdent then
-        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal); FLex.Advance(); end
+        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal, False); FLex.Advance(); end
       else Fail('''goto'' needs a line number or a label', FLex.Cur().Line);
       Exit;
     end;
@@ -1865,9 +2060,9 @@ begin
     begin
       FLex.Advance();
       if FLex.Cur().Kind = tkInt then
-        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal)); FLex.Advance(); end
+        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal), True); FLex.Advance(); end
       else if FLex.Cur().Kind = tkIdent then
-        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal); FLex.Advance(); end
+        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal, True); FLex.Advance(); end
       else Fail('''gosub'' needs a line number or a label', FLex.Cur().Line);
       Exit;
     end;

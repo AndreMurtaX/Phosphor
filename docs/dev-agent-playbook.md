@@ -319,9 +319,9 @@ Two mechanical parts of that, both paid for:
 
 ## What the 2026-09-06 gauntlet left open
 
-The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-07
-the crashes, the seven security and data-loss findings, and 17 of the 21 wrong
-answers are closed on both operating systems. **Nineteen remain, and they are
+The whole-tree adversarial sweep returned 59 confirmed findings. As of 2026-09-09
+the crashes, the seven security and data-loss findings, and all 21 wrong answers
+are closed on both operating systems. **Twelve remain, and they are
 listed here rather than in a task tracker because this project has learned that a
 backlog nobody can find is a backlog that does not exist.**
 
@@ -329,13 +329,25 @@ Some may already be closed by later work: the budget landed after the sweep ran,
 and it plausibly reaches both hangs. **Verify before fixing** -- closing something
 already closed is how a patch introduces a defect.
 
-**Four wrong answers, in the front end.** A GOTO inside a function body escapes
-the activation; a CONST silently shadows a parameter; a source file truncated
-inside a string literal compiles; SELECT CASE keeps its subject in a program-wide
-hidden global. A patch exists for all four and was held back: three are clean, but
-its GOTO refusal is over-broad -- its reviewer measured three constructs that
-answer correctly on pristine HEAD and are refused by it. Narrow that one and the
-other three land with it.
+~~**Four wrong answers, in the front end**~~ -- CLOSED 2026-09-09. The GOTO
+refusal was narrowed to the jumps that PROVABLY never return, discriminating on
+the opcode at AddGoto: opJump is refused, opGosub and opSetErrHandler are not.
+The first version refused all of them and its reviewer measured twelve programs
+that answer correctly without the check; all twelve are pinned now, and both
+refused shapes have a negative test, because they reach the check from two
+different procedures and one file cannot cover both.
+
+**WHAT THAT LEFT OPEN, and it is the honest residual.** The opcode is a BOUND,
+not an equivalence. opGosub and opSetErrHandler come back only when their TARGET
+does, which the call site cannot see: a subroutine ending in `goto` instead of
+`return`, and a handler that never reaches `resume`, abandon the activation
+exactly as `goto` does. Measured on both operating systems -- `on error goto h`
+inside a function, handler falling through to the end of the program, run under
+callfunc, prints the tail TWICE, byte for byte the wrong answer of this defect's
+own repro. It is NOT a regression: the tree before the check behaves identically,
+and refusing it at compile time is what cost the first version its twelve correct
+programs. **The repair belongs in the VM**, which can see at fault time what the
+compiler cannot -- that a handler jump crossed a frame boundary.
 
 **Two hangs and a breakage, all in the GUI host.** BREAK inside a function defined
 in a loop body binds to the enclosing loop and jumps out of the frame; app_quit()

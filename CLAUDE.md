@@ -162,7 +162,15 @@ The failure modes are known, named, and keep recurring. Watch for them in your o
   broken band. **Sweep a range against the pristine build; never a list you chose.**
 - **A test that fails for the wrong reason is not a confirmation.** Read the failure
   message, not the exit code. When a test's whole value is that it broke something, assert
-  that it broke.
+  that it broke. **And a test written with the fix already in hand can pass because it
+  never reached the defect** -- on 2026-09-10 the assertion pinning "an outer loop whose
+  body defines a function still breaks" passed on both sides of a live hang, because the
+  function it defined had no loop of its own. Remove the fix, watch the new test fail,
+  put it back. Every time.
+- **Saving a scope counter is not saving the scope.** The BREAK fix saved `FLoopDepth`
+  around a function body and left `FLoopBreaks`/`FLoopConts` -- which are INDEXED BY that
+  depth -- shared with the enclosing loop, which turned one hang into a worse one. When
+  you save a variable to scope something, ask what else is keyed by it.
 - **Green suites prove the absence of regression, not the presence of correctness.** With
   every golden byte-exact on both OSes, an adversarial sweep still found defects that
   killed the process. When a subsystem looks finished, attack it rather than extend it.

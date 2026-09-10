@@ -449,6 +449,7 @@ var
   funcName: String;
   retType: TVarType;
   ltypes: array of TVarType;
+  savedBreaks, savedConts: array of array of Integer;
 begin
   ltypes := nil;
   if FInFunction then begin Fail('nested functions are not supported', FLex.Cur().Line); Exit; end;
@@ -529,11 +530,32 @@ begin
     exists -- "'break' outside a loop" -- rather than silently retargeted.
 
     Restored afterwards, because the enclosing loop is still being compiled and
-    its own `break` must keep working. }
+    its own `break` must keep working.
+
+    THE DEPTH IS NOT THE STATE. Saving FLoopDepth alone closed the case above and
+    left a worse one open, because the pending fixup lists are INDEXED BY that
+    depth: a loop inside the function body pushes at depth 0, and PushLoop clears
+    the slot it is about to use -- which is the enclosing loop's slot. Its
+    recorded `break` sites were erased, so PatchBreaks patched nothing and the
+    jump kept its placeholder operand of 0: a `break` in the outer loop jumped to
+    INSTRUCTION ZERO and restarted the whole program, for ever, with no error and
+    no exit. PopLoop only decrements, so the slot then held the FUNCTION's own
+    already-patched sites, which the enclosing loop re-patched to its own exit --
+    the 262,146-line symptom above, back again by another road.
+
+    So the lists are saved and NILLED, not just saved: nil makes PushLoop
+    allocate fresh storage for the body, and the enclosing loop's lists cannot be
+    reached from inside the function at all. }
   savedLoopDepth := FLoopDepth;
+  savedBreaks := FLoopBreaks;
+  savedConts := FLoopConts;
+  FLoopBreaks := nil;
+  FLoopConts := nil;
   FLoopDepth := 0;
   ParseBlockUntil(['endfunction']);
   FLoopDepth := savedLoopDepth;
+  FLoopBreaks := savedBreaks;
+  FLoopConts := savedConts;
   if FFailed then Exit;
   // The body can ADD locals -- a FOR bound is one -- and the type table was taken
   // before the body was parsed, so those slots were missing from it. The frame is

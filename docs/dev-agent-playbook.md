@@ -501,6 +501,168 @@ test-suite actually runs.
 
 ---
 
+## What the 2026-09-10 gauntlet found
+
+
+The second whole-tree adversarial sweep, run after the 2026-09-06 backlog had been
+emptied and with every suite byte-exact green on both operating systems. Fourteen
+file-disjoint lanes attacked ~40,000 lines; every claim then went to two
+adversarial refuters -- one that reran the reproduction, one that hunted for proof
+the behaviour was intentional or already closed -- and a split vote went to a
+tie-breaker. **78 claims, 65 confirmed, 13 refuted.** 22 high, 25 medium, 18 low.
+
+Two things about the shape of the result are worth more than any single finding.
+
+**A green suite told us nothing it had not told us the day before.** The tree was
+clean-building with zero notes, byte-exact on Windows and Linux, eight gates
+passing, with `-ProveFailure` seen catching a corruption -- and it was hiding a
+hang, four crashes, five sandbox escapes and twenty wrong answers. The rule in
+section 0 is not a slogan.
+
+**The refuters earned their place.** 13 of 78 killed is a real rejection rate,
+against the round where refuters killed 0 of 45 and were measuring nothing. Three
+survivors were also CORRECTED by their refuters rather than accepted as written --
+a severity lowered, a mechanism restated, an anchor moved to the file that
+actually holds the defect -- and those corrections are carried in the list below,
+not the finder's original wording.
+
+Anything not yet struck through is OPEN. Verify before fixing: a finding is a
+report, not a diagnosis, and closing something already closed is how a patch
+introduces a defect.
+
+
+### Security and sandbox escape (5)
+
+1. **engine/PhosphorSandbox.pas:310** [high] -- On Linux a symlink inside the sandbox root plus '..' escapes it for read, write AND recursive delete: RealPathOf collapses '..' textually before following any link, so the gate judges a different path than the syscall opens
+2. **engine/PhosphorSandbox.pas:378** [high] -- A NUL byte in a path defeats the sandbox: the gate judges the whole string, the OS opens the prefix (read/write/delete of a single file escape; the dir_delete-walks-a-drive-root consequence is overstated -- the same truncation neuters the walk's deletes)
+3. **host/console/phosphor.lpr:1016** [high] -- `--sandbox ""` (an empty argument, e.g. an unset shell variable) runs the script completely unconfined, silently, exit 0
+4. **host/packages/PhosphorZipLib.pas:456** [high] -- Zip slip: SafeEntryName judges the central-directory name, paszlib extracts under the local file header's name -- a byte lands outside the destination and outside the sandbox root (reproduced; the proposed OnCreateStream remedy would itself break the destination path)
+5. **host/console/phosphor.lpr:845** [medium] -- A truncated packed application loses the tail that is its only self-identification, so TryReadEmbeddedPayload answers esNone and phosphor.lpr:845 falls through to the interactive REPL with exit 0 -- the outcome the esCorrupt guard was written to refuse
+
+### Data loss (9)
+
+6. **engine/PhosphorSandbox.pas:245** [high] -- A junction whose target is a drive root is unresolved by both sandbox rules on Windows: IsPerilousPath calls it ordinary AND the containment rule lets the recursive remover walk out of the sandbox through it
+7. **engine/libs/PhosphorIoLib.pas:622** [high] -- On Linux file_move overwrites an existing target file and reports 1; dir_move does the same onto an existing EMPTY directory -- docs/libraries/io.md:59,102 promise 0 in both cases (Windows refuses; the refusal is an accident of MoveFileW)
+8. **engine/libs/PhosphorJsonLib.pas:1311** [high] -- A tail fpjson ignores disarms the \u re-spelling: unmatched quote or apostrophe after the value silently restores all four fpjson escape defects on a document json_parse@ accepts with rc=0
+9. **engine/libs/PhosphorStrLib.pas:516** [high] -- replacetext$ returns wrong answers and silently drops trailing bytes whenever the haystack contains a character whose uppercase has a different UTF-8 byte length
+10. **host/gui/libs/PhosphorControlLib.pas:301** [high] -- control_free on a node@ or an item@ destroys it (and the subtree it owns), answers 1 with gui_error 0, and leaves a live child handle that access-violates on the next read
+11. **engine/PhosphorValue.pas:632** [medium] -- str$/print/print# format a Double with FloatToStr's 15-significant-digit default, so most computed Doubles silently change value across a str$/print#/input# round-trip, and str$(MaxDouble) rounds up past MaxDouble into text val() rejects as an overflow
+12. **engine/libs/PhosphorConfigLib.pas:83** [medium] -- cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
+13. **engine/PhosphorEngine.pas:286** [low] -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
+14. **host/packages/PhosphorGzipLib.pas:338** [low] -- A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
+
+### Crashes (4)
+
+15. **engine/libs/PhosphorJsonLib.pas:633** [high] -- JsonNestsTooDeep opens a string literal only on `"` (line 633), so an unmatched `"` inside a single-quoted value desynchronises the scan and bypasses the 256-level ceiling entirely -- a 300-deep document parses, and a 400 KB one segfaults the process with no diagnostic
+16. **engine/libs/PhosphorJsonLib.pas:1682** [high] -- json_push@/json_set@ charge no depth: a build-side tree of any depth crashes the recursive teardown (exit 3) after the program's output is complete, and segfaults json_stringify$ -- reachable from a plain linear loop, not only the doubling trick
+17. **engine/libs/PhosphorJsonLib.pas:1789** [high] -- json_merge@ uses `s` after free when the source is a descendant of the target whose member name collides with the target key that owns it (engine/libs/PhosphorJsonLib.pas:1788-1790)
+18. **engine/libs/PhosphorStrLib.pas:860** [high] -- center$ with a saturating negative width wraps `pad := w - CpLen(s)` in 32-bit arithmetic and builds a 2 GiB string instead of returning the string unchanged (wrong answer + unbounded allocation, not a crash)
+
+### Hangs (2)
+
+19. ~~**engine/PhosphorCompiler.pas:534** [high]~~ -- CLOSED 2026-09-10, and it is
+   the third time this one sentence has had to be written down: **the compiler must
+   scope control-flow targets to the function being compiled.** The GOTO refusal of
+   2026-09-09 applied it to labels, the BREAK fix later the same day applied it to
+   the loop DEPTH -- and the depth is not the state. `FLoopBreaks`/`FLoopConts` are
+   indexed BY that depth, and `PushLoop` clears the slot it is about to use, so the
+   first loop inside a function body, pushing at depth 0, erased the ENCLOSING
+   loop's recorded break sites. `PatchBreaks` then patched an empty list, the outer
+   `break` kept its placeholder operand of 0, and jumping to instruction ZERO
+   restarted the whole program: five seconds is five megabytes of output, with no
+   error and no exit. `PopLoop` only decrements, so the slot afterwards held the
+   function's own already-patched sites, which the enclosing loop re-patched to its
+   own exit -- the 262,146-line symptom of the day before, back by another road.
+   `ParseFunction` now saves the lists and NILS them, so `PushLoop` allocates fresh
+   storage and the enclosing loop's lists cannot be reached from inside a function
+   at all. Three assertions in `02_control_flow` (golden 23 -> 26), and each one
+   needs the inner LOOP: the assertion added the day before passed throughout,
+   because the function it defined inside a loop had no loop of its own.
+   **Yesterday's fix was tested by the case that could not fail.**
+20. **engine/PhosphorRegistry.pas:363** [medium] -- Overload resolution runs 2^(int-args) linear scans of the 1232-entry registry on every library call with no cache, so the idiomatic integer subscript costs ~50 us per array write and makes identical work 21x slower (1.01 s vs 21.02 s)
+
+### Wrong answers (20)
+
+21. **engine/PhosphorVM.pas:1632** [high] -- `resume next` on the last statement of a block leaves the block: the `else` arm runs after the `then` arm (block AND inline one-line form), the next `case` arm runs, and a for/while/repeat loop is abandoned after one pass
+22. **engine/PhosphorVM.pas:2810** [high] -- A stale FHalted makes CallUserFunc discard every later return value (0, LastError=peNone) after any `end` -- including the top-level `end` the language reference recommends -- and TPhosphorEngine exposes no way to detect it
+23. **engine/libs/PhosphorNumLib.pas:49** [high] -- round/fix/cint/int discard an exact int% through AsDouble: silently wrong for values above 2^53 that a Double cannot hold, and a spurious overflow error for every int% >= 9223372036854775296
+24. **host/gui/libs/PhosphorCanvasLib.pas:271** [high] -- canvas_polyline@ and canvas_polygon@ pass NumPts = n-1 to the LCL, dropping the final vertex; a two-point polyline draws nothing and reports success
+25. **engine/PhosphorBudget.pas:975** [medium] -- BudgetPatternBounded refuses a repeated alternation of 17+ branches because the branch table only tracks 16, giving up toward "refuse" where its two siblings and its own documented contract give up toward "allow" -- ^[a-q]+$ is allowed while ^(a|b|...|q)+$ is refused
+26. **engine/PhosphorBytecode.pas:478** [medium] -- A .pbc whose user function starts one past the last instruction passes validation and runs as a silent no-op with exit code 0
+27. **engine/PhosphorCompiler.pas:722** [medium] -- Label-resolution diagnostics (undefined label, duplicate label) carry no line: PhosphorCompiler.pas:722 and :609 pass a literal 0, which PhosphorEngine.pas:246 clamps to a confident, wrong "line 1"
+28. **engine/PhosphorVM.pas:1500** [medium] -- `end` typed at the REPL leaves FHalted set, so every later session line aborts silently at its first library call (dropping the result and the enclosing assignment/print)
+29. **engine/PhosphorValue.pas:1077** [medium] -- Float `mod` computes a - b*Int(a/b), so above 2^53 it silently answers 0 instead of the remainder (1e16 mod 3 = 0, 1e17 mod 3 = 0), breaks 0 <= |r| < |b| on wide exponent spreads (1.5 mod 1e-300 is negative), and raises a spurious overflow when the quotient overflows (1e200 mod 1e-200) -- and tests/suite/51_arith_faults.bas:78 pins one of the wrong answers
+30. **engine/libs/PhosphorBufferLib.pas:718** [medium] -- buffer_setsng writes the narrowed bytes before checking them, so an unrepresentable value leaves +/-Inf in the buffer behind the raised error -- unlike buffer_setint, which refuses before WriteRaw
+31. **engine/libs/PhosphorConfigLib.pas:197** [medium] -- cfg_setn@/cfg_setns@ store numbers through a 15-digit FloatToStr, so they do not round-trip (the finding stands; the proposed 17-digit remedy is a no-op on win64 and must be replaced)
+32. **engine/libs/PhosphorDateTimeLib.pas:134** [medium] -- Below-range TDateTime is unvalidated in the date-taking functions: four week functions halt with the RTL's own words, daysinmonth fabricates 31 from an in-constant out-of-bounds read, and datetostr$ renders an unparseable 0000-00-00 -- the mirror of the top end, which correctly clamps
+33. **engine/libs/PhosphorRagLib.pas:393** [medium] -- Every query byte >= 128 becomes a space in ExtractKeywords (PhosphorRagLib.pas:393), so rag_retrieve$/rag_retrieve_json$/rag_retrieve_budget$ and DetectIntent silently return nothing for non-Latin scripts and truncate accented Latin words
+34. **engine/libs/PhosphorStrLib.pas:554** [medium] -- containstext says a needle occurs where startstext/endstext say it does not, on equal-length strings: the "ignoring case" family folds by two incompatible rules (SysUtils byte-table vs platform AnsiUpperCase), and the folding half also differs between Windows and Linux
+35. **host/gui/libs/PhosphorGuiCore.pas:649** [medium] -- GuiCallBack has no Halted guard on entry: a handler dispatched after `end` (onclose after a halting onclosequery, or the rest of the pending queue in app_run) runs a full BASIC body on a halted VM
+36. **engine/PhosphorCompiler.pas:2264** [low] -- A `const` declaration never checks the literal against the name's suffix (`const i% = 1.5` keeps 1.5, `const s$ = 5` holds an Int64) -- one of two unchecked bindings, the other being user-function parameter binding
+37. **engine/PhosphorLexer.pas:461** [low] -- `engine/PhosphorLexer.pas:461` appends a bare `Char` into a `{$codepage UTF8}` string, so every source byte >= 128 is destroyed to a literal `?` -- the message is byte-identical to the one a real ASCII `?` produces
+38. **engine/libs/PhosphorStrLib.pas:562** [low] -- isnumeric answers 1 for "inf", "nan", "INF" and "1e999" -- it tests the parse, not the value, so it approves strings the engine's finiteness invariant forbids val from returning
+39. **engine/libs/PhosphorStrLib.pas:956** [low] -- delete$ and stuffstring$ silently DUPLICATE the string when (pos-1)+count overflows Int32 -- `rem := n - (pos - 1) - cnt` wraps (PhosphorStrLib.pas:956, :965)
+40. **host/console/phosphor.lpr:546** [low] -- `phosphor.exe` content-sniffs only the 3 ASCII bytes `PBC`, so a valid source file starting with an uppercase `PBC…` identifier is refused as bytecode with a nonsense version number (host/console/phosphor.lpr:546)
+
+### Leaks and cost (3)
+
+41. **engine/PhosphorHandles.pas:45** [high] -- HandleCount is the count of handles EVER created, not live ones -- so freed ids keep costing memory forever and turn every json member replacement (and every GUI form close) into an O(handles-ever-created) scan: 0.31 s of json work becomes 44.8 s
+42. **host/gui/libs/PhosphorCanvasLib.pas:193** [high] -- image_setbitmap@ assigns a full surface copy into a TImage with no ledger charge, so live GUI surface accumulates while GuiChargeRoom reads zero
+43. **engine/PhosphorValue.pas:674** [low] -- `Utf8Starts` allocates 8 bytes per string BYTE, so len()/left$/right$/mid$ spike to ~8x the string transiently (not a leak -- it is released) and cost O(n) time per call; engine/*.pas is outside check-budget.py's SCAN_DIRS, and the exemption that was deleted when the code moved priced "one entry per byte" without pricing the entry
+
+### Gate blind spots (11)
+
+44. **scripts/coverage.py:141** [high] -- coverage.py's "exercised by a test" loop globs only engine/libs and host/packages (line 141) -- the 426 host/gui/libs names are outside it, 76 of them are called by no .bas, and the gate still prints "every registered function is exercised by a test"
+45. **engine/libs/PhosphorBufferLib.pas:436** [medium] -- buffer_indexof's 3-argument form bypasses the execution budget entirely -- a one-token escape from the ceiling that exists to make untrusted scripts safe to embed
+46. **host/packages/PhosphorZipLib.pas:447** [medium] -- The decompression-bomb guard prices the work from the archive's own central directory: an under-reporting entry writes 1.99 GB in 8.3 s under a 256,000,000-unit / 2,000 ms budget
+47. **host/packages/PhosphorZipLib.pas:840** [medium] -- zip_extract and zip_extractall never consult the execution budget: two of the three extractors walk into UnZipFiles/UnZipAllFiles unbounded, and check-budget.py cannot see them because they reach the unzipper through a field
+48. **scripts/check-seams.py:212** [medium] -- check-seams.py:212 globs only host/**/*.lpr, so lazarus/demo/phosphordemorunner.pas -- a suite-built, documented host that fills OnOutput and leaves OnInput, OnBreakpoint and HostServices nil -- is outside the gate, while README.md and the playbook claim it covers "every host"
+49. **scripts/test-examples.sh:28** [medium] -- Only test-suite.sh rejects an unknown ProveFailure spelling; test-examples.sh silently ignores the canonical `-ProveFailure` and prints EXAMPLES OK exit 0, test-classic.sh does the same for `--prove-failure`, and test.sh/test-packages/test-gui have no prove mode at all
+50. **scripts/test-suite.ps1:220** [medium] -- test-suite.{ps1,sh} and test-gui.{ps1,sh} discard the -vewn log for nine sources and judge the build by file existence -- the class commit c65807a fixed only in build.* and test-packages.* -- and a live warning sits in scripts/probe_budget.lpr:588 because of it
+51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
+52. **tests/gui/manifest.txt:1** [medium] -- scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
+53. **tests/negative/11_unknown_escape.bas:4** [medium] -- scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)
+54. **tests/skeleton/hello.bas:1** [low] -- check-manifests.py enumerates nothing: tests/skeleton and tests/gui/hostmode are in neither CORPORA nor NO_MANIFEST, so a .bas dropped there is invisible to the gate while coverage.py still credits it as exercised (defect is in scripts/check-manifests.py:39-51,68, not in tests/skeleton/hello.bas)
+
+### Test gaps (3)
+
+55. **tests/suite/49_on_error.bas:76** [medium] -- tests/suite/49_on_error.bas:76: the only assertion in the "error inside a called function" case is dead code -- h5 leaves by `goto done`, jumping past it (and past line 77, which leaves the VM stuck in-handler -- NOT, as the finder says, "h5 still installed")
+56. **host/gui/phosphorguitest.lpr:177** [low] -- The GUI test runner's hang watchdog calls Application.Terminate instead of ending the process, permanently disabling the message loop for every later app_run() in the same file
+57. **tests/PhosphorTestLib.pas:76** [low] -- tests/PhosphorTestLib.pas:76 -- assert_eq's relative 1e-12 epsilon loses all resolution above ~1e12, and because assert_int has no `:%%$` message overload, six live assertions that need a message fall back onto it (57_buffer.bas:412/415/416, gui/18_faults.bas:73, gui/19_argord_and_size.bas:122) where their expected literal can be mutated without failing
+
+### Documentation errors (6)
+
+58. **docs/embedding.md:230** [high] -- embedding.md (and decisions.md:296, architecture.md:158) present the three ceilings plus SandboxRoot as the complete set of bounds on an untrusted script and never say memory is outside all of them; PhosphorBudget.pas:40-63 says so in the source and no doc carries it -- measured: 400,000,000 bytes built by one opAdd in 1203 ms, 3.6 GB peak, rc=0
+59. **CLAUDE.md:51** [low] -- CLAUDE.md:51's registry argument-code list is missing `%`, one of the five codes in the real alphabet, and contradicts docs/decisions.md:175 and PhosphorRegistry.pas
+60. **docs/embedding.md:27** [low] -- docs/embedding.md:27 says "three unit paths are the entire requirement" above a block that lists two; two are in fact sufficient (2 required, 2 optional, 4 possible -- never 3)
+61. **docs/embedding.md:269** [low] -- Gate-count drift in the docs: docs/embedding.md:269 says "seven source gates", and README.md:169 ("the same seven on Linux") and README.md:192 ("the six source gates described above") plus README's 6-row gate table are also stale -- the suite runs eight
+62. **docs/embedding.md:298** [low] -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run
+63. **docs/function-reference.md:88** [low] -- function-reference.md:88 still says Str has 67 registry entries and line 62 says 826 total; 103491e added stri$:% and str$:% (69 and 828 now) without touching the page, and the entries column has no gate to notice
+
+### Cross-OS divergence (1)
+
+64. **scripts/build.sh:23** [low] -- scripts/build.sh:23 and scripts/test-suite.sh:18 strip only // and { } comments while their PowerShell counterparts (build.ps1:66-68, test-suite.ps1:40-42) also strip (* *), so a forbidden unit named inside a paren comment fails the boundary check on Linux and passes on Windows -- and build.sh's own comment at 20-22 claims the missing pass (test-suite.sh's does not)
+
+### Breakage (1)
+
+65. **engine/PhosphorCompiler.pas:2228** [low] -- `print`/`println` rejects the `:` statement separator wherever an item is expected -- after the bare keyword, and after a trailing `;` or `,` -- because lines 2228/2240 omit tkColon that all five sibling parsers, including `print using`, include
+
+### Killed by the refuters (13, kept so they are not re-found)
+
+- `engine/PhosphorCompiler.pas:1323` -- The two-word `else if` the language reference promises is a syntax error in the one-line IF form, because the lexer merges it into `elseif` and the inline branch only looks for `else`
+- `engine/PhosphorVM.pas:2802` -- TimeoutMs on a prepared session is a wall-clock fuse lit at Prepare -- it counts the host's idle time, and disagrees with the library-side budget, which restarts on every call
+- `scripts/check-suffix.py:53` -- check-suffix.py cannot see a `%` name that returns a Double, because it maps `%` and no-suffix to the same kind -- and dict_get%, documented as `-> int`, returns 1.5
+- `engine/libs/PhosphorJsonLib.pas:245` -- json_getn aborts the program on a member holding a numeric string like "1e999" -- NumVal produces a non-finite Double and the declared default is never used
+- `engine/libs/PhosphorConfigLib.pas:203` -- cfg_getn/cfg_getns raise on numeric text that overflows a Double, where the docs promise 0
+- `engine/libs/PhosphorNumLib.pas:178` -- cmpval answers 0 (equal) for two int% that the engine's own `>` operator says differ
+- `engine/libs/PhosphorDateTimeLib.pas:406` -- daysbetween/weeksbetween/monthsbetween/yearsbetween narrow to a 32-bit local: negative distances, and weeksbetween larger than daysbetween
+- `host/console/phosphor.lpr:1300` -- A script can be given no command-line arguments at all: `phosphor prog.bas a b` exits 2, while the documented `paramstr$()` returns the host's own flags -- and the same program packed sees the arguments correctly
+- `host/console/phosphor.lpr:989` -- The REPL exits 0 after reporting errors, so a script that pipes commands into `phosphor` is told the whole file succeeded
+- `host/embed/phosphorembed.lpr:111` -- The embedding worked example reads `v.Num` without checking `v.Kind`, so a host copying it silently gets 0.0 from any `%`-suffixed BASIC routine
+- `host/packages/PhosphorHttpLib.pas:142` -- HTTPS certificate verification never checks the hostname: a certificate issued for a different name is accepted, contradicting the unit header's "wrong host" claim
+- `host/packages/PhosphorGzipLib.pas:286` -- gzip_decompress$ / gzip_decompressfile never check the CRC32 or ISIZE trailer they write -- a corrupted stream returns wrong bytes with gzip_error() = 0
+- `scripts/test-gui.sh:66` -- test-gui.sh reports "GUI SUITE SKIPPED" and exit 0 for a genuine GUI failure whenever stderr mentions gtk, which every gtk2 program on a desktop prints
+
 ## Retrospective log (appended each round)
 
 Newest first. Each entry: what broke or was missed, and the rule it produced. A

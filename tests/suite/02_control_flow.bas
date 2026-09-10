@@ -179,6 +179,45 @@ while outer < 100
 endwhile
 assert_eq(outer, 7, "an outer loop whose body defines a function still breaks")
 
+rem AND THE ONE THAT PROVES THE DEPTH IS NOT THE STATE. The assertion above
+rem passed while the defect below was live, because `definedinside` contains no
+rem loop of its own. The fixup lists are INDEXED BY the depth, and PushLoop
+rem clears the slot it is about to use -- so a loop inside the function body,
+rem pushing at depth 0, erased the ENCLOSING loop's recorded break sites. The
+rem outer break then kept its placeholder operand and jumped to instruction 0,
+rem restarting the whole program with no error and no exit: five seconds of that
+rem is five megabytes of output. Every assertion here needs the inner LOOP.
+withloop = 0
+while withloop < 100
+  withloop += 1
+  if withloop = 3 then
+    break
+  end if
+  function hasloop() local j
+    j = 0
+    while j < 4
+      j += 1
+    endwhile
+    return j
+  endfunction
+  rem The mirror. PopLoop only decrements, so after this function's loop pops,
+  rem its already-patched break sites were still sitting in the slot -- and the
+  rem enclosing loop re-patched them to its own exit, jumping out of the frame.
+  function ownbreak() local j
+    j = 0
+    while j < 9
+      j += 1
+      if j = 3 then
+        break
+      end if
+    endwhile
+    return j
+  endfunction
+endwhile
+assert_eq(withloop, 3, "an outer break survives a loop inside a function in its body")
+assert_eq(hasloop(), 4, "and that inner loop still runs to its own end")
+assert_eq(ownbreak(), 3, "a break inside a function defined in a loop is the function's own")
+
 function firstover(limit) local i
   for i = 1 to 100
     if i > limit then

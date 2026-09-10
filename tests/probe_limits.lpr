@@ -65,6 +65,43 @@ begin
   end;
 end;
 
+type
+  { TWO HOST SEAMS, because two of this ceiling's failure modes can only be
+    reached through one. TFreeingSink drops the host's own ballast the first time
+    the script prints -- a GUI clearing a log pane is the real shape -- and
+    TFatInput hands back 64 KB per line, which is growth arriving through neither
+    opAdd nor a registry call. }
+  TFreeingSink = class
+    Ballast: String;
+    Keep: String;
+    Fired: Integer;
+    Biggest: Int64;    { the largest len= the script reported }
+    procedure Take(const S: String);
+  end;
+
+  TFatInput = class
+    Line: String;
+    function Read(out ALine: String): Boolean;
+  end;
+
+procedure TFreeingSink.Take(const S: String);
+begin
+  Inc(Fired);
+  if Fired = 1 then Ballast := '';   { the host lets go, mid-run }
+  { A NUMBER, not the text of one: 'len=134217728' sorts BEFORE 'len=67108864' as
+    a string, so comparing the transcript would have read a bigger tree as a
+    smaller one. }
+  if Copy(S, 1, 4) = 'len=' then
+    Biggest := StrToInt64Def(Trim(Copy(S, 5, Length(S) - 4)), Biggest);
+end;
+
+function TFatInput.Read(out ALine: String): Boolean;
+begin
+  ALine := Line;
+  Line := Line + ' ';   { a fresh buffer every time, never a shared reference }
+  Result := True;
+end;
+
 { The memory ceiling, which needs its own runner because it is the only one of
   the four whose interesting cases are about SIZE rather than about time. AWant is
   the fragment the message must carry, or '' for a run that must succeed. }
@@ -99,6 +136,125 @@ begin
   end;
   if Length(ballast) <> AHostHolds then
     Report(False, AName + ' (the ballast was collected under the check)');
+end;
+
+{ The host frees 512 MB of its own the first time the script prints; the script
+  keeps allocating and must still be refused. }
+procedure CheckMemHostFrees(const AName: String);
+var
+  eng: TPhosphorEngine;
+  sink: TFreeingSink;
+  rc: Integer;
+begin
+  sink := TFreeingSink.Create();
+  eng := TPhosphorEngine.Create();
+  try
+    sink.Ballast := StringOfChar('B', 256 * 1024 * 1024);
+    { A SECOND chunk, allocated AFTER the first, so the first is not the last one
+      out: GetFPCHeapStatus().CurrHeapUsed does not fall when the LAST large chunk
+      is released, and a fixture with one ballast cannot reach this branch at all.
+      Measured -- 520 MB before the free and 520 MB after, with one; 520 and 8,
+      with two. }
+    sink.Keep := StringOfChar('K', 8 * 1024 * 1024);
+    eng.OnOutput := @sink.Take;
+    eng.MaxMemoryBytes := 32 * 1024 * 1024;
+    eng.TimeoutMs := 60000;
+    { WHAT IS OBSERVED IS HOW FAR THE SCRIPT GOT, not that it was refused. It is
+      refused either way in the end -- once the heap climbs back over the stale
+      base -- so `rc` cannot tell the two apart. How much it built before that
+      can: the ceiling stops being enforced in between. }
+    rc := eng.Run('println "go"' + #10 +
+                  's$ = "A"' + #10 +
+                  'for i% = 1 to 30' + #10 +
+                  '  s$ = s$ + s$' + #10 +
+                  '  println "len=" + str$(len(s$))' + #10 +
+                  'next' + #10);
+    Report((rc <> 0) and (eng.LastError.Code = peLimit),
+           AName + ' -- refused (' + IntToStr(Ord(eng.LastError.Code)) + ' ' +
+           eng.ErrorMessage + ')');
+    Report(sink.Biggest > 0, AName + ' -- the script reported its progress');
+    Report(sink.Biggest <= 64 * 1024 * 1024,
+           AName + ' -- and stopped near the 32 MB ceiling, not far past it (' +
+           IntToStr(sink.Biggest) + ' bytes)');
+  finally
+    eng.Free;
+    sink.Free;
+  end;
+end;
+
+{ A thousand 64 KB lines through OnInput: 64 MB arriving where neither the opAdd
+  pre-check nor the after-a-library-call check is looking. }
+procedure CheckMemFatInput(const AName: String);
+var
+  eng: TPhosphorEngine;
+  src: TFatInput;
+  rc: Integer;
+begin
+  src := TFatInput.Create();
+  eng := TPhosphorEngine.Create();
+  try
+    src.Line := StringOfChar('L', 65536);
+    eng.OnInput := @src.Read;
+    eng.MaxMemoryBytes := 16 * 1024 * 1024;
+    eng.TimeoutMs := 60000;
+    rc := eng.Run('L@ = strings@()' + #10 +
+                  'for i% = 1 to 2000' + #10 +
+                  '  line input a$' + #10 +
+                  '  n = strings_add(L@, a$)' + #10 +
+                  'next' + #10);
+    Report((rc <> 0) and (eng.LastError.Code = peLimit),
+           AName + ' (got ' + IntToStr(Ord(eng.LastError.Code)) + ' ' +
+           eng.ErrorMessage + ')');
+  finally
+    eng.Free;
+    src.Free;
+  end;
+end;
+
+{ THE SAME TPhosphorVM, RUN TWICE. TPhosphorEngine builds a fresh VM per Run, so
+  this shape is only reachable by an embedder holding the VM itself -- which is a
+  public class. The base is sampled before the state reset, and the first run's
+  memory is still accounted for when the second one samples, so the second run
+  starts with a base ABOVE what it will ever hold. Answering "below the base,
+  nothing to charge" there turned the ceiling off for the whole second run: 1.3 GB
+  through a 128 MB ceiling. The floor has to fall to whatever is actually held. }
+procedure CheckMemVmReused(const AName: String);
+var
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  vm: TPhosphorVM;
+  first, second: Boolean;
+  Src: String;
+begin
+  { A LITERAL AND opAdd, NO LIBRARY CALL. A bare TPhosphorVM has no Registry --
+    TPhosphorEngine is what installs one -- so `string$` here would dereference
+    nil and take the probe down with exit 217, which is what the first draft did.
+    A kilobyte doubled twenty times is a gigabyte, through the one instruction
+    this check is about. }
+  Src := 's$ = "' + StringOfChar('A', 1024) + '"' + #10 +
+         'for i% = 1 to 20' + #10 + '  s$ = s$ + s$' + #10 + 'next' + #10;
+  comp := TPhosphorCompiler.Create();
+  prog := nil;
+  vm := nil;
+  try
+    if not comp.Compile(Src, prog) then
+    begin
+      Report(False, AName + ' (the fixture did not compile)');
+      Exit;
+    end;
+    vm := TPhosphorVM.Create();
+    vm.MaxMemoryBytes := 128 * 1024 * 1024;
+    vm.TimeoutMs := 60000;
+    first := vm.Run(prog);
+    second := vm.Run(prog);
+    Report((not first) and (not second) and (vm.LastError.Code = peLimit),
+           AName + ' (first refused=' + BoolToStr(not first, True) +
+           ', second refused=' + BoolToStr(not second, True) + ')');
+  finally
+    vm.Free;
+    prog.Free;
+    comp.Free;
+  end;
 end;
 
 { Compile ASource and require that it is REJECTED -- Compile returns False, the
@@ -602,6 +758,51 @@ begin
            's$ = string$(2000000, 97)' + LF +
            'for i% = 1 to 6' + LF + '  s$ = s$ + s$' + LF + 'next' + LF,
            0, '');
+
+  { THE FLOOR ONLY EVER FALLS. If the host releases its own memory while the
+    script runs, the heap drops below the base the run started from -- and the
+    first version answered "nothing to charge" and turned the ceiling OFF for the
+    rest of the run: 1516 MB through a 32 MB ceiling, where the same script with
+    the host holding on was refused at 591 MB. }
+  CheckMemHostFrees('the ceiling survives the host freeing its own memory');
+  CheckMemVmReused('and a VM run a second time is bounded like the first');
+
+  { GROWTH THROUGH A HOST SEAM. It arrives at neither an opAdd nor a registry
+    call -- but to MATTER it has to be retained, and retaining it means a
+    container or a string, so one of the two checks meets it on the way. This
+    asserts that, rather than the seam itself. }
+  CheckMemFatInput('growth arriving through the input seam is caught');
+
+  { THE GROWTH IN THE RIGHT OPERAND. Every other check here puts the size in the
+    LEFT one, so `growth := Length(a.Str) + TextLenOf(b)` was never exercised
+    through b -- and three mutations walked through: TextLenOf answering 0,
+    RoomFor ignoring its AGrowth argument entirely, and the pre-check disabled.
+    That last one is the whole stated reason for putting a check at opAdd rather
+    than only in the step loop, so nothing pinned the design's own justification.
+    Deliberately under 4096 instructions, so ONLY the pre-check can catch it. }
+  CheckMem('memory ceiling: a growth carried by the RIGHT operand is refused',
+           'b$ = string$(20000000, 65)' + LF +
+           'p$ = "x"' + LF +
+           'q$ = p$ + b$' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+
+  { A LIBRARY CALL IS ASKED ABOUT DIRECTLY, not only every 4096 steps. Twelve big
+    allocations in about forty instructions never reached the step-loop check. }
+  CheckMem('memory ceiling: a library allocation is refused in a short script',
+           'a$ = string$(60000000, 65)' + LF +
+           'b$ = string$(60000000, 66)' + LF +
+           'c$ = string$(60000000, 67)' + LF +
+           'd$ = string$(60000000, 68)' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+
+  { AND len() DOES NOT COST EIGHT BYTES PER BYTE. It used to build a table of one
+    Int64 per input byte just to count the entries, so this reached 1716 MB under
+    this very ceiling and answered rc 0. }
+  CheckMem('len() of a large string does not allocate past the ceiling',
+           's$ = string$(20000000, 65)' + LF +
+           'n% = len(s$)' + LF +
+           'if n% <> 20000000 then' + LF + '  x = 1 / 0' + LF + 'end if' + LF,
+           64 * 1024 * 1024, '');
 
   { THE BACKSTOP. Memory that grows through a library, one call at a time, with no
     single allocation large enough for the pre-check to look at. A FRESH string per

@@ -821,7 +821,16 @@ introduces a defect.
    slot went from 8 bytes to 24, so a program holding a million handles LIVE pays
    25.2 MB of table against 8.39 MB. Bounded 24 in place of unbounded 8.
 42. **host/gui/libs/PhosphorCanvasLib.pas:193** [high] -- image_setbitmap@ assigns a full surface copy into a TImage with no ledger charge, so live GUI surface accumulates while GuiChargeRoom reads zero
-43. **engine/PhosphorValue.pas:674** [low] -- `Utf8Starts` allocates 8 bytes per string BYTE, so len()/left$/right$/mid$ spike to ~8x the string transiently (not a leak -- it is released) and cost O(n) time per call; engine/*.pas is outside check-budget.py's SCAN_DIRS, and the exemption that was deleted when the code moved priced "one entry per byte" without pricing the entry
+43. ~~**engine/PhosphorValue.pas:674** [low]~~ -- CLOSED 2026-09-10, and it was not
+   low. The finding calls it "not a leak -- it is released", which is true and
+   beside the point: the transient is EIGHT BYTES PER INPUT BYTE, on every len(),
+   asc(), left$(), right$(), mid$() and pad. Under all four ceilings including a
+   32 MB memory one, `s$ = string$(200000000, 65)` then `n% = len(s$)` reached a
+   peak of 1716 MB and answered rc 0, scaling linearly to 4291 MB at 500 MB of
+   string -- so it defeated the memory ceiling on the day that ceiling landed.
+   `Utf8Len` counts in place instead of building a table it only measures: 190 MB
+   and three times faster, byte-identical across all 138 .bas files under tests/.
+   `Utf8Left` and `Utf8Right` still build the table, because they need the offsets.
 
 ### Gate blind spots (11)
 
@@ -872,14 +881,55 @@ introduces a defect.
    pristine build, string-heavy work with no ceiling set is unchanged within
    noise.
 
-   Five checks in `probe_limits` (30 -> 39 assertions), and four mutations prove
-   they bite: `RoomFor` always yes, the pre-check disabled, the backstop disabled,
-   and the base measured from zero rather than from the run. Two of them were
-   holes in my first draft. The backstop check "passed" while measuring nothing,
-   because adding one `chunk$` a thousand times stores a thousand REFERENCES to
-   one buffer -- AnsiStrings are refcounted -- and the growth-not-absolute check
-   passed both ways because its script was four lines and the periodic check only
-   looks every 4096 steps.
+   Checks in `probe_limits`, 33 -> 47 assertions (the commit message said 30; it
+   was 33, and in this project a count is load-bearing). Two of the first five
+   were holes: the backstop check "passed" while measuring nothing, because adding
+   one `chunk$` a thousand times stores a thousand REFERENCES to one buffer --
+   AnsiStrings are refcounted -- and the growth-not-absolute check passed both ways
+   because its script was four lines and the periodic check only looked every 4096
+   steps.
+
+   THE REVIEW THEN FOUND THREE BLOCKING DEFECTS AND THREE MORE HOLES, and reshaped
+   the design.
+
+   `used < FHeapBase` answered "nothing to charge" and turned the ceiling OFF for
+   the rest of the run. Reachable two ways: a TPhosphorVM run a second time (1.3 GB
+   through a 128 MB ceiling) and a host freeing its own memory mid-run (1516 MB
+   against 591). The floor falls now -- `FHeapBase := used`. Sampling the base
+   later does NOT fix it and the reviewer measured that too:
+   `GetFPCHeapStatus().CurrHeapUsed` does not fall when the LAST large chunk is
+   released, so the base stays high whatever the ordering. That same fact is why
+   the check for it needs TWO ballasts and frees the first: with one, the counter
+   reads 520 MB before the free and 520 MB after, and the branch is unreachable.
+
+   `len()` allocated EIGHT BYTES PER INPUT BYTE. `Utf8Len` was
+   `Length(Utf8Starts(S)) - 1` -- a table of one Int64 per byte, built to count its
+   own entries. Three lines under all four ceilings reached 1716 MB and answered
+   rc 0, scaling linearly to 4291 MB. Counting in place is the same rule without
+   the table: 190 MB and three times faster, byte-identical across all 138 .bas
+   files. That was open finding 12 and it is closed here because it made the new
+   ceiling's headline claim false.
+
+   A THRESHOLD ALONE WAS NOT ENOUGH, and neither was a periodic check. 700
+   concatenations of 64000 bytes -- each under the threshold -- reached 43 MB under
+   a 4 MB ceiling and finished before the step-loop check ever looked. The growth
+   ACCUMULATES now, so the heap is asked once per 64 KB added rather than once per
+   concatenation, and the overshoot is bounded by 64 KB plus the allocation in
+   flight. And twelve `string$` calls in forty instructions reached 3814 MB under a
+   256 MB ceiling, so every library call is asked on the way out -- one query
+   against a call that costs 21 to 115 us is under a thousandth of it.
+
+   THE PERIODIC CHECK IS GONE. With those two doors asked directly it became
+   unreachable as the only catcher -- growth through any other seam has to be
+   RETAINED to matter, and retaining it means a container (a library call) or a
+   string (an opAdd). It also cost one test per instruction, measured at 3 to 4
+   percent on a tight arithmetic loop with no ceiling set. A branch no test can
+   reach, that everything pays for, is decoration.
+
+   Nine mutations now, eight of them red: RoomFor ignoring its growth argument,
+   TextLenOf answering 0, the pre-check disabled, the after-a-call check disabled,
+   the base from zero, and the floor not falling. `MemCheckFrom = 0` survives and
+   should: it is a cost knob, not a correctness one.
 59. ~~**CLAUDE.md:51** [low]~~ -- CLOSED 2026-09-10. Both short forms carried the
    same gap: CLAUDE.md:51 and this file's own section-2 bullet listed four codes
    where the alphabet is five. Both now read `n % $ @ ?`, and both say `#` is never

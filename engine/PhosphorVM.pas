@@ -138,13 +138,18 @@ const
 
     Crossing either ceiling is a FATAL peLimit, for the reason given at
     MaxStackDepth. }
-  { BELOW THIS, A CONCATENATION IS NOT WORTH ASKING THE HEAP ABOUT.
+  { HOW MANY BYTES MAY BE ADDED BEFORE THE HEAP IS ASKED ABOUT AGAIN.
     GetFPCHeapStatus is about 39 ns and a short concatenation about 3, so an
     unconditional query would be a tax on every string-building script to catch a
-    ceiling only large allocations can cross. 64 KB is well under any ceiling a
-    host would set and well over the size at which the query stops mattering next
-    to the copy it precedes. Smaller growth accumulates into the periodic check in
-    the step loop, beside the wall clock. }
+    ceiling only large allocations can cross. But a THRESHOLD alone was not
+    enough: 700 concatenations of 64000 bytes each -- every one under the
+    threshold -- reached 43 MB under a 4 MB ceiling and finished before the
+    step-loop check ever looked, because that fires only every 4096 steps.
+
+    So the growth ACCUMULATES: one add and one compare per concatenation, and the
+    heap is asked once per 64 KB added rather than once per concatenation. The
+    overshoot is then bounded by 64 KB plus whatever single allocation is in
+    flight, instead of by 4095 times the threshold. }
   MemCheckFrom = 65536;
   MaxFrameDepth = 262144;
   MaxFrameSlots = 1048576;
@@ -281,6 +286,8 @@ type
     FSteps: Int64;
     FOutputBytes: Int64;
     FHeapBase: PtrUInt;     // heap in use when this run began; see MaxMemoryBytes
+    FUncharged: Int64;      // bytes added since the heap was last consulted
+    FHeapBased: Boolean;    // FHeapBase has been sampled for this session
     FStartTick: QWord;
     // Debug tracing, set by the TRACE statement (opTrace). BREAKPOINT reports the
     // frame through OnBreakpoint only while this is on; off, it is a pure no-op.
@@ -1478,6 +1485,7 @@ begin
   FStackLimit := False;
   FStartTick := GetTickCount64;
   FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
+  FHeapBased := True;
   FTrace := False;
   CloseAllChannels();            // no file channel leaks between programs
   FInBuf := ''; FInPos := 1;
@@ -1543,7 +1551,16 @@ begin
   FOutputBytes := 0;
   FStackLimit := False;
   FStartTick := GetTickCount64;
-  FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
+  { STEPS AND TIME DO NOT SURVIVE A LINE; MEMORY DOES. Each REPL line is its own
+    run for the step counter and the clock, and re-sampling the base here made the
+    memory ceiling mean nothing across a session: five lines each just under a
+    256 MB ceiling reached 2575 MB and answered rc 0. The base is taken once, when
+    the session starts, and ResetHandles-level teardown is what starts a new one. }
+  if not FHeapBased then
+  begin
+    FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
+    FHeapBased := True;
+  end;
   savedMask := EnterFPU();
   try
     try
@@ -1886,8 +1903,26 @@ var
   begin
     Result := True;
     if MaxMemoryBytes <= 0 then Exit;
+    FUncharged := 0;
     used := GetFPCHeapStatus().CurrHeapUsed;
-    if used < FHeapBase then Exit;   // the host freed under us; nothing to charge
+    { THE FLOOR ONLY EVER FALLS, and the first version's `Exit` here turned the
+      ceiling OFF for the rest of the run instead.
+
+      Two reachable spellings, both measured. A TPhosphorVM run a SECOND time
+      samples its base while the first run's memory is still accounted for, so
+      every later question answered "below the base, nothing to charge" and 1.3 GB
+      went through a 128 MB ceiling. And a host that frees its own memory during a
+      run -- a GUI clearing a log pane from OnOutput -- did the same: 1516 MB
+      through a 32 MB ceiling, where the same script with the host holding on was
+      refused at 591 MB.
+
+      Sampling the base LATER does not fix it, and that was tried and measured:
+      GetFPCHeapStatus().CurrHeapUsed does not fall when the last large chunk is
+      released, so the base stays high whatever the ordering. Lowering the floor to
+      whatever is actually held is the answer -- the ceiling then means "this much
+      more than the least you have held since you started", which is the honest
+      reading of a growth bound. }
+    if used < FHeapBase then FHeapBase := used;
     if Int64(used - FHeapBase) + AGrowth <= MaxMemoryBytes then Exit;
     LastError := MakeError(peLimit, 'memory limit exceeded (' +
       IntToStr(MaxMemoryBytes) + ' bytes)');
@@ -1957,13 +1992,21 @@ begin
       ErrorLine := ins.Line;
       Exit(False);
     end;
-    { The backstop for everything the pre-check cannot size: a million small
-      concatenations, an array that grows, a tree that is built. It fires AFTER
-      the allocation that crossed the line, so it bounds a run rather than
-      preventing every overshoot -- which is exactly what the wall clock beside
-      it does, and for the same reason. }
-    if (MaxMemoryBytes > 0) and ((FSteps and $FFF) = 0) and (not RoomFor(0)) then
-      Exit(False);
+    { THERE IS NO PERIODIC MEMORY CHECK HERE, AND THERE WAS.
+
+      It fired every 4096 instructions, which is both too coarse and, once the
+      other two checks existed, unnecessary. Too coarse: a script that allocates
+      gigabytes in forty instructions never reaches it -- twelve string$ calls
+      reached 3814 MB under a 256 MB ceiling. Unnecessary: memory reaches a script
+      through exactly two doors, and both are now asked directly. `opAdd`
+      accumulates and asks per 64 KB added; every library call asks on the way
+      out. Growth through any other seam has to be RETAINED to matter, and
+      retaining it means a container (a library call) or a string (an opAdd).
+
+      Removing it also removed its cost, which was not free: one test per
+      instruction, measured at 3 to 4 percent on a tight arithmetic loop even with
+      no ceiling set. A branch no test can reach, that everything pays for, is
+      decoration. }
     if (TimeoutMs > 0) and ((FSteps and $FFF) = 0) and
        (GetTickCount64 - FStartTick > QWord(TimeoutMs)) then
     begin
@@ -2023,7 +2066,8 @@ begin
           if (MaxMemoryBytes > 0) and (a.Kind = vkString) then
           begin
             growth := Int64(Length(a.Str)) + TextLenOf(b);
-            if (growth >= MemCheckFrom) and (not RoomFor(growth)) then Exit(False);
+            Inc(FUncharged, growth);
+            if (FUncharged >= MemCheckFrom) and (not RoomFor(growth)) then Exit(False);
           end;
           case Bin(ValAdd(a, b, r), r) of 1: Continue; 2: Exit(False); end;
         end;
@@ -2514,6 +2558,19 @@ begin
               r := res.HostFunc(Self, args, e)
             else
               r := res.Func(args, e);
+            { A LIBRARY CALL IS WHERE THE BIG ALLOCATIONS ARE, and the step-loop
+              check could not see them: it fires every 4096 instructions, and a
+              script that allocates gigabytes in forty does not reach it. Measured:
+              twelve `string$(200000000)` into distinct globals is 3814 MB under a
+              256 MB ceiling, rc 0.
+
+              Asked HERE, after every library call, because that is exactly where
+              a script's memory comes from that `opAdd` does not supply -- an
+              array resized, a document parsed, an archive inflated, a list grown.
+              One query per call against a call that costs 21 to 115 microseconds
+              on this build is under a thousandth of it, so unlike the `+` path
+              this one needs no threshold. }
+            if (MaxMemoryBytes > 0) and (not RoomFor(0)) then Exit(False);
           except
             on ex: Exception do
             begin

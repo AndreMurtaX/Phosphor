@@ -278,7 +278,8 @@ exception everyone assumes is waiting there.
 
 ### The ceilings reach inside a library call, too
 
-The three you set used to be tested only **between instructions**, which left the
+The step, output and time ceilings used to be tested only **between
+instructions**, which left the
 hole they were meant to close: a library call is one instruction, so anything
 that ran long *inside* one escaped all three. A host that set exactly the ceilings above
 still hung for ever on a forty-character string handed to a backtracking regex.
@@ -297,7 +298,12 @@ catchable error, not a fatal ceiling** — `err()` is `7`, the message names the
 function and the size it declined, and `resume next` continues. Nothing has been
 spent, so a script that catches it and asks for something smaller is behaving
 correctly. Second, it only happens **when you set a ceiling**: a host that leaves
-all three at `0` behaves exactly as it always did, and pays nothing.
+them at `0` behaves exactly as it always did, and pays nothing. And note which
+ceilings arm it — the library budget is armed by `MaxSteps` or `TimeoutMs`, so
+`MaxMemoryBytes` on its own does not turn it on. The memory ceiling is asked
+directly at `+` and on the way out of every library call, which is what bounds a
+script that sets only that one; the *work* refusals above still need one of the
+other two.
 
 The rule is kept honest by `scripts/check-budget.py`, one of the eight source
 gates: a loop or an allocation over a script-supplied count must consult the
@@ -496,7 +502,7 @@ comes back from `CallFunction`, not through output.
 Create
   -> Registry.Add / AddHost   (your functions)
   -> OnOutput := ...          (optional)
-  -> MaxSteps / MaxOutputBytes / TimeoutMs := ...   (optional, for untrusted scripts)
+  -> MaxSteps / MaxOutputBytes / TimeoutMs / MaxMemoryBytes := ...   (untrusted scripts)
   -> SandboxRoot := '<dir>'                   (optional; bounds WHERE it writes)
   -> Run(source)                              one-shot
      OR

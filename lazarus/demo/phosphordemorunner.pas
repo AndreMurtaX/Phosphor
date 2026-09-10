@@ -152,10 +152,16 @@ begin
 
     { The ceilings docs/embedding.md prescribes for a script the application did
       not write. Generous enough that nothing here notices them, small enough
-      that a runaway loop stops in well under a second. }
+      that a runaway loop stops in well under a second.
+
+      ALL FOUR. This demonstration set three of them and left memory unbounded,
+      which is the shape the fourth ceiling was added for: three instructions can
+      take 14.7 GB while the other three watch. A demonstration of bounding an
+      untrusted script has to bound it. }
     eng.MaxSteps := 2000000;
     eng.TimeoutMs := 3000;
     eng.MaxOutputBytes := 1024 * 1024;
+    eng.MaxMemoryBytes := 256 * 1024 * 1024;
 
     { AND THE ONE THIS DEMO EXISTS TO SHOW. Off by default in the engine; a
       desktop application that would rather tell its user and save their work

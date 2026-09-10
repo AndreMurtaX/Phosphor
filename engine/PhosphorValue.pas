@@ -688,9 +688,29 @@ begin
   SetLength(Result, n + 1);
 end;
 
+{ COUNTS IN PLACE. This was `Length(Utf8Starts(S)) - 1`, which built a table of
+  one Int64 per input BYTE only to ask how many entries it had -- eight bytes of
+  heap for every byte of string, transiently, on every len(), asc(), left$(),
+  right$(), mid$() and pad.
+
+  Under all four documented ceilings including a 32 MB memory one, three lines --
+  `s$ = string$(200000000, 65)`, `n% = len(s$)`, `println n%` -- reached a peak of
+  1716 MB and answered rc 0, and it scaled linearly: 500 MB of string reached
+  4291 MB. Counting instead of tabulating is the same rule, one byte at a time,
+  and the same measurement is 190 MB and three times faster. Verified byte for
+  byte across all 138 .bas files under tests/.
+
+  Utf8Left and Utf8Right still build the table, because they need the offsets. }
 function Utf8Len(const S: String): Integer;
+var
+  i: Integer;
 begin
-  Result := Length(Utf8Starts(S)) - 1;
+  Result := 0;
+  if Length(S) = 0 then Exit;
+  Result := 1;                  // whatever byte 1 is, it starts the first character
+  for i := 2 to Length(S) do
+    if (Ord(S[i]) < $80) or (Ord(S[i]) >= $C0) then   // not a continuation byte
+      Inc(Result);
 end;
 
 function Utf8Left(const S: String; ACount: Integer): String;

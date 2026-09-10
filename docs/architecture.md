@@ -155,9 +155,9 @@ minefield otherwise.
    [roadmap-phase2.md](roadmap-phase2.md) and [gui-components.md](gui-components.md).
 3. **Done.** Robust and deployable, all five steps: the catchable language-level
    error model (`ON ERROR` / `resume` / `resume next`, re-entrant across calls),
-   execution limits so a host can bound how long an untrusted script runs —
-   `MaxSteps`, `MaxOutputBytes` and `TimeoutMs`, each `0` by default meaning
-   unlimited and costing nothing, plus a fixed call-depth ceiling, the documented
+   execution limits so a host can bound an untrusted script — `MaxSteps`,
+   `MaxOutputBytes`, `TimeoutMs` and `MaxMemoryBytes`, each `0` by default
+   meaning unlimited and costing nothing, plus a fixed call-depth ceiling, the documented
    embedding API with `phosphorembed` as a third consumer, the on-disk bytecode
    (`.pbc`, validated on load rather than trusted), and the self-extracting
    deployment stub -- `phosphor compile app.bas app.pbc` then `phosphor pack

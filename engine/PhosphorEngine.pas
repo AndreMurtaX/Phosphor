@@ -239,6 +239,7 @@ begin
   FErrorMessage := '';
   FLastError := NoError();
   FMaxSteps := 0;
+  FMaxMemoryBytes := 0;
   FMaxOutputBytes := 0;
   FTimeoutMs := 0;
   FVM := nil;

@@ -301,10 +301,11 @@ Consequences:
   on-disk format), it would be a large, explicit, documented number — not 513.
 
 A runaway script is bounded by **execution limits, not a variable count**. The
-engine exposes three ceilings — `MaxSteps` (instruction budget), `MaxOutputBytes`
-(total bytes through `OnOutput`), and `TimeoutMs` (wall-clock) on `PhosphorEngine`
-— all **off by default** (`0`), so the embedder opts in to exactly the bound it
-wants (`probe_limits` exercises them). This is the deliberate difference from
+engine exposes four ceilings — `MaxSteps` (instruction budget), `MaxOutputBytes`
+(total bytes through `OnOutput`), `TimeoutMs` (wall-clock) and, since 2026-09-10,
+`MaxMemoryBytes` (heap the script may add) on `PhosphorEngine` — all **off by
+default** (`0`), so the embedder opts in to exactly the bound it wants
+(`probe_limits` exercises them). This is the deliberate difference from
 Plan9Basic's `513`: an arbitrary global count is a proxy for "this program is out
 of control", and a 521-global program that Phosphor runs fine is proof the proxy
 is the wrong measure. The real question — *is this script consuming more than the

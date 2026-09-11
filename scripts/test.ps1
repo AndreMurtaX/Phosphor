@@ -31,7 +31,13 @@ if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 $exe      = Join-Path $root 'bin\phosphor.exe'
 $bas      = Join-Path $root 'tests\skeleton\hello.bas'
 $expected = Join-Path $root 'tests\skeleton\hello.expected'
-$tmp      = [System.IO.Path]::GetTempPath()
+# Every scratch path in this script hangs off $tmp, and $tmp is a per-PROCESS
+# directory rather than the shared user TEMP. Fixed names directly under TEMP
+# meant two runs at once -- two worktrees, two agents -- clobbered each other's
+# output and died on a file lock, which reads exactly like a test failure. The
+# bash twin has always used mktemp.
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) "phosphor-run-$PID"
+if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
 $outA     = Join-Path $tmp 'phosphor_hello.A.actual'
 $outB     = Join-Path $tmp 'phosphor_hello.B.actual'
 
@@ -587,3 +593,8 @@ else { Write-Host "FAIL  O:a source file whose first line starts PBC is taken fo
 
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO) { exit 0 } else { exit 1 }
+
+# A plain rmdir: it succeeds only if the directory is empty, so it can never take
+# anything with it. Deliberate -- this tree has erased thirteen working trees to a
+# recursive removal once, and a scratch directory that outlives a run costs nothing.
+try { Remove-Item -LiteralPath $tmp -ErrorAction Stop } catch { }

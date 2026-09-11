@@ -22,6 +22,14 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
 
+# Every scratch path in this script hangs off $tmp, and $tmp is a per-PROCESS
+# directory rather than the shared user TEMP. Fixed names directly under TEMP
+# meant two runs at once -- two worktrees, two agents -- clobbered each other's
+# output and died on a file lock, which reads exactly like a test failure. The
+# bash twin has always used mktemp.
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) "phosphor-run-$PID"
+if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
+
 function Resolve-Fpc {
     if ($Fpc) { return $Fpc }
     $c = 'C:\lazarus\fpc\3.2.2\bin\x86_64-win64\fpc.exe'
@@ -75,14 +83,34 @@ Write-Host "runner built: $exe" -ForegroundColor DarkGray
 # The BINARY's timestamp is moved back, never a source file's: bin/ is a build
 # artifact and the next compile overwrites it, so an interruption here cannot
 # leave anything tracked changed. Restored immediately either way.
+# It is moved to just BEFORE the newest source that guard actually reads,
+# computed here rather than by a fixed offset. The four sets below mirror
+# RefuseIfStale's four NewestIn calls exactly, and non-recursively, because it
+# scans each directory and not its children.
+#
+# A fixed -2h fired only when the runner happened to be built within two hours of
+# an engine edit -- which is to say only when nobody needs the guard. On 2026-09-11
+# the Linux tree's newest .pas was SIXTEEN hours old (a git pull that changes no
+# .pas leaves every source stamped at the previous checkout), the back-dated binary
+# stayed newer than all of them, and the check declared the guard broken; it had
+# never once run there. Windows passed the same morning by a one-minute margin,
+# which is luck, not a test.
+$srcNewest = Get-ChildItem -Path (Join-Path $root 'engine\*.pas'),
+                                 (Join-Path $root 'engine\libs\*.pas'),
+                                 (Join-Path $root 'tests\*.pas'),
+                                 (Join-Path $root 'host\console\*.lpr') |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $srcNewest) {
+    throw "cannot read the source timestamps the staleness guard compares against; the proof cannot run, and a check that silently does not run is worse than none"
+}
 $stampWas = (Get-Item $exe).LastWriteTime
 try {
-    (Get-Item $exe).LastWriteTime = $stampWas.AddHours(-2)
+    (Get-Item $exe).LastWriteTime = $srcNewest.LastWriteTime.AddSeconds(-60)
     # Both streams redirected INSIDE cmd, the same way Run-One does it and for the
     # same reason: PowerShell 5.1 wraps a native command's stderr in ErrorRecords
     # and reads $? as false even on exit 0, so `2>&1` here turned a working guard
     # into a NativeCommandError that killed the run.
-    cmd /c "`"$exe`" `"$(Join-Path $suiteDirForStale '00_harness.bas')`" > `"$env:TEMP\ph_stale.out`" 2> `"$env:TEMP\ph_stale.err`""
+    cmd /c "`"$exe`" `"$(Join-Path $suiteDirForStale '00_harness.bas')`" > `"$(Join-Path $tmp 'ph_stale.out')`" 2> `"$(Join-Path $tmp 'ph_stale.err')`""
     $staleRc = $LASTEXITCODE
 } finally {
     (Get-Item $exe).LastWriteTime = $stampWas
@@ -90,7 +118,14 @@ try {
 if ($staleRc -ne 3) {
     throw "phosphortest ran with a back-dated binary (exit $staleRc, expected 3) -- the staleness guard is not working, so a stale runner would answer silently again"
 }
-Write-Host "runner refuses to answer when stale (exit 3)" -ForegroundColor DarkGray
+# And the other direction, because a guard that refused EVERYTHING would also have
+# passed the check above. With its own timestamp restored the runner must answer.
+cmd /c "`"$exe`" `"$(Join-Path $suiteDirForStale '00_harness.bas')`" > `"$(Join-Path $tmp 'ph_fresh.out')`" 2> `"$(Join-Path $tmp 'ph_fresh.err')`""
+$freshRc = $LASTEXITCODE
+if ($freshRc -eq 3) {
+    throw "phosphortest refused its own freshly built binary (exit 3) -- the guard refuses everything, which would pass the stale check above while testing nothing"
+}
+Write-Host "runner refuses when stale (exit 3), answers when fresh (exit $freshRc)" -ForegroundColor DarkGray
 Write-Host ''
 
 # --- run the manifest --------------------------------------------------------
@@ -99,7 +134,6 @@ $negDir = Join-Path $root 'tests\negative'
 # Single-source manifest, shared with test-suite.sh so Windows/Linux never drift.
 $manifest = Get-Content (Join-Path $suite 'manifest.txt') |
     ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
-$tmp = [System.IO.Path]::GetTempPath()
 
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {
     $out = Join-Path $tmp 'phosphortest.out'
@@ -328,3 +362,8 @@ if (-not $py) {
 Write-Host ''
 if ($allOk) { Write-Host 'SUITE OK' -ForegroundColor Green; exit 0 }
 else { Write-Host 'SUITE FAILED' -ForegroundColor Red; exit 1 }
+
+# A plain rmdir: it succeeds only if the directory is empty, so it can never take
+# anything with it. Deliberate -- this tree has erased thirteen working trees to a
+# recursive removal once, and a scratch directory that outlives a run costs nothing.
+try { Remove-Item -LiteralPath $tmp -ErrorAction Stop } catch { }

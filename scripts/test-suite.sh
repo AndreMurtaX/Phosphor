@@ -38,8 +38,33 @@ echo "runner built: $exe"
 #
 # The BINARY's timestamp is moved back, never a source file's: bin/ is a build
 # artifact and the next compile overwrites it. Restored immediately either way.
+# It is moved to just BEFORE the newest source that guard actually reads,
+# computed here rather than by a fixed offset. The four sets below mirror
+# RefuseIfStale's four NewestIn calls exactly, and non-recursively, because it
+# scans each directory and not its children.
+#
+# A fixed '2 hours ago' fired only when the runner happened to be built within two
+# hours of an engine edit -- which is to say only when nobody needs the guard. On
+# 2026-09-11 this tree's newest .pas was SIXTEEN hours old here, because a git pull
+# that changes no .pas leaves every source stamped at the previous checkout, so the
+# back-dated binary stayed newer than all of them and this check declared the guard
+# broken. It had never once run on Linux. Windows passed the same morning by a
+# one-minute margin, which is luck, not a test.
+newest_src=$(
+  { find "$root/engine"       -maxdepth 1 -name '*.pas' -printf '%T@\n'
+    find "$root/engine/libs"  -maxdepth 1 -name '*.pas' -printf '%T@\n'
+    find "$root/tests"        -maxdepth 1 -name '*.pas' -printf '%T@\n'
+    find "$root/host/console" -maxdepth 1 -name '*.lpr' -printf '%T@\n'
+  } | sort -rn | head -1 | cut -d. -f1
+)
+case "$newest_src" in
+  ''|*[!0-9]*)
+    echo "cannot read the source timestamps the staleness guard compares against;" >&2
+    echo "the proof cannot run, and a check that silently does not run is worse than none" >&2
+    exit 1 ;;
+esac
 touch -r "$exe" "$exe.stamp"
-touch -d '2 hours ago' "$exe"
+touch -d "@$((newest_src - 60))" "$exe"
 "$exe" "$root/tests/suite/00_harness.bas" >/dev/null 2>&1
 stale_rc=$?
 touch -r "$exe.stamp" "$exe"
@@ -48,7 +73,15 @@ if [ "$stale_rc" -ne 3 ]; then
   echo "phosphortest ran with a back-dated binary (exit $stale_rc, expected 3) -- the staleness guard is not working"
   exit 1
 fi
-echo "runner refuses to answer when stale (exit 3)"; echo
+# And the other direction, because a guard that refused EVERYTHING would also have
+# passed the check above. With its own timestamp restored the runner must answer.
+"$exe" "$root/tests/suite/00_harness.bas" >/dev/null 2>&1
+fresh_rc=$?
+if [ "$fresh_rc" -eq 3 ]; then
+  echo "phosphortest refused its own freshly built binary (exit 3) -- the guard refuses everything"
+  exit 1
+fi
+echo "runner refuses when stale (exit 3), answers when fresh (exit $fresh_rc)"; echo
 
 suite="$root/tests/suite"; neg="$root/tests/negative"
 # Single-source manifest, shared with test-suite.ps1 so Windows/Linux never drift.

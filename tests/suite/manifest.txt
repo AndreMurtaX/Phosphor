@@ -60,3 +60,4 @@
 59_alloc_limits
 60_stack_operands
 61_utf8_character_ops
+66_dict_index

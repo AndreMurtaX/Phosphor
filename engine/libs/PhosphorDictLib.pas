@@ -8,6 +8,11 @@
   registered under every typed name); the dict knows its own value kind. All
   errors are RETURNED, never raised, and a fabricated handle is rejected by
   GetDict (IsHandle) rather than dereferenced.
+
+  Entries live in two parallel arrays and that IS the documented insertion order
+  (dict_key$ reads position n of it). Beside them sits a hash table that maps a
+  key to its position, so IndexOf -- which ten registered functions go through,
+  eight of them to READ -- costs a probe instead of a scan of every key.
 ******************************************************************************}
 unit PhosphorDictLib;
 
@@ -21,36 +26,179 @@ uses
 
 type
   TPhosphorDict = class
+  private
+    FKeys: array of String;
+    FVals: array of TValue;
+    FCount: Integer;
+    { The lookup index, and nothing more than an accelerator. FBuckets is open
+      addressed with linear probing and holds an ENTRY NUMBER, one-based, so 0
+      reads as empty; its length is always a power of two and FMask is that
+      length minus one. Every hit it reports is confirmed against FKeys with the
+      same `=` the old linear scan used, so a collision costs a probe and can
+      never change an answer.
+
+      The index is not free: with FHashes it costs about six bytes per entry on
+      live heap -- 60.7 bytes per entry before, 66.9 after -- so an embedder who
+      sets MaxMemoryBytes holds roughly 7% fewer keys under the same ceiling
+      (8187 -> 7625 under 1 MB, measured). Nothing answers wrongly; the program
+      is refused. docs/libraries/dict.md says the same thing to the caller. }
+    FBuckets: array of Integer;
+    FMask: Integer;
+    { Each entry's hash, taken once when the entry is made and carried beside
+      its key ever after. Without it Reindex would re-HASH every surviving key,
+      and Remove calls Reindex -- so removal would cost the dictionary's total
+      key BYTES instead of its entry count. Measured, 1000 removals from the
+      front of a 4000-entry dictionary with 202-byte keys: 54 ms under the old
+      linear scan, 691 ms with this index but no stored hashes, 62 ms with them.
+      Filling and then removing was 740 ms without them against the scan's
+      576 ms -- a change sold as a speedup, making a real workload SLOWER. With
+      them, Reindex re-PLACES entries and reads no key at all. Four bytes per
+      allocated entry slot. }
+    FHashes: array of LongWord;
+    function GetKey(AIndex: Integer): String;
+    function GetVal(AIndex: Integer): TValue;
+    procedure Bind(AEntry: Integer);
+    procedure Reindex;
   public
     Kind: TArrayKind;
-    Keys: array of String;
-    Vals: array of TValue;
-    Count: Integer;
     constructor Create(AKind: TArrayKind);
     function IndexOf(const AKey: String): Integer;
     procedure SetVal(const AKey: String; const AVal: TValue);
     procedure Remove(const AKey: String);
     procedure Clear;
     function TypeName: String;
+    { Keys, Vals and Count used to be public mutable FIELDS. They are read-only
+      now for one reason: the table has to agree with the arrays after EVERY
+      mutation, and an index that disagrees with its array is a silently wrong
+      answer -- worse than the scan it replaced. Exactly three routines mutate,
+      all of them below; with the fields closed, nothing anywhere can put the
+      two out of step, which is what makes the agreement an invariant rather
+      than a habit. }
+    property Count: Integer read FCount;
+    property Keys[AIndex: Integer]: String read GetKey;
+    property Vals[AIndex: Integer]: TValue read GetVal;
   end;
 
 procedure RegisterDictFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
+(* FNV-1a over the RAW BYTES of the key, and it has to stay that way: the library
+   page promises keys are compared exactly, byte for byte -- case matters,
+   whitespace matters, no Unicode normalization happens -- and IndexOf still
+   settles every candidate with Pascal's own `=`. A hash that folded case or
+   normalized would simply never offer the entry that `=` would have accepted, and
+   the miss would be silent.
+
+   What `=` actually compares, read rather than assumed (rtl/inc/astrings.inc:717
+   fpc_AnsiStr_Compare_equal, and :64 TranslatePlaceholderCP): it compares raw
+   bytes only when the two operands' CODE PAGE TAGS agree, and transcodes both to
+   UTF-8 first when they do not. So "hash the raw bytes" and "compare the raw
+   bytes" are the same rule only for strings that carry the same tag. Every string
+   this engine makes carries one -- DefaultSystemCodePage, measured across sixteen
+   string-producing shapes -- so no BASIC program can reach the difference, and the
+   unit's codepage directive colours only string LITERALS, none of which reach this
+   function. An EMBEDDER can: hand in a String tagged differently (a host linking
+   PhosphorCrtLib without the LCL tags CP_UTF8) and a key `=` would have accepted
+   is one the hash separates. That is a MISS, never a wrong value, because every
+   hit is still settled by `=` below.
+
+   The multiply is done in QWord and masked back rather than left to wrap around:
+   unsigned overflow is an error when a host compiles with overflow or range
+   checking on, and this unit must not depend on which switches it is given.
+   QWord is 64 bits on every target the engine builds for, and 2^32 * 16777619 is
+   under 2^57, so the product cannot overflow it on either operating system.
+
+   This comment is in the star form and not the file's usual braces because a
+   brace comment that names a compiler switch opens a second comment level --
+   a warning, and the bar here is zero warnings. *)
+function HashKey(const AKey: String): LongWord;
+var i: Integer;
+begin
+  Result := $811C9DC5;
+  for i := 1 to Length(AKey) do
+  begin
+    Result := Result xor LongWord(Byte(AKey[i]));
+    Result := LongWord((QWord(Result) * 16777619) and $FFFFFFFF);
+  end;
+end;
+
 constructor TPhosphorDict.Create(AKind: TArrayKind);
 begin
   inherited Create();
   Kind := AKind;
-  Count := 0;
+  FCount := 0;
+  Reindex();
 end;
 
-function TPhosphorDict.IndexOf(const AKey: String): Integer;
-var i: Integer;
+function TPhosphorDict.GetKey(AIndex: Integer): String;
 begin
-  for i := 0 to Count - 1 do
-    if Keys[i] = AKey then Exit(i);
+  Result := FKeys[AIndex];
+end;
+
+function TPhosphorDict.GetVal(AIndex: Integer): TValue;
+begin
+  Result := FVals[AIndex];
+end;
+
+{ Place one entry in the first free slot from its hash position. The loop is
+  bounded by the table rather than written `while True`: the table is never more
+  than half full, so a free slot always exists and the bound is never reached --
+  but a bound that cannot be reached still beats a loop that cannot end. What
+  keeps it unreachable is the `* 2` in SetVal's load-factor line further down;
+  falling out of this loop would leave an entry in the arrays and NOT in
+  the table, which is a key that is present and cannot be found. That is why the
+  suite pins the load factor rather than trusting it. }
+procedure TPhosphorDict.Bind(AEntry: Integer);
+var slot, probes: Integer;
+begin
+  slot := Integer(FHashes[AEntry] and LongWord(FMask));
+  for probes := 1 to Length(FBuckets) do
+  begin
+    if FBuckets[slot] = 0 then
+    begin
+      FBuckets[slot] := AEntry + 1;
+      Exit;
+    end;
+    slot := (slot + 1) and FMask;
+  end;
+end;
+
+{ Build the table from the entries, which are the truth. Called from everything
+  that can renumber an entry, and cheap enough to be: one pass of FCount probes
+  over cached hashes, which is what Remove's shift already costs and reads no
+  key. It re-PLACES entries; it does not re-hash them. }
+procedure TPhosphorDict.Reindex;
+var slotCount, i: Integer;
+begin
+  slotCount := 8;
+  while slotCount < (FCount * 2) do slotCount := slotCount * 2;
+  SetLength(FBuckets, 0);            // discard, then allocate: FPC zeroes a fresh
+  SetLength(FBuckets, slotCount);    // dynamic array, and every slot must read empty
+  FMask := slotCount - 1;
+  for i := 0 to FCount - 1 do Bind(i);
+end;
+
+{ There is deliberately NO `if FCount = 0 then Exit` fast path here, and its
+  absence is load-bearing. An empty dictionary has an empty table -- Create and
+  Clear both end in Reindex -- so the probe below reads an empty slot and answers
+  -1 on its own; the guard would have been a line whose wrong version (deletion)
+  nothing could tell from its right one. Worse, it would have made Clear's own
+  contract untestable: a Clear that shortened the count without emptying the
+  table is exactly the defect the guard would hide for every question asked
+  before the next insert. }
+function TPhosphorDict.IndexOf(const AKey: String): Integer;
+var slot, probes, entry: Integer;
+begin
   Result := -1;
+  slot := Integer(HashKey(AKey) and LongWord(FMask));
+  for probes := 1 to Length(FBuckets) do
+  begin
+    entry := FBuckets[slot];
+    if entry = 0 then Exit;          // an empty slot ends the probe: not present
+    if FKeys[entry - 1] = AKey then Exit(entry - 1);
+    slot := (slot + 1) and FMask;
+  end;
 end;
 
 procedure TPhosphorDict.SetVal(const AKey: String; const AVal: TValue);
@@ -59,17 +207,31 @@ begin
   idx := IndexOf(AKey);
   if idx >= 0 then
   begin
-    Vals[idx] := AVal;
+    FVals[idx] := AVal;              // overwrite keeps the position it already had
     Exit;
   end;
-  if Count = Length(Keys) then
+  if FCount = Length(FKeys) then
   begin
-    SetLength(Keys, (Count + 1) * 2);
-    SetLength(Vals, (Count + 1) * 2);
+    SetLength(FKeys, (FCount + 1) * 2);
+    SetLength(FVals, (FCount + 1) * 2);
+    SetLength(FHashes, (FCount + 1) * 2);
   end;
-  Keys[Count] := AKey;
-  Vals[Count] := AVal;
-  Inc(Count);
+  FKeys[FCount] := AKey;
+  FVals[FCount] := AVal;
+  FHashes[FCount] := HashKey(AKey);   // the only place a key is ever hashed for storage
+  Inc(FCount);
+  { Half full at most, and the `* 2` is the whole of that rule -- drop it and the
+    table is allowed to fill completely. That is not a style preference: a table
+    whose length is a power of two is EXACTLY FULL whenever the entry count is
+    that same power of two, and an absent-key probe in a full table finds no
+    empty slot to stop at, so it walks every slot and compares every key. At
+    n = 8192 that is the linear scan this change was made to remove, restored in
+    full. tests/suite/62_dict_index.bas sizes its cost case to 8192 for exactly
+    that reason and fails within a second of the `* 2` going away. }
+  if (FCount * 2) > Length(FBuckets) then
+    Reindex()
+  else
+    Bind(FCount - 1);
 end;
 
 procedure TPhosphorDict.Remove(const AKey: String);
@@ -77,17 +239,27 @@ var idx, i: Integer;
 begin
   idx := IndexOf(AKey);
   if idx < 0 then Exit;
-  for i := idx to Count - 2 do
+  for i := idx to FCount - 2 do
   begin
-    Keys[i] := Keys[i + 1];
-    Vals[i] := Vals[i + 1];
+    FKeys[i] := FKeys[i + 1];
+    FVals[i] := FVals[i + 1];
+    FHashes[i] := FHashes[i + 1];    // the hash travels with its key, or Reindex places it wrong
   end;
-  Dec(Count);
+  Dec(FCount);
+  { EVERY entry above idx just changed number. Deleting only the removed key's
+    own slot would leave the table pointing one past the truth for all of them --
+    a wrong VALUE returned for a key that is still present, and silent. }
+  Reindex();
 end;
 
 procedure TPhosphorDict.Clear;
 begin
-  Count := 0;
+  { FKeys and FVals keep their contents past FCount, exactly as they always have.
+    That was invisible while IndexOf was bounded by FCount; with a table beside
+    them it would not be, so the table is emptied here rather than merely
+    shortened -- otherwise dict_haskey answers 1 for a key that was cleared. }
+  FCount := 0;
+  Reindex();
 end;
 
 function TPhosphorDict.TypeName: String;

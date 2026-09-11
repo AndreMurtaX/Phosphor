@@ -15,9 +15,41 @@ in what they say the dictionary was *made for*, which `dict_type` reports. Entri
 keep **insertion order**, so `dict_key$(d@, n)` walks them in the order they were
 first set, and a key that is overwritten keeps the position it already had.
 
-The lookup is a **linear scan of the keys**, not a hash. That is a deliberate size
-trade — configuration, headers, counters, small indexes are what these are for.
-A dictionary with tens of thousands of keys will feel it.
+The lookup is **indexed**: a hash table sits beside the entries and maps a key to
+its position, so finding a key — which is what every get, every set, `dict_haskey`
+and `dict_typeof` all start by doing — costs the same whether the dictionary holds
+ten keys or a hundred thousand. The entries themselves are still the
+insertion-order arrays that `dict_key$` walks; the table only says where to look,
+and every answer it gives is confirmed against the key itself.
+
+It was a linear scan until 2026-09-11, which made *filling* a dictionary
+quadratic: 32000 keys took 3.7 s and 64000 took 14.5 s, against 0.37 s and 0.71 s
+now, and reading those 64000 keys back went from 14.3 s to 0.28 s.
+
+**`dict_remove` is the one operation still proportional to the size**, and always
+was: the entries above the removed one shift down to close the gap, so removing
+the first key of a large dictionary moves every other entry, and the index is
+rebuilt over those same entries in the same pass. What it is *not* proportional
+to is the length of the keys — each entry's hash is kept beside it, so the
+rebuild never reads a key. Measured, 1000 removals from the front of a
+4000-entry dictionary: 53 ms before this change and 63 ms after with two-byte
+keys, 54 ms before and 62 ms after with 202-byte keys. Filling that same
+dictionary and then removing from it went from 576 ms to 111 ms. So the advice
+is unchanged and so is its reason: build with `dict_set@` freely, and remove in
+a loop only when the dictionary is small.
+
+**The index costs memory, and an embedder who sets a ceiling can feel it.** It
+is about six bytes per entry on top of what an entry already cost — measured on
+live heap, 60.7 bytes per entry before and 66.9 after, which is 10.1% at 2000,
+4000 and 8000 entries alike. What that buys is the paragraph above; what it costs
+is head-room. A host that sets `MaxMemoryBytes` holds about 7% fewer keys under
+the same ceiling: the largest dictionary that still runs clean under 1 MB went
+from 8187 entries to 7625, and under 2 MB from 16375 to 15312. Nothing answers
+wrongly — the program is *refused*, with `peLimit` — and the ceiling is charged
+after every library call, so a dictionary-heavy script meets it sooner than
+anything else does. The shipped hosts set no ceiling (`MaxMemoryBytes` is 0,
+meaning off), so this reaches only an embedder who has chosen one, and the remedy
+there is to raise it by about a tenth when taking this version.
 
 The design stance is the project's usual one, in three places a caller can see.
 **Errors are values, not events**: the library never raises inside itself, and a
@@ -208,7 +240,16 @@ Two things worth noticing:
   ends, which is why storing the same handle in two dictionaries is safe and why a
   long-lived program should reuse a dictionary rather than make one per iteration.
 - **Keys are compared exactly**, byte for byte. Case matters, whitespace matters,
-  and no Unicode normalization happens; `"Name"` and `"name"` are two keys.
+  and no Unicode normalization happens; `"Name"` and `"name"` are two keys. The
+  index hashes those same raw bytes — a hash that folded case would quietly fail
+  to offer the entry the comparison would have accepted. Hash and comparison
+  agree for every string a *program* can build here, because Pascal's `=`
+  compares raw bytes when both operands carry the same code page and everything
+  this engine produces carries the system one. An **embedder** is the exception
+  worth knowing: hand the engine a String tagged with a different code page and
+  `=` transcodes both sides to UTF-8 before comparing, while the hash does not,
+  so the table can fail to offer a key `=` would have matched. That is a miss,
+  never a wrong value — every hit the table does offer is still settled by `=`.
 - **Iteration is `dict_count` plus `dict_key$`.** There is no keys-array or
   values-array call, and no sorted view — insertion order is the only order.
 - The one-line catalogue entry for each of these names is in

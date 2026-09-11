@@ -172,9 +172,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)
   · [docs/roadmap.md](docs/roadmap.md).
 
-## The eight source gates
+## The nine source gates
 
-After the acceptance corpus, `test-suite` runs eight Python checks over the *source* —
+After the acceptance corpus, `test-suite` runs nine Python checks over the *source* —
 invariants no compiler can check and no golden happens to cover. They run in the
 suite rather than in the build, because building should not need Python but passing
 should mean the invariants hold; and a missing interpreter **fails** the run instead
@@ -184,11 +184,15 @@ saying that *nothing checks this list*, and that this was how `check-suffix.py` 
 predicted itself: `check-budget.py` joined on 2026-09-07 and the heading still said
 six. **`coverage.py` now counts the gates `scripts/test-suite.ps1` actually runs and
 fails if this number disagrees**, so the next one to join cannot be missed the same
-way. `scripts/test-suite.sh` runs the same eight on Linux.
+way. **And it did**: `check-crossrefs.py` joined on 2026-09-11 and this heading
+still said eight, which `coverage.py` refused within minutes of the wiring — the
+mechanism catching the person who had just built a mechanism for the same class one
+level over. `scripts/test-suite.sh` runs the same nine on Linux.
 
 | gate | what it refuses to let through |
 | ---- | ------------------------------ |
 | `coverage.py` | a registered built-in that no test calls, that the function reference omits, or that its own library page does not describe — and, the other way round, a function name or a count a document states that the registry does not back. |
+| `check-crossrefs.py` | a repo path named in a comment or a document that the tree does not have — renumbering one test file broke four citations in an afternoon and no other gate reads a sentence — and a probe registered in one suite runner but not the other, which runs on one operating system while both print OK. |
 | `check-codepage.py` | a `Char` concatenated into a code-page string, where every byte `>= 128` is silently destroyed. The class has been swept three times. |
 | `check-sandbox.py` | a routine a script can reach that touches the filesystem without asking the sandbox gate first — or without being exempt by name, with a reason. |
 | `check-seams.py` | a host that neither fills an engine seam (`OnOutput`, `OnInput`, `OnBreakpoint`, `HostServices`) nor records why leaving it nil is right. A nil seam answers silently. |
@@ -209,7 +213,7 @@ way. `scripts/test-suite.sh` runs the same eight on Linux.
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs — and they are RUN: `test-examples` byte-compares each to a golden (a windowed one is compiled, since the compiler needs no display). |
-| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the eight source gates described above.|
+| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the nine source gates described above.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

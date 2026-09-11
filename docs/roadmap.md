@@ -129,9 +129,10 @@ and is unverifiable until the engine exists).
    the local list is a frame slot, any other name is a global). Calls resolve to
    a user function first, else the library registry, so forward references work.
    `tests/suite/03a_functions.bas` (18 asserts — the function subset of
-   03_functions) is byte-exact green. Full `03_functions.bas` waits on
-   arrays/handles (`func/pointer-return`) and the string lib `stri$`
-   (`func/mixed-args`), steps 6-8. The global cap (negative 01 / 13_global_limit)
+   03_functions) was byte-exact green here, waiting on arrays/handles
+   (`func/pointer-return`) and the string lib `stri$` (`func/mixed-args`) for the
+   rest. **Both arrived at step 8** and `eb4171d` replaced the subset with the
+   full `tests/suite/03_functions.bas`, which is what the manifest runs now. The global cap (negative 01 / 13_global_limit)
    is deferred with those files; its value is Claude/council's to decide.
    **Original gate:** `03_functions` green; negative 01 rejects for the intended
    reason; a recursion/frame-teardown probe shows no local leakage.

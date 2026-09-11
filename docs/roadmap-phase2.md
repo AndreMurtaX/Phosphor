@@ -180,10 +180,13 @@ VM gtk2 build flags that worked (fpc direct, Lazarus 4.8 at `/usr/share/lazarus/
    `-B` clean. **Deferral cost:** every event handler stands on it.
 
 2. **GUI host skeleton + widgetset spike.** *DONE.* Widgetset settled (above):
-   `win32` headless on Windows, `gtk2` on the Linux session's live display. Both
-   hosts built: `host/gui/phosphorgui.lpr` (interactive) and `host/gui/
-   phosphorguitest.lpr` (headless runner, `FileWrite(StdOutputHandle)` summary),
-   mirroring `host/console/`. `scripts/test-gui.{ps1,sh}` build against the
+   `win32` headless on Windows, `gtk2` on the Linux session's live display. Two
+   hosts were built here -- `host/gui/phosphorgui.lpr` (interactive) and
+   `host/gui/phosphorguitest.lpr` (headless runner,
+   `FileWrite(StdOutputHandle)` summary), mirroring `host/console/`. **The
+   interactive one is gone**, folded into the single `phosphor` binary by
+   `15187b7` ("one binary -- phosphor brings the GUI up itself, or runs
+   headless"); only the headless runner is still a separate program. `scripts/test-gui.{ps1,sh}` build against the
    platform widgetset and run the GUI manifest byte-exact.
 
 3. **Form + first control + one event, end to end.** *DONE (2026-09-01).* The

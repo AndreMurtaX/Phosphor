@@ -363,7 +363,7 @@ if (-not $py) {
     Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
     $allOk = $false
 } else {
-    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py', 'check-budget.py', 'check-manifests.py')) {
+    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py', 'check-budget.py', 'check-manifests.py', 'check-crossrefs.py')) {
         $gp = Join-Path $here $gate
         # The comment above says a gate that quietly does not run is worse than no
         # gate, and then this line skipped a gate whose FILE was missing -- exactly

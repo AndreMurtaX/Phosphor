@@ -226,7 +226,7 @@ begin
     that same power of two, and an absent-key probe in a full table finds no
     empty slot to stop at, so it walks every slot and compares every key. At
     n = 8192 that is the linear scan this change was made to remove, restored in
-    full. tests/suite/62_dict_index.bas sizes its cost case to 8192 for exactly
+    full. tests/suite/66_dict_index.bas sizes its cost case to 8192 for exactly
     that reason and fails within a second of the `* 2` going away. }
   if (FCount * 2) > Length(FBuckets) then
     Reindex()

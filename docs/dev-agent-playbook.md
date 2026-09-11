@@ -671,7 +671,25 @@ introduces a defect.
    every component, 175 us at depth three and 825 us at depth twelve.
 7. **engine/libs/PhosphorIoLib.pas:622** [high] -- On Linux file_move overwrites an existing target file and reports 1; dir_move does the same onto an existing EMPTY directory -- docs/libraries/io.md:59,102 promise 0 in both cases (Windows refuses; the refusal is an accident of MoveFileW)
 8. **engine/libs/PhosphorJsonLib.pas:1311** [high] -- A tail fpjson ignores disarms the \u re-spelling: unmatched quote or apostrophe after the value silently restores all four fpjson escape defects on a document json_parse@ accepts with rc=0
-9. **engine/libs/PhosphorStrLib.pas:516** [high] -- replacetext$ returns wrong answers and silently drops trailing bytes whenever the haystack contains a character whose uppercase has a different UTF-8 byte length
+9. ~~**engine/libs/PhosphorStrLib.pas:516** [high]~~ -- CLOSED 2026-09-10, as a
+   consequence of 34 rather than by anyone aiming at it, and MEASURED here on
+   2026-09-11 rather than assumed. The mechanism was the delegation itself:
+   `DoReplace` handed the job to the RTL's `StringReplace` with `rfIgnoreCase`,
+   which finds every match on an `AnsiUpperCase` copy and then copies bytes out of
+   the ORIGINAL at the positions it found -- and `AnsiUpperCase` is not
+   length-preserving over UTF-8. Rewriting the case-folding family removed that
+   delegation, so the defect went with it.
+
+   The finding's OWN reproduction: `replacetext$(U+017F + "abc", "abc", "Z")` was
+   `C5 5A 63` -- the second byte of the character destroyed, a stray `c` appended,
+   the result no longer valid UTF-8 -- and is now `C5 BF 5A`, which is what
+   `replacestr$` always answered. Its sweep over codepoints 128..66000 found 11
+   where `replacetext$("x" + C + "y", C, "Z")` was not `"xZy"`; it finds 0.
+
+   MY FIRST TEST FOR THIS SAID IT WAS FIXED AND PROVED NOTHING. It used characters
+   whose uppercase is the same length, so the pristine build answered identically
+   -- which is what running it against the pre-change binary showed, and why that
+   comparison is worth the three minutes every time.
 10. **host/gui/libs/PhosphorControlLib.pas:301** [high] -- control_free on a node@ or an item@ destroys it (and the subtree it owns), answers 1 with gui_error 0, and leaves a live child handle that access-violates on the next read
 11. **engine/PhosphorValue.pas:632** [medium] -- str$/print/print# format a Double with FloatToStr's 15-significant-digit default, so most computed Doubles silently change value across a str$/print#/input# round-trip, and str$(MaxDouble) rounds up past MaxDouble into text val() rejects as an overflow
 12. **engine/libs/PhosphorConfigLib.pas:83** [medium] -- cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section

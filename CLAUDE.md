@@ -78,11 +78,13 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   `rem` above.
 - **A backslash in a string literal is an escape.** `"\2"` is a rejected unknown escape;
   `"\\"` collapses to one. Keep paths and cited expressions out of `msg$`, or double them.
-- **`resume next` on the LAST statement of a block leaves the block.** A loop whose
-  failing call is the last line of its body runs ONE pass and stops, and reports
-  success. This is gauntlet finding 7 and it is OPEN, so until it is fixed, put a
-  statement after the call you expect to fail -- a counter is enough. It cost two
-  wrong readings of a leak probe on 2026-09-10, both of them green.
+- **`resume next` continues in CONTROL-FLOW order, and did not until 2026-09-10.**
+  It used to leave the block: a loop whose failing call was the last line of its
+  body ran ONE pass, stopped, and reported success, and a fault on the last line
+  of a `then` block ran the `else` arm. Fixed -- each statement's boundary now
+  records where that statement's code ends -- but the old behaviour is worth
+  knowing, because it cost two wrong readings of a leak probe that were BOTH
+  green, and because a test written before that date may still encode it.
 
 ## Traps that have already cost real time
 

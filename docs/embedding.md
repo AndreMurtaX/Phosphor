@@ -202,6 +202,55 @@ Codes (`PhosphorErrors`): `peNone` 0, `peIntOverflow` 1, `peDivByZero` 2,
 7, `peFatal` 8. A script can also handle its own errors with `ON ERROR` (see
 [roadmap-phase3.md](roadmap-phase3.md)).
 
+### Reading a program one line at a time
+
+A host with a prompt — a REPL, a console pane, a scripting bar — has to tell two
+different failures apart. `if a = 1 then` with nothing after it is not wrong; it is
+**unfinished**, and the answer is to read another line. `csae 2` for `case 2` is
+wrong, and no continuation will ever repair it.
+
+Two properties answer that, and both are about the last **compile**:
+
+```pascal
+if eng.ReplRun(line) <> 0 then
+begin
+  if eng.ErrorUnterminatedBlock and eng.ErrorAtEndOfInput then
+    pending := line          // a block with no terminator, and the input ran out
+  else
+    ShowMessage(eng.ErrorMessage);
+end;
+```
+
+`ErrorUnterminatedBlock` says the failure was something opened and never closed: an
+`if`, a loop, a `select case`, a `function` — or a JSON literal spread over several
+lines, which continues at a prompt for the same reason a block does.
+`ErrorAtEndOfInput` says the **parser** ran out of input — it asked for the next
+token and the file had ended — rather than a wrong token turning up where the
+terminator belonged.
+
+That word *parser* is load-bearing. A check that runs once the whole program has
+been read answers `False` here even though there is nothing left to read: `goto
+nowhere` is not a program waiting for another line, it is a program that is wrong,
+and the lexer merely happens to be parked at the end by the time the label is
+looked up.
+
+**Ask both**, even though the first is the one that carries the answer today. The
+second is the belt: it is inferred from the token the parser was actually looking
+at, for every failure the parser raises, so a construct added to the engine later
+that records "unterminated" at a real token cannot make your prompt wait for a line
+that can never come. It costs one `and` — and because the two now agree on every
+refusal the engine's own corpus sweep can produce, a construct that runs out of
+input without saying so fails a test rather than reaching your prompt.
+
+Both describe the last **compile**, and both are cleared by every entry point —
+`Run`, `RunBytecode`, `Prepare`, `CallFunction`, `ReplRun` — so they never answer
+about a compile that failed earlier in the session.
+
+Do not classify by `ErrorMessage`. The console host did, against nine string
+literals of its own, and the wording could not be improved without breaking
+multi-line entry at the prompt with nothing anywhere to say so. The text is for a
+person to read; these two are the interface.
+
 ### When the interpreter itself takes a fault
 
 Codes 1 to 6 describe something the **program** did. `peLimit` describes a

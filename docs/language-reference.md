@@ -34,7 +34,22 @@ Hello, Phosphor!
 
 `phosphor.exe <file.bas>` runs a program; `phosphor.exe` alone opens an interactive
 REPL where variables and functions persist from line to line, and a multi-line
-block (an `if`, a loop, a `function`) waits for its terminator before running.
+block (an `if`, a loop, a `function`) waits for its terminator before running —
+as does a **multi-line JSON literal**, since 2026-09-11. The prompt changes to
+`     ...>` while something is open, and two shapes of that are worth knowing:
+
+- A newline is allowed wherever the literal allows one — before a key, before a
+  value, after a comma, before the closing bracket — but **not between a key and
+  its colon**. `{` then `"k"` on the next line is refused (*expected ':'*) rather
+  than continued, because the colon is the only thing that can follow a key and
+  the line break arrives before it.
+- **An open literal absorbs the line that finally breaks it.** Almost any token
+  can start an element, so the prompt keeps waiting until something can only be
+  wrong: `a@ = [` then `next` then `println "hi"` reports *expected ']'* and the
+  `println` is part of the rejected literal rather than a statement of its own.
+  An open block loses less — its terminator keyword is a much narrower target.
+  Either way the prompt recovers on the very next line.
+
 You can also `phosphor compile file.bas out.pbc` (bytecode) or
 `phosphor compile [--check] file.bas app.pbc` followed by `phosphor pack app.pbc app.exe`
 (a standalone executable — `pack` takes compiled bytecode, not source).
@@ -899,13 +914,30 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
   text that matched, and `regex_groupcount` counts it — so two parenthesised
   groups answer `3`. Numbering the parts of a match differently from the rest of
   the language would have been worse than this exception.
-- **`next` takes no variable.** Write `next`, not `next i`.
+- **`next` takes no variable.** Write `next`, not `next i` — and `next i` says so:
+  *"'next' takes no variable -- remove the 'i'; the 'for' on line 12 already names
+  it"*. It used to answer "expected end of line", which names the rule instead of
+  the word to delete. *(Since 2026-09-11.)*
 - **A block terminator on its own, with nothing open, is an error.** A stray
   `next`, `endif`, `wend`, `loop`, `until`, `case`, `endselect` or `endfunction`
   used to be accepted and do nothing, so deleting a `for` line by accident left a
   program that still ran with the loop gone. The same goes for `then`, `to`,
   `step` and `local`, which belong in the middle of a line rather than at the
   start of one. *(Since 2026-09-06.)*
+- **And an opener with no terminator is reported where it OPENED.** The mirror of
+  the rule above, in the same words: a `for` that is never closed says *"'for' on
+  line 12 without a matching 'next'"*, and the error's line is 12. It used to point
+  at the end of the file — and, because a file that ends with a newline has one
+  more line than its text does, at a line that was not there at all: three lines of
+  program reporting line 4. The end of a file is the one place in it where nothing
+  can be fixed. *(Since 2026-09-11.)*
+  A misspelled `case` label is not this mistake and does not get this message: it
+  is reported on its own line, because the `select` above it is fine.
+  The same is true of a **multi-line JSON literal**: one left open says *"'{' on
+  line 12 without a matching '}'"*, naming the innermost container still open —
+  the one you have to close first. A key that is not a string, or a bracket that
+  does not match, is still reported on its own line, because the literal above it
+  is fine.
 - **But those words are still ordinary names.** They are decided by the parser
   from where they appear, not reserved by the lexer, so `next = 5` and
   `elseif += 3` are assignments and always were. Only the word standing **alone**,

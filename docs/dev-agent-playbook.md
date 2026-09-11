@@ -2440,10 +2440,19 @@ exists so they can next time.
     variables AND user functions carrying across lines, with no new symbol-table
     machinery. `RunFrom` grows FVars without clearing it and leaves handles, channels,
     the DATA cursor and the ON ERROR handler alone.
-  - **Reuse the compiler's own error messages as a signal.** Multi-line blocks work
-    because the host treats exactly the compiler's unterminated-block messages
-    (`expected 'endif'`, …) as "keep reading" and shows a `...>` prompt — no second
-    parser, no brace counting.
+  - ~~**Reuse the compiler's own error messages as a signal.**~~ **SUPERSEDED
+    2026-09-11 by piece A5, and it is worth knowing why it lasted.** Multi-line
+    blocks worked because the host treated exactly the compiler's unterminated-block
+    message TEXT (`expected 'endif'`, …) as "keep reading" and showed a `...>`
+    prompt — no second parser, no brace counting. That was a genuinely good trade
+    for nine months, and it was also a coupling nothing could see: the host compared
+    all nine messages by EXACT STRING EQUALITY, so rewording a diagnostic broke the
+    prompt with no compiler error, no gate and no golden to notice — and A5's whole
+    job was rewording those nine. The compiler now RECORDS the fact
+    (`ErrorUnterminatedBlock`, with `ErrorAtEndOfInput` as the second half of the
+    test) and the host asks for it. The transferable lesson is the opposite of the
+    one this line used to carry: **when a consumer infers a fact from a producer's
+    prose, make the producer state the fact.**
   - **A REPL is testable.** `tests/classic/*.repl` pipes a session to stdin and pins the
     whole transcript, prompts included, byte-exact on both OSes.
 - **2026-09-02 · round 14 · streamed channels + random access.** Closed the two limits

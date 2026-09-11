@@ -1441,28 +1441,22 @@ begin
   end;
 end;
 
-{ True when a compile error means "the block is not finished yet" rather than "this
-  is wrong" -- the compiler's own terminator messages. The REPL then keeps reading
-  instead of rejecting the line, so a multi-line IF, loop or FUNCTION can be typed. }
-function IsUnterminatedBlock(const AMsg: String): Boolean;
-begin
-  { EVERY terminator the compiler can ask for, taken from the compiler rather than
-    remembered. `next` was missing, so a FOR loop -- the one block a person is most
-    likely to type at a prompt -- answered "expected 'next'" and threw the line
-    away, while the banner two lines above promised it would wait. The two `case`
-    messages belong here for the same reason: a bare `select case v` is a block
-    that has not been finished yet, not a mistake. }
-  Result := (AMsg = 'expected ''endif''') or
-            (AMsg = 'expected ''endwhile'' or ''wend''') or
-            (AMsg = 'expected ''endfunction''') or
-            (AMsg = 'expected ''endselect''') or
-            (AMsg = 'expected ''loop''') or
-            (AMsg = 'expected ''until''') or
-            (AMsg = 'expected ''next''') or
-            (AMsg = 'expected ''case'' after ''select''') or
-            (AMsg = 'expected ''case'' or ''endselect''');
-end;
+{ THIS HOST USED TO CLASSIFY THE COMPILER'S ERRORS BY READING THEM.
 
+  A function here compared eng.ErrorMessage with nine string literals -- "expected
+  'endif'", "expected 'next'", and seven more -- to decide whether the REPL should
+  keep reading. Three things were wrong with that. The list was written from
+  memory, so `next` was missing and a FOR loop, the one block a person is most
+  likely to type at a prompt, was thrown away while the banner promised it would
+  wait. The list could not be verified by anything: no compiler error, no gate and
+  no golden connects a literal here to the Fail that produces it, so the compiler
+  could be reworded and this host would go quiet and wrong. And it asked the
+  question in the wrong place: whether a block is unfinished is something the
+  PARSER knows and a reader of English is guessing at.
+
+  The compiler now records it -- ErrorUnterminatedBlock -- and the guess is gone.
+  ErrorAtEndOfInput is still the second half of the test, for the reason the
+  comment at the call site gives. }
 function Repl: Integer;
 var
   host: TConsoleHost;
@@ -1490,14 +1484,16 @@ begin
       if not host.ReadLine(line) then
       begin
         host.Output(#10);
-        { Input ended. If a block was still open, SAY SO and fail: discarding it
+        { Input ended. If something was still open, SAY SO and fail: discarding it
           and answering 0 told anything that piped us a truncated file that the
           whole file had run. A person at a keyboard sees their own half-typed
-          loop vanish; a script sees success. }
+          loop vanish; a script sees success. "Block or literal" rather than
+          "block" because a multi-line JSON literal continues here too, and
+          waitingFor then names a bracket rather than a keyword. }
         if pending <> '' then
         begin
-          Writeln(StdErr, 'error: input ended inside an unfinished block (',
-                  waitingFor, ')');
+          Writeln(StdErr, 'error: input ended inside an unfinished block or ',
+                  'literal (', waitingFor, ')');
           Result := 2;
           Exit;
         end;
@@ -1506,13 +1502,26 @@ begin
       if pending <> '' then line := pending + #10 + line;
       if eng.ReplRun(line) <> 0 then
       begin
-        { BOTH conditions. The message says a terminator is missing; the flag says
-          the input ran out rather than a wrong token turning up where the
-          terminator belonged. The message alone was not enough: `csae 2` for
-          `case 2` produces "expected 'case' or 'endselect'", so the prompt kept
-          waiting and swallowed every line that followed -- for ever, because no
-          continuation can satisfy an error already sitting in the buffer. }
-        if IsUnterminatedBlock(eng.ErrorMessage) and eng.ErrorAtEndOfInput then
+        { BOTH conditions, and they are different facts. The first says the failure
+          is something opened and never closed -- a block, or a JSON literal spread
+          over lines. The second says the input ran out rather than a wrong token
+          turning up where the terminator belonged.
+
+          THE FIRST IS THE ONE THAT ANSWERS, and that is worth stating plainly
+          because an earlier draft of this comment justified the pair with `csae 2`
+          for `case 2` and that justification is false: a misspelled case label
+          reports False here, which tests/probe_limits.lpr now pins, so the second
+          condition is not what saves the prompt from it.
+
+          The second is the BELT. Fail infers it from the token the parser was
+          actually looking at, for every failure the parser raises -- so a
+          construct added to the compiler later that records "unterminated" at a
+          REAL token cannot make this prompt wait for a continuation that can never
+          arrive. That is the 2026-09-06 defect's shape, and it costs one `and` to
+          keep shut. (It says False for a failure raised after the parse has read
+          the whole line, such as a `goto` to a label that does not exist, because
+          the lexer is parked at the end by then and the input did not run out.) }
+        if eng.ErrorUnterminatedBlock and eng.ErrorAtEndOfInput then
         begin
           pending := line;              // not wrong, just unfinished -- read on
           waitingFor := eng.ErrorMessage;

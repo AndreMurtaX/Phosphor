@@ -1,7 +1,7 @@
 rem Every block form typed at the prompt. 08_repl covers `function` and `if`;
 rem the other five were never entered interactively, and `for` -- the one a
 rem person is most likely to type -- was thrown away as an error until 2026-09-06
-rem because IsUnterminatedBlock did not list "expected 'next'".
+rem because the host classified by message TEXT; since 2026-09-11 it asks a flag.
 for i% = 1 to 3
 println "for " + str$(i%)
 next

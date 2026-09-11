@@ -1,0 +1,14 @@
+rem A multi-line JSON literal waits for its closing bracket, the same way a
+rem block waits for its terminator. It did not until 2026-09-11: the literal
+rem was refused on its first line, so JSON could not be typed at the prompt.
+cfg@ = {
+  "name": "phosphor",
+  "tags": [
+    "basic",
+    "embeddable"
+  ]
+}
+println json_gets$(cfg@, "name")
+println json_len(json_get@(cfg@, "tags"))
+bad@ = { 1: 2 }
+println "recovered"

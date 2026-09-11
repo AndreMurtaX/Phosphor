@@ -47,6 +47,7 @@ type
     FErrorLine: Integer;
     FErrorMessage: String;
     FErrorAtEof: Boolean;
+    FErrorUnterminated: Boolean;
     FLastError: TPhosphorError;
     FMaxSteps: Int64;
     FMaxMemoryBytes: Int64;
@@ -60,6 +61,7 @@ type
     FReplSource: String;    // every line accepted so far
     FReplPC: Integer;       // first instruction of the NEXT line
     function CompileSource(const ASource: String; out AProg: TProgram): Boolean;
+    procedure ClearErrorState;
     procedure ConfigureVM(AVM: TPhosphorVM);
     function GetHalted: Boolean;
     function GetSandboxRoot: String;
@@ -122,8 +124,20 @@ type
     property ErrorMessage: String read FErrorMessage;
     { A host reading a line at a time asks this before deciding to wait for more:
       a message about a missing terminator means "unfinished" only if the input
-      actually ran out. See TPhosphorCompiler.Fail. }
+      actually ran out -- that is, the PARSER asked for another token and the file
+      had ended. A check that runs after the parse is finished answers False even
+      though nothing is left to read: `goto nowhere` cannot be repaired by typing
+      more. See TPhosphorCompiler.Fail. }
     property ErrorAtEndOfInput: Boolean read FErrorAtEof;
+    { True when that failure was SOMETHING OPENED AND NEVER CLOSED -- an `if`, a
+      loop, a `select case`, a `function`, or a JSON literal spread over several
+      lines -- rather than any other syntax error. With ErrorAtEndOfInput it is the
+      whole test a line-at-a-time host needs to decide between "read another line"
+      and "reject this". Asking it is how a host avoids matching on the compiler's
+      wording, which is not an interface. The name says "block" because that is
+      what a person typing at a prompt is nearly always in the middle of; a literal
+      continues for the same reason and answers the same way. }
+    property ErrorUnterminatedBlock: Boolean read FErrorUnterminated;
     property LastError: TPhosphorError read FLastError;
     { Execution ceilings for running untrusted scripts; 0 (the default) = no limit.
       A ceiling is fatal -- ON ERROR cannot catch it -- so a script cannot escape
@@ -266,9 +280,7 @@ begin
   FOnInput := nil;
   FOnBreakpoint := nil;
   FHostServices := Default(THostServices);
-  FErrorLine := 0;
-  FErrorMessage := '';
-  FLastError := NoError();
+  ClearErrorState();
   FMaxSteps := 0;
   FMaxMemoryBytes := 0;
   FMaxOutputBytes := 0;
@@ -289,6 +301,31 @@ begin
   inherited Destroy();
 end;
 
+{ THE WHOLE ERROR STATE IS CLEARED IN ONE PLACE, and every entry point calls it.
+
+  The first version of this cleared the two compile flags inside CompileSource, on
+  the reasoning that CompileSource is the only routine that ever SETS them. That is
+  true and it is not enough: RunBytecode and CallFunction never reach CompileSource
+  -- one reads a .pbc through ReadProgram, the other runs on an already-prepared VM
+  -- so both of them cleared FErrorLine and FErrorMessage, wrote their own failure
+  into them, and left ErrorUnterminatedBlock and ErrorAtEndOfInput describing a
+  compile that had failed three calls earlier. An embedder asking the documented
+  properties got an answer about the wrong failure, and a REPL-shaped host would
+  wedge on it.
+
+  That is the difference between fixing the instance and fixing the class: the rule
+  is "every door into the engine starts from a clean error state", so there is one
+  routine that says what clean means and six doors that call it. A seventh door
+  added later gets it by calling this instead of by remembering four field names. }
+procedure TPhosphorEngine.ClearErrorState;
+begin
+  FErrorLine := 0;
+  FErrorMessage := '';
+  FErrorAtEof := False;
+  FErrorUnterminated := False;
+  FLastError := NoError();
+end;
+
 { Compile ASource; on failure fill the engine error state and return False. }
 function TPhosphorEngine.CompileSource(const ASource: String; out AProg: TProgram): Boolean;
 var
@@ -302,6 +339,7 @@ begin
       FErrorMessage := comp.ErrorMessage;
       FErrorLine := comp.ErrorLine;
       FErrorAtEof := comp.ErrorAtEndOfInput;
+      FErrorUnterminated := comp.ErrorUnterminatedBlock;
       if FErrorLine = 0 then FErrorLine := 1;
       FLastError := MakeError(peSyntax, FErrorMessage);
     end;
@@ -344,9 +382,7 @@ var
   vm: TPhosphorVM;
   prog: TProgram;
 begin
-  FErrorLine := 0;
-  FErrorMessage := '';
-  FLastError := NoError();
+  ClearErrorState();
   Finish();         // a one-shot run discards any prepared state
   ResetHandles();   // no handles leak between programs
 
@@ -384,9 +420,7 @@ var
   prog: TProgram;
   err: String;
 begin
-  FErrorLine := 0;
-  FErrorMessage := '';
-  FLastError := NoError();
+  ClearErrorState();
   Finish();
   ResetHandles();
 
@@ -423,9 +457,7 @@ end;
 
 function TPhosphorEngine.Prepare(const ASource: String): Integer;
 begin
-  FErrorLine := 0;
-  FErrorMessage := '';
-  FLastError := NoError();
+  ClearErrorState();
   Finish();         // discard a previous preparation
   ResetHandles();
 
@@ -461,9 +493,7 @@ end;
 
 function TPhosphorEngine.CallFunction(const AName: String; const Args: array of TValue): TValue;
 begin
-  FErrorMessage := '';
-  FLastError := NoError();
-  FErrorLine := 0;
+  ClearErrorState();
   if FVM = nil then
   begin
     FLastError := MakeError(peRuntime, 'no script is prepared (call Prepare first)');
@@ -524,9 +554,7 @@ var
   prog, old: TProgram;
   startPC: Integer;
 begin
-  FErrorLine := 0;
-  FErrorMessage := '';
-  FLastError := NoError();
+  ClearErrorState();
   cand := FReplSource + ALine + #10;
   // A line that does not compile never joins the session.
   if not CompileSource(cand, prog) then Exit(FErrorLine);

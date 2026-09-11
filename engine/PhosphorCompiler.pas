@@ -68,6 +68,13 @@ type
     FErr: String;
     FErrLine: Integer;
     FErrAtEof: Boolean;
+    FErrUnterminated: Boolean;
+    { False while the parser is reading tokens, True once it has finished with
+      the input and only the whole-program checks are left. Fail reads it -- see
+      the comment there -- because "the lexer is sitting at the end" and "the
+      parser asked for a token and there was none" are two different facts and
+      only the second one means "read another line". }
+    FParseDone: Boolean;
     FExprDepth: Integer;
     FStmtDepth: Integer;   // block nesting; see THE PARSER'S DEPTH BUDGET
     FBool: Boolean;
@@ -110,6 +117,8 @@ type
     FGotoLine: array of Integer;
     FGotoCount: Integer;
     procedure Fail(const AMsg: String; ALine: Integer);
+    procedure FailUnterminated(const AOpener: String;
+      const ATerminators: array of String; AOpenLine: Integer);
     procedure Expect(AKind: TTokenKind; const AWhat: String);
     function IsKeyword(const AKw: String): Boolean;
     function CurIsTerm(const ATerms: array of String): Boolean;
@@ -179,9 +188,18 @@ type
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
     property ErrorMessage: String read FErr;
     property ErrorLine: Integer read FErrLine;
-    { True when the failure happened AT the end of the input rather than on a
-      token. Only then can reading another line help. }
+    { True when the PARSER ran out of input -- it asked for the next token and the
+      file had ended -- rather than failing on a token it could read. Only then can
+      reading another line help. A check that runs after the parse answers False
+      even though the lexer is sitting at the end by then: `goto nowhere` is not a
+      program that needs another line, it is a program that is wrong. }
     property ErrorAtEndOfInput: Boolean read FErrAtEof;
+    { True when the failure is A BLOCK THAT WAS NEVER CLOSED, as opposed to any
+      other syntax error that happens to sit at the end of the input. This is the
+      fact a line-at-a-time host needs, and it is recorded rather than spelled,
+      because the host used to recover it by comparing ErrorMessage with nine
+      string literals of its own -- see FailUnterminated. }
+    property ErrorUnterminatedBlock: Boolean read FErrUnterminated;
   end;
 
 implementation
@@ -242,20 +260,129 @@ end;
 { Every failure also records WHETHER THE INPUT HAD RUN OUT, which is a different
   fact from what the message says and cannot be recovered from the text.
 
-  "expected 'endselect'" is produced both when the file simply ends mid-block and
-  when a wrong token turns up where the terminator belonged. A file does not care:
-  either way it is a syntax error. The REPL cares completely -- the first means
-  "read another line", the second means "this can never be fixed by reading more".
-  Without the distinction a typo in a case label made the prompt swallow every
-  line that followed it, for ever, because no continuation can satisfy an error
-  that has already been typed. }
+  A file does not care: either way it is a syntax error. The REPL cares completely
+  -- the first means "read another line", the second means "this can never be fixed
+  by reading more". Without the distinction a typo in a case label made the prompt
+  swallow every line that followed it, for ever, because no continuation can satisfy
+  an error that has already been typed.
+
+  WHAT MADE THE FLAG NECESSARY HAS SINCE MOVED, so read this as the reason it is
+  still here rather than as a description of today's messages. It used to be that
+  "expected 'endselect'" was produced both when the file simply ended mid-block and
+  when a wrong token turned up where the terminator belonged, and nothing in the
+  text told the two apart. Those end-of-input shapes now go through
+  FailUnterminated, which names the line the block opened on and records the fact
+  as FErrUnterminated, so every message Fail still produces for a block describes a
+  REAL token -- "expected 'case' or 'endselect'" now means a label this parser could
+  not read, never a file that ran out.
+
+  So FErrUnterminated alone would answer the host today. FErrAtEof is kept beside it
+  as the belt: it is inferred here, for every failure the PARSER raises, from the
+  token the parser is actually looking at, so a FailUnterminated site added later
+  WITHOUT its tkEOF guard sets FErrUnterminated at a real token and this flag is
+  what stops the prompt waiting for a continuation that can never arrive.
+
+  AND "THE PARSER RAISES" IS THE LOAD-BEARING HALF OF THAT SENTENCE, because the
+  lexer outlives the parse. `goto nowhere` fails in ResolveGotos, which runs after
+  the statement loop has consumed the whole file, so the token this routine sees is
+  tkEOF for a failure that has nothing to do with the input running out -- and this
+  flag said so, for 2046 of the 4886 refusals in the corpus sweep. It read as a
+  different copy of the value than the one that decides: the question is whether
+  the PARSER wanted a token and found none, not where the lexer happens to be
+  parked. FParseDone answers it, and Compile's lexical branch below is the mirror
+  case at the other end -- the parser has not started yet there.
+
+  The narrowing costs the host nothing (it asks for both facts, and a failure that
+  sets FErrUnterminated is always one the parser raised) and buys the invariant
+  that makes the flag half gateable: over every truncation of the project's whole
+  corpus, THESE TWO FLAGS NOW AGREE, which tests/probe_limits.lpr asserts on every
+  run. A construct added later that runs out of input, reports the right line and
+  forgets to record the fact turns that assertion red. }
 procedure TPhosphorCompiler.Fail(const AMsg: String; ALine: Integer);
 begin
   if FFailed then Exit;
   FFailed := True;
   FErr := AMsg;
   FErrLine := ALine;
-  FErrAtEof := (FLex <> nil) and (FLex.Cur().Kind = tkEOF);
+  FErrAtEof := (not FParseDone) and (FLex <> nil) and (FLex.Cur().Kind = tkEOF);
+  FErrUnterminated := False;
+end;
+
+{ ANYTHING THAT WAS OPENED AND NEVER CLOSED IS REPORTED WHERE IT OPENED, and it is
+  recorded as that KIND of failure rather than left to be recognised by its wording.
+
+  WHO HAS TO CALL THIS IS A CHECKABLE FACT, not a list to remember. A diagnostic
+  can only name the end of the input if the parser is LOOKING at the end of the
+  input, and the only way to get there is to skip line breaks until they run out.
+  There are exactly three such loops in this file -- grep `while FLex.Cur().Kind =
+  tkEOL` -- and every one of them is guarded: ParseBlockUntil exits at tkEOF and
+  leaves its caller to call this; ParseSelect tests tkEOF and calls this;
+  ParseJsonLiteral's SkipEolsOk tests tkEOF and calls this. Everywhere else the
+  parser stops at a real token on a real line, which is why `b = a +` at the end of
+  a file has always reported correctly and an unclosed literal did not.
+
+  A fourth such loop added later is the way this comes back, so it is swept rather
+  than promised: tests/probe_limits.lpr truncates the project's whole .bas corpus
+  at every line and fails if any diagnostic names a line past the end of its file.
+
+  Two separate defects meet here.
+
+  The line. Every one of these failures used to pass FLex.Cur().Line, which at
+  this point is the end of the input -- and because the lexer synthesises a final
+  tkEOL before tkEOF, a file that ends with a newline reported a line ONE PAST ITS
+  LAST. A 3-line file answered "b.bas:4", a location that cannot be opened, cannot
+  be fixed, and looks plausible enough that an editor will try to scroll to it
+  (PhosphorIDE clamps it before scrolling, which is a workaround for a diagnostic
+  that should not need one). The end of a file is the one place in it where the
+  user can change nothing. The opening line is the only actionable location, every
+  one of these parsers is already holding it, and every one of them threw it away.
+
+  The wording. The engine already had this diagnostic in the mirror direction --
+  OrphanKeyword says "'endif' without a matching 'if'" for a terminator with no
+  opener -- so an unclosed opener says "'if' on line 3 without a matching 'endif'"
+  and the two halves of the same mistake read as one family.
+
+  The flag. host/console/phosphor.lpr decided whether the REPL should keep reading
+  by comparing ErrorMessage against NINE STRING LITERALS copied into the host. The
+  wording above could not have been changed without silently breaking multi-line
+  block entry at the prompt: no compiler error, no gate, no golden -- exactly the
+  defect that cost `for` at the prompt on 2026-09-06, arriving from the other side.
+  The host needs a FACT, not a sentence, so the fact is written down here and the
+  literals are gone.
+
+  WHICH CLEAR IS LOAD-BEARING, since three of them look alike and only one is:
+  TPhosphorCompiler.Compile clears the flag on the way in, and that is the one that
+  makes a reused compiler safe. Fail's clear can never be the only thing standing
+  between a stale True and a host, because every call site below is guarded by an
+  `if FFailed then Exit` -- it is belt, and worth keeping as belt, because the cost
+  is one assignment and the failure it would prevent is a wedged prompt. One level
+  up, TPhosphorEngine.ClearErrorState is what keeps the ENGINE's copy honest, and
+  that one IS load-bearing: it is called by all six entry points, including the two
+  that never compile anything. }
+procedure TPhosphorCompiler.FailUnterminated(const AOpener: String;
+  const ATerminators: array of String; AOpenLine: Integer);
+var
+  i: Integer;
+  wanted: String;
+begin
+  if FFailed then Exit;
+  { THE QUOTING BELONGS TO THIS ROUTINE, which is why the terminators arrive as a
+    LIST rather than as a phrase. `while` is the one block with two spellings of
+    its terminator, and the first version of this was handed the pre-quoted
+    alternation `endwhile'' or ''wend` at that call site so the wrapper's own
+    quotes would land around the whole thing. It produced the right sentence and
+    left the parameter meaning two different things -- a terminator at six sites
+    and a fragment of the message at the seventh -- with nothing but a comment
+    keeping the next caller's quotes balanced. }
+  wanted := '';
+  for i := Low(ATerminators) to High(ATerminators) do
+  begin
+    if i > Low(ATerminators) then wanted := wanted + ' or ';
+    wanted := wanted + '''' + ATerminators[i] + '''';
+  end;
+  Fail('''' + AOpener + ''' on line ' + IntToStr(AOpenLine) +
+       ' without a matching ' + wanted, AOpenLine);
+  FErrUnterminated := True;
 end;
 
 procedure TPhosphorCompiler.Expect(AKind: TTokenKind; const AWhat: String);
@@ -600,7 +727,7 @@ begin
   FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(retType)), 0, ln);
   FProg.Emit(opRetFunc, 0, 0, ln);
   FProg.Patch(jOver, FProg.Count);
-  if not IsKeyword('endfunction') then begin Fail('expected ''endfunction''', FLex.Cur().Line); Exit; end;
+  if not IsKeyword('endfunction') then begin FailUnterminated('function', ['endfunction'], ln); Exit; end;
   FLex.Advance();
   FInFunction := False;
   FLocalCount := 0;
@@ -945,27 +1072,55 @@ end;
   values can be any expression (a variable, a call), not just constants. The
   container handle stays on the stack: json_array@/json_object@ leave it there and
   every json_pushval@/json_setval@ returns it, so the literal's value is the handle
-  once the closing bracket is reached. Newlines are ignored INSIDE a literal. }
+  once the closing bracket is reached. Newlines are ignored INSIDE a literal.
+
+  THAT LAST SENTENCE IS THE SECOND HALF OF THE UNTERMINATED-BLOCK DEFECT, and it is
+  the half a generated sweep of malformed BLOCKS could never have found.
+
+  Ignoring newlines means SkipEols, and SkipEols is the only read in this procedure
+  that can walk past the last real line of the file onto the tkEOF the lexer
+  synthesises after it. Everywhere else the parser stops at a real token on a real
+  line. So an unterminated literal reported the end of the input in exactly the way
+  the seven block parsers used to -- and, because the lexer emits a final tkEOL
+  before tkEOF, a file ending in a newline named a line ONE PAST ITS LAST. Two
+  lines of source, `a = 1` then an assignment opening a brace, answered line 3.
+
+  Four different messages carried it out -- the key test, the two Expects, and
+  `unexpected token in expression` from ParseExpr -- which is why enumerating
+  messages was the wrong way to look for it and asking which READ walks off the end
+  was the right one. Every one of the four is downstream of a SkipEols, so the
+  answer is that SkipEols reports rather than walks: it now says whether the input
+  survived, and an open literal is named at the line it opened on, in the same
+  words as an open block. The three checks that follow it are left exactly as they
+  were, because none of them can see tkEOF any more, and each is still the right
+  message for the real token it does see. }
 procedure TPhosphorCompiler.ParseJsonLiteral;
-
-  procedure SkipEols;
-  begin
-    while FLex.Cur().Kind = tkEOL do FLex.Advance();
-  end;
-
 var
   ln: Integer;
   key: String;
+  opener, closer: String;
+
+  { False means the input ran out inside the literal, with the failure already
+    recorded against the opening bracket's line. }
+  function SkipEolsOk: Boolean;
+  begin
+    while FLex.Cur().Kind = tkEOL do FLex.Advance();
+    Result := FLex.Cur().Kind <> tkEOF;
+    if not Result then FailUnterminated(opener, [closer], ln);
+  end;
+
 begin
   ln := FLex.Cur().Line;
   if FLex.Cur().Kind = tkLBracket then
   begin
+    opener := '[';
+    closer := ']';
     FLex.Advance();   // '['
     FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_array@')), 0, ln);
-    SkipEols();
+    if not SkipEolsOk() then Exit;
     if FLex.Cur().Kind <> tkRBracket then
       repeat
-        SkipEols();
+        if not SkipEolsOk() then Exit;
         if (FLex.Cur().Kind = tkIdent) and (FLex.Cur().StrVal = 'null') then
         begin
           FLex.Advance();
@@ -977,27 +1132,34 @@ begin
           if FFailed then Exit;
           FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_pushval@')), 2, ln);
         end;
-        SkipEols();
-        if FLex.Cur().Kind = tkComma then begin FLex.Advance(); SkipEols(); end else Break;
+        if not SkipEolsOk() then Exit;
+        if FLex.Cur().Kind = tkComma then
+        begin
+          FLex.Advance();
+          if not SkipEolsOk() then Exit;
+        end
+        else Break;
       until FFailed;
-    SkipEols();
+    if not SkipEolsOk() then Exit;
     Expect(tkRBracket, ''']''');
   end
   else
   begin
-    FLex.Advance();   // '{'
+    opener := '{';
+    closer := '}';
+    FLex.Advance();   // the opening brace
     FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_object@')), 0, ln);
-    SkipEols();
+    if not SkipEolsOk() then Exit;
     if FLex.Cur().Kind <> tkRBrace then
       repeat
-        SkipEols();
+        if not SkipEolsOk() then Exit;
         if FLex.Cur().Kind <> tkString then
         begin Fail('a JSON object key must be a string', FLex.Cur().Line); Exit; end;
         key := FLex.Cur().StrVal;
         FLex.Advance();
         Expect(tkColon, ''':''');
         if FFailed then Exit;
-        SkipEols();
+        if not SkipEolsOk() then Exit;
         FProg.Emit(opPushConst, FProg.Consts.Add(ValStr(key)), 0, ln);   // the key
         if (FLex.Cur().Kind = tkIdent) and (FLex.Cur().StrVal = 'null') then
         begin
@@ -1010,10 +1172,15 @@ begin
           if FFailed then Exit;
           FProg.Emit(opCall, FProg.Consts.Add(ValStr('json_setval@')), 3, ln);
         end;
-        SkipEols();
-        if FLex.Cur().Kind = tkComma then begin FLex.Advance(); SkipEols(); end else Break;
+        if not SkipEolsOk() then Exit;
+        if FLex.Cur().Kind = tkComma then
+        begin
+          FLex.Advance();
+          if not SkipEolsOk() then Exit;
+        end
+        else Break;
       until FFailed;
-    SkipEols();
+    if not SkipEolsOk() then Exit;
     Expect(tkRBrace, '''}''');
   end;
   FBool := False;
@@ -1366,7 +1533,7 @@ begin
     end
     else
       FProg.Patch(jFalse, FProg.Count);
-    if not IsKeyword('endif') then begin Fail('expected ''endif''', FLex.Cur().Line); Exit; end;
+    if not IsKeyword('endif') then begin FailUnterminated('if', ['endif'], ln); Exit; end;
     FLex.Advance();
     for i := 0 to High(endJumps) do
       FProg.Patch(endJumps[i], FProg.Count);
@@ -1425,7 +1592,12 @@ begin
   PatchConts(condStart);
   PopLoop();
   if not (IsKeyword('endwhile') or IsKeyword('wend')) then
-  begin Fail('expected ''endwhile'' or ''wend''', FLex.Cur().Line); Exit; end;
+  begin
+    // WHILE is the one block with two spellings of its terminator, and both are
+    // named: FailUnterminated joins the list with `or` and owns the quoting.
+    FailUnterminated('while', ['endwhile', 'wend'], ln);
+    Exit;
+  end;
   FLex.Advance();
 end;
 
@@ -1449,7 +1621,7 @@ begin
   PatchBreaks(afterLoop);
   PatchConts(condStart);
   PopLoop();
-  if not IsKeyword('loop') then begin Fail('expected ''loop''', FLex.Cur().Line); Exit; end;
+  if not IsKeyword('loop') then begin FailUnterminated('do while', ['loop'], ln); Exit; end;
   FLex.Advance();
 end;
 
@@ -1463,7 +1635,7 @@ begin
   ParseBlockUntil(['until']);
   if FFailed then Exit;
   contTarget := FProg.Count;   // continue re-checks the until condition
-  if not IsKeyword('until') then begin Fail('expected ''until''', FLex.Cur().Line); Exit; end;
+  if not IsKeyword('until') then begin FailUnterminated('repeat', ['until'], ln); Exit; end;
   FLex.Advance();
   ParseCondition();
   if FFailed then Exit;
@@ -1546,8 +1718,29 @@ begin
   PatchBreaks(afterLoop);
   PatchConts(incPoint);
   PopLoop();
-  if not IsKeyword('next') then begin Fail('expected ''next''', FLex.Cur().Line); Exit; end;
+  if not IsKeyword('next') then begin FailUnterminated('for', ['next'], ln); Exit; end;
   FLex.Advance();
+  { `next i` IS THE HABIT OF EVERY OTHER BASIC, and it is the one Phosphor does
+    not take: the loop variable is named once, on the `for` line. The answer used
+    to be "expected end of line", produced far from here by the statement
+    terminator check, which names the rule that was broken and not the word to
+    delete -- and a person who has written `next i` for thirty years reads it as a
+    complaint about the newline. Say what is wrong with the line that is there.
+
+    IT SAYS "VARIABLE" FOR EVERY IDENTIFIER, INCLUDING ONES THAT SPELL A KEYWORD,
+    and that was checked rather than assumed: this dialect has no reserved words,
+    so `endif = 5` / `println endif` compiles and prints 5 (measured). `next endif`
+    therefore IS a `next` followed by a variable named endif, and calling it one is
+    accurate, not a wrong guess about what the author meant. A comment, a statement
+    separator and a bare `next` are all still fine -- `rem` is eaten by the lexer
+    and a colon is not a tkIdent -- so this only ever fires on a real name. }
+  if FLex.Cur().Kind = tkIdent then
+  begin
+    Fail('''next'' takes no variable -- remove the ''' + FLex.Cur().StrVal +
+         '''; the ''for'' on line ' + IntToStr(ln) + ' already names it',
+         FLex.Cur().Line);
+    Exit;
+  end;
 end;
 
 { THE SUBJECT IS EVALUATED ONCE AND RELOADED BEFORE EVERY CASE TEST, so it has to
@@ -1575,6 +1768,13 @@ var
 begin
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'select'
+  { NOT an unterminated block, and deliberately left as it is: a `select` whose
+    header is missing its `case` is a malformed LINE, and the current token is the
+    end of that line -- so FLex.Cur().Line already points at the select itself,
+    which is where the word has to be added. The lexer always emits a tkEOL before
+    tkEOF, so this can never fire at the end of the input, which is why it never
+    meant "keep reading" at the prompt either, even while the host was listing its
+    text among the terminators that did. }
   if not IsKeyword('case') then begin Fail('expected ''case'' after ''select''', FLex.Cur().Line); Exit; end;
   FLex.Advance(); // 'case'
   selVar := NewHidden(vtAny);
@@ -1586,7 +1786,21 @@ begin
   begin
     while FLex.Cur().Kind = tkEOL do FLex.Advance();
     if IsKeyword('endselect') then Break;
-    if not IsKeyword('case') then begin Fail('expected ''case'' or ''endselect''', FLex.Cur().Line); Exit; end;
+    { THE ONE TERMINATOR CHECK IN THE COMPILER THAT IS NOT END-OF-INPUT ONLY, and
+      the reason this is a branch rather than a rewrite. Two different mistakes
+      arrive here. If the input has run out, the select was never closed and the
+      useful line is the one it opened on. If a TOKEN is sitting here instead --
+      `csae 2` for `case 2` -- the useful line is THIS one, the typo's own, and
+      nothing about the select is unfinished. Redirecting both to the opening line
+      would blame a correct `select case` for a misspelling three lines below it,
+      and would undo the distinction tests/classic/15_repl_bad_case.repl exists to
+      pin: the REPL waits for more input on the first and must not on the second. }
+    if not IsKeyword('case') then
+    begin
+      if FLex.Cur().Kind = tkEOF then FailUnterminated('select case', ['endselect'], ln)
+      else Fail('expected ''case'' or ''endselect''', FLex.Cur().Line);
+      Exit;
+    end;
     FLex.Advance(); // 'case'
     if IsKeyword('else') then
     begin
@@ -1606,7 +1820,7 @@ begin
     FProg.Patch(jNext, FProg.Count);
   end;
   if FFailed then Exit;
-  if not IsKeyword('endselect') then begin Fail('expected ''endselect''', FLex.Cur().Line); Exit; end;
+  if not IsKeyword('endselect') then begin FailUnterminated('select case', ['endselect'], ln); Exit; end;
   FLex.Advance();
   endTarget := FProg.Count;
   for i := 0 to High(endFixups) do
@@ -2683,6 +2897,15 @@ end;
 function TPhosphorCompiler.Compile(const ASource: String; out AProg: TProgram): Boolean;
 begin
   FFailed := False; FErr := ''; FErrLine := 0;
+  { The two facts ABOUT the failure are cleared with it, for the reason the line
+    below gives about depth: a reused compiler must not inherit them either. They
+    were not, and a second Compile that SUCCEEDED left both standing -- so a host
+    holding one compiler and asking ErrorUnterminatedBlock after a clean compile
+    was answered about whatever failed before it. TPhosphorEngine makes a fresh
+    compiler per call and never saw it; the class is public and the next embedder
+    might not. }
+  FErrAtEof := False; FErrUnterminated := False;
+  FParseDone := False;
   FVarCount := 0; FHidden := 0; FLoopDepth := 0;
   // The two nesting counters are balanced by try/finally on every path, failures
   // included, so they are already 0 here -- set outright anyway, because a reused
@@ -2790,6 +3013,14 @@ begin
       else if FLex.Cur().Kind = tkEOL then
         FLex.Advance();
     end;
+    { THE PARSER IS DONE WITH THE INPUT HERE, and what follows are the checks that
+      need the whole program. They run with the lexer parked on the tkEOF the loop
+      above stopped at, so without this line every one of them would be recorded as
+      a failure at the end of the input -- which is what "read another line" is
+      inferred from. ResolveGotos is the only one today; the flag is set here, once,
+      rather than inside it, so a second whole-program check added beside it is
+      covered by having been written in the right place. }
+    FParseDone := True;
     if not FFailed then ResolveGotos();
   finally
     FLex.Free;

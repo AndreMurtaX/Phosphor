@@ -26,8 +26,8 @@ program probe_limits;
 {$codepage UTF8}
 
 uses
-  SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler, PhosphorOpcodes,
-  PhosphorValue, PhosphorRegistry, PhosphorVM;
+  Classes, SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler,
+  PhosphorOpcodes, PhosphorValue, PhosphorRegistry, PhosphorVM;
 
 var
   Ok: Integer = 0;
@@ -349,6 +349,425 @@ begin
     Report(got = AWant, AName);
   finally
     comp.Free;
+  end;
+end;
+
+{ NO DIAGNOSTIC ANYWHERE MAY NAME A LINE THE FILE DOES NOT HAVE, AND THE TWO FACTS
+  THE PROMPT READS MAY NEVER DISAGREE -- BOTH SWEPT OVER A RANGE NOBODY CHOSE.
+
+  The checks below this one are a list someone wrote, and a list cannot find the
+  case its author did not think of. That is not hypothetical here: the first
+  attempt at this work generated 270 malformed sources, reported the class closed,
+  and had missed the multi-line JSON literal entirely, because every source it
+  generated was a malformed BLOCK.
+
+  So this takes the project's OWN corpus -- every .bas the suite, the classic
+  runner, the negative corpus, the examples and the package tests contain -- and
+  truncates each file at every line, with and without a trailing newline, asking
+  one question of each: is the line it reported inside the file it compiled? A
+  truncated program is the general shape of "the input ran out", so this reaches
+  every construct the project actually uses rather than the ones a test author
+  remembered.
+
+  IN-PROCESS ON PURPOSE. The same sweep driven from a shell is one process per
+  compile and runs for a quarter of an hour, which is why it would have been a
+  script nobody runs. Through TPhosphorCompiler it is thousands of compiles in
+  seconds and the suite can afford it on every run.
+
+  It finds the corpus from the BINARY's own path, not the working directory, so it
+  answers the same whoever starts it -- and it fails rather than passes when it
+  finds nothing, because a sweep that silently sweeps zero files is the exact
+  shape of a verification stage that can never reject.
+
+  THE SECOND QUESTION IS THE FLAG HALF, and it is asked here because asking it
+  anywhere else did not work. The line above is what a PERSON reads; a host with a
+  prompt reads ErrorAtEndOfInput and ErrorUnterminatedBlock instead, and a
+  construct that runs out of input, reports the right line and forgets to record
+  the fact would pass the line question and still wedge -- or, at this prompt,
+  reject -- every user who typed it. A review measured the obvious gate for that
+  and it did not hold: "every refusal where the lexer is sitting at the end of the
+  input is an unterminated one" had 2046 counter-examples out of 4886 here, every
+  one of them `undefined label X`, because that check runs AFTER the parse has
+  consumed the file and the lexer is parked at the end by then. The answer was not
+  a softer proxy but the one the flag was always supposed to carry: Fail now asks
+  whether the PARSER ran out of input, not where the lexer is (TPhosphorCompiler
+  gained FParseDone for it), and with that the two flags agree on every one of
+  these refusals. So they are asserted to agree -- which fails in both directions.
+  A construct that runs out of input without recording it splits them one way; a
+  FailUnterminated site added without its tkEOF guard splits them the other, which
+  is the belt the console host's `and` is there to be.
+
+  BOTH DIRECTIONS ARE REACHED HERE, and the paragraph that used to sit in this
+  place is worth remembering because it was wrong in both directions at once.
+
+  It said the sweep STILL CANNOT REACH the second, because a FailUnterminated
+  firing at a REAL token needs a wrong token where a terminator belongs "which a
+  truncation never produces". Right about truncation, wrong about the sweep: PUT
+  the token there. Every truncation this loop already refuses as unterminated is
+  compiled once more with an identifier no block form terminates on appended, and
+  nothing may then be recorded as unterminated at a real token. About 1074 extra
+  compiles over roughly 26000, inside run-to-run noise; it finds six counter-
+  examples the moment ParseSelect's tkEOF guard is removed, named by file and cut.
+
+  And it credited TWO witnesses for that direction -- the misspelled-case-label
+  expectation below, and tests/classic/15_repl_bad_case.repl. Measured by removing
+  that guard and rebuilding both binaries: ONE goes red. The .repl cannot ever go
+  red, because direction B means ErrorUnterminatedBlock while not
+  ErrorAtEndOfInput, and the host's `and` at phosphor.lpr:1201 turns that into a
+  rejection -- which is the belt doing its job, so the transcript is byte-identical
+  by construction. The comment named the belt's VICTIM as the belt's WITNESS. A
+  ninth block form is now covered mechanically rather than by anyone remembering
+  to add an expectation for it. }
+procedure CheckNoPhantomLinesInCorpus;
+const
+  Dirs: array[0..4] of String = ('tests/suite', 'tests/classic', 'tests/negative',
+                                 'examples', 'tests/packages');
+var
+  root, dir, text, blob: String;
+  files: TStringList;
+  rec: TSearchRec;
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  d, f, cut, i, nl, reported, phantoms, runs: Integer;
+  split, waiting: Integer;
+  src: TStringList;
+  worst, worstSplit: String;
+  { DIRECTION B: one extra compile per truncation that is already open, with an
+    identifier no block form terminates on put where the terminator would go. }
+  comp2: TPhosphorCompiler;
+  prog2: TProgram;
+  intruded, realTok: Integer;
+  worstReal: String;
+begin
+  root := IncludeTrailingPathDelimiter(
+            ExpandFileName(ExtractFilePath(ParamStr(0)) + '..'));
+  files := TStringList.Create();
+  src := TStringList.Create();
+  try
+    for d := Low(Dirs) to High(Dirs) do
+    begin
+      dir := IncludeTrailingPathDelimiter(root + StringReplace(Dirs[d], '/',
+               PathDelim, [rfReplaceAll]));
+      if FindFirst(dir + '*.bas', faAnyFile, rec) = 0 then
+      begin
+        repeat
+          if (rec.Attr and faDirectory) = 0 then files.Add(dir + rec.Name);
+        until FindNext(rec) <> 0;
+        FindClose(rec);
+      end;
+    end;
+    { A sweep with nothing in it would pass every assertion below. }
+    Report(files.Count >= 50,
+           'the corpus sweep found the corpus (' + IntToStr(files.Count) +
+           ' .bas files under ' + root + ')');
+    if files.Count = 0 then Exit;
+
+    phantoms := 0;
+    runs := 0;
+    split := 0;
+    waiting := 0;
+    worst := '';
+    worstSplit := '';
+    intruded := 0;
+    realTok := 0;
+    worstReal := '';
+    for f := 0 to files.Count - 1 do
+    begin
+      src.LoadFromFile(files[f]);
+      { Joined with an explicit #10 rather than with TStringList.Text, which uses
+        the platform's LineEnding and would hand this sweep CRLF-separated sources
+        on Windows and LF-separated ones on Linux. The whole subject here is which
+        line a diagnostic names when the input runs out, so feeding the two
+        operating systems different bytes is the one thing that would make the
+        answer differ between them for a reason that is not the engine's. }
+      for cut := 1 to src.Count do
+      begin
+        text := '';
+        for i := 0 to cut - 1 do
+        begin
+          if i > 0 then text := text + #10;
+          text := text + src[i];
+        end;
+        for nl := 0 to 1 do
+        begin
+          if nl = 0 then blob := text + #10 else blob := text;
+          if blob = '' then Continue;
+          comp := TPhosphorCompiler.Create();
+          try
+            prog := nil;
+            try
+              if not comp.Compile(blob, prog) then
+              begin
+                reported := comp.ErrorLine;
+                Inc(runs);
+                if reported > cut then
+                begin
+                  Inc(phantoms);
+                  if worst = '' then
+                    worst := ExtractFileName(files[f]) + ' cut to ' +
+                             IntToStr(cut) + ' lines (trailing newline=' +
+                             IntToStr(1 - nl) + ') reported line ' +
+                             IntToStr(reported) + ': ' + comp.ErrorMessage;
+                end;
+                if comp.ErrorAtEndOfInput <> comp.ErrorUnterminatedBlock then
+                begin
+                  Inc(split);
+                  if worstSplit = '' then
+                    worstSplit := ExtractFileName(files[f]) + ' cut to ' +
+                                  IntToStr(cut) + ' lines (trailing newline=' +
+                                  IntToStr(1 - nl) + ') at end of input=' +
+                                  BoolToStr(comp.ErrorAtEndOfInput, True) +
+                                  ' unterminated=' +
+                                  BoolToStr(comp.ErrorUnterminatedBlock, True) +
+                                  ': ' + comp.ErrorMessage;
+                end
+                else if comp.ErrorAtEndOfInput then
+                  Inc(waiting);
+                { Direction B is reached by PUTTING a wrong token where the
+                  terminator belongs, not by cutting tokens away -- which is why
+                  the truncation sweep alone could never see it. Only where
+                  something really is open, and only on one newline variant, so
+                  it costs one extra compile per OPEN truncation rather than one
+                  per truncation: measured at about 1074 extra compiles over
+                  roughly 26000, inside run-to-run noise. }
+                if comp.ErrorUnterminatedBlock and (nl = 0) then
+                begin
+                  comp2 := TPhosphorCompiler.Create();
+                  try
+                    prog2 := nil;
+                    if not comp2.Compile(text + #10 + 'zzq_not_a_terminator' + #10,
+                                         prog2) then
+                    begin
+                      Inc(intruded);
+                      if comp2.ErrorUnterminatedBlock and
+                         (not comp2.ErrorAtEndOfInput) then
+                      begin
+                        Inc(realTok);
+                        if worstReal = '' then
+                          worstReal := ExtractFileName(files[f]) + ' cut to ' +
+                                       IntToStr(cut) + ' lines + one token: ' +
+                                       comp2.ErrorMessage;
+                      end;
+                    end;
+                    if prog2 <> nil then prog2.Free;
+                  finally
+                    comp2.Free;
+                  end;
+                end;
+              end;
+            except
+              on E: Exception do
+              begin
+                Inc(phantoms);
+                if worst = '' then
+                  worst := ExtractFileName(files[f]) + ' cut to ' + IntToStr(cut) +
+                           ' RAISED ' + E.ClassName;
+              end;
+            end;
+            if prog <> nil then prog.Free;
+          finally
+            comp.Free;
+          end;
+        end;
+      end;
+    end;
+    { The refusals have to be real ones, or "no phantom" means "nothing refused". }
+    Report(runs > 1000, 'and the sweep actually reached ' + IntToStr(runs) +
+           ' refused compiles to judge');
+    Report(phantoms = 0, 'no diagnostic names a line past the end of its file (' +
+           IntToStr(phantoms) + ' over ' + IntToStr(runs) + ' refusals; first: ' +
+           worst + ')');
+    { Both of these, or the one below passes by never meeting the case: if nothing
+      in the corpus ever ran out of input, "the two flags agree" would be a
+      statement about 4886 Falses. }
+    Report(waiting > 500, 'and it reached ' + IntToStr(waiting) +
+           ' refusals that a prompt should WAIT on, to judge the pair against');
+    Report(split = 0, 'the end-of-input and unterminated flags never disagree (' +
+           IntToStr(split) + ' over ' + IntToStr(runs) + ' refusals; first: ' +
+           worstSplit + ')');
+    Report(intruded > 200, 'and the intruder pass reached ' + IntToStr(intruded) +
+           ' open truncations with a wrong token where the terminator belongs');
+    Report(realTok = 0, 'nothing is recorded as unterminated at a REAL token (' +
+           IntToStr(realTok) + ' over ' + IntToStr(intruded) + '; first: ' +
+           worstReal + ')');
+  finally
+    src.Free;
+    files.Free;
+  end;
+end;
+
+{ THE WHOLE DIAGNOSTIC, NOT JUST THE FACT THAT ONE HAPPENED.
+
+  The negative corpus judges a bad program on its exit code alone, so the LINE a
+  compile error names, and the words it uses, were pinned by nothing anywhere in
+  this tree. That is how every unterminated block came to report the end of the
+  file -- a location with nothing in it to fix, and, for a file that ends with a
+  newline, a line one PAST the last, which no editor can even open. It went green
+  for months.
+
+  Line, text and the unterminated-block flag are asserted together because the
+  console host reads two of the three and a person reads the other. }
+procedure CheckDiag(const AName, ASource: String; AWantLine: Integer;
+  const AWantMsg: String; AWantUnterminated: Boolean);
+var
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  gotLine: Integer;
+  gotMsg: String;
+  gotUnterm: Boolean;
+begin
+  comp := TPhosphorCompiler.Create();
+  try
+    prog := nil;
+    gotLine := -1;
+    gotMsg := '(compiled -- no diagnostic at all)';
+    gotUnterm := not AWantUnterminated;   // a raise leaves the check failing
+    try
+      if not comp.Compile(ASource, prog) then
+      begin
+        gotLine := comp.ErrorLine;
+        gotMsg := comp.ErrorMessage;
+        gotUnterm := comp.ErrorUnterminatedBlock;
+      end;
+    except
+      on E: Exception do gotMsg := 'RAISED ' + E.ClassName + ': ' + E.Message;
+    end;
+    if prog <> nil then prog.Free;
+    Report((gotLine = AWantLine) and (gotMsg = AWantMsg) and
+           (gotUnterm = AWantUnterminated),
+           AName + ' (line ' + IntToStr(gotLine) + ', "' + gotMsg +
+           '", unterminated=' + BoolToStr(gotUnterm, True) + ')');
+  finally
+    comp.Free;
+  end;
+end;
+
+{ NEITHER COMPILE FLAG MAY OUTLIVE THE COMPILE THAT SET IT, THROUGH ANY DOOR.
+
+  Both are set in one place -- TPhosphorEngine.CompileSource, on failure -- and
+  every other entry point clears FErrorLine and FErrorMessage while leaving these
+  alone. So a host that asked ErrorUnterminatedBlock after a RUNTIME error was
+  answered about the last compile that failed, whenever that was. The REPL asks
+  exactly there, and the price of a stale True is a prompt that waits for a
+  terminator nobody is typing.
+
+  THE FIRST VERSION OF THIS CHECK TESTED ONLY THE HALF THAT HAD BEEN FIXED, which
+  is worse than testing nothing because it reads as covered. It drove Run, Run,
+  Run -- and all three of those reach CompileSource, which is where the clear had
+  been put. TPhosphorEngine has six doors and TWO OF THEM NEVER COMPILE ANYTHING:
+  RunBytecode reads a .pbc through ReadProgram, and CallFunction runs on a VM that
+  Prepare already built. Both wrote their own failure into ErrorMessage and left
+  both flags describing a compile from three calls earlier -- the new public
+  property this work adds, and the one docs/embedding.md now tells embedders to
+  read, answering about the wrong failure.
+
+  So every door gets a case here, and each is preceded by a Report that the run
+  actually reached the state being asked about: without those, a Run that stopped
+  failing would make the flag check pass by never getting near the question. }
+procedure CheckFlagsDoNotGoStale;
+const
+  LFc = #10;
+var
+  eng: TPhosphorEngine;
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  junk: TMemoryStream;
+  notBytecode: String;
+  v: TValue;
+begin
+  { The same question one level down, at the compiler, where a host holding ONE
+    TPhosphorCompiler asks it. Compile clears FFailed, FErr and FErrLine on the way
+    in; until these two were added to that line, a second compile that SUCCEEDED
+    left both standing from the first one that had not. }
+  comp := TPhosphorCompiler.Create();
+  try
+    prog := nil;
+    Report(not comp.Compile('if 1 = 1 then' + LFc + '  println "x"' + LFc, prog),
+           'the reused-compiler check starts from a compile that failed');
+    if prog <> nil then begin prog.Free; prog := nil; end;
+    Report(comp.ErrorUnterminatedBlock, 'and the first compile set the flag');
+    Report(comp.Compile('println 1' + LFc, prog),
+           'and then the SAME compiler compiles a good program');
+    if prog <> nil then prog.Free;
+    Report(not (comp.ErrorUnterminatedBlock or comp.ErrorAtEndOfInput),
+           'a reused compiler does not inherit the previous failure''s flags');
+  finally
+    comp.Free;
+  end;
+
+  eng := TPhosphorEngine.Create();
+  try
+    Report(eng.Run('a = 1' + LFc + 'if a = 1 then' + LFc + '  println "x"' + LFc) <> 0,
+           'the stale-flag check starts from a run that really did fail to compile');
+    Report(eng.ErrorUnterminatedBlock and eng.ErrorAtEndOfInput,
+           'an unterminated block sets both compile flags');
+
+    { Compiles; fails while RUNNING -- measured, "division by zero" at line 2. d is
+      a variable, so nothing folds the division away at compile time. The first
+      Report here is not ceremony: without it a Run that stopped failing would make
+      the flag check below pass by never getting near the question. }
+    Report(eng.Run('d = 0' + LFc + 'x = 1 / d' + LFc) <> 0,
+           'and reaches a genuine runtime fault after it');
+    Report(not (eng.ErrorUnterminatedBlock or eng.ErrorAtEndOfInput),
+           'a runtime fault does not leave the previous compile''s flags standing');
+
+    Report(eng.Run('x = 1 + 1' + LFc) = 0, 'and then a run that succeeds');
+    Report(not (eng.ErrorUnterminatedBlock or eng.ErrorAtEndOfInput),
+           'a clean run does not leave them standing either');
+
+    { THE TWO DOORS THAT NEVER REACH CompileSource. Set the flags again first, so
+      each of these starts from a genuine stale True rather than from a state that
+      happened to be clean already. }
+    Report(eng.Run('a = 1' + LFc + 'for i = 1 to 3' + LFc + '  println i' + LFc) <> 0,
+           'the bytecode door starts from a compile that failed');
+    Report(eng.ErrorUnterminatedBlock and eng.ErrorAtEndOfInput,
+           'and that compile really did set both flags');
+    junk := TMemoryStream.Create();
+    try
+      (* Not a .pbc: ReadProgram rejects it on the magic, which is a failure that
+         never goes near the compiler. The two non-printing bytes are built with
+         Chr() rather than written as literals -- every unit here sets the UTF8
+         codepage directive, which turns a byte above 127 in a LITERAL into two.
+         Both of these are ASCII and would have survived, but the habit is the
+         point: the next person who reaches for a high byte here must not learn
+         the wrong lesson from this line. *)
+      notBytecode := 'not a phosphor bytecode file' + Chr(10) + Chr(0) + Chr(1);
+      junk.Write(notBytecode[1], Length(notBytecode));
+      junk.Position := 0;
+      Report(eng.RunBytecode(junk) <> 0, 'and RunBytecode rejects a stream that is not bytecode');
+    finally
+      junk.Free;
+    end;
+    Report(not (eng.ErrorUnterminatedBlock or eng.ErrorAtEndOfInput),
+           'a bad bytecode stream does not answer about the previous compile');
+
+    Report(eng.Run('a = 1' + LFc + 'while a < 2' + LFc + '  a = a + 1' + LFc) <> 0,
+           'the CallFunction door starts from a compile that failed');
+    Report(eng.ErrorUnterminatedBlock and eng.ErrorAtEndOfInput,
+           'and that compile really did set both flags too');
+    v := eng.CallFunction('nosuch', []);
+    Report(eng.LastError.Code <> peNone, 'and CallFunction with nothing prepared fails');
+    Report(not (eng.ErrorUnterminatedBlock or eng.ErrorAtEndOfInput),
+           'a CallFunction failure does not answer about the previous compile');
+    Report(v.Kind = vkDouble, 'and hands back the default value');
+
+    { The same door reached the way an embedder reaches it -- Prepare refuses the
+      source, so there is no VM and the very next call is CallFunction.
+
+      The OTHER branch of CallFunction, the one with a VM actually prepared, cannot
+      be reached with a stale flag at all, and that was checked rather than assumed:
+      a successful Prepare clears the state, and every door that could set the flags
+      afterwards (Run, Prepare, ReplRun) calls Finish first and discards the prepared
+      VM, so by the time the flags are True there is no VM left to call into. }
+    Report(eng.Prepare('a = 1' + LFc + 'repeat' + LFc + '  a = a + 1' + LFc) <> 0,
+           'a Prepare that cannot compile fails');
+    Report(eng.ErrorUnterminatedBlock, 'and sets the unterminated flag');
+    v := eng.CallFunction('nosuch', []);
+    Report(eng.LastError.Code <> peNone, 'and the call that follows it fails too');
+    Report(not (eng.ErrorUnterminatedBlock or eng.ErrorAtEndOfInput),
+           'a call after a refused Prepare does not answer about that Prepare');
+  finally
+    eng.Free;
   end;
 end;
 
@@ -692,6 +1111,223 @@ begin
     synthesised EOF would have read as end-of-input -- so the prompt would have
     sat waiting for a line that can never repair a bad character. }
   CheckErrAtEof('a bad first character is not end-of-input', '~' + LF, False);
+
+  { --- the front end: a block that is never closed -------------------------
+    EVERY SOURCE BELOW IS THREE LINES LONG -- four for the two select shapes,
+    which need a `case` arm before they can be unfinished -- and in every one of
+    them the block opens on LINE 2. The expected line is counted off the literal
+    written here, not copied from a run.
+
+    All seven used to answer the LAST line, which for a source ending in a
+    newline is one PAST it: three lines of text reporting line 4. The parser
+    passed FLex.Cur().Line, and where these fire the current token is the end of
+    the input -- the one place in a file where the user can change nothing, and,
+    at line 4 of 3, a place no editor can even scroll to. Each parser was already
+    holding the opening line in `ln` and threw it away.
+
+    The wording is not invented here either: the engine has said
+    "'endif' without a matching 'if'" for the mirror mistake -- a terminator with
+    no opener -- since 2026-09-06 (OrphanKeyword). These are the same sentence
+    with the two halves swapped, so one mistake reads as one family.
+
+    The third expectation is the fact the console REPL actually reads. It used to
+    recover it by comparing the message against nine string literals of its own,
+    which is why rewording any of these would have broken multi-line block entry
+    at the prompt with nothing anywhere to say so. }
+  CheckDiag('an unclosed if names the if, not the end of the file',
+            'a = 1' + LF + 'if a = 1 then' + LF + '  println "x"' + LF,
+            2, '''if'' on line 2 without a matching ''endif''', True);
+  CheckDiag('an unclosed while names both its terminators',
+            'a = 1' + LF + 'while a < 3' + LF + '  a = a + 1' + LF,
+            2, '''while'' on line 2 without a matching ''endwhile'' or ''wend''', True);
+  CheckDiag('an unclosed do while names the do while',
+            'a = 1' + LF + 'do while a < 3' + LF + '  a = a + 1' + LF,
+            2, '''do while'' on line 2 without a matching ''loop''', True);
+  CheckDiag('an unclosed repeat names the repeat',
+            'a = 1' + LF + 'repeat' + LF + '  a = a + 1' + LF,
+            2, '''repeat'' on line 2 without a matching ''until''', True);
+  CheckDiag('an unclosed for names the for',
+            'a = 1' + LF + 'for i = 1 to 3' + LF + '  println i' + LF,
+            2, '''for'' on line 2 without a matching ''next''', True);
+  CheckDiag('an unclosed function names the function',
+            'a = 1' + LF + 'function f(n)' + LF + '  return n' + LF,
+            2, '''function'' on line 2 without a matching ''endfunction''', True);
+  CheckDiag('an unclosed select names the select',
+            'a = 1' + LF + 'select case a' + LF + 'case 1' + LF + '  println 1' + LF,
+            2, '''select case'' on line 2 without a matching ''endselect''', True);
+  CheckDiag('an unclosed select with a case else names the select too',
+            'a = 1' + LF + 'select case a' + LF + 'case else' + LF + '  println 1' + LF,
+            2, '''select case'' on line 2 without a matching ''endselect''', True);
+
+  { A source with NO trailing newline reports the same line as the one with it.
+    Worth its own check because the phantom only LOOKS impossible when the file
+    ends in a newline: without one the old code answered the last real line, so a
+    builder verifying this with a newline-less file would have seen a plausible
+    number and concluded nothing was wrong. }
+  CheckDiag('and the same answer when the file does not end in a newline',
+            'a = 1' + LF + 'if a = 1 then' + LF + '  println "x"',
+            2, '''if'' on line 2 without a matching ''endif''', True);
+
+  { NESTED: the INNER block is the one that is unfinished, and it is the inner
+    opener that has to be named. The outer `if` on line 1 is not the mistake. }
+  CheckDiag('a nested unclosed block names the inner opener',
+            'if 1 = 1 then' + LF + 'for i = 1 to 3' + LF + '  println i' + LF,
+            2, '''for'' on line 2 without a matching ''next''', True);
+
+  { A MULTI-LINE JSON LITERAL IS THE SECOND HALF OF THE SAME DEFECT, and it is the
+    half that a sweep of malformed BLOCKS could not have found -- it is reached
+    through the expression parser, not through ParseBlockUntil, and it carried the
+    phantom line out under FOUR different messages (the key test, the two Expects,
+    and "unexpected token in expression").
+
+    It was found by truncating the project's own corpus at every line rather than
+    by generating more malformed sources: tests/suite/45_json_literals.bas cut to
+    97 lines reported line 98. Reduced, it is two lines of source -- an assignment
+    and an opening brace -- answering line 3.
+
+    Newlines are ignored inside a literal, which means SkipEols, and SkipEols was
+    the only read left in the compiler that could walk past the last real line onto
+    the synthesised end-of-input token. Everywhere else the parser stops at a real
+    token on a real line, which is why `b = a +` at the end of a file has always
+    reported correctly and this did not.
+
+    Each source below is counted off the literal written here. The container that
+    is named is the INNERMOST one still open, which is the one the author has to
+    close first. }
+  CheckDiag('an unclosed json object names the brace, not the end of the file',
+            'a = 1' + LF + 'big@ = {' + LF,
+            2, '''{'' on line 2 without a matching ''}''', True);
+  CheckDiag('an unclosed json array names the bracket',
+            'a = 1' + LF + 'big@ = [' + LF,
+            2, '''['' on line 2 without a matching '']''', True);
+  CheckDiag('an unclosed json literal is named without a trailing newline too',
+            'a = 1' + LF + 'big@ = {',
+            2, '''{'' on line 2 without a matching ''}''', True);
+  CheckDiag('a nested json literal names the inner container',
+            'a = 1' + LF + 'big@ = {' + LF + '  "u": [' + LF,
+            3, '''['' on line 3 without a matching '']''', True);
+  CheckDiag('a json literal that stops after a comma still names its opener',
+            'a = 1' + LF + 'big@ = [' + LF + '  1,' + LF,
+            2, '''['' on line 2 without a matching '']''', True);
+  CheckDiag('a json object that stops after a key and colon names its opener',
+            'a = 1' + LF + 'big@ = {' + LF + '  "n":' + LF,
+            2, '''{'' on line 2 without a matching ''}''', True);
+
+  { The three checks INSIDE the literal keep their own wording, because none of
+    them can see the end of input any more and each is still right about the real
+    token it does see. Asserting that is the guard against the obvious overshoot --
+    redirecting every failure inside a literal to the opening brace, which would
+    blame a correct literal for a mistake several lines below it. }
+  CheckDiag('a json key that is not a string still blames the key',
+            'a = 1' + LF + 'big@ = {' + LF + '  1: 2' + LF + '}' + LF,
+            3, 'a JSON object key must be a string', False);
+  CheckDiag('a json literal closed by the wrong bracket still blames the bracket',
+            'a = 1' + LF + 'big@ = [' + LF + '  1' + LF + '}' + LF,
+            4, 'expected '']''', False);
+
+  { --- and the two that are NOT unterminated blocks, which is the whole point --
+    `select case` is the one terminator check in the compiler that also fires on
+    a TOKEN. A misspelled label is a mistake on ITS OWN line, inside a select that
+    is not unfinished at all, and blaming the select three lines above would be
+    the fix overshooting. The flag has to answer False here or the REPL waits for
+    a continuation that can never arrive -- which is the defect
+    tests/classic/15_repl_bad_case.repl exists to pin, reached from Pascal.
+
+    A select header with no `case` is likewise a malformed LINE: the current
+    token is the end of that line, so the line it reports is already the
+    actionable one. Left exactly as it was, and pinned so that stays deliberate. }
+  CheckDiag('a misspelled case label blames the label, not the select',
+            'a = 1' + LF + 'select case a' + LF + 'csae 1' + LF + '  println 1' + LF +
+            'endselect' + LF,
+            3, 'expected ''case'' or ''endselect''', False);
+  CheckErrAtEof('and a misspelled case label is not end-of-input',
+                'a = 1' + LF + 'select case a' + LF + 'csae 1' + LF + '  println 1' + LF +
+                'endselect' + LF, False);
+  CheckDiag('a select header with no case blames its own line',
+            'a = 1' + LF + 'select' + LF,
+            2, 'expected ''case'' after ''select''', False);
+
+  { The line rewrite must not disturb the OTHER fact each failure records. Fail
+    infers ErrorAtEndOfInput from the current token, and the obvious wrong
+    simplification -- inferring it from the line it was handed instead -- would
+    still pass every check above. }
+  CheckErrAtEof('an unclosed block is still end-of-input after the line moved',
+                'a = 1' + LF + 'for i = 1 to 3' + LF + '  println i' + LF, True);
+
+  { AND THE OTHER HALF OF THAT FACT: a failure the parser did not raise is not "the
+    input ran out", however far the lexer has got. ResolveGotos runs after the
+    statement loop has consumed the whole file, so the token in front of it is
+    always tkEOF -- and `goto nowhere` therefore answered ErrorAtEndOfInput=True,
+    for 2046 of the corpus sweep's 4886 refusals. Nothing wedged at the prompt,
+    because the host asks for both facts and the other one is False. What it cost
+    was the GATE: while a legitimate refusal can sit at the end of the input
+    without being an unfinished construct, "the two flags agree" cannot be
+    asserted, and the flag half of this work had nothing sweeping it at all. }
+  CheckErrAtEof('a label that does not exist is not end-of-input',
+                'println 1' + LF + 'goto nowhere' + LF, False);
+  CheckDiag('and it blames the goto, unterminated=False',
+            'println 1' + LF + 'goto nowhere' + LF,
+            2, 'undefined label nowhere', False);
+
+  { `next i` is the habit of every other BASIC. The answer used to be "expected
+    end of line", produced by the statement terminator check far from ParseFor,
+    which names a rule instead of the word to delete. }
+  CheckDiag('next with a variable says which word to remove',
+            'for i = 1 to 3' + LF + '  println i' + LF + 'next i' + LF,
+            3, '''next'' takes no variable -- remove the ''i''; the ''for'' on ' +
+               'line 1 already names it', False);
+
+  { A DIAGNOSTIC THAT REFUSES A CORRECT PROGRAM IS WORSE THAN THE ONE IT REPLACED.
+    Every block form closed properly, including `wend`, `end select` and a `next`
+    followed by a statement separator rather than a line end. }
+  CheckAccepted('every block form still compiles when it is closed',
+                'a = 1' + LF +
+                'if a = 1 then' + LF + '  println "y"' + LF + 'endif' + LF +
+                'while a < 2' + LF + '  a = a + 1' + LF + 'endwhile' + LF +
+                'b = 0' + LF + 'while b < 2' + LF + '  b = b + 1' + LF + 'wend' + LF +
+                'c = 0' + LF + 'do while c < 2' + LF + '  c = c + 1' + LF + 'loop' + LF +
+                'd = 0' + LF + 'repeat' + LF + '  d = d + 1' + LF + 'until d = 2' + LF +
+                'for i = 1 to 2' + LF + '  println i' + LF + 'next' + LF +
+                'select case a' + LF + 'case 2' + LF + '  println "two"' + LF +
+                'case else' + LF + '  println "no"' + LF + 'endselect' + LF +
+                'println f(3)' + LF + 'end' + LF +
+                'function f(n)' + LF + '  return n * 2' + LF + 'endfunction' + LF);
+  { `next :` and not `next <newline>`: the new check reads the token AFTER next,
+    and a statement separator there must stay legal. (A one-line `for` header is
+    a different matter -- `for i = 1 to 2 : ...` is rejected by the expression
+    parser reading the limit, on this build and before it, and has nothing to do
+    with this change.) }
+  CheckAccepted('a nested for whose two nexts share a line still compiles',
+                'for i = 1 to 2' + LF + '  for j = 1 to 2' + LF +
+                '    println j' + LF + '  next : next' + LF);
+  CheckAccepted('a comment after next is still a comment, not a variable',
+                'for i = 1 to 2' + LF + '  println i' + LF + 'next rem done' + LF);
+  CheckAccepted('next is still an ordinary name where it is not a terminator',
+                'next = 5' + LF + 'println next' + LF);
+
+  { The multi-line JSON literal the fix touches, in every shape the corpus uses:
+    nested containers, a trailing element with no comma, blank lines inside the
+    literal, an empty object and an empty array, and a closing bracket on its own
+    line. The empty pair matter most -- they are the one path where SkipEols lands
+    directly on the closing bracket, which is the case a too-eager end-of-input
+    test would have refused. }
+  CheckAccepted('a multi-line json literal still compiles',
+                'big@ = {' + LF +
+                '  "users": [' + LF +
+                '    { "id": 1, "name": "a" },' + LF +
+                '' + LF +
+                '    { "id": 2, "name": "b" }' + LF +
+                '  ],' + LF +
+                '  "empty@": {},' + LF +
+                '  "none@": [],' + LF +
+                '  "n": null' + LF +
+                '}' + LF +
+                'println json_count(json_get@(big@, "users"))' + LF);
+  CheckAccepted('an empty json literal spread over lines still compiles',
+                'a@ = {' + LF + '}' + LF + 'b@ = [' + LF + ']' + LF);
+
+  CheckFlagsDoNotGoStale;
+  CheckNoPhantomLinesInCorpus;
 
   { --- the front end: a literal the machine cannot hold ---------------------
     '1' followed by 400 zeros was rejected; `1e999` was ACCEPTED, because FPC's

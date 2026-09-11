@@ -34,7 +34,8 @@ bar.
 ```powershell
 powershell -NoProfile -File scripts\build.ps1        # clean build + boundary check
 powershell -NoProfile -File scripts\test-suite.ps1   # suite + probes + 8 gates
-powershell -NoProfile -File scripts\test-classic.ps1 # also: -examples -packages -gui
+powershell -NoProfile -File scripts\test-classic.ps1 # classic file I/O, PRINT USING
+powershell -NoProfile -File scripts\test-examples.ps1  # and -packages, -gui: SEPARATE scripts
 powershell -NoProfile -File scripts\test.ps1
 ```
 

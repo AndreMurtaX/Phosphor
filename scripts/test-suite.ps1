@@ -135,6 +135,19 @@ $negDir = Join-Path $root 'tests\negative'
 $manifest = Get-Content (Join-Path $suite 'manifest.txt') |
     ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
 
+# `Get-Content -Raw` answers $null for an EMPTY file, and $null.Trim() throws a
+# null-reference that $ErrorActionPreference = 'Stop' turns into a dead run. Both
+# callers below read the stderr of something that has ALREADY failed, so the crash
+# lands exactly where the harness was about to say what broke: a reviewer met it as
+# `FAIL  probe: probe_value ()` with an empty summary and spent the time deciding
+# whether the probe or the runner was at fault. Read a maybe-empty file through here.
+function Read-Text([string] $path) {
+    if (-not (Test-Path $path)) { return '' }
+    $raw = Get-Content -Raw $path
+    if ($null -eq $raw) { return '' }
+    return $raw.Trim()
+}
+
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {
     $out = Join-Path $tmp 'phosphortest.out'
     $err = Join-Path $tmp 'phosphortest.err'
@@ -236,7 +249,7 @@ else {
             cmd /c "`"$exe`" `"$($neg.FullName)`" > `"$out`" 2> `"$err`""
             $code = $LASTEXITCODE
             if ($code -ne 0) {
-                $why = (Get-Content -Raw $err).Trim()
+                $why = Read-Text $err
                 Write-Host ("PASS  reject: {0}  (exit {1})" -f $neg.Name, $code) -ForegroundColor Green
                 if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
             } else {
@@ -289,7 +302,7 @@ else {
         if ($pcode -eq 0) { Write-Host ("PASS  probe: {0}  ({1})" -f $hp.name, $psum) -ForegroundColor Green }
         else {
             Write-Host ("FAIL  probe: {0}  ({1})" -f $hp.name, $psum) -ForegroundColor Red
-            $why = (Get-Content -Raw $perr).Trim(); if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
+            $why = Read-Text $perr; if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
             $allOk = $false
         }
     }

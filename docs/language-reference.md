@@ -759,6 +759,69 @@ function handler(code, msg$)
 endfunction
 ```
 
+### A jump out of a function body must come back
+
+Every label belongs to the program rather than to a function — a label written
+inside a function body is not visible as one. So both `on error goto h` and
+`gosub sub`, written inside a function, necessarily jump *outside* it, and the
+call they jumped out of stays open while they run. Exactly two things go back
+into it: `resume` / `resume next` for a handler, and `return` for a subroutine.
+Nothing else can, because at top level `return` is the GOSUB return.
+
+Reaching the end of the program from out there leaves the call pending for good,
+and the engine **refuses the program** instead of ending quietly:
+
+    the ON ERROR GOTO handler at line 14 took 'division by zero' and ran to the
+    end of the program without 'resume' or 'resume next', so the call to risky it
+    was raised inside was never returned from
+
+    control reached the end of the program inside risky, so the call to it was
+    never returned from. A 'gosub' made inside a function must 'return'…
+
+That used to be silent, and it was not harmless. Through `callfunc` the caller
+popped an operand it still needed and ran the tail of the program a **second**
+time at exit 0 — a duplicated append, a duplicated post, reported as success —
+and through a direct call the rest of the calling statement was dropped. Each
+occurrence also leaked one activation frame, so a long-running program of that
+shape eventually died at the frame ceiling, naming the call site and never the
+handler.
+
+Neither of the two near misses settles it. Writing `on error goto 0` in the
+handler disables error handling; it does not return to the call. And resuming
+some *other*, inner error inside the handler settles that one, not this one. Both
+are refused just the same. The ways out are to resume the fault that was raised,
+to `return` from the subroutine, or to install the handler with `on error call`,
+which is a function and comes back by itself:
+
+```basic
+function risky(n) local z
+  on error call rescue        ' a function handler returns into the call
+  z = 1 / 0
+  return 7
+endfunction
+
+function rescue(code, msg$)
+  println "rescued "; code
+  return 0                    ' 0 = resume next, non-zero = abort
+endfunction
+
+println risky(1)
+```
+
+**This changes what some existing programs do.** A program of either shape used
+to reach exit 0 and now exits non-zero with one of the messages above. Through a
+direct call the old output could look entirely right — only a frame leaked and
+one statement was dropped — so a script that appeared to work may now be refused.
+That is the intended trade: the refusal names the handler and the abandoned call,
+where the old behaviour named nothing.
+
+A handler installed at **top level** is unaffected however deep the fault was:
+the fault puts the frame pointer back where the install stood, so the pending
+calls are discarded rather than abandoned and the program ends normally. A
+**top-level** `gosub` whose subroutine ends in `goto` is likewise fine — there is
+no call to abandon. It is only a jump out of a *function body* that has something
+to come back to.
+
 ---
 
 ## Debugging: TRACE & BREAKPOINT

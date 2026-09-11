@@ -281,6 +281,10 @@ else {
         @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
         @{ name='probe_registry'; src='tests\probe_registry.lpr' },
         @{ name='probe_debug';    src='tests\probe_debug.lpr' },
+        # The WORDING of the abandoned-activation diagnostics. tests\negative
+        # compares exit codes only and tests\classic discards stderr, so without
+        # this nothing in the tree would notice either message being garbled.
+        @{ name='probe_onerror';  src='tests\probe_onerror.lpr' },
         @{ name='probe_budget';   src='scripts\probe_budget.lpr' },
         @{ name='probe_crt';      src='tests\probe_crt.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' },

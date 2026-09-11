@@ -119,6 +119,33 @@ Six things worth noticing:
   labels are not that. Inside a function, `on error call` — the handler is a
   routine, taking the code and the message.
 
+- **And a handler a function installs by label must `resume`.** Because that
+  label is outside the function, the jump leaves the call open, and reaching the
+  end of the program from inside the handler leaves it open for good — which the
+  engine refuses, naming the handler's line, the error it took and the call it
+  abandoned. Neither `on error goto 0` in the handler nor resuming some *other*,
+  inner error counts as coming back, and `gosub` out of a function body that
+  never `return`s is the same refusal without any `on error` in it. The shapes
+  and the ways out are in
+  [language-reference.md](../language-reference.md#a-jump-out-of-a-function-body-must-come-back).
+
+- **One shape of that is still not caught, and it is worth knowing which.** The
+  check runs where control leaves the program, and by then the only evidence left
+  for the `gosub` spelling is the frame count. That count stops being a count of
+  open calls the moment a handler installed by a call that has since *returned*
+  takes a fault raised shallower than the install: the engine stands the
+  interpreter back at the level the install remembers, over slots the returned
+  call left behind. The engine records which slots those are, so calls made
+  *after* that still count — but a call already abandoned *before* it is buried
+  under them and is not reported. Concretely: a `gosub` out of a function that
+  never returns, followed by a fault taken through such a stale deeper install,
+  ends the program quietly. It is not a new defect (nothing reported it before
+  this check existed either), it needs both halves of that sequence in one
+  program, and every `on error` spelling of it *is* caught, because a handler
+  jump is recorded when it happens rather than measured at the end. The counter
+  is deliberately allowed to be too wide rather than too narrow: refusing a
+  correct program would be worse than missing this one.
+
 ## Where the rest of the mechanism lives
 
 `on error goto`, `on error call`, `resume`, `resume next` and `on error goto 0`

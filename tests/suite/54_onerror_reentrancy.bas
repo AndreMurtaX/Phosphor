@@ -572,7 +572,42 @@ rn6:
 on error goto 0
 assert_eq(rnmid$, "a,b,c,", "the rest of the block still runs")
 
+rem ---------------------------------------------------------------
+rem A HANDLER INSTALLED IN A CALL THAT RETURNED IS NOT AN ABANDONED ONE.
+rem
+rem The VM refuses a program whose `on error goto` handler runs off the end
+rem while the call it was raised inside is still open -- through callfunc that
+rem call's caller used to pop an operand it still needed and run the tail of
+rem the program a second time, and tests/negative/33 and /34 pin the refusal.
+rem
+rem This is the shape one term away from it, and it is CORRECT. `abarm` installs
+rem the handler and RETURNS NORMALLY, so the install depth stays at 1 for the
+rem rest of the run while nothing at all is open. The later fault happens at TOP
+rem LEVEL, the handler never resumes, and the program ends inside it.
+rem
+rem A check that asked only "was the handler installed inside a function" would
+rem refuse this program: measured, it did, and it took a second reading of the
+rem VM's own state to see why. What separates the two is where the FAILING
+rem STATEMENT ran, not where the handler was installed.
+rem
+rem This block is deliberately the LAST executable one: entering a handler that
+rem never resumes means control does not come back, so the statements after it
+rem are the handler's own and the program ends by running off the end of the
+rem file. That is exactly the exit the VM check sits on, which is the point --
+rem the `end` above is reached only if this fault does not happen.
+rem ---------------------------------------------------------------
+test_case("onerror/a handler installed in a call that RETURNED is not abandoned")
+assert_eq(abarm(1), 2, "the function that installed the handler returned normally")
+abq = 1 / 0
+assert_true(0, "the top-level fault must reach the handler, not this line")
+
 end
+
+function abarm(n) local z
+  on error goto abend
+  z = n + 1
+  return z
+endfunction
 
 gaddit:
 gtot = gtot + gcur
@@ -596,3 +631,12 @@ resume next
 gh2:
 gd = 2
 resume
+
+rem The handler for the block above. It never resumes, and the program ENDS
+rem here, running off the end of the file with the handler still active -- the
+rem VM's abandoned-activation check reads that exit and must let this through,
+rem because the call the handler was installed in returned long ago and the
+rem fault it took was raised at top level, with nothing open.
+abend:
+assert_eq(abq, 0, "the faulting assignment never completed")
+assert_true(1, "and the handler ran to the end of the program without resuming")

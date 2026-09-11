@@ -226,11 +226,25 @@ type
     FErrHandlerSP, FErrHandlerFrameSP: Integer;
     FErrHandlerMode: Integer;    // 0 = goto a label, 1 = call a function
     FErrHandlerFuncIdx: Integer; // const-pool index of the function name (call mode)
+    // The source line of the `on error` statement that INSTALLED the handler --
+    // the only line a diagnostic can name when the handler pc has no instruction
+    // to read a line from, which is what `h:` as the last line of the file
+    // produces (a pc of exactly FProg.Count; the install accepts it at :2509).
+    // See the abandoned-activation diagnostic at the end of ExecFrom.
+    FErrHandlerLine: Integer;
     FInHandler: Boolean;
     FErrCode: Integer;              // last caught error: code / message / line
     FErrMsg: String;
     FErrLine: Integer;
     FErrStmtPC, FErrStmtSP, FErrStmtFrameSP: Integer; // the failing statement, for resume
+    { WHICH FAULT THE FErrStmt*/FErrSave* FIELDS ARE CURRENTLY ABOUT. One number,
+      bumped every time a handler takes a fault. The fields above are a SINGLE
+      slot: a second fault overwrites them, so "is this resume putting back the
+      frames that fault took aside" is not a question any of their VALUES can
+      answer -- two different faults can carry the same depths. The counter can.
+      It is what the abandoned-activation check at the end of ExecFrom compares
+      to decide whether a resume settles the abandonment it recorded. }
+    FFaultSeq: Int64;
     // THE OVERLAP. A handler runs at the level it was INSTALLED at, but `resume`
     // returns to the level the failing STATEMENT ran at, and the second is deeper
     // whenever the fault happened inside a call made mid-expression. Everything
@@ -1535,12 +1549,14 @@ begin
   FErrHandler := -1;
   FErrHandlerMode := 0;
   FErrHandlerFuncIdx := 0;
+  FErrHandlerLine := 0;
   FInHandler := False;
   FErrSaveValid := False;
   FHalted := False;
   FCallDepth := 0;
   FLimitFromInner := False;
   FErrCode := 0; FErrMsg := ''; FErrLine := 0;
+  FFaultSeq := 0;                 // 0 is "no fault yet": the counter is bumped BEFORE use
   FErrStmtPC := 0; FErrStmtSP := 0; FErrStmtFrameSP := 0;
   FSteps := 0;
   FOutputBytes := 0;
@@ -1669,7 +1685,72 @@ var
   sTmp: String;             // scratch for the classic-I/O handlers
   bTmp: Boolean;
   nTmp: Int64;
+  // Where an abandoned ON ERROR GOTO handler starts, for the diagnostic at the
+  // fall-through. Its own name, not sTmp's: that one is live inside the loop.
+  hLine: String;
+  { AN `ON ERROR GOTO` HANDLER THIS ACTIVATION JUMPED TO AND HAS NOT COME BACK
+    FROM, recorded as the frame DEPTH it jumped out with (-1 = none), with the
+    handler's own line, the error it took, and the line to report -- all taken at
+    the jump. LOCALS for the reason stmtPC is one, and then some: the ON ERROR
+    fields outlive a run on purpose, a handler can switch every one of them off
+    from the inside with `on error goto 0`, and a second fault taken INSIDE a
+    handler rewrites the two depth fields with its own. A depth rather than a
+    flag because resumes nest: only the OUTERMOST abandonment is kept, and only
+    a resume that reaches back to it clears the record. See the fall-through. }
+  abandonedAt: Integer;
+  // WHICH FAULT the record above was taken at, so that the resume of THAT fault
+  // settles it and the resume of any later one does not. See RestoreOverlap.
+  abandonedSeq: Int64;
+  abandonedLine: Integer;
+  // The line the abandoning handler was INSTALLED at, for the one case where the
+  // handler's own pc has no instruction to read a line from; see the snapshot.
+  abandonedInst: Integer;
+  abandonedFrom: Integer;
+  abandonedMsg: String;
+  abandonedName: String;
+  { WHICH FRAME SLOTS MAY BE COUNTING ACTIVATIONS NOBODY PUSHED -- the half-open
+    range inventedFrom .. inventedTo, empty when inventedFrom is MaxInt. Exactly
+    one line in this unit raises the frame pointer with no push behind it -- the
+    fault dispatcher standing at a STALE handler's remembered depth -- and the
+    slots it steps over held calls that already returned.
+
+    A RANGE rather than a flag, because frames outside it are still real, and
+    both ends are needed: above it for the end-of-program check's frame arm
+    (which asks whether the frame under it was pushed), below it for the ON ERROR
+    arm (which asks whether the failing statement really ran inside a call). A
+    flag made both stand down for the rest of the run, which left one spelling of
+    the defect uncaught; reading only the top made the ON ERROR arm refuse
+    correct programs whose fault was raised in a fabricated slot.
+
+    It can only ever be too WIDE. Two separate fabrications merge into one range
+    covering both, and the real frames between them are then discounted as well;
+    ranges are lowered when a jump or a resume moves the frame pointer down past
+    them, never raised except by the dispatcher. Too wide is a missed detection.
+    Too narrow would be a correct program refused. }
+  inventedFrom: Integer;
+  inventedTo: Integer;
+  // The activation the diagnostic at the fall-through names, and the line its
+  // body starts on. Read from the frame rather than from any ON ERROR field,
+  // because the `gosub` spelling of the same defect never touches one.
+  abName: String;
+  abLine: Integer;
   growth: Int64;            // bytes a concatenation is about to add; MaxMemoryBytes
+
+  { The frame pointer has just moved DOWN to ALevel, so every fabricated slot at
+    or above it has gone with whatever else was there. One place because two
+    different operations move it down past a fabrication -- a handler jump to a
+    shallower install, and a resume -- and a rule written at one of them only is
+    how this class of thing rots. }
+  procedure DropInventedAbove(ALevel: Integer);
+  begin
+    if ALevel >= inventedTo then Exit;
+    inventedTo := ALevel;
+    if inventedFrom >= inventedTo then
+    begin
+      inventedFrom := MaxInt;      // nothing is fabricated any more
+      inventedTo := 0;
+    end;
+  end;
 
   { Put back what the handler ran on top of, and stand at the failing statement's
     level again. Without this the resume re-exposed slots the handler had since
@@ -1706,6 +1787,43 @@ var
       end;
       FErrSaveValid := False;
     end;
+    { AND THE ABANDONMENT IS SETTLED ONLY BY THE RESUME OF THE FAULT THAT MADE
+      IT. The frames this puts back are the ones FErrSave* took aside, and those
+      belong to whichever fault last ran -- so the question is which fault that
+      is, and FFaultSeq is the only thing that answers it. An inner handler
+      resuming its OWN fault leaves an outer abandonment exactly where it was
+      (tests/negative/37, /38, /42): the counter has moved on, and this restore is
+      putting back the inner fault's frames, not the outer one's. Here rather than
+      in opResume because `on error call` reaches this by a different road and
+      must settle its own.
+
+      A DEPTH COMPARISON WAS THE FIRST SPELLING AND IT REFUSED A CORRECT PROGRAM.
+      It asked whether the level being restored to was at or below the level the
+      handler jumped out with -- but the two are only equal when the fault was
+      raised in the handler's OWN frame. Raise it one call deeper, which is the
+      overlap this engine documents at FErrSaveStack and which
+      `w = 1000 + g(1)` inside a function that installed the handler produces,
+      and the resume that puts everything back looked like somebody else's:
+      the program answered correctly, printed its tail, and was then refused at
+      exit 1. Measured on the round-3 build; tests/suite/66 is that program. }
+    if (abandonedAt >= 0) and (FFaultSeq = abandonedSeq) then
+    begin
+      abandonedAt := -1;
+      abandonedSeq := -1;
+      abandonedLine := 0;
+      abandonedInst := 0;
+      abandonedFrom := 0;
+      abandonedMsg := '';
+      abandonedName := '';
+    end;
+    { AND THE FABRICATED FRAMES GO WITH THE LEVEL THEY SAT ABOVE. This resume
+      stands the VM back at the FAILING STATEMENT's depth, so every slot at or
+      above it is out of scope -- including any the fault dispatcher fabricated on
+      the way in. The very fault that fabricates them records its own depth BEFORE
+      they exist (Fault copies FStmt* first, then the dispatcher raises the frame
+      pointer to the handler's remembered level), so a resume that reaches back to
+      it puts the range back where it was and both arms can see again. }
+    DropInventedAbove(FErrStmtFrameSP);
     FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;
   end;
 
@@ -1868,6 +1986,9 @@ var
         Exit(False);
       end;
       FErrStmtPC := stmtPC; FErrStmtSP := stmtSP; FErrStmtFrameSP := stmtFrameSP;
+      // A NEW FAULT OWNS THE RESUME POINT FROM HERE. Everything the previous one
+      // put in those fields, and in FErrSave* below, is gone. See FFaultSeq.
+      Inc(FFaultSeq);
       // Copy the overlap aside BEFORE unwinding onto it.
       n := FErrStmtSP - FErrHandlerSP;
       if n < 0 then n := 0;
@@ -1892,6 +2013,30 @@ var
           FErrSaveFrames[i].Locals[j] := FFrames[FErrHandlerFrameSP + i].Locals[j];
       end;
       FErrSaveValid := True;
+      { THE ONE LINE IN THIS UNIT THAT RAISES FFrameSP WITH NO PUSH BEHIND IT.
+        A handler whose install is stale is remembered at a depth ABOVE the one
+        we are standing at, and the assignment below then stands the VM over
+        frame slots a returned call left behind. The program is correct and the
+        assignment stays; what is recorded is HOW FAR UP those fabricated slots
+        now reach, so the fall-through's second arm -- which has nothing but
+        FFrameSP to go on -- can discount them instead of standing down for the
+        rest of the run. The `else` lowers the mark when the same assignment
+        moves the VM DOWN past it: the slots above are gone, so they are no
+        longer anybody's fabrication.
+
+        Both branches only ever move the range to the level the frame pointer is
+        about to be set to, which is the invariant the arms rest on: FFrameSP is
+        never left below inventedTo, so anything above the range was pushed. }
+      if FErrHandlerFrameSP > FFrameSP then
+      begin
+        // Ranges MERGE rather than replace -- an older fabrication is still
+        // fabricated -- so the real frames between two of them are discounted as
+        // well. Wider can only miss; narrower could refuse a correct program.
+        if FFrameSP < inventedFrom then inventedFrom := FFrameSP;
+        inventedTo := FErrHandlerFrameSP;
+      end
+      else
+        DropInventedAbove(FErrHandlerFrameSP);
       FSP := FErrHandlerSP; FFrameSP := FErrHandlerFrameSP;
       if FErrHandlerMode = 1 then
       begin
@@ -1923,6 +2068,62 @@ var
       begin
         // `on error goto label`: jump to the handler
         FInHandler := True;
+        { THE ONE MOMENT THE FIELDS BELOW ARE STILL ABOUT THIS JUMP. The check at
+          the fall-through cannot read them: by then a statement inside the
+          handler may have rewritten every one, and a second fault taken inside
+          it certainly has. So the question is answered here and the answer kept
+          in a local.
+
+          FErrHandlerFrameSP > 0 -- the handler is running with an activation
+          under it, which top-level code has no opcode to pop. FErrStmtFrameSP >
+          0 -- the failing statement really ran inside one, which is what
+          separates this from a handler whose install is merely STALE: `on error
+          goto h` executed in a function that RETURNED leaves FErrHandlerFrameSP
+          at that function's depth for the rest of the run, and a later fault at
+          top level is an ordinary correct program.
+
+          AND THE FRAME UNDER THE FAILING STATEMENT HAS TO BE ONE SOMEBODY
+          PUSHED. `FErrStmtFrameSP > 0` alone reads a DEPTH, and a depth is not a
+          count of real activations once the line above has fabricated some: a
+          fault raised by top-level code running inside a handler that stands at
+          a stale install's remembered level has FErrStmtFrameSP > 0 with nothing
+          open under it at all. Measured -- ten programs of that shape, correct
+          and exiting 0 on the shipped binary, were refused before this term
+          (tests/suite/67). The range says which slots those are.
+
+          Recorded only if nothing is recorded yet, so nesting keeps the
+          OUTERMOST abandonment: a handler that abandons a call and then invokes
+          a helper with its own resuming handler must not have its record
+          overwritten by the helper's innocent numbers. }
+        if (abandonedAt < 0) and (FErrHandlerFrameSP > 0) and
+           (FErrStmtFrameSP > 0) and
+           ((FErrStmtFrameSP <= inventedFrom) or (FErrStmtFrameSP > inventedTo)) then
+        begin
+          abandonedAt := FErrHandlerFrameSP;
+          abandonedSeq := FFaultSeq;
+          abandonedMsg := FErrMsg;
+          abandonedFrom := FErrLine;
+          // The activation being abandoned is the one the FAILING STATEMENT ran
+          // in, and its name is taken here for the same reason the rest is: at
+          // the fall-through, FFrameSP - 1 can point into frames a stale install
+          // had the dispatcher invent, and naming from there named a function
+          // that had already RETURNED.
+          abandonedName := FProg.UserFuncs[FFrames[FErrStmtFrameSP - 1].FuncIndex].Name;
+          { THE HANDLER'S OWN FIRST LINE -- and, for the one case that has none,
+            the line the install was written at. `on error goto h` with `h:` as
+            the last thing in the file installs a pc of exactly FProg.Count,
+            which the install accepts (:2571, where the bound is strictly greater)
+            and which has no instruction to
+            read a line from. That case used to produce "the ON ERROR GOTO
+            handler at the end of the program took ... and ran to the end of the
+            program" -- the same clause twice, naming nothing anyone can go and
+            look at. The install site is a line the reader wrote. }
+          if (FErrHandler >= 0) and (FErrHandler < FProg.Count) then
+            abandonedLine := FProg.Instr(FErrHandler).Line
+          else
+            abandonedLine := 0;
+          abandonedInst := FErrHandlerLine;
+        end;
         pc := FErrHandler;
         Result := True;
       end;
@@ -2034,6 +2235,20 @@ begin
   bTmp := False;
   nTmp := 0;
   ins := Default(TInstr);   // so the guards below can report a line before the first fetch
+  abandonedAt := -1;
+  abandonedSeq := -1;
+  abandonedLine := 0;
+  abandonedInst := 0;
+  abandonedFrom := 0;
+  abandonedMsg := '';
+  abandonedName := '';
+  // An EMPTY range: nothing has been fabricated yet. inventedTo is 0 rather than
+  // AStopFrameSP because a re-entrant run already has AStopFrameSP as its floor
+  // in the arm itself.
+  inventedFrom := MaxInt;
+  inventedTo := 0;
+  abName := '';
+  abLine := 0;
   pc := AStartPC;
   stmtPC := AStartPC; stmtSP := FSP; stmtFrameSP := FFrameSP;
   while pc < FProg.Count do
@@ -2366,6 +2581,11 @@ begin
             FErrHandler := ins.A;     // installed (a pc for goto, a name index for call)
             if ins.B = 1 then FErrHandlerFuncIdx := ins.A;
             FErrHandlerSP := FSP; FErrHandlerFrameSP := FFrameSP;
+            // Where the install was written. `on error goto h` with `h:` as the
+            // last line of the file installs a pc of exactly FProg.Count, and
+            // there is no instruction there to take a line from -- this is the
+            // one the diagnostic names instead.
+            FErrHandlerLine := ins.Line;
           end;
           FInHandler := False;        // (re-)installing re-arms the handler
         end;
@@ -2378,6 +2598,12 @@ begin
             Exit(False);
           end;
           FInHandler := False;
+          // RestoreOverlap, on the next line, is what actually puts the
+          // abandoned activation back, so it is also where the abandonment
+          // record is settled -- and only if this resume reaches back to it.
+          // The field above cannot say any of that: opSetErrHandler clears it
+          // too, and `on error goto 0` inside a handler is not a resume, it is
+          // the defect with one more line in it.
           RestoreOverlap();
           if ins.A = 1 then
             // resume next: continue at the statement after the one that failed
@@ -2842,6 +3068,237 @@ begin
       if Fault(MakeError(peRuntime, 'bad opcode ' + IntToStr(Ord(ins.Op)))) then Continue else Exit(False);
     end;
     Inc(pc);
+  end;
+  { CONTROL LEFT THE PROGRAM WITH A USER-FUNCTION ACTIVATION STILL OPEN.
+
+    A label always lives at TOP LEVEL -- labels are recorded in Compile's
+    top-level loop, which a function body never passes through, so `on error
+    goto h` with `h:` written in the body answers "undefined label h" (measured).
+    Every handler a function can install is therefore OUTSIDE it, and jumping to
+    one leaves the call open, holding the caller's half-evaluated operands.
+    `resume` and `resume next` are the only way back in: opRetFunc is the one
+    opcode that pops a frame and PhosphorCompiler.pas:2170 emits it only inside a
+    function body, while at top level `return <value>` is a parse error and bare
+    `return` is opReturn, which answers "RETURN without GOSUB".
+
+    THE DAMAGE IS ONE POP. Falling out of the loop answers Exit(True) with
+    FHalted False, so CallUserFunc takes its success branch and runs `Result :=
+    Pop()` at :3468 over an operand the CALLER still needs. Measured, on the
+    shipped binary: the tail of the program ran a SECOND time and put two rows on
+    disk from a program that appends one, at exit 0. Through a direct call the
+    symptom is the other half of the same wound -- the rest of the calling
+    statement is dropped, so `c = 1 + risky(1)` leaves c at its previous value,
+    silently. Each occurrence also leaks one activation frame, so a long-running
+    program of this shape dies at MaxFrameDepth naming the call site and nothing
+    else. PhosphorCompiler.pas:724-725 asks for exactly this check, in these
+    words: it is "the same defect through another door, and closing it belongs to
+    the VM, which can see at fault time what this site cannot -- that a handler
+    jump crossed a frame boundary."
+
+    TWO ARMS, because there are two ways to cross that boundary and they leave
+    completely different evidence behind.
+
+    ARM 1, abandonedAt -- A HANDLER JUMPED OUT AND HAS NOT COME BACK.
+
+    The question is asked ONCE, at the instant the jump happens, and the answer
+    is kept in a LOCAL. Not one of the fields: every one of them can be rewritten
+    from inside the very handler that is abandoning the call.
+
+      - FInHandler is an ARM/DISARM FLAG, not a record of what happened.
+        opSetErrHandler ends with `FInHandler := False` OUTSIDE its own if/else
+        (:2527), so the DISABLE branch clears it too, and one `on error goto 0`
+        written in the handler switched a check keyed on it straight off.
+        Measured: the reproduction still put two rows on disk at exit 0.
+      - FErrHandlerMode moves to 1 if the handler writes `on error call`.
+      - FErrHandlerFrameSP and FErrStmtFrameSP describe the LAST fault, and a
+        handler is free to take another one. A handler that abandons a call and
+        then invokes an ordinary helper with its own resuming handler overwrites
+        both with the helper's shallower, innocent numbers -- and that program
+        walked through a check that read them at this line, at exit 0, with the
+        duplicated row on disk. tests/negative/37 and /38.
+
+    So the two fields are read where they are still fresh, in the goto arm of the
+    fault dispatcher (:2036), and what is kept is the DEPTH the handler jumped
+    out with. FErrHandlerFrameSP > 0 says the handler is running with an
+    activation still under it, which top-level code cannot pop; FErrStmtFrameSP >
+    0 says the failing statement really ran inside one, which separates the
+    abandonment from a handler whose install is merely STALE -- `on error goto h`
+    executed in a function that RETURNED leaves FErrHandlerFrameSP at that
+    function's depth for the rest of the run, and a later fault at top level is
+    correct and must stay correct (tests/suite/62).
+
+    The OUTERMOST abandonment, because resumes nest: it is recorded only if
+    nothing is recorded yet. What settles it is RestoreOverlap -- the one
+    operation that actually puts an abandoned activation back -- and only when
+    the fault it is putting back is the one the record was taken at, which
+    FFaultSeq is what identifies. An inner handler resuming its own fault
+    therefore leaves the outer abandonment on the record, which is precisely
+    what a single boolean could not do; and the resume of the abandoning fault
+    itself settles it even when the fault was raised a call DEEPER than the
+    handler, which a comparison of the two depths got wrong. See RestoreOverlap.
+
+    ARM 2, the honest frame depth -- NOTHING JUMPED; THE FUNCTION SIMPLY NEVER
+    CAME BACK.
+
+    `gosub` from inside a function to a top-level label that ends in `goto`
+    abandons the activation just as thoroughly, with no `on error` anywhere in
+    the program, so arm 1 has nothing to see. PhosphorCompiler.pas:715-716 names
+    this spelling in the same sentence as the handler one -- "A subroutine that
+    ends in `goto` instead of `return`, and a handler that never reaches
+    `resume`, both abandon the activation exactly as `goto` does" -- and it put
+    two rows on disk at exit 0 too. tests/negative/39 and /40.
+
+    FFrameSP > 0 -- an activation is open at all. A TOP-LEVEL handler that never
+    resumes ends with an empty frame stack, because the fault stands the frame
+    pointer back at the level the handler was installed at (:1978); that shape is
+    documented and ordinary, and is the false positive this fix was warned about.
+    It is pinned by tests/suite/62, and hard: removing it refuses every program
+    in the tree, because a clean top-level end reads 0 against the top level's
+    floor of -1.
+
+    FFrameSP > AStopFrameSP -- the open activation belongs to THIS run rather
+    than to an outer one still live on the Pascal stack. Together the two are
+    `FFrameSP > Max(AStopFrameSP, 0)`; apart they say what each half is for. Note
+    what AStopFrameSP is NOT doing: it is not a depth being subtracted. RunFrom
+    passes -1 (:1583) and CallUserFunc a real depth (:3460), so this term ALONE
+    would call a clean top-level end (0 against -1) defective and this very
+    defect (1 against 0) the same. It is a floor below which frames belong to
+    someone else, and -1 is a floor the frame stack never reaches -- which is
+    what the first term supplies.
+
+    AND THIS SECOND TERM IS UNPINNED, DELIBERATELY, WHICH IS WORTH SAYING
+    PLAINLY. It is here because ResumeAtNextStmt ends a re-entrant run on purpose
+    at :1858-1860, popping to exactly AStopFrameSP and setting pc := FProg.Count
+    -- documented legitimate traffic through this same line, and the reason the
+    line exists at all is to avoid resuming to a re-entrant frame's ReturnAddr of
+    -1. Removing the term breaks nothing measurable: the whole suite, both other
+    corpora, a generated sweep of 78 on-error and gosub shapes, 31 hand probes
+    and eight programs written for no other purpose than to reach that exit all
+    stay green, and a trace build printing FFrameSP and AStopFrameSP at this line
+    showed every one of them arriving with AStopFrameSP = -1, the top level. The
+    reason appears to be that the compiler's implicit end-of-body return is
+    always inside the body, so the resume lands on it and leaves through
+    opRetFunc instead. I could not construct a program from BASIC source that
+    reaches :1860, so I cannot pin this term -- and I am not dropping it on that
+    basis either, because failing to reach an exit is not proof it is
+    unreachable, the engine documents it as legitimate, and the cost of the term
+    is one comparison while the cost of being wrong is refusing a correct
+    program. tests/suite/64 covers the shape it protects even though no mutation
+    of this term makes that file fail.
+
+    FFrameSP > inventedTo -- AND THE FRAME UNDER US IS ONE SOMEBODY PUSHED.
+    FFrameSP is an honest count everywhere except one line.
+    `grep -n 'FFrameSP :=|Inc(FFrameSP)|Dec(FFrameSP)'` over this unit finds nine
+    sites: two resets, two pushes, two pops, CallUserFunc's restore,
+    RestoreOverlap's restore -- and the fault dispatcher's, which stands the VM at
+    the handler's REMEMBERED depth. When that handler's install is stale the
+    remembered depth is above the real one and the line fabricates frames over
+    slots a returned call left behind. The program is correct (nothing is pending,
+    and the top level has no opcode that could return from those slots), so the
+    assignment stays as it is and the dispatcher records how far up the
+    fabrication reaches instead.
+
+    A LEVEL AND NOT A FLAG, and the difference is a whole spelling of the defect.
+    The first version of this was a Boolean, switched off for the rest of the
+    activation by any stale install -- which is safe, because standing down can
+    only miss, never misfire, but which also left a program that stale-installs
+    AND THEN gosub-abandons a direct call with nothing looking at it: arm 1 has no
+    record to take (a gosub touches no ON ERROR state) and arm 2 had switched
+    itself off. Measured on that build: exit 0, stderr empty, the statement after
+    the abandoned call silently dropped. A level keeps the discount exactly as
+    wide as the fabrication -- slots pushed ABOVE it are ordinary activations that
+    an opCall put there -- so that program is refused while the one the Boolean
+    existed for is not. That one is tests/suite/65: a handler over a stale install
+    that calls a helper which resumes, which a frame-only build refused and a
+    generated sweep caught. It ends with FFrameSP exactly AT the mark.
+
+    The mark moves in two places and only ever to a level the frame pointer is
+    being set to at the same moment: up in the dispatcher when the assignment
+    fabricates, down in RestoreOverlap when a resume reaches back past it and
+    those slots stop existing. So FFrameSP is never left below it, and it can
+    never be too LOW -- which is the only direction that could refuse a correct
+    program. Too high is a missed detection, and one shape still is: an
+    abandonment made BEFORE the fabrication is buried under it, because the mark
+    then stands above the open frame. Arm 1 sees every ON ERROR spelling of that
+    -- its record is taken at the jump, before anything later can bury it -- so
+    what is left uncaught is a `gosub` abandonment followed by a stale-deep
+    install's fault. It is written up in docs/libraries/err.md.
+
+    THE HANDLER IS DISARMED AS THIS IS REPORTED, and that is measured too. This
+    error travels: through callfunc it comes back to the OUTER activation's
+    opCall, which offers it to whatever handler is installed -- and that is this
+    same handler. The first build of this check left it armed, so the handler ran
+    a SECOND time, put the second ledger row on disk anyway, and reported itself
+    nested inside itself. FErrHandlerSP and FErrHandlerFrameSP describe a stack
+    that has just been abandoned, so it no longer has anywhere to run. Disarmed,
+    opCall's Fault sees no handler and the error aborts once. }
+  if (abandonedAt >= 0) or
+     ((FFrameSP > 0) and (FFrameSP > AStopFrameSP) and (FFrameSP > inventedTo)) then
+  begin
+    FInHandler := False;
+    FErrHandler := -1;
+    if abandonedAt >= 0 then
+    begin
+      { The handler's own line and the error it took, both SNAPSHOTTED at the
+        jump for the reason the verdict is: reading FErrHandler here names
+        whatever was installed last (`on error goto 0` leaves it at -1, which
+        used to print "at the end of the program"), and reading FErrMsg here
+        names whatever faulted last, which may be an inner fault that was
+        handled correctly. }
+      if abandonedLine > 0 then
+        hLine := 'at line ' + IntToStr(abandonedLine)
+      else if abandonedInst > 0 then
+        // The label is the last thing in the file, so the handler has no body and
+        // no line of its own. Name where it was PUT there instead: saying "at the
+        // end of the program ... and ran to the end of the program" said the same
+        // clause twice and gave the reader nothing to go and look at.
+        hLine := 'installed at line ' + IntToStr(abandonedInst)
+      else
+        hLine := 'at the end of the program';
+      LastError := MakeError(peRuntime,
+        'the ON ERROR GOTO handler ' + hLine + ' took ''' + abandonedMsg +
+        ''' and ran to the end of the program without ''resume'' or ''resume next'', ' +
+        'so the call to ' + abandonedName + ' it was raised inside was never returned from. ' +
+        'Resume from the handler, or install it with ''on error call'', which comes ' +
+        'back by itself -- a label is always outside the function, so a handler that ' +
+        'does neither abandons the call');
+      ErrorLine := abandonedFrom;
+    end
+    else
+    begin
+      { WHICH ACTIVATION ARM 2 NAMES: the innermost frame still open, which is
+        what it just judged. This read lives INSIDE arm 2's branch, not above the
+        `if`, and that placement is the whole of it: arm 1 can be the reason we
+        are here, and arm 1 does not require FFrameSP > 0, so `FFrames[FFrameSP -
+        1]` above the branch indexes -1 whenever it is not. Measured, and by a
+        mutation rather than by reading: dropping RestoreOverlap's clear left an
+        abandonment recorded across a resume that had popped back to the top
+        level, and tests/suite/63 died with an access violation instead of the
+        refusal it was written to catch -- a test failing for the wrong reason.
+        Arm 1 needs none of this anyway: it carries the name it took at the jump,
+        because by here FFrameSP - 1 can also point into frames a stale install
+        had the dispatcher invent, and it did -- this named the function that had
+        RETURNED rather than the one left open.
+
+        A frame's FuncIndex only ever comes from FindUserFunc, which answers -1
+        or a real index and opCall refuses -1, so it needs no bound; Entry does,
+        because TProgram.Instr does not bound itself, and ResumeAtNextStmt bounds
+        the same field for the same reason at :1816. }
+      ufi := FFrames[FFrameSP - 1].FuncIndex;
+      abName := FProg.UserFuncs[ufi].Name;
+      if (FProg.UserFuncs[ufi].Entry >= 0) and (FProg.UserFuncs[ufi].Entry < FProg.Count) then
+        abLine := FProg.Instr(FProg.UserFuncs[ufi].Entry).Line
+      else
+        abLine := 0;
+      LastError := MakeError(peRuntime,
+        'control reached the end of the program inside ' + abName + ', so the call ' +
+        'to it was never returned from. A ''gosub'' made inside a function must ' +
+        '''return'', and an ON ERROR handler a function installs must ''resume'' -- ' +
+        'a label is always outside the function, so jumping to one leaves the call ' +
+        'open and only those two ways go back into it');
+      ErrorLine := abLine;
+    end;
+    Exit(False);
   end;
   Result := True;
 end;

@@ -1989,6 +1989,19 @@ end;
   end: they belong to the middle of an `if`, `for` or `function` line, so one
   standing alone as a statement is a line that lost the rest of itself.
 
+  ELEVEN OF THE FIFTEEN ALSO END A STATEMENT, and ATerminator says which. The
+  eleven block words are exactly the ones ParseBlockUntil accepts with no
+  separator in front of them, so a statement can finish where one of them begins.
+  The other four cannot end anything: a statement whose next token is `then`,
+  `to`, `step` or `local` is a statement that has NOT finished. The
+  expression-statement check further down needs that distinction to decide
+  whether a statement ended at its expression, and it must not keep its own copy
+  of the list to have it -- when it took all fifteen, `local step` inside a
+  function lost `expected end of line` and was answered with "a call needs
+  parentheses: local()", which names a function that does not exist. A sixteenth
+  word added here has to say which kind it is, in the same place the word itself
+  is written down.
+
   ONLY WHEN THE WORD STANDS ALONE, and that restriction is the whole subtlety.
   None of these is a lexer keyword -- they are CONTEXTUAL, decided by the parser,
   which is what lets a program keep a variable called `elseif` or `next`
@@ -1998,9 +2011,13 @@ end;
   read as a variable it compiles to a load and a discard, which is why the typo
   was silent. So the next token decides, and only end-of-line, end-of-file or `:`
   makes it an orphan. }
-function OrphanKeyword(const S: String; out AMsg: String): Boolean;
+function OrphanKeyword(const S: String; out AMsg: String;
+                       out ATerminator: Boolean): Boolean;
 begin
   Result := True;
+  { The eleven block words below close something, so a statement can end where
+    one starts; the four line-interior words at the bottom say otherwise. }
+  ATerminator := True;
   case S of
     'next':        AMsg := '''next'' without a matching ''for''';
     'endif':       AMsg := '''endif'' without a matching ''if''';
@@ -2013,13 +2030,26 @@ begin
     'case':        AMsg := '''case'' without a matching ''select case''';
     'endselect':   AMsg := '''endselect'' without a matching ''select case''';
     'endfunction': AMsg := '''endfunction'' without a matching ''function''';
-    'then':        AMsg := '''then'' belongs on an ''if'' line, not on one of its own';
-    'to':          AMsg := '''to'' belongs on a ''for'' line, not on one of its own';
-    'step':        AMsg := '''step'' belongs on a ''for'' line, not on one of its own';
-    'local':       AMsg := '''local'' belongs on the ''function'' line that declares the names';
+    'then':        begin
+                     AMsg := '''then'' belongs on an ''if'' line, not on one of its own';
+                     ATerminator := False;
+                   end;
+    'to':          begin
+                     AMsg := '''to'' belongs on a ''for'' line, not on one of its own';
+                     ATerminator := False;
+                   end;
+    'step':        begin
+                     AMsg := '''step'' belongs on a ''for'' line, not on one of its own';
+                     ATerminator := False;
+                   end;
+    'local':       begin
+                     AMsg := '''local'' belongs on the ''function'' line that declares the names';
+                     ATerminator := False;
+                   end;
   else
     Result := False;
     AMsg := '';
+    ATerminator := False;
   end;
 end;
 
@@ -2084,6 +2114,8 @@ var
   neg: Boolean;
   k: TTokenKind;
   nidx: Integer;
+  exprStart: Integer;
+  acts, cterm: Boolean;
 begin
   { The opStmt marking this boundary is emitted by ParseStatement, which patches
     it with the pc this statement ends at once the body below has been parsed. }
@@ -2099,9 +2131,13 @@ begin
       silent no-op in exactly one place. `else` cannot follow a variable being
       read for anything either, so the word is still doing nothing. }
     k := FLex.Peek().Kind;
+    { All fifteen answer here -- this is the word itself standing alone, and a
+      line-interior word alone is as much a lost line as a stranded terminator
+      is. cterm is what the word can FOLLOW, which only the expression statement
+      at the bottom of this routine asks about. }
     if ((k = tkEOL) or (k = tkEOF) or (k = tkColon) or
         ((k = tkIdent) and (LowerCase(FLex.Peek().StrVal) = 'else'))) and
-       OrphanKeyword(t.StrVal, cname) then
+       OrphanKeyword(t.StrVal, cname, cterm) then
     begin
       Fail(cname, t.Line);
       Exit;
@@ -2465,9 +2501,183 @@ begin
       Exit;
     end;
   end;
-  // expression statement
+  { EXPRESSION STATEMENT -- AND IT MUST DO SOMETHING, which until now none had to.
+
+    `err_clear` -- the registered name with the parentheses left off -- was a
+    complete, legal statement: ParseExpr read the word as a variable, opLoadVar
+    pushed the global's default value, the opPop below threw it away, and the
+    program ran to exit 0 having called nothing and reported nothing. The error
+    library's own clear was the measured instance; every one of the 1141
+    script-reachable registered names behaves the same way written bare, and the
+    124 zero-arity ones are the subset where the bare word looks exactly like a
+    correct call. This is not a hypothetical beginner's mistake: this project's
+    own tests/suite/53_bounds.bas wrote `randomize`, and the generator went
+    unseeded for five days while the test it was guarding reported success.
+
+    The compiler cannot answer this by NAME. It never sees the registry -- opCall
+    carries the name as a constant and the lookup happens in the VM -- and that
+    absence is the whole reason a bare name compiled. So it answers the question
+    it can: did the code this expression just emitted contain anything that
+    reaches past the expression stack? opCall is the opcode that matters.
+    opInputChars and opFileChars stand with it because INPUT$ advances a console
+    or file cursor, which is an effect even when its characters are discarded.
+    Everything else ParseExpr can emit -- loads, constants, arithmetic,
+    comparisons, and/or/not, eof/lof/loc -- is a pure read, so a statement built
+    only from those computes a value and drops it.
+
+    That is the judgement OrphanKeyword makes one screen up, applied to the class
+    a stranded block word is one instance of: a statement that cannot have an
+    effect is a line that lost the rest of itself. It is a REFUSAL, so its cost
+    was measured the other way round -- no .bas file in this tree and no basic
+    block in the documentation holds an expression statement that is not this
+    defect.
+
+    AND ONLY WHEN THE STATEMENT ENDS HERE, which is OrphanKeyword's restriction
+    for OrphanKeyword's reason. When something else follows, the expression is
+    not the whole mistake and the caller already refuses the line: `local v` on a
+    line of its own is `expected end of line`, and answering it with "a call needs
+    parentheses: local()" would send the author to a worse place than silence did.
+    So the follower decides -- end of line, end of input, a ':' separator, or one
+    of the ELEVEN BLOCK TERMINATORS, which ParseBlockUntil accepts with no
+    separator in front of them and which therefore end a statement as surely as a
+    newline does. Not all fifteen of OrphanKeyword's words: `then`, `to`, `step`
+    and `local` end nothing, and taking them cost `local step` the very message
+    the restriction exists to protect, which is why ATerminator is a fact carried
+    by the word list rather than a second list kept here.
+
+    FIVE SENTENCES, because one of them cannot be true of five mistakes, and two
+    of these replaced advice that was WRONG rather than merely absent.
+      - the word is one of OrphanKeyword's fifteen: its own sentence, which is
+        already written. `local` is not a function parentheses would rescue.
+      - `name:` is the LABEL syntax written where labels are not read. The label
+        reader in Compile is at program level only, so one inside a block was
+        never recorded, and what the compiler used to say came from the far end
+        of the program -- `undefined label name`, which was TRUE. Answering that
+        with "a call needs parentheses" names a function that does not exist.
+      - a bare name: the call missing its parentheses, the defect this is for.
+        The name MAY genuinely be a variable -- `x next`, a read stranded before
+        a terminator, is told "a call needs parentheses: x()" for an `x()` that
+        need not exist. The compiler cannot tell: it has no registry, and for a
+        global it has no "was this ever assigned" either. It is left saying the
+        likelier thing because the cost of being wrong was measured and is one
+        step: following the advice answers `no function x:` naming that same
+        line, not a program that runs wrong. The one sub-case where the compiler
+        DOES know -- opLoadLocal, a declared local or a parameter, which can
+        never be a call -- is deliberately not split out, because the note's own
+        shape is a GLOBAL and a branch that fixed only locals would leave the
+        class it belongs to reading exactly as covered.
+      - a bare integer: the classic-BASIC `if x = 1 then 42`, in a language that
+        really does label lines with numbers, so say how a jump is spelled here.
+      - anything else: it computes a value and drops it. The sentence names the
+        test that was actually run -- "no call in it" -- because an indexed read
+        and a JSON literal drop a value too and are ACCEPTED, having called
+        something on the way, and a wider claim would be a rule the code does
+        not enforce. A bare CONST name lands here rather than in the name arm
+        above, because `const K = 5` folds K to opPushConst and the name arms all
+        test for a single LOAD. That is the right answer and not an oversight:
+        widening them to opPushConst would tell the author to write `K()`, and a
+        const is not a function either.
+
+    WHAT THIS DOES NOT REACH, said out loud so the next reader does not have to
+    re-derive it, and WIDER THAN A LINE'S START: at PROGRAM LEVEL, `name :` is
+    consumed by that same label reader before any statement is parsed -- and
+    Compile's loop re-runs that reader wherever a statement may begin, not only
+    after a newline: after a ':' separator, after a numeric label, and after
+    another label as well, so `randomize : x = rnd(10)`,
+    `y = 1 : randomize : z = 2`, `10 randomize : x = 1` and
+    `head: randomize : x = 1` all compile with nothing called. A generated sweep of
+    the twelve program-level prefixes -- a numeric label or not, times a named
+    label or not, times nought, one or two statements already closed by a ':' --
+    found all twelve silent, and every block body refused, the eight block forms
+    swept the same way. That is the label syntax working, not this check
+    leaking, and closing it would mean refusing a label nothing jumps to. See the
+    note over the label reader in Compile, and docs/language-reference.md.
+
+    AND IT DOES NOT REACH THE SAME MISTAKE ONE TOKEN TO THE RIGHT, which is the
+    larger half of what survives and is easy to read past, because everything
+    above is about a STATEMENT. `v = err_clear` and `p$ = date$` are assignments,
+    so they are not this check's business at all: p$ is quietly set to the empty
+    string a global nobody assigned carries, where `date$()` answers the date.
+    Measured over the whole registry rather than argued -- all 109 zero-arity
+    registered names in this tree are refused written bare as a statement, and
+    all 109 compile silently on an assignment's right-hand side, which for a
+    value-returning name like `date$`, `time$`, `rnd` or `keypressed` is the
+    likelier place to write it in the first place.
+
+    That half is not closable the way this one was. Here the question had an
+    answer -- a statement that emits no call cannot do anything, whatever the
+    name means -- and there it does not: the value IS used, the statement DOES
+    something, and `v = date$` and `v = mycounter` are the same two tokens to a
+    compiler that never sees the registry. The one signal that would separate
+    them is a global that is READ and never WRITTEN anywhere in the program.
+    VarIndex cannot answer that -- it creates the slot for either use and records
+    which nowhere -- but Compile could, since it sees the whole program before it
+    returns. It is not done here because it is a DIFFERENT diagnostic: it fires on
+    a mistyped variable name just as loudly, it says nothing about parentheses,
+    and its false-positive surface has not been measured. Naming it is the point;
+    choosing it is another piece of work. Pinned in tests/probe_limits.lpr and
+    asserted at runtime in tests/suite/19_language_contract.bas, so the limit is
+    measured rather than promised. }
+  exprStart := FProg.Count;
   ParseExpr();
-  if not FFailed then FProg.Emit(opPop, 0, 0, t.Line);
+  if FFailed then Exit;
+  acts := False;
+  for i := exprStart to FProg.Count - 1 do
+    if FProg.Instr(i).Op in [opCall, opInputChars, opFileChars] then
+    begin
+      acts := True;
+      Break;
+    end;
+  k := FLex.Cur().Kind;
+  cterm := False;
+  if (not acts) and
+     ((k = tkEOL) or (k = tkEOF) or (k = tkColon) or
+      ((k = tkIdent) and OrphanKeyword(FLex.Cur().StrVal, cname, cterm) and
+       cterm)) then
+  begin
+    { WHICH MISTAKE IT IS, most specific first. The three shapes with a remedy
+      worth spelling out are each exactly ONE instruction -- a single load, or a
+      single constant -- because anything longer is a computation to rethink
+      rather than to punctuate, and the last arm says the true thing about those. }
+    if (t.Kind = tkIdent) and (FProg.Count - exprStart = 1) and
+       (FProg.Instr(exprStart).Op in [opLoadVar, opLoadLocal]) and
+       OrphanKeyword(t.StrVal, cname, cterm) then
+      { THE WORD ITSELF IS ONE OF THE FIFTEEN. It reached here rather than the
+        check at the top of this routine by exactly one route -- a block
+        terminator followed it with no separator, as in `local next` -- and its
+        own sentence is the true one either way: `local` is not a function that
+        parentheses would rescue. (cterm is scratch here; the follower question
+        it answers was settled by the test above.) }
+      Fail(cname, t.Line)
+    else if (t.Kind = tkIdent) and (k = tkColon) and (FProg.Count - exprStart = 1) and
+       (FProg.Instr(exprStart).Op in [opLoadVar, opLoadLocal]) and
+       (not IsReservedWord(t.StrVal)) and
+       ((FLex.Peek().Kind = tkEOL) or (FLex.Peek().Kind = tkEOF)) then
+      { `name:` with nothing after the colon is the label syntax -- the exact
+        shape Compile reads as a label at program level. Reaching here means it
+        was written somewhere Compile never looks, so it was never recorded. }
+      Fail('''' + t.StrVal + ':'' is a label, and a label belongs to the ' +
+           'program -- one written inside a block is never recorded, so no ' +
+           '''goto'' can reach it', t.Line)
+    else if (t.Kind = tkIdent) and (FProg.Count - exprStart = 1) and
+       (FProg.Instr(exprStart).Op in [opLoadVar, opLoadLocal]) then
+      Fail('''' + t.StrVal + ''' on its own does nothing -- a call needs ' +
+           'parentheses: ' + t.StrVal + '()', t.Line)
+    else if (t.Kind = tkInt) and (FProg.Count - exprStart = 1) then
+      { `if x = 1 then 42` in the dialects that had it. Here a number is a label
+        only at program level, and the jump is spelled out. }
+      Fail('''' + IntToStr(t.IntVal) + ''' on its own is not a statement -- a ' +
+           'number labels a line only at program level, and a jump is written ' +
+           'out: goto ' + IntToStr(t.IntVal), t.Line)
+    else
+      { Not "it does nothing": an indexed read and a JSON literal discard a value
+        too and are ACCEPTED, because they call something on the way. Say what
+        was actually looked for. }
+      Fail('this statement has no call in it, so it computes a value and ' +
+           'discards it', t.Line);
+    Exit;
+  end;
+  FProg.Emit(opPop, 0, 0, t.Line);
 end;
 
 function TPhosphorCompiler.Compile(const ASource: String; out AProg: TProgram): Boolean;
@@ -2516,6 +2726,53 @@ begin
       // a leading `name:` is a named label. An identifier alone is never a
       // statement, so `ident :' at the start of one can only be a label --
       // except a keyword, which may be a statement with a ':' separator after.
+      //
+      // THE LABEL READING WINS, AND IT COSTS SOMETHING. Since the expression
+      // statement began refusing a bare name, "an identifier alone is never a
+      // statement" is enforced rather than merely asserted -- but it also means
+      // this test is where a call with its parentheses left off still goes
+      // quiet: `randomize : x = rnd(10)` is a label called `randomize` followed
+      // by a statement, and it compiles, exactly as `retry : println "x"` must.
+      // The two are the same three tokens and the compiler has no registry to
+      // tell them apart by name.
+      //
+      // AND THIS LOOP RUNS THE TEST IN MORE PLACES THAN A LINE'S START, which
+      // is the thing to carry away from here, because the obvious reading of
+      // "a LEADING `name:`" above is narrower than the code. `Continue` after a
+      // label, and the ':' advance at the foot of the loop, both come back to
+      // this line -- so the reader fires wherever a statement may begin at
+      // program level: a line's start, after a ':' separator, after a numeric
+      // label, after another label. `y = 1 : randomize : z = 2`,
+      // `10 randomize : x = 1` and `head: randomize : x = 1` are labels for the
+      // same reason the first example is, and are silent in the same way. All
+      // four positions are asserted at RUNTIME in 19_language_contract, each
+      // with its own function, since a label name is defined once.
+      // Twelve generated program-level
+      // prefixes were measured by RUNNING them and reading err(), not by
+      // compiling them: twelve silent, while every one of the eight block forms
+      // refused. If that sentence is ever narrowed again, the runtime pins in
+      // tests/suite/19_language_contract.bas are what will catch it.
+      //
+      // THE SAME CLASS WAS MET ONCE BEFORE AND CLOSED THE ONLY WAY IT CAN BE:
+      // `close : rem done` became a label called close and the file was never
+      // closed, and the fix was to put `close` in IsReservedWord above -- a word
+      // that can BEGIN a statement is not a label name. That door is shut for
+      // every keyword. It cannot be shut for a registered function, because the
+      // compiler never sees the registry; `randomize` is not a word this unit
+      // knows.
+      //
+      // The one signal that would separate them is a label no `goto` ever names,
+      // and it was measured rather than guessed: 284 label definitions across
+      // the 147 .bas files here, and the only ones nothing jumps to are the six
+      // lines 19_language_contract adds to demonstrate this very limit -- so
+      // such a rule would break no program already written here. It is still the wrong
+      // rule, and that is a judgement, not a measurement shortfall. A label
+      // whose jump has not been written yet is a legitimate program, and the
+      // message it would produce -- "nothing jumps here" -- describes the label,
+      // not the missing parentheses, so it would answer the wrong question for
+      // the mistake it was meant to catch. The label wins, deliberately; the
+      // limit is written down in docs/language-reference.md and pinned by
+      // tests/suite/19_language_contract.bas rather than left to be re-derived.
       if (FLex.Cur().Kind = tkIdent) and (FLex.Peek().Kind = tkColon) and
          (not IsReservedWord(FLex.Cur().StrVal)) then
       begin

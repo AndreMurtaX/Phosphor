@@ -105,7 +105,10 @@ Six things worth noticing:
 - **`error` is not special.** The handler cannot tell a failure the program raised
   from one the engine raised, and does not need to: both arrive with a code, a
   message and a line.
-- **`err_clear` before returning to normal work.** Without it, a later `err()`
+- **`err_clear()` before returning to normal work — with the parentheses.** They
+  are what makes it a call: `err_clear` on its own is a name, and the compiler
+  refuses it for that reason (it used to compile to a read and a discard, so the
+  error stayed set and nothing said so). Without the clear, a later `err()`
   read somewhere else would still be describing this error, long after it was
   handled. The handler above does not need it because it answers through a
   variable of its own, which is the shape to prefer when the caller has to make a

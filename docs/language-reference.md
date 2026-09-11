@@ -284,6 +284,35 @@ back in main
 done
 ```
 
+**Labels belong to the program — to every point in it where a statement may
+begin.** A `name:` written inside an `if`, a loop or a function body is never
+recorded, so nothing can jump to it; the compiler says so where it is written
+rather than leaving a `goto` somewhere else to report an undefined label. At
+program level the opposite holds, and in more places than a line's start: the
+label reader runs again after each `:` separator, after a numeric label, and
+after another label, so every name before a `:` below is a label —
+
+```basic
+retry: println "again"
+x = 1 : retry2: println "again"
+10 retry3: println "again"
+retry4: retry5: println "again"
+```
+
+That has a consequence worth knowing: wherever a statement may begin at program
+level, a name whose next token is `:` is *always* the label, so a call with its
+parentheses left off is read as a label there and stays silent. All three of
+`randomize : x = rnd(10)`, `y = 1 : randomize : z = 2` and `10 randomize : x = 1`
+define a label called `randomize` and never seed anything. Inside a block, and at
+program level whenever the name is *not* followed by `:`, that mistake is refused
+(see **A call needs its parentheses** below); these positions are the price of
+letting a label share a line, and the compiler has no way to tell the two apart —
+they are the same three tokens. A **keyword** is safe there: `close : rem done`
+used to become a label called `close` and leave the file open, and words that can
+begin a statement are no longer accepted as label names. A registered function
+name cannot get the same treatment, because the compiler does not know the
+library.
+
 ### ON … GOTO / GOSUB
 
 A computed jump: a 1-based selector picks the *N*-th label in the list; a selector
@@ -881,6 +910,27 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
   from where they appear, not reserved by the lexer, so `next = 5` and
   `elseif += 3` are assignments and always were. Only the word standing **alone**,
   where it can be doing nothing at all, is refused.
+- **A call needs its parentheses, even with no arguments.** `err_clear` on a line
+  of its own is a *name*, not a call: written bare it used to compile to a read of
+  a variable nobody had set, and a discard — the program ran clean, the function
+  never ran, and nothing said so. Write `err_clear()`, `randomize()`, `cls$()`.
+  This is the same rule as the stray `next` above, with the special case taken
+  out of it: a statement that is only an expression has to contain a call, so
+  `x + 1` on a line of its own is refused too. There is **one shape** the rule
+  cannot reach, in **every** program-level position that shape can stand in — it
+  is written up under [labels](#gosub--goto-and-labels): a name whose next token
+  is `:` is the label syntax, and the label reader runs wherever a statement may
+  begin at program level, so `randomize : x = rnd(10)`,
+  `y = 1 : randomize : z = 2` and `10 randomize : x = 1` are all labels and all
+  compile. A bare integer gets its own answer, because other
+  dialects jumped with it: `if x = 1 then 42` is told to write `goto 42`.
+  **The rule is about a statement, and the same slip one token to the right is
+  not reached at all**: on the right of an `=`, or anywhere else a value is
+  wanted, a name without parentheses is still read as a variable, so `p$ = date$`
+  quietly leaves `p$` empty where `date$()` answers the date. That half cannot be
+  decided here — the value really is used, and `p$ = date$` and `p$ = mytext$`
+  are the same two tokens to a compiler that never sees the library. Write the
+  parentheses. *(Since 2026-09-11.)*
 - **Undeclared names inside a function are globals.** List scratch variables after
   `local` so they don't leak.
 - **`sqr` is square root.** For x², write `x * x` or `x ^ 2`.

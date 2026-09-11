@@ -403,9 +403,19 @@ else echo 'FAIL  N:--out argument handling'; fail=1; fi
 #    The real header is the magic PLUS a version byte, and no text file carries a
 #    control character there. "A control character" alone is not the whole rule
 #    either: TAB, LF and CR are 9, 10 and 13, and `PBC<TAB>= 3` and a line that is
-#    just `PBC` are both valid BASIC. Shapes 3 and 4 are those two, and here
-#    shape 4's fourth byte is LF where on Windows it is CR -- the same file asks a
-#    different half of the rule on each OS, which is the honest thing about it.
+#    just `PBC` are both SOURCE TEXT the sniffer must not claim. Shapes 3 and 4
+#    are those two, and here shape 4's fourth byte is LF where on Windows it is
+#    CR -- the same file asks a different half of the rule on each OS, which is
+#    the honest thing about it.
+#
+#    Shape 4 stopped being a valid PROGRAM on 2026-09-11: a name on a line of its
+#    own is a call with the parentheses left off, and the compiler refuses it
+#    instead of reading a variable and discarding it. That takes nothing away
+#    from the shape -- its fourth byte is still the newline, which is the whole
+#    question here -- so what it asserts changed rather than what it is. A
+#    diagnostic naming the line is something only the COMPILER can produce, so it
+#    is proof the file went to the compiler and not to the bytecode reader,
+#    exactly as `count is 3` was for shape 1.
 #
 #    Shapes 5 to 7 are the MIRROR and matter as much: a genuine .pbc must still be
 #    recognised as one, or a sniff that answered "source" to everything would pass
@@ -431,10 +441,23 @@ check_sniff_runs() {  # shape path want
   echo "        $1: exit $code, said '$out'"
   return 1
 }
+
+check_sniff_compiled() {  # shape path want -- the same question for a file the
+  # COMPILER refuses: the refusal has to be the compiler's, naming the source
+  # line, and never a format version.
+  local out code
+  if out="$("$exe" "$2" < /dev/null 2>&1)"; then code=0; else code=$?; fi
+  if [ "$code" -ne 0 ] && [[ "$out" == *"$3"* ]] && [[ "$out" != *"format version"* ]]; then
+    return 0
+  fi
+  echo "        $1: exit $code, said '$out'"
+  return 1
+}
 check_sniff_runs 'PBCount = 3'      "$sniffdir/pbcount.bas"   'count is 3'      || okO=1
 check_sniff_runs 'PBC$ = "..."'     "$sniffdir/pbcdollar.bas" 'hello there'     || okO=1
 check_sniff_runs 'PBC<TAB>= 3'      "$sniffdir/pbctab.bas"    'tabbed is 3'     || okO=1
-check_sniff_runs 'a bare PBC line'  "$sniffdir/pbcbare.bas"   'a bare pbc line' || okO=1
+check_sniff_compiled 'a bare PBC line' "$sniffdir/pbcbare.bas" \
+                     "'pbc' on its own does nothing" || okO=1
 
 # 5: `pack` must give its OWN refusal for source, the one F already pins, and not
 #    a version number -- IsBytecode answering True took that branch away.

@@ -736,6 +736,239 @@ begin
   CheckAccepted('64 parentheses and a few signs still compile',
                 'x = ' + Repeated('(', 64) + '---1' + Repeated(')', 64) + LF);
 
+  { --- the front end: a statement that cannot do anything --------------------
+    A CALL WITH THE PARENTHESES LEFT OFF WAS A LEGAL STATEMENT. `err_clear` is a
+    registered zero-argument function, so the line reads as a correct call and is
+    not one: the compiler read the word as a variable, emitted a load and a
+    discard, and the program ran to exit 0 having cleared nothing. Every
+    registered name behaves that way written bare; the zero-argument ones are the
+    subset where the bare word is indistinguishable from the call. It reached
+    this project's own suite -- tests/suite/53_bounds said `randomize` and drew
+    from a generator that was never seeded, for five days, green.
+
+    These live HERE rather than only in tests/negative for the reason this file's
+    header gives: that harness asks only whether the exit code was non-zero, so a
+    .bas file cannot tell this refusal from any other refusal, and cannot see the
+    message at all. What the message SAYS is most of the value of the change. }
+  CheckRejected('a registered name written bare',
+                'err_clear' + LF,
+                '''err_clear'' on its own does nothing -- a call needs ' +
+                'parentheses: err_clear()');
+  CheckRejected('the instance that was live in this suite',
+                'randomize' + LF,
+                '''randomize'' on its own does nothing');
+  CheckRejected('a bare name as the body of an inline if',
+                'if 1 = 1 then err_clear' + LF, 'on its own does nothing');
+  CheckRejected('a bare name in the else arm of an inline if',
+                'if 1 = 1 then x = 1 else err_clear' + LF,
+                'on its own does nothing');
+  CheckRejected('a bare name after a '':'' separator',
+                'x = 1 : err_clear' + LF, 'on its own does nothing');
+  CheckRejected('a bare name inside a function body',
+                'function g()' + LF + '  err_clear' + LF + '  return 0' + LF +
+                'endfunction' + LF + 'x = g()' + LF, 'on its own does nothing');
+  CheckRejected('a bare name inside a loop body',
+                'for i = 1 to 2' + LF + '  err_clear' + LF + 'next' + LF,
+                'on its own does nothing');
+  { ParseBlockUntil accepts a terminator with no separator in front of it, so
+    this shape ends the statement as surely as a newline does and has to be
+    judged the same way -- the follower test would otherwise let it through. }
+  CheckRejected('a bare name with no separator before its terminator',
+                'for i = 1 to 2' + LF + '  err_clear next' + LF,
+                'on its own does nothing');
+  { The wider half of the same rule: not every effect-free statement is a name. }
+  CheckRejected('a bare arithmetic expression',
+                'x = 1' + LF + 'x + 1' + LF,
+                'computes a value and discards it');
+  CheckRejected('a bare literal', 'true' + LF,
+                'computes a value and discards it');
+  CheckRejected('a bare file query', 'eof(#1)' + LF,
+                'computes a value and discards it');
+  { ...and it says what was actually LOOKED FOR. An indexed read and a JSON
+    literal discard a value too, and are accepted three blocks down, because
+    they call something on the way; a sentence that claimed "so it does
+    nothing" stated a rule wider than the code enforces. }
+  CheckRejected('the wider wording names the test the compiler ran',
+                'x = 1' + LF + 'x + 1' + LF, 'has no call in it');
+
+  { THREE MISTAKES, THREE SENTENCES, because one of them cannot be true of all
+    three -- and two of these replaced advice that was WRONG rather than merely
+    silent. A label written inside a block used to be answered from the far end
+    of the program with `undefined label handler`, which was TRUE; answering it
+    with "a call needs parentheses: handler()" names a function that does not
+    exist. And `if x = 1 then 42` is the classic-BASIC jump, in a language that
+    really does label lines with numbers, so the thing to say is how a jump is
+    spelled here -- not that a value was discarded. }
+  CheckRejected('a label inside a while body is a label, not a call',
+                'while 1 = 0' + LF + 'handler:' + LF + 'x = 1' + LF +
+                'endwhile' + LF,
+                '''handler:'' is a label, and a label belongs to the program');
+  CheckRejected('a label inside an if body',
+                'if 1 = 1 then' + LF + 'retry:' + LF + 'x = 1' + LF +
+                'endif' + LF, 'is a label, and a label belongs to the program');
+  CheckRejected('a label inside a function body',
+                'function g()' + LF + 'again:' + LF + 'return 0' + LF +
+                'endfunction' + LF + 'x = g()' + LF,
+                'is a label, and a label belongs to the program');
+  CheckRejected('a bare number after then is the jump other dialects had',
+                'x = 1' + LF + 'if x = 1 then 42' + LF,
+                '''42'' on its own is not a statement -- a number labels a ' +
+                'line only at program level, and a jump is written out: goto 42');
+  CheckRejected('a bare number inside a block says the same thing',
+                'while 1 = 0' + LF + '42' + LF + 'endwhile' + LF,
+                'a jump is written out: goto 42');
+  { A float is not a line number in any dialect, so it takes the wider sentence
+    -- the branch is the INTEGER literal, not "the statement starts with a
+    number". }
+  CheckRejected('a bare float is not a line number',
+                'while 1 = 0' + LF + '4.5' + LF + 'endwhile' + LF,
+                'computes a value and discards it');
+  { AND TWO SENTENCES THAT ARE DELIBERATELY NOT THE NAME ONE, pinned here so the
+    judgement is visible rather than re-opened. A const folds to opPushConst, and
+    all three name arms test for a single LOAD, so a bare const takes the general
+    sentence -- which is the right one: telling the author to write `K()` would
+    name a function no more than `K` is one. Widening those arms to opPushConst
+    is the change this row exists to catch. }
+  CheckRejected('a bare const name takes the general sentence, not the name one',
+                'const K = 5' + LF + 'K' + LF,
+                'computes a value and discards it');
+  { The other direction of the same limit, and this one the compiler gets WRONG
+    on purpose: `x` may genuinely be a variable, and it is still told to add
+    parentheses to an `x()` that need not exist. The registry is not visible from
+    here and a global carries no "was this assigned", so the likelier reading
+    wins; the cost of being wrong was measured and is one step, since following
+    the advice answers `no function x:` on that same line. }
+  CheckRejected('a variable stranded before a terminator gets the call advice',
+                'x = 1' + LF + 'for i = 1 to 2' + LF + 'x next' + LF,
+                '''x'' on its own does nothing -- a call needs parentheses: x()');
+
+  { AND THE SECOND SPELLING, ONE TOKEN TO THE RIGHT, which this rule does not
+    reach in ANY position and which is the larger half of the surviving defect.
+    Everything above is about a STATEMENT. Used as a VALUE the same forgotten
+    parentheses are still read as a variable -- and there the compiler has no
+    question to ask, because the value IS used and the statement does do
+    something. Swept rather than argued: all 109 zero-arity registered names in
+    this tree are refused written bare as a statement, and all 109 compile
+    silently on the right of an '='; `p$ = date$` leaves p$ empty where
+    `date$()` answers the date. The runtime half is asserted in
+    tests/suite/19_language_contract.bas. If a later change ever closes this
+    door, these two rows are what must move with it. }
+  CheckAccepted('the same name on an assignment rhs is still a variable',
+                'v = err_clear' + LF);
+  CheckAccepted('...and so is a value-returning one, which is the likelier slip',
+                'p$ = date$' + LF);
+
+  { THE REFUSAL MUST NOT REACH THE STATEMENT NEXT DOOR, which is the commonest
+    statement in the language: a call whose value nobody wants. Nothing in the
+    147-file corpus or the documentation's basic blocks was refused by the rule
+    above; these are the shapes that would have gone first if it over-reached.
+    The runtime half -- that the effect still lands -- is asserted in
+    tests/suite/19_language_contract.bas, which can only be written from inside
+    the language. }
+  CheckAccepted('a zero-argument call as a statement', 'randomize()' + LF);
+  CheckAccepted('the measured instance, written correctly', 'err_clear()' + LF);
+  CheckAccepted('a call with arguments as a statement', 'len("abc")' + LF);
+  CheckAccepted('a user function called as a statement',
+                'function g()' + LF + '  return 0' + LF + 'endfunction' + LF +
+                'g()' + LF);
+  CheckAccepted('a mutator whose returned handle is discarded',
+                'a@ = dim@(3)' + LF + 'arr_set@(a@, 1, 5)' + LF);
+  CheckAccepted('an indexed assignment', 'a@ = dim@(3)' + LF + 'a@[1] = 5' + LF);
+  CheckAccepted('an indexed read as a statement',
+                'a@ = dim@(3)' + LF + 'a@[1]' + LF);
+  CheckAccepted('a string index as a statement', 's$ = "x"' + LF + 's$[1]' + LF);
+  CheckAccepted('a JSON literal as a statement', '[1, 2, 3]' + LF);
+  { INPUT$ moves a console or file cursor, so it is an effect even when its
+    characters are thrown away -- the two opcodes that stand beside opCall. }
+  CheckAccepted('INPUT$ from the console as a statement', 'input$(1)' + LF);
+  CheckAccepted('INPUT$ from a channel as a statement', 'input$(1, #1)' + LF);
+  CheckAccepted('a call as the body of an inline if', 'if 1 = 1 then len("a")' + LF);
+  CheckAccepted('a call after a '':'' separator', 'x = 1 : len("a")' + LF);
+  CheckAccepted('a named label at program level',
+                'goto done' + LF + 'done:' + LF + 'println "ok"' + LF);
+  CheckAccepted('a numeric label at program level',
+                'goto 100' + LF + '100' + LF + 'println "ok"' + LF);
+  CheckAccepted('a label sharing its line with a statement',
+                'goto done' + LF + 'done: println "ok"' + LF);
+  { THE LIMIT, PINNED AS A DECISION RATHER THAN LEFT AS A SURPRISE -- AND IT IS
+    WIDER THAN A LINE'S START. `name :` is read as a label before any statement
+    is parsed, so a call with its parentheses left off is a label there and is
+    still silent; Compile's loop re-runs that reader wherever a statement may
+    begin at PROGRAM LEVEL, which is a line's start, after a ':' separator, after
+    a numeric label, and after another label. All four are spelled out below. A
+    generated sweep -- a numeric label or not, times a named label or not, times
+    nought, one or two statements already closed by a ':' -- found all twelve
+    prefixes silent when RUN and read through err(), while all eight block forms
+    refused; these rows are the ones that go red if that ever changes, and
+    CheckAccepted is the weaker half of the pin, since it only says the line
+    compiles. The runtime half -- that the function was never CALLED -- is in
+    tests/suite/19_language_contract.bas, which asserts it for the same four
+    positions.
+
+    Separating a label from a missing call needs a label that no `goto` names,
+    and of the 284 label definitions in this tree's 147 .bas files the only
+    unreferenced ones are the six lines written to demonstrate this limit -- so
+    such a rule would break nothing already written here, and would still be the
+    wrong rule: a jump not yet written is a legitimate program, and "nothing
+    jumps here" describes the label rather than the missing parentheses.
+    docs/language-reference.md says the same in prose. If a later change closes
+    this door, THESE are the lines that must change with it. }
+  CheckAccepted('a bare call name before a '':'' at a line''s start is a label',
+                'randomize : x = rnd(10)' + LF);
+  CheckAccepted('...and after a '':'' separator mid-line, which is a statement '
+                + 'start too',
+                'y = 1 : randomize : z = 2' + LF);
+  CheckAccepted('...and after a numeric label, which is one as well',
+                '10 randomize : x = 1' + LF);
+  CheckAccepted('...and after another label, the fourth of the four',
+                'goto head' + LF + 'head: randomize : x = 1' + LF);
+  CheckAccepted('a label after a '':'' separator at program level',
+                'goto two' + LF + 'x = 1 : two:' + LF + 'println "ok"' + LF);
+  CheckAccepted('a label after a numeric label on the same line',
+                'goto three' + LF + '20 three:' + LF + 'println "ok"' + LF);
+
+  { AND IT MUST NOT TAKE OVER A DIAGNOSTIC THAT WAS ALREADY BETTER. The refusal
+    fires only when the statement ENDS at the expression -- OrphanKeyword's
+    restriction, for OrphanKeyword's reason. `local v` on a line of its own is
+    still `expected end of line`; answering it with "a call needs parentheses:
+    local()" would send the author somewhere worse than the silence did. And the
+    typo'd case label is the shape tests/classic/15_repl_bad_case.repl exists
+    for: it must keep the message the REPL discriminates on. }
+  CheckRejected('local on a line of its own keeps its own message',
+                'function g()' + LF + '  local v' + LF + '  return 0' + LF +
+                'endfunction' + LF + 'x = g()' + LF, 'expected end of line');
+  { `local v` cannot break: `v` is not one of the fifteen, so the follower test
+    never looked at it. `local step` is the one that CAN, and did -- a first
+    version of this check took all fifteen of OrphanKeyword's words as
+    statement-enders, and `step`, `then`, `to` and `local` end nothing. The
+    eleven that do are the block terminators, and OrphanKeyword now answers
+    which is which so the two lists cannot drift apart. }
+  CheckRejected('local before a name that is a contextual keyword',
+                'function g()' + LF + '  local step' + LF + '  return 0' + LF +
+                'endfunction' + LF + 'x = g()' + LF, 'expected end of line');
+  CheckRejected('local before to keeps its own message',
+                'function g()' + LF + '  local to' + LF + '  return 0' + LF +
+                'endfunction' + LF + 'x = g()' + LF, 'expected end of line');
+  CheckRejected('a name followed by step keeps its own message',
+                'x = 1' + LF + 'x step' + LF, 'expected end of line');
+  { And when a contextual keyword DOES reach the expression statement -- the one
+    route is a block terminator behind it with no separator -- the true sentence
+    is the word's own. `local` is not a function that parentheses would rescue. }
+  CheckRejected('a stranded local before a terminator keeps ITS sentence',
+                'for i = 1 to 2' + LF + 'local next' + LF,
+                '''local'' belongs on the ''function'' line');
+  CheckRejected('a stranded step before a terminator keeps ITS sentence',
+                'for i = 1 to 2' + LF + 'step next' + LF,
+                '''step'' belongs on a ''for'' line');
+  CheckRejected('a stranded next before a terminator keeps ITS sentence',
+                'if 1 = 1 then' + LF + 'next endif' + LF,
+                '''next'' without a matching ''for''');
+  CheckRejected('two juxtaposed names keep their own message',
+                'foo bar' + LF, 'expected end of line');
+  CheckRejected('a typo''d case label keeps the message the REPL reads',
+                'select case 1' + LF + 'csae 1' + LF + 'endselect' + LF,
+                'expected ''case'' or ''endselect''');
+
   { A ceiling that refuses must not pay for refusing; see the note on the check. }
   CheckRefusedGraftDoesNotLeak;
 

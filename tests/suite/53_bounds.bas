@@ -60,7 +60,12 @@ assert_eq(ubound(b@, 1), 3, "and reports the size it was given")
 test_case("num/rnd covers the range it was asked for")
 rem The bound was narrowed to a 32-bit Integer, so rnd(3000000000) wrapped negative,
 rem clamped to 1, and returned 0 every time -- forever, silently.
-randomize
+rem The parentheses are load-bearing, and were missing here from the day this test
+rem was written: `randomize` written bare was an expression statement -- a global
+rem read, discarded -- so the draws below came from an unseeded generator and the
+rem check reported success without ever exercising what it names. The compiler now
+rem refuses the shape; tests/negative/43_bare_call_without_parentheses.bas pins it.
+randomize()
 above% = 0
 for i = 1 to 400
   if rnd(3000000000) > 2147483647 then above% = above% + 1

@@ -506,9 +506,19 @@ else {
 #    The real header is the magic PLUS a version byte, and no text file carries a
 #    control character there. "A control character" alone is not the whole rule
 #    either: TAB, LF and CR are 9, 10 and 13, and `PBC<TAB>= 3` and a line that is
-#    just `PBC` are both valid BASIC. Shapes 3 and 4 are those two, and on Windows
-#    shape 4's fourth byte is CR where on Linux it is LF -- the same file asks a
-#    different half of the rule on each OS, which is the honest thing about it.
+#    just `PBC` are both SOURCE TEXT the sniffer must not claim. Shapes 3 and 4
+#    are those two, and on Windows shape 4's fourth byte is CR where on Linux it
+#    is LF -- the same file asks a different half of the rule on each OS, which is
+#    the honest thing about it.
+#
+#    Shape 4 stopped being a valid PROGRAM on 2026-09-11: a name on a line of its
+#    own is a call with the parentheses left off, and the compiler refuses it
+#    instead of reading a variable and discarding it. That takes nothing away
+#    from the shape -- its fourth byte is still the newline, which is the whole
+#    question here -- so what it asserts changed rather than what it is. A
+#    diagnostic naming the line is something only the COMPILER can produce, so it
+#    is proof the file went to the compiler and not to the bytecode reader,
+#    exactly as `count is 3` was for shape 1.
 #
 #    Shapes 5 to 7 are the MIRROR and matter as much: a genuine .pbc must still be
 #    recognised as one, or a sniff that answered "source" to everything would pass
@@ -526,6 +536,21 @@ function Test-SniffRuns([string] $shape, [string] $file, [string] $want) {
     # 'format version' is the tell of the old defect, so it is asserted ABSENT:
     # a refusal for the right reason and one for this reason are not the same.
     $ok = ($code -eq 0) -and ($text -like "*$want*") -and ($text -notlike '*format version*')
+    if (-not $ok) {
+        Write-Host ("        {0}: exit {1}, said '{2}'" -f $shape, $code,
+                    ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    }
+    return $ok
+}
+
+# The same question for a file the COMPILER refuses: the refusal has to be the
+# compiler's, naming the source line, and never a format version.
+function Test-SniffCompiled([string] $shape, [string] $file, [string] $want) {
+    cmd /c "`"$exe`" `"$file`" < NUL > `"$sniffOut`" 2>&1"
+    $code = $LASTEXITCODE
+    $text = Get-Content -Raw $sniffOut
+    if ($null -eq $text) { $text = '' }
+    $ok = ($code -ne 0) -and ($text -like "*$want*") -and ($text -notlike '*format version*')
     if (-not $ok) {
         Write-Host ("        {0}: exit {1}, said '{2}'" -f $shape, $code,
                     ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
@@ -556,7 +581,7 @@ Set-Content -LiteralPath $sniff4 -Encoding ascii -Value @(
 $okO = (Test-SniffRuns 'PBCount = 3'      $sniff1 'count is 3')      -and $okO
 $okO = (Test-SniffRuns 'PBC$ = "..."'     $sniff2 'hello there')     -and $okO
 $okO = (Test-SniffRuns 'PBC<TAB>= 3'      $sniff3 'tabbed is 3')     -and $okO
-$okO = (Test-SniffRuns 'a bare PBC line'  $sniff4 'a bare pbc line') -and $okO
+$okO = (Test-SniffCompiled 'a bare PBC line' $sniff4 "'pbc' on its own does nothing") -and $okO
 
 # 5. `pack` must give its OWN refusal for source, the one F already pins, and not
 #    a version number -- IsBytecode answering True took that branch away.

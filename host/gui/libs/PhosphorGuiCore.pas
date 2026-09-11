@@ -310,7 +310,13 @@ function GuiGridBytes(ACols, ARows: Int64): Int64;
   own current charge, which is being replaced rather than added to -- a grid that
   goes from 1000 rows to 1001 costs one more row, not another whole grid.
 
-  The store is a flat array and lookup is a linear scan, like the registry's own.
+  The store is a flat array and lookup is a linear scan. The function registry's
+  own SIGNATURE lookup no longer is, but two scans of this shape remain on the
+  per-call path and both were measured on 2026-09-11: TPhosphorRegistry.HasName,
+  which answers a name-PREFIX question no signature index can, at about 100 us a
+  call; and TProgram.FindUserFunc, at 5.73 ns per declared routine per call --
+  +2.29 us with 400 routines merely declared, nine times what the indexed registry
+  lookup now costs.
   It holds one entry per LIVE charged surface, which is a handful in any real
   program; measured at the unreasonable end, 20,000 simultaneously live bitmaps
   cost 1.6 s against the unguarded build's 1.4 s. If that ever stops being true the

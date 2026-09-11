@@ -269,6 +269,7 @@ else {
         @{ name='probe_limits';   src='tests\probe_limits.lpr' },
         @{ name='probe_bytecode'; src='tests\probe_bytecode.lpr' },
         @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
+        @{ name='probe_registry'; src='tests\probe_registry.lpr' },
         @{ name='probe_budget';   src='scripts\probe_budget.lpr' },
         @{ name='probe_crt';      src='tests\probe_crt.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' },

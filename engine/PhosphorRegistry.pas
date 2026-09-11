@@ -109,10 +109,17 @@ type
                       out Err: TPhosphorError): TValue;
   end;
 
-  { A small hand-rolled string->func map. The registry holds a few dozen entries
-    and does not need Generics.Collections (whose enumerator instantiation emits
-    library-internal warnings). Linear lookup is fine at this size; swap in a
-    hash if the function count ever grows large. }
+  { A hand-rolled string->func map. It does not use Generics.Collections (whose
+    enumerator instantiation emits library-internal warnings), so the index is
+    here: FHash, an open-addressed table from signature to slot, maintained by
+    EnsureSlot -- the one routine that writes FKeys.
+
+    IT USED TO BE A LINEAR SCAN, and "the registry holds a few dozen entries" had
+    stopped being true: the console host registers 1,271 signatures with the GUI
+    up and 828 without. Resolve runs that scan once per widening mask, so a call
+    with k integer arguments walked the whole table 2^k times -- 21.0 us for a
+    two-argument built-in against 1.7 us for the whole loop body carrying it, on
+    2026-09-11. See IndexOfKey. }
   TPhosphorRegistry = class
   private
     FKeys: array of String;
@@ -123,6 +130,10 @@ type
     FMaxArity: Integer;   // the widest arity anything is registered under
     FWild: array of Integer;   // indices of keys holding a '*' (see Resolve)
     FCount: Integer;
+    FHash: array of Integer;   // signature -> slot + 1; 0 is an empty bucket
+    FHashMask: Integer;        // Length(FHash) - 1; the table is a power of two
+    procedure HashPut(const AKey: String; ASlot: Integer);
+    procedure HashRebuild;
     function IndexOfKey(const AKey: String): Integer;
     function EnsureSlot(const AKey: String): Integer;
   public
@@ -217,14 +228,89 @@ begin
   inherited Destroy;
 end;
 
-function TPhosphorRegistry.IndexOfKey(const AKey: String): Integer;
+{ FNV-1a over the bytes of a signature. A key is 'name:codes' and is stored
+  lowercased by EnsureSlot's callers, so the same bytes go in on both sides of a
+  lookup. Nothing here interprets a byte, so no code page can reach it. The
+  multiply is meant to overflow -- that is the mixing step -- so the overflow and
+  range checks are off for this function and for nothing else. }
+{$push}{$Q-}{$R-}
+function SigHash(const S: String): Cardinal;
 var
   i: Integer;
 begin
-  for i := 0 to FCount - 1 do
-    if FKeys[i] = AKey then
-      Exit(i);
+  Result := 2166136261;
+  for i := 1 to Length(S) do
+  begin
+    Result := Result xor Cardinal(Ord(S[i]));
+    Result := Result * 16777619;
+  end;
+end;
+{$pop}
+
+{ Put ASlot's key into the index. The table is a power of two and is never more
+  than half full, so linear probing always reaches an empty bucket and this
+  terminates. Only HashRebuild and EnsureSlot call it, and both hold that
+  invariant before they do. }
+procedure TPhosphorRegistry.HashPut(const AKey: String; ASlot: Integer);
+var
+  b: Integer;
+begin
+  b := Integer(SigHash(AKey)) and FHashMask;
+  while FHash[b] <> 0 do
+    b := (b + 1) and FHashMask;
+  FHash[b] := ASlot + 1;
+end;
+
+{ Grow the index to hold FCount keys at a load factor of one half, and refill it.
+
+  IT STOPS AT FCount - 1, NOT AT High(FKeys). EnsureSlot over-allocates the
+  parallel arrays -- SetLength(FKeys, (FCount + 1) * 2) -- so Length(FKeys) is up
+  to twice FCount and the tail slots hold empty strings. A refill written against
+  High(FKeys) would index that tail and make a lookup for '' succeed. }
+procedure TPhosphorRegistry.HashRebuild;
+var
+  n, i: Integer;
+begin
+  n := 16;
+  while n < FCount * 2 do n := n * 2;
+  SetLength(FHash, 0);       // drop the old table; nothing in it is reused
+  SetLength(FHash, n);       // a fresh dynamic array arrives zero-filled
+  FHashMask := n - 1;
+  for i := 0 to FCount - 1 do HashPut(FKeys[i], i);
+end;
+
+{ THE TABLE IS INDEXED, AND THIS IS THE ONLY WAY IN.
+
+  This was `for i := 0 to FCount - 1 do if FKeys[i] = AKey then Exit(i)`, and
+  Resolve calls it once per widening mask -- so a call with k integer arguments
+  walked every registered signature 2^k times. Measured on the console host at
+  300,000 iterations on 2026-09-11, best of seven interleaved runs: 518 ms for a
+  loop body with no built-in in it, 2775 ms for the same loop calling a
+  one-argument built-in, 6816 ms for a two-argument one. That is +7.5 us and
+  +21.0 us per call, and the jump between them is the four masks. The same three
+  programs on the indexed build: 500, 527 and 608 ms -- +0.09 us and +0.36 us.
+
+  FHash[b] holds the slot index PLUS ONE, so 0 means "empty" and slot 0 is still
+  reachable. A FALSE HIT is impossible by construction: the key found in the
+  bucket is compared for equality before it is returned, exactly as the scan
+  compared it. The only thing a broken index could produce is a false MISS -- and
+  a false miss here would make EnsureSlot append a second slot under a signature
+  that already exists instead of overwriting it, so the overwrite-by-signature
+  rule is what tests this. }
+function TPhosphorRegistry.IndexOfKey(const AKey: String): Integer;
+var
+  b, slot: Integer;
+begin
   Result := -1;
+  if FHash = nil then Exit;          // nothing registered yet
+  b := Integer(SigHash(AKey)) and FHashMask;
+  slot := FHash[b];
+  while slot <> 0 do
+  begin
+    if FKeys[slot - 1] = AKey then Exit(slot - 1);
+    b := (b + 1) and FHashMask;
+    slot := FHash[b];
+  end;
 end;
 
 { Return the index of AKey (a lowercase signature), creating an empty slot if it
@@ -264,6 +350,12 @@ begin
   end;
   Result := FCount;
   Inc(FCount);
+  // THE INDEX IS MAINTAINED HERE, in the one routine that writes FKeys, so the
+  // overwrite-by-signature rule above (the early Exit on an existing key) falls
+  // out unchanged: a repeat registration never reaches this line. Grow when the
+  // table would pass half full, which is what keeps HashPut's probe terminating.
+  if FCount * 2 > Length(FHash) then HashRebuild()
+  else HashPut(AKey, Result);
 end;
 
 procedure TPhosphorRegistry.Add(const ASignature: String; AFunc: TPhosphorFunc);
@@ -329,7 +421,7 @@ end;
 function TPhosphorRegistry.Resolve(const AName: String;
   const AKinds: array of TValueKind): TResolvedFunc;
 var
-  n, k, i, j, mask, bestPop, pop, idx, bestIdx: Integer;
+  n, k, i, j, mask, bestPop, pop, idx, bestIdx, argAt: Integer;
   intPos: array of Integer;
   codes: array of Char;
   key, lname: String;
@@ -358,23 +450,30 @@ begin
   end;
   k := Length(intPos);
 
+  // Built by index rather than by appending each Char: no code page can touch it,
+  // and this is the innermost loop of overload resolution -- one allocation
+  // instead of one per argument.
+  //
+  // AND BUILT ONCE, NOT ONCE PER MASK. The name, the colon and the key's LENGTH
+  // are the same for every mask; only the characters at the integer positions
+  // change. Rebuilding the whole key inside the loop meant a SetLength and a
+  // fresh copy of the name for every one of the 2^k probes.
+  SetLength(key, Length(lname) + 1 + n);
+  for i := 1 to Length(lname) do key[i] := lname[i];
+  key[Length(lname) + 1] := ':';
+  for i := 0 to n - 1 do
+    key[Length(lname) + 2 + i] := codes[i];
+  argAt := Length(lname) + 2;    // where argument 0's code sits inside key
+
   bestPop := MaxInt;
   // Each mask bit widens one int position ('%' -> 'n'); prefer the fewest.
   for mask := 0 to (1 shl k) - 1 do
   begin
     for j := 0 to k - 1 do
       if (mask and (1 shl j)) <> 0 then
-        codes[intPos[j]] := 'n'
+        key[argAt + intPos[j]] := 'n'
       else
-        codes[intPos[j]] := '%';
-    // Built by index rather than by appending each Char: no code page can touch it,
-    // and this is the innermost loop of overload resolution -- one allocation
-    // instead of one per argument.
-    SetLength(key, Length(lname) + 1 + n);
-    for i := 1 to Length(lname) do key[i] := lname[i];
-    key[Length(lname) + 1] := ':';
-    for i := 0 to n - 1 do
-      key[Length(lname) + 2 + i] := codes[i];
+        key[argAt + intPos[j]] := '%';
     idx := IndexOfKey(key);
     if idx >= 0 then
     begin
@@ -384,6 +483,13 @@ begin
         bestPop := pop;
         bestIdx := idx;
       end;
+      // MASK 0 WIDENS NOTHING, so its popcount is zero -- the least this loop can
+      // ever reach -- and `pop < bestPop` is strict, so no later mask can replace
+      // it. Stopping on it therefore cannot change which overload wins, and it is
+      // the difference between one probe and 2^k of them on every call whose
+      // arguments already match a signature exactly. It was running all four
+      // probes for min(i, 5) after the first one had already answered.
+      if pop = 0 then Break;
     end;
   end;
   // NOTHING MATCHED EXACTLY. Only now are wildcard signatures considered, so a

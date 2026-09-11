@@ -129,6 +129,29 @@ just more `Add`s under the same name with different codes. The function's own
 name may carry a return-type suffix for the caller to read (`greet$`, `dim@`); it
 is part of the name, not a code.
 
+**Registering a lot of names is free at the call site.** The registry indexes its
+signatures, so what a call costs does not grow with how many are registered, or
+with where yours sits among them: resolving against a table of 8,194 signatures
+costs the same for a key registered near the front of it and one registered last
+(`tests/probe_registry.lpr`, which fails if that stops being true). *Resolution*
+is what is free. `funcexists?` is not: it asks a name-prefix question the
+signature index cannot answer and still scans every registered signature, about
+100 us a call on the shipped host, so keep it out of a loop. Until
+2026-09-11 it was a linear scan run once per integer-widening combination: a loop
+calling a two-integer built-in cost about 13x the same loop without the call, and
+now costs about 1.2x — roughly 21 us of overhead per call on the shipped host
+against under half a microsecond today.
+
+**Which overload wins is a rule, not an accident of registration order.** An
+exact reading beats one that has to widen an `int%` into an `n` slot; among
+readings that widen, the fewest widenings wins, wherever that reading happens to
+be found, and a tie between two equally cheap readings goes to the one that
+widens the EARLIER argument (`t:n%` answers a two-int call, not `t:%n`); a `*`
+wildcard answers only what no exact reading can. The order is the same before and
+after the indexing above, and `tests/probe_registry.lpr` pins it in both
+directions — including the case where the costlier reading is the one the engine
+reaches first.
+
 **Calling back into BASIC.** A function that must run a BASIC routine (an event
 dispatcher, an indirect call) uses the host-aware shape and `AddHost`; it receives
 the executing VM (as `TObject`; cast to `TPhosphorVM`) and can call

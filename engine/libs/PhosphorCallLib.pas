@@ -67,9 +67,12 @@ const
     impl -- the suffix only tells the caller's reader (and the compiler) the kind. }
   Names: array[0..4] of String = ('callfunc', 'callfunc%', 'callfunc$', 'callfunc@', 'callfunc?');
   { How many arguments may follow the name. A per-KIND signature for each arity
-    would be 5^n keys, and the registry is a linear scan -- so the arguments are
-    registered as '*' (any kind), one key per arity instead of 5^n. Eight is
-    generous: the widest thing in the whole library takes six. }
+    would be 5^n keys -- 488,281 of them for eight arguments, against a whole
+    registry of 1,271 -- so the arguments are registered as '*' (any kind), one
+    key per arity. The registry indexes its keys now, so the cost of the choice
+    is registration and memory rather than lookup, and the ratio is still four
+    hundred to one. Eight is generous: the widest thing in the whole library
+    takes six. }
   MaxIndirectArgs = 8;
 var
   s, a: Integer;

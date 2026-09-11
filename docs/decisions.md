@@ -376,9 +376,10 @@ direct call worked)*. An unknown name is a runtime error, not a silent no-op
 
 Eight arguments rather than one needs no signature explosion: the registry
 resolves by argument KINDS, so a per-kind signature for every arity would be 5^n
-keys in a linear-scan table. A `*` in a registered signature matches any kind at
-that position, tried only after exact resolution has failed — so the successful
-path is untouched, and `callfunc` costs 45 keys instead of 488281. `tests/suite/48_callback.bas`
+keys — 488281 of them, against a whole registry of 1271. A `*` in a registered
+signature matches any kind at that position, tried only after exact resolution
+has failed — so the successful path is untouched, and `callfunc` costs 45 keys
+instead of 488281. `tests/suite/48_callback.bas`
 proves the whole seam headless: indirect numeric/string/handle calls, a routine
 mutating a shared global (the event-handler shape), and indirect recursion
 through the re-entrant path.

@@ -29,7 +29,8 @@ byte outside the string or a value outside `0..255`, because there is no honest
 number to answer with. `bytemid$` clamps like everything else.
 
 Two things commonly surprise a caller. `ucase$`/`lcase$` know only ASCII `a`–`z`
-(`ucase$("café")` is `"CAFé"`); the Unicode-aware pair is `aucase$`/`alcase$`.
+(`ucase$("café")` is `"CAFé"`); the Unicode-aware pair is `aucase$`/`alcase$`, and
+the *ignoring case* family under *Search and compare* folds by that same rule.
 And `hex$`/`bin$`/`oct$` are **sign-and-magnitude**, not two's complement:
 `hex$(-255)` is `"-FF"`.
 
@@ -91,6 +92,14 @@ And `hex$`/`bin$`/`oct$` are **sign-and-magnitude**, not two's complement:
 | `strcmp(a$, b$) → num` | the **sign** of a case-sensitive comparison: `-1`, `0` or `1` — never the raw difference |
 | `strcmpi(a$, b$) → num` | the same sign, ignoring case |
 
+**"Ignoring case" means one rule for all five.** `containstext`, `startstext`,
+`endstext`, `strcmpi` and `replacetext$` fold with the same Unicode simple
+uppercase mapping `aucase$` uses, so they always agree with each other and with
+`aucase$`. That mapping is a table compiled into the engine rather than a service
+the platform installs, so Windows and Linux answer identically. It is *case*
+folding only: an accented letter still differs from its unaccented one, and
+`"ss"` does not match `"ß"`.
+
 ### Splitting into fields and lines
 
 | function | what it answers |
@@ -107,9 +116,9 @@ can fail.
 | function | what it answers |
 | --- | --- |
 | `replacestr$(s$, from$, to$) → str` | `s$` with **every** `from$` replaced by `to$`, case-sensitive. No match answers `s$` unchanged |
-| `replacetext$(s$, from$, to$) → str` | the same, ignoring case when matching |
+| `replacetext$(s$, from$, to$) → str` | the same, ignoring case when matching — by the one rule stated under *Search and compare* |
 | `insert$(s$, ins$, pos) → str` | `s$` with `ins$` inserted before `pos`. `pos` clamps to `1..len+1`, so a position past the end appends rather than erroring |
-| `delete$(s$, pos, count) → str` | `s$` with `count` characters removed from `pos`. A `count` of `0`, or a `pos` past the end, answers `s$` unchanged |
+| `delete$(s$, pos, count) → str` | `s$` with `count` characters removed from `pos`. A `count` of `0`, or a `pos` past the end, answers `s$` unchanged, and a `delete$` never returns a longer string than it was given — however large `pos` and `count` are |
 | `stuffstring$(s$, start, len, repl$) → str` | `s$` with the `len` characters at `start` replaced by `repl$` — delete and insert in one call. A `start` past the end appends |
 
 ### Numbers and radix
@@ -134,7 +143,7 @@ letters, and no spaces in it.
 
 | function | what it answers |
 | --- | --- |
-| `isnumeric(s$) → num` | `1` when the whole trimmed string parses as a number |
+| `isnumeric(s$) → num` | `1` when the whole trimmed string parses as a number **`val` can answer**. `"inf"`, `"nan"` and an out-of-range exponent such as `"1e999"` answer `0`, because no value in this engine holds a non-finite number — so what `isnumeric` approves, `val` returns without faulting |
 | `isalpha(s$) → num` | `1` when every byte is an ASCII letter — an accented letter answers `0` |
 | `isdigits(s$) → num` | `1` when every character is `0`–`9` |
 | `isalnum(s$) → num` | `1` when every character is an ASCII letter or digit |

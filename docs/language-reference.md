@@ -70,7 +70,9 @@ what `return` is for.
 
 Phosphor has **five value types, and the type is part of the name**: the last
 character of a variable name is its type suffix. Names are case-insensitive
-(`Score` and `score` are the same variable).
+(`Score` and `score` are the same variable). The suffix decides what the name may
+hold: an assignment coerces the value to it or refuses, and a `const` declaration
+asks the same question at the same moment (see *Variables & CONST*).
 
 | Suffix | Type | Example | Notes |
 |--------|------|---------|-------|
@@ -104,7 +106,10 @@ a **file number** in the classic I/O statements (`open … as #1`, `print #1`,
 Assignment is just `name = value`; the optional keyword `let` is accepted. A
 `const` gives a name to a fixed number or string; assigning to a constant is a
 compile-time error, so a value you never meant to change can't be changed by
-accident.
+accident. The literal has to fit the name's suffix, exactly as an assignment
+does: `const i% = 1.5` binds 2, and `const s$ = 5` is refused at the declaration
+rather than at the first line that uses it. A `?` or `@` name can never be a
+constant, because no literal produces a boolean or a handle.
 
 ```basic
 const MAXLIVES = 3
@@ -129,12 +134,15 @@ Arithmetic, with two divisions worth remembering:
 | `/` | **real** division (always float) | `7 / 2` → `3.5` |
 | `\` | **integer** division | `7 \ 2` → `3` |
 | `^` | power (always float) | `2 ^ 8` → `256` |
-| `mod` | remainder | `17 mod 5` → `2` |
+| `mod` | remainder — the sign of the left operand, always smaller in magnitude than the right | `17 mod 5` → `2` |
 | `and or not` | logic | `not (5 < 3)` → `true` |
 | `= <> < > <= >=` | comparison | `2 >= 2` → `true` |
 
 Integer±*integer stays an integer; the moment a float joins in, the result is a
-float. Integer overflow is a catchable error, not silent wraparound.
+float. Integer overflow is a catchable error, not silent wraparound. `mod` with a
+float operand answers the exact IEEE remainder, computed without ever forming a
+quotient: `1e16 mod 3` is `1`, and `1e200 mod 1e-200` answers
+`4.18199169208316E-201` rather than overflowing on a quotient nobody asked for.
 
 Compound assignment works too: `+= -= *= /=` for numbers, and `+=` to append to a
 string. The operator and `=` must be adjacent (`x += 1`, not `x + = 1`).

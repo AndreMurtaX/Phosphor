@@ -96,7 +96,7 @@ machine reads back identically on another whatever that CPU's own endianness is.
 | `buffer_getdbl(b@, i) → num` | the IEEE-754 double in the 8 bytes at `i`. Always little-endian; there is no byte-order argument |
 | `buffer_setdbl(b@, i, v) → num` | the value written, `v`, in 8 bytes at `i`. Fewer than 8 bytes left is an error |
 | `buffer_getsng(b@, i) → num` | the IEEE-754 single in the 4 bytes at `i`, widened to a number |
-| `buffer_setsng(b@, i, v) → num` | the value written **at single precision** — `0.1` in gives back the nearest single, not `0.1`. 4 bytes at `i` |
+| `buffer_setsng(b@, i, v) → num` | the value written **at single precision** — `0.1` in gives back the nearest single, not `0.1`. 4 bytes at `i`. A value outside a single's range (about `-3.4e38`..`3.4e38`) is a **returned error naming it, and nothing is written** — this is the one row on the page where an argument is refused for its value rather than its position. A value that merely loses precision, or underflows to `0`, is written |
 
 ## A worked example
 

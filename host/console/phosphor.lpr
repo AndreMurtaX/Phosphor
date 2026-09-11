@@ -548,17 +548,40 @@ begin
   end;
 end;
 
-{ A file is bytecode if it starts with the .pbc magic. }
+{ A file is bytecode if it starts with the WHOLE .pbc header, and that header is
+  longer than the three letters of PBC_MAGIC: PhosphorBytecode writes the magic
+  and then a VERSION BYTE (engine/PhosphorBytecode.pas, WriteProgram), and that
+  byte is 1 -- a control character, which is the part no text file carries there.
+
+  Sniffing the three ASCII letters alone made every source file whose first line
+  begins with an uppercase identifier starting PBC into a false positive.
+  `PBCount = 3` was refused with "unsupported .pbc format version 111" -- 111 is
+  the code point of the fourth SOURCE character, 'o', reported as a format
+  version -- and `PBC$ = "hello"` gave version 36. The same file compiled through
+  `phosphor compile` and the resulting .pbc ran, and phosphortest, which never
+  sniffs, ran the source directly, so the two shipped hosts disagreed about one
+  file. `phosphor pack` was hit at the same door and lost its own helpful refusal
+  for the same nonsense message.
+
+  AND THE FOURTH BYTE MUST NOT BE ONE OF THE THREE THAT SPACE TEXT. "a control
+  character" alone was measured to be not enough: `PBC<TAB>= 3` and a line that
+  is just `PBC` are both valid BASIC -- the identical files written with the name
+  XBC run and exit 0 -- and TAB, LF and CR are 9, 10 and 13, so all three would
+  still be refused as bytecode. They are excluded here. The price is a version
+  number this format would have to REACH before a genuine .pbc could be read as
+  source, and PBC_VERSION is 1. }
 function IsBytecode(const APath: String): Boolean;
-var fs: TFileStream; buf: array[0..2] of Char;
+var fs: TFileStream; buf: array[0..3] of Char;
 begin
   Result := False;
   fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
   try
-    if fs.Size >= 3 then
+    if fs.Size >= 4 then
     begin
-      fs.ReadBuffer(buf[0], 3);
-      Result := (buf[0] = 'P') and (buf[1] = 'B') and (buf[2] = 'C');
+      fs.ReadBuffer(buf[0], 4);
+      Result := (buf[0] = 'P') and (buf[1] = 'B') and (buf[2] = 'C') and
+                (Ord(buf[3]) < 32) and
+                (buf[3] <> #9) and (buf[3] <> #10) and (buf[3] <> #13);
     end;
   finally
     fs.Free;

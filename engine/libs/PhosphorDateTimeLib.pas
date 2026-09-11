@@ -11,13 +11,25 @@
   clock and take no arguments.
 
   Most functions cannot fail: a date is a number and almost any number is some
-  date. The NINE that can are of two kinds. Six take a year, a month or a day as
-  SEPARATE numbers, where the RTL either indexed its month table out of bounds or
-  raised with its own words: daysinayear, daysinamonth, weeksinayear, encodedate
-  and the three strto* parsers -- that is seven, because strto* is three. And
-  incmonth and incyear refuse a step that would leave 0001-01-01..9999-12-31, or
-  that starts from a number outside it. Each answers this library's own runtime
-  error with the offending value in it, never a wrong number.
+  date. The EIGHTEEN that can are of three kinds.
+
+  Seven take a year, a month or a day as SEPARATE numbers, where the RTL either
+  indexed its month table out of bounds or raised with its own words: daysinayear,
+  daysinamonth, weeksinayear, encodedate and the three strto* parsers.
+
+  Two, incmonth and incyear, refuse a step that would leave
+  0001-01-01..9999-12-31, or that starts from a number outside it.
+
+  And nine TAKE A DATE that the RTL cannot decompose. At or below -693594 -- the
+  day before 0001-01-01 -- DecodeDate answers Year=0, Month=0, Day=0 instead of
+  refusing, and the functions built on that answer read a month table out of
+  bounds, raise, count no day at all, or render text no parser accepts:
+  daysinmonth, daysinyear, weeksinyear, weekoftheyear, weekof, weekofthemonth,
+  dayoftheyear, datetostr$ and datetimetostr$. They ask SourceOk, the same guard
+  incmonth and incyear ask about their starting date.
+
+  Each answers this library's own runtime error with the offending value or the
+  range in it, never a wrong number.
 ******************************************************************************}
 unit PhosphorDateTimeLib;
 
@@ -46,6 +58,58 @@ function I1(const A: array of TValue): Integer; begin Result := ArgI32(A[1]); en
 var
   FirstDay, LastMoment: TDateTime;
 
+{ A NUMBER IS NOT A DATE JUST BECAUSE IT IS A NUMBER, and the low end is where
+  that bites.
+
+  DecodeDate answers Year=0, Month=0, Day=0 for ANY number at or below -693594 --
+  the day before 0001-01-01 -- rather than refusing it (the RTL's own
+  rtl/objpas/sysutils/dati.inc:155, `if Date <= -datedelta`). The TOP end of the
+  same routine CLAMPS instead, at dati.inc:167, so every function here that takes
+  a date already had a defined answer above the range and none at all below it.
+
+  Such a number is easy to hold. incday and incweek are additions with no range
+  check of their own -- the long note at incmonth below says why -- so
+  `incday(encodedate(1,1,1), -1)` produces one, and a date is a plain number, so
+  any literal below the range does too.
+
+  Year 0 is not merely unusual, it is a value the RTL cannot then be asked about.
+  DaysInMonth indexes MonthDays with the Month it decoded, and MonthDays is an
+  array of TDayTable where TDayTable is indexed 1..12, so Month=0 reads ONE
+  ELEMENT BEFORE the table -- the same out-of-bounds read date-time.md records as
+  fixed for daysinamonth(2024, 13), reached through the date-TAKING spelling of
+  the question, and it lands on the adjacent constant 31, which is why the wrong
+  answer looked plausible. WeekOfTheYear, WeekOfTheMonth and WeeksInYear hand
+  Year=0 to DateUtils, which raises EConvertError in the RTL's own words about a
+  date the program never wrote. DayOfTheYear answers 0, which is no day of any
+  year, and DateToStr renders 0000-00-00, which strtodate then refuses -- so
+  render and parse stop being inverses.
+
+  Hence ONE guard, called by every function that takes a date and cannot survive
+  Year=0, answering this library's own error with the range in it rather than a
+  fabricated number, an RTL message or unparseable text. }
+function SourceOk(const AFn: String; const D: TDateTime; out E: TPhosphorError): Boolean;
+begin
+  { THE FIRST DAY IS AN OPEN INTERVAL BELOW ITS OWN MIDNIGHT, because a negative
+    TDateTime carries its time of day as a NEGATIVE fraction. Midnight on
+    0001-01-01 is -693593, and noon that same day is -693593.5 -- a SMALLER
+    number. `D >= FirstDay` therefore refused every instant of the first day
+    except midnight, while datetimetostr$, yearof and hourof all agreed it was
+    0001-01-01 12:00:00. The library called a value it had just built through its
+    own strtodatetime "not a date".
+
+    The high end was written correctly and the low end was not, which is the whole
+    lesson: LastMoment is the first instant AFTER the last day precisely so that a
+    time on that day counts as inside, and the mirror image at the front needs the
+    same widening in the other direction -- to just above -693594, the threshold
+    this file's own comment names as where DecodeDate stops answering a real year. }
+  Result := (D > FirstDay - 1) and (D < LastMoment);
+  if not Result then
+    E := MakeError(peRuntime, AFn +
+                   ': that number is not a date in 0001-01-01..9999-12-31')
+  else
+    E := NoError();
+end;
+
 // --- decomposition ----------------------------------------------------------
 function t_yearof(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(YearOf(D0(A))); end;
@@ -69,7 +133,10 @@ begin E := NoError(); Result := ValInt(MonthOfTheYear(D0(A))); end;
 function t_dayoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
 var y, m, d: Word; i, n: Integer;
 begin
-  E := NoError();
+  { SourceOk first, or the accumulator runs over a Year=0/Month=0 decomposition
+    and answers 0 -- which is no day of any year -- as a clean success. }
+  Result := ValInt(0);
+  if not SourceOk('dayoftheyear', D0(A), E) then Exit;
   DecodeDate(D0(A), y, m, d);
   n := d;
   for i := 1 to Integer(m) - 1 do
@@ -131,7 +198,11 @@ begin
   Result := ValInt(DaysInAYear(I0(A)));
 end;
 function t_daysinmonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DaysInMonth(D0(A))); end;
+begin
+  Result := ValInt(0);
+  if not SourceOk('daysinmonth', D0(A), E) then Exit;
+  Result := ValInt(DaysInMonth(D0(A)));
+end;
 function t_daysinamonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
@@ -171,12 +242,27 @@ begin
 end;
 
 // --- weeks ------------------------------------------------------------------
+{ All three RAISED for a below-range number, in the RTL's words about a date the
+  program never wrote ("0-1-1 is not a valid date specification"). SourceOk turns
+  that into this library's own refusal, naming the function the script called. }
 function t_weekoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(WeekOfTheYear(D0(A))); end;
+begin
+  Result := ValInt(0);
+  if not SourceOk('weekoftheyear', D0(A), E) then Exit;
+  Result := ValInt(WeekOfTheYear(D0(A)));
+end;
 function t_weekof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(WeekOfTheYear(D0(A))); end;     // answers the same
+begin
+  Result := ValInt(0);
+  if not SourceOk('weekof', D0(A), E) then Exit;
+  Result := ValInt(WeekOfTheYear(D0(A)));    // answers the same
+end;
 function t_weekofthemonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(WeekOfTheMonth(D0(A))); end;
+begin
+  Result := ValInt(0);
+  if not SourceOk('weekofthemonth', D0(A), E) then Exit;
+  Result := ValInt(WeekOfTheMonth(D0(A)));
+end;
 function t_weeksinayear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
@@ -238,10 +324,13 @@ begin E := NoError(); Result := ValDouble(IncWeek(D0(A), I1(A))); end;
   restated with the step that went off the end.
 
   incday and incweek are NOT given the same treatment, because they do not raise
-  -- they answer a number outside the representable range, which datetostr$ and
-  yearof then silently clamp back to 9999-12-31 and report as if it were real.
-  That is a different defect and a wider one; it belongs to the whole library
-  rather than to these two functions.
+  -- they answer a number outside the representable range. What that number then
+  means depends on which door it reaches. The nine date-taking functions listed
+  in this file's header ask SourceOk and refuse it by name. yearof, monthof,
+  dayof and formatdatetime$ do not: they still hand it to DecodeDate, which
+  clamps the top end back to 9999-12-31 and reports it as if it were real, and
+  answers year 0 below the range. That remaining half is a wider defect and
+  belongs to the whole library rather than to these two functions.
 
   AND THE TWO FAIL DIFFERENTLY, which is why neither can be guarded by catching.
   incyear raises. incmonth does NOT: its re-encode answers 0 on failure without a
@@ -254,44 +343,6 @@ begin
   Result := ValInt(0);
   E := MakeError(peRuntime, AFn + ': ' + IntToStr(ABy) + ' ' + AUnit +
                  ' from that date leaves 0001-01-01..9999-12-31');
-end;
-
-{ THE STEP IS ONLY HALF THE QUESTION: the date it starts from has to be a date.
-
-  Checking the target year alone was not enough, and failed in the exact way it
-  was written to prevent. DecodeDate answers Year=0, Month=0, Day=0 for ANY number
-  at or below -693594 -- the day before 0001-01-01 -- rather than refusing it. The
-  accumulator below then starts from that fictitious year 0 and lands inside
-  1..9999 for every step of 13 or more, so the guard APPROVED them; the RTL went
-  on to re-encode with Day=0, which cannot succeed, and answered 1899-12-30. The
-  result was non-monotonic and absurd: incmonth(x, 12) was refused while
-  incmonth(x, 13) came back as a silently wrong date.
-
-  Such a number is easy to hold. incday and incweek are additions with no range
-  check of their own -- this file says so a few lines up -- so
-  `incday(encodedate(1,1,1), -1)` produces one, and a date is a plain number, so
-  any literal below the range does too. }
-function SourceOk(const AFn: String; const D: TDateTime; out E: TPhosphorError): Boolean;
-begin
-  { THE FIRST DAY IS AN OPEN INTERVAL BELOW ITS OWN MIDNIGHT, because a negative
-    TDateTime carries its time of day as a NEGATIVE fraction. Midnight on
-    0001-01-01 is -693593, and noon that same day is -693593.5 -- a SMALLER
-    number. `D >= FirstDay` therefore refused every instant of the first day
-    except midnight, while datetimetostr$, yearof and hourof all agreed it was
-    0001-01-01 12:00:00. The library called a value it had just built through its
-    own strtodatetime "not a date".
-
-    The high end was written correctly and the low end was not, which is the whole
-    lesson: LastMoment is the first instant AFTER the last day precisely so that a
-    time on that day counts as inside, and the mirror image at the front needs the
-    same widening in the other direction -- to just above -693594, the threshold
-    this file's own comment names as where DecodeDate stops answering a real year. }
-  Result := (D > FirstDay - 1) and (D < LastMoment);
-  if not Result then
-    E := MakeError(peRuntime, AFn +
-                   ': that number is not a date in 0001-01-01..9999-12-31')
-  else
-    E := NoError();
 end;
 
 { The year a month step lands in, computed the way the RTL's own IncAMonth
@@ -453,12 +504,25 @@ begin E := NoError(); Result := ValInt(Ord(IsToday(D0(A)))); end;
 var
   ISOFS: TFormatSettings;
 
+{ RENDER AND PARSE ARE EXACT INVERSES, and below the range they were not: a
+  number at or under -693594 decomposes to Year=0, Month=0, Day=0 and rendered as
+  "0000-00-00", which strtodate then refuses as invalid text. The two renderers
+  that carry a DATE therefore ask SourceOk; timetostr$ does not, because it reads
+  only the fraction and every number has one. }
 function t_datetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(DateToStr(D0(A), ISOFS)); end;
+begin
+  Result := ValStr('');
+  if not SourceOk('datetostr$', D0(A), E) then Exit;
+  Result := ValStr(DateToStr(D0(A), ISOFS));
+end;
 function t_timetostr(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(TimeToStr(D0(A), ISOFS)); end;
 function t_datetimetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(DateTimeToStr(D0(A), ISOFS)); end;
+begin
+  Result := ValStr('');
+  if not SourceOk('datetimetostr$', D0(A), E) then Exit;
+  Result := ValStr(DateTimeToStr(D0(A), ISOFS));
+end;
 function t_date_s(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(DateToStr(Date, ISOFS)); end;
 function t_time_s(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -512,10 +576,21 @@ function t_incmillisecond(const A: array of TValue; out E: TPhosphorError): TVal
 begin E := NoError(); Result := ValDouble(IncMilliSecond(D0(A), I1(A))); end;
 
 // --- year lengths taking a date ---------------------------------------------
+{ The date-TAKING half of the pair whose year-taking half daysinayear/weeksinayear
+  has been guarded since the 65450 defect. Below the range daysinyear answered 366
+  for the fictitious year 0 and weeksinyear raised. }
 function t_daysinyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DaysInYear(D0(A))); end;
+begin
+  Result := ValInt(0);
+  if not SourceOk('daysinyear', D0(A), E) then Exit;
+  Result := ValInt(DaysInYear(D0(A)));
+end;
 function t_weeksinyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(WeeksInYear(D0(A))); end;
+begin
+  Result := ValInt(0);
+  if not SourceOk('weeksinyear', D0(A), E) then Exit;
+  Result := ValInt(WeeksInYear(D0(A)));
+end;
 
 // --- more distances ---------------------------------------------------------
 // The same substitution as the five above: the RTL's formula, over Linear's

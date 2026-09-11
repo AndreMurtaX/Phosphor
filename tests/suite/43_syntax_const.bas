@@ -106,6 +106,36 @@ const LATER = 99
 assert_eq(LATER, 99, "a declaration after the variable use")
 assert_eq(const + LATER, 109, "the variable and the constant coexist")
 
+test_case("const/the literal is checked against the name suffix")
+rem A const is a BINDING, and it was the one binding nobody checked. The value
+rem was built from the token kind alone -- tkInt, tkDouble, tkString -- and the
+rem NAME was never consulted, so `const i% = 1.5` kept 1.5 under a `%` name and
+rem `const s$ = 5` kept an Int64 under a `$` one. Every other binding asks
+rem VarTypeOf: VarIndex for a global, AddLocal for a frame slot, which is why
+rem `i% = 1.5` has always stored 2.
+rem
+rem A const now asks the same question through the same StoreCheck, so it takes
+rem the same coercion. The refusals -- `const s$ = 5` and friends -- live in
+rem tests/negative, because a compile error cannot be asserted from inside the
+rem program it kills. This holds the half that still compiles.
+rem
+rem assert_int is `:%%` ONLY, so it takes no message argument -- a third one
+rem raises `no function assert_int:%%$` and halts the file. It is used here
+rem precisely because `%` accepts an int% and NOTHING ELSE: it asserts the KIND
+rem the constant holds, not merely the number it prints. Before the fix
+rem ROUNDED% held a Double and this line failed with `no function assert_int:n%`.
+const ROUNDED% = 1.5
+assert_int(ROUNDED%, 2)
+assert_eq(ROUNDED% * 2, 4, "the rounded value is what arithmetic sees")
+const WHOLE% = 7
+assert_int(WHOLE%, 7)
+rem And the unsuffixed and `$` forms are untouched: a plain name still takes
+rem either kind of number, and a `$` name still takes text.
+const EXACT = 2.5
+assert_eq(EXACT * 4, 10, "an unsuffixed const keeps its fraction")
+const TAG$ = "ok"
+assert_eq(TAG$ + "!", "ok!", "a $ const still holds text")
+
 function uses_const() local t
   t = MAXLIVES * 10
   return t

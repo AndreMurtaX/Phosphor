@@ -1063,10 +1063,86 @@ begin
   end;
 end;
 
-function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
+{ AN EXACT FLOATING REMAINDER, COMPUTED WITHOUT EVER FORMING THE QUOTIENT.
+
+  `a - b*Int(a/b)` is the textbook spelling of a float remainder and it is wrong
+  in three independent ways. Each was measured against C/Python fmod before this
+  was written, not argued:
+
+    1e16 mod 3        answered 0, where the remainder is 1. 1e16/3 ROUNDS to
+                      3333333333333333.5, Int truncates that to ...333, and
+                      ...333*3 = 9999999999999999 is not representable at that
+                      magnitude (the gap there is 2) so it rounds back up to
+                      1e16 exactly -- and the subtraction cancels to nothing.
+                      Above 2^53 that is the normal outcome, not an edge case.
+    1.5 mod 1e-300    answered -2.22E-16: NEGATIVE, for two positive operands,
+                      and 10^284 times LARGER than the divisor. 1.5/1e-300 is
+                      exactly 1.5e300, but 1.5e300*1e-300 rounds to
+                      1.5000000000000002, so the subtraction answers the
+                      rounding error instead of the remainder. `0 <= |r| < |b|`
+                      is not approximated there; it is broken.
+    1e200 mod 1e-200  raised a catchable overflow. Only the QUOTIENT overflows
+                      (1e400 is +Inf); the remainder is an ordinary
+                      4.18199169208316e-201. FiniteD was right to refuse -Inf --
+                      the value it was handed should never have been computed.
+
+  FPC's Math.FMod is THE SAME FORMULA (C:\lazarus\fpc\3.2.2\source\rtl\objpas\
+  math.pp: `Result := X - Int(X/Y)*Y`), so "call the RTL" is not a fix. It was
+  read before it was rejected, as the rule about this RTL requires.
+
+  What replaces it is binary long division that keeps only the remainder. Two
+  IEEE-754 facts make every step exact, so there is no rounding left to
+  accumulate:
+
+    * scaling by a power of two changes only the exponent;
+    * (Sterbenz) if y <= x <= 2y then x - y is exact.
+
+  Scale the divisor up to within a factor of two below the dividend, then walk
+  it back down halving, subtracting wherever it fits. Every subtraction meets
+  Sterbenz by construction, the running value only shrinks, and no intermediate
+  can overflow -- which is what removes the spurious overflow above.
+
+  THE LOOP IS BOUNDED BY THE FORMAT, NOT BY THE OPERANDS: its length is the
+  exponent spread of two finite doubles, at most 2098 iterations for any input
+  whatsoever (MaxDouble against the smallest denormal), so no script can make it
+  long. That is why it consults no budget.
+
+  Measured 2026-09-10: bit-identical to C fmod on 400 random finite pairs
+  spanning the whole exponent range, on every case above, and on MaxDouble
+  against the smallest denormal. The answer is fmod's: sign(r) = sign(a),
+  0 <= |r| < |b|, and a = n*b + r exactly for some whole n. }
+function DoubleRemainder(const A, B: Double): Double;
 var
-  ai, bi: Int64;
-  q: Double;
+  x, y, sc: Double;
+  k, j: Integer;
+begin
+  x := Abs(A);
+  y := Abs(B);
+  if x < y then Exit(A);              // already the remainder, sign and all
+
+  { Up to the largest y*2^k that still fits under x. The test is `sc <= x - sc`
+    rather than `sc + sc <= x` because it is the DOUBLING that must not
+    overflow: when 2*sc would pass x, then x - sc is below sc, Sterbenz makes
+    that subtraction exact, and the comparison refuses the step -- so the test
+    is exact at the one place where being wrong would matter. }
+  sc := y;
+  k := 0;
+  while sc <= x - sc do
+  begin
+    sc := sc + sc;
+    Inc(k);
+  end;
+
+  for j := k downto 0 do
+  begin
+    if sc <= x then x := x - sc;      // exact: sc <= x < 2*sc
+    if j > 0 then sc := sc * 0.5;     // exact, and never steps below y
+  end;
+
+  if A < 0 then Result := -x else Result := x;
+end;
+
+function ValMod(const A, B: TValue; out R: TValue): TPhosphorError;
 begin
   try
     R := Default(TValue);
@@ -1090,14 +1166,12 @@ begin
     begin
       if AsDouble(B) = 0 then
         Exit(MakeError(peDivByZero, 'mod by zero'));
-      // The quotient stays a DOUBLE. Trunc() narrowed it to Int64 and raised
-      // EInvalidOp -- killing the process -- for any pair whose quotient exceeded
-      // Int64 range, e.g. `1e30 mod 2.5`. Int() truncates within Double, so there is
-      // no range to exceed and the remainder is simply computed.
-      q := Int(AsDouble(A) / AsDouble(B));
-      ai := 0; bi := 0; // silence "unused" on some paths
-      if (ai <> 0) or (bi <> 0) then ;
-      Exit(FiniteD('mod', AsDouble(A) - q * AsDouble(B), R));
+      { No quotient is formed at all -- see DoubleRemainder above for why the
+        obvious `a - b*Int(a/b)` cannot be repaired. FiniteD stays because the
+        invariant is stated at the RESULT and every producer answers for it;
+        this one cannot break it (|r| <= |a|, and a is finite by the gate above),
+        which is a reason to keep the check cheap, not a reason to drop it. }
+      Exit(FiniteD('mod', DoubleRemainder(AsDouble(A), AsDouble(B)), R));
     end;
   except
     on E: EMathError do Result := TrappedInOperator('mod', E, R);

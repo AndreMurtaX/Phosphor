@@ -12,6 +12,13 @@
   library ARGUMENT and not an operator. That claim can only be checked from the
   outside, so that one section calls in through Prepare + CallFunction.
 
+  AND ONE SECTION THAT TESTS AGAINST AN ORACLE RATHER THAN AGAINST ITSELF:
+  CheckFloatRemainder. Two of this probe's own expectations recorded a wrong
+  `mod` answer for months, because a value chosen while reading the code agrees
+  with the code. That section compares the Double branch against the int% branch,
+  against C's fmod, and against the definition of a remainder swept over the
+  whole exponent range.
+
   Prints "ok: N" / "fail: M" and exits non-zero on any failure.
   Run with --fail to corrupt one expectation and confirm the check can fail.
 ******************************************************************************}
@@ -38,6 +45,14 @@ const
   Ref10m310: Double  = 1e-310;
   Ref10m320: Double  = 1e-320;
   Ref15m1800: Double = 1.0857596514320163e-317;
+  { The divisors the float-remainder cases compare against, TYPED for the same
+    reason: `r.Num < 1e-308` promotes both sides to Extended on Linux and asks
+    the compiler's literal parser a question this probe is not about. }
+  Ref1em308: Double  = 1e-308;
+  { 2^53, the point above which an integer stops having a Double of its own --
+    exactly representable, so this one is safe either width, and it is typed for
+    the same reason as its neighbours. }
+  Pow2_53: Double    = 9007199254740992.0;
 
 var
   Ok: Integer = 0;
@@ -66,6 +81,7 @@ begin
   if Pass then Inc(Ok)
   else begin Inc(Failed); Writeln(StdErr, 'FAIL: ', Name); end;
 end;
+
 
 procedure CheckInt(const V: TValue; Expected: Int64; const Name: String);
 begin
@@ -292,6 +308,15 @@ begin
   Result := PQWord(@D)^;
 end;
 
+{ The inverse, and the reason the remainder sweep uses it: an untyped float
+  literal in FPC source is an Extended, so `1e-300` written in this file reaches
+  a Double through a second rounding on Linux and through none on Windows. An
+  operand assembled from its IEEE pattern asks both platforms the same question. }
+function FromBits(const Q: QWord): Double;
+begin
+  Result := PDouble(@Q)^;
+end;
+
 { ----------------------------------------------------------------------------
   `^` OVER A RANGE, NOT OVER A LIST -- and against an ORACLE, not a table.
 
@@ -422,8 +447,18 @@ begin
     CheckErr(e, peIntOverflow, 'unmasked: 1e308 / 1e-10 is reported, not raised');
     e := ValPow(ValDouble(1e308), ValDouble(400.0), r);
     CheckErr(e, peIntOverflow, 'unmasked: 1e308 ^ 400 is reported, not raised');
+    { WAS `CheckErr(e, peIntOverflow, ...)` AND THAT PINNED A WRONG ANSWER.
+      1e308 mod 1e-308 is an ordinary subnormal, 3.498445546245627e-309; only the
+      QUOTIENT, 1e616, overflows, and `mod` no longer forms one. What this case
+      is really here for -- that the operator REPORTS rather than raising with the
+      overflow trap unmasked -- is now checked by the two above it, whose results
+      really do overflow; this one checks that the same unmasked trap does not
+      fire on the intermediate arithmetic of a remainder that is perfectly
+      representable. }
     e := ValMod(ValDouble(1e308), ValDouble(1e-308), r);
-    CheckErr(e, peIntOverflow, 'unmasked: 1e308 mod 1e-308 is reported, not raised');
+    Report((not IsError(e)) and (r.Kind = vkDouble) and (r.Num > 0) and
+           (r.Num < Ref1em308),
+           'unmasked: 1e308 mod 1e-308 answers a subnormal without raising');
     // ...and an ordinary computation is untouched by the net.
     e := ValMul(ValDouble(3.0), ValDouble(4.0), r);
     CheckDouble(r, 12, 'unmasked: 3 * 4 is still 12');
@@ -664,8 +699,17 @@ begin
   CheckErr(e, peIntOverflow, '1e308 * 10 overflows');
   e := ValDivReal(ValDouble(1e308), ValDouble(1e-308), r);
   CheckErr(e, peIntOverflow, '1e308 / 1e-308 overflows');
+  { THE MOD LINE HERE USED TO READ `CheckErr(e, peIntOverflow, ...)` TOO, and it
+    was wrong for a reason the division above it makes plain: 1e308 / 1e-308 has
+    no representable answer, and 1e308 mod 1e-308 has one -- the subnormal
+    3.498445546245627e-309. The old `mod` computed the quotient anyway, met the
+    same +Inf the division does, and reported the division's error for a question
+    that was never asked. It sat one line under the division that justifies it,
+    which is exactly how it read as right. }
   e := ValMod(ValDouble(1e308), ValDouble(1e-308), r);
-  CheckErr(e, peIntOverflow, '1e308 mod 1e-308 overflows');
+  Report((not IsError(e)) and (r.Kind = vkDouble) and (r.Num > 0) and
+         (r.Num < Ref1em308),
+         '1e308 mod 1e-308 answers a subnormal, it does not overflow');
   e := ValPow(ValInt(10), ValInt(400), r);
   CheckErr(e, peIntOverflow, '10 ^ 400 overflows');
   e := ValPow(ValInt(0), ValInt(-1), r);
@@ -719,6 +763,208 @@ begin
   CheckErr(e, peIntOverflow, '1e300 \ 2 is still out of integer range');
   i := 0;
   if i <> 0 then ;
+end;
+
+{ ----------------------------------------------------------------------------
+  THE FLOAT REMAINDER, AGAINST AN ORACLE THAT IS NOT ITSELF.
+
+  `mod` on a Double operand computed `a - b*Int(a/b)` and answered wrongly in
+  three separate ways: 0 for almost any pair above 2^53 (1e16 mod 3), a NEGATIVE
+  result vastly larger than the divisor on a wide exponent spread (1.5 mod
+  1e-300), and a spurious catchable overflow when only the QUOTIENT overflows
+  (1e200 mod 1e-200). Two of those wrong answers were PINNED -- one here, one in
+  tests/suite/51_arith_faults.bas -- because a list of values chosen while
+  looking at the code will agree with the code.
+
+  So this section does not test against a list. It tests three ways:
+
+    (1) NAMED CASES, BIT-EXACT, WITH THE OPERANDS BUILT FROM BITS. Every
+        expected value below was produced by C/Python fmod, not by this engine.
+        The operands are assembled from their IEEE patterns rather than written
+        as decimal literals, because an untyped float literal in FPC source is an
+        Extended -- 80 bits on Linux x86-64, 64 on Win64 -- and `1e-300` reaching
+        a Double through an Extended is a double rounding this probe is not
+        about. From bits, the two platforms are asked the same question.
+
+    (2) AN INDEPENDENT ORACLE INSIDE THE ENGINE. For two integral Doubles inside
+        Int64 range the answer must equal the int% path's answer -- `A.Int mod
+        B.Int`, a different branch, a machine instruction, no floating point
+        anywhere. The magnitudes are drawn up to 2^62, so most of the sweep sits
+        above 2^53 where the old formula cancelled to 0. This is the check that
+        cannot be satisfied by agreeing with the implementation.
+
+    (3) THE DEFINITION, SWEPT OVER THE WHOLE EXPONENT RANGE. Random finite
+        non-zero pairs, subnormals included: the result must exist, be finite,
+        satisfy 0 <= |r| < |b|, and carry the sign of the dividend. A range, not
+        a list -- the rule this project wrote after a finiteness patch passed its
+        own chosen values while destroying a whole band of correct ones.
+  ---------------------------------------------------------------------------- }
+procedure CheckFloatRemainder;
+var
+  ra, rb: TValue;
+  e: TPhosphorError;
+  seed: QWord;
+  k, bad, above53: Integer;
+  a, b, oracle: Double;
+  ia, ib: Int64;
+
+  function NextRaw: QWord;
+  begin
+    // xorshift64*, so the sweep is the same numbers on both platforms
+    seed := seed xor (seed shr 12);
+    seed := seed xor (seed shl 25);
+    seed := seed xor (seed shr 27);
+    Result := seed * QWord(2685821657736338717);
+  end;
+
+  { One named case: both operands and the expected answer as IEEE patterns. }
+  procedure ModBits(AA, AB, AWant: QWord; const AName: String);
+  var v: TValue; er: TPhosphorError; got: String;
+  begin
+    er := ValMod(ValDouble(FromBits(AA)), ValDouble(FromBits(AB)), v);
+    if IsError(er) then got := 'error ' + er.Message
+    else if v.Kind <> vkDouble then got := 'not a double'
+    else got := IntToHex(BitsOf(v.Num), 16) + ' = ' + ValToStr(v);
+    Report((not IsError(er)) and (v.Kind = vkDouble) and (BitsOf(v.Num) = AWant),
+           AName + ' (wanted ' + IntToHex(AWant, 16) + ', got ' + got + ')');
+  end;
+
+begin
+  Stage := 'the float remainder';
+
+  { (1) The four cases from the report, plus the boundaries of the format.
+    Every expected pattern here is C/Python fmod's answer for the same two
+    IEEE patterns; none of them was read off this engine. }
+  ModBits(QWord($4341C37937E08000), QWord($4008000000000000),
+          QWord($3FF0000000000000), '1e16 mod 3 = 1, not 0');
+  ModBits(QWord($3FF8000000000000), QWord($01A56E1FC2F8F359),
+          QWord($018D87654EA9F100), '1.5 mod 1e-300 = 3.4447797920595673e-301');
+  ModBits(QWord($6974E718D7D7625A), QWord($16687E92154EF7AC),
+          QWord($16547CB1E27E03C0), '1e200 mod 1e-200 = 4.18199169208316e-201');
+  ModBits(QWord($4008000000000000), QWord($3FB999999999999A),
+          QWord($3FB999999999998E), '3 mod 0.1 = 0.09999999999999984, not 0');
+  ModBits(QWord($7FE1CCF385EBC8A0), QWord($000730D67819E8D2),
+          QWord($00028401CF53D610), '1e308 mod 1e-308 = 3.498445546245627e-309');
+  ModBits(QWord($4630000000000000), QWord($4008000000000000),
+          QWord($3FF0000000000000), '2^100 mod 3 = 1');
+  ModBits(QWord($401E000000000000), QWord($4000000000000000),
+          QWord($3FF8000000000000), '7.5 mod 2 = 1.5 (the ordinary case)');
+  { The sign of a zero remainder follows the dividend, as fmod's does. It is
+    pinned as BITS because that is the only place the difference is visible:
+    ValToStr spells -0.0 as "0", so no golden anywhere can see it. }
+  ModBits(QWord($C01E000000000000), QWord($4004000000000000),
+          QWord($8000000000000000), '-7.5 mod 2.5 is a negative zero');
+  { The widest and narrowest the format goes: MaxDouble against the smallest
+    denormal is ~2098 halvings, the longest this can ever run. }
+  ModBits(QWord($7FEFFFFFFFFFFFFF), QWord($0000000000000001),
+          QWord($0000000000000000), 'MaxDouble mod the smallest denormal = 0');
+  ModBits(QWord($7FEFFFFFFFFFFFFF), QWord($4008000000000000),
+          QWord($4000000000000000), 'MaxDouble mod 3 = 2');
+  ModBits(QWord($0000000000000001), QWord($7FEFFFFFFFFFFFFF),
+          QWord($0000000000000001), 'the smallest denormal mod MaxDouble is itself');
+
+  { (2) THE INT ORACLE. Two integral Doubles, answered by the Double branch, must
+    agree with the same two numbers answered by the int% branch -- which is
+    `A.Int mod B.Int`, a machine instruction with no rounding in it. }
+  seed := QWord(88172645463325252);
+  bad := 0;
+  above53 := 0;
+  for k := 1 to 4000 do
+  begin
+    { The magnitude is built and then signed by hand: FPC's `shr` is a LOGICAL
+      shift even on a signed type, so shifting a negative Int64 would hand back a
+      large positive one and the sweep would never see a negative dividend.
+
+      THE DIVIDEND IS KEPT BIG ON PURPOSE -- shifted by at most 7, so it sits
+      between 2^54 and 2^62 and every one of these pairs is in the band where
+      the old formula cancelled to 0. A first draft drew both operands from the
+      whole range and only 523 of 4000 landed above 2^53; the sweep still caught
+      the defect, but most of it was measuring nothing, and the count assertion
+      below is there so a future edit cannot quietly shrink it again. The DIVISOR
+      spans the whole range, which is what varies the number of halvings. }
+    ia := Int64(NextRaw and QWord($3FFFFFFFFFFFFFFF)) shr Integer(NextRaw mod 8);
+    if (NextRaw and 1) <> 0 then ia := -ia;
+    ib := Int64(NextRaw and QWord($3FFFFFFFFFFFFFFF)) shr Integer(NextRaw mod 62);
+    if (NextRaw and 1) <> 0 then ib := -ib;
+    if ib = 0 then ib := 3;
+    a := ia;
+    b := ib;
+    { Re-read what the Doubles actually hold: above 2^53 the conversion rounds,
+      and the oracle has to be asked about the number the Double IS. }
+    if not TryD2I(a, ia) then Continue;
+    if not TryD2I(b, ib) then Continue;
+    if ib = 0 then Continue;
+    if Abs(a) > Pow2_53 then Inc(above53);
+    e := ValMod(ValDouble(a), ValDouble(b), ra);
+    if IsError(e) then begin Inc(bad); Continue; end;
+    e := ValMod(ValInt(ia), ValInt(ib), rb);
+    if IsError(e) then begin Inc(bad); Continue; end;
+    { ASSIGNED, NEVER `Double(rb.Int)`: a typecast between two 8-byte types
+      reinterprets the bytes instead of converting the number, and the check
+      would then be comparing a remainder against a bit pattern. }
+    oracle := rb.Int;
+    if (ra.Kind <> vkDouble) or (rb.Kind <> vkInt) or (ra.Num <> oracle) then
+      Inc(bad);
+  end;
+  Report(bad = 0, 'the Double branch agrees with the int% branch on 4000 ' +
+                  'integral pairs (' + IntToStr(bad) + ' disagreed)');
+  { A sweep that never reached the interesting magnitudes would pass on the old
+    code too, so the sweep states how far it went. }
+  Report(above53 > 3500, 'and nearly all of that sweep was above 2^53 (' +
+                         IntToStr(above53) + ' of 4000)');
+
+  { (3) THE DEFINITION, over the whole exponent range including subnormals. }
+  seed := QWord(1234567891234567);
+  bad := 0;
+  for k := 1 to 4000 do
+  begin
+    { Any finite, non-zero pattern: the exponent field is forced into 1..2045 so
+      neither operand is zero, infinite or a NaN, and the sign and fraction are
+      left as they fall. Subnormals are reached by the divisor sweep below. }
+    a := FromBits((NextRaw and QWord($800FFFFFFFFFFFFF)) or
+                  (QWord((NextRaw mod 2045) + 1) shl 52));
+    b := FromBits((NextRaw and QWord($800FFFFFFFFFFFFF)) or
+                  (QWord((NextRaw mod 2045) + 1) shl 52));
+    e := ValMod(ValDouble(a), ValDouble(b), ra);
+    if IsError(e) or (ra.Kind <> vkDouble) or (not IsFiniteD(ra.Num)) then
+    begin
+      Inc(bad);
+      Continue;
+    end;
+    if Abs(ra.Num) >= Abs(b) then Inc(bad)
+    else if (ra.Num <> 0) and ((ra.Num < 0) <> (a < 0)) then Inc(bad);
+  end;
+  Report(bad = 0, '0 <= |r| < |b| and sign(r) = sign(a) over 4000 pairs ' +
+                  'spanning the exponent range (' + IntToStr(bad) + ' broke it)');
+
+  { The same definition with a SUBNORMAL divisor, which is where the scaling has
+    to stop halving. A separate sweep because the pattern generator above never
+    produces one. }
+  seed := QWord(99194853094755497);
+  bad := 0;
+  for k := 1 to 2000 do
+  begin
+    a := FromBits((NextRaw and QWord($800FFFFFFFFFFFFF)) or
+                  (QWord((NextRaw mod 2045) + 1) shl 52));
+    b := FromBits((NextRaw and QWord($800FFFFFFFFFFFFF)));   // exponent 0
+    if b = 0 then Continue;
+    e := ValMod(ValDouble(a), ValDouble(b), ra);
+    if IsError(e) or (ra.Kind <> vkDouble) or (not IsFiniteD(ra.Num)) then
+    begin
+      Inc(bad);
+      Continue;
+    end;
+    if Abs(ra.Num) >= Abs(b) then Inc(bad)
+    else if (ra.Num <> 0) and ((ra.Num < 0) <> (a < 0)) then Inc(bad);
+  end;
+  Report(bad = 0, 'and with a SUBNORMAL divisor over 2000 pairs (' +
+                  IntToStr(bad) + ' broke it)');
+
+  { Zero is still division by zero, and the int% path is untouched. }
+  e := ValMod(ValDouble(1.5), ValDouble(0.0), ra);
+  CheckErr(e, peDivByZero, 'x mod 0.0 is still division by zero');
+  e := ValMod(ValInt(17), ValInt(5), ra);
+  CheckInt(ra, 2, 'the int% path still answers 17 mod 5');
 end;
 
 var
@@ -802,6 +1048,7 @@ begin
     CheckNonFinite;
     CheckFiniteStillWorks;
     CheckPowOverTheWholeRange;
+    CheckFloatRemainder;
     CheckOperatorsWithOverflowUnmasked;
     CheckLibraryDoorOnNonFinite;
   except

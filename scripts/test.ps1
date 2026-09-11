@@ -477,5 +477,113 @@ else {
     Write-Host ("        empty said: {0}" -f ($nText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
 }
 
+# O. A SOURCE FILE IS NOT BYTECODE BECAUSE ITS FIRST THREE LETTERS ARE PBC.
+#    IsBytecode read three bytes and answered on 'P','B','C' alone, so every .bas
+#    whose first line begins with an uppercase identifier starting PBC -- PBCount,
+#    PBCmax, PBC$ -- was handed to the bytecode reader and refused with
+#    "unsupported .pbc format version 111": the code point of the fourth SOURCE
+#    character reported as a format version, which says nothing about what is
+#    wrong. `pack` lost its own helpful refusal at the same door, and
+#    phosphortest, which never sniffs, ran the very same file -- two shipped
+#    hosts disagreeing about one file.
+#
+#    The real header is the magic PLUS a version byte, and no text file carries a
+#    control character there. "A control character" alone is not the whole rule
+#    either: TAB, LF and CR are 9, 10 and 13, and `PBC<TAB>= 3` and a line that is
+#    just `PBC` are both valid BASIC. Shapes 3 and 4 are those two, and on Windows
+#    shape 4's fourth byte is CR where on Linux it is LF -- the same file asks a
+#    different half of the rule on each OS, which is the honest thing about it.
+#
+#    Shapes 5 to 7 are the MIRROR and matter as much: a genuine .pbc must still be
+#    recognised as one, or a sniff that answered "source" to everything would pass
+#    1 to 4 and break running and packing bytecode entirely.
+$sniffDir = Join-Path $tmp 'phosphor_sniff'
+New-Item -ItemType Directory -Force $sniffDir | Out-Null
+$sniffOut = Join-Path $tmp 'phosphor_sniff.txt'
+$okO = $true
+
+function Test-SniffRuns([string] $shape, [string] $file, [string] $want) {
+    cmd /c "`"$exe`" `"$file`" < NUL > `"$sniffOut`" 2>&1"
+    $code = $LASTEXITCODE
+    $text = Get-Content -Raw $sniffOut
+    if ($null -eq $text) { $text = '' }
+    # 'format version' is the tell of the old defect, so it is asserted ABSENT:
+    # a refusal for the right reason and one for this reason are not the same.
+    $ok = ($code -eq 0) -and ($text -like "*$want*") -and ($text -notlike '*format version*')
+    if (-not $ok) {
+        Write-Host ("        {0}: exit {1}, said '{2}'" -f $shape, $code,
+                    ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    }
+    return $ok
+}
+
+$sniff1 = Join-Path $sniffDir 'pbcount.bas'
+Set-Content -LiteralPath $sniff1 -Encoding ascii -Value @(
+    'PBCount = 3',
+    'println "count is " + str$(PBCount)'
+)
+$sniff2 = Join-Path $sniffDir 'pbcdollar.bas'
+Set-Content -LiteralPath $sniff2 -Encoding ascii -Value @(
+    'PBC$ = "hello there"',
+    'println PBC$'
+)
+$sniff3 = Join-Path $sniffDir 'pbctab.bas'
+Set-Content -LiteralPath $sniff3 -Encoding ascii -Value @(
+    "PBC`t= 3",
+    'println "tabbed is " + str$(PBC)'
+)
+$sniff4 = Join-Path $sniffDir 'pbcbare.bas'
+Set-Content -LiteralPath $sniff4 -Encoding ascii -Value @(
+    'PBC',
+    'println "a bare pbc line"'
+)
+$okO = (Test-SniffRuns 'PBCount = 3'      $sniff1 'count is 3')      -and $okO
+$okO = (Test-SniffRuns 'PBC$ = "..."'     $sniff2 'hello there')     -and $okO
+$okO = (Test-SniffRuns 'PBC<TAB>= 3'      $sniff3 'tabbed is 3')     -and $okO
+$okO = (Test-SniffRuns 'a bare PBC line'  $sniff4 'a bare pbc line') -and $okO
+
+# 5. `pack` must give its OWN refusal for source, the one F already pins, and not
+#    a version number -- IsBytecode answering True took that branch away.
+cmd /c "`"$exe`" pack `"$sniff1`" `"$(Join-Path $sniffDir 'never.exe')`" > `"$sniffOut`" 2>&1"
+$o5code = $LASTEXITCODE
+$o5text = Get-Content -Raw $sniffOut
+if ($null -eq $o5text) { $o5text = '' }
+if (($o5code -ne 2) -or ($o5text -notlike '*not a .pbc*') -or ($o5text -like '*format version*')) {
+    Write-Host ("        pack of PBC-prefixed source: exit {0}, said '{1}'" -f $o5code,
+                ($o5text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    $okO = $false
+}
+
+# 6/7. THE MIRROR. The same program COMPILED is bytecode, and must still be read
+#      as bytecode -- run directly, and packed into a standalone executable.
+$sniffPbc = Join-Path $sniffDir 'pbcount.pbc'
+cmd /c "`"$exe`" compile `"$sniff1`" `"$sniffPbc`" > `"$sniffOut`" 2>&1"
+if (($LASTEXITCODE -ne 0) -or (-not (Test-Path $sniffPbc))) {
+    Write-Host '        compiling the PBC-prefixed source did not produce a .pbc' -ForegroundColor DarkGray
+    $okO = $false
+} else {
+    $okO = (Test-SniffRuns 'the .pbc compiled from it' $sniffPbc 'count is 3') -and $okO
+}
+
+$sniffExe = Join-Path $sniffDir 'pbcount_packed.exe'
+cmd /c "`"$exe`" pack `"$sniffPbc`" `"$sniffExe`" > `"$sniffOut`" 2>&1"
+if (($LASTEXITCODE -ne 0) -or (-not (Test-Path $sniffExe))) {
+    Write-Host '        pack no longer accepts a genuine .pbc' -ForegroundColor DarkGray
+    $okO = $false
+} else {
+    cmd /c "`"$sniffExe`" < NUL > `"$sniffOut`" 2>&1"
+    $o7code = $LASTEXITCODE
+    $o7text = Get-Content -Raw $sniffOut
+    if ($null -eq $o7text) { $o7text = '' }
+    if (($o7code -ne 0) -or ($o7text -notlike '*count is 3*')) {
+        Write-Host ("        the packed .pbc: exit {0}, said '{1}'" -f $o7code,
+                    ($o7text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+        $okO = $false
+    }
+}
+
+if ($okO) { Write-Host "PASS  O:PBC-prefixed source (read as the source it is, and a real .pbc still as bytecode)" -ForegroundColor Green }
+else { Write-Host "FAIL  O:a source file whose first line starts PBC is taken for bytecode" -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
-    $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN) { exit 0 } else { exit 1 }
+    $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO) { exit 0 } else { exit 1 }

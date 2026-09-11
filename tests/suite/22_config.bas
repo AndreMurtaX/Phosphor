@@ -117,6 +117,48 @@ cfg_sets@(a@, "later", "value")
 h@ = cfg_open@(g$)
 assert_eq(cfg_gets$(h@, "later", "not yet"), "value", "autosave on writes it through")
 
+test_case("config/a number comes back as the number that went in")
+rem cfg_setn@/cfg_setns@ stored through FloatToStr, which formats 15 significant
+rem digits where an IEEE double needs 17 to round-trip. The user id below was
+rem written as 1.23456789012346E15 and read back as 1234567890123460 -- three
+rem larger, deterministically, on every machine, which is exactly why a
+rem byte-exact golden over an .ini file never noticed.
+rem
+rem The differences are asserted to be EXACTLY zero rather than comparing the
+rem values: assert_eq's numeric form allows a relative 1e-12, and the old error
+rem here was 2.4e-15, so the obvious spelling of this test passes against the
+rem defect it was written for.
+id% = 1234567890123457
+cfg_setns@(c@, "userid", id%)
+assert_eq(cfg_getns(c@, "userid", -1) - 1234567890123457, 0, "an exact integer past 15 digits survives")
+
+rem 0.1+0.2 is the classic double that is not 0.3, and its error is far below
+rem what a tolerance would see, so this one is compared BIT FOR BIT.
+frac = 0.1 + 0.2
+cfg_setn@(c@, "Math", "sum", frac)
+back = cfg_getn(c@, "Math", "sum", 0)
+bits@ = buffer_new@(16)
+x = buffer_setdbl(bits@, 1, frac)
+x = buffer_setdbl(bits@, 9, back)
+samebits = 1
+for i = 1 to 8
+  if buffer_get(bits@, i) <> buffer_get(bits@, i + 8) then samebits = 0
+next
+assert_eq(samebits, 1, "and so do the low bits of a fraction")
+x = buffer_free(bits@)
+
+rem through the FILE, not merely through the handle's own memory
+cfg_setn@(c@, "Window", "height", 768)
+cfg_save(c@)
+k@ = cfg_open@(f$)
+assert_eq(cfg_getns(k@, "userid", -1) - 1234567890123457, 0, "the same after a save and a reopen")
+assert_eq(cfg_getn(k@, "Math", "sum", 0) - frac, 0, "for the fraction too")
+
+rem A value that never needed the extra digits is still written the short,
+rem readable way -- the repair must not turn every setting into an exponent.
+inifile$ = file_readalltext$(f$)
+assert_true(instr(inifile$, "height=768"), "an ordinary setting is written in full")
+
 test_case("config/path")
 rem The platform's configuration directory. Its value differs per system,
 rem so what is asserted is that there is one.

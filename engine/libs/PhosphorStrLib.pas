@@ -494,32 +494,172 @@ begin
   Result := (hits * delta <= High(Integer)) and (AOut <= High(Integer));
 end;
 
-function DoReplace(const A: array of TValue; const AFn: String; AFlags: TReplaceFlags;
+{ THE ONE CASE RULE FOR THE "ignoring case" FAMILY -- containstext, startstext,
+  endstext, strcmpi and replacetext$ -- written down here because it used to be
+  two rules, and they disagreed.
+
+  str.md defines all five by reference to a case-sensitive twin ("as containsstr,
+  ignoring case", and so on) and puts no ASCII restriction on any of them, the way
+  it deliberately does state one for ucase$/lcase$. They were nevertheless folded
+  by two incompatible engines. startstext/endstext/strcmpi went through
+  SysUtils.SameText and CompareText, whose table maps a..z and nothing else --
+  rtl/objpas/sysutils/sysstr.inc reads, literally, `if Chr1 in [97..122] then
+  dec(Chr1,32)`. containstext (StrUtils.ContainsText) and replacetext$
+  (StringReplace with rfIgnoreCase) went through AnsiUpperCase, which is
+  `widestringmanager.UpperAnsiStringProc` (sysstr.inc:552-555) -- a hook the HOST
+  PLATFORM installs. So an E-acute word CONTAINED its own lower-case spelling and
+  did not START with it: 313 of the 3152 cased codepoints in 128..66000 got
+  opposite verdicts from the two halves, the first six of them a-grave through
+  a-ring. And the folding half was not the same function on Windows as on Linux,
+  where nothing installs a Unicode-capable manager unless a program asks for
+  cwstring -- so the same script did not have to answer the same on the two
+  operating systems this project ships on.
+
+  ONE RULE NOW, AND IT IS THE ONE THIS UNIT ALREADY OWNS: Utf8CaseU, the
+  aucase$/alcase$ engine, reached through FoldText below. There is no second
+  implementation -- the family folds by calling the very function aucase$ calls.
+  Its mapping is TCharacter.ToUpper, which reads GetProps out of the RTL's
+  compiled-in `unicodedata` tables (rtl/objpas/character.pas:832-837): no
+  widestring manager, no OS call, no locale. That is why the two operating
+  systems answer identically, and a probe that folded all 65536 BMP codepoints
+  and checksummed the result was run on both to confirm it rather than assume it.
+
+  WHY THE BYTE TESTS BELOW ARE SOUND ON THE FOLDED FORMS. Utf8CaseU emits exactly
+  one codepoint per input codepoint and its output is well-formed UTF-8; UTF-8 is
+  self-synchronising, so a valid sequence can only be found at a character
+  boundary. A prefix, suffix or substring test on the folded BYTES therefore says
+  exactly what the same test on the folded CHARACTERS would say.
+
+  WHAT IT COSTS. An uppercased copy of each operand -- which containstext and
+  replacetext$ were already paying inside the RTL, on both operands, for every
+  call. It is charged to the budget inside Utf8CaseU, and a refusal is the
+  ordinary peLimit these functions already carry for their search cost. }
+function FoldText(const S: String; out AAllowed: Boolean): String; forward;
+
+{ One codepoint forward from a byte position in a well-formed UTF-8 string:
+  step off the lead byte, then over its continuation bytes. Bounded by
+  Length(S), which is already in memory. }
+function NextCp(const S: String; APos: Integer): Integer;
+begin
+  Result := APos + 1;
+  while (Result <= Length(S)) and ((Ord(S[Result]) and $C0) = $80) do Inc(Result);
+end;
+
+{ AND FOLD ONLY WHAT CAN DECIDE THE QUESTION. startstext, endstext and strcmpi
+  used to answer in a handful of byte comparisons; folding both operands whole to
+  give them one case rule measured 57 s where the old code took 0.055 s, on
+  `startstext(32-MB string, "AAAAA")`, and 28 s for the matching strcmpi. That is
+  not slowness, it is a refusal under any TimeoutMs a host installs -- the very
+  class of damage this patch exists to remove.
+
+  Only as much of the text as the NEEDLE is long can decide a prefix or a suffix
+  test, and only as much as the SHORTER operand can decide an ordering, because
+  the fold emits exactly one codepoint per input codepoint. These two walk to
+  that boundary and no further. Neither allocates, and the pad family's CpLeft is
+  not used for it: that one builds an Int64 per input BYTE, which is the wrong
+  price for a needle-sized question.
+
+  CpWalk: how many codepoints S holds, counted no further than ALimit, and in
+  AEnd the byte position one past them. }
+procedure CpWalk(const S: String; ALimit: Integer; out ACount, AEnd: Integer);
+var p, n: Integer;
+begin
+  { The LOOP is bounded by the string, and the limit only cuts it shorter: that
+    is why the limit is tested inside and not in the `while`. Written the other
+    way round -- a condition naming a count that came from the program -- it
+    reads to check-budget.py as a loop over a script-supplied quantity, which is
+    exactly the shape that check exists to stop, and it could not tell the two
+    apart from the outside. }
+  p := 1;
+  n := 0;
+  while p <= Length(S) do
+  begin
+    if n >= ALimit then Break;
+    p := NextCp(S, p);
+    Inc(n);
+  end;
+  ACount := n;
+  AEnd := p;
+end;
+
+{ CpSuffixStart: the byte position at which the last ACount codepoints of S
+  begin -- the backward twin, so endstext costs the needle and not the text.
+  Answers 1 when S is shorter than ACount characters. }
+function CpSuffixStart(const S: String; ACount: Integer): Integer;
+var n, p: Integer;
+begin
+  p := Length(S) + 1;
+  n := 0;
+  while p > 1 do                     // bounded by the string; see CpWalk
+  begin
+    if n >= ACount then Break;
+    Dec(p);
+    while (p > 1) and ((Ord(S[p]) and $C0) = $80) do Dec(p);
+    Inc(n);
+  end;
+  Result := p;
+end;
+
+function DoReplace(const A: array of TValue; const AFn: String; AIgnoreCase: Boolean;
                    out E: TPhosphorError): TValue;
 var
   outlen: Int64;
+  hay, needle, fh, fn, r: String;
+  ok, ok2: Boolean;
+  fp, target, fcur, hcur, seg: Integer;
 begin
   E := NoError();
-  if not ReplaceFitsRtl(s0(A), A[1].Str, A[2].Str, outlen) then
+  hay := s0(A); needle := A[1].Str;
+  fh := hay; fn := needle;
+  if AIgnoreCase then
+  begin
+    { replacetext$ cannot just hand rfIgnoreCase to StringReplace any more: that
+      folds with AnsiUpperCase, the platform hook this family has been taken off.
+      It folds both operands here instead and searches the FOLDED bytes, then
+      copies the ORIGINAL bytes back out around each match -- the fold is one
+      codepoint per codepoint, so the two strings advance in step, one character
+      at a time, and every stretch that did not match keeps the text's own
+      spelling. The size guard and the price are measured on the folded pair,
+      because that is the search that is actually going to run. }
+    fh := FoldText(hay, ok);
+    fn := FoldText(needle, ok2);
+    if not (ok and ok2) then begin E := BudgetRefusal(AFn); Exit(ValStr('')); end;
+  end;
+  if not ReplaceFitsRtl(fh, fn, A[2].Str, outlen) then
   begin
     E := MakeError(peIntOverflow, AFn + ': the result would be ' + IntToStr(outlen) +
          ' bytes, past the ' + IntToStr(High(Integer)) +
          ' this replace can address');
     Exit(ValStr(''));
   end;
-  if not BudgetAllows(ReplaceCost(s0(A), A[1].Str, A[2].Str,
-                                  rfIgnoreCase in AFlags)) then
+  if not BudgetAllows(ReplaceCost(fh, fn, A[2].Str, AIgnoreCase)) then
   begin
     E := BudgetRefusal(AFn);
     Exit(ValStr(''));
   end;
-  Result := ValStr(StringReplace(s0(A), A[1].Str, A[2].Str, AFlags));
+  if not AIgnoreCase then
+    Exit(ValStr(StringReplace(hay, needle, A[2].Str, [rfReplaceAll])));
+  if fn = '' then Exit(ValStr(hay));       // an empty needle answers the text unchanged
+  r := ''; fcur := 1; hcur := 1; seg := 1;
+  fp := PosEx(fn, fh, 1);
+  while fp > 0 do
+  begin
+    while fcur < fp do
+    begin fcur := NextCp(fh, fcur); hcur := NextCp(hay, hcur); end;
+    r := r + Copy(hay, seg, hcur - seg) + A[2].Str;
+    target := fp + Length(fn);
+    while fcur < target do
+    begin fcur := NextCp(fh, fcur); hcur := NextCp(hay, hcur); end;
+    seg := hcur;
+    fp := PosEx(fn, fh, target);
+  end;
+  Result := ValStr(r + Copy(hay, seg, Length(hay) - seg + 1));
 end;
 
 function f_replacestr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin Result := DoReplace(A, 'replacestr$', [rfReplaceAll], E); end;
+begin Result := DoReplace(A, 'replacestr$', False, E); end;
 function f_replacetext(const A: array of TValue; out E: TPhosphorError): TValue;
-begin Result := DoReplace(A, 'replacetext$', [rfReplaceAll, rfIgnoreCase], E); end;
+begin Result := DoReplace(A, 'replacetext$', True, E); end;
 
 function f_countstr(const A: array of TValue; out E: TPhosphorError): TValue;
 var sub: String; c, p: Integer;
@@ -550,16 +690,52 @@ function f_endsstr(const A: array of TValue; out E: TPhosphorError): TValue;
 var t, x: String;
 begin E := NoError(); t := s0(A); x := A[1].Str;
   Result := ValInt(Ord((Length(x) <= Length(t)) and (Copy(t, Length(t) - Length(x) + 1, Length(x)) = x))); end;
-function f_startstext(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(SameText(Copy(s0(A), 1, Length(A[1].Str)), A[1].Str))); end;
-function f_endstext(const A: array of TValue; out E: TPhosphorError): TValue;
-var t, x: String;
-begin E := NoError(); t := s0(A); x := A[1].Str;
-  Result := ValInt(Ord((Length(x) <= Length(t)) and SameText(Copy(t, Length(t) - Length(x) + 1, Length(x)), x))); end;
+{ The *text predicates all fold through FoldText -- the one case rule, stated
+  above DoReplace. SameText, which used to stand here, folds a..z only.
 
+  Each folds the needle and only the stretch of the TEXT that can answer: the
+  first k characters for a prefix, the last k for a suffix, where k is the
+  needle's own length in characters. The fold preserves that count, so the two
+  folded strings are compared WHOLE -- a text with fewer than k characters folds
+  to fewer than k and simply is not equal. See CpWalk for the measurement that
+  made the bound necessary. }
+function f_startstext(const A: array of TValue; out E: TPhosphorError): TValue;
+var t, ft, fx: String; k, n, e2: Integer; ok, ok2: Boolean;
+begin
+  E := NoError();
+  t := s0(A);
+  k := Utf8Len(A[1].Str);
+  CpWalk(t, k, n, e2);
+  ft := FoldText(Copy(t, 1, e2 - 1), ok);
+  fx := FoldText(A[1].Str, ok2);
+  if not (ok and ok2) then begin E := BudgetRefusal('startstext'); Exit(ValInt(0)); end;
+  Result := ValInt(Ord(ft = fx));
+end;
+function f_endstext(const A: array of TValue; out E: TPhosphorError): TValue;
+var t, ft, fx: String; k, st: Integer; ok, ok2: Boolean;
+begin
+  E := NoError();
+  t := s0(A);
+  k := Utf8Len(A[1].Str);
+  st := CpSuffixStart(t, k);
+  ft := FoldText(Copy(t, st, Length(t) - st + 1), ok);
+  fx := FoldText(A[1].Str, ok2);
+  if not (ok and ok2) then begin E := BudgetRefusal('endstext'); Exit(ValInt(0)); end;
+  Result := ValInt(Ord(ft = fx));
+end;
+
+{ isnumeric ANSWERS FOR THE VALUE, NOT FOR THE PARSE. TryStrToFloat succeeds on
+  "inf", "nan" and on an out-of-range exponent like "1e999", handing back a
+  non-finite Double -- and this function used to throw that Double away and report
+  1. But str.md's documented idiom is to guard a val() with isnumeric, and val()
+  cannot return a non-finite Double: the engine's finiteness gate (PhosphorValue)
+  turns one into `val has no finite result for those arguments`. So the guard said
+  yes and the call it guarded faulted, and an unguarded program exited 1 with no
+  output at all. A string isnumeric approves must be one val can hand back. }
 function f_isnumeric(const A: array of TValue; out E: TPhosphorError): TValue;
 var d: Double;
-begin E := NoError(); Result := ValInt(Ord((s0(A) <> '') and TryStrToFloat(Trim(s0(A)), d, InvFS))); end;
+begin E := NoError();
+  Result := ValInt(Ord((s0(A) <> '') and TryStrToFloat(Trim(s0(A)), d, InvFS) and IsFiniteD(d))); end;
 function f_isalpha(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: Integer; ok: Boolean;
 begin
@@ -753,6 +929,16 @@ begin
   Result := Utf8CaseU(S, False, AAllowed);
 end;
 
+{ THE FOLD THE "ignoring case" FAMILY USES, and the whole of it: it is aucase$'s
+  own engine, not a second copy of the rule. The long note above DoReplace says
+  why there is exactly one, why it is this one, and why Windows and Linux answer
+  the same. AAllowed False means the budget refused the fold, and the caller turns
+  that into the peLimit it would have raised for the search. }
+function FoldText(const S: String; out AAllowed: Boolean): String;
+begin
+  Result := Utf8UpperU(S, AAllowed);
+end;
+
 function SignI(c: Integer): Integer; inline;
 begin if c < 0 then Result := -1 else if c > 0 then Result := 1 else Result := 0; end;
 
@@ -925,19 +1111,51 @@ begin
 end;
 
 function f_containstext(const A: array of TValue; out E: TPhosphorError): TValue;
+var ft, fx: String; ok, ok2: Boolean;
 begin
   E := NoError();
-  // ContainsText upper-cases BOTH strings and then searches, so it is the naive
-  // product plus two copies of the haystack. Same bound, same rule.
+  // The fold upper-cases BOTH strings and then searches, so it is the naive
+  // product plus two copies of the haystack. Same bound, same rule -- and the
+  // same shape StrUtils.ContainsText had here before, only folding by this
+  // unit's rule instead of by the platform's.
   if not BudgetAllows(SearchCost(s0(A), A[1].Str, True)) then
   begin E := BudgetRefusal('containstext'); Exit(ValInt(0)); end;
-  Result := ValInt(Ord(ContainsText(s0(A), A[1].Str)));
+  ft := FoldText(s0(A), ok); fx := FoldText(A[1].Str, ok2);
+  if not (ok and ok2) then begin E := BudgetRefusal('containstext'); Exit(ValInt(0)); end;
+  Result := ValInt(Ord(Pos(fx, ft) > 0));
 end;
 
 function f_strcmp(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(SignI(CompareStr(s0(A), A[1].Str))); end;
+{ strcmpi folds only as far as the comparison can reach. CompareStr is decided
+  either at the first differing byte -- which lies inside the first min(length)
+  CHARACTERS of both, the fold being one codepoint per codepoint -- or by the
+  two character counts. So both counts are walked to a limit of one more than the
+  shorter operand's BYTE length, which is an upper bound on the shorter
+  character count and therefore leaves the shorter operand's count EXACT while
+  capping only the longer one, and capping it above the other. Then only that
+  many characters of each are folded.
+
+  Without the bound, strcmpi(32-MB string, "x") folded 32 MB to answer a question
+  the first character settles: 28 s against 0.057 s, measured. }
 function f_strcmpi(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(SignI(CompareText(s0(A), A[1].Str))); end;
+var sa, sb, fa, fb: String; lim, ka, kb, k, ea, eb, c: Integer; ok, ok2: Boolean;
+begin
+  E := NoError();
+  sa := s0(A); sb := A[1].Str;
+  if Length(sa) < Length(sb) then lim := Length(sa) + 1 else lim := Length(sb) + 1;
+  CpWalk(sa, lim, ka, ea);
+  CpWalk(sb, lim, kb, eb);
+  if ka < kb then k := ka else k := kb;
+  CpWalk(sa, k, c, ea);
+  CpWalk(sb, k, c, eb);
+  fa := FoldText(Copy(sa, 1, ea - 1), ok);
+  fb := FoldText(Copy(sb, 1, eb - 1), ok2);
+  if not (ok and ok2) then begin E := BudgetRefusal('strcmpi'); Exit(ValInt(0)); end;
+  c := CompareStr(fa, fb);
+  if c = 0 then c := ka - kb;
+  Result := ValInt(SignI(c));
+end;
 
 function f_insert(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, ins: String; pos, n: Integer;
@@ -947,12 +1165,25 @@ begin
   if pos > n + 1 then pos := n + 1;
   Result := ValStr(CpLeft(s, pos - 1) + ins + CpRight(s, n - (pos - 1)));
 end;
+{ CLAMP BEFORE SUBTRACTING -- the fix f_mid already carries, applied to its two
+  siblings. ArgI32 SATURATES, so delete$(s$, 2147483647, 2147483647) arrives with
+  pos and cnt both at High(Integer); `n - (pos - 1) - cnt` is then Integer
+  arithmetic whose true value, -4294967288 for a five-character string, wraps
+  modulo 2^32 to +8. The `if rem < 0` guard below therefore never fired, and
+  CpRight was asked for eight characters of a five-character string -- which
+  answers the WHOLE string, so delete$ returned its input TWICE and stuffstring$
+  returned it twice with the replacement in the middle. A delete cannot make a
+  string longer. No position past the end and no count past the length can mean
+  anything, so both are clamped to what the string can hold before they are used,
+  and the subtraction that follows is then bounded by n on every term. }
 function f_delete(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; pos, cnt, n, rem: Integer;
 begin
   E := NoError(); s := s0(A); pos := ArgI32(A[1]); cnt := ArgI32(A[2]); n := CpLen(s);
   if pos < 1 then pos := 1;
+  if pos > n + 1 then pos := n + 1;
   if cnt < 0 then cnt := 0;
+  if cnt > n then cnt := n;
   rem := n - (pos - 1) - cnt; if rem < 0 then rem := 0;
   Result := ValStr(CpLeft(s, pos - 1) + CpRight(s, rem));
 end;
@@ -961,7 +1192,9 @@ var s, repl: String; start, len, n, rem: Integer;
 begin
   E := NoError(); s := s0(A); start := ArgI32(A[1]); len := ArgI32(A[2]); repl := A[3].Str; n := CpLen(s);
   if start < 1 then start := 1;
+  if start > n + 1 then start := n + 1;
   if len < 0 then len := 0;
+  if len > n then len := n;
   rem := n - (start - 1) - len; if rem < 0 then rem := 0;
   Result := ValStr(CpLeft(s, start - 1) + repl + CpRight(s, rem));
 end;

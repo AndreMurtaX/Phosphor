@@ -14,9 +14,10 @@ with `<`, or printed as a number without asking this library's permission.
 
 The consequence a caller has to hold in mind is that **there is no empty date**.
 `0` is not "no value", it is 1899-12-30 — so `yearof(0)` answers `1899` rather
-than complaining, and no function here has a "not a date" answer to give. A
-number that came from somewhere untrustworthy is not validated by asking a
-question about it; it is validated before it becomes a date.
+than complaining, and for any number inside `0001-01-01`..`9999-12-31` no
+function here has a "not a date" answer to give. A number that came from
+somewhere untrustworthy is not validated by asking a question about it; it is
+validated before it becomes a date.
 
 The implementation is a thin layer over the RTL's `DateUtils`, deliberately: leap
 years, ISO week numbering, month lengths and the clamp that turns "a year after
@@ -26,8 +27,16 @@ worse than an error: the three parsers (`strtodate`, `strtotime`,
 `strtodatetime`) and the three functions that take a **year or month as a
 number** (`daysinayear`, `daysinamonth`, `weeksinayear`). `daysinamonth(2024, 13)`
 used to index the RTL's month table out of bounds and return `65450` as a clean
-success; it now raises a catchable runtime error naming the value. Everything
-else on this page always answers.
+success; it now raises a catchable runtime error naming the value.
+
+A further family breaks the pass-through the same way and for the same reason, at
+the other end. Nine functions that take a **date** cannot survive the number
+being outside `0001-01-01`..`9999-12-31`, because the RTL's `DecodeDate` answers
+year 0 below that range instead of refusing, and clamps above it. They ask the
+same guard `incmonth` and `incyear` ask, and answer `that number is not a date in
+0001-01-01..9999-12-31`: `daysinmonth`, `daysinyear`, `weeksinyear`,
+`weekoftheyear`, `weekof`, `weekofthemonth`, `dayoftheyear`, `datetostr$` and
+`datetimetostr$`. Everything else on this page always answers.
 
 Text is ISO 8601 and **pinned**, not locale-following: `yyyy-mm-dd`, `hh:nn:ss`,
 `.` for decimals, and English month and day names, on every machine. So a
@@ -65,8 +74,10 @@ Predicates answer the numbers `1` and `0`, not a `?` bool, so they are written
 
 ### Decomposing a date
 
-None of these can fail. Every finite number is *some* date, so a nonsense value
-is taken apart into the nonsense date it names rather than reported as bad.
+Only `dayoftheyear` can fail here, and only for a number outside
+`0001-01-01`..`9999-12-31`. Every number inside the range is *some* date, so a
+nonsense value in it is taken apart into the nonsense date it names rather than
+reported as bad.
 
 | function | what it answers |
 | --- | --- |
@@ -75,7 +86,7 @@ is taken apart into the nonsense date it names rather than reported as bad.
 | `monthoftheyear(d) → num` | the same answer as `monthof` |
 | `dayof(d) → num` | the day of the month, 1–31 |
 | `dayofthemonth(d) → num` | the same answer as `dayof` |
-| `dayoftheyear(d) → num` | the day within the year, 1–366 |
+| `dayoftheyear(d) → num` | the day within the year, 1–366. Refuses a number outside `0001-01-01`..`9999-12-31` rather than answering for a date that does not exist; it used to count day `0` of year `0` |
 | `dayofweek(d) → num` | the weekday counting **Sunday = 1** … Saturday = 7 |
 | `dayoftheweek(d) → num` | the weekday counting **ISO Monday = 1** … Sunday = 7. Three letters from the row above, one from its answer |
 | `hourof(d) → num` | the hour, 0–23 (never 1–12; there is no clock half in this number) |
@@ -91,15 +102,15 @@ is taken apart into the nonsense date it names rather than reported as bad.
 | function | what it answers |
 | --- | --- |
 | `isinleapyear(d) → num` | `1` when `d`'s year is a leap year — 2000 is, by the 400 rule; 1900 is not, by the 100 rule |
-| `daysinmonth(d) → num` | 28–31, for the month `d` falls in. Takes a **date** |
+| `daysinmonth(d) → num` | 28–31, for the month `d` falls in. Takes a **date**, and refuses a number outside `0001-01-01`..`9999-12-31` rather than answering for a date that does not exist — below the range it used to read one element before the RTL's 1–12 month table and answer a fabricated `31` |
 | `daysinamonth(year, month) → num` | 28–31 for a month named by two numbers. A month outside 1–12 or a year outside 1–9999 raises a catchable runtime error (`daysinamonth: 13 is not a month in 1..12`) instead of answering a number |
-| `daysinyear(d) → num` | 365 or 366, for the year `d` falls in |
+| `daysinyear(d) → num` | 365 or 366, for the year `d` falls in. Refuses a number outside `0001-01-01`..`9999-12-31` |
 | `daysinayear(year) → num` | the same, for a year named by number; a year outside 1–9999 is an error, not an answer |
-| `weeksinyear(d) → num` | 52 or 53 ISO weeks, for the year `d` falls in |
+| `weeksinyear(d) → num` | 52 or 53 ISO weeks, for the year `d` falls in. Refuses a number outside `0001-01-01`..`9999-12-31` |
 | `weeksinayear(year) → num` | the same by year number, with the same 1–9999 guard — `weeksinayear(0)` used to raise the RTL's own `EConvertError`, and now raises this library's message |
-| `weekoftheyear(d) → num` | the ISO week number, 1–53. An ISO week belongs to the year that owns most of it, so 2021-01-01 is week **53**, not week 1 — `yearof` and `weekoftheyear` can disagree about which year you are in |
-| `weekof(d) → num` | the same function under a shorter name |
-| `weekofthemonth(d) → num` | which week of its own month the date falls in, counting from 1 — a month reaches 5 whenever its days straddle five week boundaries, as February 2024 does |
+| `weekoftheyear(d) → num` | the ISO week number, 1–53. An ISO week belongs to the year that owns most of it, so 2021-01-01 is week **53**, not week 1 — `yearof` and `weekoftheyear` can disagree about which year you are in. Refuses a number outside `0001-01-01`..`9999-12-31` |
+| `weekof(d) → num` | the same function under a shorter name, with the same refusal |
+| `weekofthemonth(d) → num` | which week of its own month the date falls in, counting from 1 — a month reaches 5 whenever its days straddle five week boundaries, as February 2024 does. Refuses a number outside `0001-01-01`..`9999-12-31` |
 
 ### Building a date from numbers
 
@@ -189,9 +200,9 @@ is `0` whole months.
 
 | function | what it answers |
 | --- | --- |
-| `datetostr$(d) → str` | the date part as `2024-02-29`; the time is dropped |
+| `datetostr$(d) → str` | the date part as `2024-02-29`; the time is dropped. Refuses a number outside `0001-01-01`..`9999-12-31` rather than rendering text `strtodate` would then refuse — below the range it used to answer `0000-00-00`, and above it a clamped `9999-12-31` reported as though it were real |
 | `timetostr$(d) → str` | the time part as `12:00:00`; the date is dropped |
-| `datetimetostr$(d) → str` | both, as `2024-02-29 12:00:00` — **except** that a value whose time is exactly midnight renders as the date alone, `2020-06-15`. It still parses back to the identical number, but the string is shorter than a fixed-width reader expects |
+| `datetimetostr$(d) → str` | both, as `2024-02-29 12:00:00` — **except** that a value whose time is exactly midnight renders as the date alone, `2020-06-15`. It still parses back to the identical number, but the string is shorter than a fixed-width reader expects. Refuses a number outside `0001-01-01`..`9999-12-31`, as `datetostr$` does |
 | `formatdatetime$(pattern$, d) → str` | `d` rendered through `pattern$` — note the **pattern comes first**, the opposite of the Delphi call it wraps. `yyyy mm dd hh nn ss zzz` for numbers, `ddd/dddd/mmm/mmmm` for pinned-English names. Literal words must be quoted inside the pattern: `formatdatetime$("'week' ww", d)` answers `week WW`, while an unquoted `"week ww"` answers `WeK WW` — every letter is a candidate specifier. An empty pattern gives the ISO date |
 | `strtodate(s$) → num` | the date `s$` names. Must be ISO `yyyy-mm-dd` (the parts may be unpadded); anything else — a `15/06/2020`, an impossible 2020-13-45 — raises a catchable runtime error whose message begins `invalid date:` rather than answering a plausible number |
 | `strtotime(s$) → num` | the time `s$` names, as a fraction below 1. `hh:nn` or `hh:nn:ss`; a bad string is an error, message beginning `invalid time:` |
@@ -283,13 +294,20 @@ refused while a step of 13 was not.
 
 `incday` and `incweek` do **not** have this check, because they are additions on
 the number and cannot raise. Stepping past the end with them answers a number
-outside the range, which `datetostr$` and `yearof` then clamp back to
-`9999-12-31` and report as though it were real. Worth knowing before you add a
-large number of days to a date near the year 9999.
+outside the range, and what happens next depends on which door that number
+reaches. The nine date-taking functions above refuse it by name. `yearof`,
+`monthof`, `dayof` and `formatdatetime$` do not: they hand it to the RTL, which
+clamps the top end back to `9999-12-31` and reports it as though it were real,
+and answers year 0 below the range. Worth knowing before you add a large number
+of days to a date near the year 9999.
 
-**The nine that can fail** are `strtodate`, `strtotime`, `strtodatetime`,
-`daysinayear`, `daysinamonth`, `weeksinayear`, `encodedate`, `incmonth` and
-`incyear`. They fail as ordinary runtime errors — code `6`, catchable with
+**The eighteen that can fail** are `strtodate`, `strtotime`, `strtodatetime`,
+`daysinayear`, `daysinamonth`, `weeksinayear`, `encodedate`, `incmonth`,
+`incyear`, and the nine that take a date outside the representable range:
+`daysinmonth`, `daysinyear`, `weeksinyear`, `weekoftheyear`, `weekof`,
+`weekofthemonth`, `dayoftheyear`, `datetostr$` and `datetimetostr$` —
+`weeksinyear` in its own right, beside its year-taking twin `weeksinayear`. They
+fail as ordinary runtime errors — code `6`, catchable with
 `on error goto` and readable through `err()` and `errmsg$()` — never by answering
 a wrong number. See [err.md](err.md) for the handler side.
 

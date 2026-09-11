@@ -82,7 +82,11 @@ refusal and the ordinary case together.
 ### Numbers
 
 Written with `.` as the decimal point regardless of locale, and read back the
-same way.
+same way. A number also comes back as **exactly** the number that went in. Values
+that need more than 15 significant digits — a large integer id, an accumulated
+float — are written in a 17-digit exponent form such as `1.2345678901234570E+015`;
+everything else is written the short readable way it always was, so an ordinary
+settings file is unchanged byte for byte.
 
 | function | what it answers |
 | --- | --- |

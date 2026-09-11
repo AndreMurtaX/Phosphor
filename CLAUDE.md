@@ -201,6 +201,16 @@ The failure modes are known, named, and keep recurring. Watch for them in your o
   body defines a function still breaks" passed on both sides of a live hang, because the
   function it defined had no loop of its own. Remove the fix, watch the new test fail,
   put it back. Every time.
+- **A test written after a defect records the defect.** Four expectations in this tree
+  asserted a wrong answer as correct: `tests/suite/51_arith_faults.bas` and two places in
+  `tests/probe_value.lpr` pinned the float-`mod` bug, block K of `test.{ps1,sh}` pinned a
+  truncated packed application opening a REPL at exit 0, and `54_onerror_reentrancy`
+  pinned a loop cut short after one pass. None was careless: each was written by reading
+  a run and recording what it printed, which is how a defect becomes a golden and then
+  guards itself for months. **Derive the expected value independently of the
+  implementation** — from an external definition (IEEE, POSIX, the RTL's own docs), from
+  arithmetic written out beside the assertion, or from a second path through the engine
+  that reaches the answer another way. Never off the run.
 - **Saving a scope counter is not saving the scope.** The BREAK fix saved `FLoopDepth`
   around a function body and left `FLoopBreaks`/`FLoopConts` -- which are INDEXED BY that
   depth -- shared with the enclosing loop, which turned one hang into a worse one. When

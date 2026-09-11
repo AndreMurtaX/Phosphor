@@ -192,9 +192,46 @@ begin
 end;
 
 // --- number get/set (invariant format) --------------------------------------
+
+{ A NUMBER MUST COME BACK AS THE NUMBER THAT WENT IN, and FloatToStr alone cannot
+  promise that. It formats with 15 significant digits, and an IEEE double needs 17
+  to round-trip; cfg_setns@ of the user id 1234567890123457 wrote
+  "1.23456789012346E15" and cfg_getns read back 1234567890123460. The loss is
+  deterministic, so every machine read the same wrong number -- which is exactly
+  why a byte-exact golden over an .ini file never noticed.
+
+  THE OBVIOUS REPAIR DOES NOT WORK, AND THE MEASUREMENT SAYS SO. FloatToStrF with
+  ffGeneral and Precision 17 is capped: sysstr.inc declares `maxdigits = 17` only
+  under FPC_HAS_TYPE_EXTENDED and 15 otherwise, and Win64 has no 80-bit Extended.
+  Over 299832 random finite doubles, ffGeneral/17 failed to round-trip 281619 of
+  them on Win64 and 0 of them on Linux -- the same source line, two answers, which
+  is the worst shape a fix can have in a project that ships on both.
+
+  So the readable form is TRIED and VERIFIED, and an exact form is the fallback.
+  `Str(V:24)` asks the RTL's Double converter for 17 significant digits directly
+  (FloatToStrFIntl itself spells this `Str(Double(...):precision+7)`), bypassing
+  the cap, and it round-tripped all 299832 on BOTH operating systems. Values that
+  do not need the extra digits -- 1024, 0.75, every setting a person types --
+  still come out as FloatToStr wrote them, so ordinary .ini files are unchanged
+  byte for byte and stay readable.
+
+  The comparison is on the BYTES of the two doubles, not with `=`: that also keeps
+  the sign of a negative zero, which `=` would have called a successful round
+  trip. }
+function NumToInv(const V: Double): String;
+var
+  back: Double;
+begin
+  Result := FloatToStr(V, InvFS);
+  back := StrToFloatDef(Result, 0, InvFS);
+  if CompareByte(back, V, SizeOf(Double)) = 0 then Exit;
+  Str(V:24, Result);
+  Result := Trim(Result);
+end;
+
 procedure WriteNum(c: TPhosphorConfig; const Sec, Key: String; V: Double);
 begin
-  c.Ini.WriteString(Sec, Key, FloatToStr(V, InvFS));
+  c.Ini.WriteString(Sec, Key, NumToInv(V));
   c.Touch();
 end;
 function ReadNum(c: TPhosphorConfig; const Sec, Key: String; const Def: TValue): TValue;

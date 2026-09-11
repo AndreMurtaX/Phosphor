@@ -268,6 +268,37 @@ Rules, in order of how easily they are got wrong:
   the "corrupted" file was intact and the test passed for nothing. When a test's
   whole value is that it broke something, ASSERT THAT IT BROKE -- read the mutation
   back before running it.
+- **A TEST WRITTEN AFTER A DEFECT RECORDS THE DEFECT, and this is a pattern here,
+  not a run of accidents.** Four expectations in this tree asserted a wrong answer
+  as correct, and each of them then guarded it:
+  - `tests/suite/51_arith_faults.bas` pinned `(10.0 ^ 30) mod 2.5` at 0. Zero is
+    not the remainder of anything; it is what `a - b*Int(a/b)` degenerates to once
+    `a` is large. The case had been written to prove the quotient is no longer
+    NARROWED to Int64 -- which it did -- and it recorded the surviving rounding as
+    if it were the arithmetic.
+  - `tests/probe_value.lpr` pinned the same operator twice, `1e308 mod 1e-308`
+    expecting `peIntOverflow`. That one sat directly under a
+    `ValDivReal(1e308, 1e-308)` overflow assertion that really IS correct, which
+    is exactly how it read as right.
+  - Block K of `scripts/test.{ps1,sh}` required a packed application truncated
+    past its magic to behave as the CLI -- a damaged MyApp.exe handing a user a
+    BASIC prompt, at exit 0, asserted as the expected behaviour.
+  - `54_onerror_reentrancy` asserted `ginner`/`gouter` at 10, which is the answer
+    a loop gives when `resume next` cuts it off after one pass. The correct answer
+    is 0.
+
+  None of the four was careless. Every one was written by reading a run and
+  recording what it printed, which is the natural way to write a test and the
+  reason the shape recurs: the implementation is the only oracle in the room, so
+  the assertion becomes a photograph of it. **DERIVE THE EXPECTED VALUE
+  INDEPENDENTLY.** Where the operation has an external definition -- IEEE, POSIX,
+  the RTL's own documentation -- pin it against that, and against a second path
+  through the engine that reaches the same answer another way; `CheckFloatRemainder`
+  is built on exactly that and compares against C/Python `fmod` as well as the
+  invariant `0 <= |r| < |b|`. Where it does not, write the arithmetic out in a
+  `rem` beside the assertion, choosing operands whose answer is exact in any float
+  width, so the next reader can check the number without running anything. A
+  golden read off a run is a record of behaviour, not of correctness.
 - **MEASURE THE LIBRARY, DO NOT REASON ABOUT IT.** Two full rounds of reasoning about
   where fcl-json loses bytes were wrong. A twenty-line Pascal probe dumping hex
   answered it in one run: TJSONString.Create is exact, AsJSON is not, and of the
@@ -306,6 +337,15 @@ Rules, in order of how easily they are got wrong:
   script. `build-gui.{ps1,sh}` verify `PhosphorDisplayGuard` precedes `Interfaces` in
   the `uses` clause for that reason — that order is the only thing making the guard
   work, and violating it still compiles and still passes on Windows.
+- **AND A GATE'S REACH IS A CLAIM OF THE SAME KIND.** `check-codepage.py` opens
+  with "The rule is absolute on purpose -- ASCII-only sites are flagged too" and
+  then skips every assignment that is not an accumulate, so a site of exactly the
+  class it exists for sat in `engine/PhosphorLexer.pas` for the life of the gate.
+  Measured by importing the gate and calling its own `scan` and
+  `char_operands` on the pristine file: `char_operands` answers `['c']`, and
+  `scan` never asks it. A gate is proof of what it READS, and what it reads is
+  not what its header says it covers -- so when you write one, feed it a site it
+  must catch and watch it catch that site.
 
 ### Every path a human can reach must have something that reaches it too
 
@@ -793,9 +833,56 @@ introduces a defect.
    NOTHING and reported success, and a four-vertex square drew as a triangle. Nine
    assertions read the pixels back off the bitmap, headless, including the bottom
    and left sides of that square.
-25. **engine/PhosphorBudget.pas:975** [medium] -- BudgetPatternBounded refuses a repeated alternation of 17+ branches because the branch table only tracks 16, giving up toward "refuse" where its two siblings and its own documented contract give up toward "allow" -- ^[a-q]+$ is allowed while ^(a|b|...|q)+$ is refused
-26. **engine/PhosphorBytecode.pas:478** [medium] -- A .pbc whose user function starts one past the last instruction passes validation and runs as a silent no-op with exit code 0
-27. **engine/PhosphorCompiler.pas:722** [medium] -- Label-resolution diagnostics (undefined label, duplicate label) carry no line: PhosphorCompiler.pas:722 and :609 pass a literal 0, which PhosphorEngine.pas:246 clamps to a confident, wrong "line 1"
+25. ~~**engine/PhosphorBudget.pas:975** [medium]~~ -- CLOSED 2026-09-10. `BranchOverflow` on TReLevel records "I could
+   not judge this": set in the `|` case when the branch count passes
+   `MaxReBranch`, cleared in `ResetLevel`, read by the refusal guard. So the
+   branch table gives up toward ALLOW like the atom table beside it and like the
+   unit's own header. Measured against the pristine build over 256 patterns --
+   alternations of 1..26 branches in three families (disjoint characters,
+   overlapping word bodies, greedy bodies), each with `+`, with no repeat, with
+   `{10}` and nested one level, plus probe_budget's 40-pattern real-world corpus:
+   50 REFUSE -> ALLOW, 0 ALLOW -> REFUSE, and nothing at 16 branches or below
+   changed verdict at all.
+
+   **THE HOLE IS WIDER ON PURPOSE, and the finding chose it.** Past 16
+   alternatives a genuinely ambiguous repeat is now allowed too -- the sweep
+   shows the overlapping family flipping, not only the disjoint one. That is the
+   unit's stated contract, and the alternative is refusing a 17-verb HTTP method
+   alternation for a reason that is not true of it, which is the failure mode
+   this project names first. It is closeable without touching the contract:
+   `BranchesOverlap` bails out entirely past `MaxReBranch + 1` branches, where it
+   could soundly judge the TRACKED PREFIX instead -- an overlap between two of
+   the first sixteen branches is a real overlap whatever the other branches are.
+26. ~~**engine/PhosphorBytecode.pas:478** [medium]~~ -- CLOSED 2026-09-10. The function-entry bound is
+   exclusive now (`>= AProg.Count`), with a message that names the valid range
+   and a separate wording when the program has no instructions at all. The
+   over-refusal question was measured, not argued: every `.bas` in tests/suite,
+   tests/classic, tests/packages, tests/negative, examples and docs was compiled,
+   serialized and read back through the real `ReadProgram` -- 119 files, 100
+   compiled and loaded, 89 user functions, and the smallest `Count - Entry` gap
+   anywhere is 4, at 11_callback_end.bas / quitter. A gap of 0 would be a
+   legitimate file the new bound refuses; nothing comes near one. And because one
+   off-by-one usually means a family, every bound this validator applies is now
+   written into the policy comment with inclusive or exclusive stated -- which is
+   how the handler target was found to have the same shape. See the new list
+   below.
+27. ~~**engine/PhosphorCompiler.pas:722** [medium]~~ -- CLOSED 2026-09-10. `FGotoLine` remembers the jump's line at
+   `AddGoto`, where `FLex.Cur().Line` was already in hand and was being thrown
+   away; `RecordLabel` takes the duplicate's own line. The line is a REQUIRED
+   parameter with no default, because a default of 0 is the exact unsafe value
+   this defect was made of. All six `AddGoto` sites and both `RecordLabel` sites
+   pass a line they already held. `goto nowhere` on line 4 says line 4, a second
+   `lab:` on line 4 says line 4, and `on error goto h` on line 2 of a function
+   body says line 2 -- all three said "line 1" before. Fifteen label programs run
+   against the pristine binary and the fixed one: every accepted program
+   byte-identical, every refused one the same message with the true line.
+
+   **NEITHER DIAGNOSTIC HAS A PERMANENT PIN, and that is the residual.** A `.bas`
+   is dead before it can assert on a compile-time message, and the negative
+   corpus is judged on the exit code alone, so a future edit could put the
+   literal 0 back with every runner and all eight gates still green.
+   `tests/probe_limits.lpr` is where these belong -- it already substring-matches
+   a compiler message and exposes `ErrorLine` -- and they are not there yet.
 28. ~~**engine/PhosphorVM.pas:1500** [medium]~~ -- CLOSED 2026-09-10 with 22: the
    same flag, the same cause, a different door. `RunFrom` resets the step counter,
    the output counter and the clock for each line and did not reset this. The tell
@@ -803,23 +890,193 @@ introduces a defect.
    `println len("abc")` printed nothing and reported success, because opCall checks
    the flag after each library call and leaves the line as though it had finished.
    `tests/classic/16_repl_after_end.repl` is that exact pair.
-29. **engine/PhosphorValue.pas:1077** [medium] -- Float `mod` computes a - b*Int(a/b), so above 2^53 it silently answers 0 instead of the remainder (1e16 mod 3 = 0, 1e17 mod 3 = 0), breaks 0 <= |r| < |b| on wide exponent spreads (1.5 mod 1e-300 is negative), and raises a spurious overflow when the quotient overflows (1e200 mod 1e-200) -- and tests/suite/51_arith_faults.bas:78 pins one of the wrong answers
-30. **engine/libs/PhosphorBufferLib.pas:718** [medium] -- buffer_setsng writes the narrowed bytes before checking them, so an unrepresentable value leaves +/-Inf in the buffer behind the raised error -- unlike buffer_setint, which refuses before WriteRaw
-31. **engine/libs/PhosphorConfigLib.pas:197** [medium] -- cfg_setn@/cfg_setns@ store numbers through a 15-digit FloatToStr, so they do not round-trip (the finding stands; the proposed 17-digit remedy is a no-op on win64 and must be replaced)
-32. **engine/libs/PhosphorDateTimeLib.pas:134** [medium] -- Below-range TDateTime is unvalidated in the date-taking functions: four week functions halt with the RTL's own words, daysinmonth fabricates 31 from an in-constant out-of-bounds read, and datetostr$ renders an unparseable 0000-00-00 -- the mirror of the top end, which correctly clamps
-33. **engine/libs/PhosphorRagLib.pas:393** [medium] -- Every query byte >= 128 becomes a space in ExtractKeywords (PhosphorRagLib.pas:393), so rag_retrieve$/rag_retrieve_json$/rag_retrieve_budget$ and DetectIntent silently return nothing for non-Latin scripts and truncate accented Latin words
-34. **engine/libs/PhosphorStrLib.pas:554** [medium] -- containstext says a needle occurs where startstext/endstext say it does not, on equal-length strings: the "ignoring case" family folds by two incompatible rules (SysUtils byte-table vs platform AnsiUpperCase), and the folding half also differs between Windows and Linux
+29. ~~**engine/PhosphorValue.pas:1077** [medium]~~ -- CLOSED 2026-09-10. `mod` forms no quotient
+   at all. `DoubleRemainder` is binary long division that scales the divisor up
+   to within a factor of two below the dividend and walks it back down halving,
+   subtracting where it fits: every subtraction meets Sterbenz by construction
+   and every scaling is a power of two, so no step rounds and no intermediate can
+   overflow -- which REMOVES the spurious overflow rather than catching it. Its
+   length is the exponent spread of two finite doubles, at most 2098 iterations
+   for any input whatsoever, so it is bounded by the format and no script can
+   lengthen it. Measured bit-identical to C/Python `fmod` on 400 random pairs
+   spanning the whole exponent range and on every named case; probe_value runs
+   4000 + 2000 pairs every suite run.
+
+   **THE REMEDY WAS DEPARTED FROM TWICE, and both are measurements.** `Math.FMod`
+   was READ before it was rejected, as the rule about this RTL requires: it is
+   the identical formula (`rtl/objpas/math.pp`, `Result := X - Int(X/Y)*Y`), so
+   "call the RTL" would have shipped all three wrong answers again. And the
+   finder's Int64 fast path was not written, because the exact scaled subtraction
+   subsumes it -- `1e16 mod 3` comes out of the general path as exactly 1 -- so
+   the smaller change is the whole change. `Math.Frexp`/`Ldexp` were read and
+   rejected too: `Ldexp` is `x * intpower(2.0, p)`, which overflows to +Inf for
+   p >= 1024, exactly the scaling this needs.
+
+   Over-refusal was swept, not sampled: 128,080 ordinary pairs (a in -200..200 by
+   quarters, b in -4.0..4.0 by tenths) through the old formula and the new one --
+   125,908 bit-identical, 2,172 differing only in the SIGN OF A ZERO, 0 differing
+   in value. `ValToStr` spells both zeros `0`, so no golden can see the
+   difference. **Both of this finding's wrong answers had been PINNED as
+   expectations** -- see the note on that below.
+30. ~~**engine/libs/PhosphorBufferLib.pas:718** [medium]~~ -- CLOSED 2026-09-10. The value is judged before
+   `WriteRaw` is reached, and an unrepresentable one is a returned error naming
+   it, so the buffer is left exactly as it was. That is the shape `buffer_setint`
+   next door already had and the unit header already promised -- "never a raise
+   and never a silent clamp". Swept over 91 decades from 1e-45 to 1e45 and the
+   eight exact edges of a Single's range: only 1e39..1e45 and 3.5e38 changed, and
+   each changed from writing +Inf to writing nothing. The largest finite Single
+   (3.4028234663852886e38, both signs) and the smallest subnormal (1.4e-45) are
+   still accepted and written. There is no refused band.
+31. ~~**engine/libs/PhosphorConfigLib.pas:197** [medium]~~ -- CLOSED 2026-09-10, and the measurement confirms why the proposed
+   remedy had to be replaced: `sysstr.inc` declares `maxdigits = 17` only under
+   FPC_HAS_TYPE_EXTENDED and 15 otherwise, and `FloatToStrFIntl` clamps
+   ffGeneral's precision to it. Over 299,832 random finite doubles,
+   `FloatToStrF(ffGeneral, 17)` failed 281,619 round-trips on Win64 and 0 on
+   Linux -- the same source line, two answers, which is the worst shape a fix can
+   have in a project that ships on both. `NumToInv` keeps `FloatToStr`'s readable
+   form when the bytes read back identically and falls back to `Str(V:24)` when
+   they do not: 0 failures out of 299,832 on BOTH operating systems. The
+   comparison is on the BYTES of the two doubles rather than `=`, which also
+   makes a negative zero survive. Ordinary settings files are unchanged -- of 30
+   stored values only the 6 that did not round-trip moved.
+32. ~~**engine/libs/PhosphorDateTimeLib.pas:134** [medium]~~ -- CLOSED 2026-09-10. The nine
+   date-TAKING functions that cannot survive `DecodeDate`'s Year=0 answer ask
+   `SourceOk`, the guard `incmonth` and `incyear` already asked, moved up the
+   unit so every caller can reach it. The guard is SYMMETRIC, so those nine now
+   refuse an above-range number too, where they used to answer off the RTL's
+   top-end clamp. That is a behaviour change beyond the half the finding reports
+   and it was taken deliberately: the clamped answers were not uniformly right
+   either, and `weekoftheyear(5000000)` answered 29556 on the pristine build,
+   which is not an ISO week of anything.
+
+   Over-refusal was swept, never a list: about 48,000 instants -- the whole span
+   at stride 97, every day of the first and the last 401, a 2,001-day window
+   across the 1899-12-30 epoch, that window again with +0.25 and -0.25 fractions,
+   and the span again at stride 1009 -- accumulated into checksums with no
+   on-error handler, so an in-range refusal aborts loudly instead of being
+   counted quietly. Pristine against fixed: byte-identical. The sharpest case is
+   in the suite, because noon on 0001-01-01 is -693593.5, a SMALLER number than
+   its own midnight, and it is inside.
+
+   The other half of the class is open. `yearof`, `monthof`, `dayof` and
+   `formatdatetime$` still answer off the fictitious year 0 -- `formatdatetime$`
+   renders the same unparseable `0000-00-00` that `datetostr$` now refuses,
+   through a different door. docs/libraries/date-time.md says so.
+33. ~~**engine/libs/PhosphorRagLib.pas:393** [medium]~~ -- CLOSED 2026-09-10. `ExtractKeywords` classifies CODEPOINTS, taking a
+   character's span exactly as `Utf8Starts` takes it, so it agrees with `len()`,
+   `left$()` and `mid$()` on the same string and stays total on the malformed
+   fragments `bytemid$` and `buffer_slice$` can hand a program.
+
+   **THE FINDER'S ONE-LINE REMEDY WAS MEASURED AND REJECTED.** "Keep every byte
+   >= 128" makes a no-break space, an em dash, a curly quote and a fullwidth
+   comma into word characters, so the words on either side glue into one token:
+   on a three-document base the query `buttondoc<NBSP>zapiski` then found only
+   one of the two documents its two ids name, where the same query with an ASCII
+   space found both. So only a NAMED set separates and every other codepoint is
+   kept, because throwing bytes away is the defect being fixed. Totality checked
+   over all 256 single bytes between two ASCII words, 192 truncated lead bytes in
+   three positions each, and codepoints 33..12400 -- no crash, no hang, no short
+   answer, 340 classified as separators. The ASCII half did not move: pristine
+   against fixed differs only on the non-Latin lines.
+34. ~~**engine/libs/PhosphorStrLib.pas:554** [medium]~~ -- CLOSED 2026-09-10 with ONE rule, and it is the one this unit already
+   owned. `containstext`, `startstext`, `endstext`, `strcmpi` and `replacetext$`
+   fold through `Utf8CaseU`, the very function `aucase$` calls, so there is no
+   second implementation to drift from; `SameText`/`CompareText` (a..z only) and
+   `AnsiUpperCase` (a hook the PLATFORM installs) are both gone from the family.
+   The cross-OS half was measured rather than asserted: a probe folding all 65536
+   BMP codepoints and checksumming the result answers `changed=1128
+   checksum=40774005D42ED26F` for `TCharacter.ToUpper` on Windows AND on Linux,
+   against 34 and 31 changed with different checksums for the `AnsiUpperCase`
+   control.
+
+   **THE FINDER'S LITERAL REMEDY WAS A DENIAL OF SERVICE, and that is a
+   measurement too.** Routing the family through a whole-string fold took 57 s
+   where the old code took 0.055 s on `startstext(32 MB, "AAAAA")`, and 28 s on
+   the matching `strcmpi` -- which under any TimeoutMs a host installs turns a
+   working call into a peLimit, the very class of damage the patch exists to
+   remove. So `startstext`, `endstext` and `strcmpi` fold only the stretch that
+   can DECIDE the question (the needle's length for a prefix or suffix, the
+   shorter operand for an ordering) through two non-allocating codepoint walks.
+   Timings are back at 0.062 s, and a 4000-pair randomised property test says the
+   bounded form answers exactly what the unbounded one does. `replacetext$` could
+   no longer delegate to `StringReplace`, so it searches the folded bytes and
+   copies the ORIGINAL bytes back out around each match, the two strings walking
+   in step one character at a time.
+
+   Over-refusal: all 9,025 printable ASCII pairs and 400 word pairs through all
+   six functions, pristine against fixed -- zero differences. What DID change is
+   stated because it is a policy choice the finding asked for: accented and
+   non-Latin pairs now match where they used to differ, so a program relying on
+   `strcmpi` separating "É" from "é" sees 0. `Utf8CaseU`'s per-codepoint append is
+   now on the hot path of `containstext` and `replacetext$` as well, and measures
+   12x slower than the RTL call it replaced on an 8 MB haystack -- the quadratic
+   shape its own header warns about, still open.
 35. ~~**host/gui/libs/PhosphorGuiCore.pas:649** [medium]~~ -- CLOSED 2026-09-10 by
    22, at the door instead of at this caller. `CallUserFunc` now refuses on a
    halted VM before it pushes a frame, so a handler dispatched after `end` runs
    NOTHING -- and every other caller of that seam gets the same guard, which is
    why it went there and not here. GuiCallBack still reads `AVM.Halted` after the
    call to leave the message loop; that part was already right.
-36. **engine/PhosphorCompiler.pas:2264** [low] -- A `const` declaration never checks the literal against the name's suffix (`const i% = 1.5` keeps 1.5, `const s$ = 5` holds an Int64) -- one of two unchecked bindings, the other being user-function parameter binding
-37. **engine/PhosphorLexer.pas:461** [low] -- `engine/PhosphorLexer.pas:461` appends a bare `Char` into a `{$codepage UTF8}` string, so every source byte >= 128 is destroyed to a literal `?` -- the message is byte-identical to the one a real ASCII `?` produces
-38. **engine/libs/PhosphorStrLib.pas:562** [low] -- isnumeric answers 1 for "inf", "nan", "INF" and "1e999" -- it tests the parse, not the value, so it approves strings the engine's finiteness invariant forbids val from returning
-39. **engine/libs/PhosphorStrLib.pas:956** [low] -- delete$ and stuffstring$ silently DUPLICATE the string when (pos-1)+count overflows Int32 -- `rem := n - (pos - 1) - cnt` wraps (PhosphorStrLib.pas:956, :965)
-40. **host/console/phosphor.lpr:546** [low] -- `phosphor.exe` content-sniffs only the 3 ASCII bytes `PBC`, so a valid source file starting with an uppercase `PBC…` identifier is refused as bytecode with a nonsense version number (host/console/phosphor.lpr:546)
+36. ~~**engine/PhosphorCompiler.pas:2264** [low]~~ -- CLOSED 2026-09-10. The const branch
+   asks `StoreCheck`, the routine an ordinary store asks, so a const takes the
+   same coercion and the same refusal in the same words -- reported at the
+   DECLARATION, which is the line the author has to change, instead of wherever
+   the value first met an operator that cared. A 135-pair sweep of
+   `const v<suffix> = <literal>` against `v<suffix> = <literal>` (27 literals x 5
+   suffixes, comparing the verdict and, on success, the printed value) went from
+   98 disagreements to 0, and every one of the 98 was the const ACCEPTING what
+   the variable refuses. The change therefore deletes 98 wrong acceptances and
+   introduces no new refusal: no `const` anywhere in the tree changes verdict,
+   which `check-examples.py` independently confirms by compiling every ```basic
+   block. `const i% = 1.5` now binds 2, which is the one line of it that changes
+   what an accepted program computes. **The other unchecked binding is still
+   open**: `function f(n%)` called with 1.5 does not take the coercion
+   `n% = 1.5` takes.
+37. ~~**engine/PhosphorLexer.pas:461** [low]~~ -- CLOSED 2026-09-10. `ByteHere` renders the
+   offending byte numerically (`#233 (0xE9)`) unless it is printable ASCII
+   33..126, where it is shown from a one-character String SLICE beside its number;
+   `ColumnAt` adds the byte column, because a line number sends a reader to a line
+   and no further when the character is invisible. Both the `unexpected
+   character` and the `unknown escape sequence` messages use them, and the quoted
+   form is built from a slice rather than a Char, so check-codepage.py's rule
+   holds here by construction instead of by an argument about which bytes are
+   safe. Over a sweep of 512 lexer refusals the distinct-message count went
+   248 -> 415 with the refused SET byte-for-byte unchanged: 22 colliding groups
+   became 0, the largest having been 129 different bytes all saying `unexpected
+   character '?'`. Columns are identical on CRLF and LF files, measured on the
+   same source written both ways. **NOTE that check-codepage.py could not see this
+   site at all** -- its `scan` skips any assignment that is not an accumulate --
+   so the class is still unguarded at that shape. See the new list below.
+38. ~~**engine/libs/PhosphorStrLib.pas:562** [low]~~ -- CLOSED 2026-09-10. `isnumeric` tests the VALUE, so `"1e999"`,
+   `"1e309"`, `"inf"`, `"nan"` and `"INF"` answer 0 and the documented
+   isnumeric-then-val guard holds. The band a finiteness patch can flatten was
+   swept rather than sampled -- every exponent from -400 to +400 in four
+   spellings, plus 45 spellings people actually type, trimmed and untrimmed: 101
+   lines moved out of 11,848 and every one is an intended change. Every NEGATIVE
+   exponent is untouched, including 1e-320, 4.9406564584124654e-324 and 1e-400,
+   which underflows to a finite 0 and is still accepted.
+39. ~~**engine/libs/PhosphorStrLib.pas:956** [low]~~ -- CLOSED
+   2026-09-10. Both clamp pos and count to what the string can hold BEFORE
+   subtracting, which is the fix `f_mid` next door already carried.
+   `delete$("hello", 2147483647, 2147483647)` answers `"hello"` where it used to
+   answer `"hellohello"`. Swept over every (pos, count) in -3..13 on five strings
+   including a multi-byte one -- 1,445 rows against the pristine build, zero
+   differences anywhere in the in-range neighbourhood.
+40. ~~**host/console/phosphor.lpr:546** [low]~~ -- CLOSED 2026-09-10. `IsBytecode` sniffs
+   four bytes -- `PBC` and then the version byte -- so a source file whose first
+   line begins with an uppercase identifier starting PBC runs as the source it
+   is. **The finder's `Ord(buf[3]) < 32` was measured and found still to refuse
+   two valid BASIC programs**: `PBC<TAB>= 3` and a line that is just `PBC` are
+   both legal (the identical files written with the name XBC run and exit 0), and
+   TAB, LF and CR are 9, 10 and 13. Those three are excluded. The price is one
+   rule on the format -- `PBC_VERSION` must never become 9, 10 or 13 without
+   changing this test -- and docs/decisions.md now records it where the format is
+   frozen. A new lettered block O in BOTH scripts/test.ps1 and scripts/test.sh
+   pins it and the mirror: a genuine .pbc is still read as bytecode, still runs,
+   and still packs into a standalone executable. Line endings make the same block
+   exercise a different half on each OS, because the bare-PBC file's fourth byte
+   is CR on Windows and LF on Linux -- and without the fix the Windows half
+   failed with "format version 13".
 
 ### Leaks and cost (3)
 
@@ -1040,12 +1297,171 @@ and one of those is NEW, found by the refuter while killing the claim:
 - `host/packages/PhosphorGzipLib.pas:286` -- gzip_decompress$ / gzip_decompressfile never check the CRC32 or ISIZE trailer they write -- a corrupted stream returns wrong bytes with gzip_error() = 0
 - `scripts/test-gui.sh:66` -- test-gui.sh reports "GUI SUITE SKIPPED" and exit 0 for a genuine GUI failure whenever stderr mentions gtk, which every gtk2 program on a desktop prints
 
+### Noticed while closing the wrong answers on 2026-09-10 -- NOT the gauntlet's list
+
+Fourteen of the twenty wrong answers above were closed by four file-disjoint
+lanes, each scope-locked to its own files. What a lane could see and could not
+touch is here. **None of these went through a refuter**: each is one agent's
+measurement, unconfirmed by a second party, which is why they are kept apart from
+the sweep above. Verify before fixing, as with everything on this page.
+
+1. **`scripts/check-codepage.py` cannot see the class it exists for, at any PLAIN
+   assignment.** Measured by importing the gate and running its own functions over
+   the pristine `engine/PhosphorLexer.pas`: on
+   `FErr := 'unexpected character ''' + c + '''';` it reports `ACC target = FErr`,
+   `is an accumulate = False`, `char operands = ['c']`. Its own `char_operands`
+   identifies the Char correctly and `scan` never asks, because the
+   `if not re.search(... base ...): continue  # not an accumulate` test requires
+   the target name to appear on the right-hand side; `scan` returns 0 hits for
+   the whole file. Finding 37 sat at that shape for the life of a gate whose own
+   header says "The rule is absolute on purpose -- ASCII-only sites are flagged
+   too". The widening is one line: keep the accumulate test as the reason to STRIP
+   the base from the expression, but do not use it to SKIP the line. It was
+   reported rather than done because widening it will surface other sites across
+   the tree that need triage. **A GATE'S REACH IS A CLAIM, and it needs exactly
+   what a completeness claim in prose needs.**
+2. **`scripts/build.ps1` does not pass `-B`, so the project's documented clean
+   build is an INCREMENTAL one.** CLAUDE.md and section 0 both state the bar as
+   `fpc -B -vewn`; `build.ps1:113` omits it. Measured in two lanes independently:
+   5,078 lines compiled on a second invocation against 35,320 from clean, and
+   2,176 of 35,180 in the other. This is the stale-`.ppu`-in-the-same-filesystem-
+   tick trap one level up -- it applies to the project's own script, not only to
+   hand-rolled mutation builds. Both lanes worked around it, one by deleting
+   `bin\units` first and one by running fpc by hand with build.ps1's exact
+   argument list plus `-B`. Adding `-B` to the `$args` array makes the script do
+   what its synopsis claims. The `phosphortest` build inside `test-suite.ps1`
+   omits `-B` too, and separately discards its own `-vewn` log -- that half is
+   open finding 50.
+3. **FPC's `Math.FMod` carries the identical defect just removed from float
+   `mod`.** `rtl/objpas/math.pp`: `Result := X - Int(X/Y)*Y`. Nothing in
+   `engine/`, `host/`, `tests/` or `lazarus/` calls it today -- grepped -- so
+   there is nothing to fix, but any future library reaching for it reintroduces
+   all three wrong answers of finding 29 at once. A banned-RTL-routine entry
+   beside `check-budget.py`'s narrowing list would catch it, and is the same shape
+   as the 32-bit-narrowing sweep that file already runs.
+4. **`rnd(0)` and `rnd(1)` both answer 0 on every call, forever.** The
+   one-argument form (`engine/libs/PhosphorNumLib.pas:178`, registered at `:251`)
+   clamps its bound up to 1 and calls `Random(hi)`, which is `0..hi-1`. That is
+   defensible as a design -- the zero-argument `rnd()` is the fraction, one line
+   below -- but in every classic BASIC `RND(1)` means "the next random fraction",
+   so a ported program gets a silently constant 0 rather than a diagnostic. It
+   cost a lane directly: a property test built on `rnd(0)` generated 4000
+   identical empty strings and reported 0 mismatches while measuring nothing -- it
+   passed against a deliberately broken build. Either make the one-argument
+   `rnd(1)` the fraction, matching the reference, or say so loudly in
+   `docs/libraries/num.md`.
+5. **A label placed inside a `for` block is not resolvable.** `on error goto sng`
+   with `sng:` in the loop body fails with `undefined label sng`. `RecordLabel` is
+   reached only from Compile's top-level loop and a `for` body is consumed by
+   `ParseBlockUntil`, so the label is never recorded at all. That may well be
+   intended -- a label belongs to the program, not to a block, which is the rule
+   the `goto`-out-of-a-function refusal rests on -- but nothing says so and the
+   message does not hint at it. The line number is right now that finding 27 is
+   closed; the diagnostic is not.
+6. **`scripts/test-suite.ps1` writes its capture to a fixed
+   `%TEMP%\phosphortest.out`, so two runs on one machine collide.** `$env:TEMP` is
+   per-USER, not per-worktree. Two lanes hit it: a full suite run died with
+   `O arquivo ja esta sendo usado por outro processo` because another worktree had
+   the file open, and the failure surfaced as a PowerShell `ReadAllBytes`
+   exception rather than as anything about concurrency -- it reads like a broken
+   harness, not like a collision. Both worked around it by pointing TEMP at their
+   own scratch directory. Derive the name from the process id or the worktree.
+   (`test-suite.ps1:105` and `:200`.)
+7. **The handler target is the same off-by-one family as finding 26, and it was
+   measured rather than guessed.** `opSetErrHandler` bounds its target inclusively
+   (`> AProg.Count`), so a `.pbc` whose installed ON ERROR handler points at
+   `pc = Count` passes validation; when the error fires, pc jumps past the last
+   instruction, the dispatch loop ends, and the program reports success having
+   done nothing. Measured on a compiled
+   `on error goto oops / x = 1/0 / println "after"` whose handler operand was
+   repointed to the instruction count: the honest file prints "handled" then
+   "after" with rc 0, the edited file prints NOTHING with rc 0 -- byte for byte
+   the silent no-op of finding 26. It was deliberately NOT changed, because unlike
+   a function entry (which must have an instruction to run) a handler at `Count`
+   might be what the compiler legitimately emits for
+   `on error goto <label at the very end>`. Closing it means repeating the corpus
+   sweep that settled the function entries -- smallest `Count - Entry` gap 4 -- for
+   handler targets. `opGosub` shares the bound and the shape (a gosub to `Count`
+   ends the program instead of returning) and nobody measured that one.
+8. **`scripts/test.sh` has no ProveFailure switch at all**, while
+   `scripts/test.ps1` has had one since it was written: `bash scripts/test.sh
+   --prove` ignores the argument, runs a normal pass and exits 0. That is the
+   shape `test-suite.sh` guards against with its unknown-argument refusal, and it
+   means "a check is only trustworthy once seen to fail" can be exercised on
+   Windows and not on Linux for this harness. Open finding 49 names the other
+   scripts; this one is a counterpart that was written on one OS only.
+9. **`check-budget.py`'s `bounded` reads a conjunction as unbounded when ANY name
+   in it is tainted**, so a `while` whose condition is
+   `p <= Length(S)` and `n < ALimit` together scores as a hole even though the
+   first conjunct bounds it by a string already in memory. Two lanes rewrote
+   correct walks as a `while` on the length alone with a `Break` on the limit
+   inside, to pass honestly.
+   Arguably the better shape either way, but the gate is teaching a style rather
+   than measuring a fact, and the next person will read the rejection as a false
+   positive and reach for an exemption. Treating a conjunction as bounded when any
+   conjunct is derived would fix it.
+10. **Two suite goldens are byte-exact COUNTS only** (`passed: N / failed: 0`), so
+   a file can silently lose an assertion to an edit and still pass if another is
+   added in the same change. Noticed while moving `43_syntax_const.expected` from
+   28 to 33.
+11. **`PhosphorRagLib.DetectFunctionNames` splits the RAW query on
+   `[' ', ',', ';', '(', ')']` only** -- the same class as finding 33, one
+   function down. A function name separated from its neighbour by a Unicode
+   separator rather than an ASCII one is not recognised.
+12. **A config now round-trips a negative zero, and nothing says whether it
+   should.** `FloatToStr` renders `-0.0` as `0`, so `-0.0` used to come back
+   `+0.0`; `NumToInv` compares BYTES rather than `=`, so the value takes the exact
+   `Str(V:24)` path and survives. The behaviour changed as a side effect of a
+   correct choice, which is the kind of change that needs writing down before
+   someone depends on either answer.
+
 ## Retrospective log (appended each round)
 
 Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule
 exists so they can next time.
 
+- **2026-09-10 · round 39 · fourteen wrong answers, four of which the tests had
+  pinned as correct.** Four file-disjoint lanes closed findings 25-27, 29-34 and
+  36-40. Six runners, nine probes, eight gates, `-ProveFailure` seen catching a
+  mismatch on the suite and on the classic runner. The headline is not any of the
+  fourteen.
+
+  - **THE TESTS HELD FOUR OF THESE DEFECTS IN PLACE.** `51_arith_faults.bas`,
+    two places in `probe_value.lpr`, block K of `test.{ps1,sh}` and
+    `54_onerror_reentrancy` each asserted a wrong answer as the expected one.
+    Every one had been written by reading a run. The rule is in section 4 and in
+    CLAUDE.md: derive the expected value from an external definition, from
+    arithmetic written out beside the assertion, or from a second path through
+    the engine — never off the implementation you are testing.
+  - **THREE OF THE FOURTEEN CLOSED BY DEPARTING FROM THE FINDER'S REMEDY, AND
+    EACH DEPARTURE IS A MEASUREMENT.** `Math.FMod` was read and found to carry
+    the identical formula. The strings finder's whole-string fold measured 57 s
+    against 0.055 s, which is a peLimit under any host timeout. "Keep every byte
+    >= 128" glues words across a no-break space and loses a document. And
+    `Ord(buf[3]) < 32` still refuses two valid BASIC programs. **A finding is a
+    report, not a prescription** — and the smallest remedy still has to be
+    measured against the input it might REJECT, not only against the input that
+    reported it.
+  - **A GATE'S REACH IS A CLAIM.** `check-codepage.py` says "the rule is absolute
+    on purpose" and cannot see the class it exists for at a plain assignment;
+    finding 37 sat at that shape for the life of the gate. Measured by importing
+    the gate and calling its own `scan` and `char_operands`. The same pass
+    found that `build.ps1` does not pass `-B`, so the command this page names as
+    the clean build is an incremental one. **An unmeasured gate is prose that
+    compiles.**
+  - **`git diff --cached --binary > file` THROUGH POWERSHELL REDIRECTION WRITES A
+    UTF-8 BOM**, and CRLF with it, after which `git apply` refuses every hunk
+    with "patch does not apply" — which reads exactly like a stale or badly
+    generated diff rather than like an encoding problem. It cost a real detour.
+    Write the diff through a raw byte path (the Bash tool, or `cmd /c`), and
+    prove the file before handing it over: `git apply --check --reverse` is the
+    cheap way.
+  - **`$env:TEMP` IS PER-USER, NOT PER-WORKTREE.** With lanes running the suite
+    concurrently, `test-suite.ps1`'s fixed `%TEMP%\phosphortest.out` made one
+    lane's run abort another's, and the failure surfaced as a PowerShell
+    `ReadAllBytes` exception. When lanes are meant to run in parallel, every file
+    a runner writes outside the worktree is shared state.
 - **2026-09-07 · round 38 · the twenty-one wrong answers, the seven escapes, and the
   briefing that finally stopped costing a round.** The gauntlet's remaining classes,
   closed in two councils. The process finding is the headline: the three rules that

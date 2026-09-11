@@ -390,4 +390,72 @@ fi
 if [ "$okN" -eq 0 ]; then echo 'PASS  N:--out "" refused    (empty argument never silently unredirects)'
 else echo 'FAIL  N:--out argument handling'; fail=1; fi
 
+# O: A SOURCE FILE IS NOT BYTECODE BECAUSE ITS FIRST THREE LETTERS ARE PBC.
+#    IsBytecode read three bytes and answered on 'P','B','C' alone, so every .bas
+#    whose first line begins with an uppercase identifier starting PBC -- PBCount,
+#    PBCmax, PBC$ -- was handed to the bytecode reader and refused with
+#    "unsupported .pbc format version 111": the code point of the fourth SOURCE
+#    character reported as a format version, which says nothing about what is
+#    wrong. `pack` lost its own helpful refusal at the same door, and
+#    phosphortest, which never sniffs, ran the very same file -- two shipped
+#    hosts disagreeing about one file.
+#
+#    The real header is the magic PLUS a version byte, and no text file carries a
+#    control character there. "A control character" alone is not the whole rule
+#    either: TAB, LF and CR are 9, 10 and 13, and `PBC<TAB>= 3` and a line that is
+#    just `PBC` are both valid BASIC. Shapes 3 and 4 are those two, and here
+#    shape 4's fourth byte is LF where on Windows it is CR -- the same file asks a
+#    different half of the rule on each OS, which is the honest thing about it.
+#
+#    Shapes 5 to 7 are the MIRROR and matter as much: a genuine .pbc must still be
+#    recognised as one, or a sniff that answered "source" to everything would pass
+#    1 to 4 and break running and packing bytecode entirely.
+sniffdir="$hidir/sniff"
+mkdir -p "$sniffdir"
+okO=0
+
+printf '%s\n' 'PBCount = 3' 'println "count is " + str$(PBCount)' > "$sniffdir/pbcount.bas"
+printf '%s\n' 'PBC$ = "hello there"' 'println PBC$'               > "$sniffdir/pbcdollar.bas"
+printf 'PBC\t= 3\n%s\n' 'println "tabbed is " + str$(PBC)'        > "$sniffdir/pbctab.bas"
+printf '%s\n' 'PBC' 'println "a bare pbc line"'                   > "$sniffdir/pbcbare.bas"
+
+check_sniff_runs() {  # shape path want
+  local out code
+  if out="$("$exe" "$2" < /dev/null 2>&1)"; then code=0; else code=$?; fi
+  # 'format version' is the tell of the old defect, so it is asserted ABSENT: a
+  # refusal for the right reason and one for this reason are not the same. [[ ]]
+  # rather than `echo | grep -q`, which SIGPIPEs its upstream under pipefail.
+  if [ "$code" -eq 0 ] && [[ "$out" == *"$3"* ]] && [[ "$out" != *"format version"* ]]; then
+    return 0
+  fi
+  echo "        $1: exit $code, said '$out'"
+  return 1
+}
+check_sniff_runs 'PBCount = 3'      "$sniffdir/pbcount.bas"   'count is 3'      || okO=1
+check_sniff_runs 'PBC$ = "..."'     "$sniffdir/pbcdollar.bas" 'hello there'     || okO=1
+check_sniff_runs 'PBC<TAB>= 3'      "$sniffdir/pbctab.bas"    'tabbed is 3'     || okO=1
+check_sniff_runs 'a bare PBC line'  "$sniffdir/pbcbare.bas"   'a bare pbc line' || okO=1
+
+# 5: `pack` must give its OWN refusal for source, the one F already pins, and not
+#    a version number -- IsBytecode answering True took that branch away.
+if o5="$("$exe" pack "$sniffdir/pbcount.bas" "$sniffdir/never" 2>&1)"; then o5code=0; else o5code=$?; fi
+if [ "$o5code" -eq 2 ] && [[ "$o5" == *"not a .pbc"* ]] && [[ "$o5" != *"format version"* ]]; then :; else
+  echo "        pack of PBC-prefixed source: exit $o5code, said '$o5'"; okO=1
+fi
+
+# 6/7: THE MIRROR. The same program COMPILED is bytecode, and must still be read
+#      as bytecode -- run directly, and packed into a standalone executable.
+"$exe" compile "$sniffdir/pbcount.bas" "$sniffdir/pbcount.pbc"
+check_sniff_runs 'the .pbc compiled from it' "$sniffdir/pbcount.pbc" 'count is 3' || okO=1
+
+"$exe" pack "$sniffdir/pbcount.pbc" "$sniffdir/pbcount_packed"
+chmod +x "$sniffdir/pbcount_packed"
+if o7="$("$sniffdir/pbcount_packed" < /dev/null 2>&1)"; then o7code=0; else o7code=$?; fi
+if [ "$o7code" -eq 0 ] && [[ "$o7" == *"count is 3"* ]]; then :; else
+  echo "        the packed .pbc: exit $o7code, said '$o7'"; okO=1
+fi
+
+if [ "$okO" -eq 0 ]; then echo 'PASS  O:PBC-prefixed source (read as the source it is, and a real .pbc still as bytecode)'
+else echo 'FAIL  O:a source file whose first line starts PBC is taken for bytecode'; fail=1; fi
+
 exit "$fail"

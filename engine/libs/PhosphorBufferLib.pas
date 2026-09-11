@@ -706,6 +706,23 @@ begin
   Result := ValDouble(s);
 end;
 
+{ REFUSE BEFORE MUTATING, the shape buffer_setint has and this one did not.
+
+  The Double->Single narrowing on the first line of the body answers +/-Inf for any
+  magnitude past about 3.4e38, and nothing looked at it: the four bytes went into
+  the buffer, and only THEN did the +Inf return value meet the engine's finiteness
+  gate and raise. So buffer_setsng(b@, 1, 1e300) left 00 00 80 7F -- an IEEE
+  infinity -- sitting in the buffer behind the error it had just raised, a value
+  buffer_getsng itself then refuses to read back, and file_writeallbytes would
+  have persisted it. A program that traps the error and carries on had a silently
+  corrupted buffer.
+
+  This unit's contract (header, "Every out-of-range position, count or value is a
+  RETURNED error ... never a raise and never a silent clamp") makes an
+  unrepresentable value exactly that: an out-of-range value. It is now named and
+  returned, before WriteRaw is reached. A value that merely loses PRECISION in a
+  Single, or underflows to zero, is still written -- that is what "at single
+  precision" means and it is what the docs promise. }
 function f_buffer_setsng(const A: array of TValue; out E: TPhosphorError): TValue;
 var b: TPhosphorBytes; p: Int64; l: LongWord; s: Single;
 begin
@@ -714,6 +731,12 @@ begin
   p := ArgI64(A[1]);
   if not CheckRange('buffer_setsng', Length(b.Data), p, 4, E) then Exit;
   s := AsDouble(A[2]);
+  if not IsFiniteD(Double(s)) then
+  begin
+    E := MakeError(peRuntime, 'buffer_setsng: ' + ValToStr(A[2]) +
+      ' does not fit a single (about -3.4e38..3.4e38)');
+    Exit;
+  end;
   Move(s, l, 4);
   WriteRaw(b, Integer(p), 4, False, QWord(l));
   Result := ValDouble(s);                        // the value written, at single precision

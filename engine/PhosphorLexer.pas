@@ -97,6 +97,58 @@ begin
   Result := IsIdentStart(C) or IsDigit(C);
 end;
 
+{ THE OFFENDING BYTE, SPELLED SO THAT IT SURVIVES BEING SAID.
+
+  This unit carries the codepage UTF8 directive, so appending a Char to a message
+  RE-ENCODES it: every byte >= 128 came out as a literal '?'. That is not merely
+  ugly -- it made `unexpected character '?'` byte-identical for a curly quote
+  pasted from a browser (0xE2), a non-breaking space (0xA0), a lone Latin-1
+  letter (0xE9) and a REAL question mark. Four different characters, one message,
+  hex 27 3f 27 in all four; measured. And a single byte >= 128 is not valid UTF-8
+  on its own, so no spelling that embeds the raw byte can work at any layer --
+  Copy(FSrc, FPos, 1), the String slice this unit reaches for elsewhere, loses it
+  just the same on the way to the console.
+
+  So the byte is rendered NUMERICALLY when it cannot be shown, and shown as
+  itself only when it is printable ASCII -- 33..126, where the encoding is the
+  identity and there is a glyph the reader can find in the file. A space, a tab
+  and every byte >= 128 take the numeric form, which is the half that matters:
+  those are exactly the characters that are invisible in an editor, so a
+  question mark told the reader nothing to search for.
+
+  The quoted form is built from a one-character SLICE, never from a Char, so the
+  rule scripts/check-codepage.py enforces holds here by construction rather than
+  by an argument about which byte values are safe. }
+function ByteHere(const ASrc: String; APos: Integer): String;
+var
+  b: Byte;
+begin
+  b := Ord(ASrc[APos]);
+  if (b >= 33) and (b <= 126) then
+    Result := '''' + Copy(ASrc, APos, 1) + ''' (#' + IntToStr(b) + ')'
+  else
+    Result := '#' + IntToStr(b) + ' (0x' + IntToHex(b, 2) + ')';
+end;
+
+{ WHERE THAT BYTE SITS ON ITS LINE, counting bytes from 1.
+
+  The line number alone sends a reader to a line and no further, which is no help
+  at all when the character is invisible: a non-breaking space between `x` and
+  `=` looks exactly like a space in every editor. The lexer is the only layer
+  that still holds the offset, so it is the only place the column exists.
+
+  Counted in BYTES, not codepoints, deliberately -- the thing being reported IS a
+  byte, and a codepoint count would be a different number from the one an editor
+  or a hex dump shows for a file whose encoding has already gone wrong. }
+function ColumnAt(const ASrc: String; APos: Integer): Integer;
+var
+  i: Integer;
+begin
+  i := APos;
+  while (i > 1) and (ASrc[i - 1] <> #10) do Dec(i);
+  Result := APos - i + 1;
+end;
+
 constructor TLexer.Create(const ASource: String);
 begin
   inherited Create();
@@ -351,7 +403,15 @@ begin
             '\': s := s + '\';
             '"': s := s + '"';
           else
-            FErr := 'unknown escape sequence ''\' + Copy(FSrc, FPos + 1, 1) + '''';
+            { The escaped byte is reported through ByteHere for the same reason
+              the operator message below is: `"a\<0xE9>b"` used to say
+              `unknown escape sequence '\?'`, which is what a real `"a\?b"` says
+              -- the Copy here is a String slice and keeps the byte in FErr, but
+              a lone byte >= 128 is not valid UTF-8 and does not survive being
+              written out either. Measured: both spellings produced hex 5c 3f. }
+            FErr := 'unknown escape sequence: a backslash followed by ' +
+                    ByteHere(FSrc, FPos + 1) + ', at column ' +
+                    IntToStr(ColumnAt(FSrc, FPos));
             FErrLine := startLine;
             Exit(False);
           end;
@@ -458,7 +518,11 @@ begin
           else begin PushSimple(tkGT, startLine); Inc(FPos); end;
         end;
     else
-      FErr := 'unexpected character ''' + c + '''';
+      { NOT `+ c +`. See ByteHere: this is the site that made a curly quote, a
+        non-breaking space, a Latin-1 letter and a real '?' all say the same
+        twenty-three bytes. }
+      FErr := 'unexpected character ' + ByteHere(FSrc, FPos) + ' at column ' +
+              IntToStr(ColumnAt(FSrc, FPos));
       FErrLine := startLine;
       Exit(False);
     end;

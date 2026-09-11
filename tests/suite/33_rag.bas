@@ -187,5 +187,83 @@ assert_eq(rag_count(junk@), 0, "a fabricated handle answers 0, never dereference
 assert_eq(rag_error(), 1, "and the refusal is a value the program can read")
 assert_eq(rag_count(r@), 2, "the real handle still answers")
 
+test_case("rag/a query is UTF-8, so its words are codepoints and not bytes")
+rem ExtractKeywords kept only ['a'..'z','0'..'9','_','#','$','@',' '] and
+rem overwrote every OTHER BYTE with a space. Every byte of a multi-byte UTF-8
+rem sequence is >= 128, so a Cyrillic, Greek, Chinese, Hebrew or Arabic word was
+rem erased to nothing and an accented Latin word was cut at the accent. Keywords
+rem are the sole input to three of the four scoring signals, so every document
+rem scored below the relevance floor and rag_retrieve$ answered NOTHING for a
+rem query in any non-Latin script -- while rag_tags$ found the same document by
+rem the same word, which is how the index was proven to be holding it.
+rem
+rem This base is its own, so the counts asserted above are left alone, and its
+rem documents are category `guide` rather than `library`: the library-hint signal
+rem greps the RAW query and applies only to `library`, and a first probe with
+rem that category appeared to work and hid all of this.
+ukb$ = "bin/p9b_kb_utf8"
+if dir_exists(ukb$) <> 0 then dir_delete(ukb$, 1)
+dir_create(ukb$)
+
+u1$ = "---" + chr$(10)
+u1$ = u1$ + "id: zapiski" + chr$(10)
+u1$ = u1$ + "title: Записки" + chr$(10)
+u1$ = u1$ + "category: guide" + chr$(10)
+u1$ = u1$ + "tags: записки, текст" + chr$(10)
+u1$ = u1$ + "functions: zap_read" + chr$(10)
+u1$ = u1$ + "---" + chr$(10)
+u1$ = u1$ + "# Zapiski" + chr$(10)
+u1$ = u1$ + "telo" + chr$(10)
+file_writealltext(ukb$ + "/zap.md", u1$)
+
+u2$ = "---" + chr$(10)
+u2$ = u2$ + "id: conf" + chr$(10)
+u2$ = u2$ + "title: Ajuste" + chr$(10)
+u2$ = u2$ + "category: guide" + chr$(10)
+u2$ = u2$ + "tags: configuração, botão" + chr$(10)
+u2$ = u2$ + "functions: conf_set" + chr$(10)
+u2$ = u2$ + "---" + chr$(10)
+u2$ = u2$ + "# Ajuste" + chr$(10)
+u2$ = u2$ + "corpo" + chr$(10)
+file_writealltext(ukb$ + "/conf.md", u2$)
+
+u@ = rag@(ukb$)
+rag_rebuild@(u@)
+assert_eq(rag_count(u@), 2, "both documents are indexed")
+
+rem q$ builds the fragment rag_analyze$ renders for a one-word keyword list, so
+rem the assertion reads the KEYWORDS and not the echoed query -- the echoed query
+rem carries the same word in the same quotes and would pass with no keywords at all.
+dq$ = chr$(34)
+cyr$ = "записки"
+kw1$ = dq$ + "keywords" + dq$ + ":[" + dq$ + cyr$ + dq$ + "]"
+assert_true(instr(rag_tags$(u@, cyr$), "Zapiski"), "rag_tags$ finds the document by its exact Cyrillic tag, so the index holds the word")
+assert_true(instr(rag_analyze$(u@, cyr$), kw1$), "and the query keeps the whole word as its one keyword")
+assert_true(instr(rag_retrieve$(u@, cyr$), "Zapiski"), "so retrieval brings back the document that tag belongs to")
+
+rem Portuguese degraded differently: "configuração" came out as "configura",
+rem the accented tail destroyed and the leftover single letter dropped.
+pt$ = "configuração"
+kw2$ = dq$ + "keywords" + dq$ + ":[" + dq$ + pt$ + dq$ + "]"
+assert_true(instr(rag_analyze$(u@, pt$), kw2$), "an accented Latin word survives whole rather than being cut at the accent")
+assert_true(instr(rag_retrieve$(u@, pt$), "Ajuste"), "and retrieves the document carrying it as a tag")
+
+rem THE OTHER DIRECTION, and it is why this fix classifies CODEPOINTS rather than
+rem bytes. Keeping every byte >= 128 would make a no-break space a word
+rem character, gluing the words on either side of it into one token: measured,
+rem the two ids below came back as the single keyword "zapiski conf", which
+rem matches neither id, and only one of the two documents was found. These two
+rem assertions do not fail against the original defect -- they pin the answer
+rem against the simpler repair, which is a different wrong one.
+nbsp$ = bytestr$(194) + bytestr$(160)
+kw3$ = dq$ + "keywords" + dq$ + ":[" + dq$ + "zapiski" + dq$ + ", " + dq$ + "conf" + dq$ + "]"
+assert_true(instr(rag_analyze$(u@, "zapiski" + nbsp$ + "conf"), kw3$), "a no-break space separates two words rather than gluing them")
+both$ = rag_retrieve$(u@, "zapiski" + nbsp$ + "conf")
+assert_true(instr(both$, "Zapiski") > 0 and instr(both$, "Ajuste") > 0, "so both documents the two ids name come back")
+assert_true(instr(rag_analyze$(u@, "zapiski conf"), kw3$), "and the ASCII space spelling of the same question is unchanged")
+
+rag_free(u@)
+dir_delete(ukb$, 1)
+
 rag_free(r@)
 dir_delete(kb$, 1)

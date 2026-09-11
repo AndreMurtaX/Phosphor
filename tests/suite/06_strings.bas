@@ -129,3 +129,53 @@ assert_eq(instr("Hello World", "World", 1), 7, "the three-argument form agrees")
 assert_eq(instr("abcabc", "b", 4), 5, "searching from an offset")
 assert_eq(instrrev("abcabc", "b"), 5, "and so does instrrev")
 assert_eq(instrrev("abcabc", "zz"), 0, "absent is 0 there too")
+
+test_case("strings/ignoring case means the same thing at all five doors")
+rem containstext said a needle OCCURRED in a string that startstext and endstext
+rem said it did not BEGIN or END -- on strings of equal length, where those three
+rem questions are the same question. The family was folded by two rules:
+rem SysUtils' a-to-z byte table in the three predicates and strcmpi, and the
+rem platform's AnsiUpperCase inside containstext and replacetext$. That second
+rem half is a hook the operating system installs, so the same script did not even
+rem have to answer the same on Windows and on Linux. One rule now, and it is
+rem aucase$'s own table.
+rem chr$(201) is E-acute and chr$(233) is e-acute: one real word, five doors.
+u$ = chr$(201) + "COLE"
+l$ = chr$(233) + "cole"
+assert_true(containstext(u$, l$), "containstext folds the accent")
+assert_true(startstext(u$, l$), "startstext agrees, and used to answer 0")
+assert_true(endstext(u$, l$), "endstext agrees, and used to answer 0")
+assert_eq(strcmpi(u$, l$), 0, "strcmpi calls them equal, and used to answer -1")
+assert_eq(replacetext$(u$, l$, "X"), "X", "replacetext$ matches the same run")
+rem the case-SENSITIVE twins must still see two different strings
+assert_false(containsstr(u$, l$), "containsstr is unchanged")
+assert_false(startsstr(u$, l$), "and so is startsstr")
+assert_eq(replacestr$(u$, l$, "X"), u$, "and replacestr$ finds nothing to replace")
+rem folding case is not folding accents: a different letter stays different
+assert_false(startstext(u$, chr$(232) + "cole"), "e-grave is not e-acute")
+rem and text outside the match keeps ITS OWN spelling, not the folded one
+assert_eq(replacetext$("x" + u$ + "y", "COLE", "-"), "x" + chr$(201) + "-y", "only the match is replaced")
+
+test_case("strings/isnumeric answers for the value, not for the parse")
+rem TryStrToFloat succeeds on all of these and hands back a NON-FINITE Double,
+rem which isnumeric used to throw away before reporting 1. But str.md's
+rem documented idiom is to guard a val() with isnumeric, and val() cannot return
+rem a non-finite Double -- the engine's finiteness gate turns one into "val has
+rem no finite result for those arguments". So the guard said yes and the call it
+rem guarded faulted; without an on-error handler the program exited 1 with no
+rem output at all.
+assert_false(isnumeric("1e999"), "an out-of-range exponent is not a number val can answer")
+assert_false(isnumeric("1e309"), "nor is one just past the top")
+assert_false(isnumeric("-1e999"), "nor its negative")
+assert_false(isnumeric("inf"), "nor inf")
+assert_false(isnumeric("nan"), "nor nan")
+assert_false(isnumeric("INF"), "in any spelling")
+assert_true(isnumeric("1e308"), "but the largest exponent that IS finite still passes")
+assert_true(isnumeric("-2.5"), "and so does an ordinary number")
+assert_true(isnumeric(" 42 "), "trimmed, as before")
+rem the guard now holds: what isnumeric approves, val answers without faulting.
+if isnumeric("1e308") <> 0 then
+  bignum = val("1e308")
+  assert_true(bignum, "val returns the guarded value")
+  assert_eq(valcode(), 0, "and reports a clean parse")
+endif

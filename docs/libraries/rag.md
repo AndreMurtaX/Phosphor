@@ -161,6 +161,19 @@ back; only a document at 8.0 or above is admitted over the token budget, and the
 it is the one that gets truncated. Scores are rendered with an invariant decimal
 point, so an index answers `score: 3.0` on every machine and never `score: 3,0`.
 
+**A query is UTF-8, and its words are codepoints.** The keyword extractor splits
+on ASCII punctuation and on a named set of Unicode separators — the no-break
+space, the dashes, quotes and bullets of General Punctuation, the CJK and
+fullwidth punctuation — and keeps every other character, so a question in
+Cyrillic, Greek, Chinese, Hebrew, Arabic or accented Latin produces the keywords
+a reader would expect. It used to erase every byte above 127, which left a
+non-Latin question with no keywords at all and therefore no results, while
+`rag_tags$` found the same document by the same word. Two things follow from the
+set being *named* rather than derived from a Unicode property table: a separator
+outside the blocks it lists joins two words instead of splitting them, and case
+folding here is ASCII-only, so a non-Latin tag and a non-Latin query match on
+their bytes and not through a case rule.
+
 **Reading is sandboxed.** Files and folders are read through the same permission
 check `io` uses, so a base path outside the sandbox indexes as empty rather than
 failing loudly. The behaviour of the whole library, including the cache that

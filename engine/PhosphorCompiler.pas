@@ -27,7 +27,7 @@ unit PhosphorCompiler;
 interface
 
 uses
-  SysUtils, PhosphorValue, PhosphorOpcodes, PhosphorLexer;
+  SysUtils, PhosphorErrors, PhosphorValue, PhosphorOpcodes, PhosphorLexer;
 
 type
   { WHERE A STATEMENT'S HIDDEN TEMPORARY LIVES, and it is not a property of the
@@ -98,6 +98,16 @@ type
     FLabelCount: Integer;
     FGotoInstr: array of Integer;
     FGotoName: array of String;
+    { THE LINE OF THE JUMP, remembered because the only place that can report on
+      it runs after the whole body has been parsed and the lexer is gone.
+
+      ResolveGotos and RecordLabel each passed a literal 0, and 0 is not even an
+      obviously-invalid marker downstream: PhosphorEngine clamps it to 1, so
+      `goto nowhere` on line 400 of a file sent the reader to line 1 -- a
+      plausible-looking line, which is worse than none. Every other diagnostic in
+      this file carries FLex.Cur().Line or t.Line; these two are the exceptions
+      because the fact was thrown away at the site that had it. }
+    FGotoLine: array of Integer;
     FGotoCount: Integer;
     procedure Fail(const AMsg: String; ALine: Integer);
     procedure Expect(AKind: TTokenKind; const AWhat: String);
@@ -122,8 +132,9 @@ type
     procedure AddCont(AInstr: Integer);
     procedure PatchBreaks(ATarget: Integer);
     procedure PatchConts(ATarget: Integer);
-    procedure RecordLabel(const AName: String; APos: Integer);
-    procedure AddGoto(AInstr: Integer; const AName: String; AReturns: Boolean);
+    procedure RecordLabel(const AName: String; APos, ALine: Integer);
+    procedure AddGoto(AInstr: Integer; const AName: String; AReturns: Boolean;
+      ALine: Integer);
     procedure ResolveGotos;
     procedure ParseExpr;
     procedure ParseOr;
@@ -622,13 +633,17 @@ begin
     FProg.Patch(FLoopConts[FLoopDepth - 1][i], ATarget);
 end;
 
-procedure TPhosphorCompiler.RecordLabel(const AName: String; APos: Integer);
+{ ALine is the line the label is WRITTEN on, and it is a parameter rather than a
+  field because that is the only line this routine can report: the duplicate is
+  found here, at the second spelling, which is the one the author has to delete.
+  Both callers -- the two arms of Compile's top-level loop -- hold it. }
+procedure TPhosphorCompiler.RecordLabel(const AName: String; APos, ALine: Integer);
 var l: Integer;
 begin
   for l := 0 to FLabelCount - 1 do
     if FLabelName[l] = AName then
     begin
-      Fail('duplicate label ' + AName, 0);
+      Fail('duplicate label ' + AName, ALine);
       Exit;
     end;
   if FLabelCount = Length(FLabelName) then
@@ -667,7 +682,7 @@ end;
   use inside a function -- in those words, and for this exact reason. The prose
   was right; nothing enforced it. }
 procedure TPhosphorCompiler.AddGoto(AInstr: Integer; const AName: String;
-  AReturns: Boolean);
+  AReturns: Boolean; ALine: Integer);
 begin
   { REFUSED ONLY IF THE JUMP DOES NOT COME BACK, and AReturns is what says so.
 
@@ -725,9 +740,11 @@ begin
   begin
     SetLength(FGotoInstr, (FGotoCount + 1) * 2);
     SetLength(FGotoName, (FGotoCount + 1) * 2);
+    SetLength(FGotoLine, (FGotoCount + 1) * 2);
   end;
   FGotoInstr[FGotoCount] := AInstr;
   FGotoName[FGotoCount] := AName;
+  FGotoLine[FGotoCount] := ALine;
   Inc(FGotoCount);
 end;
 
@@ -741,7 +758,7 @@ begin
       if FLabelName[l] = FGotoName[g] then begin pos := FLabelPos[l]; Break; end;
     if pos < 0 then
     begin
-      Fail('undefined label ' + FGotoName[g], 0);
+      Fail('undefined label ' + FGotoName[g], FGotoLine[g]);
       Exit;
     end;
     FProg.Patch(FGotoInstr[g], pos);
@@ -1017,13 +1034,13 @@ begin
     jNext := FProg.Emit(opJumpIfFalse, 0, 0, ln);   // selector <> idx: next test
     if isGosub then
     begin
-      j := FProg.Emit(opGosub, 0, 0, ln); AddGoto(j, labelName, True);
+      j := FProg.Emit(opGosub, 0, 0, ln); AddGoto(j, labelName, True, ln);
       SetLength(endJumps, Length(endJumps) + 1);
       endJumps[High(endJumps)] := FProg.Emit(opJump, 0, 0, ln);   // after return, jump to end
     end
     else
     begin
-      j := FProg.Emit(opJump, 0, 0, ln); AddGoto(j, labelName, False);
+      j := FProg.Emit(opJump, 0, 0, ln); AddGoto(j, labelName, False, ln);
     end;
     FProg.Patch(jNext, FProg.Count);
     Inc(idx);
@@ -1056,9 +1073,9 @@ begin
     FLex.Advance();
   end
   else if FLex.Cur().Kind = tkInt then
-    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, IntToStr(FLex.Cur().IntVal), True); FLex.Advance(); end
+    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, IntToStr(FLex.Cur().IntVal), True, ln); FLex.Advance(); end
   else if FLex.Cur().Kind = tkIdent then
-    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, FLex.Cur().StrVal, True); FLex.Advance(); end
+    begin j := FProg.Emit(opSetErrHandler, 0, 0, ln); AddGoto(j, FLex.Cur().StrVal, True, ln); FLex.Advance(); end
   else
     Fail('''on error goto'' needs a label or 0', FLex.Cur().Line);
 end;
@@ -2042,7 +2059,8 @@ var
   t: TToken;
   i: Integer;
   cname: String;
-  cval: TValue;
+  cval, cfit: TValue;
+  cerr: TPhosphorError;
   neg: Boolean;
   k: TTokenKind;
   nidx: Integer;
@@ -2122,9 +2140,9 @@ begin
     begin
       FLex.Advance();
       if FLex.Cur().Kind = tkInt then
-        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal), False); FLex.Advance(); end
+        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal), False, t.Line); FLex.Advance(); end
       else if FLex.Cur().Kind = tkIdent then
-        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal, False); FLex.Advance(); end
+        begin i := FProg.Emit(opJump, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal, False, t.Line); FLex.Advance(); end
       else Fail('''goto'' needs a line number or a label', FLex.Cur().Line);
       Exit;
     end;
@@ -2132,9 +2150,9 @@ begin
     begin
       FLex.Advance();
       if FLex.Cur().Kind = tkInt then
-        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal), True); FLex.Advance(); end
+        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, IntToStr(FLex.Cur().IntVal), True, t.Line); FLex.Advance(); end
       else if FLex.Cur().Kind = tkIdent then
-        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal, True); FLex.Advance(); end
+        begin i := FProg.Emit(opGosub, 0, 0, t.Line); AddGoto(i, FLex.Cur().StrVal, True, t.Line); FLex.Advance(); end
       else Fail('''gosub'' needs a line number or a label', FLex.Cur().Line);
       Exit;
     end;
@@ -2324,6 +2342,42 @@ begin
       begin
         Fail('const value must be a single number or string literal, not an expression', FLex.Cur().Line); Exit;
       end;
+      { A CONST IS A BINDING, AND THIS WAS THE ONE BINDING NOBODY CHECKED.
+
+        The value above is built purely from the TOKEN KIND -- tkInt, tkDouble,
+        tkString -- and the NAME was never consulted, so `const s$ = 5` kept an
+        Int64 under a `$` name, `const i% = 1.5` kept 1.5 under a `%` one, and
+        `const b? = 7` and `const h@ = 3` invented a bool and a handle that were
+        neither. Every other binding in this language asks VarTypeOf: VarIndex
+        for a global, AddLocal for a frame slot. Those two are why `i% = 1.5`
+        stores 2 and `s$ = 5` is refused at its own line.
+
+        The consequence was not a cosmetic one. ParsePrimary emits the const's
+        raw value with opPushConst, so the wrongly-kinded value flowed into every
+        expression naming it and the diagnosis landed wherever it first met an
+        operator that cared: `const s$ = 5` / `println s$ + "x"` reported "cannot
+        add text to a number" on line 2, about a declaration on line 1, and the
+        value carried no suffix information for anything downstream to recover.
+
+        StoreCheck is the language's own answer to "may this value go into a slot
+        of this type", so a const now asks exactly the question an assignment
+        asks, gets the same coercion (`const i% = 1.5` is 2, like `i% = 1.5`) and
+        the same refusal in the same words -- reported HERE, at the declaration,
+        which is the line the author has to change. }
+      cerr := StoreCheck(VarTypeOf(cname), cval, cfit);
+      if IsError(cerr) then
+      begin
+        if cerr.Code = peTypeMismatch then
+          Fail('cannot store ' + KindName(cval.Kind) + ' into ' +
+               VarTypeName(VarTypeOf(cname)) + ' constant ' + cname, t.Line)
+        else
+          // The other codes (an int% slot too small for the literal) already word
+          // themselves, but in the vocabulary of a VARIABLE store, which is where
+          // StoreCheck is otherwise called from. Say whose declaration it is.
+          Fail('constant ' + cname + ': ' + cerr.Message, t.Line);
+        Exit;
+      end;
+      cval := cfit;
       if FConstCount = Length(FConstNames) then
       begin
         SetLength(FConstNames, (FConstCount + 1) * 2);
@@ -2432,7 +2486,7 @@ begin
       // a leading line number is a label
       if FLex.Cur().Kind = tkInt then
       begin
-        RecordLabel(IntToStr(FLex.Cur().IntVal), FProg.Count);
+        RecordLabel(IntToStr(FLex.Cur().IntVal), FProg.Count, FLex.Cur().Line);
         FLex.Advance();
         if (FLex.Cur().Kind = tkEOL) or (FLex.Cur().Kind = tkEOF) then
         begin
@@ -2446,7 +2500,7 @@ begin
       if (FLex.Cur().Kind = tkIdent) and (FLex.Peek().Kind = tkColon) and
          (not IsReservedWord(FLex.Cur().StrVal)) then
       begin
-        RecordLabel(FLex.Cur().StrVal, FProg.Count);
+        RecordLabel(FLex.Cur().StrVal, FProg.Count, FLex.Cur().Line);
         FLex.Advance();   // name
         FLex.Advance();   // ':'
         Continue;

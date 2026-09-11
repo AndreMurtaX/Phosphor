@@ -856,7 +856,40 @@ begin
   Pattern('(([a-z])+)+$', False);
   Pattern('((a)*)*$', False);
 
+  { THE BRANCH TABLE GAVE UP TOWARD REFUSE, WHERE EVERY OTHER GIVE-UP IN THIS
+    UNIT GIVES UP TOWARD ALLOW.
+
+    BodyUnambiguous stops recording past MaxReBranch+1 = 16 alternatives, and
+    then returned the False it was initialised with -- which the caller read as
+    "the body is ambiguous" rather than as "I could not judge it". So the
+    SEVENTEENTH branch flipped the verdict, and the reason printed named the
+    (a+)+ shape, which the pattern does not have. Its sibling give-ups do the
+    opposite: the ATOM table's overflow already suppressed the refusal, and
+    BranchesOverlap and UnionFirst both bail out toward "cannot judge".
+
+    THE COUNTS ARE THE WHOLE POINT of the first two lines: sixteen and seventeen
+    of the same harmless thing have to answer the same way. The class spelling
+    underneath them is the same language and was allowed throughout, which is
+    what made the refusal indefensible rather than merely cautious. Under the
+    ceilings docs/embedding.md prescribes, a script using the method pattern got
+    peLimit instead of a match, and the same script worked with the ceilings off. }
+  Pattern('^(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p)+$', True);       // 16 branches
+  Pattern('^(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)+$', True);     // 17: was REFUSED
+  Pattern('^(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z)+$', True);
+  Pattern('^[a-q]+$', True);                                   // the same language
+  Pattern('^(GET|PUT|POST|HEAD|PATCH|TRACE|DELETE|OPTIONS|CONNECT|LINK|UNLINK|' +
+          'PURGE|LOCK|UNLOCK|MOVE|MKCOL|COPY)+$', True);
+  { AND THE JUDGE IS STILL A JUDGE. Suppressing a refusal it could not justify
+    must not suppress the ones it can: these have sixteen branches or fewer, so
+    the table did track them, and they are refused with a reason that fits. }
+  Pattern('^(a+|b)+$', False);
+  Pattern('^(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|ab)+$', False);
+
   { End to end, not just the judge in isolation. }
+  Allowed('a 17-verb method alternation answers under a budget',
+          'println regex_find$("^(GET|PUT|POST|HEAD|PATCH|TRACE|DELETE|OPTIONS|' +
+          'CONNECT|LINK|UNLINK|PURGE|LOCK|UNLOCK|MOVE|MKCOL|COPY)+$", ' +
+          '"GETPOSTCOPY")' + LF, 'GETPOSTCOPY' + LF);
   Allowed('a unix-path regex answers under a budget',
           'println regex_find$("^(/[^/]+)+$", "/usr/local/bin")' + LF,
           '/usr/local/bin' + LF);

@@ -116,3 +116,50 @@ x = val("123")
 assert_eq(valcode(), 0, "a clean number leaves no code")
 y = val("12abc")
 assert_true(valcode(), "and a bad one leaves the position that stopped it")
+
+test_case("strlib/one case rule, swept rather than sampled")
+rem The five "ignoring case" functions used to fold by two incompatible rules,
+rem and a hand-picked list of examples would have missed it: 2839 of the 3152
+rem cased codepoints agreed. So this SWEEPS a range instead. For every codepoint
+rem aucase$ changes, a string and its own upper-cased self must be judged the
+rem same by all four predicates -- 313 pairs disagreed before, the first six of
+rem them a-grave through a-ring, the ordinary Western European alphabet.
+bad = 0 : seen = 0 : enough = 0
+for cp = 128 to 1200
+  lo$ = chr$(cp)
+  up$ = aucase$(lo$)
+  if up$ <> lo$ then
+    seen = seen + 1
+    if containstext(up$, lo$) <> 1 then bad = bad + 1
+    if startstext(up$, lo$) <> 1 then bad = bad + 1
+    if endstext(up$, lo$) <> 1 then bad = bad + 1
+    if strcmpi(up$, lo$) <> 0 then bad = bad + 1
+    if replacetext$(up$, lo$, "#") <> "#" then bad = bad + 1
+  endif
+next
+if seen > 300 then enough = 1
+assert_eq(enough, 1, "the sweep found cased codepoints to judge")
+assert_eq(bad, 0, "and every door agreed on every one of them")
+
+test_case("strlib/a delete can never make the string longer")
+rem delete$ and stuffstring$ computed  rem = n - (pos-1) - cnt  with all four
+rem terms Integer. ArgI32 SATURATES rather than raising, so a count of
+rem 2147483647 made the true value -4294967288, which wraps modulo 2^32 to +8;
+rem the `if rem < 0` guard therefore never fired and CpRight was asked for eight
+rem characters of a five-character string -- which answers the WHOLE string. So
+rem delete$ returned its input TWICE. This is the fix mid$ already carried,
+rem applied to its two siblings: clamp, then subtract.
+assert_eq(delete$("hello", 2147483647, 2147483647), "hello", "a pos past the end deletes nothing")
+assert_eq(delete$("hello", 2147483647, 2147483646), "hello", "one below the top does not either")
+assert_eq(delete$("hello", 2000000000, 2000000000), "hello", "nor just above the wrap")
+assert_eq(delete$("hello", 1000000000, 1000000000), "hello", "as it already did just below it")
+assert_eq(delete$("hello", 3, 2147483647), "he", "a huge count from inside deletes to the end")
+assert_eq(delete$("hello", 2147483647, 3), "hello", "a huge pos with a small count still deletes nothing")
+assert_eq(delete$("hello", 1e18, 1e18), "hello", "a Double that saturates on the way in, too")
+assert_eq(stuffstring$("hello", 2147483647, 2147483647, "Z"), "helloZ", "a start past the end appends")
+assert_eq(stuffstring$("hello", 2000000000, 2000000000, "Z"), "helloZ", "however big the start is")
+assert_eq(stuffstring$("hello", 1e18, 1e18, "Z"), "helloZ", "or the run it was told to replace")
+rem the ordinary cases are what they always were
+assert_eq(delete$("hello", 2, 2), "hlo", "an ordinary delete is untouched")
+assert_eq(delete$("hello", 1, 5), "", "and deleting all of it still empties it")
+assert_eq(stuffstring$("hello", 2, 2, "Z"), "hZlo", "and an ordinary stuff")

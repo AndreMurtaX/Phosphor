@@ -242,6 +242,15 @@ binary, which is the only file that is genuinely a bare stub. Applications packe
 before 2026-09-10 carry no mark and keep the old failure mode — repack them. The
 binary's own path is `ParamStr(0)` on Windows and `/proc/self/exe` on Linux.
 
+A file handed to `phosphor` is taken for a `.pbc` on **four** bytes, not three:
+the magic `PBC` and then the version byte, which must be a control character and
+must not be TAB, LF or CR. The three letters alone made `PBCount = 3` a false
+positive — a valid source file refused as bytecode with `unsupported .pbc format
+version 111`, the fourth *source* character reported as a version — and
+`PBC<TAB>= 3`, and a line that is just `PBC`, are valid BASIC too. What that costs
+the format is one rule: `PBC_VERSION` must never become 9, 10 or 13 without
+changing that test. It is at 1.
+
 Plan9Basic's `TInstr` already nearly serializes:
 
 ```pascal

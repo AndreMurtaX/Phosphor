@@ -425,3 +425,60 @@ rem because reading past the end is a bug worth stopping for. Freeing twice is n
 assert_eq(buffer_free(c@), 1, "it freed a buffer")
 assert_eq(buffer_free(c@), 0, "and says so the second time rather than raising")
 assert_eq(buffer_free(dim@(2)), 0, "a handle of the wrong kind is answered, not raised")
+
+test_case("buffer/setsng refuses what a single cannot hold, and leaves the bytes alone")
+rem The Double->Single narrowing answers +/-Inf past about 3.4e38, and the bytes
+rem were written BEFORE anything looked: the only thing that noticed was the
+rem engine's finiteness gate, checking the RETURN value one line after the write.
+rem So the error was raised over a buffer that already held 00 00 80 7F -- an
+rem infinity buffer_getsng itself then refuses to read back, and that
+rem file_writeallbytes would have persisted. buffer_setint refuses before
+rem WriteRaw; this is the same shape.
+s@ = buffer_new@(8)
+assert_eq(buffer_setsng(s@, 1, 1.5), 1.5, "a representable value is still written")
+assert_eq(buffer_get(s@, 8), 0, "and the bytes past it are untouched")
+
+rem The flag is set IN the handler, not after the call: `resume next` continues
+rem at the statement following the one that faulted, so a flag placed there would
+rem be set either way and the test would pass with the fix removed.
+sngmsg$ = ""
+sngcaught% = 0
+on error goto sng_big
+zz = buffer_setsng(s@, 5, 1e300)
+goto after_sng_big
+sng_big:
+sngcaught% = 1
+sngmsg$ = errmsg$()
+resume next
+after_sng_big:
+on error goto 0
+assert_eq(sngcaught%, 1, "the call was refused rather than answered")
+assert_true(instr(sngmsg$, "does not fit a single"), "the refusal says what is wrong")
+assert_true(instr(sngmsg$, "1E300"), "and names the value the program passed")
+assert_eq(buffer_get(s@, 5), 0, "byte 5 is as it was")
+assert_eq(buffer_get(s@, 6), 0, "byte 6 too")
+assert_eq(buffer_get(s@, 7), 0, "byte 7 too")
+assert_eq(buffer_get(s@, 8), 0, "and byte 8, which used to become 127 -- the top of +Inf")
+assert_eq(buffer_getsng(s@, 1), 1.5, "and the value already in the buffer still reads back")
+
+rem the negative half of the same range, and the edge that still fits
+sngmsg$ = ""
+sngcaught% = 0
+on error goto sng_neg
+zz = buffer_setsng(s@, 5, -1e300)
+goto after_sng_neg
+sng_neg:
+sngcaught% = 1
+sngmsg$ = errmsg$()
+resume next
+after_sng_neg:
+on error goto 0
+assert_eq(sngcaught%, 1, "-1e300 is refused too")
+assert_true(instr(sngmsg$, "does not fit a single"), "-1e300 is refused the same way")
+assert_eq(buffer_get(s@, 8), 0, "and writes nothing either")
+assert_near(buffer_setsng(s@, 5, 3e38), 3e38, 1e32, "3e38 does fit, and is written")
+assert_near(buffer_getsng(s@, 5), 3e38, 1e32, "and reads back at single precision")
+rem losing PRECISION is not the same as being unrepresentable: a value that
+rem underflows to zero in a single is still written, as the docs promise.
+assert_eq(buffer_setsng(s@, 5, 1e-300), 0, "1e-300 underflows to zero rather than refusing")
+assert_eq(buffer_free(s@), 1, "freed")

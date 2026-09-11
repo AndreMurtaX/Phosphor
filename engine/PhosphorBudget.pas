@@ -689,6 +689,21 @@ type
     NAtoms: Integer;         // atoms recorded for the ambiguity test
     Atoms: array[0..MaxReAtoms - 1] of TReAtom;
     Overflowed: Boolean;     // more atoms than the table holds: do not judge
+    { MORE BRANCHES THAN THE TABLE HOLDS -- the twin of Overflowed, and it was
+      missing, so the two table limits gave up in OPPOSITE directions.
+
+      With more than MaxReBranch+1 alternatives the First/Known arrays stop
+      recording, so BodyUnambiguous cannot judge the body -- and it returned its
+      initial False, which the caller reads as "ambiguous", which refuses. That
+      made `^(a|b|...|p)+$` (16 branches) allowed and `^(a|b|...|q)+$` (17)
+      refused, with a reason naming the (a+)+ shape that neither pattern has;
+      `^[a-q]+$`, the same language, is allowed. A 17-verb HTTP-method
+      alternation is the realistic form.
+
+      This flag is what lets the caller tell "I judged it and it is ambiguous"
+      from "I could not judge it", so the second resolves toward ALLOW like
+      every other uncertainty in this unit. }
+    BranchOverflow: Boolean;
     FixedWidth: Boolean;     // every branch consumes a fixed number of bytes
   end;
 
@@ -743,6 +758,7 @@ var
     L.AnyFirst := False;
     L.NAtoms := 0;
     L.Overflowed := False;
+    L.BranchOverflow := False;
     L.FixedWidth := True;
   end;
 
@@ -1163,7 +1179,14 @@ begin
               Exit(False);
             end;
             ambiguous := not BodyUnambiguous(popped);
-            if ambiguous and (not popped.Overflowed) and (popped.NAtoms > 0) then
+            { BOTH TABLE OVERFLOWS SUPPRESS THE REFUSAL, and for one reason:
+              BodyUnambiguous cannot have judged what it could not record, and
+              this unit's contract is that every uncertainty resolves toward
+              letting the pattern run. Overflowed (atoms) always did; the branch
+              table did not, and refused a 17-way alternation of single
+              characters while allowing the 16-way one beside it. }
+            if ambiguous and (not popped.Overflowed) and
+               (not popped.BranchOverflow) and (popped.NAtoms > 0) then
             begin
               if q = qkUnbounded then
                 AWhy := 'a repeat of a group whose body can match the same text in ' +
@@ -1234,8 +1257,13 @@ begin
       '|':
         begin
           Inc(i);
-          if lv[top].Branches <= MaxReBranch then Inc(lv[top].Branches)
-          else Inc(lv[top].Branches);          // counted, but no longer tracked
+          { Past MaxReBranch+1 alternatives the First/Known arrays stop
+            recording, so nothing downstream may READ a verdict off this level.
+            The count keeps rising (BranchesOverlap and UnionFirst test it), and
+            the flag is what tells the judgement it is looking at an untracked
+            level rather than an ambiguous one. }
+          if lv[top].Branches > MaxReBranch then lv[top].BranchOverflow := True;
+          Inc(lv[top].Branches);
           lv[top].NeedFirst := True;
           lv[top].AnyFirst := False;
         end;

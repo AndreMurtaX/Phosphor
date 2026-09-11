@@ -225,6 +225,23 @@ begin
           // length is not a count of entries, so no MaxSaneCount ever applied.
           8: PLongInt(@buf[o - 7])^ := 2000000000;
           9: PLongInt(@buf[o - 7])^ := -1;
+          { MODE 10 -- THE ENTRY FIELD, SET TO ONE PAST THE LAST INSTRUCTION.
+
+            The other nine modes make a file that is refused or that crashes.
+            This one made a file that RAN, printed nothing, and exited 0.
+            Valid instruction indices are 0..n-1, and the bound was written
+            `Entry > AProg.Count` -- inclusive, so Entry = n slipped through.
+            That form is right for a JUMP target eleven lines above it, where
+            pc = Count is how a compiler spells "the program ends"; for a
+            function entry it means the call pushes a frame, jumps past the
+            last instruction, the dispatch loop stops, and everything after
+            the call is abandoned while Run still answers True.
+
+            Measured on the pristine loader 2026-09-10: WithFunc, whose only
+            output is one println of dbl(21), loaded cleanly and printed
+            nothing with rc = 0. No message, no trace, no exit code -- the one
+            outcome this whole validator exists to prevent. }
+          10: PLongInt(@buf[o])^ := n;
         end;
         Break;
       end;
@@ -1310,6 +1327,13 @@ begin
                    'stored string claims', 16384);
   CheckBodyRefusal('refuse: a stored string of negative length', WithFunc, 9,
                    'stored string has length -1', 16384);
+  { The tenth field of the same table, and the only one of these that used to
+    produce a file that RAN. See mode 10: a function entry is an instruction
+    index, so Count is out of range, and the bound said it was in. The message
+    is demanded by name because "it was refused" would also be true of a reader
+    that refused it for some unrelated reason further down the file. }
+  CheckBodyRefusal('refuse: a function entry one past the last instruction',
+                   WithFunc, 10, 'starts at instruction');
   { The last enum byte in the format without a case of its own, at both ends of
     the constant pool and in the DATA section. See CheckValueKindRefusal: on the
     pristine reader the second of these printed one wrong digit and exited 0. }

@@ -238,3 +238,77 @@ mod_b = strtodatetime("2024-06-16 00:00:00")
 assert_eq(hoursbetween(mod_a, mod_b), 12, "after 1900 twelve hours is still twelve")
 assert_near(dayspan(mod_a, mod_b), 0.5, 0.0000001, "and half a day still half")
 assert_eq(daysbetween(strtodate("2020-06-15"), strtodate("2021-07-20")), 400, "and a long modern gap is unmoved")
+
+test_case("datetime/a number below the calendar is refused by the functions that take a date")
+rem THE MIRROR OF THE TOP END, which the RTL clamps. DecodeDate answers
+rem Year=0, Month=0, Day=0 for any number at or below -693594 -- the day before
+rem 0001-01-01 -- instead of refusing it, and the number is trivial to hold:
+rem incday and incweek are additions with no range check, so incday of the first
+rem day by -1 produces exactly it.
+rem
+rem What the nine date-TAKING functions then did with year 0 was three different
+rem wrong things. daysinmonth indexed the RTL's 1..12 month table ONE ELEMENT
+rem BEFORE its start and answered the adjacent constant 31 as a clean success --
+rem the same out-of-bounds read date-time.md records as fixed for the
+rem year-and-month spelling daysinamonth(2024, 13). weekoftheyear, weekof,
+rem weekofthemonth and weeksinyear raised EConvertError, so the program was
+rem handed the RTL's own words about a date it never wrote, "0-1-1 is not a valid
+rem date specification". dayoftheyear answered 0, which is no day of any year,
+rem daysinyear answered 366 for a year that does not exist, and datetostr$
+rem rendered "0000-00-00", which strtodate then refuses -- so render and parse
+rem stopped being inverses.
+below = incday(encodedate(1, 1, 1), 0 - 1)
+assert_eq(below, 0 - 693594, "the day before the first day is a plain number a program can hold")
+
+rem One handler for all nine, so the count IS the assertion: without the guard
+rem only the four week functions fail here and the other five answer a number.
+rem The `goto` after the last call is deliberate -- a `resume next` on the last
+rem statement of a block leaves the block.
+nerr% = 0
+msgs$ = ""
+on error goto bel1
+x = daysinmonth(below)
+x = daysinyear(below)
+x = dayoftheyear(below)
+x = weekoftheyear(below)
+x = weekof(below)
+x = weekofthemonth(below)
+x = weeksinyear(below)
+s$ = datetostr$(below)
+s$ = datetimetostr$(below)
+goto after_bel1
+bel1:
+nerr% = nerr% + 1
+msgs$ = msgs$ + errmsg$() + "|"
+resume next
+after_bel1:
+on error goto 0
+assert_eq(nerr%, 9, "all nine refuse it rather than four raising and five answering")
+assert_eq(countstr(msgs$, "is not a date in 0001-01-01..9999-12-31"), 9, "each in this library's words, with the range in them")
+assert_eq(instr(msgs$, "not a valid date specification"), 0, "and none of them in the RTL's, about a date the program never wrote")
+assert_true(instr(msgs$, "daysinmonth:") > 0, "each message names the function that was called")
+assert_true(instr(msgs$, "weekofthemonth:") > 0, "including the ones that used to raise")
+
+rem AND THE GUARD MUST REFUSE NOTHING LEGITIMATE. The first representable day is
+rem -693593, one above the threshold, and every instant of it lies in the OPEN
+rem interval below that midnight, because a negative TDateTime carries its time
+rem of day as a negative fraction: noon on 0001-01-01 is -693593.5, a SMALLER
+rem number than midnight.
+first = encodedate(1, 1, 1)
+assert_eq(datetostr$(first), "0001-01-01", "the first representable day still renders")
+assert_eq(strtodate(datetostr$(first)), first, "and parses back, so render and parse are inverses again")
+assert_eq(daysinmonth(first), 31, "January still has 31 days")
+assert_eq(daysinyear(first), 365, "year 1 still has 365")
+assert_eq(dayoftheyear(first), 1, "it is still the first day of its year")
+assert_eq(weekoftheyear(first), 1, "in ISO week 1")
+assert_eq(weekof(first), 1, "by either name")
+assert_eq(weekofthemonth(first), 1, "and the first week of its month")
+assert_eq(weeksinyear(first), 52, "and year 1 still has 52 ISO weeks")
+assert_eq(datetimetostr$(first - 0.5), "0001-01-01 12:00:00", "noon on the first day is inside the range, half a unit below its own midnight")
+assert_eq(daysinmonth(first - 0.5), 31, "and answers for that instant too")
+
+rem the far end, which was never the broken half and must stay answering
+last = encodedate(9999, 12, 31)
+assert_eq(datetostr$(last), "9999-12-31", "the last representable day still renders")
+assert_eq(daysinmonth(last), 31, "December still has 31 days")
+assert_eq(weeksinyear(last), 52, "and 9999 has 52 ISO weeks")

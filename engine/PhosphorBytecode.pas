@@ -334,6 +334,22 @@ const
   against the same. What cannot be checked statically -- a local slot, which
   depends on the frame -- is at least checked for a negative.
 
+  AND EACH OF THOSE BOUNDS IS INCLUSIVE OR EXCLUSIVE ON PURPOSE, because one
+  of them was not and it cost a silent no-op (2026-09-10). Written out:
+
+    constant index (opPushConst, opCall)     0 .. Consts.Count-1   EXCLUSIVE
+    variable index (opLoadVar/opStoreVar)    0 .. VarCount-1       EXCLUSIVE
+    jump target (opJump/JumpIfFalse/Gosub)   0 .. Count            INCLUSIVE --
+        Count is not an instruction; it is where the dispatch loop STOPS, which
+        is what a compiler emits for "and then the program ends".
+    handler target (opSetErrHandler)        -1 .. Count            INCLUSIVE --
+        -1 disables the handler; Count is the same end-of-program position.
+    local slot (opLoadLocal/opStoreLocal)    0 .. maxLocals-1      EXCLUSIVE
+    function entry                           0 .. Count-1          EXCLUSIVE --
+        a called function must have an instruction to run; see the check itself.
+    operand counts (DupN/Breakpoint/PrintUsing, opCall's argc)  >= 0 only, and
+        the VM bounds the rest against the stack it actually has.
+
   And everything the VM will COMPUTE ON, which is the half this pass did not have
   (2026-09-06): every index in the file was bounded and not one VALUE was looked
   at, so a stored Double could be +Inf or a NaN. See the pool sweep below.
@@ -475,10 +491,32 @@ begin
 
   for i := 0 to AProg.UserFuncCount - 1 do
   begin
-    if (AProg.UserFuncs[i].Entry < 0) or (AProg.UserFuncs[i].Entry > AProg.Count) then
+    { A FUNCTION ENTRY IS AN INSTRUCTION INDEX, SO THE BOUND IS EXCLUSIVE -- and
+      it was written inclusive, `> AProg.Count`, which let Entry = Count through.
+
+      That form is right eleven lines up for a JUMP target: pc = Count is how a
+      compiler spells "fall off the end", the dispatch loop stops, and the
+      program has finished. It is wrong for a function entry, where the loop
+      stopping means the call never runs, never returns, and abandons everything
+      after it while Run still answers True. Measured 2026-09-10 on a .pbc whose
+      one user function had its Entry set to the instruction count: the file
+      loaded, the program that should print two lines printed nothing, and the
+      process exited 0. "Runs and does nothing, successfully" is the single
+      outcome this validator exists to prevent, and it was the one it produced.
+
+      A function must have at least one instruction to enter, so Count is out. }
+    if (AProg.UserFuncs[i].Entry < 0) or (AProg.UserFuncs[i].Entry >= AProg.Count) then
     begin
-      AErr := Format('corrupt .pbc: function %d starts at %d, outside the program',
-                     [i, AProg.UserFuncs[i].Entry]);
+      { "outside 0..-1" reads like a bug in the checker rather than a fact about
+        the file, the same way it did for the local-slot message above. }
+      if AProg.Count = 0 then
+        AErr := Format('corrupt .pbc: function %d starts at instruction %d, but ' +
+                       'this program has no instructions',
+                       [i, AProg.UserFuncs[i].Entry])
+      else
+        AErr := Format('corrupt .pbc: function %d starts at instruction %d, ' +
+                       'outside the program''s 0..%d',
+                       [i, AProg.UserFuncs[i].Entry, AProg.Count - 1]);
       Exit;
     end;
     { A FUNCTION'S LOCAL TABLE MUST HOLD ITS PARAMETERS, and this one is not

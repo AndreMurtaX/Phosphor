@@ -25,6 +25,15 @@
       answers the message "Error: ..." rather than an empty string, so the
       oracle's assertion that a missing id "answers a message, not nothing"
       holds byte-for-byte.
+    * A QUERY IS UTF-8 AND ITS WORDS ARE CODEPOINTS. The keyword extractor is
+      the one place in this unit that classifies characters rather than moving
+      bytes around, so it is the one place that has to know: see the long note
+      at ExtractKeywords for what an ASCII-only classifier did to every query
+      not written in English, and for why "keep every byte >= 128" is not the
+      repair. Everything downstream stays byte-oriented -- SplitChars splits on
+      an ASCII space, NormalizeTag and LowerCase leave high bytes alone
+      (LowerCase is the RTL's A-Z byte map, identical on both OSes), and Pos is
+      a byte search -- so a keyword that survives compares correctly.
 ******************************************************************************}
 unit PhosphorRagLib;
 
@@ -375,6 +384,76 @@ end;
 
 // ---- query analysis --------------------------------------------------------
 
+{ A QUERY IS UTF-8, SO ITS WORDS ARE CODEPOINTS AND NOT BYTES.
+
+  ExtractKeywords used to keep only ['a'..'z','0'..'9','_','#','$','@',' '] and
+  overwrite every other BYTE with a space. Every byte of a multi-byte UTF-8
+  sequence is >= 128 and so fell outside that set: a Cyrillic, Greek, Chinese,
+  Hebrew or Arabic word was erased down to nothing, and an accented Latin word
+  was cut at each accent -- "configuracao" with cedilla and tilde came out as the
+  one keyword "configura", with the tail destroyed and the leftover single letter
+  dropped by the length rule. Keywords are the sole input to three of the four
+  scoring signals, so a query written in any non-Latin script scored every
+  document below RAG_MIN_RELEVANCE and rag_retrieve$ answered nothing, while
+  rag_tags$ found the very same document by the very same word.
+
+  THE NAIVE REPAIR IS TO KEEP EVERY BYTE >= 128, AND IT WAS MEASURED WRONG. It
+  makes a no-break space, an em dash, a curly quote and a fullwidth comma into
+  word characters, so the words on either side glue into one token. Measured on a
+  three-document base: the query "buttondoc<NBSP>zapiski" found only one of the
+  two documents its two ids name, where the same query with an ASCII space found
+  both -- an id scores on an exact match or on the keyword lying INSIDE the id,
+  and a glued token is neither.
+
+  So the classifier walks CODEPOINTS. The span of one is taken exactly as
+  PhosphorValue.Utf8Starts takes it -- a byte below $80 or at or above $C0 begins
+  a character and the continuation bytes after it belong to it -- which keeps
+  this agreeing with len(), left$() and mid$() on the same string, and stays
+  total on the malformed fragments bytemid$ and buffer_slice$ can hand a program.
+
+  EVERY UNCERTAINTY RESOLVES TOWARD KEEPING THE CHARACTER, because throwing bytes
+  away is the defect being fixed. Only codepoints named below separate: the
+  Unicode spaces, dashes, quotes and bullets of General Punctuation, the CJK and
+  fullwidth punctuation blocks, and the handful of Latin-1 marks a Western
+  European keyboard actually types. A letter, a digit, a combining mark and an
+  unlisted symbol are all word characters. }
+function RagSeparatorCode(ACode: Integer): Boolean;
+begin
+  Result := (ACode = $00A0) or                                  // no-break space
+            (ACode = $00A1) or (ACode = $00BF) or                // inverted ! and ?
+            (ACode = $00AB) or (ACode = $00BB) or                // guillemets
+            (ACode = $00AD) or                                   // soft hyphen
+            (ACode = $00B7) or                                   // middle dot
+            ((ACode >= $2000) and (ACode <= $206F)) or            // General Punctuation
+            ((ACode >= $2E00) and (ACode <= $2E7F)) or            // Supplemental Punctuation
+            ((ACode >= $3000) and (ACode <= $303F)) or            // CJK symbols/punctuation
+            ((ACode >= $FE10) and (ACode <= $FE19)) or            // vertical forms
+            ((ACode >= $FE30) and (ACode <= $FE6F)) or            // CJK compatibility forms
+            ((ACode >= $FF01) and (ACode <= $FF0F)) or            // fullwidth punctuation
+            ((ACode >= $FF1A) and (ACode <= $FF20)) or            //   (the fullwidth DIGITS
+            ((ACode >= $FF3B) and (ACode <= $FF40)) or            //    and LETTERS between
+            ((ACode >= $FF5B) and (ACode <= $FF65)) or            //    them are words)
+            (ACode = $FEFF);                                     // zero-width no-break space
+end;
+
+{ The codepoint whose bytes are S[AStart .. AStart+ALen-1], decoded the way
+  PhosphorStrLib's asc() decodes one. ALen came from the continuation-byte scan,
+  so a malformed run longer than four bytes decodes from its first four; whatever
+  number that produces is not in the separator set, so the bytes are kept. }
+function RagCodeAt(const S: String; AStart, ALen: Integer): Integer;
+begin
+  if ALen >= 4 then
+    Result := ((Ord(S[AStart]) and $07) shl 18) or ((Ord(S[AStart + 1]) and $3F) shl 12) or
+              ((Ord(S[AStart + 2]) and $3F) shl 6) or (Ord(S[AStart + 3]) and $3F)
+  else if ALen = 3 then
+    Result := ((Ord(S[AStart]) and $0F) shl 12) or ((Ord(S[AStart + 1]) and $3F) shl 6) or
+              (Ord(S[AStart + 2]) and $3F)
+  else if ALen = 2 then
+    Result := ((Ord(S[AStart]) and $1F) shl 6) or (Ord(S[AStart + 1]) and $3F)
+  else
+    Result := Ord(S[AStart]);
+end;
+
 function TPhosphorRag.ExtractKeywords(const AQuery: String): TStrArr;
 const
   STOP: array[0..59] of String = (
@@ -385,13 +464,48 @@ const
     'they','them','that','this','these','those','what','which',
     'who','whom','where','when','why','how','of','in','to',
     'for','with','on','at','from','by');
-var cleaned, lw: String; i, k: Integer; words: TStrArr; isStop: Boolean;
+var cleaned, lw: String; i, k, bt, sp, blank: Integer;
+    words: TStrArr; isStop: Boolean;
 begin
   Result := nil;
   cleaned := LowerCase(AQuery);
+  { ONE FORWARD PASS, bounded by the string it is walking. The judgement is made
+    at the byte that BEGINS a character and `blank` carries the verdict across
+    that character's continuation bytes, so the index still advances by exactly
+    one byte per step and the walk cannot outrun what is already allocated. }
+  blank := 0;
   for i := 1 to Length(cleaned) do
-    if not (cleaned[i] in ['a'..'z', '0'..'9', '_', '#', '$', '@', ' ']) then
+  begin
+    bt := Ord(cleaned[i]);
+    if (bt >= $80) and (bt < $C0) then
+    begin
+      { A continuation byte belongs to the character in front of it -- and if
+        there is none in front, it is a lone fragment the language can hand a
+        program through bytemid$, and it is kept as data rather than erased. }
+      if blank > 0 then
+      begin
+        cleaned[i] := ' ';
+        Dec(blank);
+      end;
+      Continue;
+    end;
+    blank := 0;
+    if bt < $80 then
+    begin
+      if not (cleaned[i] in ['a'..'z', '0'..'9', '_', '#', '$', '@', ' ']) then
+        cleaned[i] := ' ';
+      Continue;
+    end;
+    sp := 1;    // the span Utf8Starts would give this character
+    while (i + sp <= Length(cleaned)) and (Ord(cleaned[i + sp]) >= $80) and
+          (Ord(cleaned[i + sp]) < $C0) do
+      Inc(sp);
+    if RagSeparatorCode(RagCodeAt(cleaned, i, sp)) then
+    begin
       cleaned[i] := ' ';
+      blank := sp - 1;
+    end;
+  end;
   words := SplitChars(cleaned, [' ']);
   for k := 0 to High(words) do
   begin

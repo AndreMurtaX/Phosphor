@@ -293,6 +293,12 @@ x$ = string$(1000000000000000000, 65)   ' refused immediately, not attempted
 println regex_find$("(a+)+$", "aaaa...!")   ' refused: the pattern can backtrack
 ```
 
+The judge only ever refuses a pattern it can **show** is ambiguous. Anything it
+cannot parse confidently — nesting deeper than it tracks, more alternatives than
+it tracks, an unterminated class, a backreference — is allowed to run. That is
+the direction a host is entitled to know, because the other one refuses working
+patterns for a reason that is not true of them.
+
 Two things follow for you. First, **a refusal of this kind is an ordinary
 catchable error, not a fatal ceiling** — `err()` is `7`, the message names the
 function and the size it declined, and `resume next` continues. Nothing has been

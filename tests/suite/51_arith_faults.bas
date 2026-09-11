@@ -75,8 +75,59 @@ on error goto 0
 assert_eq(caught%, 1, "integer division of a huge Double is a catchable overflow")
 
 test_case("arith/mod with a Double operand stays in Double and answers")
-assert_eq((10.0 ^ 30) mod 2.5, 0, "a quotient beyond Int64 range is no longer narrowed")
+rem 1, AND THE OLD EXPECTATION HERE WAS 0 -- it pinned a wrong answer.
+rem
+rem The line used to read `assert_eq((10.0 ^ 30) mod 2.5, 0, ...)`. The 0 is not
+rem the remainder of anything; it is what  a - b*Int(a/b)  degenerates to once a
+rem is large. The quotient 10^30/2.5 is 4e29, whose gap between neighbouring
+rem Doubles is far wider than 2.5, so q*b rounds straight back to a and the
+rem subtraction cancels to nothing. The case was written to prove the quotient is
+rem no longer NARROWED to Int64, which it did -- and it recorded the answer that
+rem the surviving rounding produced as if it were the arithmetic.
+rem
+rem `mod` now does binary long division and forms no quotient at all, so the
+rem operands below are chosen to make the expected value exact arithmetic rather
+rem than a property of the compiler's float literals: 2^100 is one bit of
+rem mantissa, identical on every platform and in every float width, and since
+rem 2 = -1 (mod 3), 2^100 = (-1)^100 = 1 (mod 3). Its quotient, 2^100/3 = 4.2e29,
+rem is still far outside Int64 range, which is what this case is here for.
+assert_eq((2.0 ^ 100) mod 3, 1, "a quotient beyond Int64 range is not narrowed")
+rem 10^16 is exact as a Double (10^16 = 2^16 * 5^16, and 5^16 needs 38 bits), and
+rem 10 = 1 (mod 3), so the remainder is 1. This one answered 0 too: above 2^53
+rem the old formula cancelled for nearly every pair.
+assert_eq(1e16 mod 3, 1, "and above 2^53 the answer is the remainder, not 0")
 assert_eq(7.5 mod 2, 1.5, "and the ordinary case is unchanged")
+
+test_case("arith/a float remainder keeps 0 <= |r| < |b| and the sign of the dividend")
+rem The defining property of a remainder was not approximated by the old
+rem formula, it was broken: `1.5 mod 1e-300` answered -2.22E-16, negative for two
+rem positive operands and 10^284 times LARGER than the divisor. 1.5/1e-300 is
+rem exactly 1.5e300, but multiplying that back by 1e-300 rounds to
+rem 1.5000000000000002, so the subtraction returned the rounding error.
+rm1 = 1.5 mod 1e-300
+assert_true(rm1 > 0, "the remainder of two positive operands is positive")
+assert_true(rm1 < 1e-300, "and it is smaller than the divisor")
+rem And `1e200 mod 1e-200` raised a catchable overflow, because ONLY the quotient
+rem overflows -- 1e400 is Inf, Inf times 1e-200 is Inf, and a - Inf is -Inf, which
+rem the finiteness gate correctly refused. The remainder is an ordinary
+rem 4.18e-201. No quotient is formed now, so there is nothing left to overflow.
+mcaught% = 0
+rm2 = 0
+on error goto modovf
+rm2 = 1e200 mod 1e-200
+goto after_modovf
+modovf:
+mcaught% = 1
+resume next
+after_modovf:
+on error goto 0
+assert_eq(mcaught%, 0, "a quotient that would overflow is not an error: none is formed")
+assert_true(rm2 > 0, "the remainder is a small positive number")
+assert_true(rm2 < 1e-200, "and it is smaller than the divisor")
+rem The sign rule, which the ordinary-sized cases always got right and which the
+rem replacement has to keep: the remainder carries the sign of the DIVIDEND.
+rm3 = (0 - 7.5) mod 2
+assert_eq(rm3, 0 - 1.5, "a negative dividend gives a negative remainder")
 
 test_case("arith/'string - n' clamps instead of narrowing a huge count")
 assert_eq("abcdef" - (10.0 ^ 30), "", "removing more characters than there are leaves nothing")

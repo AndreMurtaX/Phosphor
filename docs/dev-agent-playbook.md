@@ -1470,6 +1470,66 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-09-11 · the work order, eight pieces in parallel, and what the MERGE found.**
+  Seven of eleven pieces landed, each its own commit, each green on both machines.
+  Four lessons, and only the first is about building.
+
+  **(1) VERIFY THE ASK BEFORE BUILDING FROM IT.** The work order was written from a
+  reading of this engine and was WRONG IN 24 OF 171 CLAIMS -- not stale citations,
+  but claims that break the repair: an opcode that does not exist, a discriminator
+  that can never fire because one line assigns the very thing it compares, a fix
+  site that is not on the path it is meant to fix, a function it asks to extend that
+  was never written, a premise (`the engine must not learn what JSON is`) the engine
+  had contradicted months earlier. Its author predicted ONE wrong claim. Checking all
+  171 against the tree cost one round and saved several: three pieces came back
+  BIGGER than written, and two would have had a builder repair a defect that was
+  already fixed.
+
+  **(2) A CRITIC THAT PASSES A PIECE AND THEN NAMES A DEFECT IT MEASURED IS NOT BEING
+  KIND -- IT IS BEING RIGHT.** Seven of eight did exactly that, and every one was
+  real: an index that made a workload SLOWER than the scan it replaced (202-byte
+  keys, 597 ms against 737 ms); one new order-affecting line that no test in the tree
+  could tell from its wrong version, which an oracle showed answering 143 queries
+  incorrectly while every runner stayed green; a hand-written heapsort the de-dup
+  beside it depends on; a report built quadratically over a script-supplied count.
+  **"Passed" is not the bar.** Every one of those went back for another round, and
+  every round closed with a measurement.
+
+  **(3) THE BUILDER MAY REFUTE THE CRITIC, AND SOMETIMES SHOULD.** B1's critic turned
+  `TProgram.SortLines` into a no-op, watched probe_debug pass 35/35, then wrote a
+  second implementation of StoppableLines and ran it over all 146 .bas files: nothing
+  the compiler builds reaches the sort. Its conclusion -- dead code -- was half right.
+  `ValidateProgram` bounds indices and never reads `Line` or any order, so a `.pbc`
+  arrives unsorted and IS a reachable input; the builder proved it with a
+  WriteProgram/ReadProgram round trip that fails under the mutation. A builder who
+  had deleted the sort to please the critic would have removed the only defence of a
+  real input. **Refute with a measurement; never with an opinion.**
+
+  **(4) THE MERGE IS WHERE THE PIECES FIRST MEET, AND IT FINDS ITS OWN DEFECTS.**
+  Eight sibling worktrees from one commit means eight builders each correctly taking
+  "the next free number": three claimed `tests/suite/62_`, two claimed
+  `tests/negative/33_`. Renumbering is clerical; what it breaks is not. Each rename
+  broke every comment citing the old name -- four citations, and the last survived
+  because the grep after each rename found *some* of them. And two pieces each added
+  a line to the probe list, which lives once per runner: the first resolution
+  REPLACED one probe with the other, which would have run it on one operating system
+  with both runners printing OK. `scripts/check-crossrefs.py` now refuses both, and
+  the same scan found two claims older than that day -- a roadmap describing an
+  interactive GUI host as built nine months after it was folded into the single
+  binary, and an 18-assert subset described as current long after the full file
+  replaced it.
+
+  **And the integrator is not exempt.** Three cleanups for one scratch directory,
+  each measured, none kept: one sat after `exit` and was dead code (15 directories
+  had piled up); one used `Remove-Item`, which PROMPTS on a non-empty directory and
+  hung a run for an hour; one used real `rmdir` and removed nothing, because the
+  directory always has files. Then `check-examples.py` refused for staleness after
+  an engine comment was edited without a rebuild, and `coverage.py` refused because
+  README.md said eight gates while nine ran -- the paragraph that predicted exactly
+  that, catching the person who had just written the ninth. **Two existing gates
+  caught the integrator in the same minute, and neither would have if the bar had
+  been run less often.**
+
 - **2026-09-11 · the Linux VM came back and the baseline failed before any work landed.**
   Eight pieces of the engine work order were building in parallel worktrees; the VM had
   been off all afternoon, so nothing had been cross-checked. The moment it returned, the

@@ -30,6 +30,16 @@ $root = Split-Path -Parent $here
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "phosphor-run-$PID"
 if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
 
+# NOT removed at the end, and that is a decision rather than an oversight. Emptying
+# it would take a recursive removal, which this tree forbids outright -- it lost
+# thirteen working copies to one. Three cleanups were written and measured here on
+# 2026-09-11: one sat after `exit` and was dead code; one used Remove-Item, which
+# PROMPTS on a non-empty directory and hung a run for an hour with no console to
+# answer it; one used Directory.Delete, which is correct rmdir and therefore
+# removed nothing, because this directory always holds the run's scratch. A few
+# kilobytes under TEMP is the operating system's to reclaim. The directory earns
+# its keep by isolating concurrent runs, which is what it was added for.
+
 function Resolve-Fpc {
     if ($Fpc) { return $Fpc }
     $c = 'C:\lazarus\fpc\3.2.2\bin\x86_64-win64\fpc.exe'
@@ -377,8 +387,3 @@ if (-not $py) {
 Write-Host ''
 if ($allOk) { Write-Host 'SUITE OK' -ForegroundColor Green; exit 0 }
 else { Write-Host 'SUITE FAILED' -ForegroundColor Red; exit 1 }
-
-# A plain rmdir: it succeeds only if the directory is empty, so it can never take
-# anything with it. Deliberate -- this tree has erased thirteen working trees to a
-# recursive removal once, and a scratch directory that outlives a run costs nothing.
-try { Remove-Item -LiteralPath $tmp -ErrorAction Stop } catch { }

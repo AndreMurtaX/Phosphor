@@ -99,6 +99,18 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   person. `examples/gui_demo.bas` is one, and `examples/manifest.txt` marks it `compile`
   for that reason: the runner compiles it and does not execute it. Same class as the REPL
   trap and it has the same tell — you are waiting on something with no console output.
+- **`Remove-Item` on a NON-EMPTY directory does not fail -- it PROMPTS**, and a
+  runner started without a console blocks there forever. This hung a suite run for an
+  hour on 2026-09-11, in a three-line cleanup, and it is the same tell as the REPL and
+  `app_run` traps above: you are waiting on something with no console output. PowerShell
+  itself names it if you ever see the error -- *"Deadlock detected: one or more jobs are
+  blocked waiting for user interaction"*. `[System.IO.Directory]::Delete(p)` is the
+  primitive that behaves the way `Remove-Item` is usually assumed to: real `rmdir`, which
+  throws on a non-empty directory and never asks. The near-miss is worth naming too --
+  had that prompt been answered "yes" by any path, it would have been a RECURSIVE removal
+  of a directory built from `GetTempPath()`. Three cleanups were written that day: one
+  sat after `exit` and was dead code, one hung, and the correct one removed nothing,
+  because the directory always had files in it. The scripts now leave it and say why.
 - **`{$codepage UTF8}` corrupts binary string LITERALS.** Every unit sets it, so `#$8B`
   in source becomes two bytes. Build exact bytes at runtime with `Chr()`; runtime calls,
   stream writes and pointer casts are unaffected. Applies to gzip headers, `.pbc` magic,

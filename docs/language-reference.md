@@ -707,19 +707,65 @@ endfunction
 ## Debugging: TRACE & BREAKPOINT
 
 `trace 1` / `trace 0` toggle tracing, and `breakpoint "msg", var…` reports a frame
-to the host debugger. In a plain console run there is no debugger attached, so a
-breakpoint simply reports-and-continues — it never blocks a program.
+to the host. It **reports and continues — it never blocks a program**, and it fires
+only while tracing is on: with `trace 0` in force the statement still evaluates its
+operands and then does nothing with them.
+
+Where the frame goes is the host's choice, because reporting is a host job. The
+`phosphor` command writes **one line per fired breakpoint to standard error** —
+never to standard output, because a program's output is its own and a debugger
+writing there would corrupt it. An embedder that installs nothing gets a
+breakpoint that does nothing at all, which is the right answer for a headless
+runner with no one to report to.
 
 ```basic
 trace 1
-breakpoint "checkpoint reached", 42
+breakpoint "checkpoint reached", 42, "and a string"
 trace 0
 println "execution continued"
 ```
 
+Standard output — the program's, untouched:
+
 ```
 execution continued
 ```
+
+Standard error — the host's report of the frame:
+
+```
+phosphor: example.bas:2: breakpoint: checkpoint reached [1]=42 [2]="and a string"
+```
+
+Operands are numbered from 1 in the order they were written, and a string is
+quoted so `42` and `"42"` cannot be confused. Expressions are welcome as operands
+(`breakpoint "loop", i, i*2`); a compiled program carries no variable names, so
+the line reports values and positions rather than names. A run with no source path
+to name — a packed application, or a line typed at the REPL — prints just the line
+number: `phosphor: 2: breakpoint: …`.
+
+**The report has ceilings, and it says when it hits one.** A breakpoint may be
+handed any number of operands of any size, and a debugger that rendered all of
+them would let a four-line program spend a minute writing eighty megabytes of
+diagnostics. So `phosphor` caps the message at 1024 bytes, each operand at 256,
+and the whole line at about 8 KB — and a cut is always declared, never silent,
+with the true size of what was cut. Two markers say so, and they are the only
+two (shown here on their own rather than inside a frame, which would be too wide
+to read):
+
+```
+[1]="<the first 256 bytes>"...(5000 bytes)   one operand the program made larger
+ ...(269 more)                               operands the line had no room for
+```
+
+So `breakpoint "many", c$, c$, …` with 300 operands of 256 bytes prints the first
+31 and ends `...(269 more)`: 31 + 269 is exactly the 300 the program passed.
+
+A value that fits is printed exactly as it is, so `...(` in a frame always means
+the program's value was larger than the line shows. A cut never lands inside a
+character or inside an escape, so what is printed still reads back as the literal
+it came from. Other hosts are free to choose other limits — an embedder that
+wants the whole frame installs its own handler and gets the operands as values.
 
 ---
 

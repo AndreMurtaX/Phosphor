@@ -79,7 +79,40 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCAN_DIRS = [
     os.path.join(ROOT, 'engine', 'libs'),
     os.path.join(ROOT, 'host', 'packages'),
+    os.path.join(ROOT, 'host', 'console'),
 ]
+# host/console WAS NOT SCANNED, AND A HOST SEAM IS THE SAME SHAPE AS A LIBRARY
+# CALL. The rule at the top says "anything a library does is invisible to all
+# three [ceilings] unless the library itself asks", and the reason is that a
+# library call is ONE instruction. A seam callback -- OnOutput, OnInput,
+# OnBreakpoint -- is called from inside one instruction too, by the same dispatch
+# loop, so the same sentence is true of it word for word. The directory was out
+# because nobody had asked the question, not because it had been answered.
+#
+# MEASURED, so it is a finding and not a suspicion: TConsoleHost.Breakpoint built
+# its report with `s := s + Format(...)` over a script-supplied operand count with
+# no ceiling on the count, on any operand's length or on the message. One
+# `breakpoint` statement, operands all the same 10 000-byte string, from a 32 065
+# byte source, on a host that holds one 10 KB string:
+#
+#     1000 operands  exit 0     396 ms   10 009 047 bytes on stderr
+#     8000 operands  exit 0  65 011 ms   80 079 047 bytes on stderr
+#
+# It now consults three named ceilings instead and is flat at ~8 KB and ~47 ms.
+#
+# AND THE SILENT HALF, which is the part worth keeping: sources() below used to
+# yield only `.pas`, and host/console holds two `.lpr` files and nothing else. So
+# adding this directory alone -- the obvious fix, the one a reader would make --
+# scanned ZERO files and printed the same confident green line as always. That is
+# this project's own named trap: a filter that hides the answer reads exactly like
+# a pass. sources() now yields .lpr too, and main() refuses a scan directory that
+# turns out to hold nothing, so the next widening cannot be silently empty.
+#
+# host/gui/libs STILL STAYS OUT, for the reason set out below, which is a
+# different reason: the GUI keeps a SECOND accounting (GuiChargeRoom/GuiChargeSet)
+# that GATE cannot see, so code that IS guarded there reads as unguarded. Nothing
+# in host/console has a second accounting; its exemptions below are all "the VM is
+# not running when this runs", which is a reason, not a workaround.
 # engine/*.pas itself is NOT scanned: the VM is where the ceilings are tested and
 # PhosphorBudget is the thing being consulted, so neither can consult it. The
 # compiler and lexer run before a budget exists at all.
@@ -386,6 +419,71 @@ ALLOWED = {
     'PhosphorCrtLib.pas:KbdRead':
         'each turn of the loop consumes one console event; the wait inside is a '
         'wait on the user, which is the whole purpose of a key read',
+
+    # ---- host/console: THE VM IS NOT RUNNING WHEN THESE RUN ------------------
+    # One discriminator covers all but two of this directory, and it is worth
+    # stating as a rule rather than repeating as eight excuses: a script can only
+    # reach host code through a SEAM, and this host has three -- Output, ReadLine
+    # and Breakpoint. Everything else here is startup, argument handling, packing
+    # or the REPL's own read loop, which run with no program executing and no
+    # budget in existence to consult. A future seam is therefore the only thing in
+    # this file that has to come back to this list.
+    #
+    # Two are seams and are answered on their own terms below: ReadLine, whose
+    # sizes come from the console; and Breakpoint, which is why the directory is
+    # scanned at all.
+    'phosphor.lpr:TConsoleHost.Breakpoint':
+        'the report is bounded by three named constants of this unit -- '
+        'BP_MAX_MESSAGE_BYTES, BP_MAX_OPERAND_BYTES and BP_MAX_LINE_BYTES -- so '
+        'neither the operand count nor any operand length decides the work; the '
+        'loop stops at the line ceiling and DECLARES what it dropped, and block P '
+        'of scripts/test.{ps1,sh} measures the bound rather than trusting this '
+        'sentence',
+    'phosphor.lpr:EscapeForDiag':
+        'a StringReplace pass per escape, over text its two callers have already '
+        'capped: RenderOperand cuts to BP_MAX_OPERAND_BYTES and Breakpoint to '
+        'BP_MAX_MESSAGE_BYTES, both BEFORE calling in, so the haystack is at most '
+        'a kilobyte and every needle is one character',
+    'phosphor.lpr:TConsoleHost.ReadLine':
+        'reads ONE console line into a fixed 8192-WideChar buffer; both SetLengths '
+        'are sized by what ReadConsoleW reported into it, and the Pos looks for a '
+        'single Ctrl+Z character in that same line',
+    'phosphor.lpr:ClipRetryCopy':
+        'the clipboard is a contended OS resource, so a write is retried at most '
+        'six times with Sleep(15) between -- a literal bound, at most 90 ms, '
+        'whatever the script asked to copy',
+    'phosphor.lpr:ClipRetryPaste':
+        'the same retry, three times: at most 45 ms',
+    'phosphor.lpr:FindPackMark':
+        'scans the running process image for its own pack mark; ACount is the size '
+        'of a file already read into memory, and this runs before any program does',
+    'phosphor.lpr:PayloadChecksum':
+        'one FNV-1a pass over the packed payload already in memory, at startup and '
+        'at pack time; no script is running either time',
+    'phosphor.lpr:Repl':
+        'the prompt loop: one turn per line a person types, ending at EOF. There '
+        'is no count here for a budget to bound -- the same answer KbdRead gets '
+        'above, and for the same reason',
+    'phosphortest.lpr:NewestIn':
+        'the test runner enumerating one source directory at startup to decide '
+        'whether its own binary is stale; not reachable from a script at all',
+
+    # ---- host/packages, REACHED ONLY NOW BECAUSE .lpr IS SCANNED -------------
+    # This one is not in host/console: it is in host/packages, which this gate
+    # has scanned all along, in a file it could not see because sources() took
+    # .pas only. Widening the extension found it, which is the argument for the
+    # widening in one line.
+    #
+    # AND READ THE KEY BEFORE BELIEVING IT. routines_of gives the LAST routine in
+    # a file a body that runs to end-of-file, so in a PROGRAM the main
+    # `begin .. end.` block is attributed to whatever routine was declared last.
+    # WriteSummary does not sleep; the main block does, waiting for the test
+    # server it just started to come up. The reason below is about that wait.
+    'phosphorhttptest.lpr:WriteSummary':
+        'the label is the last routine in the file, but the code is the runner\'s '
+        'main block: it waits up to 3000 ms in 20 ms slices for its own loopback '
+        'HTTP server to report Active before running any .bas. A literal ceiling, '
+        'a fixed port, and no program executing yet',
 }
 
 
@@ -576,12 +674,18 @@ def amplifiers(body):
     return sorted(set(hits))
 
 
+#: what a scan directory can hold. `.lpr` was missing and that was the silent
+#: half of the host/console blindness: a directory of programs scanned as empty
+#: and reported as clean. Keep the two together.
+SOURCE_EXTS = ('.pas', '.lpr')
+
+
 def sources(dirs):
     for d in dirs:
         if not os.path.isdir(d):
             continue
         for fn in sorted(os.listdir(d)):
-            if fn.endswith('.pas'):
+            if fn.lower().endswith(SOURCE_EXTS):
                 yield os.path.join(d, fn)
 
 
@@ -857,6 +961,23 @@ def main():
         return prove()
     if '--narrowing' in sys.argv:
         return narrowing()
+    # A SCAN DIRECTORY THAT YIELDS NOTHING IS A GREEN LINE ABOUT NOTHING. This is
+    # not hypothetical: host/console holds two .lpr files and sources() yielded
+    # only .pas, so adding the directory without also widening the extensions
+    # would have scanned zero files and still printed "budget gate: ... exempt by
+    # name". Asked here rather than left to a reader, because a filter that hides
+    # the answer is indistinguishable from a pass.
+    for d in SCAN_DIRS:
+        if not any(sources([d])):
+            print('SCAN DIRECTORY YIELDS NO SOURCE -- this gate would report '
+                  'nothing about it:')
+            print('  %s' % d)
+            print('')
+            print('Either the path is wrong, or it holds a file extension')
+            print('SOURCE_EXTS does not list (%s). A directory scanned as empty'
+                  % ', '.join(SOURCE_EXTS))
+            print('reads exactly like a directory with nothing wrong in it.')
+            return 1
     holes, gated, used = scan(SCAN_DIRS, ALLOWED)
     if holes:
         report(holes)

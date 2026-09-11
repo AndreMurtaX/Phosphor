@@ -100,23 +100,188 @@ procedure BindSandbox(AEng: TPhosphorEngine); forward;
 
 type
   { The whole host side of the boundary: give the engine somewhere to put its
-    output, and (for the REPL) a way to read a line. }
+    output, (for the REPL) a way to read a line, and somewhere for a BREAKPOINT
+    to report to. }
   TConsoleHost = class
   private
     FOutFile: TStream;       // non-nil only in --out file mode
+    FSourceName: String;     // what a diagnostic calls the running program; '' = unnamed
     {$IFDEF WINDOWS}
-    FStdOut, FStdIn: THandle;
+    FStdOut, FStdIn, FStdErr: THandle;
     FOutIsConsole: Boolean;  // stdout is an interactive console (not redirected)
     FInIsConsole: Boolean;   // stdin  is an interactive console
+    FErrIsConsole: Boolean;  // stderr is an interactive console
     {$ENDIF}
+    procedure WriteStdErr(const AText: String);
   public
     constructor Create(const AOutPath: String);
     destructor Destroy; override;
     procedure Output(const AText: String); // matches TPhosphorOutputProc
     function ReadLine(out ALine: String): Boolean; // False at end of input
+    procedure Breakpoint(const AMessage: String; ALine: Integer;
+                         const AOperands: array of TValue); // TPhosphorBreakpointProc
     function StdoutIsConsole: Boolean;
     function StdinIsConsole: Boolean;
+    function StderrIsConsole: Boolean;
+    { The name a breakpoint line gives the running program. BindHostSeams sets it
+      and every engine-building door goes through BindHostSeams, so there is no
+      path that reports a frame without having said what it belongs to. }
+    property SourceName: String read FSourceName write FSourceName;
   end;
+
+{ THREE NAMED CEILINGS, BECAUSE THE SCRIPT DECIDES HOW MUCH WORK THIS LINE IS.
+
+  A breakpoint's operand COUNT and every operand's LENGTH come from the program
+  being debugged, and the seam fires inside one VM instruction -- so MaxSteps and
+  TimeoutMs, which are tested between instructions, are tested before this line
+  and after it and never during it. MaxOutputBytes does not apply at all: it
+  counts "total bytes emitted through OnOutput" (PhosphorVM.pas:386, charged at
+  :1955) and a frame goes to stderr through the host, not through the output
+  seam. That is the project's own named class, "a loop or an allocation over
+  a script-supplied count", and it landed here where scripts/check-budget.py
+  could not see it: the gate scanned engine/libs and host/packages only, and its
+  file walk yielded .pas alone, so this file was invisible twice over. Measured
+  on the unbounded version, ONE `breakpoint` statement, operands all the same
+  10 000-byte string, from a 32 065-byte source, with the engine holding one
+  10 KB string:
+
+      1000 operands  exit 0     396 ms   10 009 047 bytes on stderr
+      2000 operands  exit 0   2 110 ms   20 019 047
+      4000 operands  exit 0  10 472 ms   40 039 047
+      8000 operands  exit 0  65 011 ms   80 079 047
+
+  -- superlinear in the count, because `s := s + ...` recopies the line it has
+  so far, and linear in each operand on top of that. Nothing refused it: this
+  host installs no ceilings for it to defeat, which is precisely why the ceiling
+  has to be here.
+
+  SO EVERY LENGTH ON THIS LINE IS NAMED, and a cut is always DECLARED -- the
+  count of bytes that did not fit, or the count of operands that did. A silent
+  truncation is a lie about the program's state, which is the one thing a
+  debugger must never tell. The message and each operand are cut BEFORE they are
+  escaped, so the ceiling bounds the WORK and not only the output; the line
+  ceiling is tested before each operand is rendered, so an operand nobody will
+  print is never built.
+
+  THE SOURCE PATH IS DELIBERATELY NOT CAPPED. It is host-supplied -- the argv
+  the operator typed -- not script-supplied, so it is not in the class these
+  ceilings exist for, and truncating it would throw away the file name, the one
+  part of the frame a reader needs to find the line. The honest bound is
+  therefore BP_MAX_LINE_BYTES plus one operand's rendering plus the marker, plus
+  whatever path the operator named; at the packed and REPL doors there is no
+  path and the bound is closed. }
+const
+  { A label a person wrote. 1 KB is far past any legible one and still a ceiling. }
+  BP_MAX_MESSAGE_BYTES = 1024;
+  { One value. Enough to recognise a string, short enough that sixteen of them
+    still read as one line. }
+  BP_MAX_OPERAND_BYTES = 256;
+  { The whole frame. The operand loop stops once the line has reached this. }
+  BP_MAX_LINE_BYTES    = 8192;
+
+{ A BYTE CEILING THAT NEVER CUTS A CHARACTER IN HALF.
+  Copy(S, 1, N) alone would split a multi-byte UTF-8 character at the limit and
+  put a lone continuation byte on the diagnostic stream. The engine already owns
+  that boundary question -- Utf8Left and Utf8Len, in PhosphorValue -- so the cut
+  is made with them rather than with a second opinion that could disagree with
+  the one left$ and mid$ use.
+
+  IT IS APPLIED TO A BOUNDED PREFIX AND NEVER TO THE WHOLE VALUE, which is the
+  whole point: Utf8Left builds one Int64 per input BYTE, so asking it about a
+  4 MB operand would commit 32 MB to answer a question about the first 256. One
+  byte past the ceiling is taken and then the last character of that prefix --
+  the one the cut may have landed inside -- is dropped, which lands on a
+  character boundary whether or not the boundary and the ceiling coincided. }
+function CapUtf8Bytes(const S: String; AMaxBytes: Integer): String;
+var
+  head: String;
+begin
+  if Length(S) <= AMaxBytes then
+    Exit(S);
+  head := Copy(S, 1, AMaxBytes + 1);
+  Result := Utf8Left(head, Utf8Len(head) - 1);
+end;
+
+{ THE LANGUAGE'S OWN ESCAPE SET, TAKEN FROM THE LEXER AND NOT FROM TASTE.
+  engine/PhosphorLexer.pas:10 lists what a source literal accepts -- \n \t \r \0
+  \a \b \f \v \\ \" -- and tests/suite/46_string_escapes.bas is its authority. A
+  breakpoint message and a string operand are arbitrary RUNTIME text, so rendering
+  them with exactly that set means the diagnostic reads back as the literal that
+  would produce it, and means a message or an operand carrying a newline cannot
+  split the host's one-line-per-breakpoint report into two. A control character
+  OUTSIDE the set (say Chr(1)) has no spelling in this language and is passed
+  through unchanged; inventing one would print something the lexer could not
+  read back.
+
+  WHAT THIS DOES NOT COVER, SAID PLAINLY RATHER THAN LEFT TO BE DISCOVERED: the
+  SOURCE PATH in the frame is not escaped. It is not script-supplied -- it is
+  the argv the operator typed -- and every other diagnostic in this file
+  interpolates that same text raw (see the two `phosphor: %s:%d: %s` sites), so
+  escaping it here would print a different name for the same file one line
+  apart, and would double every backslash of every Windows path to guard against
+  a file name a script cannot create. On Linux a file name MAY contain 0x0A, and
+  such a name splits this frame exactly as it already splits this host's other
+  diagnostics; that is a host-wide property of the `phosphor: ...` shape, not a
+  property of breakpoints, and a framed protocol (B2/B3) carries its own length
+  rather than trusting a newline.
+
+  StringReplace rather than a character loop on purpose: every unit here sets the
+  UTF8 codepage directive, and appending a Char to such a string re-encodes it,
+  which is the class scripts/check-codepage.py exists to catch. Replacing String
+  with String never touches the bytes >= 128 of a UTF-8 message. }
+function EscapeForDiag(const S: String): String;
+begin
+  { THE BACKSLASH FIRST, and the order is the whole correctness argument: every
+    substitution below introduces backslashes of its own, so a backslash pass run
+    after them would double what they had just written. }
+  Result := StringReplace(S, '\', '\\', [rfReplaceAll]);
+  Result := StringReplace(Result, '"', '\"', [rfReplaceAll]);
+  Result := StringReplace(Result, #10, '\n', [rfReplaceAll]);
+  Result := StringReplace(Result, #13, '\r', [rfReplaceAll]);
+  Result := StringReplace(Result, #9,  '\t', [rfReplaceAll]);
+  Result := StringReplace(Result, #0,  '\0', [rfReplaceAll]);
+  Result := StringReplace(Result, #7,  '\a', [rfReplaceAll]);
+  Result := StringReplace(Result, #8,  '\b', [rfReplaceAll]);
+  Result := StringReplace(Result, #12, '\f', [rfReplaceAll]);
+  Result := StringReplace(Result, #11, '\v', [rfReplaceAll]);
+end;
+
+{ KIND-AWARE, BECAUSE ValToStr IS NOT -- AND THAT IS THE ONLY THING MISSING.
+  The renderer itself already exists and is locale-independent: ValToStr, declared
+  in the interface of PhosphorValue.pas, is what the engine uses everywhere and
+  what this host must keep using, so a Double reads the same in a breakpoint line
+  as it does in str$. What ValToStr cannot do is SAY WHICH KIND it rendered: it
+  returns a vkString as bare text, so `breakpoint "m", 5` and `breakpoint "m", "5"`
+  come out identical, and the first question anyone debugging a BASIC program asks
+  is whether the thing is a number or the text of one. Quoting the string answers
+  it, and costs nothing anywhere else.
+
+  THE CAP GOES ON THE RAW VALUE, BEFORE THE ESCAPE, for two separate reasons and
+  each on its own is sufficient. It bounds the WORK: escaping a 4 MB operand in
+  order to throw all but 256 bytes of it away is exactly the cost the ceiling
+  exists to refuse, and EscapeForDiag makes ten passes over what it is given. And
+  it cannot land inside an escape: a cut made after escaping could fall between a
+  backslash and the character it escapes, leaving a dangling backslash that no
+  longer reads back as the literal it came from -- the one property this whole
+  rendering rests on. Cutting first means there is no escape to split.
+
+  A CUT IS ALWAYS DECLARED, with the value's TRUE length in bytes, so the reader
+  is never told a short string where the program holds a long one. Every other
+  kind renders to a fixed handful of characters -- an Int64, a Double through
+  FloatToStr, true/false, '@' and a handle number -- so no ceiling can bite
+  there; the line ceiling in Breakpoint is the backstop that bounds the frame
+  whatever a future kind decides to render. }
+function RenderOperand(const V: TValue): String;
+var
+  raw: String;
+begin
+  if V.Kind <> vkString then
+    Exit(ValToStr(V));
+  raw := CapUtf8Bytes(V.Str, BP_MAX_OPERAND_BYTES);
+  Result := '"' + EscapeForDiag(raw) + '"';
+  if Length(raw) < Length(V.Str) then
+    Result := Result + Format('...(%d bytes)', [Length(V.Str)]);
+end;
 
 constructor TConsoleHost.Create(const AOutPath: String);
 {$IFDEF WINDOWS}
@@ -126,15 +291,22 @@ var
 begin
   inherited Create();
   FOutFile := nil;
+  FSourceName := '';
   if AOutPath <> '' then
     FOutFile := TFileStream.Create(AOutPath, fmCreate);
   {$IFDEF WINDOWS}
   mode := 0;
   FStdOut := StdOutputHandle;
   FStdIn := StdInputHandle;
+  FStdErr := StdErrorHandle;
   { GetConsoleMode succeeds only on a real console handle; a file/pipe fails it. }
   FOutIsConsole := (FOutFile = nil) and GetConsoleMode(FStdOut, mode);
   FInIsConsole := GetConsoleMode(FStdIn, mode);
+  { --out redirects STDOUT and says nothing about stderr, so FErrIsConsole asks
+    its own handle rather than borrowing FOutIsConsole's answer. The two are
+    genuinely independent: `phosphor run f.bas --out log.txt` on a terminal has a
+    file for stdout and a console for stderr. }
+  FErrIsConsole := GetConsoleMode(FStdErr, mode);
   {$ENDIF}
 end;
 
@@ -157,6 +329,20 @@ function TConsoleHost.StdinIsConsole: Boolean;
 begin
   {$IFDEF WINDOWS}
   Result := FInIsConsole;
+  {$ELSE}
+  Result := False;
+  {$ENDIF}
+end;
+
+{ Reported by --diag for a reason the other two already have: the UTF-16 console
+  branch of WriteStdErr is the one path here that no automated test can reach,
+  because it needs a real terminal, and --diag is how this host lets a person
+  check by hand what it decided about its own handles. False on Unix, like its
+  two neighbours -- there is no second encoding to choose there. }
+function TConsoleHost.StderrIsConsole: Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := FErrIsConsole;
   {$ELSE}
   Result := False;
   {$ENDIF}
@@ -233,6 +419,140 @@ begin
     Exit(False);
   ReadLn(ALine);
   Result := True;
+end;
+
+{ ONE HOST DIAGNOSTIC, ON STDERR, WITH THE CARE Output ALREADY TAKES WITH STDOUT.
+  Named WriteStdErr and not Diag because a unit-level `function Diag: Integer` --
+  the --diag command -- already exists further down, and Pascal is
+  case-insensitive: a method with that name would resolve ahead of it inside this
+  class and read as the same routine to anyone scanning the file.
+  Every other diagnostic in this file is `Writeln(StdErr, ...)`, which is right
+  for them and wrong here, for two reasons that only apply to script-supplied text:
+
+    1. Writeln bypasses the WriteConsoleW path this file's header exists to
+       justify. A breakpoint message is arbitrary program text and may be
+       non-ASCII; written as raw bytes it is correct in a file or a pipe and
+       mojibake on an interactive Windows console. The fix is the one Output
+       already uses -- UTF-16 to a console handle, UTF-8 bytes to anything else.
+    2. Writeln on a text file ends a line with CRLF on Windows and LF on Linux.
+       A caller supplying its own #10 gets the SAME BYTES on both machines, which
+       is what lets a cross-platform test compare this stream at all.
+
+  The caller supplies the terminator, so this routine never invents one. }
+procedure TConsoleHost.WriteStdErr(const AText: String);
+{$IFDEF WINDOWS}
+var
+  w: WideString;
+  written: DWORD;
+{$ENDIF}
+begin
+  if Length(AText) = 0 then
+    Exit;
+  {$IFDEF WINDOWS}
+  if FErrIsConsole then
+  begin
+    written := 0;
+    w := UTF8Decode(AText);           // UTF-8 bytes -> UTF-16 for the console
+    if Length(w) > 0 then
+      WriteConsoleW(FStdErr, PWideChar(w), Length(w), written, nil);
+    Exit;
+  end;
+  {$ENDIF}
+  { Redirected (pipe/file) or non-Windows: raw UTF-8 bytes, byte-exact. }
+  FileWrite(StdErrorHandle, AText[1], Length(AText));
+end;
+
+{ WHAT A BREAKPOINT NOW DOES IN THIS HOST: ONE LINE, ON STDERR, AND KEEP GOING.
+  The engine has always offered the seam and this host has always left it nil, so
+  the only debugging statement the language has did nothing at all here while
+  docs/language-reference.md said it reported a frame to a host debugger. It now
+  reports, in the diagnostic shape the rest of the file already uses:
+
+      phosphor: <path>:<line>: breakpoint: <message> [1]=<v> [2]=<v>
+      phosphor: <line>: breakpoint: <message>            (a run with no path)
+
+  STDERR AND NEVER STDOUT. A program's output is its own: every byte-exact golden
+  in this tree is a comparison of stdout, and a debugger that wrote there would
+  corrupt all of them at once. The path-or-no-path pair is not a new shape either
+  -- it is exactly what the error diagnostics at the file and embedded doors
+  already print, so a reader has one shape to learn rather than two.
+
+  THE OPERAND LIST IS POSITIONAL BECAUSE NO NAMES REACH HERE. The compiled program
+  carries no variable names, so `breakpoint "m", x, x*2` arrives as two values and
+  nothing else -- and half of them are expressions that never had a name to carry.
+  Indices are BASE-1, like every other index a program in this language sees. The
+  shape leaves the slot between `]` and `=` free on purpose: when a name table
+  lands, `[1]=5` becomes `[1]x=5` and every other character of the line a user has
+  learned to read stays where it was.
+
+  NEVER BLOCKS. The seam is a report, not a wait -- the engine offers no way to
+  answer it, tests/suite/15_breakpoint_degrade pins that a host which installs
+  nothing simply continues, and a host that parked here would deadlock a program
+  whose only console is a pipe. Writing a line and returning is the whole job.
+
+  AND NEVER RUNS LONG. Everything on this line is sized by the program being
+  debugged, so all three lengths are capped by name -- see the BP_MAX_* block
+  above for the numbers and for the 80 MB report that is the reason. Block P of
+  scripts/test.ps1 and of its bash twin measures the bound; the exemption in
+  scripts/check-budget.py points at that measurement rather than replacing it. }
+procedure TConsoleHost.Breakpoint(const AMessage: String; ALine: Integer;
+  const AOperands: array of TValue);
+var
+  s, msg: String;
+  i: Integer;
+begin
+  msg := CapUtf8Bytes(AMessage, BP_MAX_MESSAGE_BYTES);
+  if Length(msg) < Length(AMessage) then
+    msg := EscapeForDiag(msg) + Format('...(%d bytes)', [Length(AMessage)])
+  else
+    msg := EscapeForDiag(msg);
+  if FSourceName <> '' then
+    s := Format('phosphor: %s:%d: breakpoint: %s', [FSourceName, ALine, msg])
+  else
+    s := Format('phosphor: %d: breakpoint: %s', [ALine, msg]);
+  { INDEXED IN PLACE. AOperands is an OPEN ARRAY parameter, not a dynamic array,
+    and FPC refuses to assign one to the other -- so the host reads it where it
+    lies rather than keeping it. It is also only valid for this call.
+
+    THE LINE CEILING IS TESTED BEFORE THE OPERAND IS RENDERED, never after. The
+    work is in the rendering, so an operand that will not be printed must not be
+    built first -- testing afterwards would still escape and copy every one of
+    eight thousand 10 KB operands before discarding all but the first few. What
+    stops is DECLARED: how many operands the program passed that this line does
+    not show. }
+  for i := 0 to High(AOperands) do
+  begin
+    if Length(s) >= BP_MAX_LINE_BYTES then
+    begin
+      s := s + Format(' ...(%d more)', [Length(AOperands) - i]);
+      Break;
+    end;
+    s := s + Format(' [%d]=%s', [i + 1, RenderOperand(AOperands[i])]);
+  end;
+  WriteStdErr(s + #10);
+end;
+
+{ EVERY SEAM, AT EVERY DOOR, FROM ONE PLACE -- AND THAT IS THE POINT OF IT.
+  This host builds an engine at three independent doors: RunFile, RunEmbedded and
+  Repl. Each used to assign OnOutput and OnInput itself, which made filling a new
+  seam a three-site edit that nothing checks: scripts/check-seams.py asks its
+  question once per FILE, so a single `eng.OnBreakpoint := ...` anywhere in here
+  turns the gate green while two of the three doors stay silent. That is the
+  instance-instead-of-the-class failure written into the build, so the wiring
+  moves here and the doors call it. A fourth door, or a fifth seam, is then one
+  edit in one place.
+
+  ASourceName HAS NO DEFAULT DELIBERATELY. '' is the value that means "no name to
+  report", which is right for the packed and REPL doors and WRONG for a file --
+  so a default of '' would let a door that forgot the argument quietly report
+  frames belonging to nothing. Required, and the omission is a compile error. }
+procedure BindHostSeams(AEng: TPhosphorEngine; AHost: TConsoleHost;
+                        const ASourceName: String);
+begin
+  AHost.SourceName := ASourceName;
+  AEng.OnOutput := @AHost.Output;
+  AEng.OnInput := @AHost.ReadLine;
+  AEng.OnBreakpoint := @AHost.Breakpoint;
 end;
 
 { The six opt-in packages, and the seventeen GUI ones. Separate routines because
@@ -619,8 +939,7 @@ begin
   eng := TPhosphorEngine.Create();
   BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
-    eng.OnOutput := @host.Output;
-    eng.OnInput := @host.ReadLine;
+    BindHostSeams(eng, host, APath);   // a file run has a path; a breakpoint names it
     RegisterAllPackages(eng);
     { OPENING the input is guarded; RUNNING it is deliberately not. An engine
       crash reported as "cannot read" would be the same wrong answer wearing a
@@ -1109,8 +1428,10 @@ begin
   eng := TPhosphorEngine.Create();
   BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
-    eng.OnOutput := @host.Output;
-    eng.OnInput := @host.ReadLine;
+    { '' because a packed application HAS no source path -- the program rides
+      inside this binary. That is why the error diagnostic one line down prints
+      a bare line number too; a breakpoint now matches it. }
+    BindHostSeams(eng, host, '');
     RegisterAllPackages(eng);
     line := eng.RunBytecode(APayload);
     if line <> 0 then begin Writeln(StdErr, Format('phosphor: %d: %s', [line, eng.ErrorMessage])); Exit(1); end;
@@ -1152,8 +1473,10 @@ begin
   eng := TPhosphorEngine.Create();
   BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
-    eng.OnOutput := @host.Output;
-    eng.OnInput := @host.ReadLine;
+    { '' because a line typed at a prompt has no file to name. Note that `trace 1`
+      PERSISTS across REPL lines where it does not across file runs: the VM resets
+      FTrace in Run and not in RunFrom, which is what the REPL uses. }
+    BindHostSeams(eng, host, '');
     RegisterAllPackages(eng);
     host.Output('Phosphor BASIC ' + PhosphorVersion +
                 ' -- REPL. Variables and functions persist across lines.'#10 +
@@ -1303,6 +1626,7 @@ begin
   try
     Writeln(StdErr, 'stdout is console: ', host.StdoutIsConsole());
     Writeln(StdErr, 'stdin  is console: ', host.StdinIsConsole());
+    Writeln(StdErr, 'stderr is console: ', host.StderrIsConsole());
     Flush(StdErr);
     host.Output('UTF-8 check: Olá — café — açúcar — ☕ — π ≈ 3.14159'#10);
     Result := 0;

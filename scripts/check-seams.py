@@ -93,9 +93,21 @@ SEAM_TYPES = tuple(sorted(seam_types()))
 # reason == None means "must be assigned". A string means "deliberately not
 # assigned, because ...". Keys are "<host file>:<seam>".
 EXEMPT = {
-    # The one shipped host. It fills OnOutput, OnInput and HostServices -- the last
-    # only when a graphical session is reachable, which is the point of the merge.
-    'phosphor.lpr:OnBreakpoint': 'BREAKPOINT is report-and-continue; there is nowhere for a host to pause to',
+    # THE ONE SHIPPED HOST HAS NO EXEMPTION LEFT, and the line that used to stand
+    # here is worth remembering rather than just deleting. It read "BREAKPOINT is
+    # report-and-continue; there is nowhere for a host to pause to" -- which is
+    # TRUE, and was still the wrong conclusion. Report-and-continue means a host
+    # must not BLOCK; it never meant a host must not REPORT. So for as long as
+    # that sentence sat here, the language's only debugging statement did
+    # literally nothing in the only shipped host while the language reference said
+    # it reported a frame to the host debugger, and this table said that was fine.
+    # phosphor.lpr now writes one line per fired breakpoint to stderr -- see
+    # TConsoleHost.Breakpoint -- so it fills all four seams, HostServices only
+    # when a graphical session is reachable.
+    #
+    # A reason that stops being true has to come OUT: the loop below fails on an
+    # exemption whose host now assigns the seam, which is what makes this table
+    # a check in both directions rather than a place to write an excuse once.
 
     # The suite runners report through assertion counters and write their own
     # summary bytes, and a .bas test file cannot type at a prompt.

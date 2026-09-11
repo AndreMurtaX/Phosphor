@@ -458,4 +458,171 @@ fi
 if [ "$okO" -eq 0 ]; then echo 'PASS  O:PBC-prefixed source (read as the source it is, and a real .pbc still as bytecode)'
 else echo 'FAIL  O:a source file whose first line starts PBC is taken for bytecode'; fail=1; fi
 
+# P: A BREAKPOINT REPORTS, AT EVERY DOOR, AND NEVER ONTO STDOUT.
+#    `breakpoint` is the only debugging statement this language has, and the
+#    engine has always offered a seam for it that this host left nil. The
+#    documented "reports a frame to the host debugger" reported to nobody: the
+#    program below printed `bp-stdout-marker` and not one further byte, on stdout
+#    or anywhere else. It now writes one line per fired breakpoint to STDERR.
+#
+#    THREE DOORS, BECAUSE THE HOST BUILDS AN ENGINE AT THREE OF THEM -- RunFile,
+#    RunEmbedded (a packed application) and Repl -- and scripts/check-seams.py
+#    asks its question once per FILE. A single assignment anywhere in phosphor.lpr
+#    turns that gate green while two doors stay silent, so the gate cannot be the
+#    proof that the seam is wired; this block is. They are checked separately
+#    because their reports differ on purpose: a file run names the file, and a
+#    packed application has no source path to name, exactly as their two error
+#    diagnostics already differ.
+#
+#    STDERR AND NOT STDOUT IS THE LOAD-BEARING HALF. Every byte-exact golden in
+#    this tree is a comparison of stdout, so a debugger that wrote there would
+#    corrupt all of them at once -- which is why stdout is compared EXACTLY here
+#    rather than searched, and why `--out` is asked as its own shape: it redirects
+#    the PROGRAM's output to a file, and a host that reported a frame through the
+#    output seam instead of stderr would put the frame in that file and still look
+#    right on a terminal.
+#
+#    The frame ends in a bare LF on BOTH systems. The host writes the handle
+#    directly instead of using Writeln, which would end the line CRLF on Windows
+#    and LF here -- one stream, one spelling, so this block and its PowerShell
+#    twin can ask for the same bytes.
+bpdir="$hidir/breakpoint"
+mkdir -p "$bpdir"
+okP=0
+printf '%s\n' 'trace 1' 'x = 5' 'breakpoint "checkpoint", x, "five"' 'trace 0' \
+              'breakpoint "after trace off", x' 'println "bp-stdout-marker"' > "$bpdir/bp.bas"
+printf '%s\n' 'trace 1' 'breakpoint "repl frame", 7' 'println "repl-done"' > "$bpdir/repl.in"
+printf 'bp-stdout-marker\n' > "$bpdir/want.out"
+
+# The operand list is the assertion that matters: `[1]=5` is the NUMBER five and
+# `[2]="five"` is the TEXT, which is the one thing ValToStr alone cannot say -- it
+# renders a vkString as bare text, so an unquoted renderer prints 5 for both
+# `breakpoint "m", 5` and `breakpoint "m", "5"`. The pattern is QUOTED inside
+# [[ ]], which makes its brackets literal rather than a bracket expression.
+bpframe='breakpoint: checkpoint [1]=5 [2]="five"'
+
+# P1: the FILE door. The frame names the file and the LINE the breakpoint is on,
+# and `trace 0` still silences the one below it -- the seam fires only while
+# tracing is on, and wiring it must not have changed that.
+if "$exe" "$bpdir/bp.bas" < /dev/null > "$bpdir/p1.out" 2> "$bpdir/p1.err"; then p1code=0; else p1code=$?; fi
+p1err="$(cat "$bpdir/p1.err")"
+if [ "$p1code" -eq 0 ] && [[ "$p1err" == *"$bpframe"* ]] && [[ "$p1err" == *"bp.bas:3:"* ]] \
+   && [[ "$p1err" != *"after trace off"* ]] && cmp -s "$bpdir/p1.out" "$bpdir/want.out"; then :; else
+  echo "        file door: exit $p1code, stderr '$p1err'"; okP=1
+fi
+
+# P2: the PACKED door. A packed application has no source path, so the frame
+# carries a bare line number -- the same shape its error diagnostic uses.
+"$exe" compile "$bpdir/bp.bas" "$bpdir/bp.pbc"
+"$exe" pack "$bpdir/bp.pbc" "$bpdir/bp_packed"
+chmod +x "$bpdir/bp_packed"
+if "$bpdir/bp_packed" < /dev/null > "$bpdir/p2.out" 2> "$bpdir/p2.err"; then p2code=0; else p2code=$?; fi
+p2err="$(cat "$bpdir/p2.err")"
+if [ "$p2code" -eq 0 ] && [[ "$p2err" == *"phosphor: 3: $bpframe"* ]] \
+   && [[ "$p2err" != *"bp.bas"* ]] && cmp -s "$bpdir/p2.out" "$bpdir/want.out"; then :; else
+  echo "        packed door: exit $p2code, stderr '$p2err'"; okP=1
+fi
+
+# P3: the REPL door. Also the one place `trace 1` PERSISTS: the VM resets FTrace
+# in Run and not in RunFrom, which is what a typed line goes through -- so tracing
+# switched on at one prompt is still on at the next, and the frame from line 2
+# proves both the seam and that carry-over.
+if "$exe" < "$bpdir/repl.in" > "$bpdir/p3.out" 2> "$bpdir/p3.err"; then p3code=0; else p3code=$?; fi
+p3err="$(cat "$bpdir/p3.err")"
+if [ "$p3code" -eq 0 ] && [[ "$p3err" == *'phosphor: 2: breakpoint: repl frame [1]=7'* ]] \
+   && [[ "$(cat "$bpdir/p3.out")" == *"repl-done"* ]]; then :; else
+  echo "        repl door: exit $p3code, stderr '$p3err'"; okP=1
+fi
+
+# P4: --out. The program's output goes to the file; the frame does NOT. A host
+# that reported through the OUTPUT seam rather than stderr would pass P1 on a
+# terminal and fail here, which is the whole reason this shape is asked.
+if "$exe" run "$bpdir/bp.bas" --out "$bpdir/p4.out" < /dev/null 2> "$bpdir/p4.err"; then p4code=0; else p4code=$?; fi
+p4err="$(cat "$bpdir/p4.err")"
+if [ "$p4code" -eq 0 ] && [[ "$p4err" == *"$bpframe"* ]] \
+   && cmp -s "$bpdir/p4.out" "$bpdir/want.out"; then :; else
+  echo "        --out door: exit $p4code, stderr '$p4err'"; okP=1
+fi
+
+# P5: THE CEILINGS. The operand COUNT and every operand's LENGTH come from the
+# program being debugged, and the seam fires inside one VM instruction -- so none
+# of MaxSteps, TimeoutMs or MaxOutputBytes is tested while this line is being
+# built. Unbounded, one `breakpoint` with 8000 operands of a 10 000-byte string
+# cost 65 011 ms and wrote 80 079 047 bytes of stderr from a 32 KB source; the
+# host now caps the message, each operand and the whole line. Asserted here and
+# not left to check-budget.py's exemption, because an exemption is a sentence and
+# this is a measurement: delete a ceiling and this block fails.
+#
+# DERIVED, NOT READ OFF A RUN: an operand of exactly BP_MAX_OPERAND_BYTES (256)
+# is AT the ceiling and must come through untouched -- a guard that refuses
+# something legitimate is the failure mode this half exists for -- 5000 bytes
+# must be cut AND declare its true length, and however many operands the line
+# shows, shown + dropped must be exactly what the program passed.
+# Five frames. Nothing in the fixture is a literal backslash or a literal
+# non-ASCII byte: both are built at RUNTIME with string$, so the lexer never sees
+# them and the .bas escape rules cannot change what is being tested.
+# BASH ONLY -- NO awk, NO seq. This file used no external text tool before this
+# block and must not gain one: how an awk handles \ooo and a lone backslash
+# differs between gawk, mawk and busybox, and this block's whole job is to
+# compare exact bytes on two machines that have to agree.
+bprep() {   # bprep <count> <string> -> that string repeated <count> times
+  local n="$1" c="$2" s='' i
+  for ((i = 0; i < n; i++)); do s="$s$c"; done
+  printf '%s' "$s"
+}
+manyops="c\$$(bprep 299 ', c$')"
+printf '%s\n' 'trace 1' 'a$ = string$(5000, 65)' 'b$ = string$(256, 66)' \
+              'breakpoint "cap", a$, b$' 'm$ = string$(5000, 68)' \
+              'breakpoint m$, 1' 'u$ = "x" + string$(128, 233)' \
+              'breakpoint "utf", u$' 's$ = string$(300, 92)' \
+              'breakpoint "esc", s$' 'c$ = string$(256, 67)' \
+              "breakpoint \"many\", $manyops" 'println "bp-cap-marker"' > "$bpdir/bpcap.bas"
+printf 'bp-cap-marker\n' > "$bpdir/want-cap.out"
+if "$exe" "$bpdir/bpcap.bas" < /dev/null > "$bpdir/p5.out" 2> "$bpdir/p5.err"; then p5code=0; else p5code=$?; fi
+p5frames=$(wc -l < "$bpdir/p5.err")
+p5cap=$(sed -n '1p' "$bpdir/p5.err")
+p5msg=$(sed -n '2p' "$bpdir/p5.err")
+p5utf=$(sed -n '3p' "$bpdir/p5.err")
+p5esc=$(sed -n '4p' "$bpdir/p5.err")
+p5many=$(sed -n '5p' "$bpdir/p5.err")
+# GREP'S "NO MATCH" IS AN EXIT CODE, AND THIS FILE RUNS UNDER set -e -o pipefail.
+# An empty stderr -- exactly what the defect being guarded looks like -- gives
+# grep nothing to match, which failed the pipeline and killed the script between
+# P4 and the verdict: no "ceilings:" line, no FAIL, no exit "$fail". Measured,
+# not feared: it happened on the first run of the mutation that deletes the seam.
+p5shown=$( { printf '%s' "$p5many" | grep -o ' \[[0-9][0-9]*\]=' || true; } | wc -l )
+p5drop=$(printf '%s' "$p5many" | sed -n 's/.*\.\.\.(\([0-9][0-9]*\) more)$/\1/p')
+# THE THREE TAILS, DERIVED AND COMPARED WHOLE rather than counted, because the
+# fixture's own path carries backslashes and capital Ds of its own.
+#   u$ is 'x' plus 128 two-byte characters = 257 bytes, so the cut at 256 falls
+#   BETWEEN the two bytes of the 128th: that character goes whole and 'x' plus
+#   127 of them, 255 bytes, survives. A byte-blind cut would end on a lone lead
+#   byte, which no length check would notice.
+#   s$ is 300 backslashes, capped to 256 BEFORE escaping, each escaping to two:
+#   512. Capping AFTER escaping would leave 256, and is the shape that can also
+#   split a backslash from the character it escapes.
+p5e2=$(printf '\303\251')   # the two bytes of one two-byte character
+p5wantutf="breakpoint: utf [1]=\"x$(bprep 127 "$p5e2")\"...(257 bytes)"
+p5wantesc="breakpoint: esc [1]=\"$(bprep 512 '\')\"...(300 bytes)"
+p5wantmsg="breakpoint: $(bprep 1024 'D')...(5000 bytes) [1]=1"
+p5why=''
+p5err="$(cat "$bpdir/p5.err")"
+if   [ "$p5code" -ne 0 ];                        then p5why="exit $p5code"
+elif [ "$p5frames" -ne 5 ];                      then p5why="$p5frames frames, wanted 5 (a cut must not split a line)"
+elif [[ "$p5cap" != *'...(5000 bytes)'* ]];      then p5why='a 5000-byte operand did not declare its true length'
+elif [[ "$p5err" == *'...(256 bytes)'* ]];       then p5why='an operand AT the ceiling was cut; the guard refuses something legitimate'
+elif [ "$(printf '%s' "$p5cap" | wc -c)" -gt 1200 ]; then p5why="the 5000-byte operand still cost $(printf '%s' "$p5cap" | wc -c) bytes of line"
+elif [[ "$p5msg" != *"$p5wantmsg" ]];            then p5why='a 5000-byte MESSAGE was not capped to 1024 and declared'
+elif [[ "$p5utf" != *"$p5wantutf" ]];            then p5why='the operand cut did not land on a character boundary'
+elif [[ "$p5esc" != *"$p5wantesc" ]];            then p5why='the operand cut landed after escaping, not before (or did not declare its length)'
+elif [ "$(printf '%s' "$p5many" | wc -c)" -gt 9500 ]; then p5why="300 operands cost $(printf '%s' "$p5many" | wc -c) bytes of line"
+elif [ -z "$p5drop" ];                           then p5why='the operands left out of the line were not declared'
+elif [ $((p5shown + p5drop)) -ne 300 ];          then p5why="shown $p5shown + dropped $p5drop is not the 300 passed"
+elif ! cmp -s "$bpdir/p5.out" "$bpdir/want-cap.out"; then p5why='stdout is not byte-exact'
+fi
+if [ -n "$p5why" ]; then echo "        ceilings: $p5why"; okP=1; fi
+
+if [ "$okP" -eq 0 ]; then echo 'PASS  P:breakpoint reports (all three doors, on stderr, stdout byte-exact, bounded)'
+else echo 'FAIL  P:a breakpoint reports to nobody, reports onto stdout, or reports without a ceiling'; fail=1; fi
+
 exit "$fail"

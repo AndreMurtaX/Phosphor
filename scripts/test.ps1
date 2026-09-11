@@ -38,6 +38,16 @@ $expected = Join-Path $root 'tests\skeleton\hello.expected'
 # bash twin has always used mktemp.
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "phosphor-run-$PID"
 if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
+
+# NOT removed at the end, and that is a decision rather than an oversight. Emptying
+# it would take a recursive removal, which this tree forbids outright -- it lost
+# thirteen working copies to one. Three cleanups were written and measured here on
+# 2026-09-11: one sat after `exit` and was dead code; one used Remove-Item, which
+# PROMPTS on a non-empty directory and hung a run for an hour with no console to
+# answer it; one used Directory.Delete, which is correct rmdir and therefore
+# removed nothing, because this directory always holds the run's scratch. A few
+# kilobytes under TEMP is the operating system's to reclaim. The directory earns
+# its keep by isolating concurrent runs, which is what it was added for.
 $outA     = Join-Path $tmp 'phosphor_hello.A.actual'
 $outB     = Join-Path $tmp 'phosphor_hello.B.actual'
 
@@ -591,10 +601,244 @@ if (($LASTEXITCODE -ne 0) -or (-not (Test-Path $sniffExe))) {
 if ($okO) { Write-Host "PASS  O:PBC-prefixed source (read as the source it is, and a real .pbc still as bytecode)" -ForegroundColor Green }
 else { Write-Host "FAIL  O:a source file whose first line starts PBC is taken for bytecode" -ForegroundColor Red }
 
-if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
-    $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO) { exit 0 } else { exit 1 }
+# P. A BREAKPOINT REPORTS, AT EVERY DOOR, AND NEVER ONTO STDOUT.
+#    `breakpoint` is the only debugging statement this language has, and the
+#    engine has always offered a seam for it that this host left nil. The
+#    documented "reports a frame to the host debugger" reported to nobody: the
+#    four-line program below printed `bp-stdout-marker` and not one further byte,
+#    on stdout or anywhere else. It now writes one line per fired breakpoint to
+#    STDERR.
+#
+#    THREE DOORS, BECAUSE THE HOST BUILDS AN ENGINE AT THREE OF THEM -- RunFile,
+#    RunEmbedded (a packed application) and Repl -- and scripts/check-seams.py
+#    asks its question once per FILE. A single assignment anywhere in phosphor.lpr
+#    turns that gate green while two doors stay silent, so the gate cannot be the
+#    proof that the seam is wired; this block is. They are checked separately
+#    because their reports differ on purpose: a file run names the file, and a
+#    packed application has no source path to name, exactly as their two error
+#    diagnostics already differ.
+#
+#    STDERR AND NOT STDOUT IS THE LOAD-BEARING HALF. Every byte-exact golden in
+#    this tree is a comparison of stdout, so a debugger that wrote there would
+#    corrupt all of them at once -- which is why stdout is compared EXACTLY here
+#    rather than searched, and why `--out` is asked as its own shape: it redirects
+#    the PROGRAM's output to a file, and a host that reported a frame through the
+#    output seam instead of stderr would put the frame in that file and still look
+#    right on a terminal.
+$bpDir = Join-Path $tmp 'phosphor_bp'
+New-Item -ItemType Directory -Force $bpDir | Out-Null
+$bpBas = Join-Path $bpDir 'bp.bas'
+Set-Content -LiteralPath $bpBas -Encoding ascii -Value @(
+    'trace 1',
+    'x = 5',
+    'breakpoint "checkpoint", x, "five"',
+    'trace 0',
+    'breakpoint "after trace off", x',
+    'println "bp-stdout-marker"'
+)
+$bpReplIn = Join-Path $bpDir 'repl.in'
+Set-Content -LiteralPath $bpReplIn -Encoding ascii -Value @(
+    'trace 1',
+    'breakpoint "repl frame", 7',
+    'println "repl-done"'
+)
 
-# A plain rmdir: it succeeds only if the directory is empty, so it can never take
-# anything with it. Deliberate -- this tree has erased thirteen working trees to a
-# recursive removal once, and a scratch directory that outlives a run costs nothing.
-try { Remove-Item -LiteralPath $tmp -ErrorAction Stop } catch { }
+# The operand list is the assertion that matters: `[1]=5` is the NUMBER five and
+# `[2]="five"` is the TEXT, which is the one thing ValToStr alone cannot say --
+# it renders a vkString as bare text, so an unquoted renderer prints 5 for both
+# `breakpoint "m", 5` and `breakpoint "m", "5"`. Substring comparison with
+# .Contains and not -like: `[` and `]` are wildcard metacharacters in -like, so
+# -like '*[1]=5*' asks for the character '1' followed by '=5' and quietly fails
+# to match the very text it appears to spell.
+$bpFrame = 'breakpoint: checkpoint [1]=5 [2]="five"'
+$okP = $true
+function Read-BpText([string] $p) {
+    if (-not (Test-Path $p)) { return '' }
+    $t = Get-Content -Raw $p
+    if ($null -eq $t) { return '' }
+    return $t
+}
+function Test-BpStdout([string] $p, [string] $want) {
+    # Byte-exact, because "stdout is untouched" is the claim, not "stdout still
+    # mentions the marker". The engine ends a println with LF on both systems.
+    if (-not (Test-Path $p)) { return $false }
+    $b = [IO.File]::ReadAllBytes($p)
+    $w = [Text.Encoding]::ASCII.GetBytes($want)
+    if ($b.Length -ne $w.Length) { return $false }
+    for ($i = 0; $i -lt $b.Length; $i++) { if ($b[$i] -ne $w[$i]) { return $false } }
+    return $true
+}
+function Report-Bp([string] $what, [string] $text) {
+    Write-Host ("        {0}: stderr was '{1}'" -f $what, ($text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+}
+
+# P1. The FILE door. The frame names the file and the LINE the breakpoint is on,
+#     and `trace 0` still silences the one below it -- the seam fires only while
+#     tracing is on, and wiring it must not have changed that.
+$p1out = Join-Path $bpDir 'p1.out'; $p1err = Join-Path $bpDir 'p1.err'
+cmd /c "`"$exe`" `"$bpBas`" < NUL > `"$p1out`" 2> `"$p1err`""
+$p1code = $LASTEXITCODE
+$p1text = Read-BpText $p1err
+if (($p1code -ne 0) -or (-not $p1text.Contains($bpFrame)) -or
+    (-not $p1text.Contains('bp.bas:3:')) -or $p1text.Contains('after trace off') -or
+    (-not (Test-BpStdout $p1out "bp-stdout-marker`n"))) {
+    Report-Bp ("file door (exit {0})" -f $p1code) $p1text
+    $okP = $false
+}
+
+# P2. The PACKED door. A packed application has no source path, so the frame
+#     carries a bare line number -- the same shape its error diagnostic uses.
+$bpPbc = Join-Path $bpDir 'bp.pbc'; $bpExe = Join-Path $bpDir 'bp_packed.exe'
+$p2out = Join-Path $bpDir 'p2.out'; $p2err = Join-Path $bpDir 'p2.err'
+& $exe 'compile' $bpBas $bpPbc
+if ($LASTEXITCODE -ne 0) { throw "breakpoint fixture: compile exited $LASTEXITCODE" }
+& $exe 'pack' $bpPbc $bpExe
+if ($LASTEXITCODE -ne 0) { throw "breakpoint fixture: pack exited $LASTEXITCODE" }
+cmd /c "`"$bpExe`" < NUL > `"$p2out`" 2> `"$p2err`""
+$p2code = $LASTEXITCODE
+$p2text = Read-BpText $p2err
+if (($p2code -ne 0) -or (-not $p2text.Contains('phosphor: 3: ' + $bpFrame)) -or
+    $p2text.Contains('bp.bas') -or
+    (-not (Test-BpStdout $p2out "bp-stdout-marker`n"))) {
+    Report-Bp ("packed door (exit {0})" -f $p2code) $p2text
+    $okP = $false
+}
+
+# P3. The REPL door. Also the one place `trace 1` PERSISTS: the VM resets FTrace
+#     in Run and not in RunFrom, which is what a typed line goes through -- so
+#     tracing switched on at one prompt is still on at the next, and the frame
+#     from line 2 proves both the seam and that carry-over.
+$p3out = Join-Path $bpDir 'p3.out'; $p3err = Join-Path $bpDir 'p3.err'
+cmd /c "`"$exe`" < `"$bpReplIn`" > `"$p3out`" 2> `"$p3err`""
+$p3code = $LASTEXITCODE
+$p3text = Read-BpText $p3err
+if (($p3code -ne 0) -or (-not $p3text.Contains('phosphor: 2: breakpoint: repl frame [1]=7')) -or
+    (-not (Read-BpText $p3out).Contains('repl-done'))) {
+    Report-Bp ("repl door (exit {0})" -f $p3code) $p3text
+    $okP = $false
+}
+
+# P4. --out. The program's output goes to the file; the frame does NOT. A host
+#     that reported through the OUTPUT seam rather than stderr would pass P1 on a
+#     terminal and fail here, which is the whole reason this shape is asked.
+$p4out = Join-Path $bpDir 'p4.out'; $p4err = Join-Path $bpDir 'p4.err'
+cmd /c "`"$exe`" run `"$bpBas`" --out `"$p4out`" < NUL 2> `"$p4err`""
+$p4code = $LASTEXITCODE
+$p4text = Read-BpText $p4err
+if (($p4code -ne 0) -or (-not $p4text.Contains($bpFrame)) -or
+    (-not (Test-BpStdout $p4out "bp-stdout-marker`n"))) {
+    Report-Bp ("--out door (exit {0})" -f $p4code) $p4text
+    $okP = $false
+}
+
+# P5. THE CEILINGS. The operand COUNT and every operand's LENGTH come from the
+#     program being debugged, and the seam fires inside one VM instruction -- so
+#     none of MaxSteps, TimeoutMs or MaxOutputBytes is tested while this line is
+#     being built. Unbounded, one `breakpoint` with 8000 operands of a 10 000-byte
+#     string cost 65 011 ms and wrote 80 079 047 bytes of stderr from a 32 KB
+#     source; the host now caps the message, each operand and the whole line, and
+#     is flat at ~8 KB. Asserted here rather than left to check-budget.py's
+#     exemption, because an exemption is a sentence and this is a measurement:
+#     delete a ceiling and this block fails.
+#
+#     THE SHAPE OF THE ASSERTION IS DERIVED, NOT READ OFF A RUN. An operand of
+#     exactly BP_MAX_OPERAND_BYTES (256) is AT the ceiling and must come through
+#     untouched -- a guard that refuses something legitimate is the failure mode
+#     this half exists for -- while 5000 bytes must be cut and must DECLARE the
+#     true length. And for the count: however many operands the line shows, the
+#     ones it does not show must be counted in the marker, so shown + dropped is
+#     exactly what the program passed.
+#     Five frames, and the derivation of each is written beside it below. Nothing
+#     in the fixture is a literal backslash or a literal non-ASCII byte: both are
+#     built at RUNTIME with string$, so the lexer never sees them and the .bas
+#     escape rules cannot change what is being tested.
+$bpCapBas = Join-Path $bpDir 'bpcap.bas'
+$manyOps = (@('c$') * 300) -join ', '
+Set-Content -LiteralPath $bpCapBas -Encoding ascii -Value @(
+    'trace 1',
+    'a$ = string$(5000, 65)',
+    'b$ = string$(256, 66)',
+    'breakpoint "cap", a$, b$',
+    'm$ = string$(5000, 68)',
+    'breakpoint m$, 1',
+    'u$ = "x" + string$(128, 233)',
+    'breakpoint "utf", u$',
+    's$ = string$(300, 92)',
+    'breakpoint "esc", s$',
+    'c$ = string$(256, 67)',
+    ('breakpoint "many", ' + $manyOps),
+    'println "bp-cap-marker"'
+)
+$p5out = Join-Path $bpDir 'p5.out'; $p5err = Join-Path $bpDir 'p5.err'
+cmd /c "`"$exe`" `"$bpCapBas`" < NUL > `"$p5out`" 2> `"$p5err`""
+$p5code = $LASTEXITCODE
+# READ SO THAT AN EMPTY STDERR IS A FAILURE AND NOT AN EXCEPTION. PowerShell
+# unrolls a zero-length array out of an `if` expression into $null, so the
+# obvious spelling threw "cannot call GetString with 1 argument" the first time a
+# mutation made this stream empty -- taking the whole runner down in place of the
+# FAIL it was supposed to print. Empty is exactly what the defect being guarded
+# looks like, so it has to be the one case this reads cleanly.
+$p5raw = $null
+if (Test-Path $p5err) { $p5raw = [IO.File]::ReadAllBytes($p5err) }
+$p5text = ''
+if (($null -ne $p5raw) -and ($p5raw.Length -gt 0)) { $p5text = [Text.Encoding]::UTF8.GetString($p5raw) }
+$p5lines = @($p5text -split "`n" | Where-Object { $_ -ne '' })
+# THE UTF-8 TAIL, DERIVED. u$ is 'x' plus 128 two-byte characters = 257 bytes, so
+# the cut at 256 falls BETWEEN the two bytes of the 128th -- that character goes
+# whole and 'x' plus 127 of them, 255 bytes, is what survives. A byte-blind
+# Copy(s, 1, 256) would instead end the operand on a lone lead byte, which this
+# comparison fails on and which no amount of line-length checking would notice.
+$p5wantUtf = 'breakpoint: utf [1]="x' + (([string][char]0xE9) * 127) + '"...(257 bytes)'
+# The MESSAGE ceiling, spelled the same way: 5000 bytes in, BP_MAX_MESSAGE_BYTES
+# out, the true size declared. Compared whole rather than counted, because the
+# fixture's own path carries a capital D of its own.
+$p5wantMsg = 'breakpoint: ' + ('D' * 1024) + '...(5000 bytes) [1]=1'
+# 300 backslashes: capped to 256 BEFORE escaping, and each escapes to two, so the
+# rendering carries 512. Capping AFTER escaping would leave 256 and is the shape
+# that can also split a backslash from the character it escapes. Compared whole
+# rather than counted, because a Windows path is made of backslashes too.
+$p5wantEsc = 'breakpoint: esc [1]="' + ('\' * 512) + '"...(300 bytes)'
+# ORDINAL, AND THE REASON IS A MUTATION THAT SURVIVED THIS BLOCK. String.EndsWith
+# with one argument compares by CURRENT CULTURE in .NET, and a culture comparison
+# treats some characters as having no weight at all -- so when the codepoint
+# boundary was deliberately broken and the frame gained a U+FFFD from a lone lead
+# byte, this twin still said PASS while its bash counterpart failed. A comparison
+# that ignores the very byte under test measures nothing.
+function Test-BpTail([string] $line, [string] $want) {
+    return $line.EndsWith($want, [StringComparison]::Ordinal)
+}
+# shown + dropped must account for every operand the program passed. Computed
+# only once there ARE five frames: a test that throws instead of reporting a
+# failure takes its own runner down and says nothing about the defect.
+$p5shown = -1; $p5dropN = -1
+if ($p5lines.Count -eq 5) {
+    $p5shown = ([regex]::Matches($p5lines[4], ' \[\d+\]=')).Count
+    $p5d = [regex]::Match($p5lines[4], '\.\.\.\((\d+) more\)$')
+    if ($p5d.Success) { $p5dropN = [int]$p5d.Groups[1].Value }
+}
+$p5why = ''
+if ($p5code -ne 0) { $p5why = "exit $p5code" }
+elseif ($p5lines.Count -ne 5) { $p5why = "$($p5lines.Count) frames, wanted 5 (a cut must not split a line)" }
+elseif (-not $p5lines[0].Contains('...(5000 bytes)')) { $p5why = 'a 5000-byte operand did not declare its true length' }
+elseif ($p5text.Contains('...(256 bytes)')) { $p5why = 'an operand AT the ceiling was cut; the guard refuses something legitimate' }
+elseif ($p5lines[0].Length -gt 1200) { $p5why = "the 5000-byte operand still cost $($p5lines[0].Length) bytes of line" }
+elseif (-not (Test-BpTail $p5lines[1] $p5wantMsg)) { $p5why = 'a 5000-byte MESSAGE was not capped to 1024 and declared' }
+elseif (-not (Test-BpTail $p5lines[2] $p5wantUtf)) { $p5why = 'the operand cut did not land on a character boundary' }
+elseif (-not (Test-BpTail $p5lines[3] $p5wantEsc)) { $p5why = 'the operand cut landed after escaping, not before (or did not declare its length)' }
+elseif ($p5lines[4].Length -gt 9500) { $p5why = "300 operands cost $($p5lines[4].Length) bytes of line" }
+elseif ($p5dropN -lt 0) { $p5why = 'the operands left out of the line were not declared' }
+elseif (($p5shown + $p5dropN) -ne 300) {
+    $p5why = "shown $p5shown + dropped $p5dropN is not the 300 passed"
+}
+elseif (-not (Test-BpStdout $p5out "bp-cap-marker`n")) { $p5why = 'stdout is not byte-exact' }
+if ($p5why -ne '') {
+    Write-Host ("        ceilings: {0}" -f $p5why) -ForegroundColor DarkGray
+    $okP = $false
+}
+
+if ($okP) { Write-Host "PASS  P:breakpoint reports (all three doors, on stderr, stdout byte-exact, bounded)" -ForegroundColor Green }
+else { Write-Host "FAIL  P:a breakpoint reports to nobody, reports onto stdout, or reports without a ceiling" -ForegroundColor Red }
+
+if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
+    $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
+    $okP) { exit 0 } else { exit 1 }

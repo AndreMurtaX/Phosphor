@@ -389,3 +389,83 @@ A GUI event dispatcher is then just a host object that, on an LCL event, calls
 reference reached the engine by walking a control's parent chain up to the form,
 a fragile path it documents as the source of several dead-event bugs — Phosphor
 gives the dispatcher the VM directly at bind time instead.
+
+---
+
+## Compiled programs keep their variable names (2026-09-11)
+
+A compiled `TProgram` used to carry `VarCount` and `VarTypes` and no names at
+all, and each `TUserFunc` its `LocalTypes` and no names. The compiler had both
+(`FVarNames`, `FLocalNames`) and dropped them on the floor at the end of
+`Compile`. An embedder could run a script and then not say what a single one of
+its globals was called; any debugger asking for `variables` was asking for
+something that did not exist.
+
+`TProgram`'s private name table and `TUserFunc.LocalNames` now carry them, sized to
+the type tables **by construction** rather than by a rule a caller has to keep --
+the two doors that write a local table, `AddUserFunc` and `SetUserFuncLocals`, size
+the names to the types and can do nothing else. `SetUserFuncLocals` matters as much
+as the first door: the compiler registers a function before parsing its body, and
+the body adds slots (a `FOR` bound is one), so a table filled only at registration
+time is short by exactly those and says nothing about it.
+
+The global table has the same shape for the same reason, and it was the half that
+had it only in prose. The names began as a public `VarNames` field whose comment
+asked writers to fill it beside `VarTypes` and readers to go through `GlobalName`
+-- two rules, neither enforceable, and a review found nothing mechanical behind
+either. The field is now private, so `SetGlobalTable` and `SetGlobalTableUnnamed`
+are the only ways a name gets in and `GlobalName` the only way one comes out.
+There are **two** doors rather than one with a defaulted argument, because the
+answer with no names in it is the unsafe one and this project has already been
+bitten by an unsafe value arrived at by leaving an argument out: the loader has to
+say `Unnamed` in its own verb. `VarTypes` stays a public field -- the VM reads it
+on the hot store path -- so a writer can still fill it directly, but such a program
+reports `HasNames` **False**: the names are then absent and *say* they are absent,
+which is the safe half of the failure.
+
+**`TProgram.HasNames` exists because the two temporary filters degrade quietly
+without it.** A program from a `.pbc` has no names, so `GlobalName` answers '' for
+every index and `GlobalIsTemporary` therefore answers `False` for every index --
+including the `SELECT` subjects that are certainly in the table. Nothing is broken
+and nothing can be; there is no name left to judge. But a host that loops without
+asking prints the compiler's own scratch under a blank name beside the script's
+variables and cannot tell them apart. `HasNames` is the one question to ask first,
+and `tests/probe_debug.lpr` pins both answers and the cost of not asking.
+
+**They are not serialized, and `PBC_VERSION` is not bumped.** The version test in
+`ReadProgram` is an exact match, so a bump makes this build refuse every `.pbc` an
+earlier one wrote and makes `phosphor pack` refuse the same files; the sniffer
+that tells a source file from bytecode also reads the version byte. Names exist to
+serve a host that compiled the program in-process, which is the only path that has
+them. A program read back from disk answers '' for every name.
+
+**A compiler temporary is now named with a prefix no script can write.** The old
+names were `__h<n>`, and `PhosphorLexer.IsIdentStart` accepts '_' -- so a program
+whose first line was `__h0 = 42` and which then used `SELECT` at the top level had
+its variable handed to the `SELECT` subject, because `VarIndex` found the name
+already in the table. Measured 2026-09-11: the program printed `7`. The prefix is
+`TemporaryNamePrefix` in `PhosphorOpcodes`, it begins with '#', and one predicate
+(`IsTemporaryName`) reads what the generator writes. That makes the collision
+impossible and makes the "is this the compiler's or the script's?" question exact
+for both tables at once -- a filter on a *count* cannot work, because hidden
+globals interleave with the script's own in the index space.
+
+The read-only window over a live VM (`DbgGlobal`, `DbgFrameDepth`, `DbgFrameFunc`,
+`DbgLocal`, `DbgProgram`) and `TProgram.StoppableLines` are described for
+embedders in [embedding.md](embedding.md), "Looking at a prepared script's
+state". No execution path is touched by any of it: no field was added to the VM,
+no branch was put in the dispatch loop, and `tests/probe_debug.lpr` is the proof
+that the surface works with no debugger, seam, socket or protocol anywhere in it.
+
+**`StoppableLines` sorts, and the sort is not reachable from the compiler.** A
+review turned the whole routine into a no-op and every assertion still passed, so
+it looked like dead code. It is not: every program the *compiler* builds arrives
+already ascending -- `ParseStatement` emits one boundary per statement in parse
+order and parse order is source order, measured at 0 non-ascending over all 146
+`.bas` in the tree -- but a `.pbc` carries each instruction's line straight from
+the file, and `ValidateProgram` bounds indices, never a line number or the order of
+anything. The sort is defending the loader's input, and the de-duplication beside
+it compares *adjacent* entries, so the two are one contract. Nothing compiled from
+source can test them, which is why `probe_debug` builds the unsorted shape by hand
+and then asserts it a second time through the serializer -- the second assertion is
+what shows the input class is one a host can really be handed.

@@ -203,6 +203,37 @@ type
       rather ask before calling. Prepare a script again to start over. }
     property Halted: Boolean read GetHalted;
     property SandboxRoot: String read GetSandboxRoot write SetSandboxRootProp;
+    { LOOKING AT A PREPARED SCRIPT'S STATE -- the VM and the program Prepare built,
+      or nil when nothing is prepared. Read-only; see TPhosphorVM's Dbg* block for
+      what the VM will answer and when.
+
+      Through PreparedProgram.GlobalName and LocalName, an embedder can print every
+      global and every live local BY NAME after Prepare and between CallFunction
+      calls -- state that used to be unreachable because the compiler threw the
+      names away. Ask PreparedProgram.HasNames first: it is True for anything
+      Prepare compiled and False for a program that came from a .pbc, where there
+      is nothing to show and nothing for the temporary filter to judge.
+      PreparedProgram.StoppableLines is the set of lines a breakpoint could be
+      installed on, answerable before anything runs.
+
+      READ THESE, DO NOT HOLD THEM. Every entry point that starts new work --
+      Run, RunBytecode and the next Prepare -- begins by calling Finish, which frees
+      THIS VM and THIS program and nils both. A host that caches the program pointer
+      and then calls Run is holding a freed object; the properties themselves answer
+      nil, so re-read them and never carry one across a call. This is the sentence
+      the paragraph below used to be mistaken for: that one is about the locals Run
+      makes for itself, which are a different pair with a different lifetime.
+
+      WHY THE PREPARED PAIR AND ONLY THAT ONE. Run creates its VM and its program
+      as locals and frees both in one finally, so there is nothing for a caller to
+      hold afterwards and a field here would read nil at every moment a host could
+      ask. The REPL session keeps its own pair and is not offered here: it is a
+      different lifetime with a different owner, and one property that sometimes
+      means one and sometimes the other is the shape this engine has been bitten by
+      before. A seam that wants the VM mid-run gets it as Self, which is the seam's
+      business and not this property's. }
+    property PreparedVM: TPhosphorVM read FVM;
+    property PreparedProgram: TProgram read FProg;
   end;
 
 implementation

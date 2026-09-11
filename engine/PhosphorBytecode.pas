@@ -558,6 +558,7 @@ var
   entry, pcount: LongInt;
   raw: Byte;
   lts: array of TVarType;
+  gts: array of TVarType;
   rt: TVarType;
 begin
   AProg := nil;
@@ -582,8 +583,10 @@ begin
       AErr := Format('corrupt .pbc: variable count %d', [vc]);
       AProg.Free; AProg := nil; Exit(False);
     end;
-    AProg.VarCount := vc;
-    SetLength(AProg.VarTypes, vc);
+    { vc is already bounded by MaxSaneCount above, which is what this length rests
+      on. The types are collected here and installed in one call, so the count and
+      the table cannot part company. }
+    SetLength(gts, vc);
     for i := 0 to vc - 1 do
     begin
       raw := RU8(AStream);
@@ -593,8 +596,16 @@ begin
                        [i, raw, Ord(High(TVarType))]);
         AProg.Free; AProg := nil; Exit(False);
       end;
-      AProg.VarTypes[i] := TVarType(raw);
+      gts[i] := TVarType(raw);
     end;
+    { THE FILE CARRIES NO NAMES, AND THIS IS WHERE THAT IS SAID OUT LOUD rather
+      than left to be inferred from an argument nobody passed. The format is
+      version 1 behind an exact-match refusal (:571), so adding a name section
+      would make this build reject every .pbc an earlier one wrote and every
+      `phosphor pack` of one. TProgram.HasNames answers False from here, which is
+      how a host learns that its variables pane has nothing to show and that the
+      temporary filter has nothing to filter by. }
+    AProg.SetGlobalTableUnnamed(gts);
 
     n := RI32(AStream);
     if (n < 0) or (n > MaxSaneCount) then
@@ -684,7 +695,14 @@ begin
         AProg.Free; AProg := nil; Exit(False);
       end;
       rt := TVarType(raw);
-      AProg.AddUserFunc(fname, entry, pcount, lts, rt);
+      { NO LOCAL NAMES, SAID OUT LOUD. The format does not carry them and is not
+        being changed to: PBC_VERSION is 1 and the version test at the top of this
+        function is exact-match, so a bump makes this build refuse every .pbc an
+        earlier one wrote and makes `phosphor pack` refuse the same files. Names
+        exist to serve a host that COMPILED the program in-process, which is the
+        only path that has them. A program read back from disk answers '' for
+        every name, which LocalName and GlobalName are written to do. }
+      AProg.AddUserFunc(fname, entry, pcount, lts, [], rt);
     end;
 
     n := RI32(AStream);

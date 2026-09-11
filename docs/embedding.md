@@ -525,6 +525,95 @@ eng.OnOutput := @host.Output;
 A scripting host that only calls functions may leave `OnOutput` unset; a value
 comes back from `CallFunction`, not through output.
 
+## Looking at a prepared script's state
+
+A prepared engine will tell you what its script's variables are **called**, not
+just what they hold. `eng.PreparedProgram` is the compiled program and
+`eng.PreparedVM` the live VM behind `Prepare`; both are `nil` when nothing is
+prepared, and both are read-only — nothing on this surface changes anything, and
+the interpreter's inner loop does not know it exists.
+
+```pascal
+var prog: TProgram; vm: TPhosphorVM; i: Integer;
+...
+if eng.Prepare(userScript) = 0 then
+begin
+  prog := eng.PreparedProgram;
+  vm   := eng.PreparedVM;
+  if not prog.HasNames then
+    Writeln('names unavailable')      // a program loaded from a .pbc
+  else
+    for i := 0 to vm.DbgGlobalCount - 1 do
+      if not prog.GlobalIsTemporary(i) then
+        Writeln(prog.GlobalName(i), ' = ', ValToStr(vm.DbgGlobal(i)));
+end;
+```
+
+Six things are worth knowing before you build a variables pane on this.
+
+**Ask `HasNames` first, and mean it.** It is `True` for anything the compiler
+built and `False` for a program that came from a `.pbc`. The `if` above is not
+decoration: with no names, `GlobalName` answers `''` for every index *and*
+`GlobalIsTemporary` answers `False` for every index — including the `SELECT`
+subjects and `SWAP` scratches that are certainly in the table, because there is no
+name left to judge them by. A loop written without that branch does not fail; it
+quietly prints the compiler's own scratch variables under a blank name, beside the
+script's, with nothing to tell them apart. Branch once at the top and show the
+values by index when the answer is `False`.
+
+**Read these properties, never hold them.** `Run`, `RunBytecode` and the next
+`Prepare` all begin by discarding the current preparation, which frees the VM and
+the program this pair points at. A `prog` cached before such a call is a dangling
+pointer; the properties themselves go back to `nil`. Re-read them after anything
+that starts new work.
+
+**Names are lowercase.** The lexer folds every identifier before the compiler sees
+it, so a script that wrote `myCounter` is reported as `mycounter`. The source
+spelling is gone by the time a name reaches a table; recovering it would have to
+happen in the lexer, and nothing here can do it for you.
+
+**Some slots are the compiler's, not the script's.** A `SELECT` subject, a `SWAP`
+scratch, a `FOR` bound are ordinary globals or frame slots with generated names,
+and they sit *between* the script's own in the index space — there is no count to
+skip. Ask `GlobalIsTemporary` / `LocalIsTemporary`, which answer for both tables
+by one rule. A generated name begins with a character no identifier can begin
+with, so it can never be confused with something a script wrote.
+
+**A function's own name can appear among the globals.** `tally = acc` inside
+`function tally(n)` is not a return in this language — `return` is — and an
+undeclared name inside a function is a global, so the assignment makes a global
+called `tally`. It will show in the dump holding a value the script's author may
+believe was returned. That is the language behaving as documented, not a defect.
+
+**Frames are only live while the VM is inside something.** `DbgFrameDepth` is 0
+between calls. From inside a seam the VM called you from — `OnOutput` during a
+`println` in a routine, a host function mid-call — the frames are there, and
+`DbgFrameFunc`, `DbgFrameLocalCount`, `DbgLocal` and `TProgram.LocalName` describe
+them. Frame 0 is the outermost call.
+
+Every accessor answers for an index it was not given rather than faulting: a host
+loops over counts, and an out-of-date count must never be able to take the process
+down. `TProgram.StoppableLines` completes the picture for an editor — the ascending,
+de-duplicated set of source lines a statement boundary actually lands on, which is
+*not* every line of the file: `rem`, `next`, `endfunction`, `endselect`, a `case`
+label and a blank line carry none, `a = 1 : b = 2` is one line with two, and a
+function's header line is left out because its boundary runs once at startup and
+never when the function is called.
+
+Names are **not** written to a `.pbc`, and `HasNames` is how a program says so.
+Only a script compiled in-process carries them; one from `RunBytecode` or
+`phosphor compile` answers `''` for every name, safely, and reports `HasNames`
+`False` so a host can say *names unavailable* rather than render a table of blanks.
+The format is version 1 behind an exact-match refusal, so adding a name section
+would make this build reject every `.pbc` an earlier one wrote — which is why the
+names stop at the compiler.
+
+`StoppableLines` is the one part of this surface that does **not** depend on names,
+so it answers the same set either way, and it answers it ascending and without
+repeats whatever order the boundaries arrive in — a `.pbc` carries each
+instruction's line straight from the file, and the loader bounds indices, not line
+numbers or their order.
+
 ## The lifecycle in one glance
 
 ```

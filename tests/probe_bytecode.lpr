@@ -591,7 +591,8 @@ begin
   Result.Emit(opLoadLocal, 0, 0, 1);
   Result.Emit(opHalt, 0, 0, 1);
   Result.Emit(opRetFunc, 0, 0, 2);                            // entry 2: never called
-  Result.AddUserFunc('never', 2, 0, [vtNumber], vtNumber);
+  // No local NAMES: a hand-built fixture has none to give, and says so.
+  Result.AddUserFunc('never', 2, 0, [vtNumber], [], vtNumber);
 end;
 
 { STORELOCAL in the main body: the same missing frame, but a WRITE through it. }
@@ -603,7 +604,7 @@ begin
   Result.Emit(opStoreLocal, 0, 0, 1);
   Result.Emit(opHalt, 0, 0, 1);
   Result.Emit(opRetFunc, 0, 0, 2);                            // entry 3: never called
-  Result.AddUserFunc('never', 3, 0, [vtString], vtString);
+  Result.AddUserFunc('never', 3, 0, [vtString], [], vtString);
 end;
 
 { A slot legal for the WIDEST function in the file and wild for the one actually
@@ -618,9 +619,9 @@ begin
   Result.Emit(opHalt, 0, 0, 1);
   Result.Emit(opLoadLocal, 4, 0, 2);                          // entry 3: f's body
   Result.Emit(opRetFunc, 0, 0, 2);
-  Result.AddUserFunc('f', 3, 0, [vtNumber], vtNumber);
+  Result.AddUserFunc('f', 3, 0, [vtNumber], [], vtNumber);
   Result.AddUserFunc('never', 3, 0,
-                     [vtNumber, vtNumber, vtNumber, vtNumber, vtNumber], vtNumber);
+                     [vtNumber, vtNumber, vtNumber, vtNumber, vtNumber], [], vtNumber);
 end;
 
 { ----------------------------------------------------------------------------
@@ -658,9 +659,7 @@ end;
 function ProgPoisonConst(k: Integer): TProgram;
 begin
   Result := TProgram.Create();
-  Result.VarCount := 1;
-  SetLength(Result.VarTypes, 1);
-  Result.VarTypes[0] := vtNumber;
+  Result.SetGlobalTableUnnamed([vtNumber]);   // one global, hand-built, no names to give
   Result.Consts.Add(ValDouble(PoisonBits(k)));
   Result.Consts.Add(ValInt(1));
   Result.Emit(opPushConst, 0, 0, 1);
@@ -679,9 +678,7 @@ end;
 function ProgPoisonData(k: Integer): TProgram;
 begin
   Result := TProgram.Create();
-  Result.VarCount := 1;
-  SetLength(Result.VarTypes, 1);
-  Result.VarTypes[0] := vtNumber;
+  Result.SetGlobalTableUnnamed([vtNumber]);   // one global, hand-built, no names to give
   Result.AddData(ValDouble(PoisonBits(k)));
   Result.Consts.Add(ValInt(1));
   Result.Emit(opReadData, 0, 0, 1);
@@ -700,9 +697,7 @@ end;
 function ProgExtremeButFinite: TProgram;
 begin
   Result := TProgram.Create();
-  Result.VarCount := 1;
-  SetLength(Result.VarTypes, 1);
-  Result.VarTypes[0] := vtNumber;
+  Result.SetGlobalTableUnnamed([vtNumber]);   // one global, hand-built, no names to give
   Result.Consts.Add(ValDouble(1.7976931348623157e308));    // MaxDouble
   Result.Consts.Add(ValDouble(4.9406564584124654e-324));   // the smallest denormal
   Result.Consts.Add(ValDouble(-0.0));                      // negative zero
@@ -1025,9 +1020,7 @@ end;
 function ProgLoadVarPastGlobals: TProgram;
 begin
   Result := TProgram.Create();
-  Result.VarCount := 1;
-  SetLength(Result.VarTypes, 1);
-  Result.VarTypes[0] := vtNumber;
+  Result.SetGlobalTableUnnamed([vtNumber]);   // one global, hand-built, no names to give
   Result.Emit(opLoadVar, 4096, 0, 1);
   Result.Emit(opHalt, 0, 0, 1);
 end;
@@ -1035,9 +1028,7 @@ end;
 function ProgStoreVarPastGlobals: TProgram;
 begin
   Result := TProgram.Create();
-  Result.VarCount := 1;
-  SetLength(Result.VarTypes, 1);
-  Result.VarTypes[0] := vtNumber;
+  Result.SetGlobalTableUnnamed([vtNumber]);   // one global, hand-built, no names to give
   Result.Consts.Add(ValInt(7));
   Result.Emit(opPushConst, 0, 0, 1);
   Result.Emit(opStoreVar, 4096, 0, 1);   // an unchecked WRITE, not merely a read

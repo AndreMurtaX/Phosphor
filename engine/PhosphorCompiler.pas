@@ -300,7 +300,7 @@ end;
 function TPhosphorCompiler.NewHiddenVar(AType: TVarType): Integer;
 var name: String;
 begin
-  name := '__h' + IntToStr(FHidden);
+  name := TemporaryNamePrefix + IntToStr(FHidden);
   Inc(FHidden);
   Result := VarIndex(name);
   FVarTypes[Result] := AType;   // override the suffix-derived type
@@ -310,8 +310,14 @@ end;
   See THiddenSlot for what this exists to prevent.
 
   The name is generated from the same FHidden counter either way, so it can
-  collide with nothing a program can write (an identifier cannot begin with '_'
-  here) and with no other temporary. Inside a function it becomes a frame slot:
+  collide with no other temporary, and it begins with TemporaryNamePrefix, which
+  is what keeps it from colliding with anything a program can write. The sentence
+  that stood here said an identifier cannot begin with '_' -- PhosphorLexer's
+  IsIdentStart accepts '_', so it can, and the old '__h' names were forgeable. A
+  program that wrote `__h0` and then used SELECT at the top level had the SELECT
+  subject handed its variable: VarIndex matched the name that was already there.
+  Measured 2026-09-11; see TemporaryNamePrefix. Inside a function it becomes a
+  frame slot:
   ParseFunction rewrites the local-type table from FLocalCount AFTER the body is
   parsed, precisely so slots the body adds are sized in, and the FOR bound
   already relied on that. The type is set outright, exactly as NewHiddenVar sets
@@ -322,7 +328,7 @@ var name: String;
 begin
   if FInFunction then
   begin
-    name := '__h' + IntToStr(FHidden);
+    name := TemporaryNamePrefix + IntToStr(FHidden);
     Inc(FHidden);
     AddLocal(name);
     Result.Idx := FLocalCount - 1;
@@ -460,9 +466,11 @@ var
   funcName: String;
   retType: TVarType;
   ltypes: array of TVarType;
+  lnames: array of String;
   savedBreaks, savedConts: array of array of Integer;
 begin
   ltypes := nil;
+  lnames := nil;
   if FInFunction then begin Fail('nested functions are not supported', FLex.Cur().Line); Exit; end;
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'function'
@@ -518,8 +526,13 @@ begin
   jOver := FProg.Emit(opJump, 0, 0, ln);
   entry := FProg.Count;
   SetLength(ltypes, FLocalCount);
-  for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];
-  ufIdx := FProg.AddUserFunc(funcName, entry, paramCount, ltypes, retType);
+  SetLength(lnames, FLocalCount);
+  for i := 0 to FLocalCount - 1 do
+  begin
+    ltypes[i] := FLocalTypes[i];
+    lnames[i] := FLocalNames[i];
+  end;
+  ufIdx := FProg.AddUserFunc(funcName, entry, paramCount, ltypes, lnames, retType);
 
   { A LOOP OUTSIDE THE FUNCTION IS NOT THIS FUNCTION'S LOOP.
 
@@ -572,10 +585,17 @@ begin
   // before the body was parsed, so those slots were missing from it. The frame is
   // sized from this table, so an index past its end read a garbage type ("cannot
   // store int into ? local") and then walked off the frame. Rewritten with what the
-  // body actually needs.
+  // body actually needs. The NAMES are rewritten in the same breath, for the same
+  // reason and at the same site: a table filled only above would be short by every
+  // slot the body added, and nothing in the tree asserts the two are parallel.
   SetLength(ltypes, FLocalCount);
-  for i := 0 to FLocalCount - 1 do ltypes[i] := FLocalTypes[i];
-  FProg.SetUserFuncLocals(ufIdx, ltypes);
+  SetLength(lnames, FLocalCount);
+  for i := 0 to FLocalCount - 1 do
+  begin
+    ltypes[i] := FLocalTypes[i];
+    lnames[i] := FLocalNames[i];
+  end;
+  FProg.SetUserFuncLocals(ufIdx, ltypes, lnames);
   // fall-through default return
   FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(retType)), 0, ln);
   FProg.Emit(opRetFunc, 0, 0, ln);
@@ -2451,7 +2471,6 @@ begin
 end;
 
 function TPhosphorCompiler.Compile(const ASource: String; out AProg: TProgram): Boolean;
-var i: Integer;
 begin
   FFailed := False; FErr := ''; FErrLine := 0;
   FVarCount := 0; FHidden := 0; FLoopDepth := 0;
@@ -2524,9 +2543,20 @@ begin
   end
   else
   begin
-    FProg.VarCount := FVarCount;
-    SetLength(FProg.VarTypes, FVarCount);
-    for i := 0 to FVarCount - 1 do FProg.VarTypes[i] := FVarTypes[i];
+    { The names go with the types through ONE door, so the two tables and the count
+      cannot be filled to different lengths and a later writer cannot fill one and
+      forget the other: TProgram's name table is private and SetGlobalTable is the
+      only way into it. The compiler had these names all along and dropped them
+      here; an embedder dumping globals after a run, and every `variables` request a
+      debugger will ever make, need exactly this. They are NOT serialized -- see
+      PhosphorBytecode -- so nothing about the .pbc format changes.
+
+      Both arrays are trimmed first: they grow by doubling (VarIndex), so their
+      length is a capacity and the tail past FVarCount is unwritten. Compile is
+      finished with them at this point. }
+    SetLength(FVarTypes, FVarCount);
+    SetLength(FVarNames, FVarCount);
+    FProg.SetGlobalTable(FVarTypes, FVarNames);
     AProg := FProg; Result := True;
   end;
 end;

@@ -466,6 +466,38 @@ type
     property ErrMessage: String read FErrMsg;
     property ErrLine: Integer read FErrLine;
     procedure ClearError;   // reset err()/errmsg$()/erl() to "no error"
+    { READ-ONLY STATE, FOR A HOST THAT WANTS TO LOOK. Nothing here writes, and the
+      dispatch loop does not know they exist -- no field was added, no branch was
+      put on any execution path, and a program that never calls one costs exactly
+      what it cost before.
+
+      WHAT THEY ARE VALID FOR, which is the half that a caller gets wrong. They
+      describe the VM AS IT STANDS. That is a useful thing to ask three times:
+
+        * after Prepare, and between CallFunction calls -- the globals the top
+          level built, which is what an embedder dumping state wants and is the
+          whole reason this is worth having before any debugger exists;
+        * from inside a seam the VM called into (OnOutput, OnBreakpoint, a library
+          function) -- the frames are live and DbgFrameDepth is above zero;
+        * never after the VM has been freed. TPhosphorEngine.Run frees its VM and
+          its program in the same finally, so there is nothing left to ask; the
+          prepared VM (Prepare) is the one that outlives its call.
+
+      DbgProgram may be nil -- a VM that has not run yet has no program -- and a
+      program read back from a .pbc carries no names. Every index is bounded here
+      rather than at the caller: a host dumping state loops over counts, and an
+      accessor that faulted on a stale count would take down a process that was
+      only asking a question. }
+    function DbgProgram: TProgram;
+    function DbgGlobalCount: Integer;
+    function DbgGlobal(AIndex: Integer): TValue;
+    { How many activation frames are live. 0 at the top level. }
+    function DbgFrameDepth: Integer;
+    { The index into DbgProgram.UserFuncs of the function frame AFrame is running,
+      counting from 0 = the OUTERMOST call, or -1 if there is no such frame. }
+    function DbgFrameFunc(AFrame: Integer): Integer;
+    function DbgFrameLocalCount(AFrame: Integer): Integer;
+    function DbgLocal(AFrame, ASlot: Integer): TValue;
   end;
 
 implementation
@@ -2794,6 +2826,64 @@ begin
   FErrCode := 0;
   FErrMsg := '';
   FErrLine := 0;
+end;
+
+{ THE READ-ONLY WINDOW. See the block over the declarations for the lifetime.
+
+  Each of these answers for an index it was not given, rather than indexing and
+  hoping. DbgGlobalCount is the program's DECLARED count, not Length(FVars): Run
+  sizes the slots to it and RunFrom only grows them, so the two normally agree --
+  but FProg is assigned before the slots are sized, and a contained fault leaves
+  them in whatever state the unwinding left them. The count a host loops over must
+  be the one the program declares, and an index with no slot behind it reads as
+  the default for its declared type, which is what the VM itself would read. }
+function TPhosphorVM.DbgProgram: TProgram;
+begin
+  Result := FProg;
+end;
+
+function TPhosphorVM.DbgGlobalCount: Integer;
+begin
+  if FProg = nil then Exit(0);
+  Result := FProg.VarCount;
+end;
+
+function TPhosphorVM.DbgGlobal(AIndex: Integer): TValue;
+begin
+  Result := Default(TValue);
+  if (FProg = nil) or (AIndex < 0) or (AIndex >= FProg.VarCount) then Exit;
+  if AIndex > High(FVars) then
+  begin
+    if AIndex <= High(FProg.VarTypes) then
+      Result := DefaultValue(FProg.VarTypes[AIndex]);
+    Exit;
+  end;
+  Result := FVars[AIndex];
+end;
+
+function TPhosphorVM.DbgFrameDepth: Integer;
+begin
+  Result := FFrameSP;
+end;
+
+function TPhosphorVM.DbgFrameFunc(AFrame: Integer): Integer;
+begin
+  if (AFrame < 0) or (AFrame >= FFrameSP) then Exit(-1);
+  Result := FFrames[AFrame].FuncIndex;
+end;
+
+function TPhosphorVM.DbgFrameLocalCount(AFrame: Integer): Integer;
+begin
+  if (AFrame < 0) or (AFrame >= FFrameSP) then Exit(0);
+  Result := Length(FFrames[AFrame].Locals);
+end;
+
+function TPhosphorVM.DbgLocal(AFrame, ASlot: Integer): TValue;
+begin
+  Result := Default(TValue);
+  if (AFrame < 0) or (AFrame >= FFrameSP) then Exit;
+  if (ASlot < 0) or (ASlot > High(FFrames[AFrame].Locals)) then Exit;
+  Result := FFrames[AFrame].Locals[ASlot];
 end;
 
 { Call ANYTHING by name, in the order a direct call uses: the program's own

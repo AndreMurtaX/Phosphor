@@ -437,6 +437,19 @@ x=10 y=20
 To turn a number into a string explicitly (e.g. to concatenate with `+`), use
 `str$(n)` or the locale-invariant `stri$(n)`.
 
+**A printed number is the number.** `print`, `println`, `print #`, `+`
+concatenation and `str$` all write text that reads back as exactly the same
+value, so `val(str$(x)) = x` and a number written with `print #` and read with
+`input #` comes back unchanged — including a negative zero, and including at the
+edges of the format, where `str$` used to produce text `val` itself refused.
+Short values are unaffected: `1.5` is still `1.5`, `1E15` is still `1E15`. What
+you see is the digits a value needs — `0.1 + 0.2` prints as
+`0.30000000000000004`, because that sum is not `0.3`, and `1 / 3` prints as
+`0.33333333333333331`. A negative zero prints as `-0`, since its sign is real.
+Use `print using` when you want a number rounded for display; the text is not
+always the *shortest* that would read back, and [str.md](libraries/str.md) says
+exactly what it is.
+
 ### PRINT USING — formatted output
 
 `print using <format$>; <value>[; <value>…]` fills the format's fields with the

@@ -172,7 +172,7 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 | `oct$(n) → str` | octal text |
 | `val(s$) → num` | parse `s$` to a number; **0 unless the whole trimmed string is numeric** |
 | `valcode() → num` | 1-based position where the last `val` stopped; 0 when it was fully numeric |
-| `stri$(n) → str` | number → string, locale-invariant (`.` decimal) |
+| `stri$(n) → str` | number → string, locale-invariant (`.` decimal); text that reads back as the same number, so `val(stri$(x)) = x` |
 | `str$(n) → str` | alias of `stri$` |
 
 **Predicates** (1 when true and the string is non-empty, else 0)

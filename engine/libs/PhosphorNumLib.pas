@@ -115,11 +115,17 @@ begin if IntIdentity(Args, Err, Result) then Exit;
 { A domain error, in the library's own words. ln(0), acos(2) and friends raised
   the RTL's own exception -- "Invalid floating point operation" -- which the VM's
   net turned into a generic runtime error naming neither the function nor the
-  argument. A reader of the message could not tell which call went wrong. }
+  argument. A reader of the message could not tell which call went wrong.
+
+  NumToInv, not FloatToStr: the argument is the whole point of the message, and a
+  bare FloatToStr both rounded it to 15 digits and spelled it in the machine's
+  locale -- so `ln(x)` on a value a comma-decimal machine formats as "0,5" said
+  so in an error a program then read back with val(). A program can read this
+  text with errmsg$, which makes it one of the engine's number-to-text paths. }
 function DomainError(const AFn, ANeeds: String; V: Double): TPhosphorError;
 begin
   Result := MakeError(peRuntime,
-    AFn + ': ' + FloatToStr(V) + ' is outside the domain (needs ' + ANeeds + ')');
+    AFn + ': ' + NumToInv(V) + ' is outside the domain (needs ' + ANeeds + ')');
 end;
 
 function f_log10(const Args: array of TValue; out Err: TPhosphorError): TValue;

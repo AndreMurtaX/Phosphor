@@ -127,6 +127,27 @@ function ValHandle(const H: Int64): TValue;
 function IsNumeric(const V: TValue): Boolean; inline;      // vkInt or vkDouble
 function AsDouble(const V: TValue): Double;                // widen int -> double
 function KindName(K: TValueKind): String;
+{ A DOUBLE AS TEXT THE ENGINE READS BACK AS THE SAME DOUBLE. Three callers share
+  it -- ValToStr (print, println, print #, concatenation, error text), str$/stri$
+  and the config writer -- so those three agree on every number's spelling.
+
+  TWO PLACES WRITE A NUMBER WITHOUT IT, and only one of them is fine. PRINT
+  USING (PhosphorVM.FormatNumericField) is a rounding formatter whose whole
+  contract is the picture the program gave it, so it is deliberately left alone.
+  json_stringify$ inherits fpjson's own spelling, which carries the digits but
+  NOT the sign of a negative zero: measured through the engine, json writes
+  a v of 0 for -0.0 and json_parse then answers +0.0, where str$/val, the config
+  file, print #/input # and buffer_setdbl all keep it. That is the same class of
+  defect one library further out, it predates this ladder, and moving json onto
+  this formatter would rewrite every float in a stored document -- so it is
+  recorded here rather than fixed here.
+
+  So this is the engine's one ROUND-TRIP formatter, not its only number-to-text
+  call.
+
+  Non-finite is answered exactly as FloatToStr answers it, so ValToStr stays
+  total. See the body for the measurement and for the limit. }
+function NumToInv(const V: Double): String;
 function ValToStr(const V: TValue): String;                // locale-independent
 
 // The UTF-8 codepoint layer --------------------------------------------------
@@ -620,16 +641,260 @@ begin
   end;
 end;
 
-{ TOTAL BY DESIGN, INCLUDING ON A VALUE THE INVARIANT FORBIDS. FloatToStr reads
-  the exponent bits rather than comparing, so it answers 'Nan' / '+Inf' / '-Inf'
-  instead of signalling, and this is the ONE operation deliberately left able to
-  see a non-finite Double: reporting a poisoned value is how a program and an
-  error message name it. Every arithmetic operator refuses it instead. }
+{ What FloatToStrF(V, ffGeneral, APrecision, 0) would answer if Win64 did not
+  clamp APrecision to 15 -- see NumToInv below for why that clamp is the whole
+  defect. The digits come from Str(V:APrecision+7), which is the spelling
+  FloatToStrFIntl itself uses (sysstr.inc:1447, one line under the clamp at
+  :1442) and the one door the clamp does not stand in; the rest is the RTL's own
+  shape rule, restated: a plain decimal while the decimal exponent is above -6
+  and below the digit count, an exponent form otherwise, trailing zeros and a
+  trailing point dropped. Restating the rule rather than inventing one is what
+  keeps the answer readable -- 0.1 + 0.2 reads 0.30000000000000004 and not
+  3.0000000000000004E-001.
+
+  KEEPING THE SHAPE RULE IS NOT KEEPING THE SHAPE, and an earlier version of
+  this comment claimed it was: it said the ladder differs from FloatToStr in
+  DIGITS and never in FORM, three lines under the rule that makes that
+  impossible. The rule's upper bound IS the digit count, and this ladder raised
+  it from 15 to 17, so the notation moves in three places and nowhere else.
+  Measured against the pristine FloatToStr call this replaced:
+
+    decimal exponent 15 or 16, falling to rung 2 -- exponent form becomes a
+    plain decimal. 93.96% of 500000 Doubles drawn uniformly from that band;
+    -9.74341031869614E16 is now -97434103186961376. config.md documents this
+    one by example, because a plain integer is the form a person can edit.
+
+    the 8 Doubles just under 1e15 that FloatToStr still spells 1E15 (4 of each
+    sign; this set was walked to exhaustion, not sampled) -- also exponent to
+    plain: 1E15 becomes 999999999999999.5, .62, .75 or .88.
+
+    the 6 just under 1e-5 that it still spells 0.00001 (3 of each sign,
+    likewise exhaustive) -- these go the OTHER way, plain to exponent, because
+    their true decimal exponent is -6: 0.00001 becomes 9.9999999999999957E-6,
+    9.9999999999999974E-6 or 9.9999999999999991E-6.
+
+  Both boundary sets move because rounding to 15 digits carried the value across
+  a threshold the value itself is not across. Outside the three, nothing moves:
+  400000 random bit patterns produced 1237 form changes and all 1237 were inside
+  them.
+
+  WHAT IS STRUCTURAL is the clause that sentence was reaching for. A value whose
+  15-digit text already reads back does not change at all -- rung 1 IS
+  FloatToStr and the ladder exits on it -- so every form change above belongs to
+  a value that did not round-trip, which is why no existing golden moved.
+
+  APrecision is a parameter because the shape rule is stated in terms of it, but
+  17 is the only precision the ladder asks for; a 16-digit rung was measured and
+  removed, and NumToInv says why. Only ever called for a finite V, and only
+  after FloatToStr has been tried. }
+function GeneralAt(const V: Double; APrecision: Integer): String;
+var
+  raw, digits, frac: String;
+  neg: Boolean;
+  e, esign, p, i: Integer;
+begin
+  Str(V:APrecision + 7, raw);
+  raw := Trim(raw);
+  p := Pos('E', raw);
+  if p = 0 then Exit(raw);              // a special; nothing to reshape
+  neg := raw[1] = '-';
+  if neg then
+  begin
+    Delete(raw, 1, 1);
+    Dec(p);
+  end;
+  // the exponent, read digit by digit: Str always writes a sign and three
+  // digits there, and reading it with StrToInt would be the one line in this
+  // function able to raise
+  esign := 1;
+  i := p + 1;
+  if raw[i] = '-' then begin esign := -1; Inc(i); end
+  else if raw[i] = '+' then Inc(i);
+  e := 0;
+  while i <= Length(raw) do
+  begin
+    e := e * 10 + (Ord(raw[i]) - Ord('0'));
+    Inc(i);
+  end;
+  e := e * esign;
+  digits := Copy(raw, 1, p - 1);
+  i := Pos('.', digits);
+  if i > 0 then Delete(digits, i, 1);
+  while (Length(digits) > 1) and (digits[Length(digits)] = '0') do
+    SetLength(digits, Length(digits) - 1);
+  if digits = '0' then
+    e := 0                              // every zero digit: the value IS zero
+  else
+    while (Length(digits) > 1) and (digits[1] = '0') do
+    begin
+      Delete(digits, 1, 1);
+      Dec(e);
+    end;
+  if (e > -6) and (e < APrecision) then
+  begin
+    if e >= Length(digits) - 1 then
+      Result := digits + StringOfChar('0', e - Length(digits) + 1)
+    else if e >= 0 then
+      Result := Copy(digits, 1, e + 1) + '.' + Copy(digits, e + 2, MaxInt)
+    else
+      Result := '0.' + StringOfChar('0', -e - 1) + digits;
+  end
+  else
+  begin
+    frac := Copy(digits, 2, MaxInt);
+    if frac <> '' then frac := '.' + frac;
+    Result := Copy(digits, 1, 1) + frac + 'E' + IntToStr(e);
+  end;
+  if neg then Result := '-' + Result;
+end;
+
+{ THE READ THAT DECIDES IS THE ONE THE CALLERS USE. TryStrToFloat with a DOUBLE
+  out-parameter is what val() and `input #` already call (PhosphorStrLib f_val,
+  PhosphorVM's field parser); sysstr.inc:1371-1375 hands it to TextToFloat, which
+  reaches `Val(S, Double(Value), E)` at :1332. Verifying a round trip with a
+  reader no caller uses is how a check passes while the thing it checks is wrong,
+  so this asks theirs.
+
+  AN EARLIER VERSION OF THIS COMMENT CLAIMED MORE THAN IS TRUE, and a review
+  caught it. It said StrToFloatDef would round a second time on a target with an
+  80-bit Extended while the Double overload would not. It would not: every FPC
+  Val on a real destination goes through fpc_Val_Real_ShortStr/AnsiStr, which
+  RETURN ValReal (compproc.inc:209-236 -- there is no size-specific variant), so
+  both doors narrow the same ValReal to a Double exactly once. Naming the Double
+  overload is a clarity choice here, not a correctness one.
+
+  WHAT THIS CANNOT SEE, and it is the honest limit of the ladder below. FPC's Val
+  is not a correctly-rounded strtod: it accumulates the digits and then
+  multiplies or divides by a power of ten (sstrings.inc:1865-1888), so it can
+  answer a Double one ulp from the nearest. A spelling it accepts is therefore
+  text PHOSPHOR reads back exactly -- which is the promise val() and `input #`
+  keep, and the only promise the documentation makes -- and not, in general, text
+  that every reader in the world resolves the same way. Measured against a
+  correctly-rounded oracle over 474393 Doubles, 9 of the ladder's answers are
+  read as the neighbouring Double by such a reader; all 9 come off the FloatToStr
+  rung, all 9 are BYTE-IDENTICAL to what the engine wrote before this ladder
+  existed, and a 16-digit rung that added 71 more of them was measured and
+  removed. Closing the last 9 needs a correctly-rounded reader, which is a
+  bignum comparison of the decimal against the two midpoints, and not this
+  function.
+
+  ONE MORE CONSEQUENCE, FOR THE OTHER OPERATING SYSTEM, AND IT IS MEASURED AND
+  NOT FEARED. ValReal is Extended on Linux x86_64 and Double on Win64
+  (systemh.inc:183-194), so Val there narrows an 80-bit intermediate where Win64
+  narrows nothing, and the rung this function accepts DOES differ between them:
+  over 746198 Doubles swept identically on both machines -- built from their bit
+  patterns, since a value computed from a real literal is not even the same
+  Double on the two -- 14 take a different rung, 7 each way; an earlier sweep of
+  482068 counted 14 as well. Those 14 are also the ONLY values whose text the
+  other build reads as a different Double, and that was measured by having each
+  build read the other's file back rather than inferred: 14 misreads of 746198,
+  always by a single ulp, and the misread spelling is the 15-digit one every
+  time. Every spelling reads back on the machine that WROTE it, which is why
+  nothing but pinned TEXT can see any of this: on each system the same Val does
+  both the verifying and the reading.
+
+  THE SPELLING DIVERGES FAR MORE OFTEN THAN THE RUNG DOES, and an earlier
+  version of this comment quantified the whole thing with the rung's number.
+  ValReal is the WRITER's parameter too: str_real takes d: ValReal and rounds in
+  valReal locals (real2str.inc:27, and the maxDigits and TIntPartStack
+  declarations under it), so the digits Str(V:24) produces are themselves
+  platform-dependent. Over the same sweep, run on both machines: 670 of the
+  578913 values that take rung 2 on both are SPELLED DIFFERENTLY -- one in 864
+  -- against 4 of the 167271 that take rung 1. All 674 of those same-rung
+  differences name the SAME Double on both systems; only the 14 rung
+  disagreements do not.
+
+  SO THE COST IS EXACTLY THIS, and it is aimed at whoever writes the next test.
+  The VALUE never differs between the two builds. A text file carried between
+  them is not guaranteed byte-identical. And a 17-DIGIT spelling is the fragile
+  thing to pin -- about one in 864 of them differs, not one in 34000 -- so a new
+  text pin belongs on a value that was spelled by both builds and compared, the
+  way the existing ones were: 3.1415926535897931, 0.33333333333333331 and
+  0.30000000000000004 are byte-identical on both, as is every short form
+  tests/suite/67_number_text_roundtrip.bas and tests/probe_value.lpr pin, and
+  both suites are byte-exact on both systems.
+
+  A text that does not parse at all is not a round trip either, and back is not
+  read in that case: an unset out-parameter is not an answer. }
+function ReadsBackAs(const S: String; const V: Double): Boolean;
+var
+  back: Double;
+begin
+  Result := TryStrToFloat(S, back, InvariantFS) and
+            (CompareByte(back, V, SizeOf(Double)) = 0);
+end;
+
+{ A NUMBER MUST COME BACK AS THE NUMBER THAT WENT IN, and FloatToStr alone
+  cannot promise that. It formats a Double with 15 significant digits where an
+  IEEE double needs 17, so the engine printed text that read back as a DIFFERENT
+  number: x = x * 1.0000001 + 0.000000123 over 200 iterations changed 196 of
+  them through val(str$(x)) and 196 through val("" + x), and the two values
+  print identically, so no amount of reading output finds it. Worse than a lost
+  digit, str$(MaxDouble) emitted 1.79769313486232E308 -- rounded UP past the
+  largest Double there is -- and the engine's own val() then refused its own
+  output as not finite. All three text paths shared the one fault: str$/stri$,
+  print / println / print # / concatenation, and the config writer.
+
+  THE OBVIOUS REPAIR DOES NOT WORK, AND THE MEASUREMENT SAYS SO. FloatToStrF
+  with ffGeneral and Precision 17 is capped: sysstr.inc declares maxdigits = 17
+  only under FPC_HAS_TYPE_EXTENDED and 15 otherwise, and Win64 has no 80-bit
+  Extended, so ffGeneral at 15, 16 and 17 return the IDENTICAL string here while
+  the same source line behaves differently on Linux -- the worst shape a fix can
+  have in a project that ships on both.
+
+  SO THE READABLE FORM IS TRIED AND VERIFIED, AND 17 DIGITS ARE THE FALLBACK.
+  Two rungs, which is the ladder the config writer had carried since 2026-09-05
+  and had already been measured over 299832 values on both operating systems.
+  Keeping rung 1 is the churn guarantee, and it is structural rather than
+  measured: rung 1 IS FloatToStr, and the ladder EXITS on it, so a value whose
+  15-digit text the engine reads back comes out of here byte for byte as it
+  always did. 1024, 0.75, 1.5, 1E200, 1E-6 -- every number a person types -- does
+  not move. What changes is only what was wrong: 0.1 + 0.2 prints as
+  0.30000000000000004 rather than 0.3, and pi as 3.1415926535897931.
+
+  THERE WAS A THIRD RUNG AT 16 DIGITS AND MEASUREMENT KILLED IT. It made pi read
+  3.141592653589793 instead, which is both shorter and prettier, and it was
+  wrong: judged against a correctly-rounded oracle outside this toolchain over
+  474393 Doubles, it emitted 71 spellings that name the NEIGHBOURING Double, and
+  exact arithmetic on the decimal confirmed the neighbour rather than the oracle.
+  Str at 16 significant digits is not correctly rounded here -- for the Double
+  $800C671E07461F30 it prints the same 16 digits as its neighbour -- and Val
+  resolves that tie in the writer's favour, so the rung's own check could never
+  see it. This is the project's first-named failure mode, checking a different
+  copy of the value than the one that acts, and the only defence against it is
+  not to offer a rung whose correctness rests on the checker. Removing it takes
+  the oracle's count from 80 to 9, and those 9 are FloatToStr's own answers,
+  unchanged. The price is ~38% of spellings carrying a 17th digit that a
+  correctly-rounded shortest form would not need; a wrong number is worse than a
+  long one.
+
+  THE COMPARISON IS ON THE BYTES of the two Doubles, not with `=`. FloatToStr
+  writes -0.0 as "0", which reads back as +0.0; `=` calls that a successful
+  round trip and the sign is gone. The ladder answers "-0" instead, and that is
+  the one place it disagrees with the RTL on purpose.
+
+  NON-FINITE IS ANSWERED BY FloatToStr AND NOTHING ELSE, so ValToStr below stays
+  total: 'Nan' / '+Inf' / '-Inf' are text no round trip can confirm, and the
+  rungs would only mangle them. }
+function NumToInv(const V: Double): String;
+begin
+  Result := FloatToStr(V, InvariantFS);
+  if not IsFiniteD(V) then Exit;
+  if ReadsBackAs(Result, V) then Exit;
+  Result := GeneralAt(V, 17);
+end;
+
+{ TOTAL BY DESIGN, INCLUDING ON A VALUE THE INVARIANT FORBIDS. NumToInv hands a
+  non-finite Double straight to FloatToStr, which reads the exponent bits rather
+  than comparing, so it answers 'Nan' / '+Inf' / '-Inf' instead of signalling,
+  and this is the ONE operation deliberately left able to see a non-finite
+  Double: reporting a poisoned value is how a program and an error message name
+  it. Every arithmetic operator refuses it instead. }
 function ValToStr(const V: TValue): String;
 begin
   case V.Kind of
     vkInt:    Result := IntToStr(V.Int);
-    vkDouble: Result := FloatToStr(V.Num, InvariantFS);
+    vkDouble: Result := NumToInv(V.Num);
     vkString: Result := V.Str;
     vkBool:   if V.Bl then Result := 'true' else Result := 'false';
     vkHandle: Result := '@' + IntToStr(V.Hnd);

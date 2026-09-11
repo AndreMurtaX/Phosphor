@@ -132,8 +132,52 @@ can fail.
 | `oct$(n%) → str` | the same in base 8 |
 | `val(s$) → num` | `s$` parsed as a number, after trimming, with `.` as the decimal point whatever the locale. **`0` unless the whole trimmed string is a number** — `val("12abc")` is `0`, not `12`. Ask `valcode()` to tell that apart from a genuine zero |
 | `valcode() → num` | the base-1 position where the **last** `val` stopped: `0` when the whole string parsed. `val("12abc")` leaves `3`. It reports on the most recent `val` call anywhere, so read it immediately |
-| `stri$(n) → str` | `n` as text, locale-invariant (`.` decimal, no thousands separator) and with **no leading space** for a positive number, unlike classic BASIC `STR$` |
+| `stri$(n) → str` | `n` as text, locale-invariant (`.` decimal, no thousands separator) and with **no leading space** for a positive number, unlike classic BASIC `STR$`. **Text that reads back as the same number** — see below |
 | `str$(n) → str` | the same function under its familiar name — an exact alias of `stri$` |
+
+**`val(str$(x))` is `x`, for every `x`.** `str$` writes text that reads back as
+exactly the number it was given, so a number survives being turned into text and
+back — through `val`, through `print #` and `input #`, through a file you wrote
+yourself. Short values are written the short way and are unaffected: `str$(1.5)`
+is `"1.5"`, `str$(0.1)` is `"0.1"`, `str$(1e15)` is `"1E15"`. Extra digits appear
+only when the number needs them — `str$(0.1 + 0.2)` is `"0.30000000000000004"`,
+because that sum is not `0.3`, and `str$` of the largest Double now spells all of
+it rather than rounding up into text `val` refuses. A negative zero answers
+`"-0"`: its sign is real, and `"0"` would read back as a different value. When
+you want a number *rounded* for display, that is what `print using` is for.
+
+Three things it does **not** promise. It is not always the *shortest* text that
+reads back: the readable 15-significant-digit form is used whenever that reads
+back, and a 17-digit one when it does not, so a value whose shortest form is 16
+digits gets 17 — `str$(1 / 3)` is `"0.33333333333333331"`, one digit longer than
+it strictly needs. And the round trip promised is **the one this build makes**:
+`val` and `input #` read back every string `str$` writes — on the machine that
+wrote it. A handful of 15-digit spellings are resolved to the *neighbouring*
+value by some other parser, and "some other parser" is not only another
+language: it includes Phosphor itself built for the other operating system,
+because the number reader FPC gives us accumulates in a wider intermediate on
+Linux x86-64 than on Windows. Measured over 482,068 Doubles read back by both
+builds, 14 are spelled by one in a way the other reads as the value next door —
+about one in 34,000, and always by a single step. (This is the *reader*, not
+`str$`; it is why `str$` verifies its short form before keeping it.) When a
+number has to cross that boundary bit for bit, write its eight bytes with
+`buffer_setdbl` instead of its text.
+
+And it does not promise the same **notation** for a number that needs the extra
+digits — the digits and the shape move together. Plain or `E` follows one rule:
+plain while the decimal exponent is above `-6` and below the digit count, and
+that count is 17 where `str$` used to stop at 15. So a number between `1e15` and
+`1e17` that needs them is now written out in full — `str$(1234567890123456.0)`
+is `"1234567890123456"`, where it used to be `"1.23456789012346E15"`, which is
+also exactly what `str$(1234567890123457.0)` used to give, the two numbers
+sharing one spelling. Three values just under `0.00001` (and their negatives)
+move the other way, to `"9.9999999999999957E-6"` and its two neighbours, because
+`-6` is their real exponent. Nothing else changes shape, and a number whose short
+form already read back keeps the text it always had: `1E15`, `1E200`, `1E-6`,
+`0.00001` and `1.5` are all untouched.
+
+An `int%` never goes through a Double here at all — `str$(1000000000000001)` is
+`"1000000000000001"`, not `"1E15"` — so an id or a timestamp keeps every digit.
 
 ### Predicates
 

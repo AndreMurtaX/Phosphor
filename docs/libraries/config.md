@@ -82,11 +82,15 @@ refusal and the ordinary case together.
 ### Numbers
 
 Written with `.` as the decimal point regardless of locale, and read back the
-same way. A number also comes back as **exactly** the number that went in. Values
-that need more than 15 significant digits — a large integer id, an accumulated
-float — are written in a 17-digit exponent form such as `1.2345678901234570E+015`;
-everything else is written the short readable way it always was, so an ordinary
-settings file is unchanged byte for byte.
+same way. A number also comes back as **exactly** the number that went in: the
+value is stored as text that reads back as that same number, which is the rule
+the whole engine uses for a number (see `str$` in [str.md](str.md)). Values that
+need more than 15 significant digits — a large integer id, an accumulated float —
+carry the extra ones, so the id `1234567890123457` is stored as
+`1234567890123457` and not rounded to `1.23456789012346E15`; everything else is
+written the short readable way it always was, so an ordinary settings file is
+unchanged byte for byte. A file written by an older build still reads back
+exactly.
 
 | function | what it answers |
 | --- | --- |

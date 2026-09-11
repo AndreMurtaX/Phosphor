@@ -317,6 +317,40 @@ begin
   Result := PDouble(@Q)^;
 end;
 
+{ THE ENGINE'S TEXT FOR A DOUBLE, READ BACK THE WAY THE ENGINE READS IT. The
+  property is IEEE's and not this engine's: a decimal string identifies exactly
+  one Double, so the spelling of a value must produce that value again. ValToStr
+  could not keep it while it formatted with FloatToStr's 15 significant digits --
+  an IEEE double needs 17 -- and two different Doubles then shared one spelling.
+
+  Read back with the DOUBLE overload of TryStrToFloat, because that is the
+  converter val() and `input #` actually call (PhosphorStrLib f_val,
+  PhosphorVM's field parser, both `Val(S, Double(...), E)` through
+  sysstr.inc:1371-1375 and :1332). StrToFloatDef would reach the SAME converter
+  -- every FPC Val on a real destination returns ValReal (compproc.inc:209-236),
+  so the Extended flavour differs only in where the single narrowing happens --
+  so this is the witness named for clarity, not a different arithmetic.
+
+  WHAT THIS WITNESS CANNOT SEE, said here because a probe that cannot fail is
+  measuring nothing: FPC's Val is not correctly rounded (sstrings.inc:1865-1888
+  accumulates and then scales by a power of ten), so it is the engine's reader
+  agreeing with the engine's writer. That is the promise the docs make, and it is
+  the whole promise: 9 of the ladder's spellings, measured over 474393 Doubles
+  against a correctly-rounded oracle outside this toolchain, are read as the
+  neighbouring Double by such a reader -- all 9 byte-identical to what FloatToStr
+  wrote before the ladder existed. }
+function SpellingReadsBack(const D: Double): Boolean;
+var
+  fs: TFormatSettings;
+  back: Double;
+begin
+  fs := DefaultFormatSettings;
+  fs.DecimalSeparator := '.';
+  fs.ThousandSeparator := #0;
+  Result := TryStrToFloat(ValToStr(ValDouble(D)), back, fs) and
+            (BitsOf(back) = BitsOf(D));
+end;
+
 { ----------------------------------------------------------------------------
   `^` OVER A RANGE, NOT OVER A LIST -- and against an ORACLE, not a table.
 
@@ -743,12 +777,47 @@ begin
   e := ValPow(ValDouble(1e300), ValInt(-2), r);
   Report((not IsError(e)) and (r.Kind = vkDouble) and (r.Num = 0),
          'a reciprocal of an overflowed power is still zero');
-  { Compared as TEXT, not against the literal 1e300: 1e-300 is not exactly
-    representable, so its reciprocal is not exactly the Double the literal
-    1e300 parses to. The engine's own locale-independent spelling is the answer
-    a program sees, and it is the one the pristine unit produced. }
-  e := ValPow(ValDouble(1e-300), ValInt(-1), r);
-  Report((not IsError(e)) and (ValToStr(r) = '1E300'), '1e-300 ^ -1 is still 1E300');
+  { 1e-300 is not exactly representable, so its reciprocal is NOT the Double the
+    literal 1e300 parses to -- it is one ulp below it, $7E37E43C8800759B.
+
+    TWO ASSERTIONS, BECAUSE THE LINE THEY REPLACE WAS DOING TWO JOBS AND ONE OF
+    THEM BADLY. It read `ValToStr(r) = '1E300'`, and as a statement about the
+    TEXT it was the fifth expectation in this tree to record a defect as
+    correct: it was written by reading a run of a build whose ValToStr formatted
+    with 15 significant digits, and at 15 digits those two Doubles share one
+    spelling, so the engine printed the text of a value it does not hold and
+    that text read back as the other one. But it was also the only thing here
+    saying anything about the VALUE, and a round-trip property alone does not:
+    every finite Double's spelling reads back, so ValPow could answer 42 and
+    SpellingReadsBack would still be true. So the value is pinned as BITS, where
+    it is unambiguous, and the spelling as the property -- which is strictly
+    more than the old line covered, and measurably so: 36 distinct Doubles are
+    spelled '1E300' by a 15-significant-digit formatter -- walked outwards from
+    the literal until the text changed -- so that comparison would have accepted
+    an answer up to 33 steps above the right one. Watched failing: perturbing
+    ValPow's negative-exponent result by a single ulp fails this line and one
+    other assertion, and nothing else in the probe.
+
+    THE BITS ARE DERIVED, AND NOT FROM THIS TOOLCHAIN. The Double nearest 1e-300
+    is $01A56E1FC2F8F359; one divided by it, rounded to nearest by exact
+    rational arithmetic, is $7E37E43C8800759B. ValPow reaches it through
+    Math.Power, whose intpower reciprocates the BASE (see ValPow's header) in
+    `float` -- Extended on Linux, Double on Win64 -- so the same quotient is
+    also formed at a 64-bit mantissa and narrowed afterwards. Rounding the exact
+    quotient that way lands on the same Double, which is why this is safe to
+    pin as bits on both systems. The BASE is assembled from its pattern for the
+    reason FromBits exists above: an untyped literal in FPC source reaches a
+    Double through one rounding here and two on Linux.
+
+    Nothing about the reciprocal's TEXT is pinned here on purpose. That it reads
+    back is the property below; WHICH rung spelled it is pinned for two other
+    values in CheckNumberText, and a third witness would only repeat them. }
+  e := ValPow(ValDouble(FromBits(QWord($01A56E1FC2F8F359))), ValInt(-1), r);
+  Report((not IsError(e)) and (r.Kind = vkDouble) and
+         (BitsOf(r.Num) = QWord($7E37E43C8800759B)),
+         '1e-300 ^ -1 is the Double one ulp below the literal 1e300');
+  Report((not IsError(e)) and (r.Kind = vkDouble) and SpellingReadsBack(r.Num),
+         '1e-300 ^ -1 is spelled as the Double it actually is');
   e := ValPow(ValDouble(1e-300), ValInt(-2), r);
   CheckErr(e, peIntOverflow, '1e-300 ^ -2 has no finite magnitude');
   e := ValPow(ValDouble(2.0), ValDouble(-2147483647.0), r);
@@ -763,6 +832,127 @@ begin
   CheckErr(e, peIntOverflow, '1e300 \ 2 is still out of integer range');
   i := 0;
   if i <> 0 then ;
+end;
+
+{ A DOUBLE'S TEXT IS SWEPT, NOT LISTED. Every path that turns a number into text
+  -- str$/stri$, print, println, print #, concatenation, an error message -- ends
+  at ValToStr, and a list of hand-picked literals is not an assertion about it:
+  the finiteness patch that turned a whole band of correct subnormal answers into
+  0 passed a byte-identical diff of chosen values. So the range is swept, and the
+  expectation is a property with an external definition -- IEEE-754: 17
+  significant decimal digits distinguish every pair of Doubles, so a spelling
+  that reads back as the value always exists.
+
+  It used not to hold. ValToStr formatted with FloatToStr's 15 significant
+  digits, and the work order's own recurrence, x = x * 1.0000001 + 0.000000123,
+  came back changed for 196 of its first 200 values -- while the two numbers
+  printed identically, so no golden and no amount of reading output could show
+  it. The recurrence is reproduced below verbatim for that reason: it is the
+  measurement, not an illustration.
+
+  THE SHAPES THAT ALREADY ROUND-TRIPPED ARE PINNED TOO, and they are the other
+  half of the change: a fix that simply emitted 17 digits always would pass every
+  round-trip assertion here and turn `println 1.5` into 1.5000000000000000E+000.
+  Those spellings come from the PRISTINE engine, not from a run of the new one --
+  06_strings.bas:45 and 61_utf8_character_ops.bas:181-183 have pinned several of
+  them in .bas since long before this. }
+procedure CheckNumberText;
+var
+  seed: QWord;
+  k, changed, bad: Integer;
+  x: Double;
+
+  function NextRaw: QWord;
+  begin
+    // xorshift64*, so the sweep is the same numbers on both platforms
+    seed := seed xor (seed shr 12);
+    seed := seed xor (seed shl 25);
+    seed := seed xor (seed shr 27);
+    Result := seed * QWord(2685821657736338717);
+  end;
+
+  procedure Spells(const AV: Double; const AWant: String);
+  begin
+    Report(ValToStr(ValDouble(AV)) = AWant,
+           'still spelled ' + AWant + ' (got ' + ValToStr(ValDouble(AV)) + ')');
+  end;
+
+begin
+  Stage := 'a number as text';
+
+  { (1) THE SWEEP. Random IEEE patterns, so the exponent range and the subnormal
+    band are covered rather than the decimal neighbourhood of 1. }
+  seed := QWord(88172645463325252);
+  bad := 0;
+  k := 0;
+  while k < 20000 do
+  begin
+    x := FromBits(NextRaw);
+    if not IsFiniteD(x) then Continue;   // 'Nan'/'+Inf' are text, not a number
+    Inc(k);
+    if not SpellingReadsBack(x) then Inc(bad);
+  end;
+  Report(bad = 0, '20000 swept Doubles each read back from their own text (' +
+                  IntToStr(bad) + ' did not)');
+
+  { (2) THE RECURRENCE FROM THE WORK ORDER, which is where the defect was found. }
+  changed := 0;
+  x := 1.0;
+  for k := 1 to 200 do
+  begin
+    x := x * 1.0000001 + 0.000000123;
+    if not SpellingReadsBack(x) then Inc(changed);
+  end;
+  Report(changed = 0, 'the 200-step recurrence loses no value through its text (' +
+                      IntToStr(changed) + ' changed)');
+
+  { (3) The edges of the format, each one a value a sweep is unlikely to draw. }
+  Report(SpellingReadsBack(FromBits(QWord($7FEFFFFFFFFFFFFF))),
+         'MaxDouble reads back from its own text');
+  Report(SpellingReadsBack(FromBits(QWord($0010000000000000))),
+         'the smallest normal reads back from its own text');
+  Report(SpellingReadsBack(FromBits(QWord($0000000000000001))),
+         'the smallest subnormal reads back from its own text');
+  Report(SpellingReadsBack(FromBits(QWord($8000000000000000))),
+         'a negative zero reads back from its own text, sign and all');
+  Spells(FromBits(QWord($8000000000000000)), '-0');
+  Spells(FromBits(QWord($0000000000000000)), '0');
+
+  { (4) THE OTHER HALF: what already round-tripped must not move. Every spelling
+    here is the PRISTINE engine's, and five of them are pinned in .bas as well
+    (06_strings.bas:45, 61_utf8_character_ops.bas:181-183). }
+  Spells(1.5, '1.5');
+  Spells(0.1, '0.1');
+  Spells(3.5, '3.5');
+  Spells(-7.0, '-7');
+  Spells(1e15, '1E15');
+  Spells(1e200, '1E200');
+  Spells(1e-6, '1E-6');
+  Spells(1e-5, '0.00001');
+
+  { (5) WHICH RUNG WAS TAKEN, PINNED AS TEXT, because nothing else can see it.
+    A round-trip assertion is satisfied by every ladder that works, so it cannot
+    tell a two-rung ladder from a three-rung one -- nor tell Windows from Linux,
+    where Val narrows an 80-bit ValReal (systemh.inc:183-194) and may therefore
+    accept a rung Win64 rejects. These two pin the exact bytes of a value that
+    FloatToStr cannot spell, so any of that says so out loud.
+
+    The expectations are derived, not read off a run: each value's exact binary
+    expansion rounded to 17 significant decimals, which is what the fallback rung
+    emits by definition. pi is 3.141592653589793115997963468544185161590576171875
+    exactly, so 17 digits is 3.1415926535897931; one third is
+    0.333333333333333314829616256247390992939472198486328125, so 17 digits is
+    0.33333333333333331. Both are ONE digit longer than the shortest text that
+    would read back (3.141592653589793 and 0.3333333333333333) -- that is the
+    measured price of not offering a 16-digit rung whose own checker cannot see
+    when it is wrong. See PhosphorValue.NumToInv.
+
+    FROM BITS, NOT FROM AN EXPRESSION: `4 * ArcTan(1.0)` is ValReal arithmetic,
+    which is Extended on Linux and Double on Win64, so the two platforms would be
+    handed different Doubles and this pin would fail for a reason that has
+    nothing to do with text. }
+  Spells(FromBits(QWord($400921FB54442D18)), '3.1415926535897931');
+  Spells(FromBits(QWord($3FD5555555555555)), '0.33333333333333331');
 end;
 
 { ----------------------------------------------------------------------------
@@ -849,9 +1039,10 @@ begin
           QWord($3FF0000000000000), '2^100 mod 3 = 1');
   ModBits(QWord($401E000000000000), QWord($4000000000000000),
           QWord($3FF8000000000000), '7.5 mod 2 = 1.5 (the ordinary case)');
-  { The sign of a zero remainder follows the dividend, as fmod's does. It is
-    pinned as BITS because that is the only place the difference is visible:
-    ValToStr spells -0.0 as "0", so no golden anywhere can see it. }
+  { The sign of a zero remainder follows the dividend, as fmod's does. Pinned as
+    BITS, which is where it is unambiguous. It was also the ONLY place it was
+    visible while ValToStr spelled -0.0 as "0"; it now spells it "-0", because
+    the byte comparison in NumToInv refuses to call a lost sign a round trip. }
   ModBits(QWord($C01E000000000000), QWord($4004000000000000),
           QWord($8000000000000000), '-7.5 mod 2.5 is a negative zero');
   { The widest and narrowest the format goes: MaxDouble against the smallest
@@ -1048,6 +1239,7 @@ begin
     CheckNonFinite;
     CheckFiniteStillWorks;
     CheckPowOverTheWholeRange;
+    CheckNumberText;
     CheckFloatRemainder;
     CheckOperatorsWithOverflowUnmasked;
     CheckLibraryDoorOnNonFinite;

@@ -200,46 +200,38 @@ end;
   deterministic, so every machine read the same wrong number -- which is exactly
   why a byte-exact golden over an .ini file never noticed.
 
-  THE OBVIOUS REPAIR DOES NOT WORK, AND THE MEASUREMENT SAYS SO. FloatToStrF with
-  ffGeneral and Precision 17 is capped: sysstr.inc declares `maxdigits = 17` only
-  under FPC_HAS_TYPE_EXTENDED and 15 otherwise, and Win64 has no 80-bit Extended.
-  Over 299832 random finite doubles, ffGeneral/17 failed to round-trip 281619 of
-  them on Win64 and 0 of them on Linux -- the same source line, two answers, which
-  is the worst shape a fix can have in a project that ships on both.
+  The remedy used to live here, as a private ladder over FloatToStr and Str(V:24).
+  It lives in PhosphorValue.NumToInv now, because it was never a config problem:
+  str$ and println were losing the same digits through the same RTL cap, and one
+  formatter cannot drift from itself. Read that comment for the measurement.
 
-  So the readable form is TRIED and VERIFIED, and an exact form is the fallback.
-  `Str(V:24)` asks the RTL's Double converter for 17 significant digits directly
-  (FloatToStrFIntl itself spells this `Str(Double(...):precision+7)`), bypassing
-  the cap, and it round-tripped all 299832 on BOTH operating systems. Values that
-  do not need the extra digits -- 1024, 0.75, every setting a person types --
-  still come out as FloatToStr wrote them, so ordinary .ini files are unchanged
-  byte for byte and stay readable.
-
-  The comparison is on the BYTES of the two doubles, not with `=`: that also keeps
-  the sign of a negative zero, which `=` would have called a successful round
-  trip. }
-function NumToInv(const V: Double): String;
-var
-  back: Double;
-begin
-  Result := FloatToStr(V, InvFS);
-  back := StrToFloatDef(Result, 0, InvFS);
-  if CompareByte(back, V, SizeOf(Double)) = 0 then Exit;
-  Str(V:24, Result);
-  Result := Trim(Result);
-end;
-
+  What moving it changed here, and it is an improvement: the fallback keeps
+  ffGeneral's shape instead of always writing an exponent, so the id above is now
+  stored as 1234567890123457 rather than 1.2345678901234570E+015. Both read back
+  to the same Double -- an .ini written by an older build still loads exactly --
+  and the plain form is the one a person can edit. }
 procedure WriteNum(c: TPhosphorConfig; const Sec, Key: String; V: Double);
 begin
   c.Ini.WriteString(Sec, Key, NumToInv(V));
   c.Touch();
 end;
+{ TryStrToFloat with a DOUBLE, not StrToFloatDef, so this reader is spelled the
+  same as the one the writer's round-trip proof uses (PhosphorValue.ReadsBackAs)
+  and the same as val() and `input #`. It is a CLARITY change, not a correctness
+  one, and a review corrected an earlier comment here that claimed otherwise:
+  StrToFloatDef reaches the same converter, because every FPC Val on a real
+  destination goes through fpc_Val_Real_ShortStr/AnsiStr and those return ValReal
+  (compproc.inc:209-236), so both doors narrow one ValReal to a Double exactly
+  once. Naming the door the writer proved against is still worth doing -- a
+  reader chosen for a different reason is how "exactly the number that went in"
+  quietly stops being true -- but it is not load-bearing here. }
 function ReadNum(c: TPhosphorConfig; const Sec, Key: String; const Def: TValue): TValue;
+var
+  d: Double;
 begin
-  if c.Ini.ValueExists(Sec, Key) then
-    Result := ValDouble(StrToFloatDef(c.Ini.ReadString(Sec, Key, ''), 0, InvFS))
-  else
-    Result := Def;
+  if not c.Ini.ValueExists(Sec, Key) then Exit(Def);
+  if not TryStrToFloat(c.Ini.ReadString(Sec, Key, ''), d, InvFS) then d := 0;
+  Result := ValDouble(d);
 end;
 function t_cfg_setn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;

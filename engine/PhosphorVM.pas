@@ -705,6 +705,22 @@ var
   dv: Double;
   fs: TFormatSettings;
   low: String;
+
+  { A MINUS AND NOTHING BUT ZEROS -- spelled out rather than inferred from the
+    parsed value. "the Int64 came out 0 and the text has a minus in it" would
+    also catch "-$0", which TryStrToInt64 reads as a hexadecimal zero and
+    TryStrToFloat cannot read at all, so a field that works today would start
+    failing. This asks for the one shape `print #` can actually write. }
+  function IsMinusZeroText(const S: String): Boolean;
+  var
+    zi: Integer;
+  begin
+    Result := (Length(S) >= 2) and (S[1] = '-');
+    if not Result then Exit;
+    for zi := 2 to Length(S) do
+      if S[zi] <> '0' then Exit(False);
+  end;
+
 begin
   Result := NoError();
   V := Default(TValue);
@@ -717,7 +733,21 @@ begin
           if ATypeCode = 2 then V := ValInt(0) else V := ValInt(0);
           Exit;
         end;
-        if TryStrToInt64(AField, iv) then
+        { A NEGATIVE ZERO IS NOT AN INTEGER ZERO, and this is the one reader in
+          the engine that could not bring back what the writer wrote. `print #`
+          spells a negative zero "-0" now, because the sign is real information
+          (see NumToInv in PhosphorValue); TryStrToInt64 accepts "-0" and answers
+          the Int64 0, so the sign died here and `input #` handed back a
+          DIFFERENT number from the one printed -- exactly the defect this whole
+          change is about, one door further along. That one spelling goes to the
+          float branch below, where -0.0 survives.
+
+          Nothing else moves. The diverted set is exactly "-0", "-00", "-000" and
+          so on -- see IsMinusZeroText above, which asks the TEXT and not the
+          parsed value for that reason -- so "-1", "0", "-$0" and every other
+          field take the int path byte for byte as before; and an int% target
+          still lands on 0, because the float branch rounds -0.0 to the Int64 0. }
+        if TryStrToInt64(AField, iv) and not IsMinusZeroText(AField) then
         begin
           if ATypeCode = 2 then V := ValInt(iv)
           else V := ValInt(iv);   // vtNumber holds an int% happily

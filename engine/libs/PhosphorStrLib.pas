@@ -256,8 +256,18 @@ begin
   GValCode := code;
   if TryStrToFloat(s, d, InvFS) then Result := ValDouble(d) else Result := ValDouble(0);
 end;
+{ NumToInv, not FloatToStr, and the difference is a whole class of wrong answer.
+  This is the function the language is named after for turning a number into
+  text, and with FloatToStr's 15 significant digits it could not describe the
+  Double it was given: val(str$(x)) changed 196 of 200 computed values, and
+  str$(MaxDouble) produced text val() refused outright. The one formatter lives
+  in PhosphorValue so that str$, println and the config writer cannot drift
+  apart again -- read its comment for the measurement and for why ffGeneral 17
+  is not the repair. InvFS and PhosphorValue's InvariantFS are the same two
+  settings ('.' and no thousands separator), so nothing about the invariant
+  spelling changes here. }
 function f_stri(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(FloatToStr(AsDouble(A[0]), InvFS)); end;
+begin E := NoError(); Result := ValStr(NumToInv(AsDouble(A[0]))); end;
 
 { AN int% KEEPS ITS DIGITS, and the registry is what makes that possible.
 

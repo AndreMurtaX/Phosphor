@@ -60,12 +60,15 @@ type
   TProbeB = class end;
 
 var
-  InvFS: TFormatSettings;
   ProbeLiveCount: Integer = 0;  // live probe instances the runner has registered
 
+{ THE SAME FORMATTER THE ENGINE USES, because a failure message that rounds is
+  useless for exactly the defect it is most likely to be reporting: with
+  FloatToStr's 15 digits, "expected 1.00000044600002, got 1.00000044600002" was a
+  real possible output of assert_eq on two Doubles 2.2e-15 apart. }
 function NumStr(const V: Double): String;
 begin
-  Result := FloatToStr(V, InvFS);
+  Result := NumToInv(V);
 end;
 
 function NumEquals(const A, B: Double): Boolean;
@@ -381,9 +384,6 @@ end;
 
 initialization
   Failures := TStringList.Create();
-  InvFS := DefaultFormatSettings;
-  InvFS.DecimalSeparator := '.';
-  InvFS.ThousandSeparator := #0;
 
 finalization
   FreeAndNil(Failures);

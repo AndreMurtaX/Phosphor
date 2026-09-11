@@ -119,6 +119,16 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
     `Test-NetConnection -ComputerName h -Port 22` (or just try the `ssh`). On 2026-09-08
     this reported a powered-off VM as online, one message after I had correctly said it
     was down.
+- **A check can be written so that it cannot fail, and then it reports the thing it
+  guards as broken.** The suite back-dated `bin/phosphortest` by a flat two hours and
+  demanded exit 3 from `RefuseIfStale`. But a `git pull` that changes no `.pas` leaves
+  every source stamped at the previous checkout, so on 2026-09-11 the Linux tree's
+  newest source was SIXTEEN hours old, a two-hour-old binary was still newer than all
+  of them, the guard correctly said nothing, and the harness declared the guard broken.
+  It had never once fired on Linux. Windows passed the same morning by a ONE-MINUTE
+  margin. **Derive a check's parameters from the thing it measures** -- the back-date
+  target is now computed from the newest source the guard actually reads -- and assert
+  BOTH directions, because a guard that refused everything would have passed too.
 - **And a filter can hide the answer as easily as an exit code can.** Piping a run
   through `grep` for the line you expect shows nothing when the tool instead printed an
   error you did not expect — which reads like a silent pass. `scripts/test-suite.sh`
@@ -137,6 +147,13 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   measured that the omission passed every runner on both OSes at one door and was
   caught at another, which is worse than uncovered because it reads as covered.
   Make it required and the omission is a compile error.
+- **Two runs of a PowerShell runner at once clobber each other.** The three `.ps1`
+  runners wrote their scratch files into the shared user `TEMP` under fixed names, so
+  two worktrees running suites at the same moment died on a file lock -- which reads
+  exactly like a test failure. Three reviewers lost a run to it on 2026-09-11 before
+  anyone named it. `$tmp` is now a per-process directory; the bash twins always used
+  `mktemp`. Its cleanup is a plain `rmdir` that can only succeed on an EMPTY directory,
+  deliberately, because this tree has lost thirteen working copies to a recursive one.
 - **`fpc` will reuse a `.ppu` written in the same filesystem tick as the `.pas`.**
   This is the stale-binary trap one level down, and it makes a MUTATION TEST report
   false survivors: a reviewer saw five, and `-B` turned one of them straight back

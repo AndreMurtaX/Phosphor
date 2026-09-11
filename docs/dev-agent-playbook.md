@@ -231,6 +231,41 @@ Rules, in order of how easily they are got wrong:
 - **A backslash in a string literal is an escape** (`"\2"` is a rejected unknown escape,
   `"\\"` collapses to one backslash) — keep backslashes out of assertion messages, or
   double them. This bites file paths and cited expressions in `msg$`.
+- **A CHECK'S PARAMETERS CAN MAKE IT UNABLE TO FAIL, and then it reports the thing it
+  guards as broken.** `scripts/test-suite.{ps1,sh}` back-dated `bin/phosphortest` by a
+  flat two hours and demanded exit 3 from `RefuseIfStale`. The offset was chosen to be
+  "obviously enough". It was not chosen from anything. A `git pull` that changes no
+  `.pas` leaves every source stamped at the previous checkout, so on 2026-09-11 the
+  Linux tree's newest source was SIXTEEN hours old, a two-hour-old binary was still
+  newer than all of them, the guard correctly stayed quiet, and the harness declared the
+  guard broken. That check had never once fired on Linux. Windows passed the same
+  morning by a ONE-MINUTE margin — the runner happened to be built one minute after the
+  last engine edit — so it would have failed there too, that afternoon, on a tree nobody
+  had touched. Measured at three stamps rather than argued:
+
+  | stamp | | exit | |
+  |---|---|---|---|
+  | its own | 07:55:35 | 0 | guard quiet, correct |
+  | now − 2 h | 14:09:46 | 0 | **the old check wanted 3** |
+  | newest source − 60 s | 07:53:37 | 3 | the new check |
+
+  **Derive a check's parameters from the thing it measures.** The back-date target is
+  now computed from the newest source `RefuseIfStale` actually reads, mirroring its four
+  `NewestIn` calls exactly and non-recursively, and both scripts refuse to continue if
+  that timestamp cannot be read. **And assert both directions**: a guard that refused
+  EVERYTHING would have passed the old check as well, so the runner is now also required
+  to answer with its own stamp restored. Same family as `-ProveFailure` and as the
+  `grep -q` trap below: a check nobody has watched fail is not known to be able to fail,
+  and one that *cannot* fail is worse than none.
+- **The three PowerShell runners collided with each other.** They wrote scratch files
+  into the shared user `TEMP` under fixed names, so two worktrees running suites at the
+  same moment clobbered each other's output and died on a file lock — which reads
+  exactly like a test failure. Three reviewers each lost a run to it on 2026-09-11
+  before anyone named it, which is what a parallel round costs when the harness assumes
+  it is alone. `$tmp` is now a per-PROCESS directory; the bash twins always used
+  `mktemp`. Fixed at the one line where `$tmp` is born, not at the forty `Join-Path`
+  call sites. Its cleanup is a plain `rmdir`, which can only succeed on an EMPTY
+  directory — deliberate, in a tree that lost thirteen working copies to a recursive one.
 - **A library-gate must be DETERMINISTIC — and beware `cmd | grep -q` under
   `pipefail`.** `grep -q` exits at the first match and SIGPIPEs the upstream, so
   `ldconfig -p | grep -q libX` reads **non-zero even when it matched** (same class as
@@ -1434,6 +1469,26 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-09-11 · the Linux VM came back and the baseline failed before any work landed.**
+  Eight pieces of the engine work order were building in parallel worktrees; the VM had
+  been off all afternoon, so nothing had been cross-checked. The moment it returned, the
+  suite at `HEAD` — a commit that touched only documentation — came back red on the
+  staleness proof. Three things worth keeping:
+  (1) **The guard was right and its proof was broken**, in the direction that reads as
+  the opposite. Read the failing check before believing what it says about the code it
+  guards.
+  (2) **It was settled by measurement in one run** — the same binary at three
+  timestamps — after one paragraph of reasoning had already produced a plausible wrong
+  answer about `ParamStr(0)`. §0 again.
+  (3) **Turning the machine on was itself the test.** A cross-OS clause that is skipped
+  because the machine is down is not a clause; it is a claim. This defect had been
+  shipped on 2026-09-10 with "proven both ways in `test-suite.{ps1,sh}`" in the commit
+  message, and that sentence was true of Windows and unverifiable on Linux, and nobody
+  could tell which.
+  Landed as `9867b3c`, green on both operating systems, with the line
+  `runner refuses when stale (exit 3), answers when fresh (exit 0)` appearing on Linux
+  for the first time.
 
 Newest first. Each entry: what broke or was missed, and the rule it produced. A
 "needed-a-human" entry is a case the agents could not resolve autonomously — its rule

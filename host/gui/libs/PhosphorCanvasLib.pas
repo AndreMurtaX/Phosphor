@@ -260,7 +260,12 @@ begin
   E := NoError; Result := A[0];
   if not Cnv(A[0].Hnd, c) then Exit;
   if not ParsePoints(A[1].Str, pts, n) then begin GGuiError := 1; Exit; end;
-  c.Polygon(@pts[0], n - 1, False);
+  { n, NOT n - 1. NumPts reaches Windows.Polyline/Polygon as cPoints, the NUMBER
+    of points -- read in lcl/interfaces/win32/win32winapi.inc, not assumed -- and
+    ParsePoints returns N as a count. So this dropped the last vertex: a two-point
+    polyline drew nothing and reported success, and a four-vertex square drew as a
+    triangle. }
+  c.Polygon(@pts[0], n, False);
 end;
 function f_polyline(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TCanvas; pts: array[0..255] of TPoint; n: Integer;
@@ -268,7 +273,7 @@ begin
   E := NoError; Result := A[0];
   if not Cnv(A[0].Hnd, c) then Exit;
   if not ParsePoints(A[1].Str, pts, n) then begin GGuiError := 1; Exit; end;
-  c.Polyline(@pts[0], n - 1);
+  c.Polyline(@pts[0], n);   { a count, not the last index -- see f_polygon }
 end;
 function f_canvas_clear(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TCanvas; begin E := NoError; Result := A[0];

@@ -83,3 +83,41 @@ assert_eq(ok, 1, "a normal number is not NaN")
 ok = 1
 if isinfinite(1) <> 0 then ok = 0
 assert_eq(ok, 1, "a normal number is not infinite")
+
+rem ---------------------------------------------------------------
+rem ROUNDING AN INTEGER IS THAT INTEGER.
+rem
+rem round/fix/cint/int widened an int% to a Double before converting,
+rem and that is wrong in both directions at once. Above 2^53 a Double
+rem cannot hold every integer, so the value was silently changed; and
+rem near High(Int64) the nearest Double lies ABOVE the range, so the
+rem in-range test refused a number that was never out of range.
+rem docs/libraries/num.md promises "all four answer an int%" and
+rem "a magnitude past Int64 range is error code 1". Both were false.
+rem ---------------------------------------------------------------
+
+test_case("num/an int% past 2^53 is not rounded away")
+big% = 9007199254740993
+assert_int(round(big%), 9007199254740993)
+assert_int(fix(big%), 9007199254740993)
+assert_int(cint(big%), 9007199254740993)
+assert_int(int(big%), 9007199254740993)
+
+test_case("num/and one near the top of the range is not refused")
+rem 9223372036854775806 is one BELOW High(Int64). As a Double it rounds to
+rem 9223372036854775808, which is one ABOVE the range -- so the widening made
+rem the guard reject a number squarely inside it.
+top% = 9223372036854775806
+assert_int(round(top%), 9223372036854775806)
+assert_int(int(top%), 9223372036854775806)
+neg% = -9223372036854775806
+assert_int(fix(neg%), -9223372036854775806)
+
+test_case("num/and the four still differ on a fraction")
+rem The identity is only for an int%. A Double still rounds, truncates and
+rem floors by its own rule, and those rules are not the same one.
+assert_eq(int(-3.5), -4, "int floors")
+assert_eq(fix(-3.5), -3, "fix truncates toward zero")
+assert_eq(int(3.5), 3, "int floors a positive too")
+assert_eq(fix(3.5), 3, "and fix agrees there")
+assert_eq(round(2.5), 2, "round is unchanged for a Double")

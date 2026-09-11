@@ -1701,8 +1701,26 @@ var
       else
         bodyEnd := entry;   // extent unknown: end the function instead of guessing
     end;
-    scan := FErrStmtPC + 1;
-    while (scan < bodyEnd) and (FProg.Instr(scan).Op <> opStmt) do Inc(scan);
+    { WHERE THE FAILING STATEMENT ENDS, WHICH THE COMPILER WROTE DOWN.
+
+      Resuming has to continue in CONTROL-FLOW order, and scanning forward for the
+      next opStmt gave the textual one: past the last statement of a `then` block
+      it found the `else` block, past a case arm it found the next arm, and past a
+      loop body it found the statement after the loop. ParseStatement patches A
+      with the pc the statement ends at, so that pc IS the continuation -- the jump
+      over the else, the jump to endselect, the loop's own tail -- and executing it
+      does the right thing by construction.
+
+      The scan stays as the answer for A = 0, which is a statement whose parse
+      failed and any .pbc written before this. Bounded by bodyEnd either way: a
+      hand-written .pbc is the only thing that can carry an A pointing elsewhere,
+      and it gets the same bounded answer everything else in this procedure gets. }
+    scan := FProg.Instr(FErrStmtPC).A;
+    if (scan <= FErrStmtPC) or (scan > bodyEnd) then
+    begin
+      scan := FErrStmtPC + 1;
+      while (scan < bodyEnd) and (FProg.Instr(scan).Op <> opStmt) do Inc(scan);
+    end;
     if scan < bodyEnd then
     begin
       pc := scan;

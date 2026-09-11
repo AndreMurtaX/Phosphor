@@ -347,8 +347,18 @@ assert_eq(gpick(1), 11, "on <expr> gosub, first label")
 assert_eq(gpick(2), 22, "on <expr> gosub, second label")
 assert_eq(ghand(), 5, "a handler installed INSIDE a function body runs")
 assert_eq(gretry(), 5, "and plain resume retries the failing statement")
-assert_eq(ginner(), 10, "an error raised inside a for, handled from in-function")
-assert_eq(gouter(), 10, "and the same body with the handler one frame UP agrees")
+rem 0, AND IT USED TO BE 10 -- the expectation pinned the defect.
+rem
+rem `s = s - 10 / (i - 2)` is the LAST statement of the loop body, and `resume
+rem next` used to leave the BLOCK: it scanned forward for the next statement
+rem boundary, found `return s` past the loop, and the loop was abandoned after one
+rem pass. So 10 was i=1's answer alone, written down as correct.
+rem
+rem Resuming continues the loop now. i=1 gives 10, i=2 faults and is skipped, i=3
+rem gives 10 - 10/1 = 0. The same three-pass arithmetic the suite already pins one
+rem line at a time elsewhere, arriving here because the loop is no longer cut off.
+assert_eq(ginner(), 0, "an error raised inside a for, handled from in-function")
+assert_eq(gouter(), 0, "and the same body with the handler one frame UP agrees")
 
 
 function selre(n)
@@ -438,6 +448,129 @@ function gouter()
   return gouterbody()
 endfunction
 
+
+rem ---------------------------------------------------------------
+rem RESUME NEXT CONTINUES IN CONTROL-FLOW ORDER, NOT IN TEXT ORDER.
+rem
+rem The resume point used to be found by scanning forward for the next
+rem statement boundary, and only a STATEMENT carries one -- the code a
+rem block generates for itself does not. So past the last statement of a
+rem `then` block the scan found the `else` block; past a case arm it
+rem found the next arm; and past a loop body it found the statement
+rem AFTER the loop, stepping over the increment and the back-jump.
+rem
+rem A fault on the last line of a block therefore ran the branch that was
+rem NOT taken, ran the arm that did NOT match, and abandoned a loop after
+rem one pass -- silently, exit 0. Every on-error test in this suite put
+rem its faulting statement before the end of its block, so none of them
+rem could see it.
+rem
+rem The compiler writes the answer down now: each statement's boundary
+rem records where that statement's code ends, which IS the continuation.
+rem ---------------------------------------------------------------
+
+test_case("resume/the branch not taken stays not taken")
+rntook$ = ""
+on error goto rnh
+if 1 = 1 then
+  rntook$ = rntook$ + "then,"
+  rnx = 1 / 0
+else
+  rntook$ = rntook$ + "ELSE,"
+end if
+rntook$ = rntook$ + "after,"
+goto rn1
+rnh:
+resume next
+rn1:
+on error goto 0
+assert_eq(rntook$, "then,after,", "the else arm did not run")
+
+test_case("resume/and the arm that did not match")
+rnarm$ = ""
+rnk = 1
+on error goto rnh2
+select case rnk
+case 1
+  rnarm$ = rnarm$ + "one,"
+  rny = 1 / 0
+case 2
+  rnarm$ = rnarm$ + "TWO,"
+case 3
+  rnarm$ = rnarm$ + "THREE,"
+end select
+rnarm$ = rnarm$ + "after,"
+goto rn2
+rnh2:
+resume next
+rn2:
+on error goto 0
+assert_eq(rnarm$, "one,after,", "no later arm ran")
+
+test_case("resume/a loop is not abandoned after one pass")
+rem The faulting line is the LAST of the body, which is the whole point: the
+rem loop's increment and test come after it in the instruction stream and used
+rem to be stepped over.
+rnw = 0
+rnwi = 0
+on error goto rnh3
+while rnwi < 3
+  rnwi = rnwi + 1
+  rnw = rnw + 1
+  rnz = 1 / 0
+endwhile
+goto rn3
+rnh3:
+resume next
+rn3:
+on error goto 0
+assert_eq(rnw, 3, "a while loop ran all three passes")
+
+rnf = 0
+on error goto rnh4
+for rnfi = 1 to 4
+  rnf = rnf + 1
+  rnq = 1 / 0
+next
+goto rn4
+rnh4:
+resume next
+rn4:
+on error goto 0
+assert_eq(rnf, 4, "and a for loop ran all four")
+
+rnr = 0
+on error goto rnh5
+repeat
+  rnr = rnr + 1
+  rnp = 1 / 0
+until rnr >= 3
+goto rn5
+rnh5:
+resume next
+rn5:
+on error goto 0
+assert_eq(rnr, 3, "and a repeat loop ran to its own condition")
+
+test_case("resume/and the ordinary case is unchanged")
+rem A fault that is NOT the last statement of its block still resumes at the
+rem line after it, which is what every other test here relies on.
+rnmid$ = ""
+on error goto rnh6
+if 1 = 1 then
+  rnmid$ = rnmid$ + "a,"
+  rnm = 1 / 0
+  rnmid$ = rnmid$ + "b,"
+else
+  rnmid$ = rnmid$ + "ELSE,"
+end if
+rnmid$ = rnmid$ + "c,"
+goto rn6
+rnh6:
+resume next
+rn6:
+on error goto 0
+assert_eq(rnmid$, "a,b,c,", "the rest of the block still runs")
 
 end
 

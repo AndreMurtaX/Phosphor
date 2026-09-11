@@ -730,7 +730,28 @@ introduces a defect.
 
 ### Wrong answers (20)
 
-21. **engine/PhosphorVM.pas:1632** [high] -- `resume next` on the last statement of a block leaves the block: the `else` arm runs after the `then` arm (block AND inline one-line form), the next `case` arm runs, and a for/while/repeat loop is abandoned after one pass
+21. ~~**engine/PhosphorVM.pas:1632** [high]~~ -- CLOSED 2026-09-10. `resume next`
+   found "the next statement" by scanning forward for the next `opStmt`, which is
+   a TEXTUAL successor: only ParseStatement emits one, and the code a block
+   generates for itself carries none. So past the last statement of a `then` block
+   the scan found the `else` block, past a case arm the next arm, and past a loop
+   body the statement AFTER the loop -- the increment and the back-jump stepped
+   over. A fault on a block's last line ran the branch not taken, ran the arm that
+   did not match, and abandoned a loop after one pass, silently, exit 0.
+
+   THE COMPILER KNOWS THE ANSWER AND NOW WRITES IT DOWN. `ParseStatement` patches
+   each `opStmt`'s A with the pc that statement's code ends at, which IS the
+   control-flow continuation by construction: at the end of a `then` block it is
+   the jump over the `else`, at the end of a case arm the jump to `endselect`, at
+   the end of a loop body the loop's own tail. Executing it does the right thing
+   without the VM knowing anything about blocks. The scan stays for A = 0, which
+   is a failed parse or a .pbc written before this.
+
+   AND THE SUITE HAD PINNED THE DEFECT. `54_onerror_reentrancy`'s `ginner`/`gouter`
+   asserted 10 -- the answer a loop gives when it is cut off after one pass. The
+   correct answer is 0, and the expectation is corrected with the arithmetic
+   written out beside it. Six assertions pin the fix, including that a fault in
+   the MIDDLE of a block still resumes on the next line.
 22. ~~**engine/PhosphorVM.pas:2810** [high]~~ -- CLOSED 2026-09-10, and it was
    WORSE THAN REPORTED. The finding says "after any `end`". Measured: a script
    written the way docs/language-reference.md teaches -- top level, then `end`,
@@ -753,8 +774,25 @@ introduces a defect.
    pushing a frame, so nothing runs at all, and `TPhosphorEngine.Halted` lets a
    host ask rather than be told. The two meanings of `end` are now written down in
    both documents that teach it.
-23. **engine/libs/PhosphorNumLib.pas:49** [high] -- round/fix/cint/int discard an exact int% through AsDouble: silently wrong for values above 2^53 that a Double cannot hold, and a spurious overflow error for every int% >= 9223372036854775296
-24. **host/gui/libs/PhosphorCanvasLib.pas:271** [high] -- canvas_polyline@ and canvas_polygon@ pass NumPts = n-1 to the LCL, dropping the final vertex; a two-point polyline draws nothing and reports success
+23. ~~**engine/libs/PhosphorNumLib.pas:49** [high]~~ -- CLOSED 2026-09-10. All four
+   widened an `int%` to a Double before converting, which is wrong in both
+   directions at once: above 2^53 a Double cannot hold every integer, so the value
+   was silently changed (`round(9007199254740993)` answered ...992); and near
+   High(Int64) the nearest Double lies ABOVE the range, so `InI64Range` refused a
+   number that was never out of range (`round(9223372036854775806)` answered error
+   1, for a value one below the top). `docs/libraries/num.md` promises both halves
+   and neither was true. Rounding, truncating and flooring an integer are the
+   identity, so the fast path is the correct answer and the cheap one -- ArgI64's
+   rule, which has had it all along. Twelve assertions, including that the four
+   still differ on a fraction, because an identity is only an identity for an int%.
+24. ~~**host/gui/libs/PhosphorCanvasLib.pas:271** [high]~~ -- CLOSED 2026-09-10.
+   Both passed `n - 1` where `NumPts` reaches `Windows.Polyline`/`Polygon` as
+   cPoints, the NUMBER of points -- read in
+   `lcl/interfaces/win32/win32winapi.inc`, not assumed -- while `ParsePoints`
+   returns N as a count. The last vertex was dropped: a two-point polyline drew
+   NOTHING and reported success, and a four-vertex square drew as a triangle. Nine
+   assertions read the pixels back off the bitmap, headless, including the bottom
+   and left sides of that square.
 25. **engine/PhosphorBudget.pas:975** [medium] -- BudgetPatternBounded refuses a repeated alternation of 17+ branches because the branch table only tracks 16, giving up toward "refuse" where its two siblings and its own documented contract give up toward "allow" -- ^[a-q]+$ is allowed while ^(a|b|...|q)+$ is refused
 26. **engine/PhosphorBytecode.pas:478** [medium] -- A .pbc whose user function starts one past the last instruction passes validation and runs as a silent no-op with exit code 0
 27. **engine/PhosphorCompiler.pas:722** [medium] -- Label-resolution diagnostics (undefined label, duplicate label) carry no line: PhosphorCompiler.pas:722 and :609 pass a literal 0, which PhosphorEngine.pas:246 clamps to a confident, wrong "line 1"

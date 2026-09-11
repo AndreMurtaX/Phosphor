@@ -639,6 +639,14 @@ A runtime error jumps to an installed handler instead of aborting. `on error got
 message, and `erl()` the failing line. `resume next` continues past the failing
 statement, `resume` retries it, and `on error goto 0` turns handling off.
 
+"Past the failing statement" means where execution would have gone had it
+succeeded, not the next line of text. If the failing statement is the last one in
+a `then` block, that is after the `endif` — never the `else` arm, which is the
+branch not taken. If it is the last in a `case` arm, that is after the
+`endselect`. If it is the last in a loop body, that is the loop's next pass: the
+loop is not abandoned. Until 2026-09-10 each of those three went to the next line
+of text instead, which ran the branch that was excluded and cut loops short.
+
 ```basic
 on error goto handler
 x = 5 / 0

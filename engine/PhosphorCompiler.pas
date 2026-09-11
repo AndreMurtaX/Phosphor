@@ -1995,7 +1995,31 @@ end;
   message, no catchable error, and an embedding host taken down with it. This
   wrapper is the whole guard; the statement grammar itself is ParseStatementBody,
   left exactly as it was so the counting is visibly the only change. }
+{ THE STATEMENT BOUNDARY, AND WHERE THIS STATEMENT ENDS.
+
+  opStmt used to be emitted with an empty A and the VM found "the next statement"
+  by scanning forward for the next opStmt. That is a TEXTUAL successor, not a
+  control-flow one, and only this procedure emits opStmt -- the code a block
+  generates for ITSELF carries none. So the first opStmt after the last statement
+  of a `then` block is the first statement of the `else` block; after the last
+  statement of a `case` arm it is the next arm; and after the last statement of a
+  loop body it is the first statement PAST the loop, because the increment and the
+  back-jump are stepped over. `resume next` therefore ran the branch that was not
+  taken, ran the arm that did not match, and abandoned a loop after one pass --
+  silently, exit 0.
+
+  The compiler knows the answer and now writes it down: A is the pc where this
+  statement's code ENDS, patched when the statement has been parsed. Resuming
+  there is resuming in control-flow order, by construction. At the end of a
+  `then` block that pc is the jump over the `else`; at the end of a case arm it is
+  the jump to `endselect`; at the end of a loop body it is the loop's own tail.
+  Each of those does the right thing when executed, which is the point.
+
+  A stays 0 for a statement whose parse failed, and for any .pbc written before
+  this; the VM keeps the old scan for exactly that case and says so. }
 procedure TPhosphorCompiler.ParseStatement;
+var
+  stmtIdx: Integer;
 begin
   if FFailed then Exit;
   Inc(FStmtDepth);
@@ -2005,7 +2029,9 @@ begin
       Fail(TooDeepBlock(), FLex.Cur().Line);
       Exit;
     end;
+    stmtIdx := FProg.Emit(opStmt, 0, 0, FLex.Cur().Line);
     ParseStatementBody();
+    if not FFailed then FProg.Patch(stmtIdx, FProg.Count);
   finally
     Dec(FStmtDepth);
   end;
@@ -2021,8 +2047,8 @@ var
   k: TTokenKind;
   nidx: Integer;
 begin
-  // Mark the statement boundary so a caught error can resume from a clean point.
-  FProg.Emit(opStmt, 0, 0, FLex.Cur().Line);
+  { The opStmt marking this boundary is emitted by ParseStatement, which patches
+    it with the pc this statement ends at once the body below has been parsed. }
   t := FLex.Cur();
   if t.Kind = tkIdent then
   begin

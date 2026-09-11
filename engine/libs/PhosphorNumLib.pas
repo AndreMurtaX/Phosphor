@@ -44,17 +44,47 @@ begin Err := NoError(); Result := ValDouble(Max(AsDouble(Args[0]), AsDouble(Args
 // overflow -- overflow is an error value here, never a crash.
 function ToIntError(const V: String): TPhosphorError; inline;
 begin Result := MakeError(peIntOverflow, 'number too large to convert to an integer (' + V + ')'); end;
+
+{ AN int% IS ALREADY AN INTEGER, and all four of these used to widen it to a
+  Double first. Two wrong answers came out of that, in opposite directions:
+
+    round(9007199254740993)      -> 9007199254740992, silently, no error
+    round(9223372036854775806)   -> error 1, "number too large", for a value one
+                                    BELOW High(Int64) and squarely inside its range
+
+  Above 2^53 a Double cannot hold every integer, so the widening loses the value;
+  and near High(Int64) the nearest Double is ABOVE the range, so the InI64Range
+  test refuses a number that was never out of range. docs/libraries/num.md says
+  "all four answer an int%" and "a magnitude past Int64 range is error code 1",
+  and both halves were false for an int% argument.
+
+  Rounding, truncating and flooring an integer are all the identity, so the fast
+  path is both the correct answer and the cheap one. This is ArgI64's rule, which
+  has had it all along. }
+function IntIdentity(const Args: array of TValue; out Err: TPhosphorError;
+  out R: TValue): Boolean;
+begin
+  Result := (Length(Args) > 0) and (Args[0].Kind = vkInt);
+  if Result then
+  begin
+    Err := NoError();
+    R := ValInt(Args[0].Int);
+  end;
+end;
 function f_round(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: Double;
-begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Round(d)); end
+begin if IntIdentity(Args, Err, Result) then Exit;
+  d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Round(d)); end
   else begin Err := ToIntError('round'); Result := ValInt(0); end; end;
 function f_fix(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: Double;
-begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Trunc(d)); end   // toward zero
+begin if IntIdentity(Args, Err, Result) then Exit;
+  d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Trunc(d)); end   // toward zero
   else begin Err := ToIntError('fix'); Result := ValInt(0); end; end;
 function f_cint(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: Double;
-begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Trunc(d)); end
+begin if IntIdentity(Args, Err, Result) then Exit;
+  d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Trunc(d)); end
   else begin Err := ToIntError('cint'); Result := ValInt(0); end; end;
 function f_frac(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValDouble(Frac(N(Args))); end;
@@ -78,7 +108,8 @@ begin Err := NoError(); Result := ValDouble(Frac(N(Args))); end;
   keeps saying so. }
 function f_int(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var d: Double;
-begin d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Floor64(d)); end   // BASIC INT: floor
+begin if IntIdentity(Args, Err, Result) then Exit;
+  d := N(Args); if InI64Range(d) then begin Err := NoError(); Result := ValInt(Floor64(d)); end   // BASIC INT: floor
   else begin Err := ToIntError('int'); Result := ValInt(0); end; end;
 
 { A domain error, in the library's own words. ln(0), acos(2) and friends raised

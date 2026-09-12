@@ -115,7 +115,34 @@ ages well. This is the shape of `LyraDebugBench`, read as a mirror and not impor
 Where a piece is not a debugger, the same idea holds with its own pair: the answer
 must not depend on the thing that was supposed to be invisible.
 
+## 5b. Products — the cells that are not cells
+
+**Some defects do not live on an axis. They live on a PRODUCT of two, and a sweep
+that crosses each axis independently misses every one of them.**
+
+Round 1 of the grid's own first use was rejected for exactly this: the builder
+answered every axis in this file, and the reviewer found a fourth by multiplying
+two of them together. Independence is the assumption that fails.
+
+Cross these as products, and say which product each row of your grid is:
+
+| product | why it is not two separate questions |
+|---|---|
+| host **re-enters** × a ceiling is **set** | the ledger is shared. Either alone is quiet; together, the host's evaluation spends the script's budget |
+| the **door** × what the host does in the stop | `Prepare`+`CallFunction` has a re-entrancy floor that `Run` does not; a clamp correct at one door detaches at the other |
+| the script's **error handler's install depth** × the host's **evaluation depth** | two depths that coincide in the easy case. This is the A1 axis below, and it is the one the debugger meets again |
+| **presence** of a debugger × what the program can **observe** | the invariant is not only "the answers do not move the program". A debugger that is merely ATTACHED must not move it either |
+
+A grid of crossed cells and no products is a grid that answers the questions
+somebody already knew to ask.
+
 ## 6. Axes that earned their place by hiding a defect
+
+**These are cells to cross, not history to read.** They are listed here with their
+provenance because knowing which defect an axis caught is what makes a builder
+cross it properly — but the table is an OBLIGATION, and round 2 of B2 was rejected
+for reading it as a record. If a row is not in your grid, it is an empty cell and
+it needs its reason like any other.
 
 | axis | what it hid | when |
 |---|---|---|

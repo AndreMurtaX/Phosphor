@@ -43,6 +43,13 @@ program phosphor;
 {$codepage UTF8}
 
 uses
+  { cthreads FIRST, and on Unix only. The debug protocol reads its socket on a
+    thread, and FPC on Linux refuses at RUNTIME rather than at compile time if no
+    thread driver was linked: "This binary has no thread support compiled in",
+    runtime error 232, before a line of the program runs. Windows has it built in,
+    so this is invisible there -- which is why it took the cross-OS half of the
+    bar to find. It must precede every unit that uses threads. }
+  {$IFDEF UNIX}cthreads,{$ENDIF}
   {$IFDEF WINDOWS}Windows,{$ENDIF}
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
   // The LCL, named by its PARTS. Deliberately NOT `Interfaces`: that unit's only

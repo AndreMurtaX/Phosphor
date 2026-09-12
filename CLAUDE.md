@@ -203,6 +203,12 @@ turned out to be false and nothing could tell:
 | `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test |
 | `check-crossrefs.py` | a repo path named in prose exists (renumbering a test file breaks every comment citing it, and no other gate reads a sentence), and both suite runners build the same probes from the same sources — a probe registered in one runs on one OS |
 
+**Before you sweep anything, read [docs/proof-axes.md](docs/proof-axes.md)** -- the axes a
+sweep must cross, each one there because it hid a real defect once. Every adversarial
+round in this project has ended with a builder who swept well and swept the wrong axis;
+the list exists so nobody invents it again. Answer it with a GRID: cells crossed, cells
+left empty, why.
+
 **If reordering, renaming or deleting something would break an invariant *silently*, the
 check belongs in a script.** A completeness claim in prose is a promise; a gate is the
 proof. `function-reference.md` called itself complete while drifting 14 functions behind.

@@ -79,8 +79,17 @@ EXEMPT = {
 
 
 def tracked():
+    """Files that are in the tree, or are about to be.
+
+    Tracked PLUS untracked-but-not-ignored, because a citation written in the same
+    edit as the file it names would otherwise read as stale for the length of the
+    window between writing and committing -- which is exactly when this gate runs.
+    Ignored files stay out: a citation to build output or scratch is a real defect."""
     out = subprocess.check_output(['git', 'ls-files'], cwd=ROOT)
-    return out.decode('utf-8', 'replace').splitlines()
+    new = subprocess.check_output(
+        ['git', 'ls-files', '--others', '--exclude-standard'], cwd=ROOT)
+    return (out.decode('utf-8', 'replace').splitlines() +
+            new.decode('utf-8', 'replace').splitlines())
 
 
 def check_citations(files):

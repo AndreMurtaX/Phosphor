@@ -19,6 +19,11 @@
       <Version Value="2"/>
       <UseFileFilters Value="True"/>
     </PublishOptions>
+    <RequiredPackages>
+      <Item>
+        <PackageName Value="LCL"/>
+      </Item>
+    </RequiredPackages>
     <Units>
       <Unit>
         <Filename Value="phosphor.lpr"/>
@@ -37,7 +42,7 @@
     </Target>
     <SearchPaths>
       <IncludeFiles Value="$(ProjOutDir)"/>
-      <OtherUnitFiles Value="../../engine;../../engine/libs;../../host/packages"/>
+      <OtherUnitFiles Value="../../engine;../../engine/libs;../../host/packages;../../host/gui/libs"/>
       <UnitOutputDirectory Value="../../bin/units/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
     <Parsing>
@@ -48,5 +53,8 @@
     <CodeGeneration>
       <TargetCPU Value="x86_64"/>
     </CodeGeneration>
+    <Other>
+      <CustomOptions Value="-dLCL"/>
+    </Other>
   </CompilerOptions>
 </CONFIG>

@@ -19,6 +19,9 @@
       <Version Value="2"/>
       <UseFileFilters Value="True"/>
     </PublishOptions>
+    <RunParams>
+      <FormatVersion Value="2"/>
+    </RunParams>
     <RequiredPackages>
       <Item>
         <PackageName Value="LCL"/>
@@ -45,11 +48,6 @@
       <OtherUnitFiles Value="../../engine;../../engine/libs;../../host/packages;../../host/gui/libs"/>
       <UnitOutputDirectory Value="../../bin/units/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
-    <Parsing>
-      <SyntaxOptions>
-        <SyntaxMode Value="ObjFPC"/>
-      </SyntaxOptions>
-    </Parsing>
     <CodeGeneration>
       <TargetCPU Value="x86_64"/>
     </CodeGeneration>

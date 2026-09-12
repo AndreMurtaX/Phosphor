@@ -663,7 +663,11 @@ trap 'rm -rf "$dbgdir"' EXIT
 printf '%s\n' 'total = 0' 'function dobro(n) local r' '  r = n * 2' '  return r' 'endfunction' 'for i = 1 to 3' '  total = total + dobro(i)' 'next' 'println "total="; total' > "$dbgdir/q.bas"
 
 # 1. no terminal: runs to completion, says why once, exit 0
-if qout="$("$exe" debug "$dbgdir/q.bas" < /dev/null 2>"$dbgdir/q1.err")"; then qcode=0; else qcode=$?; fi
+# stdout to a FILE, not a variable: `$(...)` strips trailing newlines, so a
+# variable compared against a file differs by exactly the last byte -- which is
+# what the first version of this did, and Linux caught it while the PowerShell
+# twin (which reads both sides as bytes) did not.
+if "$exe" debug "$dbgdir/q.bas" < /dev/null > "$dbgdir/q1.out" 2>"$dbgdir/q1.err"; then qcode=0; else qcode=$?; fi
 q1err="$(cat "$dbgdir/q1.err")"
 if [ "$qcode" -ne 0 ]; then echo "        no-terminal: exit $qcode"; okQ=1; fi
 if [[ "$q1err" != *'not a terminal'* ]]; then echo '        no-terminal: did not say why it continued'; okQ=1; fi
@@ -680,7 +684,7 @@ if [[ "$q2err" != *'n  '* ]];      then echo '        session: locals were not l
 "$exe" "$dbgdir/q.bas" < /dev/null > "$dbgdir/plain.out" 2>/dev/null
 if ! cmp -s "$dbgdir/q2.out" "$dbgdir/plain.out"; then
   echo '        invisible: stdout differs with the debugger attached'; okQ=1; fi
-if ! printf '%s' "$qout" | cmp -s - "$dbgdir/plain.out"; then
+if ! cmp -s "$dbgdir/q1.out" "$dbgdir/plain.out"; then
   echo '        invisible: stdout differs with the debugger attached but silent'; okQ=1; fi
 
 # 4. --break stops where it was asked and nowhere else. Line 9 is outside the

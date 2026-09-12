@@ -1190,18 +1190,22 @@ end;
 
 destructor TDebugProto.Destroy;
 begin
+  { BOTH, AND IN THIS ORDER. shutdown() is what returns a blocked read on Linux;
+    closing the handle is what does it on Windows. Doing only one moves the hang
+    across the boundary instead of closing it, which is what the first repair of
+    this did -- Linux went green and Windows went red in the same commit. The
+    thread's own read is inside a try/except, so a handle freed under it ends the
+    loop rather than the process. }
+  if FReader <> nil then FReader.Terminate();
+  CloseTransport();
+  if FSock <> nil then
+    try FSock.Free; FSock := nil; except on Exception do ; end;
   if FReader <> nil then
   begin
-    FReader.Terminate();
-    CloseTransport();
     FReader.WaitFor();
     FReader.Free();
     FReader := nil;
-  end
-  else
-    CloseTransport();
-  if FSock <> nil then
-    try FSock.Free; FSock := nil; except on Exception do ; end;
+  end;
   FInbox.Free();
   FLock.Free();
   inherited Destroy();

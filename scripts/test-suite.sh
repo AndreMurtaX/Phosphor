@@ -172,13 +172,40 @@ done
 # (the value kernel, the execution limits, the embedding API). Each prints ok:/
 # fail: and exits non-zero on a failure.
 #
+# probe_step drives a whole debugging session from Pascal -- the debug seam is a
+# CALLBACK the engine waits on, so the test has to be the thing on the other end
+# of it, and no .bas file can be that.
+#
+# probe_sweep is the other half of that proof: probe_step pins named cases from
+# fixtures whose traces are derived by hand, and probe_sweep generates program
+# shapes it has never seen and judges every step against a rule stated in its own
+# header. A sweep that measures the OFF state of a feature has not measured the
+# feature -- and a sweep that only ever calls eng.Run has not measured the door a
+# GUI host uses, which is why every generated program with functions in it is
+# also debugged through a host CallFunction.
+#
+# It is also where THE DIFFERENTIAL lives, and that is the half that re-runs for
+# ever. docs/proof-axes.md section 5: for one source, detached, attached-and-
+# continuing and attached-and-stepping must be byte-identical on exit code,
+# stdout, error line and error message. All three legs are run on every generated
+# program at both doors. The detached one -- no seam installed, nothing armed --
+# was missing for three rounds, and it is the only leg that can see a defect
+# caused by the PRESENCE of a debugger rather than by its answers.
+#
+# bench_debug is the COST of the seam, committed rather than quoted: it judges only
+# the differential (attached and stepping change nothing a program prints or answers)
+# and prints its timings without a threshold, because a fixed millisecond bar on an
+# unknown machine is red at random. Three review rounds disagreed about one cell of
+# docs/embedding.md's cost table and none could settle it, because each ran a bench
+# that lived in a scratch directory. `--full` is the real measurement.
+#
 # probe_onerror is the WORDING of the abandoned-activation diagnostics:
 # tests/negative compares exit codes only and tests/classic discards stderr, so
 # without it nothing in the tree would notice either message being garbled. It is
 # listed in test-suite.ps1 too -- a probe in one runner only is a probe the other
 # operating system never runs.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handles.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_registry:tests/probe_registry.lpr" "probe_debug:tests/probe_debug.lpr" "probe_onerror:tests/probe_onerror.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handles.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_registry:tests/probe_registry.lpr" "probe_debug:tests/probe_debug.lpr" "probe_step:tests/probe_step.lpr" "probe_sweep:tests/probe_sweep.lpr" "probe_onerror:tests/probe_onerror.lpr" "bench_debug:tests/bench_debug.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
   # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.

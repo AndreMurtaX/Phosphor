@@ -887,6 +887,15 @@ character or inside an escape, so what is printed still reads back as the litera
 it came from. Other hosts are free to choose other limits — an embedder that
 wants the whole frame installs its own handler and gets the operands as values.
 
+**And the stream is on a ceiling.** Those three caps bound *one* report; the count
+of reports is the half no host can bound without lying about the program's state,
+and a `breakpoint` inside a loop is a script-driven stream like any other. So the
+payload the engine hands the host — the message plus each operand's size — is
+charged against `MaxOutputBytes`, the same ceiling `PRINT` is charged against. The
+`phosphor` command sets no output ceiling, so nothing changes there; an embedder
+that sets one gets the debug stream bounded by it, and a run that crosses it ends
+with `peLimit` rather than with the report half-written.
+
 ---
 
 ## The standard libraries

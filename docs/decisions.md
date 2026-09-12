@@ -311,7 +311,9 @@ Consequences:
 
 A runaway script is bounded by **execution limits, not a variable count**. The
 engine exposes four ceilings — `MaxSteps` (instruction budget), `MaxOutputBytes`
-(total bytes through `OnOutput`), `TimeoutMs` (wall-clock) and, since 2026-09-10,
+(bytes the script pushes through a host seam: `PRINT` through `OnOutput`, and
+since 2026-09-11 a `BREAKPOINT`'s payload through `OnBreakpoint`, which used to be
+charged to nothing at all), `TimeoutMs` (wall-clock) and, since 2026-09-10,
 `MaxMemoryBytes` (heap the script may add) on `PhosphorEngine` — all **off by
 default** (`0`), so the embedder opts in to exactly the bound it wants
 (`probe_limits` exercises them). This is the deliberate difference from
@@ -469,3 +471,196 @@ it compares *adjacent* entries, so the two are one contract. Nothing compiled fr
 source can test them, which is why `probe_debug` builds the unsorted shape by hand
 and then asserts it a second time through the serializer -- the second assertion is
 what shows the input class is one a host can really be handed.
+
+
+**The step-out clamp is decided by an interpreter-activation count, not by the
+frame depth.** `ExecFrom` stops when the frame stack comes back to the floor it
+was given, so the outermost frame of a host callback has no shallower boundary to
+reach and a step out there must behave as *continue* -- otherwise the debugger
+arms a condition nothing can satisfy and goes silent for the rest of the run. The
+first rule for "is the host above me" was `AStopFrameSP <= 0`, and it was wrong:
+top-level code makes re-entrant calls with a floor of zero too. `on error call` is
+the one the language reference teaches, and against it a step out of the handler
+set the mode to *continue* and a step-only session never stopped again -- four
+more boundaries ran, the return to the top level among them, and none was
+reported. Measured at 12 of 336 generated programs before the fix and 0 after, the
+same counts on both operating systems.
+
+The question the frame pointer cannot answer is whether an `ExecFrom` is live on
+the Pascal stack above this one, so `FExecDepth` counts exactly that. The premise
+for not doing it -- "a counter around `ExecFrom` means a try/finally around the
+hottest routine in the program" -- was measured false: `ExecFrom` has three call
+sites, all three already held a try/finally, and an ordinary BASIC call does not
+re-enter it (`opCall` pushes its frame inside the dispatch loop). It is paid once
+per host call and never per instruction.
+
+**A `GOSUB` is a call, so the stepper counts two depths and not one.** `gosub`
+pushes a return address and no activation frame, so on `FFrameSP` alone a
+subroutine body is "the same level" as the line that called it: step over walked
+every statement of the subroutine and reported them as the caller's own, and step
+out from inside one was measured against a depth the subroutine SHARES with its
+caller and never became shallower. The pair `(FFrameSP, FCSP)` compared
+lexicographically is how deep we are, and `DbgGosubDepth` is the same number
+offered to a host that wants to render it. The residual is stated where it can be
+met: a subroutine abandoned by `goto` rather than `return` leaves its entry pending
+for the rest of the run, and a step out asked for inside one never finds anywhere
+shallower -- but that program has no return point to step out to, and the answer
+before the pair existed was the same silence in EVERY gosub rather than only the
+abandoned one.
+
+**A `BREAKPOINT` report is charged what printing its payload would cost.** The
+charge began as `TextLenOf`, which prices any non-string at a flat 32 -- an
+estimator borrowed from `opAdd`, whose own header says the exactness does not
+matter "because the caller is deciding whether a growth is worth measuring and
+then measuring the heap itself". That is true of `opAdd` and false here, where the
+number is SPENT against a threshold and nothing measures anything afterwards.
+Three small integers cost 96 bytes for the 5 a host writes, and a program whose
+whole real output was 61 bytes was refused under a 100-byte ceiling. `ValToStr` is
+what `print` charges for the same values, it runs once per report on a path
+already gated by `FTrace` and an installed seam, and it makes the number mean
+something instead of bounding it. Measured over a generated grid against an oracle
+that uses no formula at all -- the same payload through `breakpoint` and through
+`print`, under the same ceiling, must be refused together or not at all: 147 of
+1512 cells disagreed under the estimate and 0 do now.
+
+**The debug seam hands over two integers, and the VM is reached through
+`TPhosphorEngine.DebugVM`.** `TPhosphorDebugProc` is `of object` so a host can keep
+session state in the method's own class; `Self` inside it is therefore the host's
+adapter and never a VM. Three doc blocks said otherwise, and one of them was the
+stated reason for not offering the live VM at all -- which left a host stopping
+through `Run` with nothing to read, since `PreparedVM` is nil unless `Prepare`
+built it and `Run` keeps its VM in a local. The alternative was a VM parameter on
+the seam, and it was refused: `TPhosphorDebugProc` lives in `PhosphorValue`, which
+cannot name `TPhosphorVM` without a circular dependency, so the parameter would
+have had to be `TObject` and every host would cast it unchecked to reach an object
+the engine can hand back with its own type. `DebugVM` is set and RESTORED (not
+nilled) around each door's existing budget region, because the doors nest: a watch
+expression is `CallFunction` inside `CallFunction`, and nilling on the way out of
+the inner one is a debugger that works until the first watch.
+
+**Memory a host makes the SCRIPT allocate while parked is still the script's.** A
+stop gives back the heap the host added, which is right for an adapter buffering a
+stack frame and wrong the moment the host spends the park running script code:
+crediting that window was a way out of `MaxMemoryBytes` -- ask the debugger to do
+the allocation. Measured: the same five million bytes of script globals refused at
+rc 4 when the script built them and allowed at rc 0 when a host evaluated the
+identical function from a stop, on both operating systems. The engine cannot
+separate the two kinds of byte after the fact, so it declines to credit the window,
+which is the direction where a number it does not know is not silently spent by
+the script. A monotone count of `ExecFrom` entries is what it reads, sampled either
+side of the park -- the value that ACTS, rather than a flag that would have to be
+cleared correctly at every door and would answer only for the one it was written
+on.
+
+**A sweep that measures the OFF state of a feature has not measured the feature.**
+The debug seam arrived with four sweeps behind it -- 1326 generated programs, 129
+real ones and 1296 ceiling cells -- and every one ran against a build with no
+debugger installed. They measured very thoroughly that an unattached engine had
+not changed, which was true and was not the question. `tests/probe_sweep.lpr` is
+the other axis: 512 generated program shapes, every one stepped at every boundary
+under step-into, step-over and step-out, judged against a rule written in its own
+header rather than read from `PhosphorVM`. Removing the step-out clamp's
+activation term makes it report 114 failures; removing the hook entirely makes it
+report 498 rather than the `failures: 0` a sweep with no empty-reference check
+would have printed. **Those three numbers are counted from a run of the current
+corpus every time they are written**, because two of them were quoted here from a
+200-program corpus for a round after it had grown, and then from a 280-program one
+for a round after that, in sentences whose whole job was the count.
+
+**The window a debugger stops in belongs to the host, and it is given back AS IT
+GOES rather than when it closes.** The first correction moved both wall clocks
+forward in the seam's `finally`, which repairs the script's CONTINUATION and not
+the WINDOW: while the host was still inside the stop, both clocks still said the
+run had been going for as long as the person had been looking at it, and
+re-entering the engine from in there -- a watch expression, the use
+`docs/embedding.md` names by hand -- was judged against that. Measured on both
+machines with a control: one prepared session under `TimeoutMs := 400`, a seam
+that evaluates a watch through `CallFunction`, answered correctly with nobody in
+front of it and *time limit exceeded (400 ms)* after a 900 ms pause, with the
+budget's own clock giving the same verdict in its own words. The credit is now
+marked at the window's start and taken at every door the host can re-enter
+through.
+
+**The engine's error fields describe the door that was called, and a door that
+nests inside itself has to say so with a value only it can write.**
+`TPhosphorEngine.CallFunction` passed `FLastError` -- the one field every door
+shares -- straight into `CallUserFunc` as an `out` parameter. That is correct for
+a door nothing nests inside, and the debug seam is documented as a door a host may
+re-enter through, so a watch expression is a `CallFunction` inside a
+`CallFunction`: the inner one wrote its fault through that reference, the outer
+one finished cleanly and never wrote it again, and `IsError` then reported the
+inner call's failure as the outer call's verdict -- value 7 returned, *division by
+zero* at a line in a function the host never called. Two halves: the out-parameter
+is a local now, so the question "did THIS call fail" is asked of a value only this
+activation can write; and every door clears its error fields on the way out of a
+SUCCESS, because clearing them on the way IN cannot account for what ran in
+between. **Found by the sweep and not by hand** -- the three-leg differential in
+`tests/probe_sweep.lpr`, in the first round its compared verdict carried the error
+line and the error message beside the output, on the shapes where a function
+installs its own handler and abandons itself. Pinned by name in
+`tests/probe_step.lpr`; both halves have a mutation that is caught.
+
+**What the host spends RUNNING SCRIPT inside that window is charged, on every
+lane, and that is one rule rather than three.** An evaluation's milliseconds, its
+instructions and its bytes are all the script's. For memory the engine could not
+separate them afterwards even if it wanted to; for the two clocks it could -- an
+evaluation's duration is exactly measurable -- and charges anyway, because
+crediting an evaluation's milliseconds while charging its bytes would be two
+different answers to one question, which is this project's oldest failure mode
+wearing a new hat. The prototype offered by the reviewer did exactly that: it
+restored the VM's clock (charging) and handed the same interval back to the
+budget's (crediting). **And the door is a DEPTH, not a flag** -- a `callfunc` the
+watch itself makes is the script re-entering, one activation deeper, so the credit
+asks whether this activation is the one the seam was entered at. A version written
+on "are we inside a seam" survives every fixture whose watch calls out on its
+FIRST statement, and is caught by one that calls out after spending 250 ms.
+
+**An evaluation does not need a clock of its own, and that was measured rather
+than imported.** The reference design this round was told to read suspends the
+script's clock at the start of the stop, which leaves an evaluation with no
+ceiling at all unless it is given a new one. This engine credits instead of
+suspending, so the script's `TimeoutMs` is still standing over the evaluation: a
+thirty-million-iteration watch under a 400 ms ceiling is refused at 400 ms and
+control returns to the host. A second clock would have needed a lane in every
+ceiling to buy nothing.
+
+**A flag that describes the Pascal stack has exactly one writer pair.**
+`FDbgInSeam` says a seam call is live above us, which is not something the
+ARMING can know -- and `DisarmDebug` cleared it, so a host re-syncing the editor's
+breakpoints from inside a stop (the natural spelling of "replace the set") lost
+the re-entrancy guard with the set and its next watch expression was stopped
+inside its own stop: 11 stops at seam depth 2 against a control of 1 at depth 1,
+bounded only by `MaxCallDepth`. `DebugBeginRun`'s clearer was the same shape one
+door over and went with it even though it is provably inert, because two "just in
+case" clearers is how the first one was written.
+
+**Both halves of an attach reach a prepared session.** `ArmDebug` forwarded to a
+live VM on purpose; `OnDebug` was a plain field write that `ConfigureVM` had
+already read, so a host that clicks *Debug* on a script it has already loaded got
+zero stops and no diagnostic at all. `OnDebug` has a setter now, forwarding to the
+prepared VM and the REPL's exactly as `ArmDebug` does, and clearing it detaches
+both.
+
+**A performance claim nobody can re-run is an assertion, so the bench is in the
+tree.** `tests/bench_debug.lpr` is committed and both suite runners build it.
+Three review rounds disagreed about one cell of the cost table -- whether deleting
+the two hook lines recovers the detached cost -- and none could settle it, because
+each ran a bench that lived in its author's scratch directory. The three cells
+that live in ONE binary and can be interleaved (attached, and one seam call)
+reproduced across all three and now a fourth; the one cell that compares two
+separately compiled binaries did not, and the fourth reading straddles zero while
+the hook-deleted control came out FASTER than the pristine engine on both shapes.
+That is consistent with the difference between two builds of a 4600-line unit
+being dominated by code layout rather than by one Boolean test, so the table says
+*not resolvable, under a few percent* and points at the file. The committed bench
+judges only the DIFFERENTIAL -- attached and stepping change nothing a program
+prints or answers -- and never judges a time, because a fixed millisecond bar on
+an unknown machine produces red at random and teaches everyone to ignore the file.
+
+**And the two operating systems are one machine.** The Linux target is a
+VirtualBox guest on the same physical Windows host, so `taskset` inside the guest
+pins a virtual CPU rather than a core and each side's timings are perturbed by
+whatever the other is doing -- measurably, and it is the missing explanation for
+two agents reading the same VM an hour apart and getting minima 9% apart. It
+changes no correctness result; it is why a timing disagreement between rounds is
+the first thing to suspect and the last thing to conclude from.

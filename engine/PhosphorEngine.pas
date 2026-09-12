@@ -43,6 +43,16 @@ type
     FOnOutput: TPhosphorOutputProc;
     FOnInput: TPhosphorInputProc;
     FOnBreakpoint: TPhosphorBreakpointProc;
+    FOnDebug: TPhosphorDebugProc;
+    { THE ARMING, HELD HERE AND APPLIED BY ConfigureVM, because Run creates its VM
+      as a local and frees it in the same finally -- so there is no VM for a host
+      to arm before a one-shot run, and a host that had to reach for one would be
+      holding a pointer this class promises not to offer. Held on the engine, the
+      one line a host writes works at every door: Run, RunBytecode, Prepare and
+      the REPL each get a VM armed the same way. }
+    FDbgLines: array of Integer;
+    FDbgStopAtEntry: Boolean;
+    FDbgArmed: Boolean;
     FHostServices: THostServices;
     FErrorLine: Integer;
     FErrorMessage: String;
@@ -55,6 +65,21 @@ type
     FTimeoutMs: Int64;
     FContainFaults: Boolean;
     FVM: TPhosphorVM;       // the live VM in the prepared (embedding) mode
+    { THE VM THAT IS RUNNING RIGHT NOW, or nil between runs. Every door that
+      executes BASIC already wraps exactly that region in BudgetBegin/BudgetEnd,
+      so this is set and restored on the same two lines and cannot outlive the VM
+      it points at -- which is the whole reason it can be offered at all. Run and
+      RunBytecode own their VM as a LOCAL and free it in the same finally, so a
+      field that survived the call would be a dangling pointer, and that is the
+      trap PreparedVM's own header is about.
+
+      SAVED AND RESTORED, NOT SET AND NILLED, because these doors NEST: a host
+      that evaluates a watch expression from inside a stop is running
+      CallFunction inside CallFunction, and nilling on the way out of the inner
+      one would leave the outer run's seam unable to reach its own VM from the
+      next boundary onwards -- a debugger that works until the first watch. See
+      the DebugVM property. }
+    FLiveVM: TPhosphorVM;
     FProg: TProgram;        // its compiled program
     FReplVM: TPhosphorVM;   // the live VM of a REPL session
     FReplProg: TProgram;    // the session's compiled program (all lines so far)
@@ -66,6 +91,7 @@ type
     function GetHalted: Boolean;
     function GetSandboxRoot: String;
     procedure SetSandboxRootProp(const AValue: String);
+    procedure SetOnDebugProp(AValue: TPhosphorDebugProc);
   public
     constructor Create;
     destructor Destroy; override;
@@ -115,6 +141,46 @@ type
       BREAKPOINT reports nothing and continues. A host that wants a debug pause
       assigns a report-only callback here -- the engine never blocks on it. }
     property OnBreakpoint: TPhosphorBreakpointProc read FOnBreakpoint write FOnBreakpoint;
+    { THE DEBUG SEAM. Nil by default: with none installed nothing ever stops, and
+      a VM that is never ARMED does not consult it at all. It is the one seam in
+      this engine that MAY BLOCK -- see TPhosphorDebugProc, and TPhosphorVM's
+      DebugPoll for what parking in it costs the script and what is given back.
+
+      The pair to it is ArmDebug below. Installing the seam says where to ask;
+      arming says when.
+
+      AND IT REACHES A SESSION THAT IS ALREADY PREPARED, which is why this one has
+      a setter where OnOutput and OnBreakpoint have a field. ArmDebug forwards to
+      a live VM on purpose -- a host changes its breakpoint set mid-session -- and
+      a plain field write did not, so the two halves of one attach disagreed:
+      Prepare, then install the seam, then arm, then call, gave zero stops and no
+      diagnostic at all. That is the shape a GUI uses when a person clicks Debug
+      on a script that is already loaded. Measured on both machines before and
+      after. }
+    property OnDebug: TPhosphorDebugProc read FOnDebug write SetOnDebugProp;
+    { ATTACH THE DEBUGGER TO EVERY RUN THIS ENGINE STARTS, with the lines to stop
+      on and whether to stop once before the first statement. Applied by
+      ConfigureVM, so it reaches Run, RunBytecode, Prepare and the REPL alike; call
+      it before the run that should be debugged.
+
+      TO CHANGE THE SET MID-SESSION, or to read state, go to the VM: DebugVM
+      answers it from inside the seam at every door, and between calls on a
+      prepared session PreparedVM answers the same object. This forwards only the
+      BEFORE-a-run half, because that is the half that has no VM to talk to yet.
+
+      PAUSE HAS NO FORWARD HERE, and the reason is a real one rather than an
+      omission: InterruptDebug is the one call made from ANOTHER THREAD while a
+      run is in progress, and DebugVM is a field this thread writes when the run
+      begins and nils when it ends. A forward would read that field from the other
+      thread against an object this one may be freeing -- a use-after-free that
+      would show up once a month. The pointer is offered to the thread that is
+      SAFE to read it from: a host takes DebugVM at its first stop (arm with
+      stop-at-entry) and hands that VM to its socket thread, which owns it for the
+      rest of the run because Run cannot return while the seam has not. On a
+      prepared session PreparedVM is stable between calls and needs none of this. }
+    procedure ArmDebug(const ALines: array of Integer; AStopAtEntry: Boolean);
+    { Detach. Later runs are undebugged; a prepared VM is detached immediately. }
+    procedure DisarmDebug;
     { The host-services seam. Empty by default (a headless host installs none), so
       processmessages/handlemessage answer 0 and copytext$/pastetext$ answer "".
       A GUI host assigns the pump and clipboard methods it can provide; the engine
@@ -244,10 +310,30 @@ type
       ask. The REPL session keeps its own pair and is not offered here: it is a
       different lifetime with a different owner, and one property that sometimes
       means one and sometimes the other is the shape this engine has been bitten by
-      before. A seam that wants the VM mid-run gets it as Self, which is the seam's
-      business and not this property's. }
+      before. A seam that wants the VM mid-run asks DebugVM, which is the next
+      property and has a different lifetime again. }
     property PreparedVM: TPhosphorVM read FVM;
     property PreparedProgram: TProgram read FProg;
+    { THE VM THAT IS EXECUTING RIGHT NOW, and nil at every other moment.
+
+      This exists because the debug seam is `of object` and `Self` inside it is
+      the HOST's adapter, not the engine's VM -- three doc blocks used to say
+      otherwise, and on the strength of that a host reading the call stack from a
+      stop through Run would have found nothing to read it from: PreparedVM is nil
+      unless Prepare built it, and Run and RunBytecode keep theirs in a local.
+      Adding the VM as a parameter to TPhosphorDebugProc was the other way and was
+      refused: that type lives in PhosphorValue, which cannot name TPhosphorVM
+      without a circular dependency, so the parameter would have had to be TObject
+      and every host would cast it unchecked to reach an object the engine can
+      simply hand back with its own type.
+
+      WHAT IT IS GOOD FOR IS THE STOPPED WINDOW AND NOTHING ELSE. Inside the seam
+      it answers the running VM, so DbgFrameDepth, DbgFrameFunc, DbgGlobal and
+      DbgLocal -- with PreparedProgram's names, or the program the host compiled --
+      are all reachable there, and reading them executes nothing. Outside a run it
+      is nil, and it must never be stored: for Run and RunBytecode the object it
+      points at is freed before the call returns. }
+    property DebugVM: TPhosphorVM read FLiveVM;
   end;
 
 implementation
@@ -279,6 +365,10 @@ begin
   FOnOutput := nil;
   FOnInput := nil;
   FOnBreakpoint := nil;
+  FOnDebug := nil;
+  FDbgLines := nil;
+  FDbgStopAtEntry := False;
+  FDbgArmed := False;
   FHostServices := Default(THostServices);
   ClearErrorState();
   FMaxSteps := 0;
@@ -286,6 +376,7 @@ begin
   FMaxOutputBytes := 0;
   FTimeoutMs := 0;
   FVM := nil;
+  FLiveVM := nil;
   FProg := nil;
   FReplVM := nil;
   FReplProg := nil;
@@ -363,12 +454,55 @@ begin
   PhosphorSandbox.SetSandboxRoot(AValue);
 end;
 
+{ THE SEAM REACHES THE VMs THAT ALREADY EXIST, exactly as ArmDebug does and to
+  the same two objects. ConfigureVM is the only other copier and it has been and
+  gone by the time a host attaches to a prepared session; a host that installs the
+  seam BEFORE Prepare is unaffected, because this writes the field ConfigureVM
+  then reads. Nil is forwarded too -- detaching mid-session is the same question
+  asked the other way round, and a host that clears the seam must not be left with
+  a VM still holding it. }
+procedure TPhosphorEngine.SetOnDebugProp(AValue: TPhosphorDebugProc);
+begin
+  FOnDebug := AValue;
+  if FVM <> nil then FVM.OnDebug := AValue;
+  if FReplVM <> nil then FReplVM.OnDebug := AValue;
+end;
+
+procedure TPhosphorEngine.ArmDebug(const ALines: array of Integer; AStopAtEntry: Boolean);
+var
+  i: Integer;
+begin
+  SetLength(FDbgLines, Length(ALines));
+  for i := 0 to High(ALines) do FDbgLines[i] := ALines[i];
+  FDbgStopAtEntry := AStopAtEntry;
+  FDbgArmed := True;
+  // A session that is already prepared is armed NOW rather than at its next run:
+  // its VM is the one the host is about to call into, and ConfigureVM has been
+  // and gone. The sorting and de-duplication happen there, once, not here.
+  if FVM <> nil then FVM.ArmDebug(FDbgLines, AStopAtEntry);
+  if FReplVM <> nil then FReplVM.ArmDebug(FDbgLines, AStopAtEntry);
+end;
+
+procedure TPhosphorEngine.DisarmDebug;
+begin
+  FDbgArmed := False;
+  FDbgLines := nil;
+  FDbgStopAtEntry := False;
+  if FVM <> nil then FVM.DisarmDebug();
+  if FReplVM <> nil then FReplVM.DisarmDebug();
+end;
+
 procedure TPhosphorEngine.ConfigureVM(AVM: TPhosphorVM);
 begin
   AVM.Registry := FRegistry;
   AVM.OnOutput := FOnOutput;
   AVM.OnInput := FOnInput;
   AVM.OnBreakpoint := FOnBreakpoint;
+  AVM.OnDebug := FOnDebug;
+  // The arming, if the host asked for one. A VM that is not armed never consults
+  // the seam, so the cost of installing OnDebug and never arming is one Boolean
+  // test per statement boundary.
+  if FDbgArmed then AVM.ArmDebug(FDbgLines, FDbgStopAtEntry);
   AVM.HostServices := FHostServices;
   AVM.MaxSteps := FMaxSteps;
   AVM.MaxOutputBytes := FMaxOutputBytes;
@@ -381,6 +515,7 @@ function TPhosphorEngine.Run(const ASource: String): Integer;
 var
   vm: TPhosphorVM;
   prog: TProgram;
+  savedLive: TPhosphorVM;
 begin
   ClearErrorState();
   Finish();         // a one-shot run discards any prepared state
@@ -393,7 +528,10 @@ begin
     ConfigureVM(vm);
     // The ceilings, installed where a library call can also see them. Paired with
     // BudgetEnd in a finally, because a run that faults must not leave a stale
-    // budget standing over whatever the host does next.
+    // budget standing over whatever the host does next. FLiveVM is set and cleared
+    // on the same two lines: see DebugVM -- this local is freed below, so the only
+    // safe lifetime for that pointer is exactly the region that is executing.
+    savedLive := FLiveVM; FLiveVM := vm;
     BudgetBegin(FMaxSteps, FTimeoutMs);
     try
       if not vm.Run(prog) then
@@ -404,9 +542,15 @@ begin
         if FErrorLine = 0 then FErrorLine := 1;
         Exit(FErrorLine);
       end;
+      // A door that succeeded reports no error. See CallFunction for the whole
+      // of why this is not already true from the ClearErrorState at the top: a
+      // seam may re-enter the engine from inside a stop, and a watch expression
+      // that faults leaves its verdict standing in these two fields.
+      ClearErrorState();
       Result := 0;
     finally
       BudgetEnd();
+      FLiveVM := savedLive;               // never outlives the VM it points at
     end;
   finally
     vm.Free;
@@ -419,6 +563,7 @@ var
   vm: TPhosphorVM;
   prog: TProgram;
   err: String;
+  savedLive: TPhosphorVM;
 begin
   ClearErrorState();
   Finish();
@@ -435,6 +580,7 @@ begin
   vm := TPhosphorVM.Create();
   try
     ConfigureVM(vm);
+    savedLive := FLiveVM; FLiveVM := vm;  // see DebugVM
     BudgetBegin(FMaxSteps, FTimeoutMs);
     try
       if not vm.Run(prog) then
@@ -445,9 +591,11 @@ begin
         if FErrorLine = 0 then FErrorLine := 1;
         Exit(FErrorLine);
       end;
+      ClearErrorState();     // a door that succeeded reports no error; see CallFunction
       Result := 0;
     finally
       BudgetEnd();
+      FLiveVM := savedLive;               // never outlives the VM it points at
     end;
   finally
     vm.Free;
@@ -456,6 +604,8 @@ begin
 end;
 
 function TPhosphorEngine.Prepare(const ASource: String): Integer;
+var
+  savedLive: TPhosphorVM;
 begin
   ClearErrorState();
   Finish();         // discard a previous preparation
@@ -465,6 +615,7 @@ begin
 
   FVM := TPhosphorVM.Create();
   ConfigureVM(FVM);
+  savedLive := FLiveVM; FLiveVM := FVM;                      // see DebugVM
   BudgetBegin(FMaxSteps, FTimeoutMs);
   try
     if not FVM.Run(FProg) then   // run the top level once; the VM stays alive after
@@ -485,13 +636,30 @@ begin
       after some later halt, but from the first call, with LastError NoError and a
       `$` function handing back a Double. }
     FVM.EndOfTopLevel();
+    ClearErrorState();     // a door that succeeded reports no error; see CallFunction
     Result := 0;
   finally
     BudgetEnd();
+    FLiveVM := savedLive;
   end;
 end;
 
 function TPhosphorEngine.CallFunction(const AName: String; const Args: array of TValue): TValue;
+var
+  savedLive: TPhosphorVM;
+  { THIS CALL'S OWN ERROR, AND NOT THE FIELD. CallUserFunc takes it as an `out`
+    parameter, so passing FLastError hands the VM a reference to the ONE field
+    every door shares -- and this door nests inside itself. A watch expression
+    evaluated from a stop is a CallFunction inside a CallFunction: the inner one
+    opens by writing `NoError` through that reference, faults, and writes its
+    error through it, and when the outer call finishes cleanly it has nothing left
+    to say so with. It never writes the field again, and the failure branch below
+    then reports the INNER call's error as the OUTER call's verdict.
+
+    A local is the fix, because the question "did THIS call fail" has to be asked
+    of a value only this activation can write. See the success branch below for
+    the other half. }
+  err: TPhosphorError;
 begin
   ClearErrorState();
   if FVM = nil then
@@ -503,17 +671,43 @@ begin
   // A call on a prepared VM is a run of its own as far as the ceilings go -- the
   // VM resets its step counter and start tick per Run, and this is the same
   // boundary for the library side.
+  savedLive := FLiveVM; FLiveVM := FVM;                      // see DebugVM
   BudgetBegin(FMaxSteps, FTimeoutMs);
   try
-    Result := FVM.CallUserFunc(AName, Args, FLastError);
+    Result := FVM.CallUserFunc(AName, Args, err);
   finally
     BudgetEnd();
+    FLiveVM := savedLive;
   end;
-  if IsError(FLastError) then
+  if IsError(err) then
   begin
-    FErrorMessage := FLastError.Message;
+    FLastError := err;
+    FErrorMessage := err.Message;
     FErrorLine := FVM.ErrorLine;
-  end;
+  end
+  else
+    { A CALL THAT SUCCEEDED REPORTS NO ERROR, and saying so takes a line because
+      of what can run in between. ClearErrorState at the top of this routine was
+      the whole of it, which is correct for a call nothing nests inside -- and
+      this is the door a debug seam re-enters through, on purpose and by document.
+      A watch expression that faults sets these two fields from ITS OWN
+      CallFunction, the outer call then finishes cleanly, and `IsError` is False
+      so the failure branch above does not run: the host reads its successful
+      call's verdict and is told `division by zero` at a line in somebody else's
+      evaluation.
+
+      MEASURED: a prepared session, a breakpoint in `f1`, the seam evaluating a
+      faulting `f1` and continuing -- the outer call answered 7 and `ErrorMessage`
+      said `division by zero` at line 8. Found by the three-leg differential in
+      tests/probe_sweep.lpr on the `innerfault` shapes, the first round the
+      compared verdict carried the error line and the error message; pinned by
+      name in tests/probe_step.lpr.
+
+      The evaluation's own verdict is NOT taken away from the host: it is read
+      from the nested call, which is where it belongs and is what
+      docs/embedding.md tells a host to do. Only the outer call's answer about
+      ITSELF is corrected. }
+    ClearErrorState();
 end;
 
 procedure TPhosphorEngine.Finish;
@@ -553,6 +747,7 @@ var
   cand: String;
   prog, old: TProgram;
   startPC: Integer;
+  savedLive: TPhosphorVM;
 begin
   ClearErrorState();
   cand := FReplSource + ALine + #10;
@@ -575,6 +770,7 @@ begin
   Result := 0;
   // Each REPL line gets its own execution budget, matching RunFrom, which resets
   // the VM's step counter and start tick per line.
+  savedLive := FLiveVM; FLiveVM := FReplVM;                   // see DebugVM
   BudgetBegin(FMaxSteps, FTimeoutMs);
   try
     if not FReplVM.RunFrom(prog, startPC) then
@@ -584,9 +780,12 @@ begin
       FErrorLine := FReplVM.ErrorLine;
       if FErrorLine = 0 then FErrorLine := 1;
       Result := FErrorLine;
-    end;
+    end
+    else
+      ClearErrorState();   // a door that succeeded reports no error; see CallFunction
   finally
     BudgetEnd();
+    FLiveVM := savedLive;
   end;
   // Safe only now: the VM no longer refers to the previous program, and every value
   // that came out of its constant pool is reference-counted in the globals.

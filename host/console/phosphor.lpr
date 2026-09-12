@@ -134,10 +134,13 @@ type
   A breakpoint's operand COUNT and every operand's LENGTH come from the program
   being debugged, and the seam fires inside one VM instruction -- so MaxSteps and
   TimeoutMs, which are tested between instructions, are tested before this line
-  and after it and never during it. MaxOutputBytes does not apply at all: it
-  counts "total bytes emitted through OnOutput" (PhosphorVM.pas:386, charged at
-  :1955) and a frame goes to stderr through the host, not through the output
-  seam. That is the project's own named class, "a loop or an allocation over
+  and after it and never during it. MaxOutputBytes now bounds the PAYLOAD the VM
+  hands over -- the message plus each operand's size, charged at opBreakpoint --
+  but not what this host then writes, and in any case this host installs no output
+  ceiling. So the count of reports is bounded by the engine and the SIZE of each
+  one is bounded here. (When this comment was first written the payload was
+  charged to nothing at all, and it said so; the engine closed that half
+  afterwards.) That is the project's own named class, "a loop or an allocation over
   a script-supplied count", and it landed here where scripts/check-budget.py
   could not see it: the gate scanned engine/libs and host/packages only, and its
   file walk yielded .pas alone, so this file was invisible twice over. Measured

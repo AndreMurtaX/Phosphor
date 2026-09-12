@@ -17,6 +17,12 @@ interface
 
 uses
   SysUtils, Classes, Math, PhosphorValue, PhosphorErrors, PhosphorOpcodes, PhosphorRegistry,
+  { FOR ONE CALL, AND IT IS THE SECOND WALL CLOCK. The VM does not ask the budget
+    for anything -- RULE 1 is asked at the library seam, two units away, which is
+    why this unit is not otherwise here. What it does need is BudgetParked: the
+    debug seam may block, and giving the parked time back to FStartTick alone
+    leaves the budget's own clock running. See DebugPoll. }
+  PhosphorBudget,
   PhosphorSandbox;
 
 { IS THIS EXCEPTION EVIDENCE THAT MEMORY IS ALREADY DAMAGED?
@@ -192,6 +198,26 @@ type
     BufStart: Int64;       // file offset of Buf[1]
   end;
 
+  { WHAT THE STEPPER IS WAITING FOR. Private to this unit deliberately: a host
+    speaks in TPhosphorDebugAction, which is what it ASKS for, and this is what
+    the VM is doing about it. The two are not the same list -- daStop is an
+    action with no mode, and dmRun is the mode three different actions can leave
+    behind -- so mapping one onto the other and calling it a saving would make
+    the arrival of a fifth action a change to the state machine.
+
+      dmRun       nothing pending; only the armed lines and the interrupt stop.
+      dmStepInto  stop at the next boundary that is not where the step began.
+      dmStepOver  the same, but never inside a call the step began outside of.
+      dmStepOut   stop only once the frame stack is strictly shallower.
+
+    All three step modes are answered by comparisons against a captured (depth,
+    line) pair rather than by an equality against a depth that has to be hit
+    exactly. That is on purpose and it is what makes them survive an ON ERROR
+    unwind: the frame pointer can drop three levels between two boundaries with
+    no boundary in between, and a `<` still fires at the next one where an `=`
+    would have been stepped straight over. }
+  TDbgStepMode = (dmRun, dmStepInto, dmStepOver, dmStepOut);
+
   TPhosphorVM = class
   private
     FStack: array of TValue;
@@ -259,10 +285,39 @@ type
     // `on error call` handler) opHalt only left that activation, and its caller read
     // the exit as an ordinary return.
     FHalted: Boolean;
+    { AND WHO SAID SO, because two different things set the flag above and only
+      one of them is a top level that finished. `end` on the last line of a
+      prepared script is the documented idiom and EndOfTopLevel clears it; a
+      debugger's daStop is a host saying TERMINATE in the middle of the run, and
+      clearing that would hand the host a session it can call into whose top
+      level never ran. Cleared beside FHalted at both per-run resets. }
+    FHaltedByDebug: Boolean;
     // Re-entrant depth. Ordinary recursion is a jump within one interpreter loop and
     // costs heap; CallUserFunc re-enters ExecFrom with a NATIVE call, so recursion
     // through callfunc costs process stack and used to end in a segfault.
     FCallDepth: Integer;
+    { HOW MANY ExecFrom ACTIVATIONS ARE LIVE ON THE PASCAL STACK, and how many
+      have ever been entered. Exactly three routines enter one -- Run, RunFrom and
+      CallUserFunc -- and all three already hold a try/finally around the call, so
+      both cost one increment per ENTRY and nothing at all per instruction or per
+      ordinary BASIC call (opCall pushes a frame INSIDE the dispatch loop and does
+      not re-enter). Measured: a bench that enters once and retires eight million
+      statement boundaries cannot tell the two builds apart.
+
+      FExecDepth answers the one question the frame pointer cannot -- whether the
+      activation being stepped out of has more BASIC above it or the HOST. See the
+      clamp in DebugPoll; a rule written on AStopFrameSP alone detached the
+      debugger for the rest of the run on `on error call`, which is an idiom the
+      language reference teaches.
+
+      FExecEntries is monotone and exists so DebugPoll can ask, AFTER the fact,
+      whether a parked host re-entered the engine -- which it must know before it
+      credits the memory the park added. A count that is READ either side of the
+      window is the value that acts; a flag set at one door would have to be
+      cleared correctly at every other one, and would answer only for the door it
+      was written on. }
+    FExecDepth: Integer;
+    FExecEntries: QWord;
     { WHERE A peLimit CAME FROM, WHICH DECIDES WHETHER IT IS FATAL.
 
       A ceiling crossed by the VM is fatal: a script must not be able to catch
@@ -306,6 +361,93 @@ type
     // Debug tracing, set by the TRACE statement (opTrace). BREAKPOINT reports the
     // frame through OnBreakpoint only while this is on; off, it is a pure no-op.
     FTrace: Boolean;
+    { THE STEPPER. Every field here is off by default and costs a program that
+      never attaches exactly one Boolean test per statement boundary -- see the
+      hook in the opStmt arm, and the numbers in DebugPoll's header.
+
+      FDbgArmed is the ONE field the hot path reads. Everything else is behind it,
+      so a detached VM never touches a second cache line for any of this. It is
+      written by ArmDebug/DisarmDebug only, from the thread that runs the VM.
+
+      FDbgMode is what the host last asked for, and FDbgDepth/FDbgGosub/FDbgLine/
+      FDbgPC are WHERE it was asked -- a frame depth, a GOSUB depth, a source line
+      and the pc of the boundary. Those four are ONE value in four fields: a step
+      is "get me somewhere that is not where I was", and any of them alone
+      describes somewhere else. Saving one without the others is the shape the
+      playbook records as "saving a scope counter is not saving the scope", so the
+      only thing that writes them is DebugCapture and the only thing that
+      invalidates them is DebugRebase.
+
+      FDbgGosub IS THERE BECAUSE GOSUB IS A CALL AND FFrameSP DOES NOT KNOW IT.
+      `gosub` pushes a return address on FCallStack and moves FCSP; it pushes no
+      activation frame, so a rule written on FFrameSP alone reads the whole
+      subroutine body as "the same level as the line that called it". Step over on
+      a `gosub` line walked every statement of the subroutine, and step out from
+      inside one was measured against a depth the subroutine shares with its
+      caller and went silent. The pair (FFrameSP, FCSP) compared lexicographically
+      is how deep we are, and it is the pair the three rules use.
+
+      THE PC IS THERE BECAUSE OF LOOPS, and leaving it out is a wrong answer, not
+      an economy. On line alone, a loop whose body is one line -- the commonest
+      shape there is -- is stepped ONCE: the second iteration's boundary carries
+      the same line at the same depth, so "somewhere else" says no and the step
+      swallows every remaining iteration. Arriving back at the boundary the step
+      was asked AT is a loop, and it stops. It is also what keeps `a = 1 : b = 2`
+      one step and not two: those are two boundaries with two different pcs on one
+      line, and neither is the one the step began at.
+
+      FDbgLines is the armed line set, ascending and de-duplicated, consulted by
+      binary search. The VM is handed the SET rather than asked per boundary, so
+      `continue` inside a long session stays a comparison and never a callback;
+      the engine still knows nothing about breakpoints -- to it these are only
+      lines to consult on.
+
+      FDbgInterrupt is the one field another thread may write, which is why it is
+      an Integer and not a Boolean: it is read-and-cleared with
+      InterlockedExchange, so the read that consumes it cannot be hoisted out of
+      the dispatch loop by an optimiser and cannot race a second setter. FPC 3.2.2
+      has no `volatile` and the engine is built -O2, so a plain Boolean field read
+      once per statement was a codegen question nobody had measured; one
+      interlocked read on the ATTACHED path only removes the question. A detached
+      VM never reaches it at all.
+
+      WHAT IT COSTS, since "nothing a host can see" used to stand here unmeasured:
+      a build that reads the field plainly first and pays for the lock only when it
+      is non-zero comes out 0.00% and -0.37% faster on Windows and -0.60% on both
+      shapes on Linux, over the armed-and-never-stopping loop. Refused on that
+      number, and the argument is at the read in DebugPoll.
+
+      FDbgInSeam is re-entrancy. A host is entitled to call back INTO the engine
+      from the seam -- CallFunction on a stopped frame is the obvious thing to
+      want -- and those statements have boundaries of their own. Without this the
+      first one would stop again, from inside the stop.
+
+      AND IT HAS EXACTLY ONE WRITER PAIR, WHICH IS THE RULE AND NOT AN
+      OBSERVATION. It describes the PASCAL STACK -- "a seam call is live above
+      me" -- so the only routine entitled to write it is the one that owns that
+      stack frame, and that is DebugPoll: True on the line before the call, False
+      in the finally. Two other routines used to clear it "in case", and one of
+      them was a live defect: DisarmDebug clears the ARMING, a host re-syncs its
+      breakpoint set from inside a stop by disarming and arming, and the guard
+      went with the set. Measured on both machines: 11 stops at seam depth 2
+      against a control of 1 stop at depth 1, and unbounded without the host's own
+      depth guard. DebugBeginRun's clearer was the same shape one door over and
+      went with it; the argument is written there.
+
+      FDbgSeamDepth is what the window uses to tell the HOST calling back in from
+      the script doing it. See DebugCreditPark. }
+    FDbgArmed: Boolean;
+    FDbgMode: TDbgStepMode;
+    FDbgDepth: Integer;
+    FDbgGosub: Integer;
+    FDbgLine: Integer;
+    FDbgPC: Integer;
+    FDbgLines: array of Integer;
+    FDbgEntryPending: Boolean;
+    FDbgInterrupt: LongInt;
+    FDbgInSeam: Boolean;
+    FDbgSeamDepth: Integer;
+    FDbgParkMark: QWord;
     // Classic-I/O state, all per-Run. FChannels[n] is the file on #n. The console
     // INPUT buffer holds the last line read for INPUT/LINE INPUT; the console char
     // buffer feeds INPUT$(n) from a line-based host, keeping any unread remainder.
@@ -375,6 +517,36 @@ type
       one BASIC routine re-entrantly and hand control back. The top-level Run uses
       AStopFrameSP = -1, a level the frame stack never reaches, so it runs to end. }
     function ExecFrom(AStartPC, AStopFrameSP: Integer): Boolean;
+    { THE STEP STATE MACHINE. DebugPoll is the whole of it; everything else here
+      exists so that the four places that can invalidate its state say so in one
+      word each. See the implementations -- each carries the reason it is separate.
+
+      DebugPoll takes AStopFrameSP as a PARAMETER because it is a parameter of
+      ExecFrom and not a field: a re-entrant activation has its own floor, and
+      stepOut has to be clamped at it. It takes ALine for the same reason -- the
+      instruction is a local of the loop. Those two are the whole of what it needs
+      from its caller, which is why it is a method and not, like RestoreOverlap
+      and Fault, nested inside ExecFrom. }
+    function DebugPoll(ALine, APC, AStopFrameSP: Integer): Boolean;
+    { Remember WHERE a step was asked, as the one value it is: frame depth, gosub
+      depth, line, pc. }
+    procedure DebugCapture(ALine, APC: Integer);
+    { -1 / 0 / +1: shallower than, at, or deeper than where the step was asked.
+      Both kinds of call count; see FDbgGosub. }
+    function DebugRelDepth: Integer;
+    { THE FRAME POINTER MOVED WHOLESALE, so a pending step is no longer about the
+      stack it was captured on. Five lines in this unit assign FFrameSP outright;
+      two of them are per-run resets that DebugBeginRun covers, and the other
+      three call this. }
+    procedure DebugRebase(ANewFrameSP: Integer);
+    { A run is starting: forget the transient step state, keep the arming. }
+    procedure DebugBeginRun;
+    { Give the two wall clocks back every millisecond of the stopped window that
+      has gone by since the last mark, and re-mark at now. See its body. }
+    procedure DebugCreditPark;
+    { True when ALine is one of the armed lines. Binary search: a session with a
+      hundred breakpoints must not make `continue` linear in them. }
+    function DebugLineArmed(ALine: Integer): Boolean;
   public
     OnOutput: TPhosphorOutputProc;
     { The INPUT seam, nil by default (a headless host installs none). The VM asks
@@ -386,6 +558,15 @@ type
       then continues unconditionally. It must never block; see the opBreakpoint
       handler. }
     OnBreakpoint: TPhosphorBreakpointProc;
+    { THE DEBUG SEAM, nil by default. The one seam in this engine that MAY BLOCK:
+      the VM calls it at a statement boundary, runs nothing until it returns, and
+      does what the returned action says. See TPhosphorDebugProc for the contract
+      and DebugPoll for what a parked host costs the script.
+
+      It is consulted only while the VM is ARMED (ArmDebug), so installing it and
+      never arming costs a detached program one Boolean test per statement
+      boundary and nothing else. }
+    OnDebug: TPhosphorDebugProc;
     { The host-services seam, all-nil by default (a headless host installs none).
       Library functions ask the host for an event pump or the clipboard through
       it; with a field unset they get the empty answer, never a fault. Wired like
@@ -397,7 +578,12 @@ type
     ErrorLine: Integer;
     // Host-set execution ceilings; 0 = unlimited (the default, zero cost).
     MaxSteps: Int64;        // instruction budget (the answer to an infinite loop)
-    MaxOutputBytes: Int64;  // total bytes emitted through OnOutput
+    { Total bytes the SCRIPT pushes through a host seam: PRINT/PRINTLN text
+      through OnOutput, and the payload a BREAKPOINT hands to OnBreakpoint. The
+      second half is new and the reason is at opBreakpoint -- the debug stream
+      used to be outside all four ceilings, and one breakpoint in a loop wrote
+      37.8 MB at exit 0. What a HOST writes on its own account is its own. }
+    MaxOutputBytes: Int64;
     TimeoutMs: Int64;       // wall-clock ceiling in milliseconds
     { HOW MUCH HEAP THIS RUN MAY ADD, and the fourth ceiling because the other
       three do not bound memory at all -- which the budget unit says in its own
@@ -507,11 +693,59 @@ type
     function DbgGlobal(AIndex: Integer): TValue;
     { How many activation frames are live. 0 at the top level. }
     function DbgFrameDepth: Integer;
+    { AND HOW MANY GOSUB RETURN ADDRESSES ARE PENDING, which is the other half of
+      "where am I" and is not a frame. `gosub` pushes a return address and no
+      activation, so a debugger that shows only DbgFrameDepth says "top level"
+      from inside a subroutine three deep. The stepper compares the PAIR for
+      exactly this reason (see FDbgGosub), and a host that wants to render the
+      same answer needs the same pair. Note that a subroutine abandoned by `goto`
+      instead of `return` leaves its entry pending for the rest of the run: this
+      reports the engine's real state, not a tidied one. }
+    function DbgGosubDepth: Integer;
     { The index into DbgProgram.UserFuncs of the function frame AFrame is running,
       counting from 0 = the OUTERMOST call, or -1 if there is no such frame. }
     function DbgFrameFunc(AFrame: Integer): Integer;
     function DbgFrameLocalCount(AFrame: Integer): Integer;
     function DbgLocal(AFrame, ASlot: Integer): TValue;
+    { ATTACH THE DEBUGGER. ALines is the set of source lines to stop on -- the
+      host's breakpoints, which the engine never learns are breakpoints; to it
+      they are lines to consult on. AStopAtEntry stops once at the first boundary
+      of the next run, before any of it executes.
+
+      THE SET RATHER THAN A CALLBACK PER BOUNDARY, and that is the whole reason
+      `continue` stays fast: with an empty set and no step pending, a boundary
+      costs one Boolean test, one mode compare and a binary search over nothing.
+
+      Call it again to change the set mid-session -- from inside the seam is the
+      normal place -- and it is cheap: the copy is sized by what the host passes.
+      Arming does not reset a step already in progress; DisarmDebug does.
+
+      A duplicate or unsorted line set is fine: it is copied, sorted and
+      de-duplicated here, once, so that every later boundary can binary-search it.
+      A line of 0 or less is dropped: no source has one, only a hand-written .pbc
+      can carry one on a boundary, and keeping it would let a host arm a set that
+      nothing can ever match. }
+    procedure ArmDebug(const ALines: array of Integer; AStopAtEntry: Boolean);
+    { Detach. The hook goes back to one never-taken Boolean test and the VM forgets
+      every armed line, any pending step and any pending interrupt. }
+    procedure DisarmDebug;
+    { PAUSE, AND THE ONLY THING IN THIS ENGINE ANOTHER THREAD MAY TOUCH. A host
+      reading a debug protocol on a socket thread calls this; the running VM stops
+      at its next statement boundary with srPause.
+
+      One interlocked write. It is safe from another thread and nothing else here
+      is: the read that consumes it is interlocked too (see DebugPoll), which is
+      what makes the pair a handshake rather than an assumption about what -O2
+      does with a Boolean field in the hottest loop in the program.
+
+      A VM THAT IS NOT ARMED IGNORES IT, deliberately. The hook is behind
+      FDbgArmed, so there is nothing to pause into: a host that wants to be able
+      to pause has attached. The flag is cleared at the next arm, so an interrupt
+      raised against a detached VM cannot fire at some later session. }
+    procedure InterruptDebug;
+    { True while a debugger is attached. A host that installed the seam and never
+      armed reads False here, which is the difference the cost numbers are about. }
+    function DebugAttached: Boolean;
   end;
 
 implementation
@@ -532,6 +766,21 @@ begin
   ErrorLine := 0;
   // No frames yet, so no local slots held; see MaxFrameDepth.
   FFrameSlots := 0;
+  // Detached. Written out rather than left to the zeroed instance, because -1 is
+  // not zero and FDbgLine's "nowhere" is what makes the first boundary of a
+  // stop-at-entry run differ from the line the step was never asked on.
+  FDbgArmed := False;
+  FDbgMode := dmRun;
+  FDbgDepth := 0;
+  FDbgGosub := 0;
+  FDbgLine := -1;
+  FDbgPC := -1;
+  FDbgLines := nil;
+  FDbgEntryPending := False;
+  FDbgInterrupt := 0;
+  FDbgInSeam := False;
+  FDbgSeamDepth := 0;
+  FDbgParkMark := 0;
 end;
 
 { THE VALUE MAY LIVE IN THE ARRAY THIS IS ABOUT TO MOVE.
@@ -1553,6 +1802,7 @@ begin
   FInHandler := False;
   FErrSaveValid := False;
   FHalted := False;
+  FHaltedByDebug := False;
   FCallDepth := 0;
   FLimitFromInner := False;
   FErrCode := 0; FErrMsg := ''; FErrLine := 0;
@@ -1565,6 +1815,9 @@ begin
   FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
   FHeapBased := True;
   FTrace := False;
+  // The two per-run frame resets the step state machine's enumeration names. The
+  // ARMING survives (a host arms once and debugs every run); the step does not.
+  DebugBeginRun();
   CloseAllChannels();            // no file channel leaks between programs
   FInBuf := ''; FInPos := 1;
   FCharBuf := ''; FCharPos := 1;
@@ -1572,6 +1825,8 @@ begin
   for i := 0 to AProg.VarCount - 1 do
     FVars[i] := DefaultValue(AProg.VarTypes[i]);
   savedMask := EnterFPU();
+  // The first of three ExecFrom entries. See FExecDepth.
+  Inc(FExecDepth); Inc(FExecEntries);
   try
     try
       Result := ExecFrom(0, -1);
@@ -1585,6 +1840,7 @@ begin
           raise;
     end;
   finally
+    Dec(FExecDepth);
     LeaveFPU(savedMask);
   end;
 end;
@@ -1617,6 +1873,7 @@ begin
     the line abort at its FIRST LIBRARY CALL and report success. `println "x"` still
     worked; `println len("x")` printed nothing and answered rc 0. }
   FHalted := False;
+  FHaltedByDebug := False;
   had := Length(FVars);
   if AProg.VarCount > had then
   begin
@@ -1629,6 +1886,7 @@ begin
   FOutputBytes := 0;
   FStackLimit := False;
   FStartTick := GetTickCount64;
+  DebugBeginRun();               // see Run: the arming survives, the step does not
   { STEPS AND TIME DO NOT SURVIVE A LINE; MEMORY DOES. Each REPL line is its own
     run for the step counter and the clock, and re-sampling the base here made the
     memory ceiling mean nothing across a session: five lines each just under a
@@ -1640,6 +1898,8 @@ begin
     FHeapBased := True;
   end;
   savedMask := EnterFPU();
+  // The second of three ExecFrom entries. See FExecDepth.
+  Inc(FExecDepth); Inc(FExecEntries);
   try
     try
       Result := ExecFrom(AStartPC, -1);
@@ -1651,6 +1911,7 @@ begin
           raise;
     end;
   finally
+    Dec(FExecDepth);
     LeaveFPU(savedMask);
   end;
 end;
@@ -1659,7 +1920,15 @@ end;
   A string contributes its own bytes; anything else contributes its str$ form,
   which is at most a handful -- 32 is a generous bound and the exactness does not
   matter, because the caller is deciding whether a growth is worth measuring and
-  then measuring the heap itself. }
+  then measuring the heap itself.
+
+  THAT SENTENCE IS A PRECONDITION, NOT A DISCLAIMER, and it has been violated
+  once. This was borrowed to price a BREAKPOINT report against MaxOutputBytes,
+  where the number is SPENT against a threshold and nothing measures anything
+  afterwards -- so three small integers cost 96 bytes for the 5 a host writes, and
+  a program whose whole real output was 61 bytes was refused under a 100-byte
+  ceiling. A caller that does NOT go on to measure the heap wants ValToStr and its
+  real length. The one legitimate caller is opAdd, below, which measures. }
 function TextLenOf(const V: TValue): Int64;
 begin
   if V.Kind = vkString then Result := Length(V.Str) else Result := 32;
@@ -1825,6 +2094,9 @@ var
       it puts the range back where it was and both arms can see again. }
     DropInventedAbove(FErrStmtFrameSP);
     FSP := FErrStmtSP; FFrameSP := FErrStmtFrameSP;
+    // The second of the three wholesale frame moves. See DebugRebase: a pending
+    // step was captured against a stack this resume has just replaced.
+    DebugRebase(FErrStmtFrameSP);
   end;
 
   { Put pc on the statement AFTER the one that faulted -- what `resume next` and a
@@ -2038,6 +2310,8 @@ var
       else
         DropInventedAbove(FErrHandlerFrameSP);
       FSP := FErrHandlerSP; FFrameSP := FErrHandlerFrameSP;
+      // The first of the three wholesale frame moves. See DebugRebase.
+      DebugRebase(FErrHandlerFrameSP);
       if FErrHandlerMode = 1 then
       begin
         // `on error call func`: run func(code%, msg$), then continue by its result
@@ -2527,13 +2801,115 @@ begin
           for i := ins.A - 1 downto 0 do
             bpOps[i] := Pop();
           v := Pop();   // the message
-          if FTrace and Assigned(OnBreakpoint) then
-            OnBreakpoint(ValToStr(v), ins.Line, bpOps);
+          { CHARGED BY `trace`, NOT BY WHO IS LISTENING.
+
+            This was `FTrace and Assigned(OnBreakpoint)`, and that made
+            MaxOutputBytes mean two different things depending on a decision the
+            SCRIPT cannot see. Measured: `trace 1` plus one `breakpoint "msg", 1,
+            22, 333` under a ceiling of 8 was refused by a host that installed a
+            reporter and admitted by a host that did not -- one script, one
+            ceiling, two verdicts. The other half of that same ceiling never
+            asked: EmitOutput charges the bytes and then calls OnOutput only if
+            something is there, so PRINT costs the same whether or not the host
+            listens.
+
+            This ceiling counts what the SCRIPT produces. A host's decision not
+            to install a reporter is not the script printing less, exactly as a
+            headless host is not a script that stopped printing. So the gate is
+            `trace`, which IS the script's own switch: with tracing off the
+            statement does nothing and costs nothing, which is the behaviour the
+            language reference already describes. }
+          if FTrace then
+          begin
+            { AND THE REPORT IS CHARGED, WHICH IT WAS NOT, AND THAT WAS A HOLE.
+
+              MaxOutputBytes used to count what left through OnOutput and nothing
+              else, so the whole BREAKPOINT stream was outside every ceiling this
+              engine has. Measured on the build before this line existed: `trace 1`
+              and one breakpoint inside a 100 000-iteration loop wrote 37.8 MB to
+              a host's stderr at exit 0, from an eight-line program. The host had
+              already bounded ONE report -- the console host caps the message, each
+              operand and the whole line by name -- and the count of reports is the
+              half no host can bound without lying about the program's state.
+
+              WHAT IS CHARGED IS THE PAYLOAD THIS VM HANDS OVER: the message it
+              built, plus each operand RENDERED THE WAY PRINT WOULD RENDER IT. Not
+              what the host then writes -- a host that decorates a frame with a
+              source name and brackets is spending its own bytes and knows it. The
+              point is that the stream is now ON a ceiling instead of beside all
+              four, so a host that sets one is protected by it; with
+              MaxOutputBytes at 0 this is as unbounded as PRINT is, which is a
+              configuration a host chose and not a hole in the engine.
+
+              AND THE RENDERING IS NOT AN EXTRAVAGANCE; THE ESTIMATE WAS A WRONG
+              ANSWER. This first spent TextLenOf, which prices any non-string at a
+              flat 32 -- and TextLenOf's own header says the exactness does not
+              matter "because the caller is deciding whether a growth is worth
+              measuring and then measuring the heap itself". That is true of opAdd,
+              which measures afterwards, and false here, where the number is SPENT
+              against a threshold and nothing measures anything. Three small
+              integers were charged 96 bytes for the 5 a host writes, and a program
+              whose whole real output was 61 bytes was refused under a 100-byte
+              ceiling: a guard refusing something legitimate, from an estimator
+              reused outside the assumption written into it. ValToStr is the same
+              rendering PRINT charges for the same values, so a BREAKPOINT report
+              now costs what printing its payload costs. It runs once per report,
+              on a path already gated by `trace`, and never per instruction.
+
+              Charged BEFORE the seam fires, and the refusal is fatal like every
+              other ceiling: the report that would cross it is not made at all,
+              because half a frame on a debugger's stream is worse than none. }
+            sTmp := ValToStr(v);
+            growth := Int64(Length(sTmp));
+            for i := 0 to High(bpOps) do
+              growth := growth + Int64(Length(ValToStr(bpOps[i])));
+            if (MaxOutputBytes > 0) and (FOutputBytes + growth > MaxOutputBytes) then
+            begin
+              LastError := MakeError(peLimit, 'output limit exceeded (' +
+                                     IntToStr(MaxOutputBytes) + ' bytes)');
+              ErrorLine := ins.Line;
+              Exit(False);
+            end;
+            Inc(FOutputBytes, growth);
+            // Charged above whatever the host installed; reported only if it did.
+            if Assigned(OnBreakpoint) then OnBreakpoint(sTmp, ins.Line, bpOps);
+          end;
         end;
       opStmt:
         begin
           // Mark this clean statement boundary; a fault resumes from here.
           stmtPC := pc; stmtSP := FSP; stmtFrameSP := FFrameSP;
+          { THE DEBUG HOOK, AND THE WHOLE OF IT. It goes in this arm and nowhere
+            else, for a reason that was measured rather than assumed: this engine
+            has already costed both shapes. A test PER INSTRUCTION was 3 to 4
+            percent on a tight arithmetic loop and was deleted as decoration (the
+            memory check, whose note is a few dozen lines above this case); tests
+            added to EXISTING case arms measured at no cost at all (the note
+            beside it). An opStmt is one instruction in about fourteen of a tight
+            loop, and this arm already runs on every one of them.
+
+            IT IS ALSO THE ONLY PLACE THE RULE CAN BE EVALUATED. The obvious rule
+            -- notice when the instruction's line differs from the last one -- is
+            wrong against the bytecode this compiler emits: a `for` loop's
+            increment instructions carry the `for` line and its body carries its
+            own, so a per-instruction line rule fires twice per iteration and one
+            Step Over lands on the `for` line every time round. Only the statement
+            boundaries are statements.
+
+            TWO CONSEQUENCES A HOST MUST EXPECT, both of them correct and both of
+            them reported as bugs by anyone who does not know. A block TERMINATOR
+            (`next`, `endwhile`, `endif`, `endfunction`) emits no boundary at all,
+            so it can never be stopped on -- TProgram.StoppableLines omits those
+            lines and an editor's gutter should too. And a `for` HEADER's boundary
+            executes ONCE, before the loop top, so a breakpoint on the `for` line
+            fires on entry and never again while a breakpoint on the body line
+            fires every iteration. }
+          if FDbgArmed then
+            if not DebugPoll(ins.Line, pc, AStopFrameSP) then
+              // daStop set FHalted and means the clean end opHalt means; a seam
+              // that raised left it clear and set LastError. One test says which,
+              // and it is the same value opHalt hands back.
+              Exit(FHalted);
         end;
       { A MEANS TWO DIFFERENT THINGS AND B SAYS WHICH, so one check cannot cover
         both -- and the loader's does not try. ValidateProgram bounds A as a pc
@@ -2919,15 +3295,20 @@ begin
               accident of which counter is per-VM and which is per-activation, and
               the value-stack ceiling stops being self-re-arming the moment
               CallUserFunc restores the stack it borrowed. Decided on the CODE, so
-              it holds for every ceiling. peLimit has NINE producers in this unit
-              -- output, value stack, steps, time, GOSUB, call depth and local
-              slots in this loop, and the two frame ceilings again in
-              CallUserFunc, which is NOT in this loop -- and `grep -rn peLimit
-              engine/ host/` finds none in any library or host, only the two
-              places that NAME the code. So treating one as fatal here cannot
-              swallow a legitimate library error. (Round two's report said
-              "exactly four producers, all of them the ceilings in this loop",
-              which was assumed rather than counted.) }
+              it holds for every ceiling. peLimit has ELEVEN producers in this
+              unit and `grep -n "MakeError(peLimit" engine/PhosphorVM.pas` is how
+              that number is arrived at, every time, because this sentence has now
+              been wrong twice by being remembered instead: memory (RoomFor) and
+              output (EmitOutput), both nested in this routine; value stack,
+              steps, time, GOSUB, call depth and local slots in this loop; the
+              BREAKPOINT report's charge in the opBreakpoint arm; and the two
+              frame ceilings again in CallUserFunc, which is NOT in this loop. And
+              `grep -rn peLimit engine/ host/` finds none in any library or host,
+              only the two places that NAME the code. So treating one as fatal
+              here cannot swallow a legitimate library error. (Round two's report
+              said "exactly four producers, all of them the ceilings in this
+              loop"; the correction said nine and omitted memory, and then the
+              breakpoint charge made it ten.) }
             if (e.Code = peLimit) and FLimitFromInner then
             begin
               LastError := e;
@@ -3305,6 +3686,15 @@ end;
 
 procedure TPhosphorVM.EndOfTopLevel;
 begin
+  { A DEBUGGER'S STOP IS NOT A TOP LEVEL THAT FINISHED, and this is the one
+    place the difference can be told. Prepare calls this after a successful run
+    so that the `end` the language reference teaches does not poison every later
+    CallFunction. A run that ended because the host returned daStop ended where
+    the host said, with the rest of the top level unexecuted -- so clearing the
+    flag would open a session on a script that never finished initialising, and
+    say nothing. The host that asked for the stop gets what it asked for: the
+    session stays closed, and CallUserFunc refuses by name. }
+  if FHaltedByDebug then Exit;
   FHalted := False;
 end;
 
@@ -3353,6 +3743,11 @@ begin
   Result := FFrameSP;
 end;
 
+function TPhosphorVM.DbgGosubDepth: Integer;
+begin
+  Result := FCSP;
+end;
+
 function TPhosphorVM.DbgFrameFunc(AFrame: Integer): Integer;
 begin
   if (AFrame < 0) or (AFrame >= FFrameSP) then Exit(-1);
@@ -3371,6 +3766,567 @@ begin
   if (AFrame < 0) or (AFrame >= FFrameSP) then Exit;
   if (ASlot < 0) or (ASlot > High(FFrames[AFrame].Locals)) then Exit;
   Result := FFrames[AFrame].Locals[ASlot];
+end;
+
+{ ------------------------------------------------------------------------------
+  THE STEP STATE MACHINE.
+  ------------------------------------------------------------------------------ }
+
+procedure TPhosphorVM.ArmDebug(const ALines: array of Integer; AStopAtEntry: Boolean);
+var
+  i, j, n, t: Integer;
+begin
+  { Copied, then insertion-sorted, then de-duplicated in place. Insertion sort
+    because the input is a host's breakpoint list -- tens of entries, usually
+    already ascending because an editor hands them over in file order -- and on an
+    already-sorted list this is one pass of comparisons and no writes. It is not
+    on any path that runs per instruction: the whole point of handing the VM a SET
+    is that arming happens when the host says so and every boundary after it is a
+    search. }
+  SetLength(FDbgLines, Length(ALines));
+  for i := 0 to High(ALines) do FDbgLines[i] := ALines[i];
+  for i := 1 to High(FDbgLines) do
+  begin
+    t := FDbgLines[i];
+    j := i - 1;
+    while (j >= 0) and (FDbgLines[j] > t) do
+    begin
+      FDbgLines[j + 1] := FDbgLines[j];
+      Dec(j);
+    end;
+    FDbgLines[j + 1] := t;
+  end;
+  n := 0;
+  for i := 0 to High(FDbgLines) do
+    // A line of 0 or less is not a line any source has; opStmt carries one only
+    // in a hand-written .pbc. Dropping it here means a host cannot arm a set that
+    // no boundary can ever match and then wonder why nothing stops.
+    if (FDbgLines[i] > 0) and ((n = 0) or (FDbgLines[i] <> FDbgLines[n - 1])) then
+    begin
+      FDbgLines[n] := FDbgLines[i];
+      Inc(n);
+    end;
+  SetLength(FDbgLines, n);
+  FDbgEntryPending := AStopAtEntry;
+  // A pending interrupt does not survive a re-arm; see InterruptDebug.
+  InterlockedExchange(FDbgInterrupt, 0);
+  FDbgArmed := True;
+end;
+
+procedure TPhosphorVM.DisarmDebug;
+begin
+  FDbgArmed := False;
+  FDbgLines := nil;
+  FDbgMode := dmRun;
+  FDbgDepth := 0;
+  FDbgGosub := 0;
+  FDbgLine := -1;
+  FDbgPC := -1;
+  FDbgEntryPending := False;
+  { FDbgInSeam IS NOT PART OF THE ARMING AND IS NOT CLEARED HERE. It says a seam
+    call is live on the Pascal stack, which disarming cannot change and cannot
+    know. A host that re-syncs the editor's breakpoints from inside a stop -- the
+    natural way to write "replace the set" is DisarmDebug then ArmDebug -- used to
+    erase the re-entrancy guard with the set, so its very next CallFunction was
+    stopped inside its own stop, once per boundary, each level re-syncing and
+    evaluating again: 11 stops at seam depth 2 against a control of 1 at depth 1,
+    and bounded only by MaxCallDepth without a guard on the host's own side. See
+    the field's declaration for the rule this is one half of. }
+  InterlockedExchange(FDbgInterrupt, 0);
+end;
+
+procedure TPhosphorVM.InterruptDebug;
+begin
+  InterlockedExchange(FDbgInterrupt, 1);
+end;
+
+function TPhosphorVM.DebugAttached: Boolean;
+begin
+  Result := FDbgArmed;
+end;
+
+procedure TPhosphorVM.DebugCapture(ALine, APC: Integer);
+begin
+  FDbgDepth := FFrameSP;
+  FDbgGosub := FCSP;
+  FDbgLine := ALine;
+  FDbgPC := APC;
+end;
+
+{ HOW DEEP THE BOUNDARY WE ARE AT IS, AGAINST THE ONE A STEP WAS ASKED AT: -1
+  shallower, 0 the same, +1 deeper. The pair is (activation frames, GOSUB return
+  addresses) compared lexicographically, because both are calls and only the first
+  is a frame. Its one inexactness is written where it can be met: a subroutine
+  abandoned by `goto` instead of `return` leaves its entry on FCallStack for the
+  rest of the run (tests/negative/45 and 46 pin that shape), so a step OUT asked
+  for inside such a subroutine never sees a shallower boundary. That program has
+  no return point to step out TO, and the answer before this pair existed was the
+  same silence in EVERY gosub, not only the abandoned one. }
+function TPhosphorVM.DebugRelDepth: Integer;
+begin
+  if FFrameSP <> FDbgDepth then
+  begin
+    if FFrameSP < FDbgDepth then Result := -1 else Result := 1;
+  end
+  else if FCSP <> FDbgGosub then
+  begin
+    if FCSP < FDbgGosub then Result := -1 else Result := 1;
+  end
+  else
+    Result := 0;
+end;
+
+procedure TPhosphorVM.DebugRebase(ANewFrameSP: Integer);
+begin
+  if not FDbgArmed then Exit;
+  { WHERE THE STEP WAS ASKED HAS STOPPED EXISTING. A fault dropping to a handler's
+    level, a resume climbing back to the failing statement's, and an unwound
+    re-entrant call all move the frame pointer wholesale, past frames nobody
+    returned from. The depth the step was captured at is then a number about a
+    stack that is gone.
+
+    A LINE OF -1 IS "NOWHERE", so the next boundary differs from it whatever line
+    it carries. That is the half a depth alone cannot do: a resume can land back
+    on the very line the step was asked on, at the very depth it was asked at, and
+    a comparison against the old pair would say "not yet" for a jump the user has
+    every right to see.
+
+    AND ONLY A STEP IS PROMOTED. If the host said `continue`, a fault is not a
+    reason to stop -- that would be a debugger refusing to do the one thing it was
+    told, and every ON ERROR / resume in a loop would stop the program on every
+    iteration. dmRun stays dmRun; anything else becomes dmStepInto, so the user
+    sees where the handler took them and then carries on stepping from there.
+
+    THE GOSUB HALF OF THE DEPTH IS REBASED FROM THE VALUE THAT ACTS. No fault
+    path unwinds FCallStack -- a handler reached from inside a subroutine runs
+    with that subroutine's return address still on it -- so the honest new
+    reference is whatever FCSP is NOW, not zero and not what it was. Writing the
+    frame half and leaving this one is the "what else is keyed by what you saved"
+    question with a different answer, and it would make the pair describe two
+    different moments.
+
+    WHICH OF THESE LINES IS PINNED, measured by removing each one and rebuilding
+    with -B. The DEPTH and the PROMOTION are both caught by tests/probe_step.lpr,
+    at two different call sites. THE OTHER THREE ARE NOT, and it is worth saying
+    exactly why rather than calling them uncovered, because the reason is a proof
+    and not a gap in the fixtures:
+
+      after this procedure runs, FDbgMode is dmRun or dmStepInto and nothing
+      else. dmRun consults none of these fields. dmStepInto's rule is line, pc
+      and FRAME -- it does not consult FDbgGosub at all -- and the line and pc it
+      does consult have just been set to "nowhere", which makes the very next
+      boundary differ whatever it carries. So between this procedure and the next
+      DebugCapture, FDbgGosub is dead, and FDbgLine and FDbgPC can only decide a
+      boundary that carries BOTH the same line and the same pc AND the same depth
+      as the one the step was asked at -- which needs a `resume` retrying the
+      failing statement with no boundary in between to re-capture on.
+
+    All three stay. Leaving a gosub depth or a line number pointing into a scope
+    that has gone is a trap for whoever edits this next -- the first time someone
+    writes a fourth step mode that reads one of them, the deadness stops being
+    true -- and the whole point of this procedure is that the four fields are ONE
+    value that moves together or not at all. }
+  FDbgDepth := ANewFrameSP;
+  FDbgGosub := FCSP;
+  FDbgLine := -1;
+  FDbgPC := -1;
+  if FDbgMode <> dmRun then FDbgMode := dmStepInto;
+end;
+
+{ GIVE THE WINDOW BACK AS IT GOES, NOT WHEN IT CLOSES.
+
+  The two wall clocks are corrected by moving their starts forward, and the first
+  version of this correction did it once, in the seam's finally. That repairs the
+  script's CONTINUATION and not the WINDOW: while the host is still inside the
+  seam both clocks still say the run has been going for as long as the person has
+  been looking at the breakpoint, so anything the host does in there that
+  re-enters the engine is judged against it. Measured on both machines, with a
+  control: one prepared session, TimeoutMs 400, a seam that evaluates burn(300000)
+  through CallFunction -- which docs/embedding.md names as the watch-expression
+  path -- answers 45000150000 with no pause in front of it and `time limit
+  exceeded (400 ms)` after a 900 ms one. The budget's own clock is the same hole
+  with a different sentence: `string$: that would take 40 units of work and only 0
+  are left`.
+
+  So the window is marked at its start and credited at every point the host can
+  re-enter, rather than measured at the end. FDbgParkMark is "the instant from
+  which un-credited window time has accumulated"; this gives back everything since
+  it and re-marks at now, which makes it safe to call as often as there are doors.
+
+  WHAT IS CREDITED IS IDLE, NOT EXECUTION. A host that spends the window running
+  SCRIPT -- a watch expression is exactly that -- is charged for it, and
+  CallUserFunc re-marks on the way out so that the next credit cannot hand it
+  back. That is the same answer the heap already gives two paragraphs down in
+  DebugPoll's header, for the same reason and now on every lane: an evaluation's
+  milliseconds, its instructions and its bytes are all the script's, and a rule
+  that charged two of the three and credited the other would be this project's
+  oldest failure mode -- judging a different copy of the value than the one that
+  acts. It is also the direction that cannot be exploited.
+
+  AND THE EVALUATION IS STILL BOUNDED, which is the half that has to be measured
+  rather than assumed. Lyra gives an evaluation a clock of its OWN because it
+  SUSPENDS the script's at the start of the stop, so without one there would be no
+  ceiling left to refuse a runaway watch and `print anInfiniteFunction()` hangs the
+  session. This engine credits instead of suspending, so the script's own
+  TimeoutMs is still standing over the evaluation: measured, a watch on a
+  thirty-million-iteration function under a 400 ms ceiling is refused at 400 ms and
+  control comes back to the host. A second clock would buy nothing here and would
+  need a lane of its own in every ceiling. }
+procedure TPhosphorVM.DebugCreditPark;
+var
+  nowTick, gone: QWord;
+begin
+  nowTick := GetTickCount64();
+  { FStartTick CANNOT BE PUSHED PAST NOW BY THIS, which matters because it is a
+    QWord and the ceiling reads `GetTickCount64 - FStartTick`: one millisecond
+    into the future would wrap that to about 18 quintillion and refuse the run for
+    ever. It cannot happen here by construction rather than by a clamp -- every
+    credited interval is a disjoint sub-interval of the run, ending at the `now`
+    this line just read, so the sum of them is at most the run's own elapsed time.
+    PhosphorBudget.BudgetParked takes an argument from a caller instead of
+    measuring, so it clamps. }
+  if nowTick > FDbgParkMark then
+  begin
+    gone := nowTick - FDbgParkMark;
+    Inc(FStartTick, gone);
+    BudgetParked(Int64(gone));
+  end;
+  FDbgParkMark := nowTick;
+end;
+
+procedure TPhosphorVM.DebugBeginRun;
+begin
+  { The ARMING survives a run and the STEP does not. A host arms once, before
+    Run, and every run of that VM is debugged; a step is a question about one
+    boundary and means nothing across a run boundary. FDbgEntryPending is part of
+    the arming on purpose -- "stop at entry" is about the next run, and Prepare,
+    Run and every CallFunction each start one.
+
+    CALLED FROM THE THREE DOORS THAT START AN EXECUTION FOR A HOST: Run,
+    RunFrom (so each REPL line is its own), and CallUserFunc when FExecDepth is
+    still 0 (so a host's CallFunction is too). NOT from a re-entrant
+    CallUserFunc, which is `callfunc` or an `on error call` handler: those are
+    the same run continuing, and a step in progress must travel through them.
+
+    HELD BY probe_step's CheckStepDoesNotSurviveARun, in three directions --
+    across two REPL lines, across a prepared run into the host's first
+    CallFunction, and NOT across a script's callfunc. The sentence at the top of
+    this block was true and unpinned for a round: deleting `FDbgMode := dmRun`
+    from here passed every probe on both operating systems, because the only door
+    that could then show it (Run) builds a fresh VM per call and the two that
+    reuse one were untested. A claim in a comment is a promise; this is the
+    proof. }
+  FDbgMode := dmRun;
+  FDbgDepth := 0;
+  FDbgGosub := 0;
+  FDbgLine := -1;
+  FDbgPC := -1;
+  { AND NOT FDbgInSeam, WHICH THIS ROUTINE ALSO USED TO CLEAR. Same rule as
+    DisarmDebug's, reached from the other side: the flag describes the Pascal
+    stack and only DebugPoll owns that frame. Here the clearer was inert rather
+    than wrong -- the seam is called from inside ExecFrom, so FDbgInSeam can only
+    be True at FExecDepth >= 1, and of this routine's three callers the host-door
+    one is guarded on FExecDepth = 0 while Run and RunFrom on the SAME VM from
+    inside its own seam have already destroyed the activation the seam returns
+    into. It goes anyway. A flag with two "just in case" clearers is how the
+    DisarmDebug defect was written, and a leaked FDbgInSeam fails loudly (the seam
+    never fires again) rather than silently. }
+end;
+
+function TPhosphorVM.DebugLineArmed(ALine: Integer): Boolean;
+var
+  lo, hi, mid: Integer;
+begin
+  lo := 0;
+  hi := Length(FDbgLines) - 1;
+  while lo <= hi do
+  begin
+    mid := lo + (hi - lo) div 2;
+    if FDbgLines[mid] = ALine then Exit(True);
+    if FDbgLines[mid] < ALine then lo := mid + 1 else hi := mid - 1;
+  end;
+  Result := False;
+end;
+
+{ ASK THE HOST WHAT HAPPENS NEXT, IF THIS BOUNDARY IS ONE IT WANTED. True = keep
+  running. False = stop the activation, and FHalted says which kind of stop it is:
+  set means daStop, which is the clean end `end` gives; clear means the seam
+  raised and LastError describes it.
+
+  WHAT PARKING IN HERE COSTS THE SCRIPT, AND WHAT IS GIVEN BACK. A host may sit in
+  this call for a minute while a person reads a stack trace. The engine has four
+  ceilings and a fifth lane, and a minute of parked wall clock is not the script's
+  in any of them:
+
+    MaxSteps        an instruction count. Correct by construction -- parking
+                    executes no instruction -- and nothing is done about it.
+    TimeoutMs       wall clock, from a tick taken once per run. GIVEN BACK:
+                    FStartTick moves forward by the parked milliseconds.
+    the budget      a SECOND wall clock, started by BudgetBegin from the same
+                    TimeoutMs and read by every library call that consults RULE 1.
+                    GIVEN BACK, through BudgetParked. Correcting the first and not
+                    this one is the shape this project calls fixing the instance:
+                    the script keeps running and its next regex_find$ is refused
+                    for time a person spent looking at a breakpoint.
+    MaxMemoryBytes  measured as process heap against a floor sampled when the run
+                    began, so a debug adapter that buffers a JSON frame in here
+                    charges those bytes to the SCRIPT. GIVEN BACK: the heap is
+                    sampled either side and the floor moves by the difference, so
+                    what the host added while parked is the host's. The VM's own
+                    comment at RoomFor records this class measured for a GUI host
+                    freeing memory from OnOutput -- 1516 MB through a 32 MB
+                    ceiling -- which is the same hole through a different seam.
+    MaxOutputBytes  counts what the SCRIPT pushes through an output seam. A host
+                    writing its own debug frames to its own stream is not the
+                    script printing, and nothing here charges it. A host that
+                    writes through OnOutput from in here is printing on the
+                    script's behalf and is charged, which is also right.
+
+  A HOST THAT RUNS SCRIPT CODE WHILE PARKED IS NOT CREDITED AT ALL, and that is
+  the one asymmetry in here. TPhosphorEngine.CallFunction on a stopped frame is
+  exactly what a watch expression is, and the bytes it allocates are the SCRIPT's:
+  crediting the whole window back would have handed a program a way past its own
+  memory ceiling by asking a debugger to run the allocation for it. Measured
+  before this term existed: the same five million bytes of script globals was
+  refused at rc 4 when the script built them and allowed at rc 0 when a host
+  evaluated the identical function from a stop, on both operating systems.
+
+  The engine cannot separate the host's frame buffer from the script's array once
+  both happened inside one window, so it declines to credit the window -- the
+  direction where a number it does not know is not silently spent by the script.
+  FExecEntries is how it knows, and it is the count that ACTS rather than a flag
+  at one door: any re-entry through any door moves it. What that costs is a host
+  which both sets MaxMemoryBytes and evaluates from a stop paying for its own
+  adapter out of the script's ceiling, and the real answer to that is an
+  evaluation with a budget of its OWN -- the operator's, not the script's -- which
+  belongs to the adapter piece and not to this seam.
+
+  A SEAM THAT RAISES DOES NOT UNWIND THE INTERPRETER. The host is on a socket and
+  a socket throws; an exception travelling out of here would leave FSP, FFrameSP
+  and every open channel wherever the unwinding left them. It is turned into an
+  ordinary engine error at this boundary instead, which is the one place where the
+  VM's state is known to be clean. }
+function TPhosphorVM.DebugPoll(ALine, APC, AStopFrameSP: Integer): Boolean;
+var
+  reason: TPhosphorStopReason;
+  act: TPhosphorDebugAction;
+  stop: Boolean;
+  rel: Integer;
+  entriesFrom: QWord;
+  heapFrom, heapTo: PtrUInt;
+begin
+  Result := True;
+  { RE-ENTRANCY, and the first thing asked because every other question is wrong
+    while it is true. A host calling back into the engine from the seam runs
+    statements of its own, and each has a boundary. }
+  if FDbgInSeam then Exit;
+  if not Assigned(OnDebug) then Exit;
+
+  reason := srStep;
+  stop := False;
+  if FDbgEntryPending then
+  begin
+    FDbgEntryPending := False;
+    reason := srEntry;
+    stop := True;
+  end;
+  { THE INTERRUPT IS READ AND CLEARED IN ONE OPERATION, once per boundary, so two
+    threads cannot both consume it and an optimiser cannot keep a stale copy. It
+    is consumed even when something else is already stopping us: a pause that was
+    asked for and then swallowed by a breakpoint on the same boundary would fire
+    again at the next one, which reads as the debugger stopping twice.
+
+    AND IT STAYS ONE OPERATION, WHICH IS A MEASUREMENT AND NOT A PREFERENCE. The
+    obvious saving is to read the field plainly first and pay for the lock only
+    when it is non-zero -- the handshake would survive, since the CONSUMING read
+    would still be interlocked. It was built and benched against this build in the
+    same pinned, alternating rotation as everything else in docs/embedding.md,
+    over the ARMED-and-never-stopping shape, which is where a debugging session
+    spends nearly all of its time: 0.00% and -0.37% on Windows, -0.60% and -0.60%
+    on Linux. That is at the resolution of the clock on one machine and just above
+    it on the other, against a whole attached cost of 23 to 35 ns a boundary.
+
+    Refused on that number. FDbgInterrupt is the ONE field another thread may
+    write, and its entire contract is that it is only ever touched atomically; a
+    second, plain read of it makes every future reader re-derive why that is still
+    safe. A gain nobody can resolve does not buy that. The measurement is written
+    here so the next person does not have to take it again. }
+  if InterlockedExchange(FDbgInterrupt, 0) <> 0 then
+  begin
+    if not stop then reason := srPause;
+    stop := True;
+  end;
+  if (not stop) and (Length(FDbgLines) > 0) and DebugLineArmed(ALine) then
+  begin
+    reason := srBreakpoint;
+    stop := True;
+  end;
+  { HOW DEEP WE ARE AGAINST WHERE THE STEP WAS ASKED, computed ONCE and only when
+    a step is pending: two of the three rules need it and dmRun needs nothing. }
+  if (not stop) and (FDbgMode <> dmRun) then
+  begin
+    rel := DebugRelDepth();
+    case FDbgMode of
+      dmRun: ;
+      { "Somewhere that is not where the step began" -- a different line, or a
+        different depth. The depth half is what makes a recursive call on the same
+        line stop, and what makes the return from it stop. The line half is what
+        makes `a = 1 : b = 2` one step rather than two: it is one line and a
+        person stepping through a file steps through lines. }
+      dmStepInto:
+        stop := (ALine <> FDbgLine) or (FFrameSP <> FDbgDepth) or
+                (APC = FDbgPC);
+      { Never inside a call the step began outside of, so DEEPER is silence. At
+        the same depth it is the dmStepInto rule; SHALLOWER, the step ran off the
+        end of the body it was in, and that stops whatever the line -- a step-over
+        on the last statement of a function lands in its caller.
+
+        "DEPTH" HERE COUNTS BOTH KINDS OF CALL; see DebugRelDepth. On FFrameSP
+        alone a `gosub` is not a call at all, and a step over on a `gosub` line
+        walked every statement of the subroutine, reporting them as if they were
+        the caller's own. }
+      dmStepOver:
+        stop := (rel < 0) or
+                ((rel = 0) and ((ALine <> FDbgLine) or (APC = FDbgPC)));
+      dmStepOut:
+        stop := rel < 0;
+    end;
+  end;
+  if not stop then Exit;
+
+  { PARKED FROM HERE. Everything after this mark is the host's -- unless the host
+    spends the window running the SCRIPT, which the entry count catches for the
+    heap and CallUserFunc's re-mark catches for the two clocks.
+
+    THE CLOCKS ARE MARKED, NOT MEASURED AT THE END. See DebugCreditPark: a window
+    that is only credited when it closes leaves everything the host does INSIDE it
+    judged against the clock the run started with, and re-entering the engine from
+    in here is the documented use. FDbgSeamDepth is what tells the host calling
+    back in from the script doing it -- a `callfunc` inside an evaluation is
+    deeper, and only an activation at the depth the seam was entered at is the
+    host's own door. }
+  FDbgParkMark := GetTickCount64();
+  heapFrom := GetFPCHeapStatus().CurrHeapUsed;
+  entriesFrom := FExecEntries;
+  FDbgInSeam := True;
+  FDbgSeamDepth := FExecDepth;
+  try
+    try
+      act := OnDebug(reason, ALine, FFrameSP);
+    except
+      on E: Exception do
+      begin
+        LastError := MakeError(peRuntime,
+          'the debug seam raised ' + E.ClassName + ': ' + E.Message);
+        ErrorLine := ALine;
+        Exit(False);
+      end;
+    end;
+  finally
+    FDbgInSeam := False;
+    { The LAST of however many credits this window took. If the host re-entered
+      the engine, the marks in CallUserFunc have already given back the idle
+      either side of each evaluation and charged the evaluations themselves; if it
+      did not, this is the whole window in one call. }
+    DebugCreditPark();
+    { The floor moves by what the host added, and only UPWARD. A host that FREED
+      while parked leaves the heap lower than it found it, and lowering the floor
+      to match would hand the script a tighter ceiling than it had a moment ago --
+      for memory it never held. RoomFor already lowers the floor when it has to,
+      by the rule it documents; this one only ever declines to charge.
+
+      AND NOT AT ALL IF THE HOST RAN SCRIPT CODE IN HERE. See the header: the two
+      kinds of byte are not separable after the fact, and crediting them was a way
+      out of MaxMemoryBytes that a script could ask a watch expression to take for
+      it. The entry count is read from the same field the three ExecFrom doors
+      move, so a re-entry through ANY of them -- CallFunction, ReplRun, a nested
+      Run -- lands here, and not only the one door a flag would have been set on. }
+    if FHeapBased and (FExecEntries = entriesFrom) then
+    begin
+      heapTo := GetFPCHeapStatus().CurrHeapUsed;
+      if heapTo > heapFrom then Inc(FHeapBase, heapTo - heapFrom);
+    end;
+  end;
+
+  case act of
+    daRun:
+      FDbgMode := dmRun;
+    daStepInto:
+      begin
+        FDbgMode := dmStepInto;
+        DebugCapture(ALine, APC);
+      end;
+    daStepOver:
+      begin
+        FDbgMode := dmStepOver;
+        DebugCapture(ALine, APC);
+      end;
+    daStepOut:
+      { CLAMPED AT THE RE-ENTRANCY FLOOR. ExecFrom stops when the frame stack
+        returns to AStopFrameSP, so the outermost frame of a callback-entered call
+        stands at AStopFrameSP + 1 and there may be no shallower boundary for this
+        activation to reach: control goes back to the HOST's Pascal, not to more
+        BASIC. A step out asked for there would arm a condition nothing can ever
+        satisfy and the program would run to its end looking stopped -- the
+        debugger silent for the rest of the session.
+
+        Treated as `continue` instead, which is what every debugger does when you
+        step out of the top frame. At the top level AStopFrameSP is -1, so `0 <=
+        0` also covers the ordinary "step out of the main program": there is
+        nothing to step out to.
+
+        AND THE SECOND TERM IS WHY THIS IS NOT JUST `FFrameSP <= AStopFrameSP + 1`.
+        Not every re-entrant activation has the host above it. `callfunc("f", x)`
+        and an `on error call` handler both re-enter through CallUserFunc from
+        INSIDE a running ExecFrom, so there IS more BASIC to come back to -- the
+        statement the callfunc was part of. Clamping those makes a step out behave
+        as continue in a place where the honest answer was one boundary away.
+
+        THE TERM THAT SAYS SO IS FExecDepth, AND IT USED TO BE `AStopFrameSP <= 0`,
+        WHICH WAS A MEASURED WRONG ANSWER. A floor of zero was read as "the host is
+        above this", but top-level code makes re-entrant calls with a floor of zero
+        too -- `on error call` is the one the language reference teaches, and a
+        `callfunc` from the top level is the other. Against the documented handler
+        idiom, step out set the mode to dmRun and a step-only session then never
+        stopped again: four more boundaries ran, the return to the top level among
+        them, and the debugger reported none of them. 12 of 336 generated programs
+        and 24 of 20 840 assertions, identically on both operating systems.
+
+        The question the frame pointer cannot answer is whether an ExecFrom is
+        live on the PASCAL stack above this one, and FExecDepth is the count of
+        exactly that. It is paid once per host call and never per instruction:
+        three routines enter an ExecFrom, all three already held a try/finally,
+        and an ordinary BASIC call does not re-enter (opCall pushes its frame
+        inside the dispatch loop). Measured at nothing distinguishable from noise
+        on both machines.
+
+        AND THE THIRD TERM IS GOSUB. A pending `gosub` return address is a
+        boundary this activation WILL come back to even at its outermost frame, so
+        a step out from inside a top-level subroutine has somewhere to go and must
+        not be clamped. Without this term the pair in DebugRelDepth would be
+        computed and then thrown away for every top-level gosub.
+
+        THE CLAMP IS PINNED IN BOTH DIRECTIONS. tests/probe_step.lpr asserts that
+        a step out from a nested frame is NOT clamped, that one from the outermost
+        frame of a host call IS, that `callfunc` and `on error call` reach their
+        caller, and that a top-level gosub does. A mutation that fires one level
+        too eagerly, one that restores the old `AStopFrameSP <= 0`, and one that
+        drops the gosub term are all caught. }
+      if (FFrameSP <= AStopFrameSP + 1) and (FExecDepth <= 1) and (FCSP = 0) then
+        FDbgMode := dmRun
+      else
+      begin
+        FDbgMode := dmStepOut;
+        DebugCapture(ALine, APC);
+      end;
+    daStop:
+      begin
+        { The clean stop, not a ninth error code. See TPhosphorDebugAction. }
+        FHalted := True;
+        FHaltedByDebug := True;
+        Result := False;
+      end;
+  end;
 end;
 
 { Call ANYTHING by name, in the order a direct call uses: the program's own
@@ -3470,6 +4426,7 @@ var
   ufi, i, saved, savedSP, slots: Integer;
   savedLimit: Boolean;
   savedMask: TFPUExceptionMask;
+  evalAtSeamDoor: Boolean;
 begin
   Result := Default(TValue);
   Err := NoError();
@@ -3489,11 +4446,23 @@ begin
     Halted either.
 
     Refused here, BEFORE the frame is pushed, so nothing runs at all. `end` means
-    the program is over; the honest answer to "call this function" is no. }
+    the program is over; the honest answer to "call this function" is no.
+
+    AND IT NAMES THE RIGHT CULPRIT. This message knew only about opHalt, so a
+    session a DEBUGGER closed was refused with a sentence about an END statement
+    -- which a GUI host puts in front of a person, about a script that may not
+    contain one. The flag that already answers is FHaltedByDebug; EndOfTopLevel
+    is the other place that reads it, for the other half of the same distinction.
+    Both refusals are final and both say to Prepare again; only the reason
+    differs, because only the reason differed. }
   if FHalted then
   begin
-    Err := MakeError(peRuntime, 'the script has run END; this session is over -- ' +
-      'Prepare it again before calling into it');
+    if FHaltedByDebug then
+      Err := MakeError(peRuntime, 'a debugger stopped this session -- ' +
+        'Prepare it again before calling into it')
+    else
+      Err := MakeError(peRuntime, 'the script has run END; this session is over -- ' +
+        'Prepare it again before calling into it');
     Exit;
   end;
   ufi := FProg.FindUserFunc(AName, Length(Args));
@@ -3576,6 +4545,49 @@ begin
   Inc(FFrameSP);
   Inc(FCallDepth);
   savedMask := EnterFPU();   // this is an entry into execution; see EnterFPU
+  { A HOST CALL IS A RUN OF ITS OWN, AND THE STEP DOES NOT SURVIVE ONE.
+
+    DebugBeginRun's header says the arming survives a run and the step does not,
+    and Run and RunFrom both say it by calling it. This door said it for neither
+    -- so a step left pending when a prepared script's top level ended was still
+    pending when the host made its first CallFunction, and the host got a stop in
+    a line nobody armed, out of a run that was over. TPhosphorEngine.CallFunction
+    already treats this door as a run's own boundary for the two ceilings
+    (BudgetBegin is on the line before the call); the step state is now on the
+    same footing, which is one rule at three doors instead of two.
+
+    ONLY WHEN THE HOST IS THE CALLER. FExecDepth is still 0 here -- the Inc is
+    the next line -- and that is precisely "no interpreter activation is live
+    above this one". A SCRIPT-initiated re-entry is 1 or more: `callfunc` and an
+    `on error call` handler both come through here from inside a running
+    ExecFrom, and a step in progress has to carry straight into them and back
+    out. Both directions are pinned in tests/probe_step.lpr, because a reset
+    written without this term passes the assertion above it and breaks the
+    stepper inside every callfunc. }
+  if FExecDepth = 0 then DebugBeginRun();
+  { AND A CALL THE HOST MAKES FROM INSIDE A STOP IS THE END OF AN IDLE INTERVAL.
+
+    This is the watch-expression door. The window's two wall clocks are credited
+    HERE rather than only when the seam returns, because the evaluation about to
+    run is judged by them and a person's pause is not the script's time. Without
+    it, one prepared session under TimeoutMs 400 answers a watch correctly with no
+    pause in front of it and `time limit exceeded (400 ms)` after a 900 ms one --
+    on both machines, and with the budget's own clock giving the same verdict in
+    its own words.
+
+    THE HOST'S OWN DOOR AND NOT THE SCRIPT'S, which is the same distinction the
+    reset above makes and a different measurement of it. FExecDepth is back at the
+    value the seam was entered at exactly when no interpreter activation has been
+    added since -- so a `callfunc` INSIDE an evaluation, which is deeper, is
+    script execution and is charged. A credit written on FDbgInSeam alone would
+    hand every nested callfunc in a watch expression a fresh clock.
+
+    The re-mark in the finally is the other half: it stops the NEXT credit from
+    giving back what this evaluation spent. }
+  evalAtSeamDoor := FDbgInSeam and (FExecDepth = FDbgSeamDepth);
+  if evalAtSeamDoor then DebugCreditPark();
+  // The third of three ExecFrom entries. See FExecDepth.
+  Inc(FExecDepth); Inc(FExecEntries);
   try
    try
     if ExecFrom(FProg.UserFuncs[ufi].Entry, saved) then
@@ -3584,7 +4596,36 @@ begin
       // the stack, and popping one takes whatever the caller had pushed and still
       // needs.
       if FHalted then
-        Result := Default(TValue)
+      begin
+        Result := Default(TValue);
+        { AND A HALT THE HOST ASKED FOR SAYS SO AT THE HOST'S OWN DOOR.
+
+          `end` and daStop both arrive here as FHalted, and the answer for `end`
+          is right: the script decided, the call has no value, and 0 with no
+          error is the honest report of a program that ended itself. daStop is
+          not that. The HOST decided, one statement into a function the host
+          asked for, and answering 0 with LastError still NoError gave it back
+          something it cannot tell from a function that returned zero. Measured:
+          a prepared session, ArmDebug on the one line inside f, the seam
+          answering daStop -- CallFunction handed back "0" and ErrorMessage "",
+          and the next call was then refused for an END the script never ran.
+
+          FExecDepth = 1 IS "THIS IS THE HOST'S OWN DOOR". The Inc is a dozen
+          lines above, so 1 means no other ExecFrom is live on the Pascal stack
+          above this one. A SCRIPT-initiated re-entry -- `callfunc`, or an `on
+          error call` handler -- is 2 or more, and there a debugger's stop has to
+          keep travelling as the clean halt opCall already knows how to read
+          (`if FHalted then Exit(True)`), exactly like `end` inside a callfunc.
+          Reporting an error there would turn a stop into a fault in the middle
+          of a statement the interpreter is still holding.
+
+          It does not change WHAT a stop does -- the session stays closed, which
+          is FHaltedByDebug's whole reason for existing -- only what the engine
+          says about it. }
+        if FHaltedByDebug and (FExecDepth = 1) then
+          Err := MakeError(peRuntime,
+            'a debugger stopped this call before it returned');
+      end
       else
         Result := Pop();   // the routine's return value
     end
@@ -3618,7 +4659,37 @@ begin
     // to do this, so anything that escaped as a Pascal exception left the frame
     // stack permanently deeper than the program believed.
     Dec(FCallDepth);
+    Dec(FExecDepth);
     LeaveFPU(savedMask);
+    { WHAT THE EVALUATION SPENT IS THE SCRIPT'S, so the window is re-marked at now
+      and the next credit starts from here. Charged, not credited -- the same
+      answer the heap gives a few lines down in DebugPoll's finally, and for the
+      same reason: a watch expression really runs the script's code, and a rule
+      that credited its milliseconds while charging its bytes and its instructions
+      would be two different answers to one question. Read the value that ACTS. }
+    if evalAtSeamDoor then FDbgParkMark := GetTickCount64();
+    { THE THIRD WHOLESALE FRAME MOVE, AND THE ONLY ONE THAT IS SOMETIMES NOT ONE.
+      On the success path opRetFunc has already popped the frame this pushed, so
+      FFrameSP is `saved` and the line below writes back what is there -- an
+      ordinary return, and a pending step is still about a stack that is intact.
+      On the failure and exception paths the body left the pointer wherever it
+      got to and this drops it, sometimes by several levels, with no boundary in
+      between. The DIFFERENCE is what decides, read from the value that acts, so
+      the question cannot be answered wrongly by reasoning about which path we are
+      on: if the pointer is about to MOVE, the step state is stale.
+
+      THIS IS THE THIRD SITE AND THE ONE I COULD NOT PIN, said out loud because
+      the other two are pinned at two assertions each. A mutation that removes it
+      survives every runner on both operating systems, and the reason is
+      structural rather than a gap in the fixtures: this site can only ever LOWER
+      the frame pointer, and every step condition is a `<` or a "differs", both of
+      which a wholesale drop satisfies on its own. So the boundary after the
+      unwind stops either way. What the rebase buys is that it stops for the right
+      REASON, against a depth that means something, rather than by accident
+      against a depth from a stack that is gone -- and the first time a fourth
+      step mode is written with an `=` in it, the accident stops happening. It
+      costs one integer compare on a path that has just unwound an activation. }
+    if FFrameSP <> saved then DebugRebase(saved);
     FFrameSP := saved;
     { AND THE VALUE STACK, WHICH THIS RESTORED FOR THE FRAMES ONLY.
 

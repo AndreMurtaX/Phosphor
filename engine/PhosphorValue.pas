@@ -75,6 +75,70 @@ type
   TPhosphorBreakpointProc = procedure(const AMessage: String; ALine: Integer;
                                       const AOperands: array of TValue) of object;
 
+  { WHY A DEBUGGER STOPPED, AND WHAT IT WANTS NEXT. Declared here beside the other
+    seam types for the same reason they are: the VM and the engine facade share
+    them without a circular dependency, and the playbook records that a type
+    naming TValue has to come after TValue in the same type block.
+
+      srEntry       the first boundary of a run armed with stop-at-entry
+      srBreakpoint  this boundary's line is one the host armed
+      srStep        the step the host last asked for has completed
+      srPause       the host called InterruptDebug from somewhere else
+
+      daRun         resume, and consult only the armed lines from here on
+      daStepInto    stop at the next boundary, whatever its depth
+      daStepOver    stop at the next boundary at this depth or shallower
+      daStepOut     stop at the next boundary strictly shallower than this one
+      daStop        end the run now
+
+    daStop ENDS THE RUN THE WAY `end` DOES, AND DELIBERATELY NOT WITH AN ERROR
+    CODE OF ITS OWN. The work order that asked for this seam specified a
+    `peHalted`. There is no such code: TPhosphorErrorCode is peNone..peFatal,
+    its own comment says it is "assigned by append only, never reordered -- these
+    codes are part of the engine's surface the way opcodes are", and a ninth code
+    would have to start meaning something to every host that reads one. What a
+    host asking to stop actually wants is the clean stop the engine already has --
+    opHalt sets FHalted, the run reports success, and Halted answers True
+    afterwards, which is exactly what END does. A host that wants the run to look
+    like a FAILURE is the one deciding that, and says so itself. }
+  TPhosphorStopReason = (srEntry, srBreakpoint, srStep, srPause);
+  TPhosphorDebugAction = (daRun, daStepInto, daStepOver, daStepOut, daStop);
+
+  { THE DEBUG SEAM, AND THE ONE THING THAT SEPARATES IT FROM EVERY OTHER SEAM IN
+    THIS ENGINE: IT MAY BLOCK.
+
+    This engine is single-threaded, so "stop at a breakpoint" cannot mean park the
+    thread and let someone else drive -- there is nobody else. It means CALL BACK.
+    The VM invokes this from a statement boundary, runs no further instruction
+    until it returns, and does what the returned action says. A host that wants to
+    wait for a person does its waiting INSIDE this call. That is why
+    TPhosphorBreakpointProc above says it must NOT block and this one may: the
+    breakpoint seam is a report with no answer, and this one is a question.
+
+    ALine is the source line of the boundary. AFrameDepth is how many activation
+    frames are live under it -- 0 at the top level, and the same number
+    TPhosphorVM.DbgFrameDepth answers.
+
+    THOSE TWO INTEGERS ARE ALL THIS SEAM CARRIES, AND `Self` IS THE HOST'S OWN
+    OBJECT, NOT THE ENGINE'S. It is declared `of object` so a host can hold its
+    session state in the method's own class; nothing about that hands back a VM.
+    The read-only state window -- the call stack, every global by name, every
+    local of every live frame -- is on TPhosphorVM, and the way to it from in here
+    is TPhosphorEngine.DebugVM, which answers the VM that is executing at every
+    door and nil at every other moment. This paragraph used to claim the window
+    was reachable without saying through what, and through TPhosphorEngine.Run it
+    was not reachable at all.
+
+    The pair is deliberate: the engine hands the seam the two numbers a host
+    always needs, and the host asks for the rest only when it wants it. A host
+    that never reads state pays nothing for the state window.
+
+    WHAT PARKING IN HERE COSTS THE SCRIPT is not nothing, and the VM gives back
+    what it can measure; TPhosphorVM.DebugPoll enumerates all four ceilings and
+    says which one it cannot reach. Read that before you allocate in here. }
+  TPhosphorDebugProc = function(AReason: TPhosphorStopReason; ALine: Integer;
+                                AFrameDepth: Integer): TPhosphorDebugAction of object;
+
   { The host-services seam: platform facilities the ENGINE asks the HOST for,
     instead of reaching into a windowing framework for them. Declared here (beside
     OnOutput/OnBreakpoint) so the VM and the engine facade share it without a

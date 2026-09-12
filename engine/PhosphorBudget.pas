@@ -208,6 +208,29 @@ const
 procedure BudgetBegin(AMaxSteps, ATimeoutMs: Int64);
 procedure BudgetEnd;
 
+{ TIME THAT WAS NOT THE SCRIPT'S. Move this run's start forward by AMs, so that a
+  stretch of wall clock nobody in the script spent is not charged to it.
+
+  THE ONE CALLER, AND WHY IT IS NOT A LIBRARY. TPhosphorVM's debug seam MAY BLOCK
+  -- it is the only seam in the engine that may -- and a host that parks in it for
+  a minute while a person reads a breakpoint has burned a minute of a clock that
+  started when the run did. The VM gives that minute back to its own FStartTick;
+  this gives the same minute back to the budget's clock, which is a SECOND wall
+  clock, started by BudgetBegin from the same TimeoutMs and read by OutOfTime and
+  MsLeft. Correcting one and not the other leaves a debugged script's very next
+  library call refused with "the budget for this run is spent", for time a person
+  spent looking at it. Measured shape, not a hypothetical: with TimeoutMs = 2000,
+  parking for three seconds at one breakpoint left MsLeft at 0 for the rest of the
+  run.
+
+  IT ONLY EVER MOVES THE START FORWARD, never back, and only while a budget is
+  actually installed. So it cannot lengthen a run beyond its ceiling by any
+  argument -- an AMs of 0 or less does nothing -- and it cannot resurrect a budget
+  that was never begun. GSpent is deliberately NOT cleared: a refusal that already
+  happened happened, and un-spending it here would be this unit lying about its
+  own history. }
+procedure BudgetParked(AMs: Int64);
+
 { True when the host asked for any bound at all. A library uses this to skip work
   that only matters under a budget -- never to decide whether to be correct. }
 function BudgetActive: Boolean;
@@ -345,6 +368,26 @@ end;
 function BudgetActive: Boolean;
 begin
   Result := GActive;
+end;
+
+procedure BudgetParked(AMs: Int64);
+var
+  now, gone: QWord;
+begin
+  if (GDepth <= 0) or (AMs <= 0) then Exit;
+  { CLAMPED AT "NOW", AND THE CLAMP IS NOT BELT AND BRACES -- it is the whole
+    reason this is four lines and not one. GStart is a QWord and every reader
+    computes `GetTickCount64() - GStart`, so a start pushed even one millisecond
+    into the FUTURE makes that subtraction wrap to about 18 quintillion and every
+    ceiling read "spent" for the rest of the run. Measured on the first version of
+    this procedure: a budget with a 200 ms ceiling, told 5000 ms were parked,
+    answered 0 ms remaining. It is also the honest bound on its own terms -- no
+    more time can have been parked than has elapsed. }
+  now := GetTickCount64();
+  if now <= GStart then Exit;
+  gone := now - GStart;
+  if QWord(AMs) >= gone then GStart := now
+  else GStart := GStart + QWord(AMs);
 end;
 
 // --- the two consultations ---------------------------------------------------

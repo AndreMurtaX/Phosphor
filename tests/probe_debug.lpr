@@ -450,6 +450,100 @@ begin
   end;
 end;
 
+{ THE TWO GUARDS INSIDE StoppableLines THAT NO COMPILED FIXTURE CAN REACH, and
+  which nothing held until this procedure existed. They are the same class the
+  sort above is in -- code only a hand-written or loaded .pbc can arrive at -- and
+  the same argument applies: a routine indistinguishable from its broken version
+  is a trap for whoever edits it next.
+
+  GUARD ONE, THE opJump HALF OF THE FUNCTION-HEADER EXCLUSION. A function's header
+  line carries a boundary whose code is the JUMP OVER THE BODY, executed once as
+  the program steps past the definition and never when the function is called, so
+  a breakpoint there fires at startup and looks broken. It is excluded by the
+  TABLE -- the boundary two before each entry point -- and BOTH opcodes are
+  checked: the boundary must be an opStmt and the instruction after it must be the
+  jump. Everything the compiler emits satisfies both, so only a program built
+  another way can tell the pair from the first half alone. Here the instruction
+  before the entry is an opNop, so the pair does NOT match and line 40 must stay
+  IN the set: a header exclusion that fired on the opStmt alone would silently
+  drop a line a breakpoint belongs on.
+
+  GUARD TWO, THE Line <= 0 FILTER. A .pbc carries each instruction's Line straight
+  from the file and ValidateProgram never looks at it, so 0 and a negative are
+  both arrivable. Neither is a line any editor can show, and a set containing one
+  is a breakpoint a user can never reach. Lines 0 and -5 are here and neither may
+  appear.
+
+  Asserted twice, as the sort is: once on the program built by hand, and once
+  through the serializer, so the second says the input really is one a host can be
+  handed rather than one only this file can make. }
+procedure CheckStoppableGuards;
+const
+  { Derived from the construction below, by hand:
+      line 12 -- an ordinary boundary                                      kept
+      line  0 -- a boundary with no line                                dropped
+      line -5 -- a boundary with a negative line                        dropped
+      line 40 -- the boundary two before `notafunc`'s entry, but the
+                 instruction after it is an opNop and not the jump over a
+                 body, so the header exclusion does not apply             kept
+      line 44 -- the entry point's own first statement                    kept }
+  Want = '12,40,44';
+var
+  p, back: TProgram;
+  st: TBytesStream;
+  err, wanted: String;
+  entry: Integer;
+begin
+  back := nil;
+  p := TProgram.Create();
+  try
+    p.Emit(opStmt, 0, 0, 12);       // 0: an ordinary boundary
+    p.Emit(opNop, 0, 0, 12);        // 1
+    p.Emit(opStmt, 0, 0, 0);        // 2: no line at all
+    p.Emit(opNop, 0, 0, 0);         // 3
+    p.Emit(opStmt, 0, 0, -5);       // 4: a negative line
+    p.Emit(opNop, 0, 0, -5);        // 5
+    p.Emit(opStmt, 0, 0, 40);       // 6: two before the entry -- but see 7
+    p.Emit(opNop, 0, 0, 40);        // 7: an opNop, NOT the jump over a body
+    p.Emit(opStmt, 0, 0, 44);       // 8: the entry point
+    entry := 8;
+    p.Emit(opHalt, 0, 0, 44);       // 9
+    p.SetGlobalTableUnnamed([]);
+    p.AddUserFunc('notafunc', entry, 0, [], [], vtNumber);
+
+    { --fail corrupts the EXPECTATION here too, the way it does for the scrambled
+      set: an assertion nobody has watched fail is not known to be able to. }
+    wanted := Want;
+    if ProveFail then wanted := wanted + ',99';
+    CheckStr(LinesToStr(p.StoppableLines), wanted,
+             'StoppableLines keeps a header-shaped boundary whose successor is ' +
+             'not the jump over a body, and drops every line of 0 or less');
+
+    st := TBytesStream.Create();
+    try
+      WriteProgram(st, p);
+      st.Position := 0;
+      if not ReadProgram(st, back, err) then
+      begin
+        Report(False, 'the guard fixture survives a .pbc round trip (' + err + ')');
+        back := nil;
+      end;
+    finally
+      st.Free;
+    end;
+    if back = nil then Exit;
+    { THE REACHABILITY HALF. The loader accepted a boundary with no line and one
+      with a negative line, so both guards are defending an input a host can be
+      handed and not a hypothetical one. }
+    CheckStr(LinesToStr(back.StoppableLines), wanted,
+             'and a .pbc really can carry both shapes, with the loaded program ' +
+             'answering the same set');
+  finally
+    back.Free;
+    p.Free;
+  end;
+end;
+
 { WHAT THE PREPARED PAIR ANSWERS AFTER SOMETHING ELSE RAN. Run, RunBytecode and the
   next Prepare all open by calling Finish, which frees the prepared VM and the
   prepared program. A host that cached the program pointer is holding a freed
@@ -659,6 +753,7 @@ begin
     prog.Free;
   end;
   CheckScrambledBoundaries();
+  CheckStoppableGuards();
   CheckPreparedState();
   CheckPreparationDiscarded();
 

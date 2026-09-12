@@ -281,10 +281,43 @@ else {
         @{ name='probe_sandbox';  src='tests\probe_sandbox.lpr' },
         @{ name='probe_registry'; src='tests\probe_registry.lpr' },
         @{ name='probe_debug';    src='tests\probe_debug.lpr' },
+        # The debug seam, the hook and the step state machine. A scripted host
+        # drives a whole debugging session from Pascal, which no .bas file can
+        # express: the seam is a CALLBACK the engine waits on, so the test has to
+        # be the thing on the other end of it.
+        @{ name='probe_step';     src='tests\probe_step.lpr' },
+        # The OTHER half of the stepper's proof: probe_step pins named cases from
+        # fixtures whose traces are derived by hand, and this one generates
+        # program shapes it has never seen and judges every step against a rule
+        # stated in its own header. It exists because four sweeps shipped with
+        # the seam and every one of them measured an UNATTACHED engine -- a sweep
+        # that measures the OFF state of a feature has not measured the feature,
+        # and the one defect that mattered lived on the axis none of them crossed.
+        # The same sentence one level down: its first round only ever called
+        # eng.Run, so every generated program with functions is now ALSO debugged
+        # through a host Prepare + CallFunction, which is the door a GUI uses and
+        # where two more defects were living.
+        # It is also where THE DIFFERENTIAL lives, and that is the half that
+        # re-runs for ever. docs/proof-axes.md section 5: for one source,
+        # detached, attached-and-continuing and attached-and-stepping must be
+        # byte-identical on exit code, stdout, error line and error message. All
+        # three legs run on every generated program at both doors. The detached
+        # one -- no seam installed, nothing armed -- was missing for three rounds,
+        # and it is the only leg that can see a defect caused by the PRESENCE of a
+        # debugger rather than by its answers.
+        @{ name='probe_sweep';    src='tests\probe_sweep.lpr' },
         # The WORDING of the abandoned-activation diagnostics. tests\negative
         # compares exit codes only and tests\classic discards stderr, so without
         # this nothing in the tree would notice either message being garbled.
         @{ name='probe_onerror';  src='tests\probe_onerror.lpr' },
+        # The COST of the seam, committed rather than quoted. Three review rounds
+        # disagreed about one cell of docs/embedding.md's table and none could
+        # settle it, because each ran a bench that lived in a scratch directory
+        # and went away with it. Here it judges only the DIFFERENTIAL -- attached
+        # and stepping change nothing a program prints or answers -- and prints
+        # its timings without a threshold, because a fixed millisecond bar on an
+        # unknown machine is red at random. `--full` is the real measurement.
+        @{ name='bench_debug';    src='tests\bench_debug.lpr' },
         @{ name='probe_budget';   src='scripts\probe_budget.lpr' },
         @{ name='probe_crt';      src='tests\probe_crt.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' },

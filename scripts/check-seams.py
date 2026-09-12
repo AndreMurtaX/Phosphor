@@ -109,6 +109,25 @@ EXEMPT = {
     # exemption whose host now assigns the seam, which is what makes this table
     # a check in both directions rather than a place to write an excuse once.
 
+    # THE DEBUG SEAM, AND SIX HOSTS THAT ANSWER "NOT YET" OR "NOT EVER".
+    #
+    # It is the one seam in the engine that MAY BLOCK: the VM calls it at a
+    # statement boundary and waits for the action it returns. That is the whole
+    # reason none of these six fills it today. Five of them have no person at the
+    # other end and must never park -- a runner that stopped at a breakpoint would
+    # hang a suite with no console output, which is the trap this project already
+    # has three names for (the REPL, app_run, and a prompting Remove-Item). The
+    # sixth, `phosphor`, is where the debug adapter goes, and this line comes out
+    # the day `phosphor debug --port N` lands. Leaving it here until then is the
+    # honest state: the engine offers the seam, nothing in the tree drives it yet,
+    # and tests/probe_step.lpr is what proves the seam works without a host.
+    'phosphor.lpr:OnDebug': 'the console host has no debug adapter yet; `phosphor debug --port N` is the piece that fills this and deletes this line',
+    'phosphortest.lpr:OnDebug': 'headless: a seam that may block would hang the suite, and a .bas test has nobody to press continue',
+    'phosphorguitest.lpr:OnDebug': 'same as phosphortest: a headless GUI run has nowhere to stop to',
+    'phosphorpkgtest.lpr:OnDebug': 'same as phosphortest',
+    'phosphorhttptest.lpr:OnDebug': 'same as phosphortest',
+    'phosphorembed.lpr:OnDebug': 'the embedding demo runs to completion with nobody watching; an embedder that wants to stop installs one, which tests/probe_step.lpr demonstrates end to end',
+
     # The suite runners report through assertion counters and write their own
     # summary bytes, and a .bas test file cannot type at a prompt.
     'phosphortest.lpr:OnOutput': 'the runner writes its own summary bytes; a test asserts, it does not print',

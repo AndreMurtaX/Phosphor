@@ -648,4 +648,63 @@ if [ -n "$p5why" ]; then echo "        ceilings: $p5why"; okP=1; fi
 if [ "$okP" -eq 0 ]; then echo 'PASS  P:breakpoint reports (all three doors, on stderr, stdout byte-exact, bounded)'
 else echo 'FAIL  P:a breakpoint reports to nobody, reports onto stdout, or reports without a ceiling'; fail=1; fi
 
+# --- Q: `phosphor debug` -------------------------------------------------------
+# A debugger is a seam that MAY BLOCK, and blocking on a read means blocking on
+# somebody typing. Three things are asserted here and the third is the point:
+#   1. with no terminal it must not wait -- the REPL trap wearing another hat
+#   2. a scripted session steps, names the frame, and names the variables
+#   3. THE PROGRAM'S OWN STDOUT IS BYTE-IDENTICAL WITH THE DEBUGGER ATTACHED.
+#      That is what "the debugger must be invisible to the program" means where a
+#      person can see it, and it is the assertion that breaks first if it stops
+#      being true.
+okQ=0
+dbgdir="$(mktemp -d)"
+trap 'rm -rf "$dbgdir"' EXIT
+printf '%s\n' 'total = 0' 'function dobro(n) local r' '  r = n * 2' '  return r' 'endfunction' 'for i = 1 to 3' '  total = total + dobro(i)' 'next' 'println "total="; total' > "$dbgdir/q.bas"
+
+# 1. no terminal: runs to completion, says why once, exit 0
+if qout="$("$exe" debug "$dbgdir/q.bas" < /dev/null 2>"$dbgdir/q1.err")"; then qcode=0; else qcode=$?; fi
+q1err="$(cat "$dbgdir/q1.err")"
+if [ "$qcode" -ne 0 ]; then echo "        no-terminal: exit $qcode"; okQ=1; fi
+if [[ "$q1err" != *'not a terminal'* ]]; then echo '        no-terminal: did not say why it continued'; okQ=1; fi
+
+# 2. a scripted session: step twice into the function, ask where and what
+printf 's\ns\ns\ns\ns\nw\nv\nc\n' > "$dbgdir/cmds"
+"$exe" debug "$dbgdir/q.bas" < "$dbgdir/cmds" > "$dbgdir/q2.out" 2>"$dbgdir/q2.err"
+q2err="$(cat "$dbgdir/q2.err")"
+if [[ "$q2err" != *'dobro()'* ]];  then echo '        session: the call stack never named the function'; okQ=1; fi
+if [[ "$q2err" != *'depth 1'* ]];  then echo '        session: never stepped into the call'; okQ=1; fi
+if [[ "$q2err" != *'n  '* ]];      then echo '        session: locals were not listed by name'; okQ=1; fi
+
+# 3. THE DEBUGGER IS INVISIBLE TO THE PROGRAM: same stdout, attached or not.
+"$exe" "$dbgdir/q.bas" < /dev/null > "$dbgdir/plain.out" 2>/dev/null
+if ! cmp -s "$dbgdir/q2.out" "$dbgdir/plain.out"; then
+  echo '        invisible: stdout differs with the debugger attached'; okQ=1; fi
+if ! printf '%s' "$qout" | cmp -s - "$dbgdir/plain.out"; then
+  echo '        invisible: stdout differs with the debugger attached but silent'; okQ=1; fi
+
+# 4. --break stops where it was asked and nowhere else. Line 9 is outside the
+#    loop, so once; line 7 is inside it, so once per iteration -- which is what a
+#    breakpoint in a loop is for, and the first version of this asserted 1 for it.
+printf 'w\nc\n' > "$dbgdir/cmds2"
+"$exe" debug --break 9 "$dbgdir/q.bas" < "$dbgdir/cmds2" > /dev/null 2>"$dbgdir/q4.err"
+q4="$(grep -c -- '-- breakpoint at' "$dbgdir/q4.err" || true)"
+if [ "$q4" -ne 1 ]; then echo "        --break 9: stopped $q4 times, wanted 1"; okQ=1; fi
+if grep -q -- '-- entry at' "$dbgdir/q4.err"; then
+  echo '        --break: still stopped at entry, which the flag replaces'; okQ=1; fi
+printf 'c\nc\nc\n' > "$dbgdir/cmds3"
+"$exe" debug --break 7 "$dbgdir/q.bas" < "$dbgdir/cmds3" > /dev/null 2>"$dbgdir/q4b.err"
+q4b="$(grep -c -- '-- breakpoint at' "$dbgdir/q4b.err" || true)"
+if [ "$q4b" -ne 3 ]; then echo "        --break 7: stopped $q4b times in a 3-pass loop, wanted 3"; okQ=1; fi
+
+# 5. bytecode is refused with the reason, not run half-blind
+"$exe" compile "$dbgdir/q.bas" "$dbgdir/q.pbc" > /dev/null 2>&1
+if "$exe" debug "$dbgdir/q.pbc" < /dev/null > /dev/null 2>"$dbgdir/q5.err"; then
+  echo '        pbc: accepted a file that carries no names'; okQ=1; fi
+if [[ "$(cat "$dbgdir/q5.err")" != *'no source and no variable names'* ]]; then
+  echo '        pbc: refused without saying why'; okQ=1; fi
+
+if [ "$okQ" -eq 0 ]; then echo 'PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)'
+else echo 'FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program'; fail=1; fi
+
 exit "$fail"

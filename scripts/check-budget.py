@@ -432,6 +432,22 @@ ALLOWED = {
     # Two are seams and are answered on their own terms below: ReadLine, whose
     # sizes come from the console; and Breakpoint, which is why the directory is
     # scanned at all.
+    'phosphor.lpr:TDebugSession.ShowStack':
+        'the frame walk is capped at DBG_STACK_MAX, a constant of that routine, '
+        'and says how many frames it did not print. The SCRIPT chooses the depth '
+        '-- 262144 frames is reachable -- so the loop is bounded by the host and '
+        'not by the program, which is what the cap is for',
+    'phosphor.lpr:TDebugSession.OnStop':
+        'the command loop of an interactive debugger: it iterates once per '
+        'command a PERSON types and leaves on the first one that answers the '
+        'seam. A script cannot make it turn, and stdin at EOF leaves it on the '
+        'first pass -- which is asserted in block Q of scripts/test.{ps1,sh}',
+    'phosphor.lpr:ParseBreakList':
+        'splits the --break argument, which is a command line and not a script; '
+        'and it refuses past 256 lines rather than growing',
+    'phosphor.lpr:DebugFile':
+        'copies the armed set ParseBreakList filled, which that function caps at '
+        '256 -- a command line, not a script',
     'phosphor.lpr:TConsoleHost.Breakpoint':
         'the report is bounded by three named constants of this unit -- '
         'BP_MAX_MESSAGE_BYTES, BP_MAX_OPERAND_BYTES and BP_MAX_LINE_BYTES -- so '

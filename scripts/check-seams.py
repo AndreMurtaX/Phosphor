@@ -121,7 +121,6 @@ EXEMPT = {
     # the day `phosphor debug --port N` lands. Leaving it here until then is the
     # honest state: the engine offers the seam, nothing in the tree drives it yet,
     # and tests/probe_step.lpr is what proves the seam works without a host.
-    'phosphor.lpr:OnDebug': 'the console host has no debug adapter yet; `phosphor debug --port N` is the piece that fills this and deletes this line',
     'phosphortest.lpr:OnDebug': 'headless: a seam that may block would hang the suite, and a .bas test has nobody to press continue',
     'phosphorguitest.lpr:OnDebug': 'same as phosphortest: a headless GUI run has nowhere to stop to',
     'phosphorpkgtest.lpr:OnDebug': 'same as phosphortest',

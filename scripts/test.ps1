@@ -39,6 +39,16 @@ $expected = Join-Path $root 'tests\skeleton\hello.expected'
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "phosphor-run-$PID"
 if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
 
+# `Get-Content -Raw` answers $null for an EMPTY file, and $null.Trim() throws a
+# null-reference that $ErrorActionPreference = 'Stop' turns into a dead run. Every
+# caller here reads the stderr of something that may have said nothing at all.
+function Read-Text([string] $path) {
+    if (-not (Test-Path $path)) { return '' }
+    $raw = Get-Content -Raw $path
+    if ($null -eq $raw) { return '' }
+    return $raw.Trim()
+}
+
 # NOT removed at the end, and that is a decision rather than an oversight. Emptying
 # it would take a recursive removal, which this tree forbids outright -- it lost
 # thirteen working copies to one. Three cleanups were written and measured here on
@@ -864,6 +874,89 @@ if ($p5why -ne '') {
 if ($okP) { Write-Host "PASS  P:breakpoint reports (all three doors, on stderr, stdout byte-exact, bounded)" -ForegroundColor Green }
 else { Write-Host "FAIL  P:a breakpoint reports to nobody, reports onto stdout, or reports without a ceiling" -ForegroundColor Red }
 
+
+# --- Q: `phosphor debug` -------------------------------------------------------
+# See scripts/test.sh's block Q for what each of the five asks and why the third
+# is the one that matters: the program's own stdout must not move when a debugger
+# is attached to it.
+$okQ = $true
+$dbgDir = Join-Path $tmp 'dbg'
+if (-not (Test-Path $dbgDir)) { New-Item -ItemType Directory -Path $dbgDir | Out-Null }
+$qBas = Join-Path $dbgDir 'q.bas'
+Set-Content -LiteralPath $qBas -Encoding ascii -Value @(
+    'total = 0',
+    'function dobro(n) local r',
+    '  r = n * 2',
+    '  return r',
+    'endfunction',
+    'for i = 1 to 3',
+    '  total = total + dobro(i)',
+    'next',
+    'println "total="; total'
+)
+
+function Dbg-Run([string] $argline, [string] $stdinFile, [string] $tag) {
+    $o = Join-Path $dbgDir "$tag.out"
+    $e = Join-Path $dbgDir "$tag.err"
+    if ($stdinFile -eq '') {
+        cmd /c "`"$exe`" $argline > `"$o`" 2> `"$e`" < NUL"
+    } else {
+        cmd /c "`"$exe`" $argline > `"$o`" 2> `"$e`" < `"$stdinFile`""
+    }
+    return @{ Code = $LASTEXITCODE; Out = $o; Err = $e }
+}
+
+# 1. no terminal: runs to completion, says why once, exit 0
+$q1 = Dbg-Run "debug `"$qBas`"" '' 'q1'
+$q1err = Read-Text $q1.Err
+if ($q1.Code -ne 0) { Write-Host ("        no-terminal: exit {0}" -f $q1.Code) -ForegroundColor DarkGray; $okQ = $false }
+if ($q1err -notlike '*not a terminal*') { Write-Host '        no-terminal: did not say why it continued' -ForegroundColor DarkGray; $okQ = $false }
+
+# 2. a scripted session
+$cmds = Join-Path $dbgDir 'cmds'
+Set-Content -LiteralPath $cmds -Encoding ascii -Value @('s','s','s','s','s','w','v','c')
+$q2 = Dbg-Run "debug `"$qBas`"" $cmds 'q2'
+$q2err = Read-Text $q2.Err
+if ($q2err -notlike '*dobro()*') { Write-Host '        session: the call stack never named the function' -ForegroundColor DarkGray; $okQ = $false }
+if ($q2err -notlike '*depth 1*') { Write-Host '        session: never stepped into the call' -ForegroundColor DarkGray; $okQ = $false }
+
+# 3. THE DEBUGGER IS INVISIBLE TO THE PROGRAM
+$plain = Dbg-Run "`"$qBas`"" '' 'plain'
+$a = [System.IO.File]::ReadAllBytes($q2.Out)
+$b = [System.IO.File]::ReadAllBytes($plain.Out)
+$c = [System.IO.File]::ReadAllBytes($q1.Out)
+if (-not (@(Compare-Object $a $b -SyncWindow 0).Count -eq 0)) {
+    Write-Host '        invisible: stdout differs with the debugger attached' -ForegroundColor DarkGray; $okQ = $false }
+if (-not (@(Compare-Object $c $b -SyncWindow 0).Count -eq 0)) {
+    Write-Host '        invisible: stdout differs with the debugger attached but silent' -ForegroundColor DarkGray; $okQ = $false }
+
+# 4. --break stops where it was asked and nowhere else. Line 9 is outside the
+#    loop, so once; line 7 is inside it, so once per iteration -- which is what a
+#    breakpoint in a loop is for, and the first version of this asserted 1 for it.
+$cmds2 = Join-Path $dbgDir 'cmds2'
+Set-Content -LiteralPath $cmds2 -Encoding ascii -Value @('w','c')
+$q4 = Dbg-Run "debug --break 9 `"$qBas`"" $cmds2 'q4'
+$q4err = Read-Text $q4.Err
+$hits = ([regex]::Matches($q4err, '-- breakpoint at')).Count
+if ($hits -ne 1) { Write-Host ("        --break 9: stopped {0} times, wanted 1" -f $hits) -ForegroundColor DarkGray; $okQ = $false }
+if ($q4err -like '*-- entry at*') { Write-Host '        --break: still stopped at entry, which the flag replaces' -ForegroundColor DarkGray; $okQ = $false }
+$cmds3 = Join-Path $dbgDir 'cmds3'
+Set-Content -LiteralPath $cmds3 -Encoding ascii -Value @('c','c','c')
+$q4b = Dbg-Run "debug --break 7 `"$qBas`"" $cmds3 'q4b'
+$hitsB = ([regex]::Matches((Read-Text $q4b.Err), '-- breakpoint at')).Count
+if ($hitsB -ne 3) { Write-Host ("        --break 7: stopped {0} times in a 3-pass loop, wanted 3" -f $hitsB) -ForegroundColor DarkGray; $okQ = $false }
+
+# 5. bytecode is refused with the reason
+$qPbc = Join-Path $dbgDir 'q.pbc'
+cmd /c "`"$exe`" compile `"$qBas`" `"$qPbc`" > NUL 2>&1"
+$q5 = Dbg-Run "debug `"$qPbc`"" '' 'q5'
+if ($q5.Code -eq 0) { Write-Host '        pbc: accepted a file that carries no names' -ForegroundColor DarkGray; $okQ = $false }
+if ((Read-Text $q5.Err) -notlike '*no source and no variable names*') {
+    Write-Host '        pbc: refused without saying why' -ForegroundColor DarkGray; $okQ = $false }
+
+if ($okQ) { Write-Host "PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)" -ForegroundColor Green }
+else { Write-Host "FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program" -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP) { exit 0 } else { exit 1 }
+    $okP -and $okQ) { exit 0 } else { exit 1 }

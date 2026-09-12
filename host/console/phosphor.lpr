@@ -13,6 +13,7 @@
     phosphor <file.bas|file.pbc>     run a file, output to stdout
     phosphor run <file> [--out F]    same, explicit verb; --out writes bytes to F
     phosphor --sandbox <dir> <file>  confine every path the script names to <dir>
+    phosphor debug [--stop-at-entry] [--break N,N] <file.bas>   step through it
     phosphor compile [--check] <in.bas> <out.pbc>   compile to portable bytecode
     phosphor pack <in.pbc> <out>     make a standalone executable (stub + payload).
                                      Takes COMPILED bytecode, not source: compile
@@ -53,6 +54,11 @@ uses
   Forms, Clipbrd, LCLType, InterfaceBase,
   {$IFDEF WINDOWS}Win32Int,{$ELSE}Gtk2Int,{$ENDIF}
   SysUtils, Classes, PhosphorEngine, PhosphorValue, PhosphorCompiler, PhosphorOpcodes,
+  { PhosphorVM for the debug state window only: DebugVM answers one, and the
+    stack and variable readers below take it as a parameter. The host reaching
+    into an engine unit is the allowed direction -- the boundary check is that
+    engine/ must not reach a HOST unit. }
+  PhosphorVM,
   PhosphorBytecode, PhosphorRegistry,
   // the GUI function packages -- registered only when a widgetset is up
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
@@ -981,6 +987,365 @@ begin
   end;
 end;
 
+{ --- `phosphor debug` : a terminal debugger ---------------------------------
+
+  B2 gave the engine a seam that may BLOCK: the VM asks at a statement boundary
+  and does what the answer says. This is the smallest host that answers it with a
+  person. The work order's B3 answers it with a socket and a protocol so an editor
+  can drive; that is a strictly larger thing and this is not it.
+
+  THE ONE HAZARD WORTH NAMING AT THE TOP: this seam may block, and blocking on a
+  read means blocking on somebody typing. When stdin is not a terminal -- a pipe,
+  a redirect from the null device, a test runner -- there is nobody to type, and a
+  debugger that waits anyway is the REPL trap wearing a different hat. So the
+  first stop with no input available answers "continue", says so once on stderr,
+  and never asks again. `phosphor debug x.bas < /dev/null` runs the program. }
+
+type
+  TDebugSession = class
+  private
+    FEng: TPhosphorEngine;
+    FPath: String;
+    FSrc: TStringList;
+    FSilent: Boolean;        // stdin gave EOF: answer daRun and stop asking
+    FLastCmd: String;        // bare Enter repeats the last command, as gdb does
+    procedure Banner(AReason: TPhosphorStopReason; ALine, ADepth: Integer);
+    procedure ShowList(ALine: Integer);
+    procedure ShowStack(AVM: TPhosphorVM; ALine, ADepth: Integer);
+    procedure ShowVars(AVM: TPhosphorVM; ADepth: Integer);
+    procedure ShowHelp;
+  public
+    constructor Create(AEng: TPhosphorEngine; const APath: String;
+                       const ASource: String);
+    destructor Destroy; override;
+    function OnStop(AReason: TPhosphorStopReason; ALine: Integer;
+                    ADepth: Integer): TPhosphorDebugAction;
+  end;
+
+constructor TDebugSession.Create(AEng: TPhosphorEngine; const APath: String;
+                                 const ASource: String);
+begin
+  inherited Create();
+  FEng := AEng;
+  FPath := APath;
+  FSrc := TStringList.Create();
+  FSrc.Text := ASource;
+  FSilent := False;
+  FLastCmd := '';
+end;
+
+destructor TDebugSession.Destroy;
+begin
+  FSrc.Free;
+  inherited Destroy();
+end;
+
+procedure TDebugSession.Banner(AReason: TPhosphorStopReason; ALine, ADepth: Integer);
+var
+  why: String;
+begin
+  if AReason = srEntry then why := 'entry'
+  else if AReason = srBreakpoint then why := 'breakpoint'
+  else if AReason = srStep then why := 'step'
+  else why := 'pause';
+  Writeln(StdErr, '');
+  Writeln(StdErr, Format('-- %s at %s:%d  (depth %d)',
+                         [why, ExtractFileName(FPath), ALine, ADepth]));
+  if (ALine >= 1) and (ALine <= FSrc.Count) then
+    Writeln(StdErr, Format('%5d | %s', [ALine, FSrc[ALine - 1]]));
+end;
+
+procedure TDebugSession.ShowList(ALine: Integer);
+var
+  i, lo, hi: Integer;
+  mark: String;
+begin
+  lo := ALine - 4; if lo < 1 then lo := 1;
+  hi := ALine + 4; if hi > FSrc.Count then hi := FSrc.Count;
+  for i := lo to hi do
+  begin
+    if i = ALine then mark := '>' else mark := ' ';
+    Writeln(StdErr, Format('%s%5d | %s', [mark, i, FSrc[i - 1]]));
+  end;
+end;
+
+{ One frame's label. AFrame = -1 means the top level, which is what lies under
+  every frame and is a real place to name rather than an absence to skip. }
+function FrameLabel(AProg: TProgram; AVM: TPhosphorVM; AFrame: Integer): String;
+var
+  fn: Integer;
+begin
+  if AFrame < 0 then Exit('<top level>');
+  fn := AVM.DbgFrameFunc(AFrame);
+  if (AProg <> nil) and (fn >= 0) and (fn < AProg.UserFuncCount) then
+    Result := AProg.UserFuncs[fn].Name + '()'
+  else
+    Result := Format('<frame %d>', [AFrame]);
+end;
+
+{ THE STACK IS READ THROUGH FrameCount AND Frame(i), NOT THROUGH A Caller LINK.
+  Lyra refuses a Caller accessor for the reason that applies here too: it invites
+  a recursive walk over a depth the SCRIPT chooses, and a debugger that overflows
+  on a deep program is worse than one that prints a number. This loop is flat. }
+procedure TDebugSession.ShowStack(AVM: TPhosphorVM; ALine, ADepth: Integer);
+const
+  { A person reads the innermost frames; a runaway recursion has 262144 of them. }
+  DBG_STACK_MAX = 200;
+var
+  i, shown: Integer;
+  prog: TProgram;
+begin
+  prog := AVM.DbgProgram();
+
+  { FRAME 0 IS WHERE EXECUTION IS, and its name comes from the innermost frame --
+    DbgFrameFunc(ADepth - 1) -- not from a separate accessor. At depth 0 there is
+    no frame and the answer is the top level, which is a place and not a gap. }
+  Writeln(StdErr, Format('#0  %s   line %d',
+                         [FrameLabel(prog, AVM, ADepth - 1), ALine]));
+
+  { Outward, one line per live frame. Flat on purpose -- no recursion over a depth
+    the SCRIPT chooses -- and CAPPED for the same reason: the frame ceiling is
+    262144, so `w` inside a runaway recursion would otherwise print a quarter of a
+    million lines into a terminal somebody is trying to read. The cap is named, and
+    what it hides is counted rather than dropped silently. }
+  shown := 0;
+  for i := ADepth - 2 downto -1 do
+  begin
+    if shown >= DBG_STACK_MAX then
+    begin
+      Writeln(StdErr, Format('     ... %d more frame(s); the innermost %d are shown',
+                             [ADepth - 1 - shown, DBG_STACK_MAX + 1]));
+      Break;
+    end;
+    Writeln(StdErr, Format('#%d  %s', [ADepth - 1 - i, FrameLabel(prog, AVM, i)]));
+    Inc(shown);
+  end;
+end;
+
+{ READING NEVER EXECUTES. Every value below comes out of the state window B1 and
+  B2 opened -- DbgGlobal, DbgLocal -- and nothing here calls back into the engine.
+  That is Lyra's rule and it is the difference between inspecting a stopped
+  program and running more of it by accident. }
+procedure TDebugSession.ShowVars(AVM: TPhosphorVM; ADepth: Integer);
+var
+  prog: TProgram;
+  i, fn, n, shown: Integer;
+begin
+  prog := AVM.DbgProgram();
+  if prog = nil then
+  begin
+    Writeln(StdErr, '   (no program)');
+    Exit;
+  end;
+  if not prog.HasNames then
+  begin
+    Writeln(StdErr, '   this program came from a .pbc and carries no names,');
+    Writeln(StdErr, '   so there is nothing to show rather than nothing to see.');
+    Exit;
+  end;
+
+  if ADepth > 0 then
+  begin
+    fn := AVM.DbgFrameFunc(ADepth - 1);
+    n := AVM.DbgFrameLocalCount(ADepth - 1);
+    if (fn >= 0) and (fn < prog.UserFuncCount) then
+      Writeln(StdErr, Format('locals of %s()', [prog.UserFuncs[fn].Name]))
+    else
+      Writeln(StdErr, 'locals');
+    for i := 0 to n - 1 do
+      Writeln(StdErr, Format('   %-20s %s',
+                             [prog.LocalName(fn, i), RenderOperand(AVM.DbgLocal(ADepth - 1, i))]));
+    if n = 0 then Writeln(StdErr, '   (none)');
+  end;
+
+  Writeln(StdErr, 'globals');
+  shown := 0;
+  for i := 0 to AVM.DbgGlobalCount() - 1 do
+  begin
+    { The compiler makes temporaries and they are globals like any other. A
+      debugger that lists them buries the three names the person wrote. }
+    if prog.GlobalIsTemporary(i) then Continue;
+    Writeln(StdErr, Format('   %-20s %s',
+                           [prog.GlobalName(i), RenderOperand(AVM.DbgGlobal(i))]));
+    Inc(shown);
+  end;
+  if shown = 0 then Writeln(StdErr, '   (none)');
+end;
+
+procedure TDebugSession.ShowHelp;
+begin
+  Writeln(StdErr, '  s, step    step into the next statement');
+  Writeln(StdErr, '  n, next    step over a call');
+  Writeln(StdErr, '  o, out     run until this function returns');
+  Writeln(StdErr, '  c, cont    continue to the next armed line');
+  Writeln(StdErr, '  w, where   the call stack');
+  Writeln(StdErr, '  v, vars    locals of this frame, then globals');
+  Writeln(StdErr, '  l, list    source around here');
+  Writeln(StdErr, '  q, quit    stop the program (a clean stop, like END)');
+  Writeln(StdErr, '  h, ?       this');
+  Writeln(StdErr, '  <Enter>    repeat the last command');
+end;
+
+function TDebugSession.OnStop(AReason: TPhosphorStopReason; ALine: Integer;
+                              ADepth: Integer): TPhosphorDebugAction;
+var
+  cmd: String;
+  vm: TPhosphorVM;
+  atEof: Boolean;
+begin
+  if FSilent then Exit(daRun);
+  Banner(AReason, ALine, ADepth);
+
+  { DebugVM answers the VM that is executing, and nil at every other moment. It
+    is read here rather than held, because the engine's own doc block says a host
+    takes it at its stop and does not carry it across calls. }
+  vm := FEng.DebugVM;
+
+  while True do
+  begin
+    Write(StdErr, '(dbg) ');
+    Flush(StdErr);
+    atEof := False;
+    try
+      atEof := Eof(Input);
+    except
+      on Exception do atEof := True;
+    end;
+    if atEof then
+    begin
+      { NOBODY IS THERE. Answer the question and stop asking -- see the hazard at
+        the top of this section. Said once, on stderr, so a redirected run still
+        explains itself without touching the program's own output. }
+      Writeln(StdErr, '');
+      Writeln(StdErr, 'phosphor debug: stdin is not a terminal; continuing without stopping.');
+      FSilent := True;
+      Exit(daRun);
+    end;
+    ReadLn(Input, cmd);
+    cmd := LowerCase(Trim(cmd));
+    if cmd = '' then cmd := FLastCmd else FLastCmd := cmd;
+
+    if (cmd = 's') or (cmd = 'step') then Exit(daStepInto);
+    if (cmd = 'n') or (cmd = 'next') then Exit(daStepOver);
+    if (cmd = 'o') or (cmd = 'out') then Exit(daStepOut);
+    if (cmd = 'c') or (cmd = 'cont') or (cmd = 'continue') then Exit(daRun);
+    if (cmd = 'q') or (cmd = 'quit') then Exit(daStop);
+    if (cmd = 'w') or (cmd = 'where') or (cmd = 'bt') then ShowStack(vm, ALine, ADepth)
+    else if (cmd = 'v') or (cmd = 'vars') then ShowVars(vm, ADepth)
+    else if (cmd = 'l') or (cmd = 'list') then ShowList(ALine)
+    else if (cmd = 'h') or (cmd = '?') or (cmd = 'help') then ShowHelp()
+    else
+      Writeln(StdErr, Format('phosphor debug: unknown command "%s" -- h for help', [cmd]));
+  end;
+end;
+
+{ Parse `--break 3,11,42` into the armed set. A line that no statement starts on
+  can be asked for and simply never fires; StoppableLines would let this refuse
+  it, but the program is not compiled yet at flag-parsing time, and refusing a
+  line late is worse than a breakpoint that never hits. }
+function ParseBreakList(const AText: String; out ALines: array of Integer;
+                        out ACount: Integer): Boolean;
+var
+  i, v, e: Integer;
+  part: String;
+  rest: String;
+begin
+  ACount := 0;
+  rest := AText;
+  while rest <> '' do
+  begin
+    i := Pos(',', rest);
+    if i = 0 then
+    begin
+      part := Trim(rest);
+      rest := '';
+    end
+    else
+    begin
+      part := Trim(Copy(rest, 1, i - 1));
+      rest := Copy(rest, i + 1, Length(rest));
+    end;
+    if part = '' then Continue;
+    Val(part, v, e);
+    if (e <> 0) or (v < 1) then
+    begin
+      Writeln(StdErr, Format('phosphor debug: --break wants line numbers, got "%s"', [part]));
+      Exit(False);
+    end;
+    if ACount > High(ALines) then
+    begin
+      Writeln(StdErr, 'phosphor debug: too many --break lines');
+      Exit(False);
+    end;
+    ALines[ACount] := v;
+    Inc(ACount);
+  end;
+  Result := True;
+end;
+
+function DebugFile(const APath: String; const ABreaks: array of Integer;
+                   ABreakCount: Integer; AStopAtEntry: Boolean): Integer;
+var
+  host: TConsoleHost;
+  eng: TPhosphorEngine;
+  sess: TDebugSession;
+  source: String;
+  line, i: Integer;
+  armed: array of Integer;
+begin
+  if not FileExists(APath) then
+  begin
+    Writeln(StdErr, 'phosphor debug: file not found: ', APath);
+    Exit(2);
+  end;
+  if IsBytecode(APath) then
+  begin
+    { A .pbc carries no names and no source, so every stop would print a line
+      number into a file the debugger cannot show and a variable list it cannot
+      name. Refused with the reason rather than run half-blind. }
+    Writeln(StdErr, 'phosphor debug: ', APath, ' is bytecode.');
+    Writeln(StdErr, '  A .pbc carries no source and no variable names; debug the .bas it came from.');
+    Exit(2);
+  end;
+
+  host := TConsoleHost.Create('');
+  eng := TPhosphorEngine.Create();
+  BindSandbox(eng);
+  sess := nil;
+  try
+    BindHostSeams(eng, host, APath);
+    RegisterAllPackages(eng);
+    try
+      source := ReadSource(APath);
+    except
+      on Ex: Exception do
+      begin
+        Writeln(StdErr, 'phosphor debug: cannot read ', APath, ': ', Ex.Message);
+        Exit(2);
+      end;
+    end;
+
+    sess := TDebugSession.Create(eng, APath, source);
+    eng.OnDebug := @sess.OnStop;
+    SetLength(armed, ABreakCount);
+    for i := 0 to ABreakCount - 1 do armed[i] := ABreaks[i];
+    eng.ArmDebug(armed, AStopAtEntry);
+
+    Writeln(StdErr, Format('phosphor debug: %s -- h for help', [ExtractFileName(APath)]));
+    line := eng.Run(source);
+    if line <> 0 then
+    begin
+      Writeln(StdErr, Format('phosphor: %s:%d: %s', [APath, line, eng.ErrorMessage]));
+      Exit(1);
+    end;
+    Result := 0;
+  finally
+    sess.Free;
+    eng.Free;
+    host.Free;
+  end;
+end;
+
 // --- self-extracting deployment (phosphor pack) ------------------------------
 // A packed application is this stub binary with a .pbc payload appended, behind a
 // fixed trailer at the very end (PE and ELF both ignore trailing bytes). The stub
@@ -1660,6 +2025,13 @@ var
   embFlags: LongWord;
   embState: TEmbeddedState;
   embWhy: String;
+  { `phosphor debug`. The armed set is a fixed array rather than a dynamic one
+    because it is filled by a flag parser that runs before anything is compiled,
+    and 256 breakpoints is far past what a person types on a command line. }
+  dbgLines: array[0..255] of Integer;
+  dbgCount: Integer;
+  dbgEntry: Boolean;
+  dbgPath: String;
 begin
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
   embState := TryReadEmbeddedPayload(payload, embFlags, embWhy);
@@ -1715,6 +2087,56 @@ begin
   end;
   { esNone falls through on purpose: no mark and no magic, so this is a bare stub
     and the CLI below is the whole point of the binary. }
+
+  // `phosphor debug [--stop-at-entry] [--break N,N] <file.bas>` -- step through it.
+  if (ParamCount >= 1) and (ParamStr(1) = 'debug') then
+  begin
+    dbgCount := 0;
+    dbgEntry := True;    // the useful default: with no --break, stop on line one
+    dbgPath := '';
+    i := 2;
+    while i <= ParamCount do
+    begin
+      arg := ParamStr(i);
+      if arg = '--stop-at-entry' then
+        dbgEntry := True
+      else if arg = '--no-stop-at-entry' then
+        dbgEntry := False
+      else if arg = '--break' then
+      begin
+        Inc(i);
+        if i > ParamCount then
+        begin
+          Writeln(StdErr, 'phosphor debug: --break needs one or more line numbers');
+          Halt(2);
+        end;
+        if not ParseBreakList(ParamStr(i), dbgLines, dbgCount) then Halt(2);
+        { An explicit --break means the person said where to stop, so entry is no
+          longer implied. --stop-at-entry after it says both, and is honoured. }
+        dbgEntry := False;
+      end
+      else if (Length(arg) > 0) and (arg[1] = '-') then
+      begin
+        Writeln(StdErr, 'phosphor debug: unknown option ', arg);
+        Halt(2);
+      end
+      else if dbgPath = '' then
+        dbgPath := arg
+      else
+      begin
+        Writeln(StdErr, 'phosphor debug: one file at a time, got ', arg);
+        Halt(2);
+      end;
+      Inc(i);
+    end;
+    if dbgPath = '' then
+    begin
+      Writeln(StdErr, 'phosphor debug: which file?');
+      Writeln(StdErr, '  phosphor debug [--stop-at-entry] [--break N,N] <file.bas>');
+      Halt(2);
+    end;
+    Halt(DebugFile(dbgPath, dbgLines, dbgCount, dbgEntry));
+  end;
 
   // `phosphor compile [--check] <in.bas> <out.pbc>` -- compile to bytecode and stop.
   if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
@@ -1797,6 +2219,12 @@ begin
     else if (arg = '--help') or (arg = '-h') then
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
+      Writeln('       phosphor debug [--stop-at-entry] [--break N,N] <file.bas>');
+      Writeln('              stop and step: s step into, n step over, o step out,');
+      Writeln('              c continue, w call stack, v variables, l list, q quit');
+      Writeln('              with no --break it stops on the first statement; the');
+      Writeln('              session is on stderr, so the program''s own output');
+      Writeln('              stays clean and can still be redirected');
       Writeln('       phosphor compile [--check] <in.bas> <out.pbc>');
       Writeln('              --check warns about function names this host does not');
       Writeln('              have; it never fails, because the file may be meant');

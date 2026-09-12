@@ -71,7 +71,7 @@ uses
     binary size, and it is the SAME encoder the editor's udebugproto.pas uses, so
     the two ends cannot disagree about escaping. ssockets is likewise already
     here, through host/packages/PhosphorHttpLib. }
-  fpjson, jsonparser, ssockets, syncobjs,
+  fpjson, jsonparser, ssockets, sockets, syncobjs,
   PhosphorBytecode, PhosphorRegistry,
   // the GUI function packages -- registered only when a widgetset is up
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
@@ -1055,6 +1055,7 @@ type
     FDisconnected: Boolean;
     FLaunched: Boolean;     // `launch` seen: the program may start
     FPendingArm: Boolean;   // a set arrived while running; arm at the next boundary
+    procedure CloseTransport;
     procedure SendJSON(AObj: TJSONObject);
     procedure SendEvent(const AName: String; AExtra: TJSONObject);
     procedure SendError(ASeq: Integer; const AText: String);
@@ -1169,18 +1170,38 @@ begin
   FAction := daRun;
 end;
 
+{ UNBLOCK THE READER BEFORE FREEING ANYTHING. The thread is parked in a blocking
+  read; on Windows the free happens to wake it and on Linux it does not, so the
+  first version hung after the program had finished, with every assertion in the
+  session already passed. shutdown() is the portable way to tell a socket somebody
+  else is blocked on that no more traffic is coming: the read returns 0, the
+  thread pushes its disconnect sentinel and leaves, and only then is it safe to
+  free the socket it was reading. }
+procedure TDebugProto.CloseTransport;
+begin
+  if FSock = nil then Exit;
+  FClosed := True;
+  try
+    fpShutdown(FSock.Handle, 2);   // 2 = SHUT_RDWR on both systems
+  except
+    on Exception do ;
+  end;
+end;
+
 destructor TDebugProto.Destroy;
 begin
   if FReader <> nil then
   begin
     FReader.Terminate();
-    if FSock <> nil then
-      try FSock.Free; FSock := nil; except on Exception do ; end;
+    CloseTransport();
     FReader.WaitFor();
     FReader.Free();
+    FReader := nil;
   end
-  else if FSock <> nil then
-    try FSock.Free; except on Exception do ; end;
+  else
+    CloseTransport();
+  if FSock <> nil then
+    try FSock.Free; FSock := nil; except on Exception do ; end;
   FInbox.Free();
   FLock.Free();
   inherited Destroy();

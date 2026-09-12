@@ -59,6 +59,12 @@ uses
     into an engine unit is the allowed direction -- the boundary check is that
     engine/ must not reach a HOST unit. }
   PhosphorVM,
+  { fpjson is ALREADY in this binary -- engine/libs/PhosphorJsonLib links it for
+    the json_* built-ins -- so the debug protocol costs no new dependency and no
+    binary size, and it is the SAME encoder the editor's udebugproto.pas uses, so
+    the two ends cannot disagree about escaping. ssockets is likewise already
+    here, through host/packages/PhosphorHttpLib. }
+  fpjson, jsonparser, ssockets, syncobjs,
   PhosphorBytecode, PhosphorRegistry,
   // the GUI function packages -- registered only when a widgetset is up
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
@@ -982,6 +988,796 @@ begin
     end;
     Result := 0;
   finally
+    eng.Free;
+    host.Free;
+  end;
+end;
+
+{ --- `phosphor debug --port N` : the Phosphor Debug Protocol ------------------
+
+  The host end of docs/debug-protocol.md in PhosphorIDE. The EDITOR listens on
+  127.0.0.1 and passes its port; this end connects, waits for `initialize`, and
+  speaks one JSON object per line terminated by a single #10.
+
+  CONCURRENCY, WHICH IS THE WHOLE DESIGN. The spec says `pause` is valid only
+  while running and `setBreakpoints` "may be sent at any time, including while
+  the program is running". A loop that reads the socket only at a stop can serve
+  neither. So a reader thread owns the socket's read side and queues raw lines;
+  the VM thread drains that queue at every statement boundary it is already
+  visiting. The reader thread touches exactly one engine field, through
+  TPhosphorVM.InterruptDebug, which B2 made interlocked for this and says so.
+
+  WRITING IS THE VM THREAD'S ALONE. Nothing but the drain loop sends a frame, so
+  there is no interleaving to guard: the reader queues, the runner answers.
+
+  SET-BREAKPOINTS WHILE RUNNING NEEDS A BOUNDARY, and arming is not thread-safe.
+  So a set that arrives while running is queued AND the VM is interrupted: it
+  stops at the next boundary, the new set is armed there, and the program resumes
+  without a `stopped` event, because the editor did not ask to stop. }
+
+type
+  TDbgState = (dbgConnected, dbgInitialized, dbgRunning, dbgStopped, dbgDone);
+
+  TDebugProto = class;
+
+  { The socket's read side. It parses nothing: it splits on #10 and queues the
+    raw line, so fpjson is only ever entered from the VM thread. }
+  TDbgReader = class(TThread)
+  private
+    FOwner: TDebugProto;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AOwner: TDebugProto);
+  end;
+
+  TDebugProto = class
+  private
+    FSock: TInetSocket;
+    FEng: TPhosphorEngine;
+    FPath: String;          // the file as this host knows it
+    FState: TDbgState;
+    FLock: TCriticalSection;
+    FInbox: TStringList;    // raw lines, written by the reader, read by the VM
+    FReader: TDbgReader;
+    FClosed: Boolean;
+    FExitCode: Integer;
+    FStopAtEntry: Boolean;
+    FBreaks: array of Integer;
+    FAction: TPhosphorDebugAction;
+    FDisconnected: Boolean;
+    FLaunched: Boolean;     // `launch` seen: the program may start
+    FPendingArm: Boolean;   // a set arrived while running; arm at the next boundary
+    procedure SendJSON(AObj: TJSONObject);
+    procedure SendEvent(const AName: String; AExtra: TJSONObject);
+    procedure SendError(ASeq: Integer; const AText: String);
+    function TakeLine(out ALine: String): Boolean;
+    procedure DoStackTrace(ASeq, ALine, ADepth: Integer);
+    procedure DoVariables(ASeq, AFrameIx, ADepth: Integer);
+    function Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
+  public
+    constructor Create(AEng: TPhosphorEngine; const APath: String);
+    destructor Destroy; override;
+    function Connect(APort: Integer): Boolean;
+    procedure Push(const ALine: String);
+    procedure InterruptVM;
+    procedure SetInitial(const ABreaks: array of Integer; ACount: Integer;
+                         AStopAtEntry: Boolean);
+    procedure Arm;
+    procedure SendStopped(AExtra: TJSONObject);
+    procedure SendExited(AExtra: TJSONObject);
+    function Finished: Boolean;
+    function Session: Integer;
+    function OnStop(AReason: TPhosphorStopReason; ALine: Integer;
+                    ADepth: Integer): TPhosphorDebugAction;
+  end;
+
+constructor TDbgReader.Create(AOwner: TDebugProto);
+begin
+  FOwner := AOwner;
+  FreeOnTerminate := False;
+  inherited Create(False);
+end;
+
+{ Byte runs, not characters. The first version of this accumulated with
+  `acc := acc + buf[i]`, which concatenates a Char into a code-page string and
+  destroys every byte >= 128 -- in a UTF-8 protocol, in the routine that reads it.
+  A variable value or a path with an accented character would have arrived
+  corrupted, and the spec says the editor answers an unparseable frame by
+  disconnecting. check-codepage.py caught it before it shipped, which is what that
+  gate is for. Moving whole runs is also O(bytes) rather than a reallocation per
+  character. }
+procedure TDbgReader.Execute;
+const
+  { The editor is on loopback and is trusted, but trusted is not unbounded: a peer
+    that never sends a #10 would otherwise grow this string until the process
+    died. A protocol frame is a few hundred bytes; a megabyte is far past any
+    honest one and short of anything that hurts. }
+  DBG_MAX_FRAME = 1024 * 1024;
+var
+  buf: array[0..4095] of Byte;
+  { NOT `start`: TThread has a method by that name and Pascal is case-insensitive,
+    so the local shadowed it and the compiler refused. }
+  got, i, runFrom: Integer;
+  acc, chunk, line: String;
+
+  procedure TakeRun(AFrom, ATo: Integer);   // [AFrom, ATo)
+  begin
+    if ATo <= AFrom then Exit;
+    SetLength(chunk, ATo - AFrom);
+    Move(buf[AFrom], chunk[1], ATo - AFrom);
+    acc := acc + chunk;                     // String + String: no Char anywhere
+  end;
+
+begin
+  acc := '';
+  while not Terminated do
+  begin
+    got := 0;
+    try
+      got := FOwner.FSock.Read(buf, SizeOf(buf));
+    except
+      on Exception do got := 0;
+    end;
+    if got <= 0 then
+    begin
+      { A closed socket IS a disconnect; the spec says the editor treats it that
+        way and so does this end. Queue the sentinel so the VM thread leaves its
+        stop instead of waiting for a frame that will never come. }
+      FOwner.Push(#0);
+      Break;
+    end;
+    runFrom := 0;
+    for i := 0 to got - 1 do
+      if buf[i] = 10 then
+      begin
+        TakeRun(runFrom, i);
+        runFrom := i + 1;
+        line := acc;
+        acc := '';
+        { A #13 before the #10 is tolerated on input and never produced on
+          output -- the spec's words. }
+        if (Length(line) > 0) and (line[Length(line)] = #13) then
+          SetLength(line, Length(line) - 1);
+        if line <> '' then FOwner.Push(line);
+      end;
+    TakeRun(runFrom, got);
+    if Length(acc) > DBG_MAX_FRAME then
+    begin
+      FOwner.Push(#0);
+      Break;
+    end;
+  end;
+end;
+
+constructor TDebugProto.Create(AEng: TPhosphorEngine; const APath: String);
+begin
+  inherited Create();
+  FEng := AEng;
+  FPath := APath;
+  FState := dbgConnected;
+  FLock := TCriticalSection.Create();
+  FInbox := TStringList.Create();
+  FExitCode := 0;
+  FAction := daRun;
+end;
+
+destructor TDebugProto.Destroy;
+begin
+  if FReader <> nil then
+  begin
+    FReader.Terminate();
+    if FSock <> nil then
+      try FSock.Free; FSock := nil; except on Exception do ; end;
+    FReader.WaitFor();
+    FReader.Free();
+  end
+  else if FSock <> nil then
+    try FSock.Free; except on Exception do ; end;
+  FInbox.Free();
+  FLock.Free();
+  inherited Destroy();
+end;
+
+function TDebugProto.Connect(APort: Integer): Boolean;
+begin
+  Result := False;
+  try
+    { LOOPBACK ONLY, and that is a requirement rather than a default: this channel
+      accepts commands that read the debuggee's whole state. }
+    FSock := TInetSocket.Create('127.0.0.1', APort);
+  except
+    on Exception do
+    begin
+      FSock := nil;
+      Exit(False);
+    end;
+  end;
+  FReader := TDbgReader.Create(Self);
+  Result := True;
+end;
+
+procedure TDebugProto.Push(const ALine: String);
+begin
+  FLock.Enter();
+  try
+    FInbox.Add(ALine);
+  finally
+    FLock.Leave();
+  end;
+end;
+
+function TDebugProto.TakeLine(out ALine: String): Boolean;
+begin
+  ALine := '';
+  FLock.Enter();
+  try
+    if FInbox.Count = 0 then Exit(False);
+    ALine := FInbox[0];
+    FInbox.Delete(0);
+  finally
+    FLock.Leave();
+  end;
+  Result := True;
+end;
+
+procedure TDebugProto.InterruptVM;
+begin
+  if FEng.DebugVM <> nil then FEng.DebugVM.InterruptDebug();
+end;
+
+{ ONE WRITER, AND IT IS THE VM THREAD. AsJSON is fpjson's own encoder, the same
+  one the editor's udebugproto.pas uses, so a value holding chr(10) or a quote
+  cannot split a frame -- and the terminator is ours to add, because AsJSON does
+  not carry one and a host that forgets leaves the editor buffering for ever. }
+procedure TDebugProto.SendJSON(AObj: TJSONObject);
+var
+  line: String;
+begin
+  try
+    line := AObj.AsJSON + #10;
+    if (FSock <> nil) and (not FClosed) then
+      FSock.Write(line[1], Length(line));
+  except
+    on Exception do FClosed := True;
+  end;
+  AObj.Free();
+end;
+
+procedure TDebugProto.SendEvent(const AName: String; AExtra: TJSONObject);
+var
+  o: TJSONObject;
+  i: Integer;
+begin
+  o := TJSONObject.Create();
+  o.Add('event', AName);
+  if AExtra <> nil then
+  begin
+    for i := 0 to AExtra.Count - 1 do
+      o.Add(AExtra.Names[i], AExtra.Items[i].Clone);
+    AExtra.Free();
+  end;
+  SendJSON(o);
+end;
+
+procedure TDebugProto.SendError(ASeq: Integer; const AText: String);
+var
+  o: TJSONObject;
+begin
+  o := TJSONObject.Create();
+  o.Add('seq', ASeq);
+  o.Add('ok', False);
+  o.Add('error', AText);
+  SendJSON(o);
+end;
+
+procedure TDebugProto.SetInitial(const ABreaks: array of Integer; ACount: Integer;
+                                 AStopAtEntry: Boolean);
+var
+  i: Integer;
+begin
+  SetLength(FBreaks, ACount);
+  for i := 0 to ACount - 1 do FBreaks[i] := ABreaks[i];
+  FStopAtEntry := AStopAtEntry;
+end;
+
+procedure TDebugProto.SendStopped(AExtra: TJSONObject);
+begin
+  SendEvent('stopped', AExtra);
+end;
+
+procedure TDebugProto.SendExited(AExtra: TJSONObject);
+begin
+  SendEvent('exited', AExtra);
+end;
+
+function TDebugProto.Finished: Boolean;
+begin
+  Result := FDisconnected or FClosed;
+end;
+
+procedure TDebugProto.Arm;
+var
+  i: Integer;
+  lines: array of Integer;
+begin
+  SetLength(lines, Length(FBreaks));
+  for i := 0 to High(FBreaks) do lines[i] := FBreaks[i];
+  { ArmDebug REPLACES the set, which is what the protocol's whole-set semantics
+    want -- and it is also why this never calls DisarmDebug first: B2 records
+    that disarming from inside a stop erases the re-entrancy guard with the set. }
+  FEng.ArmDebug(lines, FStopAtEntry);
+end;
+
+{ A frame's name, as the protocol wants it: the user function, or `(main)` for
+  the outermost. NOTE FOR THE EDITOR'S SIDE: TProgram lowercases a function name
+  at registration, so a source that spells it `Greet` is reported as `greet`. The
+  compiler has the as-written spelling and TProgram does not; making the two
+  agree is a change to the name table, not to this. }
+function DbgFrameName(AProg: TProgram; AVM: TPhosphorVM; AFrame: Integer): String;
+var
+  fn: Integer;
+begin
+  if AFrame < 0 then Exit('(main)');
+  fn := AVM.DbgFrameFunc(AFrame);
+  if (AProg <> nil) and (fn >= 0) and (fn < AProg.UserFuncCount) then
+    Result := AProg.UserFuncs[fn].Name
+  else
+    Result := '(frame)';
+end;
+
+function DbgKindName(const V: TValue): String;
+begin
+  if V.Kind = vkInt then Result := 'int'
+  else if V.Kind = vkString then Result := 'string'
+  else if V.Kind = vkBool then Result := 'bool'
+  else if V.Kind = vkHandle then Result := 'handle'
+  else Result := 'number';
+end;
+
+procedure TDebugProto.DoStackTrace(ASeq, ALine, ADepth: Integer);
+const
+  { An editor paints a stack pane; nobody reads 262144 rows of one. }
+  DBG_MAX_FRAMES = 200;
+var
+  o, f: TJSONObject;
+  arr: TJSONArray;
+  vm: TPhosphorVM;
+  prog: TProgram;
+  i, ix: Integer;
+begin
+  vm := FEng.DebugVM;
+  prog := nil;
+  if vm <> nil then prog := vm.DbgProgram();
+  arr := TJSONArray.Create();
+  ix := 0;
+  { Innermost first. GOSUB return addresses are NOT frames and do not appear --
+    a GOSUB creates no scope, and the spec says so explicitly. Capped for the
+    reason the terminal debugger's `w` is: the SCRIPT chooses the depth and the
+    frame ceiling is 262144, so an unbounded walk would build a quarter of a
+    million objects into one frame and the editor would have to read it. }
+  for i := ADepth - 1 downto -1 do
+  begin
+    if ix >= DBG_MAX_FRAMES then Break;
+    f := TJSONObject.Create();
+    f.Add('index', ix);
+    f.Add('name', DbgFrameName(prog, vm, i));
+    f.Add('path', FPath);
+    { Only the innermost frame has a line this host can name: the VM keeps the
+      boundary it stopped at, not a return line per frame. An outer frame reports
+      0, which the editor reads as "no line" rather than as line zero. }
+    if ix = 0 then f.Add('line', ALine) else f.Add('line', 0);
+    arr.Add(f);
+    Inc(ix);
+  end;
+  o := TJSONObject.Create();
+  o.Add('seq', ASeq);
+  o.Add('ok', True);
+  o.Add('frames', arr);
+  SendJSON(o);
+end;
+
+procedure TDebugProto.DoVariables(ASeq, AFrameIx, ADepth: Integer);
+var
+  o, v: TJSONObject;
+  arr: TJSONArray;
+  vm: TPhosphorVM;
+  prog: TProgram;
+  i, fn, vmFrame, n: Integer;
+  val: TValue;
+begin
+  vm := FEng.DebugVM;
+  if vm = nil then
+  begin
+    SendError(ASeq, 'no program is executing');
+    Exit;
+  end;
+  prog := vm.DbgProgram();
+  if (prog = nil) or (not prog.HasNames) then
+  begin
+    SendError(ASeq, 'this program carries no variable names (it came from a .pbc)');
+    Exit;
+  end;
+  { Frame 0 is innermost; the VM numbers them the other way. }
+  vmFrame := ADepth - 1 - AFrameIx;
+  if (AFrameIx < 0) or (vmFrame < -1) then
+  begin
+    SendError(ASeq, Format('no frame %d', [AFrameIx]));
+    Exit;
+  end;
+
+  arr := TJSONArray.Create();
+  if vmFrame >= 0 then
+  begin
+    fn := vm.DbgFrameFunc(vmFrame);
+    n := vm.DbgFrameLocalCount(vmFrame);
+    for i := 0 to n - 1 do
+    begin
+      val := vm.DbgLocal(vmFrame, i);
+      v := TJSONObject.Create();
+      v.Add('name', prog.LocalName(fn, i));
+      v.Add('value', ValToStr(val));
+      v.Add('kind', DbgKindName(val));
+      v.Add('scope', 'local');
+      arr.Add(v);
+    end;
+  end;
+  { BOTH SCOPES, because in this language an undeclared name inside a function IS
+    a global -- a pane that hid them would hide most of what a function touches.
+    The compiler's own temporaries are filtered: they are globals too, and they
+    would bury the names the person wrote. }
+  for i := 0 to vm.DbgGlobalCount() - 1 do
+  begin
+    if prog.GlobalIsTemporary(i) then Continue;
+    val := vm.DbgGlobal(i);
+    v := TJSONObject.Create();
+    v.Add('name', prog.GlobalName(i));
+    v.Add('value', ValToStr(val));
+    v.Add('kind', DbgKindName(val));
+    v.Add('scope', 'global');
+    arr.Add(v);
+  end;
+
+  o := TJSONObject.Create();
+  o.Add('seq', ASeq);
+  o.Add('ok', True);
+  o.Add('variables', arr);
+  SendJSON(o);
+end;
+
+{ One request. Returns True when the answer resumes the program, so the stop loop
+  knows to leave. ALine/ADepth are where the VM is; they are -1/0 while running. }
+function TDebugProto.Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
+var
+  d: TJSONData;
+  o, res, caps: TJSONObject;
+  arr: TJSONData;
+  cmd: String;
+  seq, i: Integer;
+  stopped: Boolean;
+begin
+  Result := False;
+  stopped := (FState = dbgStopped);
+
+  if ARaw = #0 then
+  begin
+    { The socket closed. Detach and let the program finish, which is the same
+      thing `disconnect terminate:false` asks for. }
+    FClosed := True;
+    FDisconnected := True;
+    FAction := daRun;
+    Exit(True);
+  end;
+
+  d := nil;
+  try
+    try
+      d := GetJSON(ARaw);
+    except
+      on Exception do d := nil;
+    end;
+    { A line that does not parse is a protocol error and the session ends. It is
+      not skipped: a stream that produced one unreadable frame has no claim to be
+      understood from the next. }
+    if (d = nil) or (not (d is TJSONObject)) then
+    begin
+      SendEvent('error', nil);
+      FClosed := True;
+      FDisconnected := True;
+      FAction := daRun;
+      Exit(True);
+    end;
+    o := TJSONObject(d);
+    seq := o.Get('seq', 0);
+    cmd := o.Get('cmd', '');
+
+    if cmd = 'initialize' then
+    begin
+      caps := TJSONObject.Create();
+      caps.Add('stepOut', True);
+      caps.Add('pause', True);
+      { FALSE, AND NOT BECAUSE IT WOULD BE UNSAFE: there is no side-effect-free
+        expression entry point in this engine at all. The spec says a host that
+        cannot guarantee an evaluation changes nothing must say false rather than
+        offer a half-safe one. }
+      caps.Add('evaluate', False);
+      caps.Add('setVariable', False);
+      caps.Add('conditionalBreakpoints', False);
+      res := TJSONObject.Create();
+      res.Add('seq', seq);
+      res.Add('ok', True);
+      res.Add('protocol', 1);
+      res.Add('capabilities', caps);
+      SendJSON(res);
+      if FState = dbgConnected then FState := dbgInitialized;
+      Exit(False);
+    end;
+
+    if cmd = 'setBreakpoints' then
+    begin
+      { Whole-set replacement for one file, which makes the editor's view
+        authoritative by construction. A path this host does not know matches
+        nothing and is not an error. }
+      SetLength(FBreaks, 0);
+      arr := o.Find('lines');
+      if (arr <> nil) and (arr is TJSONArray) then
+      begin
+        SetLength(FBreaks, TJSONArray(arr).Count);
+        for i := 0 to TJSONArray(arr).Count - 1 do
+          FBreaks[i] := TJSONArray(arr).Integers[i];
+      end;
+      if stopped or (FState = dbgInitialized) then
+        Arm()
+      else
+      begin
+        { While RUNNING, arming is not safe from here: mark it and interrupt, and
+          the VM arms at the boundary it stops on -- without a `stopped` event,
+          because the editor did not ask to stop. }
+        FPendingArm := True;
+        InterruptVM();
+      end;
+      res := TJSONObject.Create();
+      res.Add('seq', seq);
+      res.Add('ok', True);
+      res.Add('lines', arr.Clone);
+      SendJSON(res);
+      Exit(False);
+    end;
+
+    if cmd = 'launch' then
+    begin
+      FStopAtEntry := o.Get('stopAtEntry', False);
+      FLaunched := True;
+      res := TJSONObject.Create();
+      res.Add('seq', seq);
+      res.Add('ok', True);
+      { The acknowledgement is the START, not the finish -- the program's progress
+        arrives as events, and an editor that reads this as a stop repaints its
+        current-line marker before there is a line to paint. }
+      SendJSON(res);
+      Exit(False);
+    end;
+
+    if cmd = 'disconnect' then
+    begin
+      res := TJSONObject.Create();
+      res.Add('seq', seq);
+      res.Add('ok', True);
+      SendJSON(res);
+      FDisconnected := True;
+      if o.Get('terminate', False) then FAction := daStop else FAction := daRun;
+      FClosed := True;
+      Exit(True);
+    end;
+
+    { --- the four that only make sense while stopped --- }
+    if (cmd = 'continue') or (cmd = 'stepOver') or (cmd = 'stepInto') or
+       (cmd = 'stepOut') then
+    begin
+      if not stopped then
+      begin
+        SendError(seq, Format('%s is not valid while running', [cmd]));
+        Exit(False);
+      end;
+      res := TJSONObject.Create();
+      res.Add('seq', seq);
+      res.Add('ok', True);
+      SendJSON(res);
+      if cmd = 'continue' then FAction := daRun
+      else if cmd = 'stepOver' then FAction := daStepOver
+      else if cmd = 'stepInto' then FAction := daStepInto
+      else FAction := daStepOut;
+      Exit(True);
+    end;
+
+    if cmd = 'pause' then
+    begin
+      if stopped then
+      begin
+        SendError(seq, 'pause is not valid while stopped');
+        Exit(False);
+      end;
+      res := TJSONObject.Create();
+      res.Add('seq', seq);
+      res.Add('ok', True);
+      SendJSON(res);
+      InterruptVM();
+      Exit(False);
+    end;
+
+    if cmd = 'stackTrace' then
+    begin
+      if not stopped then SendError(seq, 'stackTrace is valid only while stopped')
+      else DoStackTrace(seq, ALine, ADepth);
+      Exit(False);
+    end;
+
+    if cmd = 'variables' then
+    begin
+      if not stopped then SendError(seq, 'variables is valid only while stopped')
+      else DoVariables(seq, o.Get('frame', 0), ADepth);
+      Exit(False);
+    end;
+
+    if cmd = 'evaluate' then
+    begin
+      SendError(seq, 'evaluate is not offered: capabilities.evaluate is false');
+      Exit(False);
+    end;
+
+    SendError(seq, Format('unknown command "%s"', [cmd]));
+  finally
+    d.Free();
+  end;
+end;
+
+function TDebugProto.OnStop(AReason: TPhosphorStopReason; ALine: Integer;
+                            ADepth: Integer): TPhosphorDebugAction;
+var
+  raw, why: String;
+  ev: TJSONObject;
+  silent: Boolean;
+begin
+  { A boundary reached only because setBreakpoints interrupted us is not a stop
+    the editor asked for, so it gets no `stopped` event: arm and carry on. }
+  silent := (AReason = srPause) and (FState = dbgRunning) and FPendingArm;
+  if silent then
+  begin
+    FPendingArm := False;
+    Arm();
+    Exit(daRun);
+  end;
+
+  FState := dbgStopped;
+  if AReason = srEntry then why := 'entry'
+  else if AReason = srBreakpoint then why := 'breakpoint'
+  else if AReason = srStep then why := 'step'
+  else why := 'pause';
+  ev := TJSONObject.Create();
+  ev.Add('reason', why);
+  ev.Add('path', FPath);
+  ev.Add('line', ALine);
+  SendEvent('stopped', ev);
+
+  FAction := daRun;
+  while True do
+  begin
+    if FClosed then Break;
+    if TakeLine(raw) then
+    begin
+      if Handle(raw, ALine, ADepth) then Break;
+    end
+    else
+      Sleep(5);   { the VM thread is parked here on purpose: this seam MAY block }
+  end;
+  FState := dbgRunning;
+  Result := FAction;
+end;
+
+function TDebugProto.Session: Integer;
+var
+  raw: String;
+begin
+  { Nothing is answered before `initialize`, and nothing runs before `launch`. }
+  while (FState <> dbgInitialized) or (not FLaunched) do
+  begin
+    if FClosed then Exit(2);
+    if TakeLine(raw) then
+    begin
+      if raw = #0 then Exit(2);
+      Handle(raw, -1, 0);
+      if FDisconnected then Exit(0);
+    end
+    else
+      Sleep(5);
+  end;
+  Exit(0);
+end;
+
+function DebugProtocol(const APath: String; APort: Integer;
+                      const ABreaks: array of Integer; ABreakCount: Integer;
+                      AStopAtEntry: Boolean): Integer;
+var
+  host: TConsoleHost;
+  eng: TPhosphorEngine;
+  proto: TDebugProto;
+  source: String;
+  line, code: Integer;
+  ev: TJSONObject;
+begin
+  if not FileExists(APath) then
+  begin
+    Writeln(StdErr, 'phosphor: file not found: ', APath);
+    Exit(2);
+  end;
+  if IsBytecode(APath) then
+  begin
+    Writeln(StdErr, 'phosphor: ', APath, ' is bytecode.');
+    Writeln(StdErr, '  A .pbc carries no source and no variable names; debug the .bas it came from.');
+    Exit(2);
+  end;
+
+  host := TConsoleHost.Create('');
+  eng := TPhosphorEngine.Create();
+  BindSandbox(eng);
+  proto := nil;
+  try
+    BindHostSeams(eng, host, APath);
+    RegisterAllPackages(eng);
+    try
+      source := ReadSource(APath);
+    except
+      on Ex: Exception do
+      begin
+        Writeln(StdErr, 'phosphor: cannot read ', APath, ': ', Ex.Message);
+        Exit(2);
+      end;
+    end;
+
+    proto := TDebugProto.Create(eng, APath);
+    { A PROGRAM LAUNCHED UNDER A DEBUGGER THAT SILENTLY RUNS UNDEBUGGED IS WORSE
+      THAN ONE THAT REFUSES, so a connection that cannot be made is exit 2 and the
+      program does not run. The spec fixes this message's shape. }
+    if not proto.Connect(APort) then
+    begin
+      Writeln(StdErr, Format('phosphor: cannot connect to the debugger on port %d', [APort]));
+      Exit(2);
+    end;
+
+    { Whatever the command line asked for is the starting set; `setBreakpoints`
+      before `launch` replaces it, which is what an editor actually does. }
+    proto.SetInitial(ABreaks, ABreakCount, AStopAtEntry);
+
+    { Nothing is answered before `initialize` and nothing runs before `launch`. }
+    code := proto.Session();
+    if code <> 0 then Exit(code);
+    if proto.Finished then Exit(0);
+
+    eng.OnDebug := @proto.OnStop;
+    proto.Arm();
+
+    line := eng.Run(source);
+    if line <> 0 then
+    begin
+      { An engine fault is a `stopped` with reason `exception` carrying the text,
+        and the `exited` below follows once this end has cleaned up. }
+      ev := TJSONObject.Create();
+      ev.Add('reason', 'exception');
+      ev.Add('path', APath);
+      ev.Add('line', line);
+      ev.Add('text', eng.ErrorMessage);
+      proto.SendStopped(ev);
+      Writeln(StdErr, Format('phosphor: %s:%d: %s', [APath, line, eng.ErrorMessage]));
+      Result := 1;
+    end
+    else
+      Result := 0;
+
+    ev := TJSONObject.Create();
+    ev.Add('exitCode', Result);
+    proto.SendExited(ev);
+  finally
+    proto.Free;
     eng.Free;
     host.Free;
   end;
@@ -2030,6 +2826,7 @@ var
     and 256 breakpoints is far past what a person types on a command line. }
   dbgLines: array[0..255] of Integer;
   dbgCount: Integer;
+  dbgPort, dbgErr: Integer;
   dbgEntry: Boolean;
   dbgPath: String;
 begin
@@ -2088,9 +2885,12 @@ begin
   { esNone falls through on purpose: no mark and no magic, so this is a bare stub
     and the CLI below is the whole point of the binary. }
 
-  // `phosphor debug [--stop-at-entry] [--break N,N] <file.bas>` -- step through it.
+  // `phosphor debug [--port N] [--stop-at-entry] [--break N,N] <file.bas>`
+  // With --port it speaks the Phosphor Debug Protocol to an editor listening on
+  // loopback; without it, the terminal debugger below.
   if (ParamCount >= 1) and (ParamStr(1) = 'debug') then
   begin
+    dbgPort := 0;
     dbgCount := 0;
     dbgEntry := True;    // the useful default: with no --break, stop on line one
     dbgPath := '';
@@ -2102,6 +2902,21 @@ begin
         dbgEntry := True
       else if arg = '--no-stop-at-entry' then
         dbgEntry := False
+      else if arg = '--port' then
+      begin
+        Inc(i);
+        if i > ParamCount then
+        begin
+          Writeln(StdErr, 'phosphor debug: --port needs a port number');
+          Halt(2);
+        end;
+        Val(ParamStr(i), dbgPort, dbgErr);
+        if (dbgErr <> 0) or (dbgPort < 1) or (dbgPort > 65535) then
+        begin
+          Writeln(StdErr, 'phosphor debug: --port wants 1..65535, got ', ParamStr(i));
+          Halt(2);
+        end;
+      end
       else if arg = '--break' then
       begin
         Inc(i);
@@ -2135,7 +2950,10 @@ begin
       Writeln(StdErr, '  phosphor debug [--stop-at-entry] [--break N,N] <file.bas>');
       Halt(2);
     end;
-    Halt(DebugFile(dbgPath, dbgLines, dbgCount, dbgEntry));
+    if dbgPort > 0 then
+      Halt(DebugProtocol(dbgPath, dbgPort, dbgLines, dbgCount, dbgEntry))
+    else
+      Halt(DebugFile(dbgPath, dbgLines, dbgCount, dbgEntry));
   end;
 
   // `phosphor compile [--check] <in.bas> <out.pbc>` -- compile to bytecode and stop.

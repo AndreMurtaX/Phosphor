@@ -72,6 +72,11 @@ EXEMPT = {
         "retired by 15187b7, which folded the interactive GUI host into the "
         "single phosphor binary. docs/roadmap-phase2.md names it to say it is "
         "gone, which is history and not a claim about the tree",
+    'docs/debug-protocol.md':
+        "PhosphorIDE's, not ours. It is the specification the two ends of the "
+        "debug protocol agree on, it lives in C:/Dev/PhosphorIDE/docs, and this "
+        "repository cites it the way it cites the Plan9Basic oracle: by name, "
+        "because the name is what a reader needs to go and find it",
     'tests/suite/03a_functions.bas':
         "retired by eb4171d, which replaced the 18-assert function subset with "
         "the full 03_functions.bas at step 8. docs/roadmap.md names it to say so",

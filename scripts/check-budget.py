@@ -432,6 +432,24 @@ ALLOWED = {
     # Two are seams and are answered on their own terms below: ReadLine, whose
     # sizes come from the console; and Breakpoint, which is why the directory is
     # scanned at all.
+    'phosphor.lpr:TDbgReader.Execute':
+        'the socket read loop of the debug protocol. It is bounded by what the '
+        'editor sends, not by anything the script can do, and it refuses a frame '
+        'past DBG_MAX_FRAME rather than growing -- a peer that never sends a '
+        'newline closes the session instead of eating memory',
+    'phosphor.lpr:TDebugProto.SetInitial':
+        'copies the armed set ParseBreakList filled, which that function caps at '
+        '256 -- a command line, not a script',
+    'phosphor.lpr:TDebugProto.DoStackTrace':
+        'the frame walk is capped at DBG_MAX_FRAMES, a constant of that routine, '
+        'for the reason TDebugSession.ShowStack is',
+    'phosphor.lpr:TDebugProto.OnStop':
+        'the stop loop of a debugger: it turns once per frame the EDITOR sends '
+        'and leaves on the first one that resumes. The seam it sits in is the one '
+        'seam in this engine that MAY block, which is what a stop is',
+    'phosphor.lpr:TDebugProto.Session':
+        'waits for `initialize` and `launch` from the editor before anything '
+        'runs; the script has not started and cannot influence it',
     'phosphor.lpr:TDebugSession.ShowStack':
         'the frame walk is capped at DBG_STACK_MAX, a constant of that routine, '
         'and says how many frames it did not print. The SCRIPT chooses the depth '

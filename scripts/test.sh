@@ -711,4 +711,24 @@ if [[ "$(cat "$dbgdir/q5.err")" != *'no source and no variable names'* ]]; then
 if [ "$okQ" -eq 0 ]; then echo 'PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)'
 else echo 'FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program'; fail=1; fi
 
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+# --- R: the debug protocol -----------------------------------------------------
+# `phosphor debug --port N` speaks docs/debug-protocol.md (PhosphorIDE) over
+# loopback. The EDITOR listens and the debuggee connects, which is the direction a
+# host implementer gets wrong first, so the test stands in for the editor and
+# drives one whole session: initialize, setBreakpoints before launch, a command
+# refused in the wrong state, launch, the stop, stackTrace, variables, evaluate
+# refused to match its own capability, continue once per loop pass, exited -- and
+# that the program's own stdout is untouched by any of it.
+okR=0
+if ! python3 "$root/tests/debug_protocol_test.py" "$exe" > "$tmpdir/r.out" 2>&1; then
+  okR=1
+  sed 's/^/        /' "$tmpdir/r.out" | tail -12
+fi
+
+if [ "$okR" -eq 0 ]; then echo 'PASS  R:debug protocol (one whole session, 25 assertions, stdout untouched)'
+else echo 'FAIL  R:the debug protocol session did not complete'; fail=1; fi
+
 exit "$fail"

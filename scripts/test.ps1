@@ -957,6 +957,22 @@ if ((Read-Text $q5.Err) -notlike '*no source and no variable names*') {
 if ($okQ) { Write-Host "PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)" -ForegroundColor Green }
 else { Write-Host "FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program" -ForegroundColor Red }
 
+# --- R: the debug protocol -----------------------------------------------------
+# See scripts/test.sh's block R. The test is Python because the other end of this
+# protocol is a separate program in another repository, and a test in the host's
+# own language could agree with the host about something the spec does not say.
+$okR = $true
+$rOut = Join-Path $tmp 'r.out'
+cmd /c "python `"$root\tests\debug_protocol_test.py`" `"$exe`" > `"$rOut`" 2>&1"
+if ($LASTEXITCODE -ne 0) {
+    $okR = $false
+    (Read-Text $rOut) -split "`n" | Select-Object -Last 12 | ForEach-Object {
+        Write-Host ("        " + $_) -ForegroundColor DarkGray }
+}
+
+if ($okR) { Write-Host "PASS  R:debug protocol (one whole session, 25 assertions, stdout untouched)" -ForegroundColor Green }
+else { Write-Host "FAIL  R:the debug protocol session did not complete" -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR) { exit 0 } else { exit 1 }

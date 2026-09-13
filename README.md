@@ -151,6 +151,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
   runnable examples. Start here.
 - **[docs/function-reference.md](docs/function-reference.md)** — the complete catalog
   of every built-in, by library.
+- **[docs/debugging.md](docs/debugging.md)** — `phosphor debug`: stepping, the call
+  stack and variables in the terminal, the socket protocol an editor attaches to,
+  and five things to try with the output each should produce.
 - **[examples/](examples/)** — runnable programs (`crt_demo.bas`, `crt_dashboard.bas`,
   `gui_demo.bas`, …).
 

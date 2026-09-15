@@ -208,6 +208,28 @@ if 'total' in names:
           ('number', 'int', 'string', 'bool', 'handle'), str(names['total']))
     check('scope is said', names['total'].get('scope') in ('local', 'global'), str(names['total']))
 
+# 6b. A MALFORMED ELEMENT INSIDE `lines` MUST NOT KILL THE DEBUGGEE. fpjson's
+#     Integers[] converts, so a string, a JSON null and a nested array each raise
+#     from inside the parse loop. An editor is a program and programs have bugs;
+#     the host must not die of someone else's. A bad element is dropped, and the
+#     editor learns which by what comes back -- the same mechanism that reports a
+#     line no statement starts on. 11 is the loop line and stays armed.
+s6b = send(cmd='setBreakpoints', path=BAS, lines=[11, 'eleven', None, [11], -1, 0])
+r = [f for f in frames(until_seq=s6b) if f.get('seq') == s6b]
+check('a malformed element is dropped, not fatal', len(r) == 1, 'no reply: the debuggee died')
+if r:
+    check('only the usable line survives', r[0].get('lines') == [11], str(r[0]))
+
+# 6c. AND THE SET CAN BE REPLACED WHILE STOPPED, which is the state an editor is
+#     always in when a person moves a breakpoint. TPhosphorEngine.ArmDebug used to
+#     forward to FVM and FReplVM only -- both nil during Run -- while the live VM
+#     is FLiveVM, the very object DebugVM hands the host. So this was acknowledged
+#     with the right lines, armed nothing, and the program ran to the end.
+#     Re-armed to 11 alone below, so the three-pass count further down still holds.
+s6c = send(cmd='setBreakpoints', path=BAS, lines=[11])
+r = [f for f in frames(until_seq=s6c) if f.get('seq') == s6c][0]
+check('the set can be replaced while stopped', r.get('lines') == [11], str(r))
+
 # 7. evaluate is refused because the capability says false
 s7 = send(cmd='evaluate', frame=0, expr='1+1')
 r = [f for f in frames(until_seq=s7) if f.get('seq') == s7][0]
@@ -244,6 +266,105 @@ check("the program's own stdout is untouched",
 
 conn.close()
 srv.close()
+
+# ---------------------------------------------------------------------------
+# SECOND SESSION: PAUSE A PROGRAM THAT NEVER STOPS ON ITS OWN.
+#
+# It needs its own session and its own fixture because no other case in this file
+# has the shape: no breakpoint anywhere, and long enough to still be running when
+# the editor asks. `pause` was advertised `true` in the handshake from the day the
+# protocol shipped and could not fire -- while the program ran, NOTHING READ THE
+# SOCKET, so the frame sat in the inbox and the next thing the editor saw was
+# `exited`. A capability that lies is worse than one that is absent.
+#
+# This is thread timing, so it is the case that has to pass on Linux too.
+# ---------------------------------------------------------------------------
+BAS2 = os.path.join(WORK, 'loop.bas')
+with open(BAS2, 'w', newline='\n') as f:
+    f.write('t = 0\nfor i = 1 to 6000000\n  t = t + i\nnext\nprintln "t="; t\nend\n')
+
+srv2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv2.bind(('127.0.0.1', 0))
+srv2.listen(1)
+port2 = srv2.getsockname()[1]
+proc2 = subprocess.Popen([EXE, 'debug', '--port', str(port2), BAS2],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv2.settimeout(10)
+conn2, _ = srv2.accept()
+conn2.settimeout(30)
+
+seq2 = [0]
+buf2 = [b'']
+
+
+def send2(**kw):
+    seq2[0] += 1
+    kw['seq'] = seq2[0]
+    conn2.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+    return seq2[0]
+
+
+def recv2(timeout=30):
+    conn2.settimeout(timeout)
+    while b'\n' not in buf2[0]:
+        try:
+            chunk = conn2.recv(65536)
+        except socket.timeout:
+            return None
+        if not chunk:
+            return None
+        buf2[0] += chunk
+    line, buf2[0] = buf2[0].split(b'\n', 1)
+    return json.loads(line.decode('utf-8'))
+
+
+def until2(pred, timeout=30, tries=60):
+    for _ in range(tries):
+        m = recv2(timeout)
+        if m is None:
+            return None
+        if pred(m):
+            return m
+    return None
+
+
+s = send2(cmd='initialize')
+until2(lambda m: m.get('seq') == s)
+s = send2(cmd='setBreakpoints', path=BAS2, lines=[])
+until2(lambda m: m.get('seq') == s)
+s = send2(cmd='launch', stopAtEntry=False)
+until2(lambda m: m.get('seq') == s)
+
+# The host arms stop-at-entry ALWAYS, because a stop is the only thread-safe
+# moment to take the running VM. The editor said it did not want to stop there,
+# so that entry stop must be invisible: nothing may arrive unasked.
+check('a silent entry resume sends nothing', recv2(timeout=1.0) is None)
+
+s = send2(cmd='pause')
+r = until2(lambda m: m.get('seq') == s, timeout=15)
+check('pause is answered while the program runs', r is not None and r.get('ok') is True, str(r))
+
+ev = until2(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('pause actually stops the program',
+      ev is not None and ev.get('event') == 'stopped', str(ev))
+if ev and ev.get('event') == 'stopped':
+    check('the stop says it was a pause', ev.get('reason') == 'pause', str(ev))
+    s = send2(cmd='variables', frame=0)
+    r = until2(lambda m: m.get('seq') == s, timeout=15)
+    got = {v['name']: v for v in (r.get('variables') or [])} if r else {}
+    check('the paused frame reads its variables mid-flight', 't' in got, sorted(got))
+    s = send2(cmd='continue')
+    until2(lambda m: m.get('seq') == s, timeout=15)
+
+ex2 = until2(lambda m: m.get('event') == 'exited', timeout=60)
+check('the paused program runs on to exit', ex2 is not None and ex2.get('exitCode') == 0, str(ex2))
+out2, _ = proc2.communicate(timeout=60)
+check('and finished its own work after being paused',
+      b't=18000003000000' in out2.replace(b'\r\n', b'\n'), repr(out2[:60]))
+conn2.close()
+srv2.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

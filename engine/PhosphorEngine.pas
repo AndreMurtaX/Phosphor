@@ -481,6 +481,21 @@ begin
   // and gone. The sorting and de-duplication happen there, once, not here.
   if FVM <> nil then FVM.ArmDebug(FDbgLines, AStopAtEntry);
   if FReplVM <> nil then FReplVM.ArmDebug(FDbgLines, AStopAtEntry);
+  // AND THE RUNNING ONE, which is the case a debugger actually lives in and the
+  // one this list left out. FLiveVM is the VM of an in-flight Run -- the very
+  // object DebugVM hands a host so it can read the stopped frame -- so a host
+  // that armed a new set from inside a stop reached FVM (nil during Run) and
+  // FReplVM (nil unless this is a REPL) and NOTHING ELSE. Measured through the
+  // debug protocol: setBreakpoints while stopped was acknowledged with the new
+  // lines, armed nothing, and the program ran to the end. The whole-set
+  // replacement the protocol promises was broken in the only state an editor is
+  // ever in when it changes a breakpoint.
+  //
+  // Safe from inside the seam: the seam runs ON the VM thread, and TPhosphorVM's
+  // ArmDebug only rewrites that VM's own line set. It REPLACES rather than
+  // disarming first, deliberately -- disarming from inside a stop erases the
+  // re-entrancy guard along with the set.
+  if FLiveVM <> nil then FLiveVM.ArmDebug(FDbgLines, AStopAtEntry);
 end;
 
 procedure TPhosphorEngine.DisarmDebug;
@@ -490,6 +505,7 @@ begin
   FDbgStopAtEntry := False;
   if FVM <> nil then FVM.DisarmDebug();
   if FReplVM <> nil then FReplVM.DisarmDebug();
+  if FLiveVM <> nil then FLiveVM.DisarmDebug();   // same omission as ArmDebug
 end;
 
 procedure TPhosphorEngine.ConfigureVM(AVM: TPhosphorVM);

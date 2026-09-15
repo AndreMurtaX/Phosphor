@@ -1057,6 +1057,17 @@ type
     FPendingArm: Boolean;   // a set arrived while running; arm at the next boundary
     FStoppable: TPhosphorLines;   // lines a breakpoint can actually bind to
     FStoppableKnown: Boolean;     // the source has been compiled once to find out
+    { THE RUNNING VM, taken at the first stop and owned by the socket thread.
+      PhosphorEngine.pas:171-180 says why it may not simply read DebugVM: that
+      field is written and nil'd by the VM thread, so reading it from here races
+      an object that thread may be freeing. The engine's own comment names the
+      remedy -- take it at a stop, where the VM thread is parked inside the seam
+      and cannot be freeing anything -- and this is it. Nil'd again the moment Run
+      returns, under the same lock the reader reads it under, so the window where
+      the pointer is dead and still visible does not exist. }
+    FRunVM: TPhosphorVM;
+    FPauseWanted: Boolean;  // a `pause` frame arrived: this stop is the editor's
+    FEditorEntry: Boolean;  // the editor asked to stop at entry (it usually does not)
     procedure EnsureStoppable;
     function InstalledLines: TJSONArray;
     procedure CloseTransport;
@@ -1073,6 +1084,8 @@ type
     function Connect(APort: Integer): Boolean;
     procedure Push(const ALine: String);
     procedure InterruptVM;
+    procedure InterruptRun;   // safe from the socket thread; see FRunVM
+    procedure ReleaseRunVM;   // call the moment Run returns
     procedure SetInitial(const ABreaks: array of Integer; ACount: Integer;
                          AStopAtEntry: Boolean);
     procedure Arm;
@@ -1151,7 +1164,15 @@ begin
           output -- the spec's words. }
         if (Length(line) > 0) and (line[Length(line)] = #13) then
           SetLength(line, Length(line) - 1);
-        if line <> '' then FOwner.Push(line);
+        if line <> '' then
+        begin
+          FOwner.Push(line);
+          { AND WAKE THE PROGRAM. Without this the frame sits in the inbox
+            until the next breakpoint -- or for ever, which is exactly what
+            `pause` did: advertised in the handshake, never answered, the
+            next frame the editor saw was `exited`. }
+          FOwner.InterruptRun();
+        end;
       end;
     TakeRun(runFrom, got);
     if Length(acc) > DBG_MAX_FRAME then
@@ -1262,6 +1283,40 @@ begin
   if FEng.DebugVM <> nil then FEng.DebugVM.InterruptDebug();
 end;
 
+{ THE SAME NUDGE, FROM THE SOCKET THREAD. This is what makes `pause` exist.
+
+  Before it, the reader pushed a frame into the inbox and nothing woke the VM, so
+  while a program ran NOTHING READ THE SOCKET: a `pause` sent half a second into a
+  loop was answered by `exited` two seconds later, and `pause` was advertised
+  `true` in the handshake the whole time. A capability that lies is worse than one
+  that is absent, because the editor builds a button on it.
+
+  FRunVM rather than FEng.DebugVM, and under the lock: the engine's comment at
+  PhosphorEngine.pas:171-180 is explicit that reading DebugVM from another thread
+  races the VM thread's own write. Between the two, this pointer is only ever read
+  while the lock is held, and ReleaseRunVM nils it under the same lock before the
+  VM is freed. InterruptDebug itself is an InterlockedExchange and is safe to call
+  from anywhere -- the hazard was never the call, it was finding the object. }
+procedure TDebugProto.InterruptRun;
+begin
+  FLock.Acquire();
+  try
+    if FRunVM <> nil then FRunVM.InterruptDebug();
+  finally
+    FLock.Release();
+  end;
+end;
+
+procedure TDebugProto.ReleaseRunVM;
+begin
+  FLock.Acquire();
+  try
+    FRunVM := nil;
+  finally
+    FLock.Release();
+  end;
+end;
+
 { ONE WRITER, AND IT IS THE VM THREAD. AsJSON is fpjson's own encoder, the same
   one the editor's udebugproto.pas uses, so a value holding chr(10) or a quote
   cannot split a frame -- and the terminator is ours to add, because AsJSON does
@@ -1314,7 +1369,8 @@ var
 begin
   SetLength(FBreaks, ACount);
   for i := 0 to ACount - 1 do FBreaks[i] := ABreaks[i];
-  FStopAtEntry := AStopAtEntry;
+  FEditorEntry := AStopAtEntry;   // what was asked for
+  FStopAtEntry := True;           // what we arm with; see FRunVM
 end;
 
 procedure TDebugProto.SendStopped(AExtra: TJSONObject);
@@ -1421,8 +1477,17 @@ begin
   for i := 0 to High(FBreaks) do lines[i] := FBreaks[i];
   { ArmDebug REPLACES the set, which is what the protocol's whole-set semantics
     want -- and it is also why this never calls DisarmDebug first: B2 records
-    that disarming from inside a stop erases the re-entrancy guard with the set. }
-  FEng.ArmDebug(lines, FStopAtEntry);
+    that disarming from inside a stop erases the re-entrancy guard with the set.
+
+    STOP-AT-ENTRY IS ASKED FOR ONCE, AND ONLY BEFORE THE PROGRAM STARTS. The VM
+    stores it as FDbgEntryPending (PhosphorVM.pas:3810) and every ArmDebug sets
+    that flag afresh, so re-arming mid-run with True schedules ANOTHER entry stop
+    -- at whatever boundary happens to be next, which is not an entry at all. It
+    showed up the moment re-arming while stopped began to work: a three-pass loop
+    reported four stops, and the extra one was this. FRunVM is nil exactly until
+    the first stop, which makes it the honest test for "the program has not
+    started", and the entry stop this asks for is the one that captures it. }
+  FEng.ArmDebug(lines, FStopAtEntry and (FRunVM = nil));
 end;
 
 { A frame's name, as the protocol wants it: the user function, or `(main)` for
@@ -1567,9 +1632,10 @@ function TDebugProto.Handle(const ARaw: String; ALine, ADepth: Integer): Boolean
 var
   d: TJSONData;
   o, res, caps: TJSONObject;
-  arr: TJSONData;
+  arr, el: TJSONData;
   cmd: String;
-  seq, i: Integer;
+  seq, i, n: Integer;
+  v: Int64;
   stopped: Boolean;
 begin
   Result := False;
@@ -1634,13 +1700,33 @@ begin
       { Whole-set replacement for one file, which makes the editor's view
         authoritative by construction. A path this host does not know matches
         nothing and is not an error. }
+      { EVERY ELEMENT IS CHECKED, not just the array. `lines` is optional, so a
+        frame may leave it out entirely -- and when it IS there, fpjson's
+        Integers[] CONVERTS: a string element raises EConvertError, a JSON null
+        raises, and a nested array raises, each of them from inside this loop and
+        each of them killing the debuggee over one malformed element in an
+        otherwise conformant frame. An editor is a program and programs have bugs;
+        the host must not die of someone else's.
+        A non-integer element is DROPPED rather than refused, because the reply
+        already says which lines were installed -- the editor learns that its
+        element did not take by not seeing it come back, which is the same
+        mechanism that reports a line no statement starts on. }
       SetLength(FBreaks, 0);
       arr := o.Find('lines');
       if (arr <> nil) and (arr is TJSONArray) then
       begin
+        n := 0;
         SetLength(FBreaks, TJSONArray(arr).Count);
         for i := 0 to TJSONArray(arr).Count - 1 do
-          FBreaks[i] := TJSONArray(arr).Integers[i];
+        begin
+          el := TJSONArray(arr).Items[i];
+          if (el = nil) or (el.JSONType <> jtNumber) then Continue;
+          v := el.AsInt64;
+          if (v < 1) or (v > High(Integer)) then Continue;   // a line number, not an index
+          FBreaks[n] := Integer(v);
+          Inc(n);
+        end;
+        SetLength(FBreaks, n);
       end;
       if stopped or (FState = dbgInitialized) then
         Arm()
@@ -1662,7 +1748,12 @@ begin
 
     if cmd = 'launch' then
     begin
-      FStopAtEntry := o.Get('stopAtEntry', False);
+      { What the editor asked for, kept apart from what we arm with: arming
+        always requests stop-at-entry so there is a safe moment to take the
+        running VM (see FRunVM), and OnStop resumes silently from it when the
+        editor did not want it. }
+      FEditorEntry := o.Get('stopAtEntry', False);
+      FStopAtEntry := True;
       FLaunched := True;
       res := TJSONObject.Create();
       res.Add('seq', seq);
@@ -1717,6 +1808,9 @@ begin
       res.Add('seq', seq);
       res.Add('ok', True);
       SendJSON(res);
+      { THIS is what tells OnStop's drain that the boundary it is standing on is a
+        stop the editor asked for, rather than one taken only to read the socket. }
+      FPauseWanted := True;
       InterruptVM();
       Exit(False);
     end;
@@ -1752,16 +1846,69 @@ function TDebugProto.OnStop(AReason: TPhosphorStopReason; ALine: Integer;
 var
   raw, why: String;
   ev: TJSONObject;
-  silent: Boolean;
+  pending: Boolean;
 begin
-  { A boundary reached only because setBreakpoints interrupted us is not a stop
-    the editor asked for, so it gets no `stopped` event: arm and carry on. }
-  silent := (AReason = srPause) and (FState = dbgRunning) and FPendingArm;
-  if silent then
+  { THE FIRST STOP IS WHERE THE SOCKET THREAD IS HANDED THE VM, and it is why
+    arming always asks for stop-at-entry even when the editor did not. The engine
+    offers no thread-safe way to find the running VM from outside (see FRunVM);
+    the one safe moment is a stop, because the VM thread is parked in this seam
+    and cannot be freeing anything. So: always stop at entry, take the pointer,
+    and if the editor did not ask to stop here, resume without saying a word. }
+  if FRunVM = nil then
   begin
-    FPendingArm := False;
-    Arm();
-    Exit(daRun);
+    FLock.Acquire();
+    try
+      FRunVM := FEng.DebugVM;
+    finally
+      FLock.Release();
+    end;
+    if (AReason = srEntry) and (not FEditorEntry) then
+    begin
+      { FState MUST become dbgRunning here. It used to be set only on the way out
+        of a real stop, so a silent entry resume left the session reading as
+        `initialized` -- and the next `pause` was answered "pause is not valid
+        while stopped" by a program that was plainly running. The state has to
+        follow the program, not the last event the editor was sent. }
+      FState := dbgRunning;
+      Exit(daRun);
+    end;
+  end;
+
+  { A BOUNDARY REACHED BECAUSE A FRAME ARRIVED, not because the editor asked to
+    stop. Everything queued is handled here, at a safe point, and then the
+    program carries on with no `stopped` event -- unless one of those frames was
+    a `pause`, which IS the editor asking, and falls through below.
+
+    This is the other half of what makes `pause` work. The reader nudges the VM
+    when a frame lands; the VM arrives here at its next statement boundary; this
+    drains the queue. Without the drain the nudge would stop the program and
+    nothing would read what stopped it. }
+  if (AReason = srPause) and (FState = dbgRunning) then
+  begin
+    FPauseWanted := False;
+    while TakeLine(raw) do
+      if Handle(raw, ALine, ADepth) then Break;
+    if not FPauseWanted then
+    begin
+      if FPendingArm then
+      begin
+        FPendingArm := False;
+        Arm();
+      end;
+      { The interrupt flag is consumed once per boundary by an InterlockedExchange,
+        so a frame that landed while this drain ran would be seen but not woken
+        for. Nudge again: the cost is one more boundary, and the alternative is a
+        frame sitting unread until the next breakpoint, or for ever.
+        Under the lock, because the reader thread writes FInbox. }
+      FLock.Enter();
+      try
+        pending := FInbox.Count > 0;
+      finally
+        FLock.Leave();
+      end;
+      if pending then InterruptRun();
+      Exit(daRun);
+    end;
   end;
 
   FState := dbgStopped;
@@ -1873,6 +2020,13 @@ begin
     proto.Arm();
 
     line := eng.Run(source);
+    { THE POINTER DIES HERE, BEFORE THE OBJECT DOES. Run has returned, so the VM
+      the reader thread was allowed to nudge is about to be freed; nil it under
+      the lock the reader reads it under, and the window in which a dead pointer
+      is still reachable does not exist. The reader may still be parked in a read
+      and may still deliver frames after this -- they queue harmlessly and wake
+      nothing, which is correct: there is no longer a program to stop. }
+    proto.ReleaseRunVM();
     if line <> 0 then
     begin
       { An engine fault is a `stopped` with reason `exception` carrying the text,

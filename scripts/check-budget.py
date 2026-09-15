@@ -257,6 +257,18 @@ ROUTINE = re.compile(r'^(?:function|procedure|constructor|destructor)\s+'
 # A routine may skip the budget only for a reason written down here. The key is
 # "<file>:<routine>"; the value is why. Anything not listed and not gated fails.
 ALLOWED = {
+    'phosphor.lpr:TDebugProto.Handle':
+        'the debug PROTOCOL parser, which no script can reach. It sizes its '
+        'breakpoint array from one JSON frame sent by the editor over loopback, '
+        'and that frame is already capped at DBG_MAX_FRAME (1 MB, '
+        'host/console/phosphor.lpr) by the reader that assembled it -- roughly a '
+        'quarter of a million line numbers at the absolute worst, on a host '
+        'thread, between statements of the program rather than inside one. The '
+        'budget bounds what an untrusted SCRIPT can make the engine do; a script '
+        'cannot put a byte into this array. Widening the exemption past this one '
+        'routine would be wrong: everything else in this host that grows from a '
+        'script-supplied count is still asked',
+
     # ---- loops and allocations bounded by the LANGUAGE, not by a script -------
     'PhosphorBufferLib.pas:ReadRaw':
         'iterates the width of one integer: at most eight bytes',

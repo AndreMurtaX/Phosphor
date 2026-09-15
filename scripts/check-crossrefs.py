@@ -80,6 +80,22 @@ EXEMPT = {
     'tests/suite/03a_functions.bas':
         "retired by eb4171d, which replaced the 18-assert function subset with "
         "the full 03_functions.bas at step 8. docs/roadmap.md names it to say so",
+    'host/console/backup/phosphor.lpr':
+        "GITIGNORED SCRATCH, and named precisely because it should not exist: "
+        "docs/attack-plan.md finding n8 records that check-seams.py counts it as "
+        "a seventh host and reports '12 seams filled across 7 hosts' for a tree "
+        "that ships six. A citation to a path the tree deliberately does not "
+        "track, made to say the gate is reading untracked scratch",
+    'tests/phosphoridetest.lpr':
+        "PhosphorIDE's, not ours -- the same reason docs/debug-protocol.md is "
+        "exempt above. docs/attack-plan.md names it to say that the editor half "
+        "of the debug protocol has a headless test which creates no widgetset, "
+        "which is why one of its failure modes cannot be caught there",
+    'tests/skeleton/zzz_unlisted.bas':
+        "a fixture that is PLANTED and removed inside a check, never committed: "
+        "docs/attack-plan.md's gate-to-leave for d54 requires check-manifests.py "
+        "to exit 1 on an unlisted .bas dropped into a corpus it does not "
+        "enumerate. Naming the file is how the next person reproduces it",
 }
 
 

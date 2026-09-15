@@ -623,6 +623,17 @@ test-suite actually runs.
 
 ## What the 2026-09-10 gauntlet found
 
+> **This list is not the whole inventory, and it is not current by default.**
+> A verification pass on 2026-09-15 read every open entry against the source and
+> found two of them fixed months earlier and never struck (#11, #20 — now marked),
+> one filed twice at two severities (#44 and #52 share the anchor
+> `scripts/coverage.py:141`), and **fourteen defects that were on no ledger at all**.
+> Those fourteen live in [docs/attack-plan.md](attack-plan.md) §5 and are not copied
+> here, because this tree has already been bitten by a second copy of a fact drifting
+> away from the first. Seven line citations in this file are stale too — the gate
+> checks that a cited *path* exists and has never checked the line after it.
+> **Treat an entry here as a lead, not a fact: open the source before acting on it,
+> and strike it here when you close it.**
 
 The second whole-tree adversarial sweep, run after the 2026-09-06 backlog had been
 emptied and with every suite byte-exact green on both operating systems. Fourteen
@@ -1196,7 +1207,7 @@ introduces a defect.
     `scripts/lib/runner.{sh,ps1}` as their FIRST act -- before the fpc lookup, before
     any build -- canonicalising `--prove`/`--prove-failure`/`-ProveFailure` and
     refusing anything else with exit 2 and a message that names the argument.
-    `test.sh` gained the prove mode its PowerShell twin always had. `check_runners()`
+    `test.sh` gained the prove mode its PowerShell twin always had. `check_runners`
     in `scripts/check-crossrefs.py` asks each one by RUNNING it, and named eleven on
     the unpatched tree. Green both OSes.
 

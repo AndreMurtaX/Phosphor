@@ -20,6 +20,8 @@ param([string] $Fpc)
 
 . (Join-Path $PSScriptRoot 'lib/runner.ps1')
 Assert-RunnerArgs 'test-packages.ps1' noprove $args
+# Assert-CleanBuild comes from lib/runner.ps1 too -- this file carried the
+# only copy of it for months while four runners that needed it had none.
 
 
 $ErrorActionPreference = 'Stop'
@@ -40,12 +42,6 @@ $exe      = Join-Path $binDir 'phosphorpkgtest.exe'
 New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
-# A -vewn build must be clean: capture it and FAIL on any warning/note, never discard
-# it. A note can hide in a host package the engine suite never compiles.
-function Assert-CleanBuild([object[]] $Log, [string] $Label) {
-    $issues = $Log | Where-Object { "$_" -match '(?i)warning|note:|error|fatal' -and "$_" -notmatch 'Compiling|Linking' }
-    if ($issues) { $issues | ForEach-Object { Write-Host $_ -ForegroundColor Red }; throw "$Label build NOT clean" }
-}
 $blog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
     "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
     "-Fu$(Join-Path $root 'tests')" "-Fu$(Join-Path $root 'host\packages')" `

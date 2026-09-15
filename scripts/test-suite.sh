@@ -33,9 +33,9 @@ echo "boundary check: engine stays host-agnostic"
 bin="$root/bin"; cpu="$("$FPC" -iTP)"; units="$bin/units/${cpu}-linux"
 exe="$bin/phosphortest"
 mkdir -p "$units"; rm -f "$exe"
-"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+strict_build "phosphortest" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -FU"$units" -FE"$bin" -o"$exe" \
-  "$root/host/console/phosphortest.lpr" >/dev/null
+  "$root/host/console/phosphortest.lpr"
 [ -x "$exe" ] || { echo "phosphortest did not build"; exit 1; }
 echo "runner built: $exe"
 
@@ -215,11 +215,11 @@ for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handl
   # The same rule the gates below state: not running is not passing.
   [ -f "$root/$src" ] || { echo "FAIL  probe: $name  source $src is missing"; allok=1; continue; }
   pexe="$bin/$name"; rm -f "$pexe"
-  "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
+  strict_build "probe $name" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
     -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/host/packages" \
     -Fu"$root/lazarus/demo" \
     -FU"$units" -FE"$bin" -o"$pexe" \
-    "$root/$src" >/dev/null 2>&1
+    "$root/$src"
   if [ ! -x "$pexe" ]; then echo "FAIL  probe: $name  did not build"; allok=1; continue; fi
   "$pexe" >"$out" 2>"$err"; pcode=$?
   psum="$(grep -E '^(ok|fail|skip):' "$out" | tr '\n' ' ')"

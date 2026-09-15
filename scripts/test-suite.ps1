@@ -86,10 +86,11 @@ $suiteDirForStale = Join-Path $root 'tests\suite'
 New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
-& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+$blog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
     "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" "-Fu$(Join-Path $root 'tests')" `
     "-FU$unitsDir" "-FE$binDir" "-o$exe" `
-    (Join-Path $root 'host\console\phosphortest.lpr') | Out-Null
+    (Join-Path $root 'host\console\phosphortest.lpr')
+Assert-CleanBuild $blog 'phosphortest'
 if (-not (Test-Path $exe)) { throw "phosphortest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "runner built: $exe" -ForegroundColor DarkGray
 
@@ -346,11 +347,12 @@ else {
         }
         $pexe = Join-Path $binDir ($hp.name + '.exe')
         if (Test-Path $pexe) { Remove-Item $pexe -Force }
-        & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
+        $plog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" `
             "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
             "-Fu$(Join-Path $root 'host\packages')" `
             "-Fu$(Join-Path $root 'lazarus\demo')" `
-            "-FU$unitsDir" "-FE$binDir" "-o$pexe" $psrc | Out-Null
+            "-FU$unitsDir" "-FE$binDir" "-o$pexe" $psrc
+        Assert-CleanBuild $plog ("probe " + $hp.name)
         if (-not (Test-Path $pexe)) { Write-Host ("FAIL  probe: {0}  did not build" -f $hp.name) -ForegroundColor Red; $allOk = $false; continue }
         $pout = Join-Path $tmp 'probe.out'
         $perr = Join-Path $tmp 'probe.err'

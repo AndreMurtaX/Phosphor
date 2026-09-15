@@ -584,8 +584,13 @@ begin
     IDENTICAL" claim could not have been true. The greedy rewrite tested the
     literal/'?' comparison BEFORE the '*' branch, so a pattern '*' landing on a
     name byte that is itself '*' was eaten as a literal pair with no star
-    remembered, and 100 of the 7225 name/pattern pairs of length 0..3 over
-    {a,b,*,?} came back 0 where the pristine recursive matcher said 1. The first
+    remembered, and 100 of the 7225 name/pattern pairs of length 0..3 over the
+    four-byte alphabet a, b, star, question came back 0 where the pristine
+    recursive matcher said 1. (That alphabet was written as a brace-enclosed set
+    here until 2026-09-15, and a brace inside a brace comment NESTS it -- one
+    "Comment level 2 found" warning, in a tree whose bar is zero warnings, which
+    every runner had been printing PASS over because eight fpc invocations
+    discarded their log and judged the build by whether the file appeared.) The first
     of them is the whole of glob: the pattern "*" failing to match a name. A file
     whose name contains '*' is legal on Linux and reaches this through
     dir_getfiles$. Testing '*' first is the entire fix; an exhaustive walk of

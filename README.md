@@ -174,7 +174,7 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
   round-by-round retrospective from the autonomous build loop that completed the oracle.
 - [docs/attack-plan.md](docs/attack-plan.md) — the plan of record for everything still
   open: seven waves with a gate to leave each, the decisions that need taking before
-  code is written, and §5's fourteen defects that were not on any ledger.
+  code is written, and §5's sixteen defects that were not on any ledger.
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)
   · [docs/roadmap.md](docs/roadmap.md).
 

@@ -50,14 +50,15 @@ $exe      = Join-Path $binDir 'phosphorguitest.exe'
 New-Item -ItemType Directory -Force $unitsDir | Out-Null
 if (Test-Path $exe) { Remove-Item $exe -Force }
 
-& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" -dLCL -dLCLwin32 `
+$glog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" -dLCL -dLCLwin32 `
     "-Fu$(Join-Path $lcl 'win32')" "-Fu$lcl" `
     "-Fu$(Join-Path $Lazarus 'components\lazutils\lib\x86_64-win64')" `
     "-Fu$(Join-Path $Lazarus 'packager\units\x86_64-win64')" `
     "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
     "-Fu$(Join-Path $root 'tests')" "-Fu$(Join-Path $root 'host\gui\libs')" `
     "-FU$unitsDir" "-FE$binDir" "-o$exe" `
-    (Join-Path $root 'host\gui\phosphorguitest.lpr') | Out-Null
+    (Join-Path $root 'host\gui\phosphorguitest.lpr')
+Assert-CleanBuild $glog 'phosphorguitest'
 if (-not (Test-Path $exe)) { throw "phosphorguitest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "gui runner built: $exe" -ForegroundColor DarkGray
 
@@ -71,14 +72,15 @@ Write-Host "gui runner built: $exe" -ForegroundColor DarkGray
 # this project has already paid for twice.
 $demoExe = Join-Path $binDir 'phosphor_demo.exe'
 if (Test-Path $demoExe) { Remove-Item $demoExe -Force }
-& $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" -dLCL -dLCLwin32 `
+$dlog = & $fpcExe -Mobjfpc -Scghi -O2 -vewn "-TWin64" -dLCL -dLCLwin32 `
     "-Fu$(Join-Path $lcl 'win32')" "-Fu$lcl" `
     "-Fu$(Join-Path $Lazarus 'components\lazutils\lib\x86_64-win64')" `
     "-Fu$(Join-Path $Lazarus 'packager\units\x86_64-win64')" `
     "-Fu$(Join-Path $root 'engine')" "-Fu$(Join-Path $root 'engine\libs')" `
     "-Fu$(Join-Path $root 'lazarus\demo')" `
     "-FU$unitsDir" "-FE$binDir" "-o$demoExe" `
-    (Join-Path $root 'lazarus\demo\phosphor_demo.lpr') | Out-Null
+    (Join-Path $root 'lazarus\demo\phosphor_demo.lpr')
+Assert-CleanBuild $dlog 'the Lazarus demo'
 if (-not (Test-Path $demoExe)) { throw "the Lazarus demo did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "lazarus demo built: $demoExe" -ForegroundColor DarkGray
 Write-Host ''

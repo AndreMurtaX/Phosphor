@@ -37,6 +37,44 @@
 
 runner_prove=0
 
+# ---------------------------------------------------------------------------
+# strict_build -- a -vewn build must be CLEAN, and the log is the only witness.
+#
+#   strict_build "phosphortest" "$FPC" -Mobjfpc ... file.lpr
+#
+# WHY IT IS HERE AND NOT COPIED A THIRD TIME. Eight fpc invocations in
+# test-suite.{ps1,sh} and test-gui.{ps1,sh} discarded their log and judged the
+# build by whether the file appeared. That is not a weaker check, it is a
+# DIFFERENT one: fpc EXITS 0 ON A WARNING and still writes the binary, so neither
+# the exit code nor the file can see one. Measured 2026-09-15 --
+#
+#   probe_budget.lpr(588,5) Warning: Comment level 2 found
+#   fpc exit=0   binary produced: True
+#
+# -- a live warning the suite had been printing PASS over, in a tree whose stated
+# bar is zero warnings and zero notes. The class was fixed once, in build.* and
+# test-packages.*, and the copies that needed it most never got it. Now there is
+# one copy.
+#
+# The exclusion is deliberately narrow. `Compiling` and `Linking` are fpc's own
+# progress lines and nothing else is filtered: widening this past those two is how
+# a real note gets hidden inside a noisy build, which is the exact shape being
+# repaired here.
+strict_build() {   # $1 = label; $2.. = the fpc command
+  local label="$1"; shift
+  local log; log="$(mktemp)"
+  "$@" >"$log" 2>&1
+  local code=$?
+  local issues; issues="$(grep -iE 'warning|note:|error|fatal' "$log" | grep -viE 'Compiling|Linking')"
+  rm -f "$log"
+  if [ -n "$issues" ]; then
+    echo "$label build NOT clean:"
+    echo "$issues"
+    exit 1
+  fi
+  [ "$code" -eq 0 ] || { echo "$label build failed (fpc exit $code)"; exit 1; }
+}
+
 runner_args() {
   local who="$1"; shift
   local mode="$1"; shift

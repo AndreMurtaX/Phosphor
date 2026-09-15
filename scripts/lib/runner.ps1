@@ -21,6 +21,30 @@
   fail, which is the class this whole exercise is about.
 #>
 
+# ---------------------------------------------------------------------------
+# Assert-CleanBuild -- a -vewn build must be CLEAN, and the log is the only
+# witness. See the long note in scripts/lib/runner.sh: fpc EXITS 0 ON A WARNING
+# and still writes the binary, so a runner that judges by Test-Path or by the
+# exit code cannot see one, and eight invocations across four runners did exactly
+# that. Measured 2026-09-15: probe_budget.lpr(588,5) Warning: Comment level 2
+# found, fpc exit 0, binary produced, suite green.
+#
+# The exclusion stays narrow on purpose -- Compiling and Linking are fpc's own
+# progress lines. Widening it is how a real note hides in a noisy build.
+function Assert-CleanBuild {
+    param(
+        [object[]] $Log,
+        [Parameter(Mandatory = $true)] [string] $Label
+    )
+    $issues = $Log | Where-Object {
+        "$_" -match '(?i)warning|note:|error|fatal' -and "$_" -notmatch 'Compiling|Linking'
+    }
+    if ($issues) {
+        $issues | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        throw "$Label build NOT clean"
+    }
+}
+
 function Assert-RunnerArgs {
     param(
         [Parameter(Mandatory = $true)] [string] $Who,

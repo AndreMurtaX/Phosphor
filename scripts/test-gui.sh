@@ -42,12 +42,12 @@ fi
 # build the gtk2 GUI runner
 bin="$root/bin"; units="$bin/gui-units/${cpu}-linux"; exe="$bin/phosphorguitest"
 mkdir -p "$units"; rm -f "$exe"
-"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
+strict_build "phosphorguitest" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
   -Fu"$lcl/gtk2" -Fu"$lcl" \
   -Fu"$lazroot/components/lazutils/lib/${cpu}-linux" \
   -Fu"$lazroot/packager/units/${cpu}-linux" \
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -Fu"$root/host/gui/libs" \
-  -FU"$units" -FE"$bin" -o"$exe" "$root/host/gui/phosphorguitest.lpr" >/dev/null
+  -FU"$units" -FE"$bin" -o"$exe" "$root/host/gui/phosphorguitest.lpr"
 [ -x "$exe" ] || { echo "phosphorguitest did not build"; exit 1; }
 echo "gui runner built: $exe (DISPLAY=${DISPLAY:-none})"; echo
 
@@ -57,12 +57,12 @@ echo "gui runner built: $exe (DISPLAY=${DISPLAY:-none})"; echo
 # until this line: the unit that wires six controls, and the program that
 # installs the application's own crash guard before anything can raise.
 demoexe="$bin/phosphor_demo"; rm -f "$demoexe"
-"$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
+strict_build "the Lazarus demo" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
   -Fu"$lcl/gtk2" -Fu"$lcl" \
   -Fu"$lazroot/components/lazutils/lib/${cpu}-linux" \
   -Fu"$lazroot/packager/units/${cpu}-linux" \
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/lazarus/demo" \
-  -FU"$units" -FE"$bin" -o"$demoexe" "$root/lazarus/demo/phosphor_demo.lpr" >/dev/null
+  -FU"$units" -FE"$bin" -o"$demoexe" "$root/lazarus/demo/phosphor_demo.lpr"
 [ -x "$demoexe" ] || { echo "the Lazarus demo did not build"; exit 1; }
 echo "lazarus demo built: $demoexe"; echo
 

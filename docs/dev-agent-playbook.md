@@ -627,7 +627,7 @@ test-suite actually runs.
 > A verification pass on 2026-09-15 read every open entry against the source and
 > found two of them fixed months earlier and never struck (#11, #20 — now marked),
 > one filed twice at two severities (#44 and #52 share the anchor
-> `scripts/coverage.py:141`), and **fourteen defects that were on no ledger at all**.
+> `scripts/coverage.py:141`), and **sixteen defects that were on no ledger at all**.
 > Those fourteen live in [docs/attack-plan.md](attack-plan.md) §5 and are not copied
 > here, because this tree has already been bitten by a second copy of a fact drifting
 > away from the first. Seven line citations in this file are stale too — the gate
@@ -1217,6 +1217,15 @@ introduces a defect.
     reader treats an open entry as a description of the tree. If you fix something
     here, say so here.
 50. **scripts/test-suite.ps1:220** [medium] -- test-suite.{ps1,sh} and test-gui.{ps1,sh} discard the -vewn log for nine sources and judge the build by file existence -- the class commit c65807a fixed only in build.* and test-packages.* -- and a live warning sits in scripts/probe_budget.lpr:588 because of it
+    **CLOSED 2026-09-15.** All eight invocations in test-suite.{ps1,sh} and
+    test-gui.{ps1,sh} route through strict_build / Assert-CleanBuild in
+    scripts/lib/runner.{sh,ps1} -- one copy, where test-packages.* had carried the
+    only one. fpc EXITS 0 ON A WARNING and still writes the binary, so neither the
+    exit code nor Test-Path could ever have seen this. Watched turning the suite
+    red on the real warning first; it also surfaced two notes nobody had seen, in
+    phosphorguitest.lpr:191-192, where nothing released the watchdog or the
+    services object. All three fixed in the same commit. No LCL/gtk2 note appeared
+    on either platform, so the exclusion filter stayed narrow. Green both OSes.
 51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
 52. **tests/gui/manifest.txt:1** [medium] -- scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
 53. **tests/negative/11_unknown_escape.bas:4** [medium] -- scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)

@@ -15,20 +15,12 @@ root="$(dirname "$here")"
 # machine that cannot build.
 . "$here/lib/runner.sh"
 runner_args "test-packages.sh" noprove "$@"
+# strict_build comes from lib/runner.sh too -- this file carried the only
+# copy of it for months while four runners that needed it had none.
 
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 
-# A -vewn build must be clean: capture it and FAIL on any warning/note, never pipe it
-# to /dev/null. A note can hide in a host package the engine suite never compiles.
-strict_build() {   # $1 = label; $2.. = the fpc command
-  local label="$1"; shift
-  local log; log="$(mktemp)"
-  "$@" >"$log" 2>&1
-  local issues; issues="$(grep -iE 'warning|note:|error|fatal' "$log" | grep -viE 'Compiling|Linking')"
-  rm -f "$log"
-  [ -z "$issues" ] || { echo "$label build NOT clean:"; echo "$issues"; exit 1; }
-}
 
 bin="$root/bin"; cpu="$("$FPC" -iTP)"; units="$bin/pkg-units/${cpu}-linux"
 exe="$bin/phosphorpkgtest"

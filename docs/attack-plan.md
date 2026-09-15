@@ -12,7 +12,7 @@ does the work go in, and how does each stage know it is finished.**
 
 Two things about it are load-bearing.
 
-**Section 5 is the inventory of defects that were NOT on the ledger** — fourteen of them,
+**Section 5 is the inventory of defects that were NOT on the ledger** — sixteen of them,
 found while verifying the thirty-three that were. They are recorded here and nowhere
 else; the playbook's numbered list points at this section rather than copying them,
 because this project has already been bitten by a second copy of a fact drifting away
@@ -28,7 +28,7 @@ debugger residuals, `nNN` the new defects in section 5.
 ---
 
 
-Scope: 34 ledger items verified against the source today. **33 are live**, 1 is closed, 1 is a duplicate. The verification also surfaced **14 defects and classes that are not on the ledger** — §6, and it is the most valuable part of this document.
+Scope: 34 ledger items verified against the source today. **33 are live**, 1 is closed, 1 is a duplicate. The verification also surfaced **16 defects and classes that are not on the ledger** — §5, and it is the most valuable part of this document.
 
 Sequencing principle, stated once so the rest follows from it: **nearly every engine fix in this set has at least one plausible wrong fix that is byte-exact green on both OSes today.** That was measured item by item, not assumed — the `{$IFDEF UNIX}` move guard, the partial JSON rewrite that manufactures NULs, the `is TComponent` node guard that access-violates on exactly the case it guards, `GuiChargeAdd`, a charge placed after the `Assign`, a cumulative-`APos` meter, four *new* 2 GiB allocations created by "consistency", a `check-budget.py` `ALLOWED` entry that closes a hole by declaring it closed. A green suite cannot distinguish any of those from the right fix. So: repair what measures, then fix what is measured — with one deliberate exception for the three items that destroy user data.
 
@@ -169,7 +169,8 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 
 - If **the Linux VM stays down**, d07's only honest see-it-fail is impossible (Windows passes the new assertions *today*). Hold d07, do d12 and d14, and do not let anyone "verify" d07 by simulating POSIX semantics on Windows and calling it done — that mutation is a step in its test plan, not a substitute for the VM.
 - If **fixing `coverage.py` prints substantially more than 79, or prints any *engine* name uncovered**, that is a bigger finding than anything in Waves 4-6 and should be triaged before proceeding.
-- If **Wave 1's clean-log check turns the tree red for something other than `probe_budget.lpr:588`** — particularly LCL/gtk2 notes in the `test-gui` build, which no clean-log check has ever seen — that is a decision to take deliberately, not a red suite to grep away. Widening the exclusion filter past `Compiling|Linking` hides our notes in the same build.
+- ~~If **Wave 1's clean-log check turns the tree red for something other than `probe_budget.lpr:588`** — particularly LCL/gtk2 notes in the `test-gui` build, which no clean-log check has ever seen — that is a decision to take deliberately, not a red suite to grep away. Widening the exclusion filter past `Compiling|Linking` hides our notes in the same build.~~
+  **ANSWERED 2026-09-15 by doing it.** It turned the tree red for `probe_budget.lpr:588` as predicted, **and for two more** — `phosphorguitest.lpr(191,3)` and `(192,3)`, `Local variable "GuiSvc"/"Dog" is assigned but never used`, live for as long as that file has existed. They are not cosmetic: taking `@Dog.Bark` is not a read as far as FPC's dataflow is concerned, and what the note was really pointing at is that **nothing ever released either object**. Fixed by releasing them at the two exits that can reach them, timer first because it holds a method pointer into the watchdog. **No LCL or gtk2 note appeared on either platform**, win32 or gtk2, so the exclusion filter stayed at `Compiling|Linking` and the feared decision never had to be taken.
 - **Honest scope note:** this is 33 items for one week. Waves 5-7 will not all land. If only Waves 1-4 land, the tree is measurably better and the rest is better understood — which is the argument for this order rather than for starting with the scariest defect.
 
 ---

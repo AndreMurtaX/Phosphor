@@ -208,6 +208,26 @@ begin
   Halt(3);   // never a dialog, never a wait
 end;
 
+{ The watchdog and the host-services object live as long as the run and are
+  released at the two exits that can reach them -- the three earlier Halts happen
+  before either exists. ORDER MATTERS: DogTimer holds a method pointer into Dog,
+  so the timer is destroyed first; freeing Dog first would leave an armed timer
+  pointing at dead memory for as long as it takes to reach Halt.
+
+  This exists because of the notes, and the notes were right. `Dog` and `GuiSvc`
+  were assigned and then only ever read through `@Dog.Bark` / `@GuiSvc.Pump`,
+  which FPC's dataflow does not count as a use -- so it said "assigned but never
+  used", and what that was really pointing at is that nothing ever released them.
+  Both notes had been live in the tree for as long as this file has existed and
+  were invisible until 2026-09-15, when this runner started reading its own build
+  log instead of checking whether the binary appeared. }
+procedure ReleaseGuiFixtures;
+begin
+  FreeAndNil(DogTimer);
+  FreeAndNil(Dog);
+  FreeAndNil(GuiSvc);
+end;
+
 begin
   if ParamCount < 1 then
   begin
@@ -280,11 +300,13 @@ begin
     begin
       Writeln(StdErr, Format('phosphorguitest: %s:%d: %s', [path, eng.ErrorLine, eng.ErrorMessage]));
       WriteSummary();
+      ReleaseGuiFixtures();
       Halt(2);
     end;
     for i := 0 to Failures.Count - 1 do
       Writeln(StdErr, '  FAIL ', Failures[i]);
     WriteSummary();
+    ReleaseGuiFixtures();
     if AssertsFailed = 0 then Halt(0) else Halt(1);
   finally
     eng.Free;

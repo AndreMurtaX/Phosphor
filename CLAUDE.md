@@ -33,7 +33,7 @@ bar.
 
 ```powershell
 powershell -NoProfile -File scripts\build.ps1        # clean build + boundary check
-powershell -NoProfile -File scripts\test-suite.ps1   # suite + probes + 8 gates
+powershell -NoProfile -File scripts\test-suite.ps1   # suite + probes + 10 gates
 powershell -NoProfile -File scripts\test-classic.ps1 # classic file I/O, PRINT USING
 powershell -NoProfile -File scripts\test-examples.ps1  # and -packages, -gui: SEPARATE scripts
 powershell -NoProfile -File scripts\test.ps1
@@ -203,7 +203,7 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
 
 ## The gates, and why they exist
 
-`scripts/test-suite.ps1` runs nine Python gates. Each exists because a rule stated in prose
+`scripts/test-suite.ps1` runs ten Python gates. Each exists because a rule stated in prose
 turned out to be false and nothing could tell:
 
 | gate | the rule it enforces |
@@ -217,6 +217,7 @@ turned out to be false and nothing could tell:
 | `check-budget.py` | a loop or an allocation over a script-supplied count consults the budget, or is exempt with a reason |
 | `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test |
 | `check-crossrefs.py` | a repo path named in prose exists (renumbering a test file breaks every comment citing it, and no other gate reads a sentence); both suite runners build the same probes from the same sources — a probe registered in one runs on one OS; and **every runner refuses an argument it does not know**, asked by running it, because `-ProveFailure` was a silent full run on five of six bash runners |
+| `check-boundary.py` | the two halves of the engine boundary check are right, **and agree** — asked by RUNNING each over `tests/boundary`, whose eleven expected answers are derived from Pascal and not from any implementation. The first time anyone asked, the bash halves scored 8/11 and the PowerShell halves 10/11: the bash ones never stripped `(* *)` at all, and all four stripped `//` before the block forms, which lets a brace comment lose its terminator to a `//` on the same line and then swallow a real `uses` clause |
 
 **Before you sweep anything, read [docs/proof-axes.md](docs/proof-axes.md)** -- the axes a
 sweep must cross, each one there because it hid a real defect once. Every adversarial

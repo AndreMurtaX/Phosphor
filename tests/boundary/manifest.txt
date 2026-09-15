@@ -1,0 +1,27 @@
+# Fixtures for the engine boundary check -- scripts/lib/boundary.{sh,ps1}, run
+# over these by scripts/check-boundary.py on every suite run.
+#
+#   <name>|<violation expected>|<why, derived from Pascal and not from a run>
+#
+# EVERY EXPECTATION HERE COMES FROM THE LANGUAGE, NOT FROM AN IMPLEMENTATION.
+# That is not ceremony: four expectations in this tree have been wrong because
+# somebody read a run and recorded what it printed. Free Pascal has three comment
+# forms -- //, { }, (* *) -- all of which may span lines except //, and THE ONE
+# THAT OPENS FIRST WINS. Every line below follows from that sentence.
+#
+# When these were written (2026-09-15) the four copies of the check in the tree
+# scored 8/11 (bash) and 10/11 (PowerShell). The cases that failed are the two
+# defects: d64, the bash halves never stripping (* *), and n13, all four halves
+# stripping // before the block forms.
+
+plain|True|a bare uses Forms with no comment anywhere. A check that misses this is measuring nothing
+clean|False|no forbidden unit in the file at all. A check that reports this refuses something legal
+in-brace|False|the name appears only inside a brace comment, which is documentation and not a dependency
+in-paren|False|the same sentence in the other block form. d64: the bash copies read this as a real dependency and the PowerShell copies did not, so one legal file failed the build on Linux and passed on Windows
+in-line|False|the name appears only in a line comment
+brace-holding-slashes|True|n13, and the dangerous direction. The // sits INSIDE a brace comment, so a stripper that removes line comments first eats the } that ends the block; the brace pass then runs from { to the next } later in the file and swallows the real uses clause with it. The violation is real and must be reported
+line-holding-open-brace|False|the MIRROR of n13, and the reason reordering is not the fix. The { sits inside a // line comment and never closes, so a brace-first stripper would open a block there and run to the next } or to end of file, swallowing the real clause. Nothing forbidden is used
+paren-holding-brace|False|nested forms: the (* opens first, so everything through *) is comment text including the { and the sentence naming Forms
+brace-holding-paren|False|the same, the other way round
+directive|True|a compiler directive is lexically a brace comment and is stripped, and the uses clause sitting between two of them is ordinary code that must still be seen
+two-clauses|True|a second uses clause in the implementation section is a dependency exactly like the first

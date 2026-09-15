@@ -17,17 +17,14 @@ runner_args "test-suite.sh" prove "$@"
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 
-# boundary check (same as build.sh)
-forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
-for f in $(find "$root/engine" -name '*.pas'); do
-  # Strip Pascal comments (line //, brace { }) before flattening, so a unit named
-  # in prose (an engine comment naming the LCL host it must NOT reach) cannot trip
-  # the check -- documentation is not a dependency.
-  flat="$(sed -E 's://.*$::' "$f" | tr '\n' ' ' | sed -E 's/\{[^}]*\}/ /g' | tr 'A-Z' 'a-z')"
-  for u in $forbidden; do
-    printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]" && { echo "boundary violation: $(basename "$f") uses '$u'"; exit 1; }
-  done
-done
+# --- boundary check: the engine must not reach a host/GUI unit ---------------
+# ONE COPY, in scripts/lib/boundary.sh, with its PowerShell twin beside it. There
+# were four, they disagreed, and on 2026-09-15 they were scored for the first time
+# against tests/boundary: the bash halves 8/11, the PowerShell halves 10/11. The
+# comment that used to sit here claimed this script stripped (* *) comments. It
+# did not. scripts/check-boundary.py now runs both halves over those fixtures.
+. "$here/lib/boundary.sh"
+boundary_check "$root/engine" || { echo "engine must stay host-agnostic (see docs/architecture.md)"; exit 1; }
 echo "boundary check: engine stays host-agnostic"
 
 bin="$root/bin"; cpu="$("$FPC" -iTP)"; units="$bin/units/${cpu}-linux"
@@ -266,7 +263,7 @@ PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
   echo "FAIL  gates: no python interpreter found (needed by the source checks)"; allok=1
 else
-  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py check-examples.py check-suffix.py check-budget.py check-manifests.py check-crossrefs.py; do
+  for gate in check-codepage.py coverage.py check-sandbox.py check-seams.py check-examples.py check-suffix.py check-budget.py check-manifests.py check-crossrefs.py check-boundary.py; do
     # The comment above says a gate that quietly does not run is worse than no gate,
     # and then this line skipped a gate whose FILE was missing. A deleted gate is
     # exactly the case the sentence was written about.

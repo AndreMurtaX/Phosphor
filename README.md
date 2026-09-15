@@ -178,9 +178,9 @@ Pascal program, see [docs/embedding.md](docs/embedding.md).
 - [docs/gui-components.md](docs/gui-components.md) · [docs/embedding.md](docs/embedding.md)
   · [docs/roadmap.md](docs/roadmap.md).
 
-## The nine source gates
+## The ten source gates
 
-After the acceptance corpus, `test-suite` runs nine Python checks over the *source* —
+After the acceptance corpus, `test-suite` runs ten Python checks over the *source* —
 invariants no compiler can check and no golden happens to cover. They run in the
 suite rather than in the build, because building should not need Python but passing
 should mean the invariants hold; and a missing interpreter **fails** the run instead
@@ -193,12 +193,14 @@ fails if this number disagrees**, so the next one to join cannot be missed the s
 way. **And it did**: `check-crossrefs.py` joined on 2026-09-11 and this heading
 still said eight, which `coverage.py` refused within minutes of the wiring — the
 mechanism catching the person who had just built a mechanism for the same class one
-level over. `scripts/test-suite.sh` runs the same nine on Linux.
+level over. `check-boundary.py` joined on 2026-09-15 and made it ten.
+`scripts/test-suite.sh` runs the same ten on Linux.
 
 | gate | what it refuses to let through |
 | ---- | ------------------------------ |
 | `coverage.py` | a registered built-in that no test calls, that the function reference omits, or that its own library page does not describe — and, the other way round, a function name or a count a document states that the registry does not back. |
-| `check-crossrefs.py` | a repo path named in a comment or a document that the tree does not have — renumbering one test file broke four citations in an afternoon and no other gate reads a sentence — and a probe registered in one suite runner but not the other, which runs on one operating system while both print OK. |
+| `check-crossrefs.py` | a repo path named in a comment or a document that the tree does not have — renumbering one test file broke four citations in an afternoon and no other gate reads a sentence — a probe registered in one suite runner but not the other, which runs on one operating system while both print OK, and a runner that accepts an argument it does not understand, which is how `-ProveFailure` was a silent full run on five of six bash runners. |
+| `check-boundary.py` | a comment-stripping bug in the engine boundary check — the thing that decides whether `engine/` has reached a host or GUI unit. The two halves are RUN over `tests/boundary`, whose eleven expected answers are derived from Pascal rather than from a run. The first time anyone asked, the bash halves scored 8/11 and the PowerShell halves 10/11: the bash ones stripped no `(* *)` comments at all, so one legal file failed on Linux and passed on Windows, and all four stripped `//` first, which lets a brace comment lose its terminator to a `//` on the same line and then swallow a real `uses` clause — hiding a violation, which is the one thing this check must never do. |
 | `check-codepage.py` | a `Char` concatenated into a code-page string, where every byte `>= 128` is silently destroyed. The class has been swept three times. |
 | `check-sandbox.py` | a routine a script can reach that touches the filesystem without asking the sandbox gate first — or without being exempt by name, with a reason. |
 | `check-seams.py` | a host that neither fills an engine seam (`OnOutput`, `OnInput`, `OnBreakpoint`, `HostServices`) nor records why leaving it nil is right. A nil seam answers silently. |
@@ -219,7 +221,7 @@ level over. `scripts/test-suite.sh` runs the same nine on Linux.
 | `host/packages/` | opt-in packages: base64, zip, gzip, http, sqlite, crt.           |
 | `tests/`         | six corpora: `suite` (the oracle), `negative`, `classic`, `packages`, `gui`, `skeleton`, plus the assert library and the Pascal probes. |
 | `examples/`      | runnable example programs — and they are RUN: `test-examples` byte-compares each to a golden (a windowed one is compiled, since the compiler needs no display). |
-| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the nine source gates described above.|
+| `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the ten source gates described above.|
 | `docs/`          | the documentation above.                                         |
 
 Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;

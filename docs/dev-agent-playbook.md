@@ -1339,6 +1339,23 @@ introduces a defect.
 ### Cross-OS divergence (1)
 
 64. **scripts/build.sh:23** [low] -- scripts/build.sh:23 and scripts/test-suite.sh:18 strip only // and { } comments while their PowerShell counterparts (build.ps1:66-68, test-suite.ps1:40-42) also strip (* *), so a forbidden unit named inside a paren comment fails the boundary check on Linux and passes on Windows -- and build.sh's own comment at 20-22 claims the missing pass (test-suite.sh's does not)
+    **CLOSED 2026-09-15, and it was bigger than this entry.** There were FOUR
+    implementations, not two: build.ps1 matched `uses ... ;` clauses while
+    test-suite.ps1 used a flat regex. Scored against tests/boundary -- eleven
+    cases whose expected answers are derived from Pascal and not from a run --
+    the bash halves got 8/11 and the PowerShell halves 10/11. This entry names
+    the paren blindness, which is two of the three bash failures. The third is
+    filed as n13 in docs/attack-plan.md and IS ON BOTH PLATFORMS: all four
+    stripped // before the block forms, so a brace comment whose } shares a line
+    with a // loses its terminator and the brace pass swallows forward over a
+    real uses clause -- HIDING a violation.
+    Reordering is not the fix, and that was measured too: brace-first breaks the
+    mirror case, a { inside a // line. A sequence of passes cannot express
+    'whichever form opens first wins'; one alternation can, and scores 11/11
+    under both perl and .NET. One copy now, in scripts/lib/boundary.{sh,ps1},
+    with scripts/check-boundary.py -- the tenth gate -- RUNNING both halves over
+    the fixtures and failing if either slips or if they disagree. Seen failing
+    against this morning's logic first. Green both OSes.
 
 ### Breakage (1)
 

@@ -14,21 +14,13 @@ FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 
 # --- boundary check: the engine must not reach a host/GUI unit ---------------
-forbidden="crt video keyboard lcl lclintf lcltype forms controls dialogs graphics interfaces windows unix baseunix"
-violation=0
-for f in $(find "$root/engine" -name '*.pas'); do
-  # Strip Pascal comments (line //, brace { }, paren (* *)) BEFORE flattening, so a
-  # unit name named in prose (an engine comment naming the LCL host it must NOT
-  # reach) is documentation, not a dependency, and cannot trip the check.
-  flat="$(sed -E 's://.*$::' "$f" | tr '\n' ' ' | sed -E 's/\{[^}]*\}/ /g' | tr 'A-Z' 'a-z')"
-  for u in $forbidden; do
-    if printf '%s' "$flat" | grep -qE "uses[^;]*[ ,]$u[ ,;]"; then
-      echo "BOUNDARY VIOLATION: $(basename "$f") uses '$u'"
-      violation=1
-    fi
-  done
-done
-[ "$violation" -eq 0 ] || { echo "engine must stay host-agnostic (see docs/architecture.md)"; exit 1; }
+# ONE COPY, in scripts/lib/boundary.sh, with its PowerShell twin beside it. There
+# were four, they disagreed, and on 2026-09-15 they were scored for the first time
+# against tests/boundary: the bash halves 8/11, the PowerShell halves 10/11. The
+# comment that used to sit here claimed this script stripped (* *) comments. It
+# did not. scripts/check-boundary.py now runs both halves over those fixtures.
+. "$here/lib/boundary.sh"
+boundary_check "$root/engine" || { echo "engine must stay host-agnostic (see docs/architecture.md)"; exit 1; }
 echo "boundary check: engine stays host-agnostic"
 
 # --- compile -----------------------------------------------------------------

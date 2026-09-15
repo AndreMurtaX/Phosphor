@@ -52,35 +52,15 @@ function Resolve-Fpc {
 }
 
 # --- 1. Boundary check: the engine must not reach for a host or GUI unit ------
-$forbidden = @(
-    'crt','video','keyboard','lcl','lclintf','lcltype','forms','controls',
-    'dialogs','graphics','interfaces','windows','unix','baseunix'
-)
+# ONE COPY, in scripts/lib/boundary.ps1, with its bash twin beside it. There were
+# four, they disagreed, and on 2026-09-15 they were scored for the first time
+# against tests/boundary: the PowerShell halves 10/11, the bash halves 8/11. Both
+# stripped // before the block forms, which lets a brace comment lose its
+# terminator to a // on the same line and then swallow a real uses clause.
+# scripts/check-boundary.py now runs both halves over those fixtures.
 $engineDir = Join-Path $root 'engine'
-$violations = @()
-foreach ($src in Get-ChildItem -Path $engineDir -Filter *.pas -Recurse) {
-    $text = Get-Content -Raw -LiteralPath $src.FullName
-    # Strip Pascal comments first: a unit name mentioned in prose (e.g. an engine
-    # comment naming the LCL host it must NOT reach) is documentation, not a
-    # dependency. Only then scan the real uses clauses, lowercased.
-    $text = [regex]::Replace($text, '(?m)//.*?$', ' ')
-    $text = [regex]::Replace($text, '(?s)\{.*?\}', ' ')
-    $text = [regex]::Replace($text, '(?s)\(\*.*?\*\)', ' ')
-    foreach ($m in [regex]::Matches($text, '(?is)\buses\b(.*?);')) {
-        $clause = $m.Groups[1].Value.ToLowerInvariant()
-        foreach ($unit in $forbidden) {
-            if ($clause -match "(^|[\s,])$([regex]::Escape($unit))([\s,]|$)") {
-                $violations += "$($src.Name): uses '$unit'"
-            }
-        }
-    }
-}
-if ($violations.Count -gt 0) {
-    Write-Host 'BOUNDARY VIOLATION -- the engine reached a host/GUI unit:' -ForegroundColor Red
-    $violations | ForEach-Object { Write-Host "  $_" }
-    throw 'engine must stay host-agnostic (see docs/architecture.md)'
-}
-Write-Host 'boundary check: engine stays host-agnostic' -ForegroundColor DarkGray
+. (Join-Path $PSScriptRoot 'lib/boundary.ps1')
+Assert-EngineBoundary $engineDir
 
 # --- Linux gate ---------------------------------------------------------------
 if ($TargetOS -eq 'linux') {

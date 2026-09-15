@@ -57,25 +57,14 @@ function Resolve-Fpc {
 }
 
 # --- boundary check: the engine must not reach a host/GUI unit ---------------
-$forbidden = @('crt','video','keyboard','lcl','lclintf','lcltype','forms','controls',
-               'dialogs','graphics','interfaces','windows','unix','baseunix')
-foreach ($src in Get-ChildItem (Join-Path $root 'engine') -Filter *.pas -Recurse) {
-    $text = Get-Content -Raw -LiteralPath $src.FullName
-    # Strip Pascal comments first: a unit name mentioned in prose (e.g. an engine
-    # comment that names the LCL host it must NOT reach) is documentation, not a
-    # dependency, and must not trip the check.
-    $text = [regex]::Replace($text, '(?m)//.*?$', ' ')
-    $text = [regex]::Replace($text, '(?s)\{.*?\}', ' ')
-    $text = [regex]::Replace($text, '(?s)\(\*.*?\*\)', ' ')
-    foreach ($m in [regex]::Matches($text, '(?is)\buses\b(.*?);')) {
-        foreach ($u in $forbidden) {
-            if ($m.Groups[1].Value.ToLowerInvariant() -match "(^|[\s,])$([regex]::Escape($u))([\s,]|$)") {
-                throw "boundary violation: $($src.Name) uses '$u'"
-            }
-        }
-    }
-}
-Write-Host 'boundary check: engine stays host-agnostic' -ForegroundColor DarkGray
+# ONE COPY, in scripts/lib/boundary.ps1, with its bash twin beside it. There were
+# four, they disagreed, and on 2026-09-15 they were scored for the first time
+# against tests/boundary: the PowerShell halves 10/11, the bash halves 8/11. Both
+# stripped // before the block forms, which lets a brace comment lose its
+# terminator to a // on the same line and then swallow a real uses clause.
+# scripts/check-boundary.py now runs both halves over those fixtures.
+. (Join-Path $PSScriptRoot 'lib/boundary.ps1')
+Assert-EngineBoundary (Join-Path $root 'engine')
 
 # --- build the runner --------------------------------------------------------
 $fpcExe   = Resolve-Fpc
@@ -411,7 +400,7 @@ if (-not $py) {
     Write-Host 'FAIL  gates: no python interpreter found (needed by the source checks)' -ForegroundColor Red
     $allOk = $false
 } else {
-    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py', 'check-budget.py', 'check-manifests.py', 'check-crossrefs.py')) {
+    foreach ($gate in @('check-codepage.py', 'coverage.py', 'check-sandbox.py', 'check-seams.py', 'check-examples.py', 'check-suffix.py', 'check-budget.py', 'check-manifests.py', 'check-crossrefs.py', 'check-boundary.py')) {
         $gp = Join-Path $here $gate
         # The comment above says a gate that quietly does not run is worse than no
         # gate, and then this line skipped a gate whose FILE was missing -- exactly

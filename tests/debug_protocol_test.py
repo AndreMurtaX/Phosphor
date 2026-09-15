@@ -365,6 +365,104 @@ check('and finished its own work after being paused',
 conn2.close()
 srv2.close()
 
+# ---------------------------------------------------------------------------
+# THIRD SESSION: A LOOP WHOSE BODY IS ONE LINE.
+#
+# This shape exists because it caught a regression that nothing else could see.
+# When the reader thread began nudging the VM so `pause` could work, it nudged for
+# EVERY frame -- including the `continue` that arrives while the program is
+# already stopped and already reading its inbox. That nudge then fired at the
+# first boundary after the resume, as a pause stop nobody asked for, and the drain
+# resumed silently from it.
+#
+# Harmless when that boundary is an ordinary line. NOT harmless when it is the
+# armed one -- and with a ONE-LINE BODY it always is, because the boundary after
+# the body is the body again. A three-pass loop reported two stops, in both `for`
+# and `while`, while every two-line body was unaffected. 39 protocol assertions
+# and both byte-exact suites passed straight through it.
+# ---------------------------------------------------------------------------
+BAS3 = os.path.join(WORK, 'tight.bas')
+with open(BAS3, 'w', newline='\n') as f:
+    f.write('t = 0\nfor i = 1 to 3\n  t = t + i\nnext\nprintln "t="; t\nend\n')
+
+srv3 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv3.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv3.bind(('127.0.0.1', 0))
+srv3.listen(1)
+port3 = srv3.getsockname()[1]
+proc3 = subprocess.Popen([EXE, 'debug', '--port', str(port3), BAS3],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv3.settimeout(10)
+conn3, _ = srv3.accept()
+conn3.settimeout(30)
+
+seq3 = [0]
+buf3 = [b'']
+
+
+def send3(**kw):
+    seq3[0] += 1
+    kw['seq'] = seq3[0]
+    conn3.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+    return seq3[0]
+
+
+def recv3(timeout=30):
+    conn3.settimeout(timeout)
+    while b'\n' not in buf3[0]:
+        try:
+            chunk = conn3.recv(65536)
+        except socket.timeout:
+            return None
+        if not chunk:
+            return None
+        buf3[0] += chunk
+    line, buf3[0] = buf3[0].split(b'\n', 1)
+    return json.loads(line.decode('utf-8'))
+
+
+def until3(pred, timeout=30, tries=80):
+    for _ in range(tries):
+        m = recv3(timeout)
+        if m is None:
+            return None
+        if pred(m):
+            return m
+    return None
+
+
+s = send3(cmd='initialize')
+until3(lambda m: m.get('seq') == s)
+# Line 3 is the whole body. Lines 1 and 5 are statements too, so the reply must
+# carry exactly what was asked for -- this case is about the COUNT, not filtering.
+s = send3(cmd='setBreakpoints', path=BAS3, lines=[3])
+r = until3(lambda m: m.get('seq') == s)
+check('the single body line is installed', r is not None and r.get('lines') == [3], str(r))
+s = send3(cmd='launch')
+until3(lambda m: m.get('seq') == s)
+
+tight = 0
+gone = False
+for _ in range(12):
+    ev = until3(lambda m: m.get('event') in ('stopped', 'exited'), timeout=20)
+    if ev is None:
+        break
+    if ev.get('event') == 'exited':
+        gone = True
+        break
+    tight += 1
+    s = send3(cmd='continue')
+    until3(lambda m: m.get('seq') == s, timeout=20)
+
+check('a one-line loop body stops once per pass, not once less', tight == 3,
+      '%d stops' % tight)
+check('and the program then exits', gone)
+out3, _ = proc3.communicate(timeout=60)
+check('having done all three passes of its own work',
+      b't=6' in out3.replace(b'\r\n', b'\n'), repr(out3[:40]))
+conn3.close()
+srv3.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

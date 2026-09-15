@@ -1067,6 +1067,22 @@ type
       the pointer is dead and still visible does not exist. }
     FRunVM: TPhosphorVM;
     FPauseWanted: Boolean;  // a `pause` frame arrived: this stop is the editor's
+    { PARKED IN THE SEAM AND ALREADY READING. Guarded by FLock, because the VM
+      thread writes it and the socket thread reads it.
+
+      Without it the reader nudged the VM for EVERY frame, including the ones that
+      arrive while the program is stopped -- and a stopped VM is sitting in the
+      wait loop reading the inbox already. The nudge then fired at the next
+      boundary after the resume, as a `pause` stop nobody asked for, and the drain
+      resumed silently from it. Harmless when that boundary is an ordinary line,
+      and NOT harmless when it is an armed one: the breakpoint stop was replaced
+      by a silent resume and simply did not happen.
+
+      Measured, because the shape is narrow enough to miss: a loop whose body is a
+      SINGLE line lost one stop of three, in both `for` and `while`, while a
+      two-line body was unaffected -- with a one-line body the boundary that
+      consumes the interrupt IS the armed one. }
+    FVMParked: Boolean;
     FEditorEntry: Boolean;  // the editor asked to stop at entry (it usually does not)
     procedure EnsureStoppable;
     function InstalledLines: TJSONArray;
@@ -1301,7 +1317,10 @@ procedure TDebugProto.InterruptRun;
 begin
   FLock.Acquire();
   try
-    if FRunVM <> nil then FRunVM.InterruptDebug();
+    { A PARKED VM NEEDS NO NUDGE -- it is in the wait loop reading the inbox
+      already, and nudging it sets an interrupt that fires at the first boundary
+      AFTER it resumes, as a pause stop nobody asked for. See FVMParked. }
+    if (FRunVM <> nil) and (not FVMParked) then FRunVM.InterruptDebug();
   finally
     FLock.Release();
   end;
@@ -1923,15 +1942,30 @@ begin
   SendEvent('stopped', ev);
 
   FAction := daRun;
-  while True do
-  begin
-    if FClosed then Break;
-    if TakeLine(raw) then
+  FLock.Enter();
+  try
+    FVMParked := True;
+  finally
+    FLock.Leave();
+  end;
+  try
+    while True do
     begin
-      if Handle(raw, ALine, ADepth) then Break;
-    end
-    else
-      Sleep(5);   { the VM thread is parked here on purpose: this seam MAY block }
+      if FClosed then Break;
+      if TakeLine(raw) then
+      begin
+        if Handle(raw, ALine, ADepth) then Break;
+      end
+      else
+        Sleep(5);   { the VM thread is parked here on purpose: this seam MAY block }
+    end;
+  finally
+    FLock.Enter();
+    try
+      FVMParked := False;
+    finally
+      FLock.Leave();
+    end;
   end;
   FState := dbgRunning;
   Result := FAction;

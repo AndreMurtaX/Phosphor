@@ -132,6 +132,23 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
     `Test-NetConnection -ComputerName h -Port 22` (or just try the `ssh`). On 2026-09-08
     this reported a powered-off VM as online, one message after I had correctly said it
     was down.
+  - **`pgrep -f PATTERN` MATCHES ITS OWN COMMAND LINE**, so it always finds something
+    and always exits 0. `until ! ssh vm 'pgrep -f "scripts/test-suite.sh" >/dev/null';
+    do sleep 15; done` therefore never ends: the remote `bash -c pgrep -f
+    scripts/test-suite.sh` contains the pattern and matches itself. Five of these ran
+    for three hours on 2026-09-15, one ssh every fifteen seconds, and were found only
+    because the user asked what the five background tasks in his sidebar were. Use
+    `pgrep -f "[s]cripts/test-suite.sh"` (the bracket makes the pattern not match its
+    own text), or `pgrep -x`, or ask for something that is not a process at all -- a
+    sentinel file the runner touches when it finishes.
+    The evidence was on screen hours earlier: a `pgrep -af` run that day printed
+    `bash -c pgrep -af "test-suite.sh|phosphortest|fpc"` as one of its own hits, and
+    it was read past. **A process listing that includes the listing is telling you
+    something about your pattern.**
+  - **And "is anything still running?" is TWO machines here.** Answering it with a
+    `pgrep` on the Linux VM and reporting "nothing in progress" leaves every local
+    background shell out of the answer, which on 2026-09-15 was exactly where the
+    five runaway loops were. Ask both, or say which one you asked.
 - **A check can be written so that it cannot fail, and then it reports the thing it
   guards as broken.** The suite back-dated `bin/phosphortest` by a flat two hours and
   demanded exit 3 from `RefuseIfStale`. But a `git pull` that changes no `.pas` leaves

@@ -140,6 +140,36 @@ s2 = send(cmd='setBreakpoints', path=BAS, lines=[11])
 r = [f for f in frames(until_seq=s2) if f.get('seq') == s2][0]
 check('setBreakpoints answers the set', r.get('ok') is True and r.get('lines') == [11], str(r))
 
+# 2a. THE REPLY IS WHAT WAS INSTALLED, NOT WHAT WAS ASKED FOR. The spec is explicit
+#     (docs/debug-protocol.md in PhosphorIDE): a line holding no executable
+#     statement has nowhere to stop, and the editor draws the difference so a
+#     breakpoint that will never fire looks different from one that will. This host
+#     used to echo the request straight back, so every mark looked verified.
+#     Line 1 of the fixture is a `rem`, and line 3 is blank.
+s2a = send(cmd='setBreakpoints', path=BAS, lines=[1, 3, 11])
+r = [f for f in frames(until_seq=s2a) if f.get('seq') == s2a][0]
+check('a comment and a blank line come back unverified', r.get('lines') == [11], str(r))
+
+# 2b. AND THE SAME LINE ASKED FOR TWICE IS ANSWERED ONCE. `a = 1 : b = 2` emits two
+#     statement boundaries on one line, so the engine's own set can repeat.
+s2b = send(cmd='setBreakpoints', path=BAS, lines=[11, 11])
+r = [f for f in frames(until_seq=s2b) if f.get('seq') == s2b][0]
+check('a duplicated line is answered once', r.get('lines') == [11], str(r))
+
+# 2c. A FRAME WITH NO `lines` KEY MUST NOT KILL THE DEBUGGEE. `lines` is optional
+#     and this host reached TJSONData.Clone -- `virtual; abstract` -- through nil
+#     to build its reply, so the exception escaped into the VM thread and the
+#     editor saw a connection reset. One conformant frame, one dead process.
+s2c = send(cmd='setBreakpoints', path=BAS)
+r = [f for f in frames(until_seq=s2c) if f.get('seq') == s2c]
+check('a frame with no lines key is answered, not fatal', len(r) == 1, 'no reply: the debuggee died')
+if r:
+    check('an absent set is the empty set', r[0].get('lines') == [], str(r[0]))
+
+# put the real breakpoint back for the rest of the session
+s2d = send(cmd='setBreakpoints', path=BAS, lines=[11])
+[f for f in frames(until_seq=s2d) if f.get('seq') == s2d]
+
 # 3. a command in the wrong state is refused, never ignored
 s3 = send(cmd='stackTrace')
 r = [f for f in frames(until_seq=s3) if f.get('seq') == s3][0]

@@ -1055,6 +1055,10 @@ type
     FDisconnected: Boolean;
     FLaunched: Boolean;     // `launch` seen: the program may start
     FPendingArm: Boolean;   // a set arrived while running; arm at the next boundary
+    FStoppable: TPhosphorLines;   // lines a breakpoint can actually bind to
+    FStoppableKnown: Boolean;     // the source has been compiled once to find out
+    procedure EnsureStoppable;
+    function InstalledLines: TJSONArray;
     procedure CloseTransport;
     procedure SendJSON(AObj: TJSONObject);
     procedure SendEvent(const AName: String; AExtra: TJSONObject);
@@ -1328,6 +1332,86 @@ begin
   Result := FDisconnected or FClosed;
 end;
 
+{ THE SET A BREAKPOINT CAN ACTUALLY BIND TO, worked out once and kept.
+
+  docs/debug-protocol.md (PhosphorIDE) says the `lines` in a setBreakpoints reply
+  is the set the host ACTUALLY INSTALLED, which may be smaller than the one asked
+  for: a line holding no executable statement -- a blank line, a comment, `endif`
+  -- has nowhere to stop. The editor draws the difference, so a breakpoint that
+  will never fire looks different from one that will. That difference is the whole
+  point of the reply, and this host was answering with the request echoed back.
+
+  The engine already knows the answer -- TProgram.StoppableLines -- but it only
+  knows it once something has compiled the source, and nothing had: the program is
+  not compiled until eng.Run, which happens after `launch`, which is long after the
+  editor asks. Prepare is not the way round that (it RUNS the top level, which
+  would execute the program before the editor said go) and Run discards any
+  prepared state anyway. So this compiles the source once, on its own, purely to
+  read the line set off it -- the same TPhosphorCompiler the `compile` command
+  uses, a few milliseconds on a program a person is editing -- and throws the
+  program away. eng.Run compiles it again for real, which is the honest trade: one
+  extra compile of a small file against an editor that can tell the user the truth.
+
+  A source that does not compile leaves the set EMPTY and known. That is not a
+  refusal: nothing is stoppable in a program that cannot run, the reply says so by
+  being empty, and the compile error still arrives the way it always did, when the
+  editor sends `launch`. }
+procedure TDebugProto.EnsureStoppable;
+var
+  comp: TPhosphorCompiler;
+  prog: TProgram;
+  source: String;
+begin
+  if FStoppableKnown then Exit;
+  FStoppableKnown := True;
+  SetLength(FStoppable, 0);
+  try
+    source := ReadSource(FPath);
+  except
+    on Exception do Exit;
+  end;
+  prog := nil;
+  comp := TPhosphorCompiler.Create();
+  try
+    if comp.Compile(source, prog) then
+      FStoppable := prog.StoppableLines;
+  finally
+    comp.Free;
+    prog.Free;
+  end;
+end;
+
+{ The reply's `lines`: what was asked for, keeping only what can bind, in the
+  order it was asked for and without duplicates.
+
+  NEVER `arr.Clone`, which is what stood here. Two defects in one expression: it
+  echoed the REQUEST rather than the installed set, and `arr` is nil whenever the
+  frame carried no `lines` key at all -- TJSONData.Clone is `virtual; abstract`, so
+  that was a virtual call through nil, and the exception escaped into the VM thread.
+  A conformant frame with one optional key left out KILLED THE DEBUGGEE. }
+function TDebugProto.InstalledLines: TJSONArray;
+var
+  i, j: Integer;
+  keep, seen: Boolean;
+begin
+  EnsureStoppable();
+  Result := TJSONArray.Create();
+  for i := 0 to High(FBreaks) do
+  begin
+    keep := False;
+    for j := 0 to High(FStoppable) do
+      if FStoppable[j] = FBreaks[i] then begin keep := True; Break; end;
+    if not keep then Continue;
+    { `a = 1 : b = 2` emits two opStmt on one line, and so does the inline
+      `if c then ...` form, so the engine's set can repeat a line. The editor is
+      told about a line once. }
+    seen := False;
+    for j := 0 to i - 1 do
+      if FBreaks[j] = FBreaks[i] then begin seen := True; Break; end;
+    if not seen then Result.Add(FBreaks[i]);
+  end;
+end;
+
 procedure TDebugProto.Arm;
 var
   i: Integer;
@@ -1571,7 +1655,7 @@ begin
       res := TJSONObject.Create();
       res.Add('seq', seq);
       res.Add('ok', True);
-      res.Add('lines', arr.Clone);
+      res.Add('lines', InstalledLines());
       SendJSON(res);
       Exit(False);
     end;

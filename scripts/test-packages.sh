@@ -7,6 +7,15 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
+
+# This runner never read $1 at all, so `-ProveFailure` ran the ordinary package
+# suite and printed OK. It has no prove mode to offer -- neither does its
+# PowerShell twin -- so it says so and refuses, rather than accepting a flag it
+# will not honour. FIRST, before the fpc lookup, so the refusal works on a
+# machine that cannot build.
+. "$here/lib/runner.sh"
+runner_args "test-packages.sh" noprove "$@"
+
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 

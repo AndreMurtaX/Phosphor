@@ -7,6 +7,13 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
 
+# FIRST, before the build. This script never read $1 at all, while test.ps1 has
+# had a -ProveFailure since it was written -- so the skeleton golden was proved
+# able to fail on Windows and never on Linux, and `bash scripts/test.sh
+# -ProveFailure` printed the ordinary all-PASS run.
+. "$here/lib/runner.sh"
+runner_args "test.sh" prove "$@"
+
 bash "$here/build.sh"
 
 exe="$root/bin/phosphor"
@@ -31,13 +38,35 @@ echo
 "$packedD" > "$outD"
 
 fail=0
-if cmp -s "$outA" "$expected"; then echo "PASS  A:--out        ($(wc -c <"$outA") bytes match golden)"
+
+# ProveFailure: flip one bit of the FIRST byte of a private copy of the golden and
+# compare against that, so every byte comparison below must report a mismatch. The
+# same corruption test.ps1 applies (`-bxor 0x20`), on a copy -- the golden itself is
+# never touched, because a corrupted golden left behind by an interrupted run is a
+# defect recorded as an expectation.
+# provetmp is EMPTY unless proving, and it is the only thing the traps remove.
+# `cmpto` must never reach an `rm`: in the ordinary run it IS the golden, and the
+# trap below at the $hidir block replaces this one wholesale, so a trap written
+# against `cmpto` would delete tests/skeleton/hello.expected on every clean run.
+# `rm -f ""` is a no-op, which is what makes the empty case safe.
+provetmp=""
+cmpto="$expected"
+if [ "$runner_prove" -eq 1 ]; then
+  provetmp="$(mktemp)"; cmpto="$provetmp"
+  trap 'rm -f "$outA" "$outB" "$outC" "$outD" "$pbc" "$packed" "$packedD" "$provetmp"' EXIT
+  cp "$expected" "$cmpto"
+  b0="$(od -An -tu1 -N1 "$expected" | tr -d ' ')"
+  printf "$(printf '\\%03o' "$((b0 ^ 0x20))")" | dd of="$cmpto" bs=1 seek=0 count=1 conv=notrunc 2>/dev/null
+  echo "ProveFailure: expectation corrupted on purpose"
+fi
+
+if cmp -s "$outA" "$cmpto"; then echo "PASS  A:--out        ($(wc -c <"$outA") bytes match golden)"
 else echo "FAIL  A:--out"; fail=1; fi
-if cmp -s "$outB" "$expected"; then echo "PASS  B:stdout-redir ($(wc -c <"$outB") bytes match golden)"
+if cmp -s "$outB" "$cmpto"; then echo "PASS  B:stdout-redir ($(wc -c <"$outB") bytes match golden)"
 else echo "FAIL  B:stdout-redir"; fail=1; fi
-if cmp -s "$outC" "$expected"; then echo "PASS  C:packed       ($(wc -c <"$outC") bytes match golden)"
+if cmp -s "$outC" "$cmpto"; then echo "PASS  C:packed       ($(wc -c <"$outC") bytes match golden)"
 else echo "FAIL  C:packed"; fail=1; fi
-if cmp -s "$outD" "$expected"; then echo "PASS  D:packed-noconsole ($(wc -c <"$outD") bytes match golden)"
+if cmp -s "$outD" "$cmpto"; then echo "PASS  D:packed-noconsole ($(wc -c <"$outD") bytes match golden)"
 else echo "FAIL  D:packed-noconsole"; fail=1; fi
 
 # The trailer has to be the VERSIONED one, or there is nowhere for a flag to live.
@@ -100,7 +129,7 @@ hidir="$(mktemp -d)"; mkdir -p "$hidir/adir"
 # Re-declare the trap rather than adding one: a second `trap ... EXIT` REPLACES
 # the first, and silently leaking every file the earlier one was cleaning up is
 # not a trade this script should make for a temp directory.
-trap 'rm -f "$outA" "$outB" "$outC" "$outD" "$pbc" "$packed" "$packedD"; rm -rf "$hidir"' EXIT
+trap 'rm -f "$outA" "$outB" "$outC" "$outD" "$pbc" "$packed" "$packedD" "$provetmp"; rm -rf "$hidir"' EXIT
 
 check_unwritable() {  # verb infile shape target
   local verb="$1" infile="$2" shape="$3" target="$4" out code
@@ -250,7 +279,7 @@ check_refused_because "$nomagic" "magic overwritten in place" overwritten || okL
 movedapp="$hidir/moved_app"; outL="$hidir/L.actual"
 cp "$packed" "$movedapp"; chmod +x "$movedapp"
 if "$movedapp" < /dev/null > "$outL"; then mcode=0; else mcode=$?; fi
-if [ "$mcode" -eq 0 ] && cmp -s "$outL" "$expected"; then
+if [ "$mcode" -eq 0 ] && cmp -s "$outL" "$cmpto"; then
   echo "PASS  L:packed, moved  ($(wc -c <"$outL") bytes match golden)"
 else
   echo "        an intact packed app, copied elsewhere: exit $mcode"; okL=1

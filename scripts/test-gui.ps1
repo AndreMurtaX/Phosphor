@@ -11,11 +11,20 @@
   message loop is never entered -- so the run is byte-exact just like phase 1.
   On Windows the win32 widgetset needs no display at all.
 #>
-[CmdletBinding()]
+# [CmdletBinding()] WAS HERE AND IS DELIBERATELY GONE. It does refuse an unknown
+# named parameter, but with PowerShell's own wording and EXIT 1 -- the same code a
+# genuinely failed suite uses, so a caller cannot tell "you typed the flag wrong"
+# from "the tests failed". Without it the stragglers land in $args and the shared
+# helper answers exit 2 with the same sentence its bash twin says. Measured
+# 2026-09-15; see scripts/lib/runner.sh for the defect this pair exists to stop.
 param(
     [string] $Fpc,
     [string] $Lazarus = 'C:\lazarus'
 )
+
+. (Join-Path $PSScriptRoot 'lib/runner.ps1')
+Assert-RunnerArgs 'test-gui.ps1' noprove $args
+
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path

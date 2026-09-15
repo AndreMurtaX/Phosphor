@@ -11,6 +11,14 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
+
+# FIRST, before the fpc and LCL lookups below -- both of which exit non-zero on a
+# machine without them, which is how a bogus flag got answered "LCL gtk2 units not
+# found" instead of being refused. This runner never read $1 at all; it has no
+# prove mode, and now says so.
+. "$here/lib/runner.sh"
+runner_args "test-gui.sh" noprove "$@"
+
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 

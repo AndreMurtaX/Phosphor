@@ -167,6 +167,21 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   anyone named it. `$tmp` is now a per-process directory; the bash twins always used
   `mktemp`. Its cleanup is a plain `rmdir` that can only succeed on an EMPTY directory,
   deliberately, because this tree has lost thirteen working copies to a recursive one.
+- **A `.gitignore` pattern with no leading slash matches at EVERY depth.** `lib/` sits
+  in the compiled-artifacts block, and it also swallowed `scripts/lib/` -- a source
+  directory. The helper the twelve runners source would have been committed by nobody
+  and absent on every other clone, where all twelve die at line 1. `check-crossrefs.py`
+  caught it by reading a citation to a path `git ls-files` did not list, which is a
+  second job that rule turned out to do. And a directory must be re-included before
+  anything in it can be: `!/scripts/lib/runner.sh` alone does nothing, because git
+  never looks inside an excluded directory.
+- **A cleanup `trap` that names a variable which is sometimes the real file.**
+  `scripts/test.sh` compares against `$cmpto`, which is a corrupted temporary under
+  `-ProveFailure` and **the golden itself** otherwise. Adding it to the EXIT trap --
+  the obvious edit -- makes every ordinary run `rm -f tests/skeleton/hello.expected`.
+  The variable a trap removes must be one that is empty when there is nothing to
+  remove; `rm -f ""` is a no-op, and that is what makes the pattern safe. Same file
+  already warns that a second `trap ... EXIT` REPLACES the first.
 - **`fpc` will reuse a `.ppu` written in the same filesystem tick as the `.pas`.**
   This is the stale-binary trap one level down, and it makes a MUTATION TEST report
   false survivors: a reviewer saw five, and `-B` turned one of them straight back
@@ -201,7 +216,7 @@ turned out to be false and nothing could tell:
 | `check-suffix.py` | a registered name's suffix is the kind its body returns |
 | `check-budget.py` | a loop or an allocation over a script-supplied count consults the budget, or is exempt with a reason |
 | `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test |
-| `check-crossrefs.py` | a repo path named in prose exists (renumbering a test file breaks every comment citing it, and no other gate reads a sentence), and both suite runners build the same probes from the same sources — a probe registered in one runs on one OS |
+| `check-crossrefs.py` | a repo path named in prose exists (renumbering a test file breaks every comment citing it, and no other gate reads a sentence); both suite runners build the same probes from the same sources — a probe registered in one runs on one OS; and **every runner refuses an argument it does not know**, asked by running it, because `-ProveFailure` was a silent full run on five of six bash runners |
 
 **Before you sweep anything, read [docs/proof-axes.md](docs/proof-axes.md)** -- the axes a
 sweep must cross, each one there because it hid a real defect once. Every adversarial

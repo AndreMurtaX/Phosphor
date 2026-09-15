@@ -10,6 +10,17 @@
 lib/
 backup/
 
+# ...but `lib/` above is UNANCHORED, so it also swallows a source directory that
+# happens to be called lib. scripts/lib/ holds the runners' shared argument
+# handling -- source, not output -- and without this line it would be invisible to
+# git: committed by nobody, absent on every other clone, and the twelve runners
+# that source it would die at line 1 for everyone but the author. Found on
+# 2026-09-15 by check-crossrefs.py, which read the citation to a file `git
+# ls-files` did not list. A directory must be re-included before anything in it
+# can be: `!/scripts/lib/runner.sh` alone would not work, because git never looks
+# inside an excluded directory.
+!/scripts/lib/
+
 # Lazarus IDE session state (per-user, not part of the project)
 *.lps
 *.lpo

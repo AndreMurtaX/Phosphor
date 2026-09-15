@@ -22,10 +22,17 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
+
+# This line used to read `[ "${1:-}" = "--prove-failure" ] && prove=1`, so the
+# project's own canonical `-ProveFailure` -- and `--prove`, which two sibling
+# runners use -- fell straight through to an ordinary run that printed EXAMPLES OK
+# and exited 0. A proof that never happened, reported as one.
+. "$here/lib/runner.sh"
+runner_args "test-examples.sh" prove "$@"
+prove="$runner_prove"
+
 examples="$root/examples"
 exe="$root/bin/phosphor"
-prove=0
-[ "${1:-}" = "--prove-failure" ] && prove=1
 
 # The binary must be the CURRENT one: running a stale build is running old code.
 bash "$here/build.sh" >/dev/null 2>&1 || { echo "FAIL  build: phosphor did not build"; exit 1; }

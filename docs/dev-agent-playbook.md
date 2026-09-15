@@ -727,6 +727,8 @@ introduces a defect.
    comparison is worth the three minutes every time.
 10. **host/gui/libs/PhosphorControlLib.pas:301** [high] -- control_free on a node@ or an item@ destroys it (and the subtree it owns), answers 1 with gui_error 0, and leaves a live child handle that access-violates on the next read
 11. **engine/PhosphorValue.pas:632** [medium] -- str$/print/print# format a Double with FloatToStr's 15-significant-digit default, so most computed Doubles silently change value across a str$/print#/input# round-trip, and str$(MaxDouble) rounds up past MaxDouble into text val() rejects as an overflow
+    **CLOSED by A3** -- the 17-digit ladder is in `engine/PhosphorValue.pas`. Struck
+    2026-09-15, having been listed as open for months after it was fixed.
 12. **engine/libs/PhosphorConfigLib.pas:83** [medium] -- cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
 13. **engine/PhosphorEngine.pas:286** [low] -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
 14. **host/packages/PhosphorGzipLib.pas:338** [low] -- A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
@@ -820,6 +822,8 @@ introduces a defect.
    because the function it defined inside a loop had no loop of its own.
    **Yesterday's fix was tested by the case that could not fail.**
 20. **engine/PhosphorRegistry.pas:363** [medium] -- Overload resolution runs 2^(int-args) linear scans of the 1232-entry registry on every library call with no cache, so the idiomatic integer subscript costs ~50 us per array write and makes identical work 21x slower (1.01 s vs 21.02 s)
+    **CLOSED by A2** -- `SigHash`/`HashPut`/`IndexOfKey` are in
+    `engine/PhosphorRegistry.pas`. Struck 2026-09-15, same drift as #11.
 
 ### Wrong answers (20)
 
@@ -1188,6 +1192,19 @@ introduces a defect.
 47. **host/packages/PhosphorZipLib.pas:840** [medium] -- zip_extract and zip_extractall never consult the execution budget: two of the three extractors walk into UnZipFiles/UnZipAllFiles unbounded, and check-budget.py cannot see them because they reach the unzipper through a field
 48. **scripts/check-seams.py:212** [medium] -- check-seams.py:212 globs only host/**/*.lpr, so lazarus/demo/phosphordemorunner.pas -- a suite-built, documented host that fills OnOutput and leaves OnInput, OnBreakpoint and HostServices nil -- is outside the gate, while README.md and the playbook claim it covers "every host"
 49. **scripts/test-examples.sh:28** [medium] -- Only test-suite.sh rejects an unknown ProveFailure spelling; test-examples.sh silently ignores the canonical `-ProveFailure` and prints EXAMPLES OK exit 0, test-classic.sh does the same for `--prove-failure`, and test.sh/test-packages/test-gui have no prove mode at all
+    **CLOSED 2026-09-15.** All twelve runners parse arguments through
+    `scripts/lib/runner.{sh,ps1}` as their FIRST act -- before the fpc lookup, before
+    any build -- canonicalising `--prove`/`--prove-failure`/`-ProveFailure` and
+    refusing anything else with exit 2 and a message that names the argument.
+    `test.sh` gained the prove mode its PowerShell twin always had. `check_runners()`
+    in `scripts/check-crossrefs.py` asks each one by RUNNING it, and named eleven on
+    the unpatched tree. Green both OSes.
+
+    **STRIKE ENTRIES WHEN THEY CLOSE.** This list is append-only in practice and it
+    has cost real planning time: a survey on 2026-09-15 found #11 and #20 fixed
+    months earlier and still listed, and #44/#52 are one defect filed twice. A
+    reader treats an open entry as a description of the tree. If you fix something
+    here, say so here.
 50. **scripts/test-suite.ps1:220** [medium] -- test-suite.{ps1,sh} and test-gui.{ps1,sh} discard the -vewn log for nine sources and judge the build by file existence -- the class commit c65807a fixed only in build.* and test-packages.* -- and a live warning sits in scripts/probe_budget.lpr:588 because of it
 51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
 52. **tests/gui/manifest.txt:1** [medium] -- scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)

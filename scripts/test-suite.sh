@@ -6,6 +6,14 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(dirname "$here")"
+
+# FIRST, before the fpc lookup below -- a runner must be able to refuse a flag it
+# does not understand on a machine that cannot build. This one used to parse at
+# line 91, after that lookup and after the staleness probe, so on a host with no
+# fpc on PATH a bogus flag was answered `fpc not found` and exit 1.
+. "$here/lib/runner.sh"
+runner_args "test-suite.sh" prove "$@"
+
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
 
@@ -88,22 +96,17 @@ suite="$root/tests/suite"; neg="$root/tests/negative"
 manifest="$(grep -vE '^[[:space:]]*#' "$suite/manifest.txt" | tr '\n' ' ')"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
-prove="${1:-}"
 
 # --prove: corrupt ONE expected value so an assertion must fail, then confirm the
-# byte comparison catches it. The harness is seen failing before it is trusted --
-# the same discipline test-suite.ps1 applies, which Linux was missing entirely.
-# An argument this script does not know is an ERROR, not a silent full run. It
-# already cost a false report once: `--prove-failure` (the PowerShell spelling with
-# a dash) fell through to the ordinary suite, which printed SUITE OK, and the run
-# was almost recorded as a ProveFailure that had never happened. A check that can
-# silently not run is worse than no check.
-case "$prove" in
-  ''|--prove|-ProveFailure) ;;
-  *) echo "test-suite.sh: unknown argument '$prove' (use --prove or -ProveFailure)" >&2; exit 2 ;;
-esac
+# byte comparison catches it. The harness is seen failing before it is trusted.
+#
+# The refusal that used to live here -- and the paragraph explaining that
+# `--prove-failure` once fell through to an ordinary run which printed SUITE OK --
+# now lives in scripts/lib/runner.sh, parsed at the top of this file, because on
+# 2026-09-15 that rule was measured to exist in THIS FILE ONLY while five sibling
+# runners ignored the canonical spelling in silence.
 
-if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
+if [ "$runner_prove" -eq 1 ]; then
   bad="$(mktemp)"
   sed 's/assert_eq(2 + 3, 5)/assert_eq(2 + 3, 6)/' "$suite/00_harness.bas" > "$bad"
   echo "ProveFailure: one expected value corrupted"

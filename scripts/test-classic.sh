@@ -10,6 +10,15 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
+
+# FIRST, before the build below. Measured 2026-09-15: a bogus flag was answered
+# with exit 2 by the build failure at the next line, having never been looked at
+# -- an exit code that means "I refuse this argument" arriving from something
+# else entirely. And `--prove-failure`, which test-examples.sh uses, fell through
+# here in silence.
+. "$here/lib/runner.sh"
+runner_args "test-classic.sh" prove "$@"
+
 exe="$root/bin/phosphor"
 # BUILD IT, do not ask for it. Every other runner here builds what it needs, and
 # a suite that only works when you happened to build first is a suite whose result
@@ -19,7 +28,6 @@ bash "$here/build.sh" >/dev/null 2>&1 || { echo "FAIL  build: phosphor did not b
 [ -x "$exe" ] || { echo "FAIL  build: no phosphor binary"; exit 2; }
 dir="$root/tests/classic"
 tmp="$(mktemp -d)"
-prove="${1:-}"
 allok=1
 
 run_one() {  # file inpath expected label
@@ -62,7 +70,7 @@ run_one() {  # file inpath expected label
   return 1
 }
 
-if [ "$prove" = "--prove" ] || [ "$prove" = "-ProveFailure" ]; then
+if [ "$runner_prove" -eq 1 ]; then
   first="$(ls "$dir"/*.bas "$dir"/*.repl 2>/dev/null | sort | head -1)"
   base="$(basename "${first%.*}")"
   bad="$tmp/bad.expected"

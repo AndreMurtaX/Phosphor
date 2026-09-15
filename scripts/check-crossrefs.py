@@ -180,17 +180,157 @@ def check_probes():
     return len(nix), failed
 
 
+BOGUS = '--zz-not-a-flag'
+
+# A runner must refuse an argument it does not know, and it must do so BEFORE it
+# builds anything -- so this budget is generous for a refusal and far too small
+# for a compile. A runner that builds first blows it, which is the answer we want.
+REFUSAL_BUDGET_S = 25
+
+
+def _runner_family(files):
+    """scripts/test*.sh and scripts/test*.ps1, derived from the tree.
+
+    Derived and not listed, because a literal list goes blind the day a seventh
+    runner ships -- which is exactly how check-seams.py missed lazarus/demo."""
+    sh, ps = {}, {}
+    for rel in files:
+        d, base = os.path.split(rel)
+        if d != 'scripts' or not base.startswith('test'):
+            continue
+        stem, ext = os.path.splitext(base)
+        if ext == '.sh':
+            sh[stem] = rel
+        elif ext == '.ps1':
+            ps[stem] = rel
+    return sh, ps
+
+
+def _ask(cmd):
+    """Run a refusal probe. Returns (returncode, said_it, timed_out), or None
+    when this host cannot run that interpreter at all.
+
+    `said_it` -- whether the output names the argument it is refusing -- is not
+    decoration. Measured on the unpatched tree: test-classic.sh answered exit 2
+    for the bogus flag and had never looked at it. Its line 18 exits 2 when
+    build.sh fails, and build.sh fails on a host with no fpc. Exit code alone
+    handed a pass to a script that does not read $1, which is this project's
+    named trap -- an exit code answers the question the tool asked, not the one
+    you meant."""
+    try:
+        p = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=REFUSAL_BUDGET_S)
+        said = BOGUS in p.stdout.decode('utf-8', 'replace')
+        return (p.returncode, said, False)
+    except subprocess.TimeoutExpired:
+        return (None, False, True)
+    except (OSError, ValueError):
+        return None
+
+
+def check_runners(files):
+    """Every runner refuses an argument it does not know, and the twins agree
+    about whether they have a prove mode.
+
+    WHY THIS EXISTS. On 2026-09-15 a survey measured that `-ProveFailure` -- the
+    project's own canonical spelling, and one of the five conditions CLAUDE.md
+    lists for calling anything done -- was a SILENT FULL RUN on five of six bash
+    runners. test-examples.sh read only `--prove-failure`; test-classic.sh read
+    only `--prove`/`-ProveFailure` and so ignored its neighbour's spelling;
+    test.sh, test-packages.sh and test-gui.sh never read $1 at all. Each of them
+    printed OK and exited 0, which reads exactly like a proof that happened.
+
+    test-suite.sh was the one that refused, and its own comment says why -- "it
+    already cost a false report once". The rule was written down in one file and
+    nowhere else, which is this project's oldest shape: a promise in prose that
+    nothing could fail.
+
+    THE CHECK IS BEHAVIOURAL, NOT TEXTUAL. Grepping for a parser would pass a
+    parser that does nothing. So each runner is actually invoked with an argument
+    that cannot mean anything, and must answer 2 -- and must answer it before it
+    builds, which the time budget enforces. A runner that refuses only after a
+    four-minute compile is not refusing, it is arriving late.
+
+    The half this host cannot execute is checked structurally and SAID SO in the
+    output, because a skipped half printed as a passed half is the failure this
+    whole file exists to stop."""
+    sh, ps = _runner_family(files)
+    if not sh or not ps:
+        print('RUNNER FAMILY NOT FOUND -- this check cannot see what it guards:')
+        print('  matched %d bash and %d PowerShell runners under scripts/.' %
+              (len(sh), len(ps)))
+        return 0, 1
+
+    failed = 0
+    asked = 0
+    structural = []
+
+    for stem in sorted(set(sh) | set(ps)):
+        for rel, cmd in ((sh.get(stem), ['bash', sh.get(stem, ''), BOGUS]),
+                         (ps.get(stem), ['powershell', '-NoProfile', '-File',
+                                         ps.get(stem, ''), BOGUS])):
+            if rel is None:
+                continue
+            got = _ask(cmd)
+            if got is None:
+                structural.append(rel)
+                continue
+            asked += 1
+            code, said, timed_out = got
+            if timed_out:
+                print('%s DID NOT REFUSE %s -- still running after %ds, so it '
+                      'started work on an argument it does not understand'
+                      % (rel, BOGUS, REFUSAL_BUDGET_S))
+                failed = 1
+            elif code != 2:
+                print('%s ANSWERED %s WITH EXIT %d -- a runner must refuse an '
+                      'argument it does not know with exit 2, or a mistyped '
+                      '-ProveFailure is a silent full run' % (rel, BOGUS, code))
+                failed = 1
+            elif not said:
+                print('%s EXITED 2 FOR %s WITHOUT NAMING IT -- that is the exit '
+                      'code of something else (a failed build, a missing fpc), '
+                      'not a refusal. Parse arguments FIRST, before any lookup '
+                      'that can fail on the machine.' % (rel, BOGUS))
+                failed = 1
+
+    # Parity: a prove mode is a promise about the pair, not about one file.
+    for stem in sorted(set(sh) & set(ps)):
+        sh_txt = io.open(os.path.join(ROOT, sh[stem]), encoding='utf-8',
+                         errors='replace').read()
+        ps_txt = io.open(os.path.join(ROOT, ps[stem]), encoding='utf-8',
+                         errors='replace').read()
+        sh_has = 'runner_prove' in sh_txt
+        ps_has = bool(re.search(r'\[switch\]\s*\$ProveFailure', ps_txt))
+        if sh_has != ps_has:
+            owner = sh[stem] if sh_has else ps[stem]
+            other = ps[stem] if sh_has else sh[stem]
+            print('PROVE MODE EXISTS ON ONE SIDE ONLY: %s has one and %s does '
+                  'not, so the proof runs on one operating system' % (owner, other))
+            failed = 1
+
+    if structural:
+        print('note: %d runner(s) not executed here (no interpreter on this '
+              'host); refusal UNVERIFIED for them:' % len(structural))
+        for rel in sorted(structural):
+            print('      %s' % rel)
+
+    return asked, failed
+
+
 def main():
     files = tracked()
     scanned, bad_cites = check_citations(files)
     probes, bad_probes = check_probes()
+    runners, bad_runners = check_runners(files)
 
-    if bad_cites or bad_probes:
+    if bad_cites or bad_probes or bad_runners:
         return 1
 
     print('crossrefs: every cited path in %d text files exists (%d retired or '
-          'oracle paths exempt with a reason), and both suite runners build the '
-          'same %d probes' % (scanned, len(EXEMPT), probes))
+          'oracle paths exempt with a reason), both suite runners build the '
+          'same %d probes, and %d runners refused an argument they do not know'
+          % (scanned, len(EXEMPT), probes, runners))
     return 0
 
 

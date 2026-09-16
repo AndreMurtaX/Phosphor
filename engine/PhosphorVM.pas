@@ -705,6 +705,22 @@ type
     { The index into DbgProgram.UserFuncs of the function frame AFrame is running,
       counting from 0 = the OUTERMOST call, or -1 if there is no such frame. }
     function DbgFrameFunc(AFrame: Integer): Integer;
+    { THE SOURCE LINE THE CALLER WAS ON WHEN IT ENTERED FRAME AFrame, or -1 when
+      there is no such frame and when the frame carries no caller boundary.
+
+      A HOST WANTS THIS ONE OFF BY ONE FROM WHERE IT LOOKS. The frame records the
+      line of ITS OWN caller, so the line where activation `i` is standing is the
+      caller line of the frame `i` called into -- `i + 1`, not `i` -- and the
+      innermost activation has no such frame at all: its line is the boundary the
+      VM stopped at, which the seam already hands the host. Written out because
+      getting it wrong reads as a call stack that is right and shifted, which is
+      worse than one with no lines in it.
+
+      NOTHING NEW IS RECORDED FOR THIS. TCallFrame.CallerStmtPC has ridden on
+      every activation since faults learned to resume in the caller, and this
+      only reads it. Not on any path that runs per instruction: it is answered
+      when a stopped host asks a question. }
+    function DbgFrameCallerLine(AFrame: Integer): Integer;
     function DbgFrameLocalCount(AFrame: Integer): Integer;
     function DbgLocal(AFrame, ASlot: Integer): TValue;
     { ATTACH THE DEBUGGER. ALines is the set of source lines to stop on -- the
@@ -3752,6 +3768,20 @@ function TPhosphorVM.DbgFrameFunc(AFrame: Integer): Integer;
 begin
   if (AFrame < 0) or (AFrame >= FFrameSP) then Exit(-1);
   Result := FFrames[AFrame].FuncIndex;
+end;
+
+function TPhosphorVM.DbgFrameCallerLine(AFrame: Integer): Integer;
+var
+  callPC: Integer;
+begin
+  Result := -1;
+  if (AFrame < 0) or (AFrame >= FFrameSP) then Exit;
+  { -1 is what a frame with no caller boundary carries, and the top-level frame
+    of a CallFunction entered from a host is one. Bounds-checked against the
+    program as well: a .pbc is a file, and a pc read out of one is an input. }
+  callPC := FFrames[AFrame].CallerStmtPC;
+  if (FProg = nil) or (callPC < 0) or (callPC >= FProg.Count) then Exit;
+  Result := FProg.Instr(callPC).Line;
 end;
 
 function TPhosphorVM.DbgFrameLocalCount(AFrame: Integer): Integer;

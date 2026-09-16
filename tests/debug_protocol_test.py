@@ -463,6 +463,237 @@ check('having done all three passes of its own work',
 conn3.close()
 srv3.close()
 
+# ---------------------------------------------------------------------------
+# FOURTH SESSION: THE FIRST EXECUTED STATEMENT, AND A LINE FOR EVERY FRAME.
+#
+# Two defects PhosphorIDE found by driving this host, both reported on
+# 2026-09-16 and both invisible to the 52 assertions above.
+#
+# (a) A breakpoint on the first EXECUTED STATEMENT was answered installed and
+#     never fired. Not line 1: this file's own main fixture opens with a `rem`,
+#     so it was line 2 that could not be stopped on -- which is exactly why
+#     nobody noticed. Every fixture anyone writes has a comment at the top.
+#
+#     The mechanism was three sites each right on its own. This host always arms
+#     with stop-at-entry, because a stop is the only thread-safe moment to take
+#     FRunVM; the engine's DebugPoll tests entry BEFORE breakpoints and guards
+#     the second with `if (not stop)`; and OnStop then resumed silently from an
+#     entry the editor had not asked for. The user's breakpoint went with it.
+#
+# (b) stackTrace gave a line only to the innermost frame. The fixtures below are
+#     recursive on purpose: every caller is the SAME line, so an off-by-one that
+#     reported the callee's line instead of the call site would still look
+#     plausible -- `(main)` is what separates them, and it must carry the line of
+#     the outermost call and not the function's own.
+# ---------------------------------------------------------------------------
+BAS4 = os.path.join(WORK, 'first.bas')
+with open(BAS4, 'w', newline='\n') as f:
+    # Line 1 IS the first statement here -- no comment to hide behind.
+    f.write('a = 1\nb = 2\nprintln "s="; a + b\nend\n')
+
+srv4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv4.bind(('127.0.0.1', 0))
+srv4.listen(1)
+port4 = srv4.getsockname()[1]
+proc4 = subprocess.Popen([EXE, 'debug', '--port', str(port4), BAS4],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv4.settimeout(10)
+conn4, _ = srv4.accept()
+conn4.settimeout(30)
+
+seq4 = [0]
+buf4 = [b'']
+
+
+def send4(**kw):
+    seq4[0] += 1
+    kw['seq'] = seq4[0]
+    try:
+        conn4.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+    except OSError:
+        pass          # the peer is gone; the assertions below say so
+    return seq4[0]
+
+
+def recv4(timeout=30):
+    conn4.settimeout(timeout)
+    while b'\n' not in buf4[0]:
+        try:
+            chunk = conn4.recv(65536)
+        except socket.timeout:
+            return None
+        except OSError:
+            # A HOST THAT HAS GONE IS NOT A CRASH IN THE HARNESS. After `exited`
+            # this host closes the socket, and Windows answers the next recv with
+            # WSAECONNABORTED rather than with an orderly zero-length read -- so a
+            # session that ends EARLIER than the script expects (which is exactly
+            # what a broken fix looks like) killed the script instead of failing
+            # its assertions. Seen on 2026-09-16 while watching these very checks
+            # fail under a deliberate mutation: two FAILs printed and the
+            # remaining six never ran. A harness must be able to report a failure,
+            # not only to have one.
+            return None
+        if not chunk:
+            return None
+        buf4[0] += chunk
+    line, buf4[0] = buf4[0].split(b'\n', 1)
+    return json.loads(line.decode('utf-8'))
+
+
+def until4(pred, timeout=30, tries=60):
+    for _ in range(tries):
+        m = recv4(timeout)
+        if m is None:
+            return None
+        if pred(m):
+            return m
+    return None
+
+
+s = send4(cmd='initialize')
+until4(lambda m: m.get('seq') == s)
+s = send4(cmd='setBreakpoints', path=BAS4, lines=[1])
+r = until4(lambda m: m.get('seq') == s)
+check('line 1 is installed when line 1 is a statement',
+      r is not None and r.get('lines') == [1], str(r))
+s = send4(cmd='launch', stopAtEntry=False)
+until4(lambda m: m.get('seq') == s)
+
+ev = until4(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('a breakpoint on the FIRST executed statement fires',
+      ev is not None and ev.get('event') == 'stopped' and ev.get('line') == 1,
+      str(ev))
+check('and says breakpoint, not entry',
+      ev is not None and ev.get('reason') == 'breakpoint', str(ev))
+s = send4(cmd='continue')
+until4(lambda m: m.get('seq') == s)
+ev = until4(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('it fires ONCE -- the program runs to the end after it',
+      ev is not None and ev.get('event') == 'exited', str(ev))
+try:
+    out4, _ = proc4.communicate(timeout=60)
+except subprocess.TimeoutExpired:
+    proc4.kill()
+    out4 = b''
+check('and the program did its own work',
+      b's=3' in out4.replace(b'\r\n', b'\n'), repr(out4[:40]))
+conn4.close()
+srv4.close()
+
+# ONE EVENT, NOT TWO, when the editor asks for BOTH an entry stop and a
+# breakpoint on that same first statement. The fix for (a) turns an unasked entry
+# into a breakpoint; it must not also turn an ASKED-FOR entry into a second stop.
+# Re-arming mid-run produced exactly that shape once before (a three-pass loop
+# reporting four stops), so it is pinned here rather than argued about.
+srv5 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv5.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv5.bind(('127.0.0.1', 0))
+srv5.listen(1)
+port5 = srv5.getsockname()[1]
+proc5 = subprocess.Popen([EXE, 'debug', '--port', str(port5), BAS4],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv5.settimeout(10)
+conn5, _ = srv5.accept()
+conn5.settimeout(30)
+seq4[0] = 0
+buf4[0] = b''
+conn4 = conn5          # reuse the helpers above on the new socket
+s = send4(cmd='initialize')
+until4(lambda m: m.get('seq') == s)
+s = send4(cmd='setBreakpoints', path=BAS4, lines=[1])
+until4(lambda m: m.get('seq') == s)
+s = send4(cmd='launch', stopAtEntry=True)
+until4(lambda m: m.get('seq') == s)
+ev = until4(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('stopAtEntry plus a breakpoint on that line reports entry',
+      ev is not None and ev.get('reason') == 'entry' and ev.get('line') == 1,
+      str(ev))
+s = send4(cmd='continue')
+until4(lambda m: m.get('seq') == s)
+ev = until4(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('and exactly once -- no second stop on the same statement',
+      ev is not None and ev.get('event') == 'exited', str(ev))
+proc5.communicate(timeout=60)
+conn5.close()
+srv5.close()
+
+# --- (b) a line for every frame -------------------------------------------
+BAS6 = os.path.join(WORK, 'deep.bas')
+with open(BAS6, 'w', newline='\n') as f:
+    f.write('rem recursion, so the stack has callers to name\n'      # 1
+            'function down(n) local r\n'                             # 2
+            '  if n <= 0 then\n'                                     # 3
+            '    println "bottom"\n'                                 # 4
+            '    return 0\n'                                         # 5
+            '  endif\n'                                              # 6
+            '  r = down(n - 1)\n'                                    # 7
+            '  return r + n\n'                                       # 8
+            'endfunction\n'                                          # 9
+            '\n'                                                     # 10
+            'total = down(3)\n'                                      # 11
+            'println "total="; total\n'                              # 12
+            'end\n')                                                 # 13
+
+srv6 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv6.bind(('127.0.0.1', 0))
+srv6.listen(1)
+port6 = srv6.getsockname()[1]
+proc6 = subprocess.Popen([EXE, 'debug', '--port', str(port6), BAS6],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv6.settimeout(10)
+conn6, _ = srv6.accept()
+conn6.settimeout(30)
+seq4[0] = 0
+buf4[0] = b''
+conn4 = conn6
+s = send4(cmd='initialize')
+until4(lambda m: m.get('seq') == s)
+s = send4(cmd='setBreakpoints', path=BAS6, lines=[4])
+until4(lambda m: m.get('seq') == s)
+s = send4(cmd='launch', stopAtEntry=False)
+until4(lambda m: m.get('seq') == s)
+ev = until4(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('stopped at the bottom of the recursion',
+      ev is not None and ev.get('line') == 4, str(ev))
+
+s = send4(cmd='stackTrace')
+r = until4(lambda m: m.get('seq') == s)
+fr = (r or {}).get('frames', [])
+check('four calls and (main)', len(fr) == 5, '%d frames' % len(fr))
+if len(fr) == 5:
+    check('the innermost frame carries the stop line',
+          fr[0].get('line') == 4, str(fr[0]))
+    # `down` calls itself on line 7, so every caller but main is standing there.
+    check('every caller carries its own call site',
+          [f.get('line') for f in fr[1:4]] == [7, 7, 7],
+          str([f.get('line') for f in fr]))
+    # THE ASSERTION THAT SEPARATES A RIGHT ANSWER FROM A SHIFTED ONE: main called
+    # down from line 11, and down's own body is nowhere near it.
+    check('(main) carries the outermost call, not the callee',
+          fr[4].get('name') == '(main)' and fr[4].get('line') == 11, str(fr[4]))
+    check('no frame is left without a line',
+          all(f.get('line', 0) > 0 for f in fr),
+          str([f.get('line') for f in fr]))
+
+# The frame index still selects the right activation -- the lines must not have
+# come at the cost of what was already right.
+s = send4(cmd='variables', frame=3)
+r = until4(lambda m: m.get('seq') == s)
+vs = {v['name']: v['value'] for v in (r or {}).get('variables', [])}
+check('frame 3 is the outermost down, called with 3',
+      vs.get('n') == '3', str(vs))
+
+s = send4(cmd='continue')
+until4(lambda m: m.get('seq') == s)
+until4(lambda m: m.get('event') == 'exited', timeout=15)
+out6, _ = proc6.communicate(timeout=60)
+check('the recursion produced its own answer',
+      b'total=6' in out6.replace(b'\r\n', b'\n'), repr(out6[:60]))
+conn6.close()
+srv6.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

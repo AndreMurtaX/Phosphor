@@ -1105,6 +1105,7 @@ type
     procedure SetInitial(const ABreaks: array of Integer; ACount: Integer;
                          AStopAtEntry: Boolean);
     procedure Arm;
+    function ArmedAt(ALine: Integer): Boolean;
     procedure SendStopped(AExtra: TJSONObject);
     procedure SendExited(AExtra: TJSONObject);
     function Finished: Boolean;
@@ -1487,6 +1488,20 @@ begin
   end;
 end;
 
+{ Is ALine one of the editor's breakpoints? Asked of FBreaks, the set as the
+  editor sent it, and not of the VM: the VM's copy is sorted, de-duplicated and
+  filtered, and none of that matters for a question with one answer per call at
+  the one boundary that asks it. }
+function TDebugProto.ArmedAt(ALine: Integer): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  if ALine <= 0 then Exit;
+  for i := 0 to High(FBreaks) do
+    if FBreaks[i] = ALine then Exit(True);
+end;
+
 procedure TDebugProto.Arm;
 var
   i: Integer;
@@ -1544,7 +1559,7 @@ var
   arr: TJSONArray;
   vm: TPhosphorVM;
   prog: TProgram;
-  i, ix: Integer;
+  i, ix, ln: Integer;
 begin
   vm := FEng.DebugVM;
   prog := nil;
@@ -1563,10 +1578,30 @@ begin
     f.Add('index', ix);
     f.Add('name', DbgFrameName(prog, vm, i));
     f.Add('path', FPath);
-    { Only the innermost frame has a line this host can name: the VM keeps the
-      boundary it stopped at, not a return line per frame. An outer frame reports
-      0, which the editor reads as "no line" rather than as line zero. }
-    if ix = 0 then f.Add('line', ALine) else f.Add('line', 0);
+    { THE LINE EACH FRAME IS STANDING ON, and it is off by one from where it
+      looks. The innermost activation's line is the boundary the VM stopped at,
+      which the seam handed us as ALine. Every other activation is parked in the
+      middle of a call, and the line of that call is recorded on the frame it
+      called INTO -- `i + 1`, not `i`, because a frame carries the line of its
+      own CALLER. `(main)` is i = -1 and takes frame 0's.
+
+      This used to report 0 for every frame but the innermost, on the grounds
+      that the VM kept no return line per frame. It kept one all along:
+      TCallFrame.CallerStmtPC has ridden on every activation since faults learned
+      to resume in the caller, and DbgFrameCallerLine only reads it.
+
+      A frame whose line still cannot be named reports 0, which the editor reads
+      as "no line" and draws as an empty cell. It must never come to mean line
+      zero. }
+    if ix = 0 then
+      f.Add('line', ALine)
+    else if vm <> nil then
+    begin
+      ln := vm.DbgFrameCallerLine(i + 1);
+      if ln > 0 then f.Add('line', ln) else f.Add('line', 0);
+    end
+    else
+      f.Add('line', 0);
     arr.Add(f);
     Inc(ix);
   end;
@@ -1889,7 +1924,28 @@ begin
         while stopped" by a program that was plainly running. The state has to
         follow the program, not the last event the editor was sent. }
       FState := dbgRunning;
-      Exit(daRun);
+
+      { ...UNLESS THE USER ASKED TO STOP ON THIS VERY STATEMENT, which for a year
+        was silently impossible. The entry stop above is this host's own
+        invention -- arming always requests it because a stop is the only
+        thread-safe moment to take FRunVM -- and the engine's DebugPoll tests
+        entry BEFORE breakpoints and guards the second with `if (not stop)`
+        (PhosphorVM.pas:4159). So at the FIRST boundary the reason is always
+        srEntry and the armed line set is never consulted there; resuming from it
+        threw away a breakpoint the editor had been told was installed.
+
+        It is the first EXECUTED STATEMENT, not line 1: a file opening with a
+        `rem` loses line 2 instead, which is how it stayed invisible -- every
+        fixture anyone wrote had a comment at the top.
+
+        Reported as a breakpoint rather than as an entry, because that is what it
+        is: the editor asked to stop here and did not ask to stop at entry. The
+        reassignment is to the value parameter on purpose, so that every line
+        below this one -- the event, the state, the terminal debugger's prompt --
+        reads the reason a stop at any other line would have. }
+      if not ArmedAt(ALine) then
+        Exit(daRun);
+      AReason := srBreakpoint;
     end;
   end;
 
@@ -2192,7 +2248,7 @@ const
   { A person reads the innermost frames; a runaway recursion has 262144 of them. }
   DBG_STACK_MAX = 200;
 var
-  i, shown: Integer;
+  i, shown, ln: Integer;
   prog: TProgram;
 begin
   prog := AVM.DbgProgram();
@@ -2217,7 +2273,17 @@ begin
                              [ADepth - 1 - shown, DBG_STACK_MAX + 1]));
       Break;
     end;
-    Writeln(StdErr, Format('#%d  %s', [ADepth - 1 - i, FrameLabel(prog, AVM, i)]));
+    { AND THE LINE IT IS PARKED ON, which this printed without for as long as it
+      has existed -- `#0` had one and every caller was a bare name. The line of a
+      frame that is mid-call is recorded on the frame it called INTO, so it is
+      i + 1 and not i; DbgFrameCallerLine says the rest. A frame that still
+      cannot be named keeps the bare form rather than printing `line 0`. }
+    ln := AVM.DbgFrameCallerLine(i + 1);
+    if ln > 0 then
+      Writeln(StdErr, Format('#%d  %s   line %d',
+                             [ADepth - 1 - i, FrameLabel(prog, AVM, i), ln]))
+    else
+      Writeln(StdErr, Format('#%d  %s', [ADepth - 1 - i, FrameLabel(prog, AVM, i)]));
     Inc(shown);
   end;
 end;

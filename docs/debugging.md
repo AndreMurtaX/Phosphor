@@ -186,12 +186,24 @@ editor and drives one:
 python tests/debug_protocol_test.py bin/phosphor.exe
 ```
 
-It asserts 25 things — `initialize` and its capabilities, `setBreakpoints` before
-`launch`, a command refused in the wrong state, the stop at the armed line,
-`stackTrace` with frame 0 innermost and `(main)` outermost, `variables` with
-name/value/kind/scope, `evaluate` refused to match its own capability, `continue`
-once per loop pass, `exited` with the code — and that the program's own stdout is
-untouched by all of it.
+It asserts 58 things across four sessions — `initialize` and its capabilities,
+`setBreakpoints` before `launch`, a command refused in the wrong state, the stop at
+the armed line, `stackTrace` with frame 0 innermost and `(main)` outermost,
+`variables` with name/value/kind/scope, `evaluate` refused to match its own
+capability, `continue` once per loop pass, `exited` with the code, `pause` on a
+program that never stops on its own, a one-line loop body stopping once per pass,
+**a breakpoint on the first executed statement**, and **a line on every frame of a
+recursion** — and that the program's own stdout is untouched by all of it.
+
+The last two are there because PhosphorIDE found both by driving this host on
+2026-09-16, and neither was visible to the 52 assertions that came before them.
+A breakpoint on the first executed statement was answered installed and never
+fired: this host always arms with stop-at-entry, because a stop is the only
+thread-safe moment to take the running VM, and the engine tests entry BEFORE
+breakpoints — so the first boundary was always an entry, and an entry the editor
+had not asked for was resumed from in silence. It was never "line 1": every
+fixture anyone writes opens with a comment, so it was line 2 that could not be
+stopped on, and nobody noticed for a year.
 
 It is Python rather than Pascal on purpose: the other end of this protocol is a
 separate program in a separate repository, and a test written in the host's own
@@ -202,10 +214,16 @@ side-effect-free expression entry point in this engine at all. The specification
 says a host that cannot guarantee an evaluation changes nothing must say so rather
 than offer a half-safe one.
 
-**The editor cannot attach yet.** PhosphorIDE's transport is unwritten and it
-disables its Debug menu on purpose while that is true. What exists today is the
-engine's half of a contract that two independent implementations must agree on,
-which is why the work order put it last.
+**The editor attaches.** PhosphorIDE drives this protocol end to end as of
+2026-09-16 — start, breakpoints, step over/into/out, continue, a variables pane
+and a call-stack pane — on Windows and on gtk2. That sentence used to read "the
+editor cannot attach yet"; it is kept in the history because the contract was
+written and agreed before either end could exercise it, which is what made two
+independent implementations meet at all.
+
+A second implementation is also the only thing that finds certain defects. Both
+of the ones fixed on 2026-09-16 were reported by the editor's side, and both were
+invisible from here: the assertions in this file all had a comment on line 1.
 
 ---
 
@@ -214,8 +232,15 @@ which is why the work order put it last.
 The seam is public, so an embedder can drive it from Pascal directly —
 `TPhosphorEngine.OnDebug` is asked at a statement boundary and its answer says what
 happens next, and `ArmDebug(lines, stopAtEntry)` says where to ask. The read-only
-state window is on the VM: `DbgFrameDepth`, `DbgFrameFunc`, `DbgLocal`,
-`DbgGlobal`, and the names through `TProgram.GlobalName` / `LocalName`.
+state window is on the VM: `DbgFrameDepth`, `DbgFrameFunc`, `DbgFrameCallerLine`,
+`DbgLocal`, `DbgGlobal`, and the names through `TProgram.GlobalName` /
+`LocalName`.
+
+`DbgFrameCallerLine(AFrame)` is the line the CALLER was on when it entered that
+frame, and a host wants it one off from where it looks: the line where activation
+`i` is standing is the caller line of the frame `i` called into. It reads
+`TCallFrame.CallerStmtPC`, which has ridden on every activation since faults
+learned to resume in the caller — nothing new is recorded for it.
 
 This engine is single-threaded, so **stopping means calling back, not blocking**:
 the seam is invoked from inside the hook and returns the next action. A host that

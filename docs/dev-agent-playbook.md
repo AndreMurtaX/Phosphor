@@ -1524,6 +1524,46 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-09-16 · the second implementation found two defects this repository could
+  not see.** PhosphorIDE finished its half of PDBP and drove it -- start,
+  breakpoints, the three steps, continue, a variables pane, a call-stack pane, on
+  Windows and on gtk2 -- and reported two defects with the reproductions attached.
+  Both were real, both were a year old, and both were invisible to the 52 protocol
+  assertions in this tree. Three lessons.
+
+  **(1) EVERY FIXTURE ANYONE WRITES OPENS WITH A COMMENT, SO NOBODY COULD STOP ON
+  THE FIRST STATEMENT.** A breakpoint on the first EXECUTED statement was answered
+  `installed` and never fired. Not "line 1": this file's own protocol fixture opens
+  with a `rem`, so the line that could not be stopped on was line 2, and the same
+  was true of every other fixture in the tree. The cause was three sites each
+  correct alone -- the host always arms with stop-at-entry, because a stop is the
+  only thread-safe moment to take the running VM; `DebugPoll` tests entry BEFORE
+  breakpoints and guards the second with `if (not stop)`; `OnStop` resumes silently
+  from an entry the editor did not ask for. Nothing was wrong. The composition ate
+  a user-visible stop. **When a mechanism is manufactured for internal bookkeeping,
+  ask what it consumes** -- and write one fixture with NO comment at the top.
+
+  **(2) THE DATA WAS ALREADY THERE, AND A COMMENT SAID IT WAS NOT.** `stackTrace`
+  gave a line only to the innermost frame, and the host said why in as many words:
+  "the VM keeps the boundary it stopped at, not a return line per frame". It kept
+  one all along. `TCallFrame.CallerStmtPC` has ridden on every activation since
+  faults learned to resume in the caller, and the whole repair was one accessor
+  that reads it. The sentence was true when it was written and nobody re-read it
+  when the field arrived. **A limitation recorded in prose is a claim with an
+  expiry date that nobody set**; the same lesson the four struck paragraphs about
+  the step debugger taught in September, learned again one layer down.
+
+  **(3) A GATE THAT CANNOT RUN AN INTERPRETER MUST SAY SO, NOT BLAME THE SCRIPTS.**
+  `check-crossrefs.py` probes every runner with an argument it cannot understand
+  and requires exit 2. On Windows `bash` on PATH is very often
+  `C:\Windows\System32\bash.exe` -- the WSL launcher -- and with no distro it does
+  not fail to START: it runs, prints `execvpe(/bin/bash) failed`, and exits 1. The
+  gate reported all six `.sh` runners as broken on a machine where Git Bash runs
+  every one of them correctly, and the obvious repair would have been to six
+  innocent scripts. It now probes each interpreter once with an exit code only a
+  working one can produce, and lists what it could not execute. **`OSError` is not
+  the only way a program fails to start.**
+
 - **2026-09-11 · the work order, eight pieces in parallel, and what the MERGE found.**
   Seven of eleven pieces landed, each its own commit, each green on both machines.
   Four lessons, and only the first is about building.

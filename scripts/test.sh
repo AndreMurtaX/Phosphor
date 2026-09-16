@@ -757,7 +757,7 @@ if ! python3 "$root/tests/debug_protocol_test.py" "$exe" > "$tmpdir/r.out" 2>&1;
   sed 's/^/        /' "$tmpdir/r.out" | tail -12
 fi
 
-if [ "$okR" -eq 0 ]; then echo 'PASS  R:debug protocol (one whole session, 25 assertions, stdout untouched)'
+if [ "$okR" -eq 0 ]; then echo 'PASS  R:debug protocol (four sessions, 58 assertions, stdout untouched)'
 else echo 'FAIL  R:the debug protocol session did not complete'; fail=1; fi
 
 exit "$fail"

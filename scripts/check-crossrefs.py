@@ -244,6 +244,28 @@ def _ask(cmd):
         return None
 
 
+def _interpreter_runs(cmd):
+    """Can this host execute this interpreter at all?
+
+    ASKED ONCE, BEFORE ANY RUNNER, because "the interpreter is not here" and "the
+    runner answered wrongly" are the same exit code otherwise. On Windows `bash`
+    on PATH is very often C:\\Windows\\System32\\bash.exe -- the WSL launcher --
+    and with no distro installed it does not fail to START: it runs, prints
+    `execvpe(/bin/bash) failed`, and exits 1. Measured on 2026-09-16 on a machine
+    where Git Bash runs all six .sh runners correctly (exit 2, naming the
+    argument): this gate reported every one of them as broken, and the repair
+    would have been to the six innocent scripts.
+
+    The probe is an exit code the interpreter can only produce by having run
+    something. A launcher that cannot find its shell cannot produce 7."""
+    try:
+        p = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=REFUSAL_BUDGET_S)
+        return p.returncode == 7
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
 def check_runners(files):
     """Every runner refuses an argument it does not know, and the twins agree
     about whether they have a prove mode.
@@ -281,11 +303,18 @@ def check_runners(files):
     asked = 0
     structural = []
 
+    have_bash = _interpreter_runs(['bash', '-c', 'exit 7'])
+    have_ps = _interpreter_runs(['powershell', '-NoProfile', '-Command', 'exit 7'])
+
     for stem in sorted(set(sh) | set(ps)):
-        for rel, cmd in ((sh.get(stem), ['bash', sh.get(stem, ''), BOGUS]),
-                         (ps.get(stem), ['powershell', '-NoProfile', '-File',
-                                         ps.get(stem, ''), BOGUS])):
+        for rel, cmd, usable in (
+                (sh.get(stem), ['bash', sh.get(stem, ''), BOGUS], have_bash),
+                (ps.get(stem), ['powershell', '-NoProfile', '-File',
+                                ps.get(stem, ''), BOGUS], have_ps)):
             if rel is None:
+                continue
+            if not usable:
+                structural.append(rel)
                 continue
             got = _ask(cmd)
             if got is None:

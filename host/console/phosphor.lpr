@@ -3413,6 +3413,12 @@ begin
       Writeln('              with no --break it stops on the first statement; the');
       Writeln('              session is on stderr, so the program''s own output');
       Writeln('              stays clean and can still be redirected');
+      Writeln('       phosphor debug --port <1..65535> <file.bas>   (for an editor)');
+      Writeln('              the same session over a socket instead of the terminal:');
+      Writeln('              THE EDITOR LISTENS AND THIS CONNECTS, one JSON object');
+      Writeln('              per line, and the program keeps its own stdin, stdout');
+      Writeln('              and stderr. docs/debugging.md and PhosphorIDE''s');
+      Writeln('              docs/debug-protocol.md are the contract');
       Writeln('       phosphor compile [--check] <in.bas> <out.pbc>');
       Writeln('              --check warns about function names this host does not');
       Writeln('              have; it never fails, because the file may be meant');

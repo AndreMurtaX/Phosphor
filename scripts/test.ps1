@@ -979,7 +979,7 @@ if ($LASTEXITCODE -ne 0) {
         Write-Host ("        " + $_) -ForegroundColor DarkGray }
 }
 
-if ($okR) { Write-Host "PASS  R:debug protocol (seven sessions, 97 assertions, stdout untouched)" -ForegroundColor Green }
+if ($okR) { Write-Host "PASS  R:debug protocol (eight sessions, 117 assertions, stdout untouched)" -ForegroundColor Green }
 else { Write-Host "FAIL  R:the debug protocol session did not complete" -ForegroundColor Red }
 
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and

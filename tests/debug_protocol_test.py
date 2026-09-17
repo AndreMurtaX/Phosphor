@@ -135,9 +135,10 @@ check('capabilities present', isinstance(caps, dict) and len(caps) == 6, str(cap
 check('evaluate is offered', caps.get('evaluate') is True, str(caps))
 check('and evaluateCalls says what it will not do',
       caps.get('evaluateCalls') is False, str(caps))
-check('setVariable and conditional breakpoints are not',
-      caps.get('setVariable') is False and caps.get('conditionalBreakpoints') is False,
-      str(caps))
+check('conditional breakpoints are offered',
+      caps.get('conditionalBreakpoints') is True, str(caps))
+check('setVariable is not -- the capability is reserved, there is no command',
+      caps.get('setVariable') is False, str(caps))
 check('stepOut and pause offered', caps.get('stepOut') and caps.get('pause'), str(caps))
 
 # 2. setBreakpoints before launch
@@ -947,6 +948,162 @@ check('and err()/errmsg$() answer nothing at all afterwards',
       b'err=0/\n' in clean7 or b'err=0/' in clean7, repr(clean7[:120]))
 conn7.close()
 srv7.close()
+
+# ---------------------------------------------------------------------------
+# EIGHTH SESSION: A BREAKPOINT WITH A CONDITION.
+#
+# The fixture is a loop with a mark on its body, because a condition only means
+# anything on a line that is hit more than once.
+#
+# FOUR RULES ARE PINNED HERE AND EACH ONE IS A DECISION THAT COULD HAVE GONE THE
+# OTHER WAY:
+#
+#  * A condition that is FALSE is not a stop, and the editor is told nothing --
+#    no event, no round trip. That is the whole point of doing this in the host.
+#
+#  * A condition that DOES NOT COMPILE is refused in the setBreakpoints REPLY,
+#    with the line it was typed on, and the breakpoint is installed UNCONDITIONAL.
+#    Refusing at reply time is what lets an editor put the message beside the line
+#    while the person is still looking at it; installing it unconditional is the
+#    lesser of two evils, because a mark that is visible and never honoured is
+#    worse than one that fires too often.
+#
+#  * A condition that compiles and then CANNOT BE EVALUATED -- a name that is not
+#    in scope at that line -- STOPS, and says why in the stop event's `text`. It
+#    cannot be caught at reply time because scope is a frame and there is no frame
+#    yet. Stopping puts the mistake in front of the person who made it; the
+#    alternative is a breakpoint that silently never fires.
+#
+#  * A condition that is not a BOOLEAN is the same case. `if` in this language
+#    refuses a non-boolean outright, so `i% + 1` as a condition is not a
+#    truthiness question a debugger gets to answer differently from the language.
+# ---------------------------------------------------------------------------
+BAS8 = os.path.join(WORK, 'cond.bas')
+with open(BAS8, 'w', newline='\n') as f:
+    f.write('rem a loop with a conditional breakpoint\n'   # 1
+            'total = 0\n'                                  # 2
+            'for i = 1 to 20\n'                            # 3
+            '  total = total + i\n'                        # 4  <- the mark
+            'next\n'                                       # 5
+            'println "total="; total\n')                    # 6
+COND_LINE = 4
+
+
+def cond_session(condition, label):
+    """One whole session with one conditional breakpoint. Answers
+    (reply, [stop events], stdout)."""
+    srv8 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv8.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv8.bind(('127.0.0.1', 0))
+    srv8.listen(1)
+    p8 = srv8.getsockname()[1]
+    pr = subprocess.Popen([EXE, 'debug', '--port', str(p8), BAS8],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    srv8.settimeout(15)
+    c8, _ = srv8.accept()
+    c8.settimeout(30)
+    buf8 = [b'']
+    sq = [0]
+
+    def snd(**kw):
+        sq[0] += 1
+        kw['seq'] = sq[0]
+        try:
+            c8.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+        except OSError:
+            pass
+        return sq[0]
+
+    def frm(until_seq=None, until_event=None, limit=120):
+        out = []
+        for _ in range(limit):
+            while b'\n' not in buf8[0]:
+                try:
+                    chunk = c8.recv(65536)
+                except (socket.timeout, OSError):
+                    return out
+                if not chunk:
+                    return out
+                buf8[0] += chunk
+            line, buf8[0] = buf8[0].split(b'\n', 1)
+            if not line.strip():
+                continue
+            m = json.loads(line.decode('utf-8'))
+            out.append(m)
+            if until_seq is not None and m.get('seq') == until_seq:
+                return out
+            if until_event is not None and m.get('event') == until_event:
+                return out
+        return out
+
+    s = snd(cmd='initialize')
+    frm(until_seq=s)
+    payload = dict(cmd='setBreakpoints', path=BAS8, lines=[COND_LINE])
+    if condition is not None:
+        payload['conditions'] = [condition]
+    s = snd(**payload)
+    reply = {}
+    for m in frm(until_seq=s):
+        if m.get('seq') == s:
+            reply = m
+    snd(cmd='launch')
+    stops = []
+    for _ in range(40):
+        got = frm(until_event='stopped', limit=40)
+        st = [m for m in got if m.get('event') == 'stopped']
+        if [m for m in got if m.get('event') == 'exited'] or not st:
+            break
+        stops.append(st[0])
+        sc = snd(cmd='continue')
+        frm(until_seq=sc)
+    out8 = pr.communicate(timeout=30)[0].replace(b'\r\n', b'\n')
+    c8.close()
+    srv8.close()
+    return reply, stops, out8
+
+
+r8, st8, o8 = cond_session(None, 'no condition')
+check('a mark with no condition stops on every pass', len(st8) == 20, str(len(st8)))
+check('  and the reply has nothing to reject', 'rejected' not in r8, str(r8))
+
+r8, st8, o8 = cond_session('i = 7', 'true once')
+check('a condition true once stops once', len(st8) == 1, str(len(st8)))
+check('  on the pass it names', st8 and st8[0].get('line') == COND_LINE, str(st8[:1]))
+check('  and the program still finishes its own work',
+      b'total=210' in o8, repr(o8[:40]))
+
+r8, st8, o8 = cond_session('i > 99', 'never true')
+check('a condition never true never stops', len(st8) == 0, str(len(st8)))
+check('  and the program runs to the end anyway', b'total=210' in o8, repr(o8[:40]))
+
+r8, st8, o8 = cond_session('i >', 'does not compile')
+rj = r8.get('rejected') or []
+check('a condition that does not compile is refused in the REPLY',
+      len(rj) == 1, str(r8))
+check('  naming the line it was typed on',
+      rj and rj[0].get('line') == COND_LINE, str(rj))
+check('  and quoting the condition back', rj and rj[0].get('condition') == 'i >', str(rj))
+check('  with the host\'s own wording',
+      rj and 'unexpected token' in (rj[0].get('error') or ''), str(rj))
+check('  and the breakpoint is installed UNCONDITIONAL, not dropped',
+      r8.get('lines') == [COND_LINE] and len(st8) == 20, '%s %d' % (r8.get('lines'), len(st8)))
+
+r8, st8, o8 = cond_session('len("ab") > 1', 'calls a function')
+rj = r8.get('rejected') or []
+check('a condition that calls a function is refused too', len(rj) == 1, str(r8))
+check('  and the refusal names the function', rj and '"len"' in (rj[0].get('error') or ''), str(rj))
+
+r8, st8, o8 = cond_session('nosuch% = 1', 'a name nobody has')
+check('a name out of scope CANNOT be caught at reply time',
+      'rejected' not in r8, str(r8))
+check('  so it stops instead of firing silently', len(st8) == 20, str(len(st8)))
+check('  and the stop says why',
+      st8 and 'nosuch%' in (st8[0].get('text') or ''), str(st8[:1]))
+
+r8, st8, o8 = cond_session('i + 1', 'not a boolean')
+check('a condition that is not a boolean stops', len(st8) == 20, str(len(st8)))
+check('  and says that is what it is',
+      st8 and 'not a true or false' in (st8[0].get('text') or ''), str(st8[:1]))
 
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))

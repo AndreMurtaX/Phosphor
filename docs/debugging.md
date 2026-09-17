@@ -186,7 +186,7 @@ editor and drives one:
 python tests/debug_protocol_test.py bin/phosphor.exe
 ```
 
-It asserts 97 things across seven sessions — `initialize` and its capabilities,
+It asserts 117 things across eight sessions — `initialize` and its capabilities,
 `setBreakpoints` before `launch`, a command refused in the wrong state, the stop at
 the armed line, `stackTrace` with frame 0 innermost and `(main)` outermost,
 `variables` with name/value/kind/scope, `evaluate` over globals, locals, a
@@ -274,6 +274,61 @@ expressions before this was chosen; it worked, and it was a second copy of a
 language whose precedence is eleven private procedures with the operator sets
 written inline. The sibling repository has spent three roadmap items on rules that
 existed twice and drifted.
+
+### A breakpoint with a condition
+
+**`capabilities.conditionalBreakpoints` reports `true` as of 2026-09-17.**
+`setBreakpoints` takes an optional `conditions` array, parallel to `lines` and read
+by the same index, and a breakpoint whose condition is false is **not a stop**: the
+program halts at the boundary as it always did, the condition is evaluated there,
+and the editor is told nothing at all. No event, no round trip, no band, no
+repainted panes.
+
+**It is the same evaluator, and that is the point.** A condition and a watch cannot
+come to disagree about what an expression means, because `EvaluateExpr` has exactly
+one caller-visible behaviour and two callers. Everything the section above says
+about the gate, the fresh VM and the refused calls is true of a condition word for
+word -- including that `len(x$)` is refused, which is worth knowing before you type
+one.
+
+**Three answers, and each is a decision that could have gone the other way:**
+
+- **A condition that does not COMPILE is refused in the `setBreakpoints` reply**,
+  under a `rejected` key carrying the line, the condition and the host's own
+  wording — and the breakpoint is then installed **unconditional**. Refusing at
+  reply time is what lets an editor put the message beside the line while the
+  person is still looking at it. Installing it unconditional is the lesser of two
+  evils: a mark that is visible and never honoured is worse than one that fires too
+  often. `rejected` is omitted entirely when there is nothing to reject, so a
+  client that has never heard of it sees the reply it always saw.
+- **A condition that compiles and then cannot be EVALUATED stops the program**, and
+  the `stopped` event carries `text` saying why. A name out of scope at that line
+  cannot be caught at reply time -- scope is a frame and there is no frame yet --
+  so the choice is between stopping with an explanation and a breakpoint that
+  silently never fires. The first puts the mistake in front of the person who made
+  it, on the line they made it on.
+- **A condition that is not a BOOLEAN is the same case.** `if` in this language
+  refuses a non-boolean outright, so `i% + 1` as a condition is not a truthiness
+  question a debugger gets to answer differently from the language it is debugging.
+
+**Only a breakpoint stop is filtered.** A step that happens to land on a conditional
+line stops, because the person asked to step and the condition is not about them;
+so does an entry, a pause and an exception.
+
+**What it costs, measured, and what is not done about it.** One condition is one
+evaluation, and an evaluation is a compile. On a six-line program that is 0,039 ms
+per hit -- 5000 hits in 196 ms, which is FASTER than the 5000 round trips the same
+breakpoint would have cost unconditional. On a 606-line program it is **2,3 ms per
+hit**: 2000 hits in 4,5 s, against 11,5 s for the same mark with no condition.
+
+Half of that went away when the BASE source stopped being recompiled on every
+evaluation -- it cannot change, `FSource` is written once -- which took the same
+measurement from 4,3 ms to 2,3. The other half is the chunk itself, and it is **not
+cached, deliberately and not by oversight**: a cache keyed on the expression would
+take a hit to microseconds, and `TProgram.Patch` re-points the prologue's
+`opPushConst` instructions at fresh constants so the kept program does not grow --
+measured at zero instruction growth over 10000 correct evaluations. It is a known
+piece of work with a proven technique, and it is not in this increment.
 
 **A defect it found on the way.** `TPhosphorVM.Create` did not initialise
 `FErrHandler`, and 0 is a valid pc, so a freshly created VM carried an `ON ERROR`

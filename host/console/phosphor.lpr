@@ -1057,6 +1057,42 @@ type
     FExitCode: Integer;
     FStopAtEntry: Boolean;
     FBreaks: array of Integer;
+    { THE CONDITION ON EACH OF THEM, parallel to FBreaks and built in the same
+      loop as it, in the one place that writes either.
+
+      PARALLEL AND NOT A RECORD, which is the opposite of what the editor does
+      with the same pair, and the reason is FBreaks itself: the engine's ArmDebug
+      wants an array of Integer and nothing else, so a record here would be
+      unpacked into one on every arm. The safety this gives up is bought back by
+      confinement -- these two are written at ONE site (the setBreakpoints arm)
+      and the invariant is one line long: every path through that loop that
+      appends to one appends to the other. An empty string is an unconditional
+      breakpoint, so the common case needs nothing. }
+    FBreakConds: array of String;
+    { WHAT THE BASE SOURCE COMPILES TO, worked out once per session.
+
+      Every evaluation needs three numbers about the program WITHOUT the appended
+      line: where the chunk will start, how many globals existed before it, and a
+      hidden name the program has not got. Getting them meant compiling the source
+      a second time, on every single evaluation -- and a CONDITION evaluates once
+      per hit of its breakpoint, so a loop paid for it two thousand times.
+
+      They cannot change. FSource is written once, in Create, and nothing else
+      assigns it; the compiler is deterministic. Measured on a 606-line program
+      with a condition on a 2000-iteration loop: 4,3 ms per hit before this and
+      2,2 ms after, which is the second compile going away and nothing else.
+
+      THE OTHER HALF IS STILL THERE and is not addressed: the chunk itself is
+      recompiled per hit. A cache keyed on the expression would take the hit to
+      microseconds -- TProgram.Patch can re-point the prologue's opPushConst
+      instructions at fresh constants so the kept program does not grow, measured
+      at 0 instruction growth over 10000 correct evaluations -- and it is not
+      built here. What is built is the half that is three fields and no
+      invalidation rule. }
+    FBaseKnown: Boolean;
+    FBaseCount: Integer;
+    FBaseVars: Integer;
+    FBaseHidden: String;
     FAction: TPhosphorDebugAction;
     FDisconnected: Boolean;
     FLaunched: Boolean;     // `launch` seen: the program may start
@@ -1114,6 +1150,8 @@ type
     function TakeLine(out ALine: String): Boolean;
     procedure DoStackTrace(ASeq, ALine, ADepth: Integer);
     procedure DoVariables(ASeq, AFrameIx, ADepth: Integer);
+    function EvaluateExpr(AFrameIx, ADepth: Integer; const AExpr: String;
+      ACompileOnly: Boolean; out AValue, AKind, AError: String): Boolean;
     procedure DoEvaluate(ASeq, AFrameIx, ADepth: Integer; const AExpr: String);
     function Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
   public
@@ -1128,6 +1166,9 @@ type
                          AStopAtEntry: Boolean);
     procedure Arm;
     function ArmedAt(ALine: Integer): Boolean;
+    function ConditionAt(ALine: Integer): String;
+    function ShouldStopAt(ALine: Integer; ADepth: Integer;
+      out AWhy: String): Boolean;
     procedure SendStopped(AExtra: TJSONObject);
     procedure SendExited(AExtra: TJSONObject);
     function Finished: Boolean;
@@ -1519,6 +1560,58 @@ begin
     if FBreaks[i] = ALine then Exit(True);
 end;
 
+{ The condition on the breakpoint at ALine, or '' for one that has none and for a
+  line that has no breakpoint. Asked once per stop, over a handful of numbers. }
+function TDebugProto.ConditionAt(ALine: Integer): String;
+var
+  i: Integer;
+begin
+  Result := '';
+  if ALine <= 0 then Exit;
+  for i := 0 to High(FBreaks) do
+    if FBreaks[i] = ALine then
+    begin
+      if i <= High(FBreakConds) then Result := FBreakConds[i];
+      Exit;
+    end;
+end;
+
+{ SHOULD THIS STOP BE REPORTED TO THE EDITOR? True for every breakpoint without a
+  condition, which is the answer that costs nothing.
+
+  A CONDITION THAT CANNOT BE EVALUATED STOPS THE PROGRAM. It is the one judgement
+  call in here and it goes the way it does because the alternative is a breakpoint
+  that silently does not fire: a typo in a condition would turn a mark the user
+  set into a mark that never reports, with no error anywhere and nothing to see.
+  Stopping on it puts the mistake in front of the person who made it, on the line
+  they made it on, which is where they can fix it. AWhy carries the reason so the
+  `stopped` event can say why it stopped for something that is not true.
+
+  A condition that evaluates to something that is NOT A BOOLEAN is the same case,
+  and for the same reason. Phosphor's `if` refuses a non-boolean outright
+  (PhosphorCompiler.pas ParseCondition), so `i% + 1` as a condition is not a
+  truthiness question this host gets to answer differently from the language. }
+function TDebugProto.ShouldStopAt(ALine: Integer; ADepth: Integer;
+  out AWhy: String): Boolean;
+var
+  cond, value, kind, err: String;
+begin
+  AWhy := '';
+  cond := ConditionAt(ALine);
+  if cond = '' then Exit(True);
+  if not EvaluateExpr(0, ADepth, cond, False, value, kind, err) then
+  begin
+    AWhy := Format('the condition %s could not be evaluated: %s', [cond, err]);
+    Exit(True);
+  end;
+  if kind <> 'bool' then
+  begin
+    AWhy := Format('the condition %s is %s, not a true or false', [cond, kind]);
+    Exit(True);
+  end;
+  Result := value = 'true';
+end;
+
 procedure TDebugProto.Arm;
 var
   i: Integer;
@@ -1895,10 +1988,25 @@ begin
   Result := '__eval';     // unreachable: see the pigeonhole above
 end;
 
-procedure TDebugProto.DoEvaluate(ASeq, AFrameIx, ADepth: Integer;
-                                 const AExpr: String);
+{ THE EVALUATOR ITSELF, with no protocol in it.
+
+  IT WAS `DoEvaluate` AND IT ANSWERED IN JSON, which was right while `evaluate`
+  was the only thing that wanted an answer. A CONDITION ON A BREAKPOINT WANTS THE
+  SAME ANSWER AND NO FRAME: it asks at a stop, believes or disbelieves, and the
+  editor is told nothing unless the program actually stops. Two callers, one of
+  which must not send anything, is what splits this in half.
+
+  The split is the whole point. There is ONE evaluator, so a condition and a watch
+  cannot come to disagree about what an expression means -- which is the failure
+  this pair of repositories has now spent five roadmap items avoiding. What is
+  above this line is the argument for the gate and the fresh VM; it applies to
+  both callers because there is only one of it.
+
+  False with AError set, or True with AValue and AKind. AError is a sentence for a
+  person, already the host's own wording, and never a code. }
+function TDebugProto.EvaluateExpr(AFrameIx, ADepth: Integer; const AExpr: String;
+  ACompileOnly: Boolean; out AValue, AKind, AError: String): Boolean;
 var
-  o: TJSONObject;
   live, vm: TPhosphorVM;
   running, prog: TProgram;
   comp: TPhosphorCompiler;
@@ -1908,55 +2016,97 @@ var
   ins: TInstr;
   v: TValue;
   known: Boolean;
-begin
-  live := FEng.DebugVM;
-  if live = nil then
+
+  { Every refusal in here used to be a `SendError` and is now this. The bodies
+    below are unchanged apart from the verb, deliberately: the wording is what an
+    editor shows a person, and a refactor is a poor moment to reword a diagnostic. }
+  procedure Fail(const AText: String);
   begin
-    SendError(ASeq, 'no program is executing');
-    Exit;
+    AError := AText;
   end;
-  running := live.DbgProgram();
-  if (running = nil) or (not running.HasNames) then
+
+begin
+  Result := False;
+  AValue := '';
+  AKind := '';
+  AError := '';
+  { COMPILE-ONLY NEEDS NO PROGRAM AND NO STOP, and that is the whole reason it
+    exists. A CONDITION IS TYPED LONG BEFORE THE PROGRAM RUNS. The editor sets a
+    breakpoint with one while nothing is executing, and the answer a person wants
+    -- "that is not an expression" -- is available then: it is a compile and a walk
+    over what the compile emitted, neither of which touches a VM.
+
+    What it CANNOT answer then is whether a name is in scope, because scope is a
+    frame and there is no frame yet. That refusal arrives at the first stop on
+    that line and nowhere earlier; see the loop below, which is skipped here for
+    exactly that reason. Promising more would be promising a check this host
+    cannot make. }
+  live := nil;
+  running := nil;
+  vmFrame := -1;
+  if not ACompileOnly then
   begin
-    SendError(ASeq, 'this program carries no variable names (it came from a .pbc)');
-    Exit;
+    live := FEng.DebugVM;
+    if live = nil then
+    begin
+      Fail('no program is executing');
+      Exit;
+    end;
+    running := live.DbgProgram();
+    if (running = nil) or (not running.HasNames) then
+    begin
+      Fail('this program carries no variable names (it came from a .pbc)');
+      Exit;
+    end;
   end;
   { THE SAME FRAME MAPPING AND THE SAME REFUSAL AS `variables`, deliberately
     literally: frame 0 is innermost, the VM numbers them the other way, and
     vmFrame = -1 is the legal `(main)` activation rather than an error. Two
     answers about the same stop that disagreed about what `frame` means would be
     worse than either. }
-  vmFrame := ADepth - 1 - AFrameIx;
-  if (AFrameIx < 0) or (vmFrame < -1) then
+  if not ACompileOnly then
   begin
-    SendError(ASeq, Format('no frame %d', [AFrameIx]));
-    Exit;
+    vmFrame := ADepth - 1 - AFrameIx;
+    if (AFrameIx < 0) or (vmFrame < -1) then
+    begin
+      Fail(Format('no frame %d', [AFrameIx]));
+      Exit;
+    end;
   end;
   expr := Trim(AExpr);
   if expr = '' then
   begin
-    SendError(ASeq, 'evaluate needs an expression');
+    Fail('evaluate needs an expression');
     Exit;
   end;
 
   { --- 1. THE BASE, COMPILED ALONE, says where the chunk begins and which names
           the program already has. It compiled once to run, so a failure here is
-          not the user's expression and is reported as itself. --------------- }
-  prog := nil;
-  comp := TPhosphorCompiler.Create();
-  try
-    if not comp.Compile(FSource, prog) then
-    begin
-      SendError(ASeq, Format('the program no longer compiles: %s', [comp.ErrorMessage]));
-      Exit;
+          not the user's expression and is reported as itself.
+
+          ONCE PER SESSION, not once per evaluation: see FBaseKnown. ------- }
+  if not FBaseKnown then
+  begin
+    prog := nil;
+    comp := TPhosphorCompiler.Create();
+    try
+      if not comp.Compile(FSource, prog) then
+      begin
+        Fail(Format('the program no longer compiles: %s', [comp.ErrorMessage]));
+        Exit;
+      end;
+    finally
+      comp.Free;
     end;
-  finally
-    comp.Free;
+    FBaseCount := prog.Count;
+    FBaseVars := prog.VarCount;
+    FBaseHidden := DbgEvalHiddenName(prog);
+    FBaseKnown := True;
+    prog.Free;
   end;
-  baseCount := prog.Count;
-  baseVars := prog.VarCount;
-  hidden := DbgEvalHiddenName(prog);
-  prog.Free;
+  baseCount := FBaseCount;
+  baseVars := FBaseVars;
+  hidden := FBaseHidden;
 
   prog := nil;
   comp := TPhosphorCompiler.Create();
@@ -1966,7 +2116,7 @@ begin
       { THE LINE NUMBER IS OURS, NOT THE USER'S. The appended line is one past the
         end of their file and a message naming it would send an editor to a line
         that is not there. }
-      SendError(ASeq, comp.ErrorMessage);
+      Fail(comp.ErrorMessage);
       Exit;
     end;
   finally
@@ -1995,7 +2145,7 @@ begin
         nm := ValToStr(prog.Consts.Get(ins.A));
         if not DbgEvalCallAllowed(prog, nm, ins.B) then
         begin
-          SendError(ASeq, Format('evaluate does not call functions, and "%s" is one. ' +
+          Fail(Format('evaluate does not call functions, and "%s" is one. ' +
             'Only a@[i], s$[n] and s$[[n]] reach a call, because the compiler puts ' +
             'them there', [nm]));
           Exit;
@@ -2003,14 +2153,14 @@ begin
       end
       else if not (ins.Op in DBG_EVAL_PURE) then
       begin
-        SendError(ASeq, 'evaluate computes a value and changes nothing; this does more');
+        Fail('evaluate computes a value and changes nothing; this does more');
         Exit;
       end;
     end;
     if (stores <> 1) or (prog.Instr(prog.Count - 1).Op <> opStoreVar)
        or (prog.GlobalName(prog.Instr(prog.Count - 1).A) <> hidden) then
     begin
-      SendError(ASeq, 'evaluate takes one expression, not a statement');
+      Fail('evaluate takes one expression, not a statement');
       Exit;
     end;
     slot := prog.Instr(prog.Count - 1).A;
@@ -2020,6 +2170,15 @@ begin
       compiler gives its own temporaries for the same reason: a generated name has
       no suffix to derive a type from (PhosphorCompiler.pas:427-432). }
     prog.VarTypes[slot] := vtAny;
+
+    { EVERYTHING PAST HERE NEEDS A STOP. The chunk has compiled and the gate has
+      passed it, which is the whole of what can be decided about an expression
+      without one. }
+    if ACompileOnly then
+    begin
+      Result := True;
+      Exit;
+    end;
 
     { --- A NAME THAT IS NEITHER A GLOBAL NOR A LOCAL OF THIS FRAME -------------
       In this language an undeclared name is a global that reads as its default,
@@ -2044,7 +2203,7 @@ begin
         end;
       if not known then
       begin
-        SendError(ASeq, Format('no variable "%s" here', [nm]));
+        Fail(Format('no variable "%s" here', [nm]));
         Exit;
       end;
     end;
@@ -2095,7 +2254,7 @@ begin
       begin
         err := vm.LastError.Message;
         if err = '' then err := 'the expression could not be evaluated';
-        SendError(ASeq, err);
+        Fail(err);
         Exit;
       end;
       if LiveHandleCount() <> handlesBefore then
@@ -2103,20 +2262,17 @@ begin
         { NO ANSWER IS SENT. An evaluation that moved the handle table changed the
           program, and the protocol's rule is that a host which cannot guarantee
           otherwise says so rather than offering the value anyway. }
-        SendError(ASeq, Format('evaluate changed the program (handles went from ' +
+        Fail(Format('evaluate changed the program (handles went from ' +
           '%d to %d) and the answer is withheld', [handlesBefore, LiveHandleCount()]));
         Exit;
       end;
       v := vm.DbgGlobal(slot);
-      o := TJSONObject.Create();
-      o.Add('seq', ASeq);
-      o.Add('ok', True);
       { RENDERED BY THE SAME TWO FUNCTIONS `variables` uses, because a second
         renderer is a second set of rules to keep in step -- and the protocol
         says the editor does not format values. }
-      o.Add('result', ValToStr(v));
-      o.Add('kind', DbgKindName(v));
-      SendJSON(o);
+      AValue := ValToStr(v);
+      AKind := DbgKindName(v);
+      Result := True;
     finally
       vm.Free;
     end;
@@ -2125,14 +2281,36 @@ begin
   end;
 end;
 
+{ `evaluate`, the request: the evaluator above, rendered as one frame. }
+procedure TDebugProto.DoEvaluate(ASeq, AFrameIx, ADepth: Integer;
+                                 const AExpr: String);
+var
+  o: TJSONObject;
+  value, kind, err: String;
+begin
+  if not EvaluateExpr(AFrameIx, ADepth, AExpr, False, value, kind, err) then
+  begin
+    SendError(ASeq, err);
+    Exit;
+  end;
+  o := TJSONObject.Create();
+  o.Add('seq', ASeq);
+  o.Add('ok', True);
+  o.Add('result', value);
+  o.Add('kind', kind);
+  SendJSON(o);
+end;
+
 { One request. Returns True when the answer resumes the program, so the stop loop
   knows to leave. ALine/ADepth are where the VM is; they are -1/0 while running. }
 function TDebugProto.Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
 var
   d: TJSONData;
   o, res, caps: TJSONObject;
-  arr, el: TJSONData;
-  cmd: String;
+  arr, el, conds: TJSONData;
+  rejected: TJSONArray;
+  rej: TJSONObject;
+  cmd, cond, evVal, evKind, evErr: String;
   seq, i, n: Integer;
   v: Int64;
   stopped: Boolean;
@@ -2199,7 +2377,15 @@ begin
         about what a person may TYPE. }
       caps.Add('evaluateCalls', False);
       caps.Add('setVariable', False);
-      caps.Add('conditionalBreakpoints', False);
+      { TRUE SINCE 2026-09-17. A breakpoint carries an optional `condition` and it
+        is evaluated HERE, at the boundary, by the same evaluator `evaluate` uses
+        -- so a condition and a watch cannot come to disagree about what an
+        expression means. A condition this host cannot read is refused in the
+        `setBreakpoints` reply, where the editor can put the message beside the
+        line it was typed on; one it cannot EVALUATE stops the program and says
+        why, because a breakpoint that silently never fires is worse than one that
+        stops for a reason you can read. }
+      caps.Add('conditionalBreakpoints', True);
       res := TJSONObject.Create();
       res.Add('seq', seq);
       res.Add('ok', True);
@@ -2226,22 +2412,72 @@ begin
         already says which lines were installed -- the editor learns that its
         element did not take by not seeing it come back, which is the same
         mechanism that reports a line no statement starts on. }
+      { A CONDITION RIDES IN A SIBLING KEY, never inside `lines`.
+
+        `conditions` is an array of strings the same length as `lines`, read BY
+        THE SAME INDEX as the element it belongs to -- which is why it is read
+        before anything is dropped. `lines` skips a non-integer element rather
+        than refusing the frame, so its output index and its input index part
+        company on the first bad element, and a condition taken from the OUTPUT
+        index would then belong to the wrong breakpoint. Silently. This is the
+        one place the two arrays can come apart and it is the one place that
+        writes either.
+
+        WHY NOT OBJECTS IN `lines`, which is the shape an editor reaches for
+        first: because it would have killed this host as it first shipped.
+        Before 2026-09-16 this loop read the array with Integers[i], which
+        CONVERTS -- an object element raised inside the loop and took the
+        debuggee down over one element of an otherwise conformant frame. The
+        hardening that drops a non-integer instead is one commit old, and an
+        editor cannot know which host it is talking to. A key an unaware host
+        never looks for cannot hurt it. }
       SetLength(FBreaks, 0);
+      SetLength(FBreakConds, 0);
+      rejected := TJSONArray.Create();
       arr := o.Find('lines');
+      conds := o.Find('conditions');
+      if not ((conds <> nil) and (conds is TJSONArray)) then conds := nil;
       if (arr <> nil) and (arr is TJSONArray) then
       begin
         n := 0;
         SetLength(FBreaks, TJSONArray(arr).Count);
+        SetLength(FBreakConds, TJSONArray(arr).Count);
         for i := 0 to TJSONArray(arr).Count - 1 do
         begin
           el := TJSONArray(arr).Items[i];
           if (el = nil) or (el.JSONType <> jtNumber) then Continue;
           v := el.AsInt64;
           if (v < 1) or (v > High(Integer)) then Continue;   // a line number, not an index
+          cond := '';
+          if (conds <> nil) and (i < TJSONArray(conds).Count) then
+          begin
+            el := TJSONArray(conds).Items[i];
+            if (el <> nil) and (el.JSONType = jtString) then cond := Trim(el.AsString);
+          end;
+          { REFUSED NOW, WHERE IT WAS TYPED, or not at all. A condition is typed
+            long before the program runs, and whether it is an EXPRESSION is
+            decidable then: it is a compile and a walk over what the compile
+            emitted. Whether its names are in scope is not, because scope is a
+            frame -- that refusal can only arrive at the first stop on the line.
+            A condition refused here is dropped and the breakpoint is installed
+            UNCONDITIONAL, because the alternative is a mark the user can see and
+            the program never honours. }
+          if cond <> '' then
+            if not EvaluateExpr(0, 0, cond, True, evVal, evKind, evErr) then
+            begin
+              rej := TJSONObject.Create();
+              rej.Add('line', Integer(v));
+              rej.Add('condition', cond);
+              rej.Add('error', evErr);
+              rejected.Add(rej);
+              cond := '';
+            end;
           FBreaks[n] := Integer(v);
+          FBreakConds[n] := cond;
           Inc(n);
         end;
         SetLength(FBreaks, n);
+        SetLength(FBreakConds, n);
       end;
       if stopped or (FState = dbgInitialized) then
         Arm()
@@ -2257,6 +2493,11 @@ begin
       res.Add('seq', seq);
       res.Add('ok', True);
       res.Add('lines', InstalledLines());
+      { `rejected` IS OMITTED WHEN IT IS EMPTY, which is the ordinary case. An
+        editor that has never heard of it sees the reply it always saw; one that
+        has, sees nothing to draw unless there is something to draw. }
+      if rejected.Count > 0 then res.Add('rejected', rejected)
+      else rejected.Free;
       SendJSON(res);
       Exit(False);
     end;
@@ -2360,7 +2601,7 @@ end;
 function TDebugProto.OnStop(AReason: TPhosphorStopReason; ALine: Integer;
                             ADepth: Integer): TPhosphorDebugAction;
 var
-  raw, why: String;
+  raw, why, condWhy: String;
   ev: TJSONObject;
   pending: Boolean;
 begin
@@ -2448,6 +2689,27 @@ begin
     end;
   end;
 
+  { A CONDITION DECIDES WHETHER A BREAKPOINT IS A STOP, and it is asked HERE --
+    after the pause drain, before the editor is told anything. The program has
+    already halted at the boundary; what a false condition saves is the round
+    trip, the event, and the person's attention, not the halt itself.
+
+    ONLY FOR srBreakpoint. A step that happens to land on a conditional
+    breakpoint stops, because the user asked to step and the condition is not
+    about them. So does an entry, a pause and an exception. }
+  if AReason = srBreakpoint then
+  begin
+    if not ShouldStopAt(ALine, ADepth, condWhy) then
+    begin
+      { The state has to follow the PROGRAM, not the last event the editor was
+        sent -- the same rule the silent entry resume above is written to. }
+      FState := dbgRunning;
+      Exit(daRun);
+    end;
+  end
+  else
+    condWhy := '';
+
   FState := dbgStopped;
   if AReason = srEntry then why := 'entry'
   else if AReason = srBreakpoint then why := 'breakpoint'
@@ -2457,6 +2719,11 @@ begin
   ev.Add('reason', why);
   ev.Add('path', FPath);
   ev.Add('line', ALine);
+  { A STOP THAT HAPPENED IN SPITE OF ITS CONDITION SAYS SO. `text` is the key an
+    exception stop already uses for the same job -- here is why this one is in
+    front of you -- and an editor that ignores it sees the stop it would have
+    seen anyway. }
+  if condWhy <> '' then ev.Add('text', condWhy);
   SendEvent('stopped', ev);
 
   FAction := daRun;

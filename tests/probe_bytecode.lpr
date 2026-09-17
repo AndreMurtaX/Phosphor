@@ -1191,6 +1191,92 @@ end;
   rather than inline code in the main block because the sources are BUILT with a
   loop, and a program block's variables are globals, which objfpc will not use as
   a for-loop counter. }
+{ A FRESH VM HAS NO `ON ERROR` HANDLER, AND RunFrom MUST SAY SO WHEN IT FAULTS.
+
+  THE DEFECT, measured 2026-09-17 while building the debug protocol's `evaluate`.
+  TPhosphorVM.Create did not initialise FErrHandler, and a zeroed instance
+  therefore carried a handler installed at instruction 0 -- 0 being a perfectly
+  valid pc. `Run` resets the ON ERROR fields, so nothing that starts there could
+  see it; `RunFrom` deliberately does not, because an installed handler is part of
+  the session a REPL line runs over. The hole was exactly a VM created and then
+  driven by RunFrom with no Run before it.
+
+  WHY IT WAS INVISIBLE. Fault dispatched to pc 0, the program ran FROM THE TOP,
+  and what happened next depended on the program's own text: one containing `end`
+  reached that halt and ended in an orderly way, so RunFrom returned TRUE and the
+  caller was told a faulting run had succeeded, with LastError empty and only
+  ErrCode still carrying the 2. The same program with the `end` removed answered
+  correctly, because the second fault arrived with FInHandler already True. A
+  defect conditional on whether the program contains `end` is not one anybody
+  finds by reading, and neither the byte-exact suites nor the REPL could see it:
+  the REPL misses it by one comparison, `FErrHandlerFrameSP > AStopFrameSP` being
+  `>` rather than `>=` with both at 0.
+
+  WHAT IS PINNED, therefore, is the pair -- with `end` and without -- because a
+  check on only the second half passes with the defect in place. Removing the
+  constructor's `FErrHandler := -1` turns the first of these red and leaves the
+  second green, which is how it was measured. }
+procedure CheckFreshVMHasNoHandler;
+const
+  WITH_END = 'a = 7'#10'println "x="; a'#10'end'#10;
+  NO_END   = 'a = 7'#10'println "x="; a'#10;
+
+  procedure One(const AName, ASource: String);
+  var
+    comp: TPhosphorCompiler;
+    prog: TProgram;
+    vm: TPhosphorVM;
+    reg: TPhosphorRegistry;
+    at: Integer;
+    ran: Boolean;
+  begin
+    prog := nil;
+    comp := TPhosphorCompiler.Create();
+    try
+      if not comp.Compile(ASource, prog) then
+      begin
+        Report(False, AName + ' [the fixture will not compile: ' +
+                      comp.ErrorMessage + ']');
+        Exit;
+      end;
+    finally
+      comp.Free;
+    end;
+    reg := TPhosphorRegistry.Create();
+    vm := TPhosphorVM.Create();
+    try
+      { A CHUNK APPENDED PAST THE PROGRAM and entered directly, which is the shape
+        that finds this: no Run has ever touched this VM. It divides by zero and
+        stores nowhere. }
+      at := prog.Count;
+      prog.Emit(opPushConst, prog.Consts.Add(ValInt(1)), 0, 0);
+      prog.Emit(opPushConst, prog.Consts.Add(ValInt(0)), 0, 0);
+      prog.Emit(opDivReal, 0, 0, 0);
+      prog.Emit(opPop, 0, 0, 0);
+      prog.Emit(opHalt, 0, 0, 0);
+      vm.Registry := reg;
+      vm.MaxSteps := 100000;
+      ran := vm.RunFrom(prog, at);
+      { BOTH HALVES: it must answer False, AND it must say what happened. With
+        the defect in place the first fixture answered True with an EMPTY
+        LastError, so a check on the message alone would have read as a wording
+        change rather than as a swallowed fault. }
+      Report((not ran) and (vm.LastError.Message = 'division by zero')
+             and (not ProveFail),
+             AName + ' [ran=' + BoolToStr(ran, True) + ' err="' +
+             vm.LastError.Message + '" code=' + IntToStr(vm.ErrCode) + ']');
+    finally
+      vm.Free;
+      reg.Free;
+      prog.Free;
+    end;
+  end;
+
+begin
+  One('a fresh VM reports a fault: the program has `end`', WITH_END);
+  One('a fresh VM reports a fault: the program has not', NO_END);
+end;
+
 procedure CheckFrameSlotLimits;
 var
   s: String;
@@ -1439,6 +1525,8 @@ begin
     RStr's first chunk, must survive the round trip byte for byte. See
     BigStringSource for why the length field is not capped. }
   CheckRoundTrip('round-trip: a 200,000-character string constant', BigStringSource());
+
+  CheckFreshVMHasNoHandler();
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

@@ -61,6 +61,12 @@ uses
   Forms, Clipbrd, LCLType, InterfaceBase,
   {$IFDEF WINDOWS}Win32Int,{$ELSE}Gtk2Int,{$ENDIF}
   SysUtils, Classes, PhosphorEngine, PhosphorValue, PhosphorCompiler, PhosphorOpcodes,
+  { PhosphorHandles for ONE NUMBER: LiveHandleCount, read either side of an
+    `evaluate` so the answer is refused if the evaluation created or freed a
+    handle. The handle registry is process-wide (its own header says so), so it
+    is the one piece of program state a fresh VM does NOT isolate -- which makes
+    it the one worth asserting rather than arguing about. See DoEvaluate. }
+  PhosphorHandles,
   { PhosphorVM for the debug state window only: DebugVM answers one, and the
     stack and variable readers below take it as a parameter. The host reaching
     into an engine unit is the allowed direction -- the boundary check is that
@@ -1055,6 +1061,21 @@ type
     FDisconnected: Boolean;
     FLaunched: Boolean;     // `launch` seen: the program may start
     FPendingArm: Boolean;   // a set arrived while running; arm at the next boundary
+    { THE SOURCE THE PROGRAM WAS COMPILED FROM, snapshotted at launch and not
+      re-read afterwards.
+
+      It matters for `evaluate`, which compiles this text again with one line
+      appended. The file on disk is NOT the same question: an editor with unsaved
+      changes, or one that saved between the launch and the watch, would have
+      this host answering about a program that is not the one standing still. The
+      running VM's globals are indexed by a table THIS text produced, so an
+      answer derived from any other text is not wrong by a line number, it is
+      wrong by a variable.
+
+      EnsureStoppable used to read the file for itself and now reads this, which
+      closes the same hole one question earlier: the set of lines a breakpoint can
+      bind to describes the program that is going to RUN. }
+    FSource: String;
     FStoppable: TPhosphorLines;   // lines a breakpoint can actually bind to
     FStoppableKnown: Boolean;     // the source has been compiled once to find out
     { THE RUNNING VM, taken at the first stop and owned by the socket thread.
@@ -1093,9 +1114,10 @@ type
     function TakeLine(out ALine: String): Boolean;
     procedure DoStackTrace(ASeq, ALine, ADepth: Integer);
     procedure DoVariables(ASeq, AFrameIx, ADepth: Integer);
+    procedure DoEvaluate(ASeq, AFrameIx, ADepth: Integer; const AExpr: String);
     function Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
   public
-    constructor Create(AEng: TPhosphorEngine; const APath: String);
+    constructor Create(AEng: TPhosphorEngine; const APath, ASource: String);
     destructor Destroy; override;
     function Connect(APort: Integer): Boolean;
     procedure Push(const ALine: String);
@@ -1200,11 +1222,12 @@ begin
   end;
 end;
 
-constructor TDebugProto.Create(AEng: TPhosphorEngine; const APath: String);
+constructor TDebugProto.Create(AEng: TPhosphorEngine; const APath, ASource: String);
 begin
   inherited Create();
   FEng := AEng;
   FPath := APath;
+  FSource := ASource;
   FState := dbgConnected;
   FLock := TCriticalSection.Create();
   FInbox := TStringList.Create();
@@ -1436,20 +1459,14 @@ procedure TDebugProto.EnsureStoppable;
 var
   comp: TPhosphorCompiler;
   prog: TProgram;
-  source: String;
 begin
   if FStoppableKnown then Exit;
   FStoppableKnown := True;
   SetLength(FStoppable, 0);
-  try
-    source := ReadSource(FPath);
-  except
-    on Exception do Exit;
-  end;
   prog := nil;
   comp := TPhosphorCompiler.Create();
   try
-    if comp.Compile(source, prog) then
+    if comp.Compile(FSource, prog) then
       FStoppable := prog.StoppableLines;
   finally
     comp.Free;
@@ -1680,6 +1697,434 @@ begin
   SendJSON(o);
 end;
 
+{ EVALUATE: AN EXPRESSION, A FRAME, AND A VALUE -- AND NOT ONE LINE OF NEW
+  LANGUAGE.
+
+  THE PROBLEM. docs/debug-protocol.md's `evaluate` section carries one sentence
+  that decides the whole shape: "Evaluation must not change the program's state:
+  no assignment, no call to a function with side effects that the host cannot
+  undo. A host that cannot guarantee that must report evaluate:false rather than
+  offering a half-safe one." Everything below is what it takes to be able to say
+  "guarantee" honestly.
+
+  WHAT IS NOT DONE, AND WHY EACH WAS REJECTED WITH A MEASUREMENT.
+
+    * A SECOND EXPRESSION READER, in this file or in an engine unit beside the
+      compiler. It works -- it was built and checked against the engine over 77
+      expressions -- and it is a SECOND COPY OF THE LANGUAGE. Phosphor's
+      precedence is not a table anything can share: it is eleven private
+      procedures with the operator sets written inline at the site that consumes
+      them (PhosphorCompiler.pas:148-157 declared, :916-1465 the bodies, the sets
+      at :1353, :1370, :1382, :1342, and `not`/`and`/`or` as string comparisons
+      because the lexer has no keyword table). Two of its irregularities are
+      exactly what a re-implementation gets wrong: `^` is LEFT-associative with a
+      primary base, so `-2^2` is -4 and `2^3^2` is 64 (:1331-1346); and
+      ParseComparison is an `if` and not a `while`, so `a < b < c` does not chain
+      (:1378-1398). The sibling repository has spent three roadmap items on rules
+      that existed twice and drifted. This one does not add a fourth.
+
+    * RUNNING THE EXPRESSION IN THE DEBUGGEE'S OWN VM. That needs every field a
+      run moves saved and put back -- a list fifteen fields long, which is a
+      SNAPSHOT of what ExecFrom touches and has no test that is not a second copy
+      of itself. Add a counter to the VM, forget to add it there, and the result
+      is a debugger that quietly perturbs the program it is watching: no error,
+      no warning, and only the output to show it. A fresh VM has nothing to
+      restore, which is not a smaller version of that problem but the absence of
+      it.
+
+    * ANSWERING ONLY A NAME. Measured against a live session: every name a
+      `variables` response contains is answerable, and nothing else is -- both
+      read the same two tables through the same accessors at the same stop. A
+      capability that promises the editor information it is already holding is
+      the wrong kind of lie to tell a program that greys out a menu on it.
+
+  WHAT IS DONE, in five steps.
+
+  1. COMPILE THE WHOLE SOURCE AGAIN, with one line appended:
+     `<hidden> = (<expr>)`. The appended line can only ADD names and instructions;
+     every earlier global index and every earlier instruction is bit-identical.
+     That is the property TPhosphorEngine.ReplRun has rested on since the REPL
+     existed (PhosphorEngine.pas:117-131) and it was checked for this rather than
+     taken: over 154 real programs in the two repositories, the whole prefix --
+     opcode, A, B and Line on every instruction, the global table, the function
+     entries and their local counts -- is identical. It costs one compile, and a
+     compile is 0,9 ms on the mean of 7558 .bas files here, 15,7 ms on the worst.
+
+     The hidden name has to be one the LEXER accepts, so it is forgeable, so it
+     is CHOSEN AGAINST THE PROGRAM rather than assumed free. The compiler's own
+     temporaries begin with '#h' precisely because '#' cannot start an identifier
+     -- which also means the compiler cannot PARSE one, since it makes those names
+     through VarIndex and never by reading them. PhosphorCompiler.pas:437-447
+     records what a forgeable temporary cost the last time: a script that wrote
+     `__h0` was handed a SELECT subject's slot.
+
+  2. REFUSE WHAT WAS EMITTED, not what was typed. This is the load-bearing
+     decision and it is the opposite of the obvious one. A text rule cannot work:
+     `expr` is a string an editor sends verbatim, and `total) : total = 99 :
+     println (1` is a legal line whose middle statement writes a global. Most such
+     smuggles happen to be refused by the compiler -- but BY ACCIDENT, on the
+     trailing fragment failing to be a statement, not on the payload; balance the
+     tail and the compiler accepts all of them. A comment defeats any scheme that
+     neutralises the tail by appending a terminator, because a comment eats the
+     terminator. None of that is visible to a text rule and all of it is obvious
+     in the instruction stream, which is where the gate is: the chunk may contain
+     only opcodes that compute, and exactly ONE store -- the last instruction,
+     into the slot this host itself named. 39 hostile strings were measured
+     against it, including the whole comment family; none passed.
+
+     `=` INSIDE AN EXPRESSION IS A COMPARISON (opEQ), never a store, so the only
+     opStoreVar an honest expression can produce is ours. And `and`/`or` emit
+     opAnd/opOr over both operands rather than jumps (PhosphorCompiler.pas:1422-
+     1442), so a legal expression has no control flow in it at all.
+
+     opLoadLocal is DELIBERATELY not in the allowed set. The appended line is at
+     the top level so the compiler cannot emit one for it, and the VM this runs on
+     has no frames, so `FFrames[FFrameSP - 1]` would read past the bottom of the
+     frame stack. An opcode that cannot legitimately appear should stop the
+     request, not be made room for.
+
+  3. THE THREE CALLS THAT ARE NOT CALLS. Every registered name is refused --
+     `len`, `abs`, `mid$`, all 1145 of them -- because TPhosphorRegistry carries
+     no notion of an effect (its whole answer is Found/IsHost/Func, and IsHost is
+     orthogonal to purity), so this host cannot tell `len` from `kill` and must
+     not guess. The exceptions are `arr_get`, `strline$` and `strchar$`, and they
+     are not a purity judgement about the library: they are what the COMPILER'S
+     OWN BRACKET SUGAR lowers to (PhosphorCompiler.pas:1035, :1046, :1056). A user
+     who writes `a@[1]` has written no call. Refusing them would mean a debugger
+     that renders an array as `@1` in the variables pane and then refuses to look
+     inside it, which is the only door out of that pane.
+
+     A USER FUNCTION SHADOWS A REGISTRY NAME AT THE SAME ARITY (opCall asks
+     FindUserFunc first), so a program defining `function arr_get(a, b)` would
+     turn the sugar into arbitrary code. Each of the three is allowed only when
+     the program defines nothing of that name and arity.
+
+  4. SEED A FRESH VM FROM THE STOPPED ONE. After the chunk, an opHalt (so the
+     chunk's fall-through ends the run rather than re-entering the prologue), then
+     a prologue of PushConst/StoreVar pairs -- every global as the stopped VM
+     holds it, then the chosen frame's locals OVER the globals of the same name --
+     and an opJump to the chunk. Seeding the locals last IS the language's own
+     shadowing rule and not a second copy of it: the compiler resolved the name to
+     the global's index because the appended line is at the top level, and
+     overwriting that index with the local's value is what an inner binding means
+     (PhosphorCompiler.pas:513-519, which asks the inner binding first in both
+     directions). A `const` needs nothing at all: it never reaches runtime, and
+     compiling the whole source means the compiler still has it in scope.
+
+  5. RUN IT SOMEWHERE THAT CANNOT REACH THE PROGRAM. A VM created here, freed
+     here, with no OnOutput, no OnInput, no OnBreakpoint and no OnDebug, and its
+     own ceilings. It shares the process-wide handle registry, which is why step 3
+     matters: a read through it is a read, and nothing else is allowed through.
+
+  WHAT WAS MEASURED, from inside a real stop and not at the top level: a local, a
+  local shadowing a global, the same name resolved at `(main)`, a parameter, a
+  const, a global and a local in one expression, a name nobody has, a call, an
+  injection and a fault -- and afterwards every global, every local of every
+  frame, and err()/errmsg$()/erl() byte-identical. And the program RAN ON to the
+  end under a step ceiling proven to bite it 6000 steps lower.
+
+  WHAT IT STILL CANNOT DO, said plainly because the error string is the only other
+  place it is said: it cannot call anything. `len(name$)` is refused. Widening it
+  needs the registry to be able to answer whether a function has an effect, which
+  is a different piece of work and is not scoped. }
+
+const
+  { EVERYTHING AN EXPRESSION NEEDS AND NOTHING THAT WRITES. opStmt is the
+    statement marker the appended line itself emits; opPop cannot appear in an
+    assignment and costs nothing to allow. The single store is counted
+    separately -- see DoEvaluate. }
+  DBG_EVAL_PURE = [opNop, opPushConst, opPop, opNeg, opAdd, opSub, opMul,
+                   opDivReal, opDivInt, opPow, opMod, opEQ, opNE, opLT, opLE,
+                   opGT, opGE, opLoadVar, opAnd, opOr, opNot, opStmt];
+
+  { An evaluation is a handful of instructions plus two per global. These bound
+    the pathological expression rather than the ordinary one: `a$ + a$ + a$ ...`
+    is legal, allocates, and would otherwise be bounded by nothing at all,
+    because the shipped host sets no budget on the debuggee either. }
+  DBG_EVAL_MAX_STEPS = 2000000;
+  DBG_EVAL_TIMEOUT_MS = 2000;
+  DBG_EVAL_MAX_BYTES = 256 * 1024 * 1024;
+
+{ Is this opCall one of the compiler's own bracket lowerings, and does the
+  program leave the name alone? See step 3 above. }
+function DbgEvalCallAllowed(AProg: TProgram; const AName: String;
+                            AArgc: Integer): Boolean;
+begin
+  Result := False;
+  if AProg.FindUserFunc(AName, AArgc) >= 0 then Exit;   // the program shadows it
+  if (AName = 'arr_get') and (AArgc >= 2) and (AArgc <= 4) then Exit(True);
+  if ((AName = 'strline$') or (AName = 'strchar$')) and (AArgc = 2) then Exit(True);
+end;
+
+{ A GLOBAL NAME THE PROGRAM HAS NOT GOT, in one pass over its table.
+
+  THE FIRST CUT WAS A `repeat` THAT TRIED CANDIDATES until one was free, and
+  scripts/check-budget.py refused it -- rightly. Its bound was real but it was an
+  argument rather than a shape: a program declaring `__eval`, `__eval1` ...
+  `__evalN` would have made it rescan the whole table once per candidate, a
+  product where a sum will do. Written this way the bound is the table itself,
+  which is what that gate reads as bounded, and no reasoning has to be trusted.
+
+  THE PIGEONHOLE IS WHY THERE IS NO FAILURE ARM: there are VarCount globals and
+  VarCount + 1 candidates (`__eval`, then `__eval1` .. `__evalVarCount`), so at
+  least one is always free. The final Result exists to satisfy the compiler. }
+function DbgEvalHiddenName(ABase: TProgram): String;
+var
+  i, n: Integer;
+  taken: array of Boolean;
+  nm: String;
+begin
+  SetLength(taken, ABase.VarCount + 1);
+  for i := 0 to High(taken) do taken[i] := False;
+  for i := 0 to ABase.VarCount - 1 do
+  begin
+    nm := ABase.GlobalName(i);
+    if Copy(nm, 1, 6) <> '__eval' then Continue;
+    if Length(nm) = 6 then
+      taken[0] := True
+    else if TryStrToInt(Copy(nm, 7, Length(nm)), n)
+            and (n >= 1) and (n <= High(taken)) then
+      taken[n] := True;
+  end;
+  for i := 0 to High(taken) do
+    if not taken[i] then
+    begin
+      if i = 0 then Exit('__eval');
+      Exit('__eval' + IntToStr(i));
+    end;
+  Result := '__eval';     // unreachable: see the pigeonhole above
+end;
+
+procedure TDebugProto.DoEvaluate(ASeq, AFrameIx, ADepth: Integer;
+                                 const AExpr: String);
+var
+  o: TJSONObject;
+  live, vm: TPhosphorVM;
+  running, prog: TProgram;
+  comp: TPhosphorCompiler;
+  expr, hidden, nm, err: String;
+  i, j, baseCount, baseVars, chunkStart, prologue, stores: Integer;
+  slot, vmFrame, fn, nLocals, gi, handlesBefore: Integer;
+  ins: TInstr;
+  v: TValue;
+  known: Boolean;
+begin
+  live := FEng.DebugVM;
+  if live = nil then
+  begin
+    SendError(ASeq, 'no program is executing');
+    Exit;
+  end;
+  running := live.DbgProgram();
+  if (running = nil) or (not running.HasNames) then
+  begin
+    SendError(ASeq, 'this program carries no variable names (it came from a .pbc)');
+    Exit;
+  end;
+  { THE SAME FRAME MAPPING AND THE SAME REFUSAL AS `variables`, deliberately
+    literally: frame 0 is innermost, the VM numbers them the other way, and
+    vmFrame = -1 is the legal `(main)` activation rather than an error. Two
+    answers about the same stop that disagreed about what `frame` means would be
+    worse than either. }
+  vmFrame := ADepth - 1 - AFrameIx;
+  if (AFrameIx < 0) or (vmFrame < -1) then
+  begin
+    SendError(ASeq, Format('no frame %d', [AFrameIx]));
+    Exit;
+  end;
+  expr := Trim(AExpr);
+  if expr = '' then
+  begin
+    SendError(ASeq, 'evaluate needs an expression');
+    Exit;
+  end;
+
+  { --- 1. THE BASE, COMPILED ALONE, says where the chunk begins and which names
+          the program already has. It compiled once to run, so a failure here is
+          not the user's expression and is reported as itself. --------------- }
+  prog := nil;
+  comp := TPhosphorCompiler.Create();
+  try
+    if not comp.Compile(FSource, prog) then
+    begin
+      SendError(ASeq, Format('the program no longer compiles: %s', [comp.ErrorMessage]));
+      Exit;
+    end;
+  finally
+    comp.Free;
+  end;
+  baseCount := prog.Count;
+  baseVars := prog.VarCount;
+  hidden := DbgEvalHiddenName(prog);
+  prog.Free;
+
+  prog := nil;
+  comp := TPhosphorCompiler.Create();
+  try
+    if not comp.Compile(FSource + hidden + ' = (' + expr + ')'#10, prog) then
+    begin
+      { THE LINE NUMBER IS OURS, NOT THE USER'S. The appended line is one past the
+        end of their file and a message naming it would send an editor to a line
+        that is not there. }
+      SendError(ASeq, comp.ErrorMessage);
+      Exit;
+    end;
+  finally
+    comp.Free;
+  end;
+
+  try
+    fn := -1;
+    nLocals := 0;
+    if vmFrame >= 0 then
+    begin
+      fn := live.DbgFrameFunc(vmFrame);
+      nLocals := live.DbgFrameLocalCount(vmFrame);
+    end;
+
+    { --- 2. THE GATE, over what was emitted ----------------------------------- }
+    chunkStart := baseCount;
+    stores := 0;
+    for i := chunkStart to prog.Count - 1 do
+    begin
+      ins := prog.Instr(i);
+      if ins.Op in [opStoreVar, opStoreLocal] then
+        Inc(stores)
+      else if ins.Op = opCall then
+      begin
+        nm := ValToStr(prog.Consts.Get(ins.A));
+        if not DbgEvalCallAllowed(prog, nm, ins.B) then
+        begin
+          SendError(ASeq, Format('evaluate does not call functions, and "%s" is one. ' +
+            'Only a@[i], s$[n] and s$[[n]] reach a call, because the compiler puts ' +
+            'them there', [nm]));
+          Exit;
+        end;
+      end
+      else if not (ins.Op in DBG_EVAL_PURE) then
+      begin
+        SendError(ASeq, 'evaluate computes a value and changes nothing; this does more');
+        Exit;
+      end;
+    end;
+    if (stores <> 1) or (prog.Instr(prog.Count - 1).Op <> opStoreVar)
+       or (prog.GlobalName(prog.Instr(prog.Count - 1).A) <> hidden) then
+    begin
+      SendError(ASeq, 'evaluate takes one expression, not a statement');
+      Exit;
+    end;
+    slot := prog.Instr(prog.Count - 1).A;
+    { THE HIDDEN SLOT TAKES ANY KIND. Its name carries no type suffix, so the
+      compiler typed it vtNumber and `nome$` answered "cannot store string into
+      number variable" -- this host's own scaffolding talking. vtAny is what the
+      compiler gives its own temporaries for the same reason: a generated name has
+      no suffix to derive a type from (PhosphorCompiler.pas:427-432). }
+    prog.VarTypes[slot] := vtAny;
+
+    { --- A NAME THAT IS NEITHER A GLOBAL NOR A LOCAL OF THIS FRAME -------------
+      In this language an undeclared name is a global that reads as its default,
+      so a typo would answer 0 and say nothing -- and a `const`, which reaches no
+      table at runtime, would answer 0 while the program computes with 10. The
+      chunk makes both visible for free: a global index at or past the base
+      program's VarCount is a name the appended line INVENTED. It is legal only
+      when the chosen frame has a local of that name, which is what the prologue
+      below is about to supply. (A const does not reach here at all: the compiler
+      folded it to an opPushConst.) }
+    for i := chunkStart to prog.Count - 1 do
+    begin
+      ins := prog.Instr(i);
+      if (ins.Op <> opLoadVar) or (ins.A < baseVars) then Continue;
+      nm := prog.GlobalName(ins.A);
+      known := False;
+      for j := 0 to nLocals - 1 do
+        if prog.LocalName(fn, j) = nm then
+        begin
+          known := True;
+          Break;
+        end;
+      if not known then
+      begin
+        SendError(ASeq, Format('no variable "%s" here', [nm]));
+        Exit;
+      end;
+    end;
+
+    { --- 4. THE PROLOGUE ------------------------------------------------------ }
+    prog.Emit(opHalt, 0, 0, 0);
+    prologue := prog.Count;
+    for i := 0 to live.DbgGlobalCount() - 1 do
+    begin
+      if i >= prog.VarCount then Break;
+      prog.Emit(opPushConst, prog.Consts.Add(live.DbgGlobal(i)), 0, 0);
+      prog.Emit(opStoreVar, i, 0, 0);
+    end;
+    for j := 0 to nLocals - 1 do
+    begin
+      nm := prog.LocalName(fn, j);
+      if nm = '' then Continue;
+      gi := -1;
+      for i := 0 to prog.VarCount - 1 do
+        if prog.GlobalName(i) = nm then
+        begin
+          gi := i;
+          Break;
+        end;
+      if gi < 0 then Continue;      // the expression never mentioned it
+      prog.Emit(opPushConst, prog.Consts.Add(live.DbgLocal(vmFrame, j)), 0, 0);
+      prog.Emit(opStoreVar, gi, 0, 0);
+    end;
+    prog.Emit(opJump, chunkStart, 0, 0);
+
+    { --- 5. A VM THAT CANNOT REACH THE PROGRAM -------------------------------- }
+    vm := TPhosphorVM.Create();
+    try
+      vm.Registry := FEng.Registry;   // arr_get and the two string lowerings
+      vm.MaxSteps := DBG_EVAL_MAX_STEPS;
+      vm.TimeoutMs := DBG_EVAL_TIMEOUT_MS;
+      vm.MaxMemoryBytes := DBG_EVAL_MAX_BYTES;
+      { THE ONE THING A FRESH VM DOES NOT ISOLATE. Variables, frames, the stack,
+        the error state and the ceilings all belong to the VM object and are
+        thrown away with it. The HANDLE REGISTRY does not: it is process-wide
+        (PhosphorHandles.pas, its header), so the array a handle names is the
+        program's own array and a call that created or freed one would be a
+        change this design could not undo. Nothing allowed through the gate does
+        -- arr_get is fifteen lines of read (PhosphorArrayLib.pas:245-260) -- and
+        that is the sentence worth checking rather than repeating. }
+      handlesBefore := LiveHandleCount();
+      if not vm.RunFrom(prog, prologue) then
+      begin
+        err := vm.LastError.Message;
+        if err = '' then err := 'the expression could not be evaluated';
+        SendError(ASeq, err);
+        Exit;
+      end;
+      if LiveHandleCount() <> handlesBefore then
+      begin
+        { NO ANSWER IS SENT. An evaluation that moved the handle table changed the
+          program, and the protocol's rule is that a host which cannot guarantee
+          otherwise says so rather than offering the value anyway. }
+        SendError(ASeq, Format('evaluate changed the program (handles went from ' +
+          '%d to %d) and the answer is withheld', [handlesBefore, LiveHandleCount()]));
+        Exit;
+      end;
+      v := vm.DbgGlobal(slot);
+      o := TJSONObject.Create();
+      o.Add('seq', ASeq);
+      o.Add('ok', True);
+      { RENDERED BY THE SAME TWO FUNCTIONS `variables` uses, because a second
+        renderer is a second set of rules to keep in step -- and the protocol
+        says the editor does not format values. }
+      o.Add('result', ValToStr(v));
+      o.Add('kind', DbgKindName(v));
+      SendJSON(o);
+    finally
+      vm.Free;
+    end;
+  finally
+    prog.Free;
+  end;
+end;
+
 { One request. Returns True when the answer resumes the program, so the stop loop
   knows to leave. ALine/ADepth are where the VM is; they are -1/0 while running. }
 function TDebugProto.Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
@@ -1732,11 +2177,27 @@ begin
       caps := TJSONObject.Create();
       caps.Add('stepOut', True);
       caps.Add('pause', True);
-      { FALSE, AND NOT BECAUSE IT WOULD BE UNSAFE: there is no side-effect-free
-        expression entry point in this engine at all. The spec says a host that
-        cannot guarantee an evaluation changes nothing must say false rather than
-        offer a half-safe one. }
-      caps.Add('evaluate', False);
+      { TRUE SINCE 2026-09-17, AND TRUE FOR A REASON THAT CAN BE CHECKED rather
+        than promised. The paragraph that stood here said there is no
+        side-effect-free expression entry point in this engine, and there still
+        is not: `evaluate` does not gain one, it borrows the whole compiler and
+        then REFUSES what it emitted unless the instruction stream is incapable
+        of changing anything. See DoEvaluate for the argument and for what it
+        costs -- notably that `len(x$)` is refused along with every other
+        registered name, because the registry carries no notion of an effect. }
+      caps.Add('evaluate', True);
+      { AND THE SECOND KEY, because `evaluate: true` alone would be a half-truth.
+        What this host evaluates is NAMES, OPERATORS AND INDEXING -- it performs
+        no call the user wrote, so `len(x$)` is refused and always will be until
+        the registry can say whether a function has an effect. An editor building
+        a watch pane wants to know that before it offers a box; finding out one
+        refusal at a time is how a capability flag stops being worth having.
+
+        `a@[i]`, `s$[n]` and `s$[[n]]` still answer. They reach a call, but not
+        one the user wrote: the compiler lowers bracket syntax to arr_get /
+        strline$ / strchar$ (PhosphorCompiler.pas:1035, :1046, :1056). The key is
+        about what a person may TYPE. }
+      caps.Add('evaluateCalls', False);
       caps.Add('setVariable', False);
       caps.Add('conditionalBreakpoints', False);
       res := TJSONObject.Create();
@@ -1885,7 +2346,8 @@ begin
 
     if cmd = 'evaluate' then
     begin
-      SendError(seq, 'evaluate is not offered: capabilities.evaluate is false');
+      if not stopped then SendError(seq, 'evaluate is valid only while stopped')
+      else DoEvaluate(seq, o.Get('frame', 0), ADepth, o.Get('expr', ''));
       Exit(False);
     end;
 
@@ -2087,7 +2549,7 @@ begin
       end;
     end;
 
-    proto := TDebugProto.Create(eng, APath);
+    proto := TDebugProto.Create(eng, APath, source);
     { A PROGRAM LAUNCHED UNDER A DEBUGGER THAT SILENTLY RUNS UNDEBUGGED IS WORSE
       THAN ONE THAT REFUSES, so a connection that cannot be made is exit 2 and the
       program does not run. The spec fixes this message's shape. }

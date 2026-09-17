@@ -186,11 +186,12 @@ editor and drives one:
 python tests/debug_protocol_test.py bin/phosphor.exe
 ```
 
-It asserts 58 things across four sessions — `initialize` and its capabilities,
+It asserts 97 things across seven sessions — `initialize` and its capabilities,
 `setBreakpoints` before `launch`, a command refused in the wrong state, the stop at
 the armed line, `stackTrace` with frame 0 innermost and `(main)` outermost,
-`variables` with name/value/kind/scope, `evaluate` refused to match its own
-capability, `continue` once per loop pass, `exited` with the code, `pause` on a
+`variables` with name/value/kind/scope, `evaluate` over globals, locals, a
+shadowed name, a const and an array element — and twelve strings it must refuse,
+`continue` once per loop pass, `exited` with the code, `pause` on a
 program that never stops on its own, a one-line loop body stopping once per pass,
 **a breakpoint on the first executed statement**, and **a line on every frame of a
 recursion** — and that the program's own stdout is untouched by all of it.
@@ -209,10 +210,81 @@ It is Python rather than Pascal on purpose: the other end of this protocol is a
 separate program in a separate repository, and a test written in the host's own
 language could agree with the host about something the specification does not say.
 
-**`evaluate` reports `false`**, and not because it would be unsafe: there is no
-side-effect-free expression entry point in this engine at all. The specification
-says a host that cannot guarantee an evaluation changes nothing must say so rather
-than offer a half-safe one.
+### `evaluate`, and what it will not do
+
+**`evaluate` reports `true` as of 2026-09-17**, and the paragraph it replaces was
+right about the engine and is still right: there is no side-effect-free expression
+entry point in here, and there is no new one. What changed is that the host stopped
+needing one.
+
+The specification's rule is that a host which cannot guarantee an evaluation
+changes nothing must say `false` rather than offer a half-safe one. This host can
+guarantee it, in five steps, and the guarantee is checkable rather than promised:
+
+1. **The whole source is compiled again with one line appended** — `<hidden> =
+   (<expr>)`. Appending can only ADD names and instructions, so every global index
+   and every instruction of the running program is where it was; that is the
+   property `TPhosphorEngine.ReplRun` has rested on since the REPL existed
+   (`PhosphorEngine.pas:117-131`), and it was checked over 154 real programs rather
+   than assumed. It costs one compile: 0,9 ms on the mean of 7558 `.bas` files in
+   the two repositories, 15,7 ms on the worst.
+2. **The gate reads the EMITTED INSTRUCTIONS, never the text.** `expr` is a string
+   an editor sends verbatim, and `total) : total = 99 : println (1` is a legal line
+   whose middle statement writes a global. The compiler refuses most such smuggles
+   — but by accident, on the trailing fragment failing to be a statement rather
+   than on the payload, so balancing the tail gets them all past it. A comment
+   defeats any scheme that neutralises the tail by appending a terminator. None of
+   that is visible to a text rule and all of it is plain in the instruction
+   stream, which may contain only opcodes that compute, and exactly one store: the
+   last instruction, into the slot this host itself named. 39 hostile strings were
+   measured against it.
+3. **No call the user writes is performed**, which is what `capabilities.
+   evaluateCalls: false` says out loud. `len(x$)` is refused along with all 1145
+   registered names, because `TPhosphorRegistry` carries no notion of an effect —
+   its whole answer is Found/IsHost/Func — so this host cannot tell `len` from
+   `kill` and does not guess. `a@[i]`, `s$[n]` and `s$[[n]]` DO answer: they reach
+   a call, but not one the user wrote, because the compiler lowers bracket syntax
+   to `arr_get` / `strline$` / `strchar$` (`PhosphorCompiler.pas:1035`, `:1046`,
+   `:1056`), and refusing them would mean a debugger that renders an array as `@1`
+   in its variables pane and then declines to look inside it. Each is allowed only
+   when the program defines no function of that name and arity: `opCall` asks
+   `FindUserFunc` first, so a program defining `function arr_get(a@, k)` would turn
+   `a@[1]` in a watch box into arbitrary user code. Removing that one guard was
+   measured turning four protocol assertions red.
+4. **It runs on a VM created for the request and freed with it** — no `OnOutput`,
+   no `OnInput`, no `OnBreakpoint`, no `OnDebug`, its own step, time and memory
+   ceilings — seeded from the stopped VM with every global, and then with the
+   chosen frame's locals over the globals of the same name, which is the
+   language's own shadowing rule rather than a second copy of it. A fresh VM has
+   nothing to save and restore, which is not a smaller version of that problem but
+   the absence of it: the alternative needed fifteen fields put back, a list that
+   is a snapshot of what `ExecFrom` touches and has no test that is not a second
+   copy of itself.
+5. **The handle registry is checked either side**, because it is the one piece of
+   program state a fresh VM does not isolate — it is process-wide. If the count of
+   live handles moved, no answer is sent.
+
+What this bought that a hand-written evaluator would not: the language's own
+precedence, including the two irregularities a re-implementation gets wrong.
+`-2 ^ 2` is `-4` because `^` takes a PRIMARY base (`PhosphorCompiler.pas:1331-
+1346`), `2 ^ 3 ^ 2` is 64 because it is left-associative, and `a < b < c` does not
+chain because `ParseComparison` is an `if` and not a `while` (`:1378-1398`). A
+second expression reader was built and checked against the engine over 77
+expressions before this was chosen; it worked, and it was a second copy of a
+language whose precedence is eleven private procedures with the operator sets
+written inline. The sibling repository has spent three roadmap items on rules that
+existed twice and drifted.
+
+**A defect it found on the way.** `TPhosphorVM.Create` did not initialise
+`FErrHandler`, and 0 is a valid pc, so a freshly created VM carried an `ON ERROR`
+handler installed at instruction 0. `Run` resets it; `RunFrom` deliberately does
+not, because a handler is part of a REPL session — so the hole was exactly a VM
+created and then driven by `RunFrom`, which is what `evaluate` does and nothing
+else did. It was invisible because what happened next depended on the program's
+own text: one containing `end` reached that halt and `RunFrom` returned **True**
+for a run that had faulted, with `LastError` empty. `probe_bytecode` now pins the
+pair, with and without `end`, because a check on the second half alone passes with
+the defect in place.
 
 **The editor attaches.** PhosphorIDE drives this protocol end to end as of
 2026-09-16 — start, breakpoints, step over/into/out, continue, a variables pane

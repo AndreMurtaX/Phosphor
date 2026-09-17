@@ -782,6 +782,39 @@ begin
   ErrorLine := 0;
   // No frames yet, so no local slots held; see MaxFrameDepth.
   FFrameSlots := 0;
+  { NO ON ERROR HANDLER, WRITTEN OUT FOR THE REASON THE NEXT PARAGRAPH GIVES ABOUT
+    THE DEBUG FIELDS -- and it was missing here, which is a defect and not a
+    tidiness.
+
+    -1 IS NOT ZERO, AND ZERO IS A VALID PC. A zeroed instance therefore carries an
+    ON ERROR handler installed at instruction 0. `Run` resets these (see its own
+    block) so nothing that starts there can see it; `RunFrom` DELIBERATELY does
+    not, because an installed handler is part of the session a REPL line runs
+    over. So the hole is exactly: a VM that is created and then driven with
+    RunFrom, having never been through Run.
+
+    Measured on 2026-09-17, by roadmap item 25's `evaluate`, which is the first
+    caller of that shape: a chunk computing `total / 0` over a program whose
+    source contains `end` answered 0 and RunFrom returned TRUE. The fault had
+    happened -- ErrCode was 2 -- and Fault had dispatched it to the phantom
+    handler at pc 0, which ran the whole program from the top and stopped at its
+    `end`, so the run ended in an orderly halt and the caller was told it
+    succeeded. The same chunk over the same program WITHOUT `end` answered
+    "division by zero" correctly, because there the second fault arrived with
+    FInHandler already True and so was reported. A defect that depends on whether
+    the program being debugged happens to contain `end` is not one anybody finds
+    by reading.
+
+    The REPL, which is RunFrom's other caller, is one guard away from it and does
+    not trip: at the top level FErrHandlerFrameSP and the fault's own frame floor
+    are both 0, and the dispatch test is `>`, not `>=`. That is luck, not design,
+    and it is now not load-bearing. }
+  FErrHandler := -1;
+  FErrHandlerMode := 0;
+  FErrHandlerFuncIdx := 0;
+  FErrHandlerLine := 0;
+  FInHandler := False;
+  FErrSaveValid := False;
   // Detached. Written out rather than left to the zeroed instance, because -1 is
   // not zero and FDbgLine's "nowhere" is what makes the first boundary of a
   // stop-at-entry run differ from the line the step was never asked on.

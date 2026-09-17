@@ -131,8 +131,13 @@ r = [f for f in frames(until_seq=s1) if f.get('seq') == s1][0]
 check('initialize answers ok', r.get('ok') is True, str(r))
 check('protocol is 1', r.get('protocol') == 1, str(r.get('protocol')))
 caps = r.get('capabilities', {})
-check('capabilities present', isinstance(caps, dict) and len(caps) == 5, str(caps))
-check('evaluate is false in v1', caps.get('evaluate') is False, str(caps))
+check('capabilities present', isinstance(caps, dict) and len(caps) == 6, str(caps))
+check('evaluate is offered', caps.get('evaluate') is True, str(caps))
+check('and evaluateCalls says what it will not do',
+      caps.get('evaluateCalls') is False, str(caps))
+check('setVariable and conditional breakpoints are not',
+      caps.get('setVariable') is False and caps.get('conditionalBreakpoints') is False,
+      str(caps))
 check('stepOut and pause offered', caps.get('stepOut') and caps.get('pause'), str(caps))
 
 # 2. setBreakpoints before launch
@@ -230,10 +235,76 @@ s6c = send(cmd='setBreakpoints', path=BAS, lines=[11])
 r = [f for f in frames(until_seq=s6c) if f.get('seq') == s6c][0]
 check('the set can be replaced while stopped', r.get('lines') == [11], str(r))
 
-# 7. evaluate is refused because the capability says false
-s7 = send(cmd='evaluate', frame=0, expr='1+1')
+# 7. EVALUATE, at a TOP-LEVEL stop. The frame case needs an activation and gets
+#    its own session at the end of this file; what belongs here is the half that
+#    is about the globals of a program standing still, and the half that is about
+#    what an `expr` string may not be allowed to do.
+#
+#    THE REFUSALS ARE THE POINT OF THIS BLOCK. `expr` is a string an editor sends
+#    verbatim, so it is the one field of this protocol an attacker-shaped input
+#    reaches directly, and the host's answer must come from the INSTRUCTIONS the
+#    expression compiled to rather than from any rule about its text. Each line
+#    below was a string that compiled cleanly.
+
+
+def ev(expr, frame=0):
+    sN = send(cmd='evaluate', frame=frame, expr=expr)
+    a = [f for f in frames(until_seq=sN) if f.get('seq') == sN][0]
+    if a.get('ok'):
+        return '%s:%s' % (a.get('kind'), a.get('result'))
+    return 'error:%s' % a.get('error')
+
+
+# The program is stopped inside the loop at line 11, so `i` has a value and
+# `total` has the sum so far. Derived from the source, not from a run: the first
+# pass reaches line 11 with i=1 and parcela=dobro(1)=2, and total is still 0
+# because line 11 is the statement that adds it.
+check('a global', ev('parcela') == 'int:2', ev('parcela'))
+check('arithmetic over two globals', ev('total + parcela') == 'int:2',
+      ev('total + parcela'))
+check('a comparison is a bool', ev('i = 1') == 'bool:true', ev('i = 1'))
+# THE LANGUAGE'S OWN IRREGULARITIES, which is what reusing the compiler buys and
+# what any second parser would get wrong: `^` is left-associative over a PRIMARY
+# base, so unary minus binds looser than it does.
+check('-2 ^ 2 is -4, not 4', ev('-2 ^ 2') == 'number:-4', ev('-2 ^ 2'))
+check('2 ^ 3 ^ 2 is 64, not 512', ev('2 ^ 3 ^ 2') == 'number:64', ev('2 ^ 3 ^ 2'))
+check('an expression that faults says why',
+      ev('total / 0') == 'error:division by zero', ev('total / 0'))
+check('a name the program has not got is refused, not answered as 0',
+      ev('naosei') == 'error:no variable "naosei" here', ev('naosei'))
+
+# EVERY ONE OF THESE COMPILES. The compiler's own refusals are incidental -- they
+# land on a trailing fragment failing to be a statement, not on the payload -- so
+# balancing the tail gets all of them past it, and only the instruction walk is
+# left standing. A comment defeats any scheme that neutralises the tail by
+# appending a terminator, because a comment eats the terminator.
+for bad_expr, why in [
+        ('total) : total = 99 : println (1', 'a second statement'),
+        ('total)\ntotal = 99\n__x = (1', 'a newline'),
+        ('total) : total = 99 rem ', 'a comment after the payload'),
+        ("total) : total = 99 'x", 'the apostrophe comment form'),
+        ('total) : println "pwned" : println (1', 'output'),
+        ('total) : open "x" for output as #1 : println (1', 'a file'),
+        ('total) : end : println (1', 'halting the debuggee'),
+        ('total) : input a$ : println (1', 'blocking on stdin'),
+        ('total) : total += 1 : println (1', 'a compound assignment'),
+        ('total) : swap total, i : println (1', 'a swap'),
+        ('dobro(1)', 'a user function'),
+        ('len("ab")', 'a library call'),
+]:
+    check('refused: ' + why, ev(bad_expr).startswith('error:'), ev(bad_expr))
+
+# AND THE PROGRAM DID NOT MOVE. Every global, after all of that.
+sV = send(cmd='variables', frame=0)
+rV = [f for f in frames(until_seq=sV) if f.get('seq') == sV][0]
+gs = {v['name']: v['value'] for v in rV.get('variables', [])}
+check('the globals are exactly where they were',
+      gs.get('total') == '0' and gs.get('i') == '1' and gs.get('parcela') == '2',
+      str(gs))
+
+s7 = send(cmd='evaluate', frame=9)
 r = [f for f in frames(until_seq=s7) if f.get('seq') == s7][0]
-check('evaluate refused, matching its capability', r.get('ok') is False, str(r))
+check('a missing expr is refused, not treated as empty', r.get('ok') is False, str(r))
 
 # 8. continue to the end
 s8 = send(cmd='continue')
@@ -693,6 +764,189 @@ check('the recursion produced its own answer',
       b'total=6' in out6.replace(b'\r\n', b'\n'), repr(out6[:60]))
 conn6.close()
 srv6.close()
+
+# ---------------------------------------------------------------------------
+# SEVENTH SESSION: EVALUATE IN A NAMED FRAME, AND THE ONE CALL THAT IS NOT A CALL.
+#
+# Roadmap item 25's done-when names three cases, and only one of them needs an
+# activation: a LOCAL in a named frame. It needs its own session because every
+# other fixture in this file stops at the top level.
+#
+# Three rules are pinned here that nothing else can witness:
+#
+#  * A LOCAL SHADOWS A GLOBAL OF THE SAME NAME, and the answer depends on which
+#    frame was asked. The expected values are derived from the source -- passo(21)
+#    sets its own `soma` to 42 while the global stays 1000 -- and never from a run.
+#
+#  * `a@[i]` REACHES A CALL, because the compiler lowers bracket sugar to
+#    `arr_get` (PhosphorCompiler.pas:1035). Every other registered name is
+#    refused, so this is the one place a call is allowed and it has to be shown
+#    working, or the allowance is untested code.
+#
+#  * AND THE ALLOWANCE IS SHADOWABLE. opCall asks the program's own functions
+#    before the registry, so a program defining `function arr_get(...)` would turn
+#    `a@[1]` in a watch box into arbitrary user code. Removing that one guard was
+#    measured turning four of these assertions red, which is the only evidence
+#    that they can fail at all.
+# ---------------------------------------------------------------------------
+BAS7 = os.path.join(WORK, 'eval.bas')
+with open(BAS7, 'w', newline='\n') as f:
+    f.write('rem evaluate, in a frame\n'          # 1
+            'const lim = 10\n'                    # 2
+            'soma = 1000\n'                       # 3
+            'fora$ = "outside"\n'                 # 4
+            'lista@ = dim@(3)\n'                  # 5
+            'lista@[1] = 10\n'                    # 6
+            'lista@[2] = 20\n'                    # 7
+            'lista@[3] = 30\n'                    # 8
+            'marca = 0\n'                         # 9
+            'function arr_get(a@, k)\n'           # 10  shadows the lowering
+            '  marca = 999\n'                     # 11
+            '  arr_get = -1\n'                    # 12
+            'endfunction\n'                       # 13
+            'function passo(n) local soma, etapa$\n'   # 14
+            '  soma = n * 2\n'                    # 15
+            '  etapa$ = "step"\n'                 # 16
+            '  parada = 1\n'                      # 17  <- the stop
+            '  return soma\n'                     # 18
+            'endfunction\n'                       # 19
+            'on error goto aqui\n'                # 20
+            'resultado = passo(21)\n'             # 21
+            'println "resultado="; resultado\n'   # 22
+            'println "err="; err(); "/"; errmsg$()\n'   # 23
+            'end\n'                               # 24
+            'aqui:\n'                             # 25
+            'println "THE HANDLER RAN"\n'         # 26
+            'resume next\n')                      # 27
+
+srv7 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv7.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv7.bind(('127.0.0.1', 0))
+srv7.listen(1)
+port7 = srv7.getsockname()[1]
+proc7 = subprocess.Popen([EXE, 'debug', '--port', str(port7), BAS7],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv7.settimeout(10)
+conn7, _ = srv7.accept()
+conn7.settimeout(30)
+seq7 = [0]
+buf7 = [b'']
+
+
+def send7(**kw):
+    seq7[0] += 1
+    kw['seq'] = seq7[0]
+    try:
+        conn7.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+    except OSError:
+        pass
+    return seq7[0]
+
+
+def until7(pred, timeout=30, tries=60):
+    conn7.settimeout(timeout)
+    for _ in range(tries):
+        while b'\n' not in buf7[0]:
+            try:
+                chunk = conn7.recv(65536)
+            except (socket.timeout, OSError):
+                return None
+            if not chunk:
+                return None
+            buf7[0] += chunk
+        line, buf7[0] = buf7[0].split(b'\n', 1)
+        if not line.strip():
+            continue
+        m = json.loads(line.decode('utf-8'))
+        if pred(m):
+            return m
+    return None
+
+
+def ev7(expr, frame=0):
+    sN = send7(cmd='evaluate', frame=frame, expr=expr)
+    a = until7(lambda m: m.get('seq') == sN)
+    if a is None:
+        return 'error:no answer'
+    if a.get('ok'):
+        return '%s:%s' % (a.get('kind'), a.get('result'))
+    return 'error:%s' % a.get('error')
+
+
+s = send7(cmd='initialize')
+until7(lambda m: m.get('seq') == s)
+s = send7(cmd='setBreakpoints', path=BAS7, lines=[17])   # inside passo
+until7(lambda m: m.get('seq') == s)
+send7(cmd='launch')
+st = until7(lambda m: m.get('event') == 'stopped')
+check('stopped inside the function', (st or {}).get('line') == 17, str(st))
+
+check('a LOCAL in a named frame', ev7('etapa$') == 'string:step', ev7('etapa$'))
+check('a local shadows a global of the same name',
+      ev7('soma') == 'int:42', ev7('soma'))
+check('and the same name at (main) is the global',
+      ev7('soma', frame=1) == 'int:1000', ev7('soma', frame=1))
+check('the parameter', ev7('n') == 'int:21', ev7('n'))
+check('a GLOBAL from inside the frame',
+      ev7('fora$ + etapa$') == 'string:outsidestep', ev7('fora$ + etapa$'))
+# A const reaches NO table at runtime -- the compiler folds it at the use site --
+# so an evaluator resolving names against the program's tables would have to
+# answer "no such variable". Compiling the whole source gets it right for free.
+check('a const, which reaches no table at runtime',
+      ev7('lim * 2') == 'int:20', ev7('lim * 2'))
+check('a local named from (main) is not there',
+      ev7('etapa$', frame=1) == 'error:no variable "etapa$" here',
+      ev7('etapa$', frame=1))
+check('a frame that is not there is refused',
+      ev7('soma', frame=99).startswith('error:'), ev7('soma', frame=99))
+
+# THE SHADOW. This program defines arr_get, so the lowering is refused here.
+check('a@[i] is refused where a user function shadows arr_get',
+      ev7('lista@[2]', frame=1).startswith('error:'), ev7('lista@[2]', frame=1))
+check('  and the refusal names it',
+      'arr_get' in ev7('lista@[2]', frame=1), ev7('lista@[2]', frame=1))
+check('s$[[n]] still works -- strchar$ is not shadowed here',
+      ev7('fora$[[1]]') == 'string:o', ev7('fora$[[1]]'))
+
+s = send7(cmd='variables', frame=0)
+r = until7(lambda m: m.get('seq') == s)
+vs = {(v['name'], v['scope']): v['value'] for v in (r or {}).get('variables', [])}
+check('the frame and the globals are untouched by all of that',
+      vs.get(('soma', 'local')) == '42' and vs.get(('soma', 'global')) == '1000'
+      and vs.get(('marca', 'global')) == '0', str(vs))
+
+# AN `ON ERROR` HANDLER IS INSTALLED AND IT MUST NOT HAVE FIRED. This is the
+# shape the whole thing turns on. Evaluating `soma / 0` above raised a real
+# division-by-zero, and a design that ran it in the debuggee's own VM would have
+# dispatched it to the program's handler -- running the program's own code from
+# inside a watch box, and leaving err()/errmsg$() answering the DEBUGGER's fault
+# to the resumed script. A fault in a VM the host created and freed reaches
+# neither: the handler pc, the handler flag and the three error fields all belong
+# to the VM object that was thrown away.
+#
+# It is also the exact shape that hid a defect. TPhosphorVM.Create left
+# FErrHandler at 0 -- a valid pc -- so a fresh VM carried a phantom handler, and a
+# fault in an evaluation jumped to instruction 0 and re-ran the program from the
+# top. See probe_bytecode's CheckFreshVMHasNoHandler.
+sX = send7(cmd='evaluate', frame=0, expr='soma / 0')
+rX = until7(lambda m: m.get('seq') == sX)
+check('a faulting evaluation is reported, not handled',
+      (rX or {}).get('ok') is False
+      and 'division by zero' in ((rX or {}).get('error') or ''), str(rX))
+
+s = send7(cmd='continue')
+until7(lambda m: m.get('seq') == s)
+until7(lambda m: m.get('event') == 'exited', timeout=15)
+out7, _ = proc7.communicate(timeout=60)
+clean7 = out7.replace(b'\r\n', b'\n')
+check('the program ran on to its own answer',
+      b'resultado=42' in clean7, repr(clean7[:80]))
+check("the program's own ON ERROR handler never ran",
+      b'THE HANDLER RAN' not in clean7, repr(clean7[:120]))
+check('and err()/errmsg$() answer nothing at all afterwards',
+      b'err=0/\n' in clean7 or b'err=0/' in clean7, repr(clean7[:120]))
+conn7.close()
+srv7.close()
 
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))

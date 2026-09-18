@@ -835,6 +835,84 @@ end;
   the VM a one-shot Run makes is a local of that call. That is the engine's
   documented shape, not an accident of this test: PreparedVM is the handle a host
   with another thread has. }
+{ AN INTERRUPT AND A MORE SPECIFIC FACT ON THE SAME BOUNDARY.
+
+  CheckPause above cannot reach either of these and never could: it arms with
+  `eng.ArmDebug([], True)` -- an EMPTY line set, so `Length(FDbgLines) > 0` is
+  false -- and drives with daRun, so FDbgMode is dmRun. Both of the tests that
+  DebugPoll guards behind the interrupt are unreachable by construction, which is
+  why a defect measured at roughly a quarter of all breakpoint hits under editor
+  traffic sat under a green probe. A case that cannot fail is not a case.
+
+  WHAT DEBUGPOLL DECIDES, and the shape of the defect. Its four tests -- entry,
+  interrupt, armed line, pending step -- each carry `if (not stop)`, so the
+  winner is not the most specific fact about the boundary, it is the first one in
+  source order. The interrupt is a fact about the HOST'S QUEUE. The armed line and
+  the pending step are facts about WHERE THE PROGRAM IS. Ordering the queue first
+  lets any frame arriving on the socket erase a position fact -- and because the
+  flag is consumed in the same operation, nothing is left for the next boundary to
+  re-derive it from. The stop is not deferred; it is gone.
+
+  Both cases below are written against the build that has the defect and were
+  watched failing there first. }
+procedure CheckInterruptSharesBoundary;
+var
+  eng: TPhosphorEngine;
+  d: TDrive;
+  rc: Integer;
+begin
+  { ONE: the interrupt lands on an ARMED line.
+
+    Line 2 is armed and the entry stop is line 1, so the interrupt asked for at
+    the entry stop fires at exactly the boundary the editor marked. The whole
+    trace is asserted, not just its first half, because the second half is what
+    refutes the wrong fix: hoisting the armed-line test above the interrupt while
+    leaving `if (not stop)` on the interrupt reads B2 here and never CONSUMES the
+    flag, so a pause nobody asked for fires at line 3 and the trace grows a P3.
+    That is the direction the comment at PhosphorVM.pas:4196-4200 was written to
+    protect, and nothing else in this file covers it. }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daRun]);
+  try
+    d.PauseAtStop := 1;
+    eng.ArmDebug([2], True);
+    rc := eng.Prepare(FixStep);
+    CheckInt(rc, 0, 'shared boundary: the fixture prepares');
+    CheckStr(d.Trace, Want('E1@0 B2@0'),
+             'an interrupt on an armed line is a BREAKPOINT, and is consumed once');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  { TWO: the interrupt lands with a STEP pending.
+
+    The seam answers the entry stop with daStepOver and asks for an interrupt in
+    the same breath, so the next boundary carries both. A step-over from line 1
+    stops at line 2 whatever the queue says; what the defect changes is the REASON
+    the host is handed, and a host that reads `pause` where `step` belongs has
+    been told its step did not happen.
+
+    THIS HALF CANNOT BE REPAIRED FROM A HOST, which is why the fix belongs in the
+    engine and not beside the sibling check in phosphor.lpr. FDbgMode is private
+    to TPhosphorVM with no accessor and no seam; a host that tried to compensate
+    by re-issuing the step from its drain would call DebugCapture again and
+    re-anchor the step to whatever boundary the drain happened to be standing on. }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepOver, daRun]);
+  try
+    d.PauseAtStop := 1;
+    eng.ArmDebug([], True);
+    rc := eng.Prepare(FixStep);
+    CheckInt(rc, 0, 'shared boundary: the fixture prepares again');
+    CheckStr(d.Trace, Want('E1@0 S2@0'),
+             'an interrupt with a step pending is a STEP, and is consumed once');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+end;
+
 procedure CheckPause;
 var
   eng: TPhosphorEngine;
@@ -3077,6 +3155,7 @@ begin
   CheckFaultRebase();
   CheckArmedLines();
   CheckPause();
+  CheckInterruptSharesBoundary();
   CheckStop();
   CheckSeamRaises();
   CheckSeamReentry();

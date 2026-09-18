@@ -4173,7 +4173,7 @@ function TPhosphorVM.DebugPoll(ALine, APC, AStopFrameSP: Integer): Boolean;
 var
   reason: TPhosphorStopReason;
   act: TPhosphorDebugAction;
-  stop: Boolean;
+  stop, interrupted: Boolean;
   rel: Integer;
   entriesFrom: QWord;
   heapFrom, heapTo: PtrUInt;
@@ -4214,11 +4214,34 @@ begin
     second, plain read of it makes every future reader re-derive why that is still
     safe. A gain nobody can resolve does not buy that. The measurement is written
     here so the next person does not have to take it again. }
-  if InterlockedExchange(FDbgInterrupt, 0) <> 0 then
-  begin
-    if not stop then reason := srPause;
-    stop := True;
-  end;
+  { CONSUMED HERE, ANSWERED FOR AT THE BOTTOM, and the split is the whole point.
+
+    The consume stays exactly where it was and stays unconditional, for the reason
+    written above. What moved is WHICH REASON THE BOUNDARY IS REPORTED UNDER.
+
+    Each of these tests used to carry `if (not stop)`, so the winner was not the
+    most specific fact about the boundary -- it was the first one in source order,
+    and the interrupt was second. But an interrupt is a fact about the HOST'S
+    QUEUE, while an armed line and a pending step are facts about WHERE THE
+    PROGRAM IS. Ordering the queue first let any frame arriving on the socket
+    erase a position fact, and because the flag is consumed in the same operation
+    there was nothing left for the next boundary to re-derive it from: the stop
+    was not deferred, it was gone.
+
+    MEASURED, on the shipped build, before this was touched: a 1000-iteration loop
+    with one breakpoint, every stop answered `continue`, and a second thread
+    sending one unrelated frame every half millisecond -- the traffic an editor
+    generates by existing. 762, 751 and 753 stops out of 1000 across three runs.
+    The program completed all 1000 iterations every time; only the stops vanished,
+    and a user watching a breakpoint saw the debugger skip iterations at random.
+    The step half is worse and not a race at all: a step pending when a frame
+    arrives is skipped every single time, and the host is handed `pause` where
+    `step` belongs.
+
+    The host cannot repair the step half from outside -- FDbgMode is private here
+    with no accessor and no seam -- which is why this is a precedence change in
+    the engine rather than the branch its sibling has in the console host. }
+  interrupted := InterlockedExchange(FDbgInterrupt, 0) <> 0;
   if (not stop) and (Length(FDbgLines) > 0) and DebugLineArmed(ALine) then
   begin
     reason := srBreakpoint;
@@ -4254,6 +4277,16 @@ begin
       dmStepOut:
         stop := rel < 0;
     end;
+  end;
+  { THE QUEUE, LAST. srPause is the reason only when nothing more specific won --
+    which is what makes it mean "the host asked us to stop and there was no other
+    reason to", rather than "a frame happened to arrive here". A pause that shares
+    its boundary with a breakpoint or a completed step is still a stop; it is just
+    not a pause, and the host is told the truer of the two. }
+  if interrupted then
+  begin
+    if not stop then reason := srPause;
+    stop := True;
   end;
   if not stop then Exit;
 

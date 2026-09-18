@@ -15,6 +15,8 @@ Usage: debug_protocol_test.py <phosphor.exe> <file.bas>
 """
 import json
 import socket
+import threading
+import time
 import subprocess
 import io
 import os
@@ -1104,6 +1106,232 @@ r8, st8, o8 = cond_session('i + 1', 'not a boolean')
 check('a condition that is not a boolean stops', len(st8) == 20, str(len(st8)))
 check('  and says that is what it is',
       st8 and 'not a true or false' in (st8[0].get('text') or ''), str(st8[:1]))
+
+# ---------------------------------------------------------------------------
+# A FRAME ARRIVING MID-RUN, WITH A BREAKPOINT ACTUALLY ARMED.
+#
+# The second session above sends `setBreakpoints ... lines=[]` at the only moment
+# a frame reaches a RUNNING program, and the third arms a line but sends nothing
+# while it runs. So the one construction that matters -- a frame landing on a
+# boundary the editor had marked -- was covered by neither, and a defect that
+# lost roughly a quarter of all breakpoint hits under ordinary editor traffic sat
+# under a green suite.
+#
+# DebugPoll decided the reason by source order rather than by specificity: the
+# interrupt a frame sets was tested before the armed line and before a pending
+# step, and each later test carried `if (not stop)`. So a frame arriving on an
+# armed boundary reported `pause`, the host's drain saw nothing that asked to
+# stop, and resumed -- and because the flag is consumed in the same operation,
+# the hit was gone rather than deferred.
+#
+# Measured on the build before the repair: 762, 751 and 753 stops out of 1000
+# with one unrelated frame every half millisecond. The program finished all 1000
+# iterations every time; only the stops vanished.
+# ---------------------------------------------------------------------------
+BAS4 = os.path.join(WORK, 'traffic.bas')
+with open(BAS4, 'w', newline='\n') as f:
+    f.write('t = 0\nfor i = 1 to 40\n  t = t + i\n  u = t\nnext\nprintln "t="; t\nend\n')
+
+srv4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv4.bind(('127.0.0.1', 0))
+srv4.listen(1)
+port4 = srv4.getsockname()[1]
+proc4 = subprocess.Popen([EXE, 'debug', '--port', str(port4), BAS4],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv4.settimeout(10)
+conn4, _ = srv4.accept()
+conn4.settimeout(30)
+
+seq4 = [0]
+buf4 = [b'']
+
+
+def send4(**kw):
+    seq4[0] += 1
+    kw['seq'] = seq4[0]
+    conn4.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+    return seq4[0]
+
+
+def recv4(timeout=30):
+    conn4.settimeout(timeout)
+    while b'\n' not in buf4[0]:
+        try:
+            chunk = conn4.recv(65536)
+        except socket.timeout:
+            return None
+        if not chunk:
+            return None
+        buf4[0] += chunk
+    line, buf4[0] = buf4[0].split(b'\n', 1)
+    return json.loads(line.decode('utf-8'))
+
+
+def until4(pred, timeout=30, tries=200):
+    for _ in range(tries):
+        m = recv4(timeout)
+        if m is None:
+            return None
+        if pred(m):
+            return m
+    return None
+
+
+s = send4(cmd='initialize')
+until4(lambda m: m.get('seq') == s)
+# Line 3 is armed and the loop runs 40 passes, so 40 stops are owed.
+s = send4(cmd='setBreakpoints', path=BAS4, lines=[3])
+r = until4(lambda m: m.get('seq') == s)
+check('the traffic fixture arms its line', r is not None and r.get('lines') == [3], str(r))
+s = send4(cmd='launch', stopAtEntry=False)
+until4(lambda m: m.get('seq') == s)
+
+# THE TRAFFIC HAS TO ARRIVE WHILE THE PROGRAM RUNS, and answering a stop is not
+# that. The reader deliberately does not nudge a VM that is parked in the seam
+# (host/console/phosphor.lpr:1388, the 2026-09-15 repair), so every `continue`
+# lands on a stopped program and sets no interrupt at all. Written that way first,
+# this case PASSED against the binary that loses a quarter of its hits -- a test
+# that cannot fail, which is the class this suite exists to refuse.
+#
+# So a second thread sends an unrelated frame every half millisecond while the
+# program is running. `ping` is not a command this host knows; it is answered with
+# a refusal, changes no state, and its only effect is the one that matters -- the
+# reader parses a line and nudges the VM. That nudge is what used to land on the
+# armed boundary and erase the hit.
+#
+# Its seq numbers start at 900000 so they cannot collide with the session's, and
+# it writes straight to the socket rather than through send4, which would race on
+# the shared counter.
+noise_stop = threading.Event()
+
+
+def noise4():
+    n = 900000
+    while not noise_stop.is_set():
+        n += 1
+        try:
+            conn4.sendall((json.dumps({'seq': n, 'cmd': 'ping'}) + chr(10)).encode('utf-8'))
+        except Exception:
+            return
+        time.sleep(0.0005)
+
+
+hits = 0
+gone4 = False
+noise_thread = threading.Thread(target=noise4, daemon=True)
+noise_thread.start()
+for _ in range(120):
+    ev = until4(lambda m: m.get('event') in ('stopped', 'exited'), timeout=20)
+    if ev is None:
+        break
+    if ev.get('event') == 'exited':
+        gone4 = True
+        break
+    if ev.get('reason') == 'breakpoint' and ev.get('line') == 3:
+        hits += 1
+    s = send4(cmd='continue')
+    until4(lambda m: m.get('seq') == s, timeout=20)
+
+noise_stop.set()
+noise_thread.join(timeout=2)
+check('a hot breakpoint keeps every hit while frames arrive mid-run', hits == 40,
+      '%d of 40' % hits)
+check('and the program then exits', gone4)
+out4, _ = proc4.communicate(timeout=60)
+check('having done all forty passes of its own work',
+      b't=820' in out4.replace(b'\r\n', b'\n'), repr(out4[:40]))
+conn4.close()
+srv4.close()
+
+# ---------------------------------------------------------------------------
+# A STEP ASKED FOR AFTER A PAUSE.
+#
+# The file sends no step command at all today -- `stepOver`, `stepInto` and
+# `stepOut` appear once between them, in the capabilities check. The pending step
+# was guarded out by the same `if (not stop)` as the armed line, and a host cannot
+# repair that half from outside: FDbgMode is private to the VM with no accessor.
+# ---------------------------------------------------------------------------
+srv5 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv5.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv5.bind(('127.0.0.1', 0))
+srv5.listen(1)
+port5 = srv5.getsockname()[1]
+proc5 = subprocess.Popen([EXE, 'debug', '--port', str(port5), BAS2],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv5.settimeout(10)
+conn5, _ = srv5.accept()
+conn5.settimeout(30)
+
+seq5 = [0]
+buf5 = [b'']
+
+
+def send5(**kw):
+    seq5[0] += 1
+    kw['seq'] = seq5[0]
+    conn5.sendall((json.dumps(kw) + '\n').encode('utf-8'))
+    return seq5[0]
+
+
+def recv5(timeout=30):
+    conn5.settimeout(timeout)
+    while b'\n' not in buf5[0]:
+        try:
+            chunk = conn5.recv(65536)
+        except socket.timeout:
+            return None
+        if not chunk:
+            return None
+        buf5[0] += chunk
+    line, buf5[0] = buf5[0].split(b'\n', 1)
+    return json.loads(line.decode('utf-8'))
+
+
+def until5(pred, timeout=30, tries=200):
+    for _ in range(tries):
+        m = recv5(timeout)
+        if m is None:
+            return None
+        if pred(m):
+            return m
+    return None
+
+
+s = send5(cmd='initialize')
+until5(lambda m: m.get('seq') == s)
+s = send5(cmd='setBreakpoints', path=BAS2, lines=[])
+until5(lambda m: m.get('seq') == s)
+s = send5(cmd='launch', stopAtEntry=False)
+until5(lambda m: m.get('seq') == s)
+
+s = send5(cmd='pause')
+until5(lambda m: m.get('seq') == s, timeout=15)
+paused = until5(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+check('the loop fixture pauses', paused is not None and paused.get('event') == 'stopped',
+      str(paused))
+
+if paused and paused.get('event') == 'stopped':
+    s = send5(cmd='stepOver')
+    r = until5(lambda m: m.get('seq') == s, timeout=15)
+    check('stepOver is accepted after a pause', r is not None and r.get('ok') is True, str(r))
+    ev = until5(lambda m: m.get('event') in ('stopped', 'exited'), timeout=15)
+    # The step must land, and land as a STEP. Before the precedence repair the
+    # host was handed `pause` here -- the step had been skipped and the editor was
+    # told its Step Over did not happen.
+    check('a step after a pause stops, and says it was a step',
+          ev is not None and ev.get('event') == 'stopped' and ev.get('reason') == 'step',
+          str(ev))
+    if ev and ev.get('event') == 'stopped':
+        s = send5(cmd='disconnect', terminate=True)
+        until5(lambda m: m.get('seq') == s, timeout=10)
+
+try:
+    proc5.wait(timeout=30)
+except Exception:
+    proc5.kill()
+conn5.close()
+srv5.close()
 
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))

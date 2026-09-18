@@ -232,3 +232,167 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 
 - **r2 — "the two guards inside `StoppableLines` that no compiled fixture can reach" — CLOSED.** `tests/probe_debug.lpr:480` `CheckStoppableGuards` exists for exactly this, headed at `:453` with those words; its fixture hand-builds the adversarial shape at `:506-507` (an `opNop` where the jump would be) and asserts line 40 is kept (`:490`), which is the `opJump` conjunct doing work; it is invoked at `:756`, corruptible at `:517` (`--fail` appends `,99`), and registered in **both** runners (`test-suite.ps1:283`, `test-suite.sh:208`). It landed in `2ee6b70`; `tests/probe_step.lpr:2089-2090` names it done in prose. **Residual filed as n11** (the `hdr >= 0` bound is reachable via a legal `.pbc` with `Entry = 0` and is untested — two `Emit` lines in the existing fixture). Separately: the `FInstrs[hdr].Op = opStmt` conjunct is **untestable by observation** — `PhosphorOpcodes.pas:506` already short-circuits on `opStmt` before `skip[]` is consulted, so deleting it is behaviour-preserving and a guaranteed mutation-test survivor **by construction, not by missing coverage**. Record that in a comment at `:498` so the next reviewer does not report it.
 - **d52 — duplicate of d44.** Its own text says so (*"anchor is `coverage.py:141`, not `tests/gui/manifest.txt:1`"*), and its filed anchor is innocent: `tests/gui/manifest.txt` lists 22 basenames plus 3 comment lines and `tests/gui/*.bas` is exactly 22 — **confirmed today, both directions clean**. Fold it into d44 with a dated pointer in the append-only style the ledger already uses. **Carry its number forward: 79** (GUI names with an actual call, comments and string literals stripped; 80 excluding the `compile`-only `examples/gui_demo.bas`), not d44's looser 76 — the three-name gap (`inputbox$`, `msgbox`, `openfile$`) is precisely the difference between a gate that requires a call and one a `rem` can satisfy. The fold edit rides in d44's Wave 3 commit.
+
+---
+
+## Open after the 2026-09-18 close review
+
+Five critics and a judge attacked the day's five changes and one deferral before
+they were committed. Two blockers and nine should-fixes were ruled real; all of
+them are closed in the tree. These are what was ruled real and **not** taken, each
+with why, plus what the review itself did not reach.
+
+**The two blockers, for the record, because both are closed but neither should be
+forgotten.** The first was a regression in a commit that had already been pushed:
+reporting a boundary under its most specific fact made an interrupt landing on an
+armed line arrive as `breakpoint`, while the host's only queue drain was still
+keyed on `pause`. A frame arriving while the program stood on a conditional mark
+was consumed, never read and never re-nudged — the editor's Pause button did
+nothing and every frame behind it died too. The second was **not** today's, and
+the judge struck the critic's attribution: `daRun` has always meant both "the user
+pressed Continue" and "resume", so any host resume cancelled a step in flight.
+Both are closed by one repair — one drain at every boundary, and `daKeep` for a
+resume that decides nothing — and both are pinned by tests watched failing first.
+
+### Filed, not fixed
+
+- **`setBreakpoints` never reads its `path`.** The handler reads `lines` and
+  `conditions` only, so a frame naming another file replaces *this* file's whole
+  set — measured: a stop on a line the editor never marked in this file, and none
+  on the line it did. The comment that promised otherwise has been withdrawn. Not
+  repaired blind, because a strict comparison against `FPath` fails **worse** than
+  the bug: an editor spelling the same file differently — forward slashes, a
+  relative path, a different case, a symlink — would have every breakpoint
+  silently ignored, which is a dead debugger rather than a confused one. Wants a
+  measurement of what real editors actually send, then a comparison built for it.
+- **`--no-console` rewires `ErrOutput`, and every diagnostic writes to `StdErr`.**
+  On win64 those are separate records (`FPC_STDOUT_TRUE_ALIAS` is defined only for
+  atari and embedded), so a packed `--no-console` application whose program faults
+  raises instead of printing and exits 3 — the code reserved for an interpreter
+  bug — where the honest answer is 1. Pre-existing. The fix is the same one that
+  would close it properly: route the ~108 `Writeln(StdErr, ...)` sites through
+  `TConsoleHost.WriteStdErr`, which already branches on whether the handle is a
+  console and gets both cases right. That is a large mechanical edit and wants its
+  own change, not a rider on a review.
+- **The standard text files are `threadvar`s.** Every thread FPC starts re-opens
+  and re-stamps them, so the codepage pinned at the door is pinned for the main
+  thread's copies. Latent today — no thread in this host writes a diagnostic —
+  and it disappears entirely under the `WriteStdErr` route above.
+- **A citation's line number rots invisibly.** `check-crossrefs.py` validates the
+  path and never the line, and three citations about this very mechanism were
+  wrong, one of them written the same day. All three are now written by NAME
+  instead, which is the cheap fix and the one that scales; a gate that checked
+  line numbers would be noisy enough to be turned off. Worth revisiting only if
+  named citations start rotting too.
+
+### What nobody checked
+
+Named on purpose. A review's silence is not coverage, and this project's own rule
+is that a stage which never rejects is measuring nothing — so it follows that a
+stone never turned over is not a stone known to be clean.
+
+- **`stepInto` and `stepOut` colliding with a frame.** Every step measurement in
+  the review, and every new test, is `stepOver`. `daKeep` applies to all three and
+  `dmStepOut` carries an extra clamp; nobody collided a frame with either.
+- **The rest of the command set in the entry segment.** Only `setBreakpoints`,
+  `pause` and `disconnect` were ever sent with `launch`. `evaluate`, `stackTrace`
+  and `variables` arriving there are untested, and `stackTrace` is state-guarded.
+- **A segment whose first frame closes the session.** The drain breaks on it, so
+  every frame behind it stays queued. Nobody asked what the editor is owed for
+  those.
+- **The packed stub and the GUI door**, end to end — which is exactly where the
+  `--no-console` item above would bite.
+
+## Decided 2026-09-18 — the compiled breakpoint condition stays uncached
+
+`docs/debugging.md` records that a condition is recompiled on every hit,
+deliberately and not by oversight. The sibling repository's roadmap lists it as a
+defect of this one. **It is not, and the decision to leave it stands — but the
+first version of this entry got all three of its load-bearing numbers wrong, in
+the direction that made the deferral look safe.** A close review overturned them
+with measurements, a judge reproduced those independently, and the table below is
+a third run, taken for this rewrite with its own driver. That history is written
+down because the entry's whole job is to stop the next reader taking the
+measurement again, and for one day it would have handed them a wrong answer
+instead.
+
+A mark on the loop line, 40 hits, best of two rounds, driven over the protocol
+the way an editor drives it. Filler lines are assignments to distinct globals,
+because the prologue copies every live global in and a lines-only shape
+understates what a real program pays:
+
+| program | no mark at all | mark, **no** condition | condition never true | condition always true |
+| --- | --- | --- | --- | --- |
+| 606 lines | 0,007 s **total** | 5,930 ms/hit | 2,12 ms **per evaluation** | 7,902 ms/hit |
+| 1206 lines | — | 6,045 ms/hit | 6,00 ms | — |
+| 1806 lines | — | 6,085 ms/hit | 11,05 ms | — |
+| 2406 lines | — | 6,315 ms/hit | 18,55 ms | — |
+
+**Read the units.** Two of those columns take **zero stops**, so there is no hit
+to divide by: the no-mark arm is a session's fixed cost and is reported as a
+total, and the false-condition arm is reported per *evaluation*. The first
+version of this entry printed both as "ms/hit" over hits that never happened,
+which made the cheapest column look comparable with the others when it is not.
+
+**The 5,9 ms is not work. It is one poll quantum.** The park loop in
+`TDebugProto.OnStop` sleeps 5 ms between reads while the VM is parked — its own
+comment says this seam MAY block — so no stop can cost less than 5 ms however
+fast the editor answers. 150 consecutive stops answered instantly never once fell
+below it. The flatness in the table is the same fact from the other side: 5,930 →
+6,315 ms while the program grows four-fold. **The real work of a stop is under a
+millisecond**, and any ratio quoted against 5,9 ms is a ratio against a constant
+this host chose. Make that loop event-driven and every such ratio is void without
+a line of this entry changing.
+
+**The crossover is BELOW 2000 lines, not past it** — this entry said "somewhere
+past 2000", and a reader who took that as the safe band would ship a 1700-line
+file into the regime it promised they were not in. Measured three times
+independently: **~1200 lines** when the added lines carry globals (twice, here
+and by the judge) and **~1650** on a lines-only shape. The arithmetic was
+available from the entry's own two rows all along — 5,93 ms ÷ 3,6 µs per line ≈
+1650 — so the printed figure was not even the one its own numbers gave. Against
+the stop's *real* work rather than the sleep, the crossover is nearer 200 lines.
+And the growth is worse than linear: +3,9 ms, +5,1, +7,5 over each 600-line step.
+
+**The always-true row is the one the feature exists for**, and no earlier version
+priced it: 7,902 ms/hit — the condition *plus* the stop it correctly took. A
+cache would save the ~2 ms of condition there too, on the arm where the user is
+being stopped anyway and is not counting milliseconds.
+
+**So why still no cache?** Not the ratio, which was a measurement of a sleep.
+**Priority, said plainly:** nothing in this tree or the sibling has measured a
+real program suffering, the shape that would suffer is a hot conditional line in
+a file past ~1200 lines, and the work is not small.
+
+*(The earlier draft closed with "at that size a person is not watching a
+breakpoint fire thousands of times". That argument is struck: a conditional
+breakpoint exists **precisely** so the person is not watching, and taken
+seriously it would make the unconditional baseline infinite. It cannot support
+the deferral it was written to support.)*
+
+**And the work is not small, for a reason that is new.** The per-hit cost is not
+only the compile. `TDebugProto.EvaluateExpr` compiles `FSource` plus one appended
+line, then emits a **prologue** that copies every live global and every local of
+the chosen frame in with `prog.Consts.Add(...)`, then runs the chunk on a fresh
+VM. Those values change at every hit, so the prologue must be re-emitted at every
+hit whatever else is cached.
+
+The **instruction** half of that is a solved problem and this entry said
+otherwise: `docs/debugging.md` and the field comment on `FSource` both already
+describe re-pointing the prologue's `opPushConst` with `TProgram.Patch`, measured
+at zero instruction growth over 10 000 evaluations, and `Patch` is **existing**
+public surface — three lines that set an emitted instruction's operand. Saying
+the fix "means new surface on `TConstPool` or `TProgram`" put a third, opposite
+account of the same work into the tree.
+
+**What today's measurement actually adds is the pool.** `Patch` moves a pointer;
+it does not free what the pointer left behind. `TConstPool` has `Add` and `Get`,
+no setter and no truncate, so a kept program still grows by one pool entry per
+global per hit, for ever. That half is genuinely uncovered, and closing it wants
+new surface on `TConstPool` — an engine type on the VM's hot path — plus a test
+that asserts **pool growth as well as time**, because a timing-only assertion is
+green with the leak.
+
+Revisit if a real program is ever measured suffering. Until then this entry
+exists so the next reader does not take the measurement again — and so that the
+next reader knows it was taken three times before it was right.

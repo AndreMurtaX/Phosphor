@@ -979,7 +979,16 @@ if ($LASTEXITCODE -ne 0) {
         Write-Host ("        " + $_) -ForegroundColor DarkGray }
 }
 
-if ($okR) { Write-Host "PASS  R:debug protocol (eight sessions, 117 assertions, stdout untouched)" -ForegroundColor Green }
+# READ FROM THE RUN, NOT WRITTEN DOWN. This label said "eight sessions, 117
+# assertions" over a file that had six and 129, and nothing could tell: a count in
+# a label is prose, and no gate in this tree reads a label. The test's last line
+# is its own tally.
+$tallyR = ''
+if ($okR) {
+    $tallyR = ((Read-Text $rOut) -split "`r?`n" | Where-Object { $_ -match '^PASS \d+' } | Select-Object -Last 1)
+    if (-not $tallyR) { $tallyR = 'no tally printed' }
+}
+if ($okR) { Write-Host ("PASS  R:debug protocol ({0}, stdout untouched)" -f $tallyR.Trim()) -ForegroundColor Green }
 else { Write-Host "FAIL  R:the debug protocol session did not complete" -ForegroundColor Red }
 
 # S: A DIAGNOSTIC IS UTF-8, WHATEVER THE CONSOLE CODEPAGE IS.
@@ -1009,20 +1018,41 @@ else { Write-Host "FAIL  R:the debug protocol session did not complete" -Foregro
 # it invalid, and substituted -- before phosphor was reached at all. That is a
 # harness measuring a different copy of the value than the one that acts, and it
 # cost two wrong readings of this very block while it was being written.
+# THE PATH IS ABSOLUTE AND UNDER $tmp, like the Unix twin's. It was a bare
+# relative name, resolved against whatever directory the runner happened to be
+# started from -- so the block's premise was not under the block's control, and a
+# run from a directory that happened to contain such a file would have measured
+# something else entirely.
+#
+# THE EXIT CODE IS CHECKED, because "the diagnostic has the right bytes" is only
+# half of it: a phosphor that refused the argument for some other reason, or did
+# not run at all, can still leave a file with nothing wrong in it.
+#
+# AND THE HEX IS MATCHED BYTE-ALIGNED. Joined without a separator, '6c3a90' --
+# three innocent bytes 6c 3a 90 -- matches 'c3a9', so the assertion could pass on
+# a stream that never contained an e-acute. Demonstrated, not reasoned about:
+# [byte[]](0x6c,0x3a,0x90) joined bare is '6c3a90' and -match 'c3a9' is True. One
+# space per byte makes the needle 'c3 a9' and the alignment impossible to lose.
 $okS = $true
 foreach ($cp in 850, 65001) {
     $encS = if ($cp -eq 65001) { New-Object System.Text.UTF8Encoding($false) }
             else { [System.Text.Encoding]::GetEncoding(850) }
     $errS = Join-Path $tmp "s$cp.err"
     $batS = Join-Path $tmp "s$cp.bat"
-    $bodyS = "@echo off`r`nchcp $cp >nul`r`n`"$exe`" run `"nao_existe_caf" + [char]0xE9 + ".bas`" 2> `"$errS`"`r`n"
+    $missS = (Join-Path $tmp ("nao_existe_caf" + [char]0xE9 + ".bas"))
+    $bodyS = "@echo off`r`nchcp $cp >nul`r`n`"$exe`" run `"$missS`" 2> `"$errS`"`r`nexit /b %ERRORLEVEL%`r`n"
     [System.IO.File]::WriteAllBytes($batS, $encS.GetBytes($bodyS))
     cmd /c "`"$batS`"" | Out-Null
+    $codeS = $LASTEXITCODE
     $bytesS = [System.IO.File]::ReadAllBytes($errS)
     # c3 a9 is e-acute in UTF-8. A lone 0x82, an ef bf bd replacement or a bare
     # 0x3f question mark all mean the byte was transcoded or lost.
-    $hexS = ($bytesS | ForEach-Object { '{0:x2}' -f $_ }) -join ''
-    if ($hexS -notmatch 'c3a9') {
+    $hexS = ($bytesS | ForEach-Object { '{0:x2}' -f $_ }) -join ' '
+    if ($codeS -ne 2) {
+        Write-Host ("        S: under chcp {0} phosphor exited {1}, not 2" -f $cp, $codeS) -ForegroundColor DarkGray
+        $okS = $false
+    }
+    if ($hexS -notmatch 'c3 a9') {
         Write-Host ("        S: under chcp {0} the accented path came back as:" -f $cp) -ForegroundColor DarkGray
         Write-Host ("        " + (($bytesS | Select-Object -Last 14 | ForEach-Object { '{0:x2}' -f $_ }) -join ' ')) -ForegroundColor DarkGray
         $okS = $false
@@ -1031,6 +1061,68 @@ foreach ($cp in 850, 65001) {
 if ($okS) { Write-Host 'PASS  S:diagnostics are UTF-8 (an accented path survives stderr under chcp 850 and 65001)' -ForegroundColor Green }
 else { Write-Host 'FAIL  S:a diagnostic lost or transcoded a byte' -ForegroundColor Red }
 
+# --- T: THE PROGRAM'S OWN OUTPUT DOES NOT DEPEND ON THE CONSOLE ----------------
+#
+# The sibling of S, and the half that block was written believing was impossible.
+# S fixed the WRITE; this is the READ. Input was not pinned until 2026-09-18, so
+# the RTL stamped it with the console codepage too and a redirected stdin was
+# transcoded FROM whatever that console happened to be -- before the program saw
+# a byte of it. Same file in, same binary, stdout to a file:
+#
+#   chcp 65001 -> 63 61 66 c3 a9               cafe-acute, correct
+#   chcp 850   -> 63 61 66 e2 94 9c c2 ae      U+251C U+00AE
+#   chcp 437   -> 63 61 66 e2 94 9c e2 8c 90   U+251C U+2310
+#
+# Three codepages, three different programs, from one binary and one input file.
+# Verified as a MUTATION and not only as a before-and-after: removing the single
+# Input pin and rebuilding reproduces those three lines byte for byte.
+#
+# 437 IS IN THE LIST DELIBERATELY. It is the codepage that has no e-acute at all,
+# so it is the one where a fix that merely picked a different single-byte
+# encoding would still be wrong.
+#
+# NO GOLDEN CAN SEE THIS. Every byte-exact expectation in this tree is ASCII: no
+# file under tests/ or examples/ carries a byte >= 0x80, which is exactly the
+# corpus gap that let the read half sit unnoticed behind the write half.
+$okT = $true
+$basT = Join-Path $tmp 'cpin.bas'
+[System.IO.File]::WriteAllBytes($basT,
+    [System.Text.Encoding]::ASCII.GetBytes("input a`$`nprintln a`$`nend`n"))
+$inT = Join-Path $tmp 'cpin.in'
+[System.IO.File]::WriteAllBytes($inT, [byte[]](0x63,0x61,0x66,0xc3,0xa9,0x0a))
+$seenT = @{}
+foreach ($cp in 65001, 850, 437) {
+    $outT = Join-Path $tmp "t$cp.out"
+    $batT = Join-Path $tmp "t$cp.bat"
+    $bodyT = "@echo off`r`nchcp $cp >nul`r`n`"$exe`" run `"$basT`" < `"$inT`" > `"$outT`"`r`nexit /b %ERRORLEVEL%`r`n"
+    # ASCII throughout: every byte of this batch file is under 0x80, so it reads
+    # the same in all three codepages and cannot itself be the thing measured.
+    [System.IO.File]::WriteAllBytes($batT, [System.Text.Encoding]::ASCII.GetBytes($bodyT))
+    cmd /c "`"$batT`"" | Out-Null
+    $codeT = $LASTEXITCODE
+    $hexT = ([System.IO.File]::ReadAllBytes($outT) | ForEach-Object { '{0:x2}' -f $_ }) -join ' '
+    $seenT[$cp] = $hexT
+    if ($codeT -ne 0) {
+        Write-Host ("        T: under chcp {0} phosphor exited {1}, not 0" -f $cp, $codeT) -ForegroundColor DarkGray
+        $okT = $false
+    }
+    if ($hexT -notmatch 'c3 a9') {
+        Write-Host ("        T: under chcp {0} the accented input came back as:" -f $cp) -ForegroundColor DarkGray
+        Write-Host ("        " + $hexT) -ForegroundColor DarkGray
+        $okT = $false
+    }
+}
+# AND ALL THREE MUST BE THE SAME STREAM, not merely three streams that each
+# contain the pair. That is the property: the program's output is a function of
+# its input and nothing else.
+if (($seenT[65001] -ne $seenT[850]) -or ($seenT[850] -ne $seenT[437])) {
+    Write-Host '        T: the same program gave different bytes under different codepages' -ForegroundColor DarkGray
+    foreach ($cp in 65001, 850, 437) { Write-Host ("        {0}: {1}" -f $cp, $seenT[$cp]) -ForegroundColor DarkGray }
+    $okT = $false
+}
+if ($okT) { Write-Host "PASS  T:a program's own output is its input, not its console (chcp 65001, 850, 437)" -ForegroundColor Green }
+else { Write-Host 'FAIL  T:the console codepage reached the program' -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ -and $okR -and $okS) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR -and $okS -and $okT) { exit 0 } else { exit 1 }

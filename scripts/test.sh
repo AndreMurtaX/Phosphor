@@ -757,7 +757,10 @@ if ! python3 "$root/tests/debug_protocol_test.py" "$exe" > "$tmpdir/r.out" 2>&1;
   sed 's/^/        /' "$tmpdir/r.out" | tail -12
 fi
 
-if [ "$okR" -eq 0 ]; then echo 'PASS  R:debug protocol (eight sessions, 117 assertions, stdout untouched)'
+# READ FROM THE RUN, NOT WRITTEN DOWN -- see the twin in test.ps1 for why.
+tallyR=$(grep -E '^PASS [0-9]+' "$tmpdir/r.out" | tail -1)
+[ -n "$tallyR" ] || tallyR='no tally printed'
+if [ "$okR" -eq 0 ]; then echo "PASS  R:debug protocol ($tallyR, stdout untouched)"
 else echo 'FAIL  R:the debug protocol session did not complete'; fail=1; fi
 
 # S: A DIAGNOSTIC IS UTF-8, WHATEVER THE CONSOLE IS.
@@ -775,28 +778,92 @@ else echo 'FAIL  R:the debug protocol session did not complete'; fail=1; fi
 # and never touches a Text file -- so the fix and a no-op are indistinguishable
 # to all five suites. That is why this block exists and why it hexdumps.
 #
-# On Unix the console codepage is the locale's and is UTF-8 on any modern system,
-# so this passes here before and after the repair. It is still run: the property
-# is "the host emits UTF-8", and a platform where that is already true is not a
-# reason to stop asserting it. The direction that could only ever fail on Windows
-# is asserted there, in test.ps1, under a pinned codepage.
+# TWO LOCALES, AND THE SECOND IS THE LOAD-BEARING ONE. This block used to run
+# once, in whatever locale the invoker happened to have, with a comment saying
+# that on Unix it passes before and after the repair because the locale is UTF-8
+# on any modern system. That was true of the ambient locale and false of the
+# property: the standard text files are LOCALE-stamped here exactly as they are
+# codepage-stamped on Windows, so under LC_ALL=C the defect was live on Linux
+# too, and the block as written could not fail. A check that cannot fail reports
+# nothing about the thing it guards.
+#
+# LC_ALL=C is this platform's `chcp 850`.
 badname="$tmpdir/nao_existe_café.bas"
 # THE `if` FORM, for the reason block F states twelve blocks above and which this
 # line got wrong anyway: under `set -e` a plain assignment from a command that
 # exits non-zero ABORTS THE SCRIPT. `phosphor run <missing>` exits 2, so the first
 # Linux run of this block died right here -- silently, after R had printed PASS,
 # with no S line at all and an exit code that looked like the block failing.
-if "$exe" run "$badname" > "$tmpdir/s.out" 2> "$tmpdir/s.err"; then scode=0; else scode=$?; fi
 okS=0
-[ "$scode" -eq 2 ] || { echo "        S: expected exit 2, got $scode"; okS=1; }
-# c3 a9 is e-acute in UTF-8. Anything else -- a lone 0x82, a 0xef 0xbf 0xbd
-# replacement, a bare '?' -- means the byte was transcoded or lost.
-if ! grep -q "$(printf 'caf\303\251')" "$tmpdir/s.err"; then
-  echo "        S: the accented path did not come back as UTF-8:"
-  od -An -tx1 "$tmpdir/s.err" | tail -2 | sed 's/^/        /'
-  okS=1
-fi
-if [ "$okS" -eq 0 ]; then echo 'PASS  S:diagnostics are UTF-8 (an accented path survives stderr)'
-else echo 'FAIL  S:a diagnostic lost or transcoded a byte'; fail=1; fi
+for sloc in "${LANG:-C.UTF-8}" C; do
+  # THE `if` FORM, for the reason block F states twelve blocks above and which
+  # this line got wrong anyway: under `set -e` a plain assignment from a command
+  # that exits non-zero ABORTS THE SCRIPT. `phosphor run <missing>` exits 2, so
+  # the first Linux run of this block died right here -- silently, after R had
+  # printed PASS, with no S line at all and an exit code that looked like the
+  # block failing.
+  if LC_ALL="$sloc" "$exe" run "$badname" > "$tmpdir/s.out" 2> "$tmpdir/s.err"
+  then scode=0; else scode=$?; fi
+  [ "$scode" -eq 2 ] || { echo "        S: under LC_ALL=$sloc expected exit 2, got $scode"; okS=1; }
+  # c3 a9 is e-acute in UTF-8. Anything else -- a lone 0x82, a 0xef 0xbf 0xbd
+  # replacement, a bare '?' -- means the byte was transcoded or lost.
+  if ! grep -q "$(printf 'caf\303\251')" "$tmpdir/s.err"; then
+    echo "        S: under LC_ALL=$sloc the accented path did not come back as UTF-8:"
+    od -An -tx1 "$tmpdir/s.err" | tail -2 | sed 's/^/        /'
+    okS=1
+  fi
+done
+if [ "$okS" -eq 0 ]; then echo 'PASS  S:diagnostics are UTF-8 (an accented path survives stderr in two locales)'
+else echo 'FAIL  S:a diagnostic lost or transcoded a byte'; fi
+
+# --- T: THE PROGRAM'S OWN OUTPUT DOES NOT DEPEND ON THE CONSOLE ----------------
+#
+# The sibling of S, and the half that block was written believing was impossible.
+# S fixed the WRITE; this is the READ. Input was not pinned until 2026-09-18, so
+# the RTL stamped it with the locale too and a redirected stdin was transcoded
+# FROM whatever that locale happened to be, before the program saw a byte of it.
+# Measured on Windows, same file in, same binary, stdout to a file:
+#
+#   chcp 65001 -> 63 61 66 c3 a9               cafe-acute, correct
+#   chcp 850   -> 63 61 66 e2 94 9c c2 ae      U+251C U+00AE
+#   chcp 437   -> 63 61 66 e2 94 9c e2 8c 90   U+251C U+2310
+#
+# Two locales here for the same reason block S runs two: C is this platform's
+# `chcp 850`, and without it the block cannot fail.
+#
+# NO GOLDEN CAN SEE THIS. Every byte-exact expectation in this tree is ASCII --
+# no file under tests/ or examples/ carries a byte >= 0x80, which is the corpus
+# gap that let the read half sit unnoticed behind the write half.
+printf 'input a$\nprintln a$\nend\n' > "$tmpdir/cpin.bas"
+printf 'caf\303\251\n' > "$tmpdir/cpin.in"
+okT=0
+seenT=''
+for tloc in "${LANG:-C.UTF-8}" C; do
+  if LC_ALL="$tloc" "$exe" run "$tmpdir/cpin.bas" < "$tmpdir/cpin.in" \
+       > "$tmpdir/t.out" 2> "$tmpdir/t.err"
+  then tcode=0; else tcode=$?; fi
+  [ "$tcode" -eq 0 ] || { echo "        T: under LC_ALL=$tloc phosphor exited $tcode, not 0"; okT=1; }
+  thex=$(od -An -tx1 "$tmpdir/t.out" | tr -s ' ' | tr -d '\n')
+  case "$thex" in
+    *" c3 a9"*) ;;
+    *) echo "        T: under LC_ALL=$tloc the accented input came back as:"
+       echo "        $thex"
+       okT=1 ;;
+  esac
+  # AND BOTH LOCALES MUST GIVE THE SAME STREAM, not merely two streams that each
+  # contain the pair. That is the property: the program's output is a function of
+  # its input and nothing else.
+  if [ -z "$seenT" ]; then seenT="$thex"
+  elif [ "$seenT" != "$thex" ]; then
+    echo "        T: the same program gave different bytes under different locales"
+    echo "        $seenT"
+    echo "        $thex"
+    okT=1
+  fi
+done
+if [ "$okT" -eq 0 ]; then echo "PASS  T:a program's own output is its input, not its locale (two locales)"
+else echo 'FAIL  T:the locale reached the program'; fi
+
+if [ "$okS" -ne 0 ] || [ "$okT" -ne 0 ]; then fail=1; fi
 
 exit "$fail"

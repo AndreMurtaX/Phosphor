@@ -51,7 +51,7 @@ uses
     bar to find. It must precede every unit that uses threads. }
   {$IFDEF UNIX}cthreads,{$ENDIF}
   {$IFDEF WINDOWS}Windows,{$ENDIF}
-  {$IFDEF UNIX}BaseUnix,{$ENDIF}
+  {$IFDEF UNIX}BaseUnix, Unix, TermIO,{$ENDIF}   // TermIO for IsATTY
   // The LCL, named by its PARTS. Deliberately NOT `Interfaces`: that unit's only
   // content is a CreateWidgetset call in its initialization section, and on gtk2
   // that call opens the X display -- before main, so a binary that merely listed
@@ -244,14 +244,23 @@ end;
   WHAT THIS DOES NOT COVER, SAID PLAINLY RATHER THAN LEFT TO BE DISCOVERED: the
   SOURCE PATH in the frame is not escaped. It is not script-supplied -- it is
   the argv the operator typed -- and every other diagnostic in this file
-  interpolates that same text raw (see the two `phosphor: %s:%d: %s` sites), so
+  interpolates that same text raw (see every `phosphor: %s:%d: %s` site), so
   escaping it here would print a different name for the same file one line
   apart, and would double every backslash of every Windows path to guard against
   a file name a script cannot create. On Linux a file name MAY contain 0x0A, and
   such a name splits this frame exactly as it already splits this host's other
   diagnostics; that is a host-wide property of the `phosphor: ...` shape, not a
-  property of breakpoints, and a framed protocol (B2/B3) carries its own length
-  rather than trusting a newline.
+  property of breakpoints.
+
+  THE SENTENCE THAT USED TO END THIS PARAGRAPH WAS FALSE, and dangerously so: it
+  said a framed protocol carries its own length rather than trusting a newline.
+  PDBP does not. It is one JSON object per line terminated by a single #10 -- see
+  the protocol host below, which writes `AObj.AsJSON + #10`, and
+  ../PhosphorIDE/docs/debug-protocol.md, which says the same from the other end.
+  A reader who treated this file's comments as the specification and made the CODE
+  match would put a length header on every frame and break the editor instantly.
+  The conclusion it was reaching for survives, with the right reason: what makes a
+  0x0A inside a value harmless is that fpjson ESCAPES it, not a length prefix.
 
   StringReplace rather than a character loop on purpose: every unit here sets the
   UTF8 codepage directive, and appending a Char to such a string re-encodes it,
@@ -561,13 +570,29 @@ begin
 end;
 
 { EVERY SEAM, AT EVERY DOOR, FROM ONE PLACE -- AND THAT IS THE POINT OF IT.
-  This host builds an engine at three independent doors: RunFile, RunEmbedded and
-  Repl. Each used to assign OnOutput and OnInput itself, which made filling a new
+  This host builds an engine at every door that runs one. The count is not
+  written here, because it has been wrong twice: grep for the calls.
+
+  THE INVARIANT IS NOT "EVERY Create IS BOUND", WHICH IS FALSE -- and it was
+  written that way for one day, in a file whose history is that a sentence like it
+  becomes a gate. The grep it invites finds SIX creates and FIVE binds. The sixth
+  is EverythingThisBinaryProvides below, which builds a registry to enumerate
+  names for `compile --check` and `pack` and frees it again; it runs no program,
+  has no host to answer for, and is correctly unbound. Anyone writing that gate
+  from the old sentence would have failed a correct line, or "fixed" it by binding
+  host seams onto an engine with nothing behind them.
+
+  EVERY ENGINE THAT RUNS A PROGRAM IS BOUND HERE. That is the invariant, and it is
+  still one grep.
+
+  It said "three independent doors: RunFile, RunEmbedded and Repl" until
+  2026-09-18, by which time the debug protocol host and the terminal debugger had
+  each added one. Each used to assign OnOutput and OnInput itself, which made filling a new
   seam a three-site edit that nothing checks: scripts/check-seams.py asks its
   question once per FILE, so a single `eng.OnBreakpoint := ...` anywhere in here
   turns the gate green while two of the three doors stay silent. That is the
   instance-instead-of-the-class failure written into the build, so the wiring
-  moves here and the doors call it. A fourth door, or a fifth seam, is then one
+  moves here and the doors call it. Another door, or another seam, is then one
   edit in one place.
 
   ASourceName HAS NO DEFAULT DELIBERATELY. '' is the value that means "no name to
@@ -1624,7 +1649,9 @@ begin
     that disarming from inside a stop erases the re-entrancy guard with the set.
 
     STOP-AT-ENTRY IS ASKED FOR ONCE, AND ONLY BEFORE THE PROGRAM STARTS. The VM
-    stores it as FDbgEntryPending (PhosphorVM.pas:3810) and every ArmDebug sets
+    stores it as FDbgEntryPending (set in TPhosphorVM.ArmDebug -- cited by NAME
+    because the line number this used to carry had rotted into the middle of an
+    unrelated function, and no gate reads a number) and every ArmDebug sets
     that flag afresh, so re-arming mid-run with True schedules ANOTHER entry stop
     -- at whatever boundary happens to be next, which is not an entry at all. It
     showed up the moment re-arming while stopped began to work: a three-pass loop
@@ -2398,9 +2425,28 @@ begin
 
     if cmd = 'setBreakpoints' then
     begin
-      { Whole-set replacement for one file, which makes the editor's view
-        authoritative by construction. A path this host does not know matches
-        nothing and is not an error. }
+      { Whole-set replacement, which makes the editor's view authoritative by
+        construction.
+
+        `path` IS NOT READ, AND THIS COMMENT USED TO SAY IT WAS -- "a path this
+        host does not know matches nothing and is not an error", which is a
+        promise the handler below does not keep. It reads `lines` and
+        `conditions` and nothing else, so a frame naming ANOTHER file replaces
+        THIS file's whole set. An editor with several files open, arming them all
+        at launch, installs the last one's marks against this one: measured, a
+        stop on a line this file was never marked at and no stop on the line it
+        was. Harmless while only one file could be in flight, and fbf74d4 --
+        which taught the entry boundary to drain that queue -- is what newly
+        exposes it at exactly the moment an editor arms.
+
+        NOT REPAIRED HERE, DELIBERATELY. The obvious comparison is against FPath,
+        and a strict one fails WORSE than the bug: an editor that spells the same
+        file differently -- forward slashes, a relative path, a different case on
+        a case-insensitive filesystem, a symlink -- would have every one of its
+        breakpoints silently ignored, which is a dead debugger rather than a
+        confused one. It wants a measurement of what real editors actually send,
+        against a comparison built for that, and it is filed in
+        docs/attack-plan.md rather than guessed at from here. }
       { EVERY ELEMENT IS CHECKED, not just the array. `lines` is optional, so a
         frame may leave it out entirely -- and when it IS there, fpjson's
         Integers[] CONVERTS: a string element raises EConvertError, a JSON null
@@ -2604,7 +2650,11 @@ var
   raw, why, condWhy: String;
   ev: TJSONObject;
   pending: Boolean;
+  entryQuiet, stopHere: Boolean;
 begin
+  { FALSE AT EVERY BOUNDARY BUT THE FIRST, and said out loud because a local is
+    not initialised here: only the FRunVM block below ever sets it True. }
+  entryQuiet := False;
   { THE FIRST STOP IS WHERE THE SOCKET THREAD IS HANDED THE VM, and it is why
     arming always asks for stop-at-entry even when the editor did not. The engine
     offers no thread-safe way to find the running VM from outside (see FRunVM);
@@ -2619,7 +2669,13 @@ begin
     finally
       FLock.Release();
     end;
-    if (AReason = srEntry) and (not FEditorEntry) then
+    { AN ENTRY BOUNDARY THE EDITOR DID NOT ASK FOR is this host's own invention:
+      arming always requests stop-at-entry because a stop is the only thread-safe
+      moment to take FRunVM. It is not a stop the editor is owed, so it is
+      resolved below along with every other boundary, rather than resumed from
+      here with its own private set of questions. }
+    entryQuiet := (AReason = srEntry) and (not FEditorEntry);
+    if entryQuiet then
     begin
       { FState MUST become dbgRunning here. It used to be set only on the way out
         of a real stop, so a silent entry resume left the session reading as
@@ -2627,135 +2683,146 @@ begin
         while stopped" by a program that was plainly running. The state has to
         follow the program, not the last event the editor was sent. }
       FState := dbgRunning;
-
-      { ...UNLESS THE USER ASKED TO STOP ON THIS VERY STATEMENT, which for a year
-        was silently impossible. The entry stop above is this host's own
-        invention -- arming always requests it because a stop is the only
-        thread-safe moment to take FRunVM -- and the engine's DebugPoll tests
-        entry BEFORE breakpoints and guards the second with `if (not stop)`
-        (PhosphorVM.pas:4159). So at the FIRST boundary the reason is always
-        srEntry and the armed line set is never consulted there; resuming from it
-        threw away a breakpoint the editor had been told was installed.
-
-        It is the first EXECUTED STATEMENT, not line 1: a file opening with a
-        `rem` loses line 2 instead, which is how it stayed invisible -- every
-        fixture anyone wrote had a comment at the top.
-
-        Reported as a breakpoint rather than as an entry, because that is what it
-        is: the editor asked to stop here and did not ask to stop at entry. The
-        reassignment is to the value parameter on purpose, so that every line
-        below this one -- the event, the state, the terminal debugger's prompt --
-        reads the reason a stop at any other line would have. }
-      { AND EVERYTHING THE EDITOR SENT BEFORE THE PROGRAM DREW BREATH, which
-        until now was stranded for the whole run.
-
-        A frame arriving between `launch` and this first boundary sets no
-        interrupt at all: TDbgReader nudges through FRunVM, and FRunVM is nil
-        until the line above this block assigns it. So the nudge is a no-op, the
-        flag is never set, and there is nothing left for any later boundary to
-        re-derive the frame from -- it simply sits in the inbox until the process
-        ends. No reply, no error, no event; an editor waiting on that seq waits
-        for ever.
-
-        IT IS NOT AN EDGE CASE. `launch` and `setBreakpoints` written back to back
-        are free to arrive in one read, which is exactly what an editor arming its
-        breakpoints as it starts produces. Measured on the build before this: one
-        sendall of both, and the reply to `launch` came back, seq 3 never did, a
-        five-pass loop stopped zero times and the program ran to completion.
-
-        THIS IS THE PLACE, and not a drain just before eng.Run: that would narrow
-        the window rather than close it, and the obvious test passes against the
-        narrower version. Here the VM thread is parked in the seam, the inbox is
-        reachable, and nothing else has run yet.
-
-        THE SET IS RE-ASKED AFTER THE DRAIN, because a setBreakpoints in that
-        queue may have armed this very boundary -- the whole point of sending it
-        with `launch`. Asking before draining would answer about the set the
-        editor had already replaced. }
-      while TakeLine(raw) do
-        if Handle(raw, ALine, ADepth) then Break;
-      if FPendingArm then
-      begin
-        { Armed HERE rather than left for the next boundary: this is a safe point
-          and the next boundary may be the one the editor asked about. }
-        FPendingArm := False;
-        Arm();
-      end;
-      if not ArmedAt(ALine) then
-      begin
-        { The same re-nudge the pause drain carries, and for the same reason: the
-          interrupt is consumed once per boundary, so a frame that landed while
-          this drain ran would be seen and not woken for. }
-        FLock.Enter();
-        try
-          pending := FInbox.Count > 0;
-        finally
-          FLock.Leave();
-        end;
-        if pending then InterruptRun();
-        Exit(daRun);
-      end;
-      AReason := srBreakpoint;
     end;
   end;
 
-  { A BOUNDARY REACHED BECAUSE A FRAME ARRIVED, not because the editor asked to
-    stop. Everything queued is handled here, at a safe point, and then the
-    program carries on with no `stopped` event -- unless one of those frames was
-    a `pause`, which IS the editor asking, and falls through below.
+  { ONE DRAIN, AT EVERY BOUNDARY THE PROGRAM IS RUNNING AT, WHATEVER THE REASON.
 
-    This is the other half of what makes `pause` work. The reader nudges the VM
-    when a frame lands; the VM arrives here at its next statement boundary; this
-    drains the queue. Without the drain the nudge would stop the program and
-    nothing would read what stopped it. }
-  if (AReason = srPause) and (FState = dbgRunning) then
+    This was three drains with three different sets of post-drain questions --
+    the entry one asked about FPendingArm and ArmedAt, the pause one asked about
+    FPauseWanted, and the false-condition resume did not drain at all -- and
+    every question one of them forgot to ask was a defect. All three were found
+    on the same day, 2026-09-18, by three reviewers who were each looking at
+    something else:
+
+      * A frame arriving while the program stood on a line armed with a FALSE
+        condition was consumed by the engine, never drained, never re-nudged, and
+        sat unread in FInbox for the rest of the run. The editor's Pause button
+        did nothing at all, and every frame queued behind it died with it.
+        Measured: no ack, no `stopped`, program ran to completion, three runs of
+        three, against a pre-95fb4fb build that answered in 0.00 s.
+      * A `pause` arriving in the ENTRY queue was answered `ok:true` and then
+        destroyed by the very interrupt it set, because the entry drain never
+        looked at FPauseWanted and the next boundary's drain cleared it before
+        asking. Measured: 42.66 s to exit, no `stopped`.
+      * A `disconnect` with `terminate:true` in either queue was answered
+        `ok:true` and its daStop thrown away -- `Exit(daRun)` on one path, and
+        `FAction := daRun` below on the other. An editor that asked for the
+        program to be killed was left holding a live process.
+
+    THE DRAIN IS NO LONGER KEYED ON THE REASON, and that is the repair rather
+    than three more branches. It was keyed on `AReason = srPause`, which was
+    sound only while a consumed interrupt always produced srPause. That stopped
+    being true when DebugPoll began reporting the most specific fact about a
+    boundary instead of the first one in source order: an interrupt landing on an
+    armed line is now a breakpoint, and the host was still asking about a pause.
+
+    The set of boundaries the engine calls this seam at is exactly the set at
+    which the interrupt flag can have been consumed. Draining at all of them is
+    what makes "a frame is read at the next boundary" true without the host
+    having to know why the boundary happened -- which is the fact it turned out
+    not to be able to see. }
+  if FState = dbgRunning then
   begin
-    FPauseWanted := False;
     while TakeLine(raw) do
       if Handle(raw, ALine, ADepth) then Break;
-    if not FPauseWanted then
+    if FPendingArm then
     begin
-      if FPendingArm then
-      begin
-        FPendingArm := False;
-        Arm();
-      end;
-      { The interrupt flag is consumed once per boundary by an InterlockedExchange,
-        so a frame that landed while this drain ran would be seen but not woken
-        for. Nudge again: the cost is one more boundary, and the alternative is a
-        frame sitting unread until the next breakpoint, or for ever.
-        Under the lock, because the reader thread writes FInbox. }
-      FLock.Enter();
-      try
-        pending := FInbox.Count > 0;
-      finally
-        FLock.Leave();
-      end;
-      if pending then InterruptRun();
-      Exit(daRun);
+      { Armed HERE rather than left for the next boundary: this is a safe point
+        and the next boundary may be the one the editor asked about. }
+      FPendingArm := False;
+      Arm();
     end;
+    { A FRAME THAT ENDED THE SESSION IS OBEYED, and obeyed HERE rather than at the
+      bottom, where `FAction := daRun` would overwrite it. `disconnect` with
+      `terminate:true` sets FAction := daStop and FClosed together; a plain
+      disconnect sets daRun, which is the "close the socket and let it run" the
+      protocol document describes. Both are the host's own answer, and neither is
+      a stop the editor is told about. }
+    if FClosed then Exit(FAction);
   end;
 
-  { A CONDITION DECIDES WHETHER A BREAKPOINT IS A STOP, and it is asked HERE --
-    after the pause drain, before the editor is told anything. The program has
-    already halted at the boundary; what a false condition saves is the round
-    trip, the event, and the person's attention, not the halt itself.
+  { WHETHER THIS BOUNDARY STOPS, AND UNDER WHICH REASON -- asked after the drain,
+    because a setBreakpoints in that queue may have armed this very line, which is
+    the whole point of an editor sending one with `launch`.
 
-    ONLY FOR srBreakpoint. A step that happens to land on a conditional
-    breakpoint stops, because the user asked to step and the condition is not
-    about them. So does an entry, a pause and an exception. }
-  if AReason = srBreakpoint then
+    THE ORDER IS THE ENGINE'S ORDER, and for the engine's reason: a fact about
+    WHERE THE PROGRAM IS beats the fact that the editor's queue had something in
+    it. A `pause` that collides with a real breakpoint is reported as the
+    breakpoint -- it was honoured, under a truer reason, and Handle answered its
+    seq `ok:true` while the program was still running, so the editor no longer
+    sees the "pause is not valid while stopped" refusal that collision produced
+    for one day. }
+  condWhy := '';
+  if entryQuiet and (AReason = srEntry) and ArmedAt(ALine) then
   begin
-    if not ShouldStopAt(ALine, ADepth, condWhy) then
-    begin
-      { The state has to follow the PROGRAM, not the last event the editor was
-        sent -- the same rule the silent entry resume above is written to. }
-      FState := dbgRunning;
-      Exit(daRun);
-    end;
-  end
+    { THE USER ASKED TO STOP ON THIS VERY STATEMENT, which for a year was
+      silently impossible: the engine tests entry before breakpoints, so at the
+      FIRST boundary the reason is always srEntry and the armed set was never
+      consulted there. It is the first EXECUTED STATEMENT and not line 1 -- a
+      file opening with a `rem` loses line 2 instead, which is how it stayed
+      invisible, because every fixture anyone wrote had a comment at the top.
+
+      Reported as a breakpoint because that is what it is: the editor asked to
+      stop here and did not ask to stop at entry. }
+    AReason := srBreakpoint;
+  end;
+
+  if AReason = srEntry then
+    { The editor asked for this one -- or, when entryQuiet, nobody did. }
+    stopHere := not entryQuiet
+  else if AReason = srBreakpoint then
+    { A CONDITION DECIDES WHETHER A BREAKPOINT IS A STOP, and it is asked HERE,
+      before the editor is told anything. The program has already halted at the
+      boundary; what a false condition saves is the round trip, the event and the
+      person's attention, not the halt itself.
+
+      ONLY FOR srBreakpoint. A step that happens to land on a conditional
+      breakpoint stops, because the user asked to step and the condition is not
+      about them. So does an entry, a pause and an exception. }
+    stopHere := ShouldStopAt(ALine, ADepth, condWhy)
+  else if AReason = srStep then
+    stopHere := True
   else
+    { srPause ON ITS OWN IS A BOUNDARY TAKEN TO READ THE SOCKET, not the editor
+      asking to stop. It stops only if something in the queue asked it to, which
+      is the question below. }
+    stopHere := False;
+
+  if (not stopHere) and FPauseWanted then
+  begin
+    AReason := srPause;
     condWhy := '';
+    stopHere := True;
+  end;
+  { CONSUMED WHATEVER HAPPENED: either it became this stop's reason, or a more
+    specific reason took the stop it asked for. Left set, it would stop the
+    program a second time at the next boundary for a request already answered. }
+  FPauseWanted := False;
+
+  if not stopHere then
+  begin
+    { THE PROGRAM CARRIES ON WITH NO `stopped` EVENT -- and carries on in the
+      debug mode it was already in. daKeep, not daRun: none of the resumes that
+      reach here is the user saying "continue". They are the host reading its
+      socket or declining a hit, and daRun would cancel a step the user asked
+      for. See TPhosphorDebugAction. }
+    FState := dbgRunning;
+    { The interrupt flag is consumed once per boundary by an InterlockedExchange,
+      so a frame that landed while the drain ran would be seen but not woken for.
+      Nudge again: the cost is one more boundary, and the alternative is a frame
+      sitting unread until the next breakpoint, or for ever.
+      Under the lock, because the reader thread writes FInbox. }
+    FLock.Enter();
+    try
+      pending := FInbox.Count > 0;
+    finally
+      FLock.Leave();
+    end;
+    if pending then InterruptRun();
+    Exit(daKeep);
+  end;
+
 
   FState := dbgStopped;
   if AReason = srEntry then why := 'entry'
@@ -3160,6 +3227,37 @@ begin
         explains itself without touching the program's own output. }
       Writeln(StdErr, '');
       Writeln(StdErr, 'phosphor debug: stdin is not a terminal; continuing without stopping.');
+      { FLUSHED BECAUSE THE PROCESS KEEPS RUNNING, which is the rule -- not
+        because stderr is "usually unbuffered", which is a Windows accident.
+        rtl/win/sysfile.inc:21-23 answers do_isdevice by comparing the handle to
+        StdErrorHandle, an identity test redirection cannot see, so FlushFunc is
+        installed on a console, a pipe and a file alike and every Writeln flushes.
+        rtl/linux/sysos.inc:160 is a real tty test: down a pipe FlushFunc stays
+        nil and the bytes wait for 256 of them (rtl/inc/textrec.inc) or for the
+        process to end. This line is followed by the whole rest of the program,
+        and FSilent means it is never said again -- so on Linux, read by an
+        editor, it arrived only at exit, when SysFlushStdIO hands the buffer over
+        (rtl/inc/system.inc) -- long after the line that caused it and long after
+        it was any use. The prompt flush above is the same rule's other half:
+        flush before a blocking read.
+
+        GUARDED, AND THAT IS NOT DECORATION. Flush is [IOCheck] (rtl/inc/text.inc)
+        and nothing in this file turns IO checking off, so a failed write RAISES.
+        This is the first call at this site that can: before it, the bytes simply
+        sat in the buffer and a dead stderr cost nothing. And the site is inside
+        the engine's OnDebug seam, so an exception here unwinds through eng.Run
+        and the net at the bottom of this file turns it into Halt(3) -- the code
+        reserved for an interpreter bug -- with the BASIC program half-executed.
+        The engine's own rule is that errors are values, not exceptions; the VM is
+        not written to be unwound by a seam. Two lines above, the same author
+        wrapped Eof(Input) in a try/except for exactly this reason.
+
+        The shape is PhosphorCrtLib.SendToNul's. A diagnostic that cannot be
+        delivered is not worth a fault. }
+      {$push}{$I-}
+      Flush(StdErr);
+      {$pop}
+      if IOResult <> 0 then ;    // nowhere left to say it
       FSilent := True;
       Exit(daRun);
     end;
@@ -3274,6 +3372,14 @@ begin
     eng.ArmDebug(armed, AStopAtEntry);
 
     Writeln(StdErr, Format('phosphor debug: %s -- h for help', [ExtractFileName(APath)]));
+    { THE RULE, AT ITS FOURTH SITE: the next statement is the whole program. A
+      person watching this banner arrive AFTER the program they were told they
+      could type `h` at has already finished is watching the buffer, not the
+      debugger. Guarded like the others -- see the notice in OnStop. }
+    {$push}{$I-}
+    Flush(StdErr);
+    {$pop}
+    if IOResult <> 0 then ;    // nowhere left to say it
     line := eng.Run(source);
     if line <> 0 then
     begin
@@ -3838,6 +3944,19 @@ begin
           Continue;
         end;
         Writeln(StdErr, 'error: ', eng.ErrorMessage);
+        { THE DIAGNOSTIC THE SESSION CONTINUES AFTER -- which is what earns the
+          flush, and not being the only one. The REPL has a second
+          Writeln(StdErr,...) below; that one is followed by `Result := 2; Exit`,
+          and the RTL flushes at exit, so it needs nothing.
+
+          Same rule as the notice above: flush before the process keeps running.
+          Invisible on Windows for the handle-identity reason, and on Linux an
+          editor driving the REPL down a pipe saw the error at exit rather than
+          after the line that caused it. Guarded for the reason written there. }
+        {$push}{$I-}
+        Flush(StdErr);
+        {$pop}
+        if IOResult <> 0 then ;    // nowhere left to say it
       end;
       pending := '';
       waitingFor := '';
@@ -3957,6 +4076,35 @@ end;
 { The whole command line, in a routine rather than in the program body, so the
   body can be nothing but the crash net wrapped round a single call. Every path
   out of here is a Halt; it does not return. }
+{ IS THIS STANDARD FILE A TERMINAL SOMEBODY IS LOOKING AT, as opposed to a pipe,
+  a file or NUL? Asked of the handle inside the Text record, because that is the
+  one that acts: --no-console re-points these files and GetStdHandle would then
+  answer about something else. }
+function TextIsTerminal(var AText: Text): Boolean;
+{$IFDEF WINDOWS}
+var
+  h: THandle;
+  mode: DWORD;
+begin
+  h := THandle(TextRec(AText).Handle);
+  Result := (GetFileType(h) = FILE_TYPE_CHAR) and GetConsoleMode(h, mode);
+end;
+{$ELSE}
+begin
+  Result := IsATTY(TextRec(AText).Handle) = 1;
+end;
+{$ENDIF}
+
+procedure GuiFlagNotice();
+begin
+  Writeln(StdErr, 'phosphor: --gui is no longer needed; this binary runs GUI ' +
+                  'programs directly (the flag is accepted and ignored)');
+  {$push}{$I-}
+  Flush(StdErr);
+  {$pop}
+  if IOResult <> 0 then ;    // nowhere left to say it
+end;
+
 procedure RunCommandLine;
 var
   i, code: Integer;
@@ -4225,8 +4373,10 @@ begin
       // session is there. Kept working rather than removed, and said out loud
       // rather than ignored -- a flag that quietly does nothing is worse than one
       // that is refused.
-      Writeln(StdErr, 'phosphor: --gui is no longer needed; this binary runs GUI ' +
-                      'programs directly (the flag is accepted and ignored)')
+      { SAME RULE: this notice falls through the argument loop to the run at the
+        bottom of this procedure, so the whole program stands between it and the
+        exit that would otherwise deliver it. }
+      GuiFlagNotice()
     else if arg = 'run' then
       { optional verb; ignore }
     else if arg = '--no-console' then
@@ -4324,13 +4474,49 @@ begin
     the path it sent. The bytes depend on the console the user happened to launch
     from, which is not a property this host should have.
 
-    THE PROGRAM'S OWN OUTPUT IS UNAFFECTED, and that is why this is safe to do at
-    the door: it leaves through FileWrite(StdOutputHandle, ...) at :404 as raw
-    bytes and has never passed through a Text file at all. Every byte-exact golden
-    in this tree compares that path. Which is also why the five suites cannot tell
-    this fix from a no-op -- see the case in tests/ that hexdumps stderr. }
-  SetTextCodePage(Output, CP_UTF8);
-  SetTextCodePage(StdErr, CP_UTF8);
+    THE WRITE THIS HOST MAKES FOR THE PROGRAM IS UNAFFECTED: the program's own
+    output leaves through FileWrite(StdOutputHandle, ...) at :404 as raw bytes and
+    has never passed through a Text file. That is what every byte-exact golden in
+    this tree compares, and it is why the five suites cannot tell the stderr half
+    of this from a no-op -- see the case in tests/ that hexdumps stderr.
+
+    IT IS NOT THE WHOLE JOURNEY, and saying it was is how the READ below went
+    unfixed for a day. }
+
+  { ...BUT ONLY WHERE UTF-8 IS WHAT THE READER WANTS, and that is a question
+    about the HANDLE, not about the platform.
+
+    Pinned unconditionally, this fixed the consumer and broke the person. A
+    program reading this stream -- PhosphorIDE, a CI log, a shell pipeline --
+    wants UTF-8 and says so in writing. A console wants the bytes it can render:
+    on a Windows console left at its default codepage, 850 on the machine this
+    was written on, raw UTF-8 is mojibake, which is exactly what this file's own
+    header says at the top and what one unconditional call made true of every
+    diagnostic in the host. Caught in review the same day it was written, before
+    it reached anyone.
+
+    ASKED OF THE HANDLE THE Text IS ACTUALLY BOUND TO, through TextRec, and not
+    of GetStdHandle(STD_ERROR_HANDLE). Those are the same handle almost always
+    and NOT after --no-console re-points a standard file at NUL; this project has
+    lost three defects to judging one copy of a value while a different copy
+    acted, and the one that acts is the one in the Text record.
+
+    INPUT IS PINNED ON THE SAME RULE, and until 2026-09-18 it was not pinned at
+    all -- so the PROGRAM'S OWN OUTPUT depended on the console its author
+    happened to launch from. Same bytes in, same binary, stdout to a file:
+
+      chcp 65001 -> 63 61 66 c3 a9               cafe-acute, correct
+      chcp 850   -> 63 61 66 e2 94 9c c2 ae      U+251C U+00AE
+      chcp 437   -> 63 61 66 e2 94 9c e2 8c 90   U+251C U+2310
+
+    Three codepages, three different programs. The comment that used to sit here
+    said the program's own output was unaffected; that was true of the WRITE,
+    which leaves through FileWrite as raw bytes, and false end to end, because
+    the bytes had already been mangled on the way IN. No test could see it: no
+    file under tests/ or examples/ carries a byte >= 0x80. }
+  if not TextIsTerminal(Output) then SetTextCodePage(Output, CP_UTF8);
+  if not TextIsTerminal(StdErr) then SetTextCodePage(StdErr, CP_UTF8);
+  if not TextIsTerminal(Input) then SetTextCodePage(Input, CP_UTF8);
 
   // Then, before anything can raise: take the LCL's modal crash dialog out of
   // the picture. See TCrashGuard above -- linking Forms is what puts it there,

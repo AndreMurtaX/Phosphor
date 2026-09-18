@@ -55,8 +55,20 @@ lazroot="${lcl%/lcl/units/*}"
   -Fu"$root/engine" -Fu"$root/engine/libs" \
   -Fu"$root/host/gui/libs" -Fu"$root/host/packages" \
   -FU"$units" -FE"$bin" -o"$exe" \
-  "$root/host/console/phosphor.lpr" >"$buildlog" 2>&1
+  "$root/host/console/phosphor.lpr" >"$buildlog" 2>&1 || fpcfailed=$?
+# PRINTED BEFORE THE EXIT CODE IS ACTED ON, and that is the whole point of the
+# `|| fpcfailed=$?` above. This `cat` used to be the statement after a bare fpc
+# call, so under `set -e` a FAILED build aborted the script here -- two lines of
+# output, exit 1, and the compiler's actual message left in a temporary file
+# nobody was told the name of. On 2026-09-18 that turned a one-line Linux error
+# ("Identifier not found IsATTY") into a silent failure that had to be traced
+# with `bash -x` to recover. A build log is never more wanted than when the build
+# failed.
 cat "$buildlog"
+if [ "${fpcfailed:-0}" -ne 0 ]; then
+  echo "build FAILED (fpc exit $fpcfailed)"
+  exit "$fpcfailed"
+fi
 
 # --- a -vewn build must be clean: FAIL on any warning/note (host packages too) ---
 # The trailing '|| true' matters under 'set -euo pipefail': a CLEAN log has no

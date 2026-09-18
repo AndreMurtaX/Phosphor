@@ -159,6 +159,25 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   margin. **Derive a check's parameters from the thing it measures** -- the back-date
   target is now computed from the newest source the guard actually reads -- and assert
   BOTH directions, because a guard that refused everything would have passed too.
+- **Shipping files between the two machines can stamp a source in the FUTURE, and
+  then every staleness gate refuses.** `scripts/check-examples.py` recuses itself when
+  the newest source is newer than `bin/phosphor` -- correct, and the trap is that the
+  premise can be false. `tar` preserves the *Windows* mtime, and on 2026-09-18 the two
+  clocks were **15 seconds apart**, Windows ahead. So a file edited on Windows landed
+  on the VM stamped ahead of the VM's own "now", the binary built immediately
+  after was older than its own source, and the suite reported SUITE FAILED. An
+  identical run fifteen seconds later reported SUITE OK with the tree untouched. The
+  tell was in the transfer, one screen earlier and read past: *"tar: scripts/test.sh:
+  time stamp 2026-09-18 17:38:57 is 8.98 s in the future"*. **A failure that does not
+  reproduce, on the second machine, right after a file transfer, is a clock before it
+  is a defect** -- measure it (`date +%s` on both) before reading the code. And do not
+  "fix" it by relaxing the gate: the gate is right, and a gate that tolerates a source
+  newer than its binary is the stale-binary trap this file opens with. Extract with
+  `tar -xm` instead -- it stamps every file at the RECEIVING machine's now -- and then
+  BUILD before running anything, because `-m` makes the whole tree look freshly edited,
+  which is true, and the gate is measuring the right thing again. **The documented route
+  never hits this**: `git pull` stamps at checkout, so the window is exactly the case
+  where a `tar` is carrying work that is not committed yet.
 - **And a filter can hide the answer as easily as an exit code can.** Piping a run
   through `grep` for the line you expect shows nothing when the tool instead printed an
   error you did not expect — which reads like a silent pass. `scripts/test-suite.sh`

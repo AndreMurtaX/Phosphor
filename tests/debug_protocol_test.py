@@ -1189,7 +1189,10 @@ until4(lambda m: m.get('seq') == s)
 
 # THE TRAFFIC HAS TO ARRIVE WHILE THE PROGRAM RUNS, and answering a stop is not
 # that. The reader deliberately does not nudge a VM that is parked in the seam
-# (host/console/phosphor.lpr:1388, the 2026-09-15 repair), so every `continue`
+# (the FVMParked guard in TDebugProto.InterruptRun, the 2026-09-15 repair --
+# named rather than numbered: this line cited :1388 for one day, which is a
+# different routine, and check-crossrefs.py validates a path and never a line),
+# so every `continue`
 # lands on a stopped program and sets no interrupt at all. Written that way first,
 # this case PASSED against the binary that loses a quarter of its hits -- a test
 # that cannot fail, which is the class this suite exists to refuse.
@@ -1416,6 +1419,354 @@ out6, _ = proc6.communicate(timeout=60)
 check('with its own work done', b't=15' in out6.replace(b'\r\n', b'\n'), repr(out6[:40]))
 conn6.close()
 srv6.close()
+
+# ---------------------------------------------------------------------------
+# A SESSION HELPER, because the four cases below differ only in what they send.
+#
+# The six sessions above each grew their own copy of this; these four share one
+# so that a fix to the framing is a fix to all of them.
+# ---------------------------------------------------------------------------
+class Wire(object):
+    def __init__(self, source, name):
+        self.path = os.path.join(WORK, name)
+        with open(self.path, 'w', newline='\n') as f:
+            f.write(source)
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(('127.0.0.1', 0))
+        self.srv.listen(1)
+        port = self.srv.getsockname()[1]
+        self.proc = subprocess.Popen(
+            [EXE, 'debug', '--port', str(port), self.path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.srv.settimeout(10)
+        self.conn, _ = self.srv.accept()
+        self.buf = b''
+
+    def send(self, **kw):
+        self.conn.sendall((json.dumps(kw) + chr(10)).encode('utf-8'))
+
+    def raw(self, text):
+        """Several frames in ONE segment, which is what an editor's arming looks
+        like on the wire and is the window three of these defects lived in."""
+        self.conn.sendall(text.encode('utf-8'))
+
+    def recv(self, timeout=30):
+        self.conn.settimeout(timeout)
+        while b'\n' not in self.buf:
+            try:
+                chunk = self.conn.recv(65536)
+            except socket.timeout:
+                return None
+            if not chunk:
+                return None
+            self.buf += chunk
+        line, self.buf = self.buf.split(b'\n', 1)
+        return json.loads(line.decode('utf-8'))
+
+    def init(self):
+        self.send(seq=1, cmd='initialize')
+        while True:
+            m = self.recv()
+            if m is None or m.get('seq') == 1:
+                return
+
+    def close(self):
+        try:
+            self.proc.kill()
+        except Exception:
+            pass
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        self.srv.close()
+
+
+# ---------------------------------------------------------------------------
+# A FRAME ARRIVING ON A LINE ARMED WITH A CONDITION THAT IS FALSE.
+#
+# The ordinary "stop when i = 5000" mark, on a line the program is running
+# through. Between 95fb4fb and 2026-09-18 this stranded the editor's whole
+# queue for the rest of the run.
+#
+# The mechanism, because it is worth knowing and nothing else in this file
+# reaches it: the engine consumes the interrupt flag at the boundary in one
+# InterlockedExchange, then reports the boundary under its most specific fact --
+# the armed line -- so the reason is `breakpoint`, not `pause`. The host's drain
+# was keyed on `AReason = srPause`, so it did not run; the condition was false,
+# so the host resumed; and the flag was already spent, so no later boundary
+# could re-derive the frame. The `pause` was never read, never answered, and
+# every frame queued behind it died with it.
+#
+# Measured against the build before the repair: no ack, no `stopped`, program
+# ran to completion, three runs of three. Against 95fb4fb^ the same script is
+# answered in 0.00 s -- which is what makes it a regression and not a gap.
+# ---------------------------------------------------------------------------
+# NO CLOCK IN THIS SESSION, AND NO BOUNDARY LEFT UNARMED. Both halves are
+# load-bearing, and each was learned by getting it wrong.
+#
+# A first draft slept one second and hoped the program was still running. It
+# passed on Windows and on an idle VM and went red inside scripts/test.sh under
+# the load of a full runner -- a flake, and a flake is a test on its way to being
+# switched off.
+#
+# A second draft was deterministic and CAUGHT NOTHING: a mutation restoring the
+# reason-keyed drain passed it. Taking the sleep out had taken the defect's reach
+# with it. Resuming from a stop on line 2, the very next boundary is the `for` on
+# line 3 -- unarmed -- so the interrupt arrived as `srPause`, which is the one
+# reason the broken drain did handle. The sleep had been doing real work: it put
+# the program deep inside the loop, where the only boundary is the armed one.
+#
+# So: line 2 carries an unconditional mark, purely to get a stop the program
+# cannot miss. From that stop the set is REPLACED with lines 3 and 4 -- the `for`
+# and the loop body, which between them are every boundary reachable after the
+# resume -- each with a condition that is never true. `next` is a block
+# terminator and carries no boundary, so there is no third. Whenever the frame
+# lands, the reason is `breakpoint`, never `pause`.
+#
+# Then `continue` and `pause` go out in ONE segment. The parked loop takes
+# `continue` and breaks -- it stops reading the moment a frame resumes the
+# program -- so the `pause` is still queued when the VM starts running again.
+#
+# IT WORKS WHETHER OR NOT THE NUDGE LANDS, which is the last thing that could
+# have made it timing-dependent. If the reader nudges after the VM has left the
+# park, the interrupt fires at the next boundary. If it nudges while FVMParked is
+# still set, there is no interrupt at all -- and the armed line brings the host to
+# the boundary anyway, where the drain finds the frame. Both paths stop.
+#
+# WATCHED FAILING: with `if FState = dbgRunning` put back to
+# `if (AReason = srPause) and (FState = dbgRunning)`, this session goes red and
+# the other nine stay green.
+w7 = Wire('rem every boundary after the resume is armed, and every condition false\n'
+          't = 0\n'
+          'for i = 1 to 50000\n'
+          '  t = t + 1\n'
+          'next\n'
+          'println "t="; t\n'
+          'end\n', 'falsecond.bas')
+w7.init()
+w7.send(seq=2, cmd='setBreakpoints', path=w7.path, lines=[2], conditions=[''])
+acked7 = False
+for _ in range(10):
+    m = w7.recv(timeout=10)
+    if m is None:
+        break
+    if m.get('seq') == 2:
+        acked7 = True
+        break
+check('the synchronising mark is installed', acked7)
+
+w7.send(seq=3, cmd='launch', stopAtEntry=False)
+at2 = None
+for _ in range(20):
+    m = w7.recv(timeout=20)
+    if m is None or m.get('event') == 'exited':
+        break
+    if m.get('event') == 'stopped' and m.get('line') == 2:
+        at2 = m
+        break
+check('it stops before the loop', at2 is not None, str(at2))
+
+# Every boundary from here on is armed, and every condition is false.
+w7.send(seq=4, cmd='setBreakpoints', path=w7.path, lines=[3, 4],
+        conditions=['i = -1', 'i = -1'])
+armed7 = False
+for _ in range(10):
+    m = w7.recv(timeout=10)
+    if m is None:
+        break
+    if m.get('seq') == 4:
+        armed7 = m.get('lines') == [3, 4]
+        break
+check('the false-condition marks replace it', armed7)
+
+# ONE SEGMENT, both frames. See the note above for why this is the whole trick.
+w7.raw(json.dumps({'seq': 5, 'cmd': 'continue'}) + chr(10) +
+       json.dumps({'seq': 6, 'cmd': 'pause'}) + chr(10))
+
+paused7 = False
+stopped7 = None
+for _ in range(40):
+    m = w7.recv(timeout=20)
+    if m is None:
+        break
+    if m.get('seq') == 6:
+        paused7 = m.get('ok') is True
+    if m.get('event') == 'stopped':
+        stopped7 = m
+        break
+    if m.get('event') == 'exited':
+        break
+
+check('a pause colliding with a false-condition mark is answered', paused7)
+check('and it stops the program', stopped7 is not None,
+      'no stopped event -- the frame was stranded')
+check('and the stop says it was the pause',
+      (stopped7 or {}).get('reason') == 'pause', str(stopped7))
+# AND IT STOPPED AT AN ARMED LINE, which is the assertion that makes this session
+# sensitive to the drain running at the RIGHT boundary rather than eventually.
+# Without it, a host that re-nudges on every resume still answers the pause --
+# at the first UNARMED boundary, which here is the println after the loop, 50000
+# iterations and a second and a quarter later. Answered late at the wrong place
+# is a different thing from answered, and only the line says which happened.
+check('at the armed boundary, not whenever the loop happens to end',
+      (stopped7 or {}).get('line') in (3, 4), str(stopped7))
+w7.close()
+
+# ---------------------------------------------------------------------------
+# A STEP IN FLIGHT WHEN THE HOST IS CALLED FOR SOMETHING ELSE.
+#
+# `stepOver` a line that calls a function, with a mark inside that function
+# whose condition is false. The host is called at a boundary in the middle of
+# the step, declines the hit, and resumes -- and until 2026-09-18 it resumed by
+# returning daRun, which the engine reads as "the user pressed Continue" and
+# which clears the pending step. The step was annihilated and the program ran
+# to its end with no `stopped` event.
+#
+# DELIBERATELY NOT A RACE. The socket-traffic shape of this defect exists too --
+# one unrelated frame 0.5 s into the call does the same thing -- but it is
+# timing-dependent and a timing-dependent test is a flake waiting to be
+# disabled. A false condition on a line inside the call reaches the identical
+# code path with no second thread and no sleep, 100% of the time.
+#
+# PRE-EXISTING, not a regression: measured identically against 95fb4fb^.
+# ---------------------------------------------------------------------------
+w8 = Wire('rem a step-over across a call with a boundary inside it\n'
+          'function slow() local s, j\n'
+          '  s = 0\n'
+          '  for j = 1 to 2000\n'
+          '    s = s + 1\n'
+          '  next\n'
+          '  return s\n'
+          'endfunction\n'
+          'a = 1\n'
+          'b = slow()\n'
+          'c = 2\n'
+          'println "c="; c\n'
+          'end\n', 'stepover.bas')
+w8.init()
+w8.send(seq=2, cmd='setBreakpoints', path=w8.path, lines=[5, 10],
+        conditions=['j = -1', ''])
+w8.recv(timeout=10)
+w8.send(seq=3, cmd='launch', stopAtEntry=False)
+
+at10 = None
+for _ in range(40):
+    m = w8.recv(timeout=20)
+    if m is None or m.get('event') == 'exited':
+        break
+    if m.get('event') == 'stopped' and m.get('line') == 10:
+        at10 = m
+        break
+check('the unconditional mark on the call line stops', at10 is not None, str(at10))
+
+w8.send(seq=4, cmd='stepOver')
+stepped8 = None
+for _ in range(40):
+    m = w8.recv(timeout=25)
+    if m is None:
+        break
+    if m.get('event') == 'stopped':
+        stepped8 = m
+        break
+    if m.get('event') == 'exited':
+        break
+
+check('a step over a call survives a boundary inside the call',
+      stepped8 is not None, 'no stop -- the step was cancelled mid-flight')
+check('and it lands on the next line, as a step',
+      (stepped8 or {}).get('line') == 11 and
+      (stepped8 or {}).get('reason') == 'step', str(stepped8))
+w8.close()
+
+# ---------------------------------------------------------------------------
+# A `pause` IN THE SAME SEGMENT AS `launch`.
+#
+# fbf74d4 taught the entry boundary to drain that queue, so the frame is read
+# and answered `ok:true` -- and then the entry resume, which asked only about
+# FPendingArm and ArmedAt, threw the decision away. The interrupt the pause had
+# just set fired at the next boundary, whose drain cleared FPauseWanted as its
+# first statement, and the program ran to completion. Measured at 42.66 s to
+# exit with no `stopped` event; before fbf74d4 the same frame got no reply at
+# all, so the day's work turned silence into a false `ok`.
+# ---------------------------------------------------------------------------
+w9 = Wire('rem a pause that arrives before the program draws breath\n'
+          't = 0\n'
+          'for i = 1 to 200000\n'
+          '  t = t + 1\n'
+          'next\n'
+          'println "t="; t\n'
+          'end\n', 'entrypause.bas')
+w9.init()
+w9.raw(json.dumps({'seq': 2, 'cmd': 'launch', 'stopAtEntry': False}) + chr(10) +
+       json.dumps({'seq': 3, 'cmd': 'pause'}) + chr(10))
+
+acked9 = False
+stopped9 = None
+for _ in range(40):
+    m = w9.recv(timeout=20)
+    if m is None:
+        break
+    if m.get('seq') == 3:
+        acked9 = m.get('ok') is True
+    if m.get('event') == 'stopped':
+        stopped9 = m
+        break
+    if m.get('event') == 'exited':
+        break
+
+check('a pause sent with launch is answered', acked9)
+check('and an answered pause actually stops the program', stopped9 is not None,
+      'ok:true and then nothing -- the decision was dropped')
+check('and it stops as a pause', (stopped9 or {}).get('reason') == 'pause',
+      str(stopped9))
+w9.close()
+
+# ---------------------------------------------------------------------------
+# A `disconnect` WITH `terminate:true` IN THE SAME SEGMENT AS `launch`.
+#
+# The protocol document is explicit that `terminate` true kills the program.
+# The drain answered it `ok:true` and then returned the literal daRun, or fell
+# through to `FAction := daRun` below, so the daStop it had decided was thrown
+# away either way. An editor that asked for the process to die was left holding
+# a live one: measured at 43.36 s, running to normal completion.
+#
+# The loop is sized so that "it exited" cannot be confused with "it finished":
+# unmolested this program runs for far longer than the wait below.
+# ---------------------------------------------------------------------------
+w10 = Wire('rem a program that does not end soon\n'
+           't = 0\n'
+           'for i = 1 to 40000000\n'
+           '  t = t + 1\n'
+           'next\n'
+           'println "t="; t\n'
+           'end\n', 'entrykill.bas')
+w10.init()
+w10.raw(json.dumps({'seq': 2, 'cmd': 'launch', 'stopAtEntry': False}) + chr(10) +
+        json.dumps({'seq': 3, 'cmd': 'disconnect', 'terminate': True}) + chr(10))
+
+acked10 = False
+for _ in range(10):
+    m = w10.recv(timeout=10)
+    if m is None:
+        break
+    if m.get('seq') == 3:
+        acked10 = m.get('ok') is True
+        break
+check('a terminating disconnect sent with launch is answered', acked10)
+
+died10 = True
+try:
+    out10, _ = w10.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    died10 = False
+    out10 = b''
+check('and the program it asked to kill is dead', died10,
+      'still running 20 s after ok:true')
+check('and it did not simply run to its end',
+      b't=' not in out10.replace(b'\r\n', b'\n'), repr(out10[:40]))
+w10.close()
 
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))

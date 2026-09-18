@@ -692,13 +692,31 @@ begin
   // state in it. The engine's VM comes from DebugVM, and only while it runs.
   vm := FEngine.DebugVM;
   ShowWhereWeAre(ALine, AFrameDepth, vm);   // read the state; see the section above
-  Result := WaitForTheUserToClickSomething; // daRun / daStepInto / ... / daStop
+  Result := WaitForTheUserToClickSomething; // daRun / daStepInto / ... / daKeep
 end;
 ...
 eng.OnDebug := @dbg.Stopped;
 eng.ArmDebug([12, 37, 41], {stop at entry} True);
 rc := eng.Prepare(script);
 ```
+
+**Return `daKeep` for a boundary you did not ask for.** A host with a socket is
+called at boundaries that are nothing to do with the user: one taken to read a
+frame that arrived, or one on a breakpoint whose condition turned out to be
+false. `daRun` is the wrong answer to those, because `daRun` means *the user
+pressed Continue* and it **cancels a pending step** — so a frame arriving in the
+middle of a `stepOver` used to annihilate the step and let the program run to its
+end with the debugger silent. `daKeep` resumes and changes nothing: whatever step
+was pending is still pending.
+
+| action | resumes | the pending step |
+| --- | --- | --- |
+| `daRun` | yes | **cleared** — the user chose to continue |
+| `daKeep` | yes | left alone — nobody chose anything |
+| `daStepInto` / `daStepOver` / `daStepOut` | yes | replaced, anchored here |
+| `daStop` | no | the clean end `end` gives |
+
+The rule of thumb: if a person did not click something, answer `daKeep`.
 
 **`eng.DebugVM` is how the seam reaches the engine.** The callback is given a line
 and a frame depth and nothing else; `Self` inside it is your adapter, not a VM.

@@ -855,6 +855,58 @@ end;
 
   Both cases below are written against the build that has the defect and were
   watched failing there first. }
+procedure CheckKeepDoesNotCancelAStep;
+var
+  eng: TPhosphorEngine;
+  d: TDrive;
+  rc: Integer;
+begin
+  { A STEP IS STILL PENDING WHEN THE HOST IS CALLED FOR SOMETHING ELSE.
+
+    FixStep line 2 is `y = add2(3)`, so a step-over there runs the whole body.
+    Line 9 is inside that body and is ARMED, so the engine stops in the middle of
+    the step and asks the host what to do about a breakpoint that is nothing to do
+    with the step. There is no second thread here and no socket: the collision is
+    a property of the program, and it happens every single time.
+
+    A host in that position has nothing to decide. It wants to resume, and until
+    2026-09-18 the only word for that was daRun -- which the engine reads as the
+    user pressing Continue, and which sets dmRun. The step was annihilated by a
+    breakpoint the user had declined, and the program ran to its end with the
+    debugger silent. daKeep is the word for resuming without deciding anything.
+
+    BOTH HALVES ARE ASSERTED, and the second is the one that keeps the first
+    honest: it answers the identical boundary with daRun and pins that the step is
+    LOST. If daKeep were ever made a synonym for daRun -- the obvious "simplifying"
+    edit -- the first assertion would still pass on its own and only this one would
+    catch it. }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepOver, daStepOver, daKeep, daRun]);
+  try
+    eng.ArmDebug([9], True);
+    rc := eng.Run(FixStep);
+    CheckInt(rc, 0, 'keep: the fixture runs');
+    CheckStr(d.Trace, Want('E1@0 S2@0 B9@1 S3@0'),
+             'daKeep at a boundary inside a stepped-over call leaves the step pending');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepOver, daStepOver, daRun]);
+  try
+    eng.ArmDebug([9], True);
+    rc := eng.Run(FixStep);
+    CheckInt(rc, 0, 'keep: the fixture runs again');
+    CheckStr(d.Trace, Want('E1@0 S2@0 B9@1'),
+             'and daRun at the same boundary CANCELS it -- the two are not the same word');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+end;
+
 procedure CheckInterruptSharesBoundary;
 var
   eng: TPhosphorEngine;
@@ -3155,6 +3207,7 @@ begin
   CheckFaultRebase();
   CheckArmedLines();
   CheckPause();
+  CheckKeepDoesNotCancelAStep();
   CheckInterruptSharesBoundary();
   CheckStop();
   CheckSeamRaises();

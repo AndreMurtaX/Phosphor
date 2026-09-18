@@ -102,7 +102,8 @@ type
     afterwards, which is exactly what END does. A host that wants the run to look
     like a FAILURE is the one deciding that, and says so itself. }
   TPhosphorStopReason = (srEntry, srBreakpoint, srStep, srPause);
-  TPhosphorDebugAction = (daRun, daStepInto, daStepOver, daStepOut, daStop);
+  TPhosphorDebugAction = (daRun, daStepInto, daStepOver, daStepOut, daStop,
+                          daKeep);
 
   { THE DEBUG SEAM, AND THE ONE THING THAT SEPARATES IT FROM EVERY OTHER SEAM IN
     THIS ENGINE: IT MAY BLOCK.

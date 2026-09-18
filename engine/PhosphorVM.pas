@@ -4346,7 +4346,21 @@ begin
 
   case act of
     daRun:
+      { THE USER SAID CONTINUE, and that cancels a pending step -- which is the
+        whole difference between this and daKeep below. }
       FDbgMode := dmRun;
+    { RESUME WITHOUT DECIDING ANYTHING. A host is called at boundaries it did not
+      ask for: to read its socket, or to decline a breakpoint whose condition is
+      false. Those resumes are not the user pressing Continue, and until
+      2026-09-18 they had no way to say so -- they returned daRun, and daRun set
+      dmRun, so any step in flight was annihilated by a frame arriving during it.
+
+      Measured before the split, on the shipped build: `stepOver` a line that
+      calls a function, one unrelated frame 0.5 s into the call, and the program
+      ran to completion with no `stopped` event; and with a false-condition
+      breakpoint on a line INSIDE that call, the same loss with no socket traffic
+      at all, 100% of the time. The step survives both now. }
+    daKeep: ;
     daStepInto:
       begin
         FDbgMode := dmStepInto;

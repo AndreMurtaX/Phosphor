@@ -2646,8 +2646,55 @@ begin
         reassignment is to the value parameter on purpose, so that every line
         below this one -- the event, the state, the terminal debugger's prompt --
         reads the reason a stop at any other line would have. }
+      { AND EVERYTHING THE EDITOR SENT BEFORE THE PROGRAM DREW BREATH, which
+        until now was stranded for the whole run.
+
+        A frame arriving between `launch` and this first boundary sets no
+        interrupt at all: TDbgReader nudges through FRunVM, and FRunVM is nil
+        until the line above this block assigns it. So the nudge is a no-op, the
+        flag is never set, and there is nothing left for any later boundary to
+        re-derive the frame from -- it simply sits in the inbox until the process
+        ends. No reply, no error, no event; an editor waiting on that seq waits
+        for ever.
+
+        IT IS NOT AN EDGE CASE. `launch` and `setBreakpoints` written back to back
+        are free to arrive in one read, which is exactly what an editor arming its
+        breakpoints as it starts produces. Measured on the build before this: one
+        sendall of both, and the reply to `launch` came back, seq 3 never did, a
+        five-pass loop stopped zero times and the program ran to completion.
+
+        THIS IS THE PLACE, and not a drain just before eng.Run: that would narrow
+        the window rather than close it, and the obvious test passes against the
+        narrower version. Here the VM thread is parked in the seam, the inbox is
+        reachable, and nothing else has run yet.
+
+        THE SET IS RE-ASKED AFTER THE DRAIN, because a setBreakpoints in that
+        queue may have armed this very boundary -- the whole point of sending it
+        with `launch`. Asking before draining would answer about the set the
+        editor had already replaced. }
+      while TakeLine(raw) do
+        if Handle(raw, ALine, ADepth) then Break;
+      if FPendingArm then
+      begin
+        { Armed HERE rather than left for the next boundary: this is a safe point
+          and the next boundary may be the one the editor asked about. }
+        FPendingArm := False;
+        Arm();
+      end;
       if not ArmedAt(ALine) then
+      begin
+        { The same re-nudge the pause drain carries, and for the same reason: the
+          interrupt is consumed once per boundary, so a frame that landed while
+          this drain ran would be seen and not woken for. }
+        FLock.Enter();
+        try
+          pending := FInbox.Count > 0;
+        finally
+          FLock.Leave();
+        end;
+        if pending then InterruptRun();
         Exit(daRun);
+      end;
       AReason := srBreakpoint;
     end;
   end;

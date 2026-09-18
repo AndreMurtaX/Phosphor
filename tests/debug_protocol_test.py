@@ -1333,6 +1333,90 @@ except Exception:
 conn5.close()
 srv5.close()
 
+# ---------------------------------------------------------------------------
+# A FRAME IN THE SAME SEGMENT AS `launch`.
+#
+# An editor that arms its breakpoints as it starts writes `launch` and
+# `setBreakpoints` back to back, and TCP is free to hand both to one read. Until
+# 2026-09-18 the second was stranded for the whole run: TDbgReader nudges the VM
+# through FRunVM, FRunVM is nil until the first stop assigns it, so the nudge was
+# a no-op and no later boundary could re-derive the frame. No reply, no error, no
+# event -- an editor waiting on that seq waited for ever.
+#
+# Measured before the repair: the reply to `launch` arrived, seq 3 never did, a
+# five-pass loop stopped zero times, and the program ran to completion.
+#
+# The two frames go out in ONE sendall deliberately. Sending them separately
+# usually works, because the reader is normally quick enough to have taken the
+# first before the second arrives -- which is exactly how this stayed invisible.
+# ---------------------------------------------------------------------------
+BAS6 = os.path.join(WORK, 'segment.bas')
+with open(BAS6, 'w', newline='\n') as f:
+    f.write('t = 0\nfor i = 1 to 5\n  t = t + i\nnext\nprintln "t="; t\nend\n')
+
+srv6 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv6.bind(('127.0.0.1', 0))
+srv6.listen(1)
+port6 = srv6.getsockname()[1]
+proc6 = subprocess.Popen([EXE, 'debug', '--port', str(port6), BAS6],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+srv6.settimeout(10)
+conn6, _ = srv6.accept()
+conn6.settimeout(30)
+buf6 = [b'']
+
+
+def recv6(timeout=30):
+    conn6.settimeout(timeout)
+    while b'\n' not in buf6[0]:
+        try:
+            chunk = conn6.recv(65536)
+        except socket.timeout:
+            return None
+        if not chunk:
+            return None
+        buf6[0] += chunk
+    line, buf6[0] = buf6[0].split(b'\n', 1)
+    return json.loads(line.decode('utf-8'))
+
+
+conn6.sendall((json.dumps({'seq': 1, 'cmd': 'initialize'}) + chr(10)).encode('utf-8'))
+while True:
+    m = recv6()
+    if m is None or m.get('seq') == 1:
+        break
+
+wire6 = (json.dumps({'seq': 2, 'cmd': 'launch', 'stopAtEntry': False}) + chr(10) +
+         json.dumps({'seq': 3, 'cmd': 'setBreakpoints', 'path': BAS6, 'lines': [3]}) + chr(10))
+conn6.sendall(wire6.encode('utf-8'))
+
+answered6 = False
+hits6 = 0
+gone6 = False
+for _ in range(60):
+    m = recv6(timeout=20)
+    if m is None:
+        break
+    if m.get('seq') == 3:
+        answered6 = True
+        check('the installed set comes back for the stranded frame',
+              m.get('lines') == [3], str(m))
+    if m.get('event') == 'stopped' and m.get('line') == 3:
+        hits6 += 1
+        conn6.sendall((json.dumps({'seq': 90, 'cmd': 'continue'}) + chr(10)).encode('utf-8'))
+    if m.get('event') == 'exited':
+        gone6 = True
+        break
+
+check('a frame sent with launch is answered, not stranded', answered6)
+check('and its breakpoint fires every pass', hits6 == 5, '%d of 5' % hits6)
+check('and the program exits', gone6)
+out6, _ = proc6.communicate(timeout=60)
+check('with its own work done', b't=15' in out6.replace(b'\r\n', b'\n'), repr(out6[:40]))
+conn6.close()
+srv6.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

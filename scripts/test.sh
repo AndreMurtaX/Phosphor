@@ -760,4 +760,43 @@ fi
 if [ "$okR" -eq 0 ]; then echo 'PASS  R:debug protocol (eight sessions, 117 assertions, stdout untouched)'
 else echo 'FAIL  R:the debug protocol session did not complete'; fail=1; fi
 
+# S: A DIAGNOSTIC IS UTF-8, WHATEVER THE CONSOLE IS.
+#
+# The RTL stamps every output text file with the console codepage when it opens
+# it (rtl/inc/text.inc:2644), so before 2026-09-18 every Writeln(StdErr, ...) was
+# transcoded on the way out -- argv, a path a script named, text sliced from a
+# source file, not merely a localised RTL message. On Windows under `chcp 850`
+# the e-acute of a missing file left as the single byte 0x82, which is not valid
+# UTF-8 at all, and an editor reading the stream and expecting UTF-8 rendered
+# whatever its widgetset made of it.
+#
+# THIS ASSERTS BYTES, because nothing else can. Every byte-exact golden in this
+# tree compares the PROGRAM's stdout, which leaves through FileWrite on a handle
+# and never touches a Text file -- so the fix and a no-op are indistinguishable
+# to all five suites. That is why this block exists and why it hexdumps.
+#
+# On Unix the console codepage is the locale's and is UTF-8 on any modern system,
+# so this passes here before and after the repair. It is still run: the property
+# is "the host emits UTF-8", and a platform where that is already true is not a
+# reason to stop asserting it. The direction that could only ever fail on Windows
+# is asserted there, in test.ps1, under a pinned codepage.
+badname="$tmpdir/nao_existe_café.bas"
+# THE `if` FORM, for the reason block F states twelve blocks above and which this
+# line got wrong anyway: under `set -e` a plain assignment from a command that
+# exits non-zero ABORTS THE SCRIPT. `phosphor run <missing>` exits 2, so the first
+# Linux run of this block died right here -- silently, after R had printed PASS,
+# with no S line at all and an exit code that looked like the block failing.
+if "$exe" run "$badname" > "$tmpdir/s.out" 2> "$tmpdir/s.err"; then scode=0; else scode=$?; fi
+okS=0
+[ "$scode" -eq 2 ] || { echo "        S: expected exit 2, got $scode"; okS=1; }
+# c3 a9 is e-acute in UTF-8. Anything else -- a lone 0x82, a 0xef 0xbf 0xbd
+# replacement, a bare '?' -- means the byte was transcoded or lost.
+if ! grep -q "$(printf 'caf\303\251')" "$tmpdir/s.err"; then
+  echo "        S: the accented path did not come back as UTF-8:"
+  od -An -tx1 "$tmpdir/s.err" | tail -2 | sed 's/^/        /'
+  okS=1
+fi
+if [ "$okS" -eq 0 ]; then echo 'PASS  S:diagnostics are UTF-8 (an accented path survives stderr)'
+else echo 'FAIL  S:a diagnostic lost or transcoded a byte'; fail=1; fi
+
 exit "$fail"

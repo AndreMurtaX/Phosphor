@@ -4302,7 +4302,37 @@ begin
 end;
 
 begin
-  // FIRST, before anything can raise: take the LCL's modal crash dialog out of
+  { THIS HOST EMITS UTF-8, INCLUDING ITS DIAGNOSTICS, and until 2026-09-18 that
+    was true of the program's output and false of everything this host said about
+    it.
+
+    The RTL stamps every output text file with the console's codepage at open
+    time -- rtl/inc/text.inc:2644, `TextRec(f).CodePage :=
+    GetStandardCodePageProc(scpConsoleOutput)`, which on Windows is
+    GetConsoleOutputCP -- so every Writeln(StdErr, ...) is transcoded on the way
+    out, whatever is in it. Not just a localised RTL message: argv, a path the
+    script named, text sliced out of a source file.
+
+    MEASURED, the same binary and the same argument, twice:
+
+      chcp 65001   ... 63 61 66 c3 a9 2e 62 61 73    (e-acute, UTF-8)
+      chcp 850     ... 63 61 66 82 2e 62 61 73       (e-acute, CP850)
+
+    0x82 alone is not valid UTF-8, so an editor reading this stream and expecting
+    UTF-8 -- which PhosphorIDE does, in writing -- renders whatever its widgetset
+    makes of an invalid sequence, and a `file not found:` line no longer equals
+    the path it sent. The bytes depend on the console the user happened to launch
+    from, which is not a property this host should have.
+
+    THE PROGRAM'S OWN OUTPUT IS UNAFFECTED, and that is why this is safe to do at
+    the door: it leaves through FileWrite(StdOutputHandle, ...) at :404 as raw
+    bytes and has never passed through a Text file at all. Every byte-exact golden
+    in this tree compares that path. Which is also why the five suites cannot tell
+    this fix from a no-op -- see the case in tests/ that hexdumps stderr. }
+  SetTextCodePage(Output, CP_UTF8);
+  SetTextCodePage(StdErr, CP_UTF8);
+
+  // Then, before anything can raise: take the LCL's modal crash dialog out of
   // the picture. See TCrashGuard above -- linking Forms is what puts it there,
   // and this binary links Forms whether or not a window is ever opened. This
   // entry catches what arrives through the message loop of a GUI program.

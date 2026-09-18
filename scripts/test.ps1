@@ -982,6 +982,55 @@ if ($LASTEXITCODE -ne 0) {
 if ($okR) { Write-Host "PASS  R:debug protocol (eight sessions, 117 assertions, stdout untouched)" -ForegroundColor Green }
 else { Write-Host "FAIL  R:the debug protocol session did not complete" -ForegroundColor Red }
 
+# S: A DIAGNOSTIC IS UTF-8, WHATEVER THE CONSOLE CODEPAGE IS.
+#
+# The RTL stamps every output text file with GetConsoleOutputCP when it opens it
+# (rtl/inc/text.inc:2644), so before 2026-09-18 every Writeln(StdErr, ...) was
+# transcoded on the way out -- argv, a path a script named, text sliced from a
+# source file, not merely a localised RTL message. Measured on the same binary
+# with the same argument: `chcp 850` gave the e-acute as the single byte 0x82,
+# `chcp 65001` gave c3 a9. The bytes depended on the console the user happened to
+# launch from, and 0x82 alone is not valid UTF-8, so PhosphorIDE -- which reads
+# this stream and expects UTF-8, in writing -- rendered an accident.
+#
+# THIS IS THE DIRECTION ONLY WINDOWS CAN PROVE. On Unix the console codepage is
+# the locale's and is UTF-8 on any modern system, so the Unix twin passes before
+# and after the repair; it is still run there, because the property is "the host
+# emits UTF-8" and a platform where that is already true is not a reason to stop
+# asserting it.
+#
+# TWO CODEPAGES, AND BOTH ARE LOAD-BEARING. Under 850 alone the assertion proves
+# the transcode is gone; under 65001 alone it passes vacuously -- the bytes were
+# already right there before the fix. Running both is what also refuses a fix
+# that double-encodes.
+#
+# EACH BATCH FILE IS WRITTEN IN THE CODEPAGE IT DECLARES. Writing both in CP850
+# made the 65001 run report ef bf bd (U+FFFD): cmd read the 0x82 as UTF-8, found
+# it invalid, and substituted -- before phosphor was reached at all. That is a
+# harness measuring a different copy of the value than the one that acts, and it
+# cost two wrong readings of this very block while it was being written.
+$okS = $true
+foreach ($cp in 850, 65001) {
+    $encS = if ($cp -eq 65001) { New-Object System.Text.UTF8Encoding($false) }
+            else { [System.Text.Encoding]::GetEncoding(850) }
+    $errS = Join-Path $tmp "s$cp.err"
+    $batS = Join-Path $tmp "s$cp.bat"
+    $bodyS = "@echo off`r`nchcp $cp >nul`r`n`"$exe`" run `"nao_existe_caf" + [char]0xE9 + ".bas`" 2> `"$errS`"`r`n"
+    [System.IO.File]::WriteAllBytes($batS, $encS.GetBytes($bodyS))
+    cmd /c "`"$batS`"" | Out-Null
+    $bytesS = [System.IO.File]::ReadAllBytes($errS)
+    # c3 a9 is e-acute in UTF-8. A lone 0x82, an ef bf bd replacement or a bare
+    # 0x3f question mark all mean the byte was transcoded or lost.
+    $hexS = ($bytesS | ForEach-Object { '{0:x2}' -f $_ }) -join ''
+    if ($hexS -notmatch 'c3a9') {
+        Write-Host ("        S: under chcp {0} the accented path came back as:" -f $cp) -ForegroundColor DarkGray
+        Write-Host ("        " + (($bytesS | Select-Object -Last 14 | ForEach-Object { '{0:x2}' -f $_ }) -join ' ')) -ForegroundColor DarkGray
+        $okS = $false
+    }
+}
+if ($okS) { Write-Host 'PASS  S:diagnostics are UTF-8 (an accented path survives stderr under chcp 850 and 65001)' -ForegroundColor Green }
+else { Write-Host 'FAIL  S:a diagnostic lost or transcoded a byte' -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ -and $okR) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR -and $okS) { exit 0 } else { exit 1 }

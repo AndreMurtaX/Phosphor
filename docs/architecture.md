@@ -131,6 +131,21 @@ minefield otherwise.
 - The engine never transcodes source bytes: it slices literals out of the
   source string and hands the raw bytes to the host. What you typed is what
   comes out.
+- **And so are the host's own diagnostics**, which until 2026-09-18 was true of
+  the program's output and false of everything the host said *about* it. The RTL
+  stamps every output text file with the console codepage when it opens it
+  (`rtl/inc/text.inc:2644`), so every `Writeln(StdErr, ...)` was transcoded on the
+  way out — argv, a path a script named, text sliced from a source file. The same
+  binary and the same argument gave `caf c3 a9` under `chcp 65001` and `caf 82`
+  under `chcp 850`, and `0x82` alone is not valid UTF-8 at all. `phosphor.lpr`
+  now calls `SetTextCodePage` on both streams at startup, so the bytes no longer
+  depend on the console the user launched from. This was written down only in
+  PhosphorIDE, which reads the stream and relies on it; an invariant recorded
+  solely by the program that depends on it is not an invariant of this one.
+  Block S of `scripts/test.{ps1,sh}` asserts it in bytes, because no golden can:
+  every byte-exact expectation in this tree compares the PROGRAM's stdout, which
+  leaves through `FileWrite` on a handle and never touches a `Text` file, so the
+  fix and a no-op are indistinguishable to all five suites.
 - The console host writes output as raw bytes straight to the OS stdout handle,
   so the golden comparison is byte-exact regardless of the console's codepage. On
   Windows, when that handle is an interactive console it writes through the

@@ -1524,6 +1524,71 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-09-18 · five critics and a judge attacked one day's work before it was
+  committed, and two of the defects they found were in commits already pushed.**
+  The round's own output was five changes and one deferral; the review ruled two
+  blockers and nine should-fixes real, struck one of its own findings and one
+  attribution, and named what it had not reached. Four lessons, and the last one
+  is the one to keep.
+
+  **(1) A PRECEDENCE CHANGE IN THE ENGINE ORPHANED A FACT THE HOST WAS READING.**
+  Reporting a boundary under its most specific fact was right. But the host's only
+  queue drain was keyed on `AReason = srPause`, which was sound only while a
+  consumed interrupt always produced srPause -- and the change ended that. With an
+  ordinary conditional mark the editor's Pause button did nothing and every frame
+  behind it died. The morning's commit message had even argued that the host could
+  not repair this class from outside, which was true and is exactly why the host
+  side needed moving in the same breath. **When you change what a value MEANS, grep
+  for everyone who reads it** -- the compiler cannot, because the type did not
+  change.
+
+  **(2) THREE DRAINS WITH THREE DIFFERENT SETS OF POST-DRAIN QUESTIONS.** The entry
+  drain asked about the pending arm, the pause drain asked about the pause flag,
+  and the false-condition resume did not drain at all. Every question one of them
+  forgot to ask was a separate defect with its own reproduction, and they were
+  found by three different reviewers looking at three different things. One drain
+  and one set of questions closed all four at once, plus a cosmetic fifth nobody
+  had filed. **Duplicated control flow does not produce one bug N times; it
+  produces N different bugs, and they are found N different ways.**
+
+  **(3) A FIX FOR A CONSUMER CAN BREAK THE PERSON.** Pinning stderr to UTF-8 made
+  the editor's stream correct and made every diagnostic on an interactive console
+  mojibake -- a fact this host's own header states at the top of the file. And its
+  sibling had been missed entirely: `Input` was never pinned, so the PROGRAM'S OWN
+  OUTPUT depended on the console its author launched from, three codepages giving
+  three different streams. The comment asserting that could not happen is what kept
+  anyone from looking. **Ask which reader wants which bytes, and make the code ask
+  the same question at runtime** -- here, of the handle inside the Text record,
+  because `--no-console` re-points those files and the other copy would have
+  answered about something else.
+
+  **(4) A DETERMINISTIC REWRITE OF A FLAKY TEST STOPPED MEASURING ANYTHING, AND
+  ONLY THE MUTATION SAID SO.** The wire case for the first blocker slept a second
+  and hoped the program was still running; it went red under a full runner's load,
+  which is a flake, and a flake is a test on its way to being switched off. The
+  deterministic rewrite was green, was obviously better, and **caught nothing** --
+  a mutation restoring the defect passed it 145/145. Removing the sleep had removed
+  the defect's reach: resuming from the synchronising stop, the next boundary was
+  unarmed, so the interrupt arrived under the one reason the broken drain did
+  handle. The sleep had been doing real work nobody had written down -- putting the
+  program deep inside the loop, where the only boundary is the armed one.
+
+  The third attempt arms every boundary reachable after the resume AND asserts
+  **where** the program stopped, which is the assertion that bites: without it even
+  a broken host answers the pause eventually, at the first unarmed boundary, a
+  second and a quarter and fifty thousand iterations later. *Answered late at the
+  wrong place is not the same as answered.*
+
+  **THIS IS THE ROUND'S REAL FINDING.** This playbook already says to remove the
+  fix and watch the test fail, every time. That rule is usually described as
+  guarding against a test written after the fact. Here it caught something else
+  entirely: a REFACTOR of a working test that silently moved it off the defect.
+  Nothing else could have -- the rewrite was green, deterministic, better-argued
+  and shorter than what it replaced. **A test's reach is not preserved by making it
+  more rigorous. Re-prove it after every rewrite, including the ones that are
+  obviously improvements.**
+
+
 - **2026-09-16 · the second implementation found two defects this repository could
   not see.** PhosphorIDE finished its half of PDBP and drove it -- start,
   breakpoints, the three steps, continue, a variables pane, a call-stack pane, on

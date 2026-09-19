@@ -1543,6 +1543,22 @@ the sweep above. Verify before fixing, as with everything on this page.
   the staleness gate two entries down, which had never once fired on Linux and
   would also have passed had it refused everything.
 
+  **(1b) AND THE SESSION THAT SPAWNED THE TASK CALLED IT OBSOLETE, TWICE, WITHOUT
+  READING IT.** This is the half worth carrying, because it is the cheaper mistake
+  to make. One of its own auditors had flagged the defect from inside a
+  documentation audit -- correctly; it found it by running the build with a wrong
+  `-Lazarus` and watching the tree lose its binary. The parent then fixed the
+  reported instance itself, never withdrew the chip, and when the owner started it
+  anyway announced in the conversation that the work was already done and the task
+  was stale. It had in fact finished, committed, and closed a residual the parent's
+  own fix had left standing -- an hour before the parent said any of that.
+
+  A spawned task is not made obsolete by having fixed "the same thing". **Read what
+  it produced before saying what it is.** `git log --oneline main..<its branch>` is
+  one command and it answered this in one line. The whole reason to flag work to a
+  separate session is that it will look at the thing with fresh eyes; dismissing its
+  result from memory of your own throws away exactly what you asked for.
+
   **(2) THE REORDER MOVED THE PROBE THE REPORT NAMED, NOT EVERYTHING THAT COULD
   FAIL.** `buildlog="$(mktemp)"` still sat *after* `rm -f "$exe"` in `build.sh`,
   and under `set -euo pipefail` a command substitution that fails ends the script

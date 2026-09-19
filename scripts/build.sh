@@ -69,8 +69,15 @@ fi
 lazroot="${lcl%/lcl/units/*}"
 
 mkdir -p "$units"
-rm -f "$exe"
+# The scratch file is claimed HERE, above the delete, for the same reason the LCL
+# probe is: mktemp can fail -- a full or unwritable $TMPDIR -- and under `set -e`
+# a command substitution that fails exits the script, which one line further down
+# would mean exiting with the binary already removed and nothing compiled. It was
+# the last statement between the delete and fpc that could fail; now nothing
+# between them can, and the delete still happens before the compile, which the
+# "trust the artifact" check at the bottom depends on.
 buildlog="$(mktemp)"
+rm -f "$exe"
 
 "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
   -Fu"$lcl/gtk2" -Fu"$lcl" \

@@ -1524,6 +1524,38 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-09-18 · the reorder that answered the report and left one line behind.**
+  A report arrived saying both build scripts delete the binary before probing for
+  the LCL, so a mistyped `-Lazarus` costs a working `phosphor` and nothing says
+  so. Every word of it was true, it quoted line numbers, and it had already been
+  fixed that morning -- it was written against the blob one commit earlier.
+  **Line numbers date a report.** Resolve them against `HEAD` before touching
+  anything; `git log -S` on a phrase from the fix answers it in one run. Two
+  things came out of measuring it anyway rather than replying that it was stale.
+
+  **(1) A GUARD THAT STOPPED DELETING ANYTHING WOULD PASS THE OBVIOUS TEST.**
+  "The binary survives a bad `-Lazarus`" is satisfied by a script that no longer
+  removes the stale binary at all -- and that failure is invisible, because the
+  build still succeeds and the `--version` check at the bottom would then be
+  confirming *yesterday's* artifact. So the check was run both ways, with a
+  planted sentinel at `bin/phosphor.exe`: a bad `-Lazarus` leaves the sentinel
+  byte-for-byte, an ordinary build replaces it with a real binary. Same shape as
+  the staleness gate two entries down, which had never once fired on Linux and
+  would also have passed had it refused everything.
+
+  **(2) THE REORDER MOVED THE PROBE THE REPORT NAMED, NOT EVERYTHING THAT COULD
+  FAIL.** `buildlog="$(mktemp)"` still sat *after* `rm -f "$exe"` in `build.sh`,
+  and under `set -euo pipefail` a command substitution that fails ends the script
+  -- so a full or unwritable `$TMPDIR` reproduced the reported outcome exactly:
+  binary gone, nothing compiled, an error about something else entirely.
+  `TMPDIR=/nonexistent bash scripts/build.sh` demonstrates it against the previous
+  revision in one line. The question a reorder like this has to answer is not
+  "is the probe above the delete" but **"can anything between the delete and the
+  thing it makes room for fail?"** -- the whole gap, not the statement in the
+  report. In the PowerShell twin the answer was already yes, for a reason worth
+  writing down: what sits in that gap there is `Join-Path` calls, which cannot
+  throw.
+
 - **2026-09-18 · five critics and a judge attacked one day's work before it was
   committed, and two of the defects they found were in commits already pushed.**
   The round's own output was five changes and one deferral; the review ruled two

@@ -7,13 +7,34 @@ The spiritual successor to Plan9Basic (Delphi/FireMonkey, now frozen). **Not a
 port:** several language decisions change on purpose — see
 [docs/decisions.md](docs/decisions.md).
 
-## Status — the full language + libraries
+## Status — the whole oracle corpus, and where this language stops
 
-Phosphor runs the full Plan9Basic **language + library oracle**, byte-exact green on
-Windows *and* Linux: the whole `tests/suite` corpus (arithmetic, strings, arrays,
-dictionaries, JSON, dates, regex, string lists, error handling, the strict-syntax
-rules), the negative suite, and six opt-in host packages (crt, base64, zip, gzip,
-http, sqlite). **715 built-in functions** are registered across those libraries and
+Phosphor runs Plan9Basic's **test oracle**, byte-exact green on Windows *and*
+Linux: 43 of its 45 `tests/suite` files have a counterpart here — 40 under the same
+names, three (`23_archive`, `32_http_offline`, `34_sqlite_full`) under
+`tests/packages` — alongside 27 suite files of Phosphor's own, the negative suite,
+and six opt-in host packages (crt, base64, zip, gzip, http, sqlite).
+`18_examples_catalog` is Plan9Basic's own website plumbing and out of scope;
+`11_encoding` is answered for base64 and gzip but not for its regex third.
+
+**It is not the whole of Plan9Basic, and this heading used to say it was.** The
+languages are close — mechanically rewriting the `#` handle suffix to `@` makes 95
+of Plan9Basic's 98 example programs compile here, so the distance is mostly one
+recorded decision — but close is not the same. `next` takes no control variable,
+`do while` is the only `do` form, an unknown escape is an error rather than literal
+text, and indexing is base 1 throughout, so a Plan9Basic program that *does*
+compile can still answer differently: `instr` returns 0 where Plan9Basic returns
+-1, and `mid$` counts from 1 where `s_mid` counts from 0. Plan9Basic's `cls`,
+`dump`, `assert`, `watch`/`unwatch`, `traceon`/`traceoff` and `refreshrate`
+statements are not in this language at all.
+
+The library surface is narrower in three places, and none of them was written down
+before 2026-09-18: **regex is find and split only** (8 of Plan9Basic's 16 names —
+no `regex_replace$`, `regex_escape$`, `regex_isvalid`), **HTTP speaks GET and
+POST**, and Plan9Basic's AI library has no counterpart here. See
+[docs/decisions.md](docs/decisions.md) for what changed on purpose.
+
+**715 built-in functions** are registered across those libraries and
 packages together -- 534 names from `engine/libs` and 181 from `host/packages` -- and
 the `phosphor` binary registers all of them, which is why the resolution section below
 points back at this number instead of stating a second one. Every one is exercised by

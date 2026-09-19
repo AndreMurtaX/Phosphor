@@ -520,6 +520,25 @@ def main():
 
         ('docs/libraries/gui-form.md', 'form_show'): 'DELIBERATE: named in a sentence that says it is gone',
 
+        # PLAN9BASIC'S NAMES, WRITTEN TO SAY THIS TREE DOES NOT HAVE THEM. Added
+        # 2026-09-18, when the README stopped claiming "the full Plan9Basic
+        # language + libraries" and started saying where the two part company --
+        # which cannot be said without naming what is missing. The same DELIBERATE
+        # case as the two above, with one difference: those name a spelling this
+        # project RETIRED, these name one it NEVER HAD. Both are prose that is
+        # correct and will never be 'fixed', which is the test.
+        #
+        # If any of these is ever implemented, its entry stops matching and this
+        # gate fails, naming the line to delete -- which is right, because the
+        # sentence beside it would have become false on the same day.
+        ('README.md', 'regex_replace$'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+        ('README.md', 'regex_escape$'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+        ('README.md', 'regex_isvalid'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+        ('docs/decisions.md', 'regex_replace$'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+        ('docs/decisions.md', 'regex_escape$'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+        ('docs/decisions.md', 'regex_isvalid'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+        ('docs/decisions.md', 'regex_match'): 'DELIBERATE: a Plan9Basic name, said here to be absent',
+
     }
 
     # A prose count known to be stale, pinned to BOTH numbers so the entry stops

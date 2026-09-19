@@ -125,6 +125,55 @@ trailing `+`/`-`; a value too wide for its field is prefixed with `%`. String fi
 the format repeats while values remain. Because Phosphor string literals use backslash
 escapes, a `\`…`\` field is written with doubled backslashes: `"\\   \\"`.
 
+## What this language refuses that Plan9Basic accepts
+
+Recorded 2026-09-18, after a review measured that README.md's pointer at this file
+promised more than the file delivered. Four divergences actually **refuse** a valid
+Plan9Basic program; only the first was written down.
+
+The measurement, because it sets the scale: of Plan9Basic's own 98 example
+programs, `phosphor` refuses **79** at compile time. Rewrite the `#` handle suffix
+to `@` mechanically and **95 of the 98 compile**. So the gulf is almost entirely
+one decision, and what remains is three.
+
+- **The `#` handle suffix is `@` here.** Already decided and already recorded above;
+  it is named again only because it is 76 of those 79 refusals by itself.
+
+- **`next` takes no control variable.** Plan9Basic writes `next col`; here it is a
+  bare `next`, and the named form is refused with *"'next' takes no variable"*.
+  This is the one that bites in practice: **33 occurrences** across Plan9Basic's
+  corpus, including inside the oracle itself (its own `23_archive` suite file). The
+  reason it stays: the control variable is already fixed by the `for`, so a name on
+  the `next` is either redundant or a lie, and a lie there is a defect a reader
+  cannot see. Phosphor names the variable in the diagnostic instead.
+
+- **`do while <cond> ... loop` is the only `do` form.** Plan9Basic has three --
+  `DO WHILE`, `DO UNTIL`, and a bare `DO` that loops until an explicit exit. Bare
+  `DO` and `DO UNTIL` are refused here with *"only 'do while <cond> ... loop' is
+  supported"*, which says so plainly rather than mis-parsing.
+
+- **An unknown escape is an error, not literal text.** Plan9Basic keeps `\w` as a
+  backslash followed by `w`; here it is refused. This is not a small difference in
+  practice -- it refuses every regex literal written the ordinary way, which is why
+  Plan9Basic's own `19_RegexLib_Tests` does not compile here. The rule is
+  deliberate and is recorded under *Encoding* below: a silently-kept backslash is
+  how a typo becomes data. The cost is that a Plan9Basic regex needs its
+  backslashes doubled.
+
+**And compiling is not agreeing.** Two carried-over names answer differently, both
+measured: `instr` returns 0 for "not found" where Plan9Basic's `n_instr` returns
+-1, and `mid$` counts from 1 where `s_mid` counts from 0. The Plan9Basic idiom
+`if instr(x$, "+") >= 0` therefore inverts in silence, with a successful exit code.
+Base-1 indexing is decided above and is not being revisited; this note exists so
+that a person porting a program knows which two names to search for first.
+
+**The library surface is narrower in three places**, which is not a language
+decision but belongs beside these because a porter hits it the same way: regex is
+find and split only (8 of Plan9Basic's 16 names -- no `regex_replace$`,
+`regex_escape$`, `regex_isvalid`, `regex_match`), HTTP speaks GET and POST, and
+Plan9Basic's AI library has no counterpart. The regex gap is why the oracle's
+`11_encoding` has no whole counterpart here.
+
 ## Rules carried over from Plan9Basic
 
 - **Two-word block terminators are accepted as equivalents of the one-word
@@ -135,7 +184,14 @@ escapes, a `\`…`\` field is written with doubled backslashes: `"\\   \\"`.
   `end` token immediately followed by the keyword; a bare `end` (the END
   statement) and `end` on its own line before a `function` definition are left
   alone (an EOL separates them). Note what is NOT in the list: `for`/`do`/`repeat`
-  end with `next`/`loop`/`until`, so there is no `end for` to accept.
+  end with `next`/`loop`/`until`, so there is no `end for` **here**.
+
+  That last clause used to read "so there is no `end for` to accept", which was a
+  wrong fact about the reference rather than a decision about this language:
+  Plan9Basic DOES accept it, through `ParseEnd`/`btkFor` in its `parser.pas`, and
+  `ENDFOR` is in its keyword table. It is a form Phosphor declines, not one that
+  never existed. The distinction matters because this file is where a reader comes
+  to learn what changed on purpose.
 - `sqr()` is square root.
 - `s$[n]` indexes a line; `s$[[n]]` indexes a character (both base 1 now).
 - `do while <cond> ... loop`; `function f(n) local a, b ... endfunction`.

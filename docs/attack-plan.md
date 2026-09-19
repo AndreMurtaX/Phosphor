@@ -285,6 +285,45 @@ resume that decides nothing — and both are pinned by tests watched failing fir
   line numbers would be noisy enough to be turned off. Worth revisiting only if
   named citations start rotting too.
 
+### Open — a statement that compiles, exits 0 and does nothing
+
+**Writing through a string index sugar is silently discarded.** Reproduced:
+
+```
+s$ = "abc"
+s$[[1]] = "z"
+println "after=" + s$
+```
+
+prints `after=abc` and exits **0**. No diagnostic, no effect. `s$[1] = "z"` does
+the same. The reads are fine and are documented — `s$[[n]]` is the n-th character
+and `s$[n]` the n-th line — and they work: `s$[[1]]` gives `a`.
+
+**The writes are not documented anywhere**, so the sugars are read-only by design
+and the defect is that the compiler ACCEPTS the assignment rather than refusing it.
+The reason it accepts it: `s$[[1]]` is parsed in the expression grammar and emitted
+as a `strchar$`/`strline$` call, so it has no lvalue form at all; the statement then
+parses as the comparison `strchar$(s$,1) = "z"` and is discarded as an unused
+expression result. The indexed-assignment branch beside it is guarded on the
+variable being a handle, so a `$` name never reaches it.
+
+**This is the worst shape a gap can take** — a grep says the feature is there, the
+exit code agrees, and only the output disagrees. Worse, the engine's own diagnostic
+advertises it: index a NUMBER and it answers *"[] indexing needs a handle (@) or
+string ($) variable"*, which tells a reader that string indexing is supported
+without saying that only reading is.
+
+**The minimum fix is a refusal, not an implementation.** Something like *"a string
+index is read-only -- build the new string with mid$ or replacestr$"*. Doing it
+needs the statement dispatcher to recognise `<stringvar> [ ... ] =` before the
+expression grammar swallows it, which is a small amount of real parser work plus a
+negative test; that is why this is filed and not done in the same pass as a README
+correction.
+
+**How it was missed:** no test in any corpus writes through a string index, and
+nothing would have failed if the feature had never existed. Plan9Basic has both
+forms as real assignments in its own parser, which is how the review found it.
+
 ### Declined, not missed
 
 **Continuous integration for this repository.** The 2026-09-18 buildability

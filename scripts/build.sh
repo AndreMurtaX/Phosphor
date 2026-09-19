@@ -28,11 +28,8 @@ bin="$root/bin"
 cpu="$("$FPC" -iTP)"           # e.g. x86_64
 units="$bin/units/${cpu}-linux"
 exe="$bin/phosphor"
-mkdir -p "$units"
-rm -f "$exe"
 
 echo "compiler: $FPC"
-buildlog="$(mktemp)"
 # The LCL comes in because phosphor IS the GUI host now -- one binary that brings
 # the widgetset up when a session is reachable and stays a console interpreter
 # when there is not. NOTE the units it will name in its own uses clause: Gtk2Int
@@ -40,13 +37,40 @@ buildlog="$(mktemp)"
 # CreateWidgetset, which opens the X display before main and is exactly what made
 # an LCL-linked binary unusable headless. The engine still sees none of it; the
 # boundary check above fails the build if a unit under engine/ reaches the LCL.
-cpu="$("$FPC" -iTP)"
+#
+# ASKED BEFORE ANYTHING IS DESTROYED. This probe used to sit after the `rm -f`
+# below, so a machine without Lazarus lost its working phosphor to build a
+# replacement that was never going to be attempted -- silently, with an error
+# about units and no hint that anything had been removed. Same ordering defect as
+# the PowerShell twin, fixed in the same change.
+#
+# $LAZARUSDIR FIRST, because someone who built Lazarus with fpcupdeluxe or by hand
+# has it nowhere on this list and knows where it is. The list after it covers the
+# distribution packages and the two common manual locations, and the failure names
+# every root it looked in rather than only the package to install: a search that
+# reports what it searched is one the reader can correct.
 lcl=""
-for d in /usr/share/lazarus/*/lcl/units/${cpu}-linux /usr/lib/lazarus/*/lcl/units/${cpu}-linux ~/lazarus/lcl/units/${cpu}-linux; do
+roots=""
+[ -n "${LAZARUSDIR:-}" ] && roots="$LAZARUSDIR/lcl/units/${cpu}-linux"
+roots="$roots /usr/share/lazarus/*/lcl/units/${cpu}-linux"
+roots="$roots /usr/lib/lazarus/*/lcl/units/${cpu}-linux"
+roots="$roots /opt/lazarus/lcl/units/${cpu}-linux"
+roots="$roots $HOME/lazarus/lcl/units/${cpu}-linux"
+roots="$roots $HOME/fpcupdeluxe/lazarus/lcl/units/${cpu}-linux"
+for d in $roots; do
   [ -d "$d/gtk2" ] && { lcl="$d"; break; }
 done
-[ -n "$lcl" ] || { echo "LCL gtk2 units not found (install lazarus/lcl-gtk2)"; exit 1; }
+if [ -z "$lcl" ]; then
+  echo "LCL gtk2 units not found (install lazarus/lcl-gtk2, or set \$LAZARUSDIR)"
+  echo "looked in:"
+  for d in $roots; do echo "  $d"; done
+  exit 1
+fi
 lazroot="${lcl%/lcl/units/*}"
+
+mkdir -p "$units"
+rm -f "$exe"
+buildlog="$(mktemp)"
 
 "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -dLCLgtk2 \
   -Fu"$lcl/gtk2" -Fu"$lcl" \

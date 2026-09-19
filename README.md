@@ -44,17 +44,63 @@ own and never names a host or GUI unit — the build fails if it does. Everythin
 program can touch (the console, files, the GUI, the network) arrives through a small
 host around it. Three hosts ship in this repo, plus the opt-in packages.
 
+## Prerequisites
+
+**Lazarus, with the FPC 3.2.2 it bundles.** Not FPC alone: `phosphor` is one
+binary that is both the console interpreter and the GUI host, so it **links the
+LCL** and the build needs Lazarus present even when you never open a window. This
+section says so because the README told Linux readers for months that a native
+`fpc` was enough, and it is not.
+
+| | what to install | where the build looks |
+| --- | --- | --- |
+| **Linux** | `sudo apt install lazarus lcl-gtk2` (or your distribution's equivalent) | `/usr/share/lazarus/*`, `/usr/lib/lazarus/*`, `~/lazarus` — it needs the `gtk2` units under one of them |
+| **Windows** | the Lazarus installer | `C:\lazarus`; installed elsewhere, pass `-Lazarus <dir>` to `scripts\build.ps1` |
+
+Both build scripts name the missing piece if it is not there, so a wrong guess
+costs one run and not an afternoon.
+
+**Python 3, for the ten source gates.** Building needs none. But
+`scripts/test-suite` **fails** without an interpreter rather than skipping the
+gates — deliberately, because a skipped check reads as a pass — so a machine with
+no Python cannot run the acceptance suite.
+
 ## Quickstart
 
+Two routes. They are not the same build, and the difference is written down here
+rather than discovered.
+
 ```powershell
-# Build the console host (drives fpc directly; the source of truth):
-powershell -File scripts\build.ps1        # Windows
-# bash scripts/build.sh                    # Linux
+# 1. The scripts -- AUTHORITATIVE. This is the build every suite is run against,
+#    and the only one that also runs the engine boundary check (no unit under
+#    engine/ may reach a host or the LCL), which no project file can express.
+powershell -NoProfile -File scripts\build.ps1     # Windows
+# bash scripts/build.sh                             # Linux
 
 # Write a program:
 #   println "Hello, " + "world"
 bin\phosphor.exe run hello.bas
 ```
+
+```powershell
+# 2. Lazarus. Open host\console\phosphor.lpi and press Ctrl+F9, or:
+lazbuild --build-mode=Release host\console\phosphor.lpi
+
+#    TWO BUILD MODES, ON PURPOSE:
+#      Default -- debug info, for stepping through the host in the IDE.
+#      Release -- the same flags scripts\build.* passes. Measured on both:
+#                 identical in size on Windows (4,939,264 bytes), 72 bytes apart
+#                 on Linux -- an embedded path, not different code. Default is
+#                 34.5 MB of debug info. Build Release when the binary is what
+#                 you want.
+#    Both pass -vewn, so the warnings and notes this project holds itself to are
+#    VISIBLE in the Messages window. Making one of them FAIL the build is still
+#    the scripts' job -- a .lpi cannot do it.
+```
+
+To build the reusable engine package or the demo instead, see
+[lazarus/README.md](lazarus/README.md); the demo needs
+`lazbuild --add-package-link lazarus/phosphor_engine.lpk` once.
 
 ```
 phosphor run  <file.bas>            run a program
@@ -139,10 +185,20 @@ run from a shell, they answer 0 and change nothing, because that window is the u
 Printing after releasing is safe — output that was a console goes to the null device,
 output redirected to a file or pipe keeps going there.
 
-`phosphor` (the console host) is the develop-compile-run tool. There is no dedicated
-IDE — write `.bas` in any editor and run it. A GUI program is run the same way,
-`phosphor run <file.bas>`, and builds an LCL window; to embed the engine in your own
-Pascal program, see [docs/embedding.md](docs/embedding.md).
+`phosphor` (the console host) is the develop-compile-run tool, and a `.bas` file
+written in any editor runs as it is. **There is also a dedicated editor:**
+[PhosphorIDE](https://github.com/AndreMurtaX/PhosphorIDE) — a Lazarus application
+with syntax highlighting for this language and a real debugger, breakpoints and
+stepping and a variables pane, driven over a small line-oriented protocol against
+`phosphor debug`. It never links the engine: a script that loops forever or faults
+the interpreter takes its own process down and leaves the editor holding your
+unsaved work. Its getting-started guide expects a checkout of this repository beside it
+(the two side by side, as siblings). (This paragraph said "there is no dedicated IDE" until 2026-09-18,
+which had stopped being true some time before.)
+
+A GUI program is run the same way, `phosphor run <file.bas>`, and builds an LCL
+window; to embed the engine in your own Pascal program, see
+[docs/embedding.md](docs/embedding.md).
 
 ## Learn the language
 
@@ -224,5 +280,6 @@ level over. `check-boundary.py` joined on 2026-09-15 and made it ten.
 | `scripts/`       | `build`, `test`, `test-suite`, `test-classic`, `test-packages`, `test-gui`, `test-examples` (`.ps1`/`.sh`), and the ten source gates described above.|
 | `docs/`          | the documentation above.                                         |
 
-Requirements: FPC 3.2.2 (bundled with Lazarus). Windows builds work out of the box;
-Linux needs a native `fpc` — see [docs/architecture.md](docs/architecture.md), "Linux".
+Requirements are at the top, under [Prerequisites](#prerequisites): Lazarus with
+the FPC 3.2.2 it bundles, on both platforms, because the one binary links the LCL.
+This line used to say Linux needed "a native `fpc`", which did not build.

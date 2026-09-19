@@ -23,6 +23,16 @@
 .PARAMETER Fpc
   Path to fpc.exe. Defaults to the Lazarus FPC on this machine, then PATH.
 
+.PARAMETER Lazarus
+  Where Lazarus is installed. Defaults to C:\lazarus, which is where the
+  installer puts it. `phosphor` is one binary that is also the GUI host, so the
+  build LINKS THE LCL and needs the win32 LCL units under
+  <Lazarus>\lcl\units\x86_64-win64. Installed somewhere else, pass it here.
+
+  This block is the only documentation this parameter has ever had. It was
+  discoverable solely by triggering the error message that suggests it, which is
+  no use to anyone who installed Lazarus elsewhere and read the help first.
+
 .PARAMETER TargetOS
   win64 (default) or linux. linux cross-builds are not yet possible on this
   machine -- see docs/architecture.md, "Linux". The script says so and stops.
@@ -78,18 +88,24 @@ $unitsDir = Join-Path $binDir "units\x86_64-$TargetOS"
 $exe      = Join-Path $binDir 'phosphor.exe'
 $lpr      = Join-Path $root 'host\console\phosphor.lpr'
 
-New-Item -ItemType Directory -Force $unitsDir | Out-Null
-if (Test-Path $exe) { Remove-Item $exe -Force }
-
-Write-Host "compiler: $fpcExe"
+# EVERY PREREQUISITE IS CHECKED BEFORE ANYTHING IS DESTROYED. This probe used to
+# sit AFTER the Remove-Item below, so someone who mistyped -Lazarus, or who simply
+# did not have Lazarus, was left with no binary at all and an error about units --
+# their working phosphor.exe deleted to build a replacement that was never going
+# to be attempted. Nothing announced that; it just was not there afterwards.
+#
 # The LCL comes in because phosphor IS the GUI host now -- one binary that brings
 # the widgetset up when there is a session and stays a console interpreter when
 # there is not. The engine still never sees any of it: the boundary check above
 # scans engine/ and fails the build if a unit there reaches for the LCL.
+Write-Host "compiler: $fpcExe"
 $lcl = Join-Path $Lazarus 'lcl\units\x86_64-win64'
 if (-not (Test-Path (Join-Path $lcl 'win32'))) {
-    throw "LCL win32 units not found under $lcl -- pass -Lazarus <dir>"
+    throw "LCL win32 units not found under $lcl -- install Lazarus, or pass -Lazarus <dir>"
 }
+
+New-Item -ItemType Directory -Force $unitsDir | Out-Null
+if (Test-Path $exe) { Remove-Item $exe -Force }
 $args = @(
     '-Mobjfpc', '-Scghi', '-O2', '-vewn',
     "-T$TargetOS", '-dLCL', '-dLCLwin32',

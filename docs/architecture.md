@@ -244,32 +244,56 @@ emitting a broken command.
 
 Two supported ways to get a Linux binary, in order of preference:
 
-- **Build natively on Linux** (recommended). The phase-1 engine and console host
-  are plain console FPC with no external dependencies, so a native `fpc` on a
-  Linux box, in WSL2, or on a Linux CI runner compiles the same sources
-  unchanged. The console host is already portable: it guards the Windows console
-  API with `{$IFDEF WINDOWS}` and falls back to raw UTF-8 bytes on Unix (where
-  the terminal is UTF-8 natively). Run, from a checkout on the Linux machine:
+- **Build natively on Linux** (recommended). The ENGINE is plain FPC with no
+  external dependencies, and the boundary check enforces that. **The console host
+  is not**, and this paragraph claimed otherwise until 2026-09-18: `phosphor` is
+  one binary that is also the GUI host, so it links the LCL and the build needs
+  **Lazarus with the gtk2 LCL units**, not a native `fpc` alone. On Debian and
+  Ubuntu that is `sudo apt install lazarus lcl-gtk2`; `scripts/build.sh` searches
+  `/usr/share/lazarus/*`, `/usr/lib/lazarus/*` and `~/lazarus` for them and says
+  which package is missing if it finds none.
+
+  The host is otherwise portable: it guards the Windows console API with
+  `{$IFDEF WINDOWS}` and falls back to raw UTF-8 bytes on Unix. Run, from a
+  checkout on the Linux machine:
 
   ```
-  bash scripts/build.sh          # build the console host
-                                 # (the one build; it links the LCL -- see above)
+  bash scripts/build.sh          # build the console host (links the LCL)
   bash scripts/test.sh           # skeleton smoke test (byte-exact golden)
-  bash scripts/test-suite.sh     # the oracle suite + negatives
+  bash scripts/test-suite.sh     # the oracle suite + negatives + the ten gates
   bash scripts/test-classic.sh   # the standard-BASIC command set + the REPL
   bash scripts/test-packages.sh  # the opt-in host packages
-  python3 scripts/coverage.py    # every built-in is tested AND documented
+  bash scripts/test-examples.sh  # every example in examples/manifest.txt
+  bash scripts/test-gui.sh       # the GUI host (needs a display, or xvfb)
   ```
+
+  **All seven, not five.** The list here was short by two for a while, so a Linux
+  reader following it ran less than a Windows one and had no way to tell.
+  `scripts/test-suite.sh` runs the ten Python source gates itself, which is why
+  `coverage.py` is no longer listed separately.
 
   These are the Unix counterparts of the `.ps1` scripts (same boundary check,
   same byte-exact goldens; the `.expected` files are marked `-text` so their LF
-  bytes are identical on both platforms). `lazbuild host/console/phosphor.lpi`
-  also works on Linux and is the IDE path.
+  bytes are identical on both platforms).
 
-  **Verified 2026-09-01** on Ubuntu (Linux 6.8, x86_64, FPC 3.2.2): all three
-  scripts pass natively — the four suite files and four negatives are byte-exact
-  green, the goldens are identical to the Windows run, and UTF-8 output renders
-  correctly through the raw-byte path. Phosphor is confirmed cross-platform.
+  **Or open it in Lazarus.** `lazbuild host/console/phosphor.lpi` works on Linux
+  too. The project has two build modes and they are not interchangeable: `Default`
+  carries debug info for stepping through the host in the IDE, and `Release` is
+  what `scripts/build.sh` produces: the same flags, measured on both machines --
+  identical in size on Windows (4,939,264 bytes) and 72 bytes apart here, which
+  is an embedded path and not different code -- against `Default`'s 34.5 MB.
+  Both pass `-vewn`, so the warnings and
+  notes this project holds itself to are visible in the Messages window; making
+  one of them FAIL the build is still the scripts' job, because a `.lpi` cannot
+  express it. **`scripts/build.*` stays authoritative** for a second reason as
+  well: it runs the engine boundary check, which no project file can carry.
+
+  **Verified 2026-09-18** on Ubuntu 24.04 (x86_64, FPC 3.2.2, Lazarus 4.8), from
+  a fresh anonymous clone of the public repository: `scripts/build.sh` clean,
+  `SUITE OK` with all ten gates, and `scripts/test.sh` green including the two
+  blocks that assert stderr and stdin bytes under two locales. The older note
+  here said "Verified 2026-09-01 ... the four suite files", which described a
+  suite that has not had that shape for some time.
 - **Cross-compile from Windows.** Install the FPC cross bits above
   (`fpcupdeluxe` is the usual way to add the `x86_64-linux` cross target and its
   binutils on Windows). Workable, more moving parts; revisit if a Windows-only

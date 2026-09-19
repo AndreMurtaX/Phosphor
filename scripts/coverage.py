@@ -8,7 +8,8 @@ line), then checks whether each function's name is referenced by any test progra
 function is uncovered.
 
 A handful of built-ins are reached only through SYNTAX SUGAR, never by name -- an
-`a@[i]` compiles to `arr_get`/`arr_set@`, `s$[n]`/`s$[[n]]` to `strline$`/`strchar$`,
+`a@[i]` compiles to `arr_get`/`arr_set@`, `s$[n]`/`s$[[n]]` to `strline$`/`strchar$`
+when read and `strsetline$`/`strsetchar$` when written,
 and a `[...]`/`{...}` literal to the json_*val@/json_*null@/json_array@/json_object@
 builders. Those are exercised by every test that uses the sugar, so they are listed
 in SUGAR_BACKED and counted as covered.
@@ -39,6 +40,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUGAR_BACKED = {
     'arr_get', 'arr_set@',
     'strline$', 'strchar$',
+    'strsetline$', 'strsetchar$',
     'json_array@', 'json_object@',
     'json_pushval@', 'json_pushnull@',
     'json_setval@', 'json_setnull@',

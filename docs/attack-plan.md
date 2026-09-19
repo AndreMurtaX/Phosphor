@@ -285,7 +285,7 @@ resume that decides nothing — and both are pinned by tests watched failing fir
   line numbers would be noisy enough to be turned off. Worth revisiting only if
   named citations start rotting too.
 
-### Open — a statement that compiles, exits 0 and does nothing
+### ~~Open~~ CLOSED 2026-09-18 — a statement that compiled, exited 0 and did nothing
 
 **Writing through a string index sugar is silently discarded.** Reproduced:
 
@@ -323,6 +323,43 @@ correction.
 **How it was missed:** no test in any corpus writes through a string index, and
 nothing would have failed if the feature had never existed. Plan9Basic has both
 forms as real assignments in its own parser, which is how the review found it.
+
+---
+
+**CLOSED, and as an IMPLEMENTATION rather than the refusal filed above.** The
+entry argued the minimum fix was to refuse, because the writes are documented
+nowhere. That was the right call for a README correction and the wrong one for the
+language: the read half exists and is documented, the handle form `a@[i] = x`
+already works, the engine's own diagnostic advertises string indexing without
+qualification, and the reference has both forms as real assignments. Refusing
+would have left the language less consistent than it looks.
+
+`strsetchar$` and `strsetline$` are registered and the compiler grew the lvalue
+branch the sugars never had; `s$[[n]] = x$` is `s$ = strsetchar$(s$, n, x$)`, so a
+string stays a value. `tests/suite/70_string_index_assignment.bas` pins it and was
+watched failing first -- 8 passed, 9 failed against the build that had no setters.
+
+**Two warts of the reference were deliberately not copied,** both read out of its
+source rather than guessed: its character setter assigns `Args[2].s.Chars[0]`, the
+first character of the replacement and nothing else, so `s$[[2]] = "XY"` silently
+loses the Y and a UTF-16 code-unit write halves anything outside the BMP -- here
+the whole replacement takes the place of the one codepoint, so a longer string
+lengthens and `""` deletes. And its line setter rebuilds through
+`TStringList.Text`, which rewrites every line ending in the document -- here the
+one line's byte range is spliced and every other byte is left alone, measured on a
+CRLF document that came back at the same 15 bytes with its CR intact.
+
+**Out of range raises**, where the read answers `""`. That asymmetry is the whole
+point: a read past the end has an obvious empty answer, a write past the end has
+none, and answering silently is what was wrong.
+
+`s$[[n]] += x` is refused rather than guessed at. The handle form supports it
+because an element is a slot that can be read back; a spliced character is not,
+and inventing a third meaning for it is the mistake this entry is about.
+
+**The budget gate caught the first implementation**, which rebuilt the document by
+concatenating every line -- quadratic, and it had to guess a separator to re-join
+with. The splice replaced it.
 
 ### Declined, not missed
 

@@ -1,6 +1,6 @@
 # str — text, by codepoint, with an answer for every question
 
-`engine/libs/PhosphorStrLib.pas` · 64 functions · always available
+`engine/libs/PhosphorStrLib.pas` · 66 functions · always available
 
 ## What it is for
 
@@ -58,6 +58,8 @@ And `hex$`/`bin$`/`oct$` are **sign-and-magnitude**, not two's complement:
 | `reverse$(s$) → str` | the codepoints in the opposite order, so multi-byte characters survive intact |
 | `strchar$(s$, n) → str` | the `n`-th codepoint as a one-character string — the helper `s$[[n]]` compiles to. Out of range answers `""` |
 | `strline$(s$, n) → str` | the `n`-th line — the helper `s$[n]` compiles to. Out of range answers `""` |
+| `strsetchar$(s$, n, x$) → str` | `s$` with the `n`-th codepoint replaced by the whole of `x$` — the helper `s$[[n]] = x$` compiles to. **Out of range RAISES**, where the read answers `""` |
+| `strsetline$(s$, n, x$) → str` | `s$` with the `n`-th line replaced by `x$`, every other byte untouched — the helper `s$[n] = x$` compiles to. **Out of range RAISES** |
 | `line$(s$, n) → str` | the `n`-th line, splitting on `\n` and dropping a trailing `\r`, so CRLF text needs no preparation. Out of range answers `""`, not an error |
 
 ### Trim, pad and justify
@@ -272,7 +274,12 @@ Two things worth noticing:
 ## Notes
 
 - `s$[n]` and `s$[[n]]` are **compiler sugar**, not syntax the library sees:
-  `s$[n]` becomes `strline$(s$, n)` and `s$[[n]]` becomes `strchar$(s$, n)`. Both
+  `s$[n]` becomes `strline$(s$, n)` and `s$[[n]]` becomes `strchar$(s$, n)` when
+  read, and `strsetline$`/`strsetchar$` when written — `s$[[2]] = "Z"` is
+  `s$ = strsetchar$(s$, 2, "Z")`, so a string stays a value rather than becoming a
+  container. Writing through either compiled, exited 0 and did nothing until
+  2026-09-18: neither sugar had an lvalue form, so the statement became a
+  comparison and was discarded. Both
   helpers are registered and callable directly, and both are base-1.
 - **Choosing between the case pairs.** `ucase$`/`lcase$` are ASCII-only and fast;
   `aucase$`/`alcase$` walk the whole codepoint range. `proper$` and `swapcase$`

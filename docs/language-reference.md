@@ -430,6 +430,13 @@ index sugars sit on a string variable:
 - `s$[[n]]` — the **n-th character** (base-1, by codepoint).
 - `s$[n]` — the **n-th line** (base-1); `count(s$)` gives the line count.
 
+**Both can be written as well as read.** `s$[[2]] = "Z"` replaces the second
+character and `s$[2] = "..."` replaces the second line. The character form takes
+the *whole* replacement, so it splices rather than overwriting one-for-one: a
+longer string lengthens, `""` deletes. Reading out of range answers `""`; **writing
+out of range raises**, because a write that cannot do what was asked has no answer
+to give, and until 2026-09-18 it did nothing at all and said nothing.
+
 Escapes are supported in literals: `\n \t \r \0 \a \b \f \v \\ \"`, and a doubled
 `""` also yields one quote. Because `\` is an escape, a **literal backslash must be
 doubled** — a Windows path is `"C:\\temp\\a.txt"` (or just use `/`).

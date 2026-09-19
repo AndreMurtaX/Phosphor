@@ -850,6 +850,95 @@ begin
   if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
 end;
 
+{ THE WRITE HALF OF THE SAME TWO SUGARS, and until 2026-09-18 there was none:
+  `s$[[1]] = "z"` compiled, exited 0 and changed nothing. The sugars are parsed in
+  the EXPRESSION grammar and emitted as calls, so they had no lvalue form at all,
+  and the statement became the comparison `strchar$(s$,1) = "z"` whose result was
+  discarded. A grep said the feature was there and the exit code agreed; only the
+  output disagreed, and no test in any corpus wrote through one.
+
+  Both return the NEW STRING rather than mutating in place, and the compiler
+  stores that back into the variable -- the same shape the reference uses, and the
+  one that keeps a string a value.
+
+  THE CHARACTER FORM SPLICES, which is a deliberate improvement on Plan9Basic.
+  Its `s_chrset` assigns `Args[2].s.Chars[0]`: the first character of the
+  replacement and nothing else, so `s$[[2]] = "XY"` silently loses the Y, and the
+  write is a UTF-16 CODE UNIT, which halves any character outside the BMP. Here
+  the whole replacement takes the place of the one codepoint. A longer string
+  lengthens, an empty one deletes, and nothing is discarded without being asked
+  for.
+
+  OUT OF RANGE RAISES, where the READ answers ''. The asymmetry is the point and
+  it is the whole defect this pair closes: a read past the end has an obvious
+  empty answer, a write past the end has no answer at all, and doing nothing in
+  silence is what was wrong before. `on error` sees it like any other fault. }
+function f_strsetchar(const A: array of TValue; out E: TPhosphorError): TValue;
+var s: String; st: TInt64DynArray; idx, n: Integer;
+begin
+  E := NoError();
+  s := s0(A);
+  Result := ValStr(s);
+  st := CpStarts(s);
+  n := Length(st) - 1;          // CpStarts carries a trailing sentinel
+  idx := ArgI32(A[1]);          // 1-based
+  if (idx < 1) or (idx > n) then
+  begin
+    E := MakeError(peRuntime, 'a string index write: character ' + IntToStr(idx) +
+         ' is outside 1..' + IntToStr(n));
+    Exit;
+  end;
+  Result := ValStr(Copy(s, 1, st[idx - 1] - 1) + A[2].Str +
+                   Copy(s, st[idx], Length(s)));
+end;
+
+function f_strsetline(const A: array of TValue; out E: TPhosphorError): TValue;
+var
+  src: String;
+  want, n, lineStart, lineEnd, i: Integer;
+begin
+  E := NoError();
+  src := s0(A);
+  Result := ValStr(src);
+  if not BudgetAllows(Length(src)) then
+  begin E := BudgetRefusal('a string index write'); Exit; end;
+
+  { THE LINE'S BYTE RANGE, FOUND BY ONE WALK, and then spliced. The first version
+    of this split the document, replaced one element and concatenated every line
+    back -- quadratic in the line count, and it had to GUESS a separator to
+    re-join with, so a document with mixed endings came back rewritten. That is
+    the same wart the reference has for a different reason: Plan9Basic rebuilds
+    through TStringList.Text, which rewrites every line ending in the string to
+    the platform's. Splicing touches the bytes of one line and leaves every other
+    byte exactly as it was, whatever the document does.
+
+    lineEnd is the offset of the terminator that ENDS this line, or Length+1 for
+    the last line, so a trailing CR is carried along with its LF and a file that
+    ends without a newline stays that way. }
+  want := ArgI32(A[1]);          // 1-based
+  n := 1;
+  lineStart := 1;
+  lineEnd := Length(src) + 1;
+  if want >= 1 then
+    for i := 1 to Length(src) do
+      if src[i] = #10 then
+      begin
+        if n = want then begin lineEnd := i; Break; end;
+        Inc(n);
+        lineStart := i + 1;
+      end;
+  if (want < 1) or (n < want) then
+  begin
+    E := MakeError(peRuntime, 'a string index write: line ' + IntToStr(want) +
+         ' is outside 1..' + IntToStr(n));
+    Exit;
+  end;
+  { A CR belongs to the terminator, not to the line. }
+  if (lineEnd > lineStart) and (src[lineEnd - 1] = #13) then Dec(lineEnd);
+  Result := ValStr(Copy(src, 1, lineStart - 1) + A[2].Str +
+                   Copy(src, lineEnd, Length(src)));
+end;
+
 // --- StrLib, the wider surface (30_strlib_full) -----------------------------
 // The reference counts these positions from 0; Phosphor is base-1 everywhere,
 // so insert$/delete$/line$ take 1-based positions here and stuffstring$ (already
@@ -1342,6 +1431,8 @@ begin
   // index sugar helpers
   Reg.Add('strchar$:$n', @f_strchar);
   Reg.Add('strline$:$n', @f_strline);
+  Reg.Add('strsetchar$:$n$', @f_strsetchar);
+  Reg.Add('strsetline$:$n$', @f_strsetline);
   // wider surface (30_strlib_full)
   Reg.Add('proper$:$', @f_proper);
   Reg.Add('swapcase$:$', @f_swapcase);

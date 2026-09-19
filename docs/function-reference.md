@@ -114,6 +114,8 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 | `reverse$(s$) → str` | reverse the codepoints |
 | `strchar$(s$, n) → str` | the `n`-th character (the helper behind `s$[[n]]`) |
 | `strline$(s$, n) → str` | the `n`-th line (the helper behind `s$[n]`) |
+| `strsetchar$(s$, n, x$) → str` | `s$` with the `n`-th character replaced by `x$` (the helper behind `s$[[n]] = x$`); out of range raises |
+| `strsetline$(s$, n, x$) → str` | `s$` with the `n`-th line replaced by `x$` (the helper behind `s$[n] = x$`); out of range raises |
 | `line$(s$, n) → str` | the `n`-th line (1-based), splitting on newlines |
 
 **Trim, pad and justify**

@@ -2330,6 +2330,7 @@ var
   nidx: Integer;
   exprStart: Integer;
   acts, cterm: Boolean;
+  dblIdx: Boolean;      // s$[[n]] rather than s$[n]
 begin
   { The opStmt marking this boundary is emitted by ParseStatement, which patches
     it with the pc this statement ends at once the body below has been parsed. }
@@ -2510,6 +2511,70 @@ begin
     if (t.StrVal = 'swap') and
        not (FLex.Peek().Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq, tkLBracket]) then
     begin ParseSwap(); Exit; end;
+    { INDEXED STRING: s$[[n]] = <expr> (character), s$[n] = <expr> (line), or
+      either one alone as an expression statement.
+
+      UNTIL 2026-09-18 THERE WAS NO BRANCH HERE AT ALL, and the consequence was
+      the worst shape a gap can take: `s$[[1]] = "z"` compiled, exited 0 and did
+      nothing. Both sugars are parsed in the EXPRESSION grammar and emitted as
+      `strchar$`/`strline$` calls, so neither had an lvalue form; the statement
+      became the comparison `strchar$(s$,1) = "z"` and its result was discarded as
+      an unused expression. A grep said the feature was there, the exit code
+      agreed, and only the output disagreed -- and no test in any corpus wrote
+      through one, so nothing would have failed had it never existed.
+
+      The engine's own diagnostic advertised it, too: index a NUMBER and
+      ParsePrimary answers "[] indexing needs a handle (@) or string ($)
+      variable", which tells a reader string indexing is supported without saying
+      that only reading was meant.
+
+      A STRING IS A VALUE, so this does not mutate in place: the setter answers
+      the new string and it is stored straight back into the variable. Same shape
+      Plan9Basic uses, and it keeps `s$` a value rather than a container. }
+    if (VarTypeOf(t.StrVal) = vtString) and (FLex.Peek().Kind = tkLBracket) then
+    begin
+      EmitLoadVar(t.StrVal, t.Line);   // the string
+      FLex.Advance();                    // the name
+      FLex.Advance();                    // '['
+      dblIdx := FLex.Cur().Kind = tkLBracket;
+      if dblIdx then FLex.Advance();     // the second '['
+      ParseExpr();                       // the index
+      Expect(tkRBracket, ''']''');
+      if dblIdx then Expect(tkRBracket, ''']''');
+      if FFailed then Exit;
+      if FLex.Cur().Kind = tkEQ then
+      begin
+        FLex.Advance();
+        ParseExpr();                     // the value
+        if dblIdx then
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('strsetchar$')), 3, t.Line)
+        else
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('strsetline$')), 3, t.Line);
+        EmitStoreVar(t.StrVal, t.Line);
+      end
+      else if FLex.Cur().Kind in [tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq] then
+      begin
+        { REFUSED RATHER THAN GUESSED AT. The handle form supports `a@[i] += x`
+          because an element is a slot that can be read back. A string index is
+          not a slot -- the character form SPLICES, so `s$[[n]] += x` would have
+          to mean "read one codepoint, append, put the result where the one
+          codepoint was", which is a third meaning nobody has asked for. Saying so
+          is the whole lesson of the defect this branch closes. }
+        Fail('a string index takes ''='' only -- write s$[[n]] = s$[[n]] + x',
+             FLex.Cur().Line);
+        Exit;
+      end
+      else
+      begin
+        // the sugar alone, as a statement: read it and discard, like a@[i].
+        if dblIdx then
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('strchar$')), 2, t.Line)
+        else
+          FProg.Emit(opCall, FProg.Consts.Add(ValStr('strline$')), 2, t.Line);
+        FProg.Emit(opPop, 0, 0, t.Line);
+      end;
+      Exit;
+    end;
     // indexed handle: a@[i,...] = <expr> (set), a@[i,...] op= <expr> (compound),
     // or a@[i,...] alone (expression stmt). N comma-separated indices are allowed.
     if (VarTypeOf(t.StrVal) = vtHandle) and (FLex.Peek().Kind = tkLBracket) then

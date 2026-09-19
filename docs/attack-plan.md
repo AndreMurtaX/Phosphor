@@ -285,6 +285,25 @@ resume that decides nothing — and both are pinned by tests watched failing fir
   line numbers would be noisy enough to be turned off. Worth revisiting only if
   named citations start rotting too.
 
+### Declined, not missed
+
+**Continuous integration for this repository.** The 2026-09-18 buildability
+review recommended a `.github/workflows` job on ubuntu-latest and
+windows-latest, and argued it well: this repository has none, so a commit here
+can break the sibling's build without any badge going red, which is exactly how
+a stale citation reached a stranger that day.
+
+**The owner has declined it, and the reason stands:** the project has no
+publicity and does not need that infrastructure yet. Recorded here so the next
+reviewer finds a decision rather than a gap and spends a round re-proposing it.
+Revisit if the repository is ever announced, or if a second person starts
+committing to it -- the argument is good, the timing is the owner's.
+
+The narrower half of that recommendation is already done and lives in the
+sibling: `PhosphorIDE/.github/workflows/build.yml` now runs
+`check-citations.py --strict`, so cross-repository prose drift is caught where
+both checkouts are pinned instead of in a newcomer's first build.
+
 ### What nobody checked
 
 Named on purpose. A review's silence is not coverage, and this project's own rule

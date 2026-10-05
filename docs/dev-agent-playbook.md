@@ -1524,6 +1524,26 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · The sibling now cites this repository by NAME, and the reading
+  that conversion forced was worth more than the conversion.** PhosphorIDE held
+  fifty-four `file:line` citations into this tree, fingerprinted by its
+  `tools/check-citations.py`. The same three were re-pointed four times in one
+  day as `phosphor.lpr` grew. Converting every one to `file#Routine` meant READING
+  every claim beside them, and about seventeen of the living ones (plus most of
+  the historical work order's) already named code unrelated to their sentence --
+  green, because a citation wrong when the lock was written is locked wrong and
+  the gate then defends it. Two further gate defects surfaced: a path spelled
+  `../Phosphor/...` never resolved, so every long-form citation had been skipped
+  in silence; and `--update` refused an in-place edit as a "move" to the line it
+  already named. Then a second commit corrected the claims that were simply no
+  longer TRUE -- a whole spec section still describing, in present tense, an
+  engine that had shipped every item it asked for. **Lesson for this side:** an
+  edit here that renames or removes a routine the sibling names is now a red
+  `--strict` run over there, not a silent drift; and a line number in a comment
+  is a claim that rots on the day it is written, which is why this tree has
+  been citing by name since the `PhosphorCompiler.pas:1056` case earlier today.
+
+
 - **2026-10-05 · A latent defect still gets measured, and a class still gets a
   class fix.** The standard text files are threadvars; the RTL re-opens them in
   every thread over the startup handles and the console code page, so a

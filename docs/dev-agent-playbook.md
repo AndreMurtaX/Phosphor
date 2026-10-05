@@ -1524,6 +1524,63 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-04 · I wrote a green, deterministic test that measured nothing,
+  sixteen days after recording that exact lesson in this file.** The round itself
+  was small and went well: a report from PhosphorIDE said `pack` writes straight
+  into the output name and stamps the packed-mark last, so an interrupted pack
+  leaves a bare stub there -- and a bare stub is the CLI by design, a prompt that
+  reads EOF and exits 0. Confirmed by reading, then measured: 80 kills at random
+  offsets inside a 27 ms pack, 4 of them left exactly that. The sizes placed the
+  kill to the byte, 4,942,336 against a complete 4,942,519, short by the 151-byte
+  payload and the 32-byte trailer. Repaired by building beside the target and
+  moving on success; 0 of 80 after, 0 of 60 on Linux. Four lessons, and the first
+  is the one to carry.
+
+  **(1) A DETERMINISTIC TEST IS NOT THEREBY A TEST OF ANYTHING.** The kill is a
+  race, and the entry above this one records what a racing assertion becomes, so
+  the repair was pinned with three deterministic properties instead: a rebuild over
+  an existing application still works, a read-only target is refused and survives,
+  and a finished pack leaves no temporary. All three are worth having. **None of
+  them can see the defect.** With the repair reverted -- packing straight into the
+  final name again -- all three still pass. I knew that from reading the block and
+  I measured it anyway, which is the only reason it is a fact here rather than an
+  opinion, and the measurement is what sent the race into
+  `tests/pack_interrupt_probe.py` as a probe a person runs on purpose, with the
+  numbers for both builds in its header. **When a defect is only observable by a
+  race, a deterministic test is a regression guard and must say so in its own
+  comment** -- otherwise the next reader takes a green runner as evidence the
+  repair is present.
+
+  **(2) A FIX IN ONE PLACE MADE THE TWO PLATFORMS DISAGREE.** `MoveFileEx` respects
+  the read-only attribute and refuses; `rename(2)` never looks at the target's mode
+  because it needs write permission on the DIRECTORY. So after the repair the same
+  command refused on Windows and silently replaced a `chmod 444` application on
+  Linux -- a divergence worse than either answer, and one the pre-fix code did not
+  have, because `fmCreate` opened the target itself and failed on both. Found only
+  because the read-only case was measured on BOTH machines; one run would have
+  looked correct. **A repair that changes which call does the writing has changed
+  the platform semantics of every guard that call carried.**
+
+  **(3) A GUARD CAUGHT MY COLLATERAL DAMAGE ON ITS FIRST RUN.** Block I asserts
+  that an unwritable output exits non-zero, says `cannot write to`, and writes
+  nothing. The first repair broke two thirds of that: a new sentence, and a 5 MB
+  temporary left beside a destination that could never work. It went red
+  immediately. The resolution was not to relax it -- one vocabulary for one
+  failure, and the temporary removed on every failure path, which was also the
+  right call on its merits: a whole pack is 27 ms, so "do not throw the finished
+  work away" was an argument about nothing, while the leftover is megabytes under
+  a name nothing cleans up and, on Windows, one that RUNS.
+
+  **(4) AND I CLAIMED MORE THAN I MEASURED, IN THE COMMENT EXPLAINING THE FIX.** It
+  said an interrupted temporary is not runnable on either platform because its name
+  does not end in `.exe`. `cmd /c foo.exe.packing-1` runs it: exit 0, REPL banner.
+  The extension buys nothing on Windows. What holds is narrower and is the property
+  that matters -- the name the user asked for is either absent or the complete
+  application -- and the comment says that now, with the Unix half (not executable
+  until the statement before the move, measured at exit 126) kept because it IS
+  true. **A comment is a claim. The bar for one is the bar for a test.**
+
+
 - **2026-09-18 · the reorder that answered the report and left one line behind.**
   A report arrived saying both build scripts delete the binary before probing for
   the LCL, so a mistyped `-Lazarus` costs a working `phosphor` and nothing says

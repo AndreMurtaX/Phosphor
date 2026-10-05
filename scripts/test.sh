@@ -864,6 +864,76 @@ done
 if [ "$okT" -eq 0 ]; then echo "PASS  T:a program's own output is its input, not its locale (two locales)"
 else echo 'FAIL  T:the locale reached the program'; fi
 
-if [ "$okS" -ne 0 ] || [ "$okT" -ne 0 ]; then fail=1; fi
+# --- U: THE FINAL NAME GETS A FILE ONLY WHEN THE PACK IS FINISHED --------------
+#
+# See the twin in scripts/test.ps1 for the whole account. In short: `pack` used to
+# write the stub, the payload, the trailer and the mark straight into the output
+# name, the mark last -- so between the stub landing and the trailer being written
+# the file at the user's chosen name was a BARE STUB, which is the CLI by design
+# (block K pins that, correctly): a prompt that reads EOF and exits 0. An
+# interrupted pack therefore replaced an application with something that runs and
+# succeeds having done nothing asked of it. Measured 2026-10-04: 4 of 80 kills
+# before the repair, 0 of 80 after on Windows and 0 of 60 here.
+#
+# THIS BLOCK DOES NOT PIN THAT, and it was measured not to: with the repair
+# reverted, all three checks below still pass. They guard what the repair must not
+# break. tests/pack_interrupt_probe.py is what distinguishes the builds -- it
+# caught the reverted one at 3 of 60 -- and it is deliberately not run from here,
+# because killing a 30 ms process at a random offset is a race and a racing
+# assertion in a runner is a flake waiting to be switched off.
+#
+# ONE PLATFORM NOTE. The read-only case below needs the explicit writability check
+# in PackFile to hold HERE: rename(2) needs write permission on the DIRECTORY and
+# never looks at the target's mode, so without it a chmod-444 application would be
+# silently replaced on Linux while Windows refused -- the same command answering
+# two different ways.
+okU=0
+udir="$(mktemp -d)"
+
+# 1. the ordinary rebuild, over a name that already holds an application
+cp "$packed" "$udir/rebuild.run"
+if "$exe" pack "$pbc" "$udir/rebuild.run" > "$udir/u1.err" 2>&1; then ucode=0; else ucode=$?; fi
+if [ "$ucode" -ne 0 ]; then
+  echo "        U: a rebuild over an existing application exited $ucode"
+  sed 's/^/        /' "$udir/u1.err"
+  okU=1
+elif ! "$udir/rebuild.run" > "$udir/u1.out" 2>/dev/null; then
+  echo "        U: the rebuilt application did not run"
+  okU=1
+elif ! cmp -s "$udir/u1.out" "$expected"; then
+  echo "        U: the rebuilt application is not byte-exact against the golden"
+  okU=1
+fi
+
+# 2. a target its owner marked read-only is refused, and survives
+printf PRECIOUS > "$udir/ro.run"
+chmod 444 "$udir/ro.run"
+if "$exe" pack "$pbc" "$udir/ro.run" > "$udir/u2.err" 2>&1; then rocode=0; else rocode=$?; fi
+rokept=$(cat "$udir/ro.run" 2>/dev/null || true)
+chmod 644 "$udir/ro.run" 2>/dev/null || true
+if [ "$rocode" -eq 0 ] || [ "$rokept" != 'PRECIOUS' ]; then
+  echo "        U: a read-only target: pack exited $rocode, content now '$rokept'"
+  sed 's/^/        /' "$udir/u2.err"
+  okU=1
+fi
+
+# 3. nothing left beside a finished output
+ulitter=$(ls "$udir" 2>/dev/null | grep -c 'packing-' || true)
+if [ "$ulitter" -ne 0 ]; then
+  echo "        U: $ulitter temporary file(s) left beside a finished pack:"
+  ls "$udir" | grep 'packing-' | sed 's/^/        /'
+  okU=1
+fi
+
+# A plain rmdir: it can only succeed on an EMPTY directory, which is deliberate --
+# this tree has lost thirteen working copies to a recursive one. It will refuse
+# while the files above are there, and that is fine; the directory is a mktemp -d.
+rm -f "$udir"/* 2>/dev/null || true
+rmdir "$udir" 2>/dev/null || true
+
+if [ "$okU" -eq 0 ]; then echo 'PASS  U:pack writes the final name only when finished (rebuild, read-only, no litter)'
+else echo 'FAIL  U:pack left the final name or a temporary in the wrong state'; fi
+
+if [ "$okS" -ne 0 ] || [ "$okT" -ne 0 ] || [ "$okU" -ne 0 ]; then fail=1; fi
 
 exit "$fail"

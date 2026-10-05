@@ -3557,6 +3557,36 @@ function  RLE32(S: TStream): LongWord;     begin S.ReadBuffer(Result, 4); Result
 
 { Compile AInBas, copy this running binary (the stub) to AOutExe, and append the
   .pbc payload plus the trailer -- a standalone executable that needs no install. }
+{ PUT A FINISHED FILE ON ITS FINAL NAME IN ONE STEP the filesystem either does
+  or does not do.
+
+  SysUtils.RenameFile IS NOT USABLE HERE ON WINDOWS. rtl/win/sysutils.pp wraps
+  MoveFileW, which REFUSES when the target exists -- so the obvious
+  delete-then-rename would re-open the very window this exists to close: an
+  interrupt between the delete and the rename leaves NO application where a
+  working one stood. MoveFileExW with MOVEFILE_REPLACE_EXISTING replaces in a
+  single operation.
+
+  THE W FORM ON PURPOSE. The Windows unit declares MoveFileEx as either the A or
+  the W entry depending on how it was compiled, and the A form would mangle a
+  path with a non-ASCII character -- the same codepage class that already cost
+  this host a round. Naming MoveFileExW and converting through UnicodeString is
+  what the RTL itself does one line down from the declaration.
+
+  ON UNIX THE PORTABLE CALL IS ALREADY RIGHT: rtl/unix/sysutils.pp implements
+  RenameFile as BaseUnix.FpRename, which is rename(2), and rename(2) replaces
+  atomically by definition. }
+function ReplaceFileWith(const ATmp, AFinal: String): Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := MoveFileExW(PWideChar(UnicodeString(ATmp)),
+                        PWideChar(UnicodeString(AFinal)),
+                        MOVEFILE_REPLACE_EXISTING);
+  {$ELSE}
+  Result := RenameFile(ATmp, AFinal);
+  {$ENDIF}
+end;
+
 function PackFile(const AInPbc, AOutExe: String; AFlags: LongWord): Integer;
 var
   prog: TProgram;
@@ -3566,7 +3596,16 @@ var
   pbcErr, missingReport: String;
   missing: Integer;
   isPbc: Boolean;
+  tmpOut: String;
+  wroteOk: Boolean;
 begin
+  wroteOk := False;
+  { EMPTY UNTIL THERE IS SOMETHING TO CLEAN UP, and it is never the name the user
+    asked for -- it always carries the .packing-<pid> suffix. Both halves matter:
+    this file already records a trap where a cleanup named a variable that was
+    sometimes the REAL file, and the pattern that makes such a cleanup safe is a
+    variable that is empty when there is nothing to remove. }
+  tmpOut := '';
   if not FileExists(AInPbc) then begin Writeln(StdErr, 'phosphor: file not found: ', AInPbc); Exit(2); end;
 
   // PACK TAKES BYTECODE, NOT SOURCE. One verb, one job: `compile` turns source
@@ -3669,8 +3708,47 @@ begin
         Writeln(StdErr, '  refusing to write an application that could not tell it had been truncated.');
         Exit(2);
       end;
+      { BUILT BESIDE THE FINAL NAME, NEVER IN IT. `pack` used to open AOutExe with
+        fmCreate and write the stub, the payload, the trailer and finally the mark
+        -- in that order, with the mark last because half of what it records is
+        the finished length. So between the stub landing and the trailer being
+        written, the file sitting at the user's chosen name WAS A BARE STUB, and a
+        bare stub is the CLI by design (see TEmbeddedState.esNone): an
+        interpreter prompt that reads EOF and exits 0.
+
+        A crash, a Ctrl+C or a full disk in that window therefore replaced an
+        application with something that runs and succeeds while doing nothing of
+        what was asked. MEASURED on 2026-10-04, 80 kills at random points inside
+        a 0.027 s pack: 4 left exactly that -- 4,942,336 bytes against a complete
+        4,942,519, short by the 151-byte payload and the 32-byte trailer. A report
+        from PhosphorIDE had measured 2 of 80 and one CI hang that left a file
+        exiting 0 without printing.
+
+        The temporary sits in the SAME DIRECTORY, because the move below has to
+        stay on one volume to be one operation. Its name carries this process's
+        id so two packs of the same target cannot write each other's bytes.
+
+        WHAT THIS DOES AND DOES NOT BUY, measured rather than reasoned, because the
+        first version of this comment claimed more than was true. It said an
+        interrupted temporary is not runnable on either platform since its name
+        does not end in .exe. That is FALSE on Windows: `cmd /c foo.exe.packing-1`
+        runs it, exit 0, REPL banner, and so does an explicit exec -- a PE is a PE
+        whatever it is called, and the extension buys nothing.
+
+        What holds, and is the whole point: THE NAME THE USER ASKED FOR IS EITHER
+        ABSENT OR THE COMPLETE APPLICATION. 80 kills at random points: 0 left
+        anything else there, against 4 before.
+
+        A pack that FAILS cleans its temporary up. A pack that is KILLED cannot,
+        so an interrupted one does leave a `.packing-<pid>` file beside the output
+        -- and on Windows that file will run if something invokes it explicitly,
+        so a script that globs a directory and executes what it finds can still
+        trip over one. On Unix it cannot: the executable bit is set in the
+        statement immediately before the move, so a temporary that never reached
+        the move never had it (measured: exit 126, permission denied). }
+      tmpOut := AOutExe + '.packing-' + IntToStr(GetProcessID);
       try
-        dst := TFileStream.Create(AOutExe, fmCreate);
+        dst := TFileStream.Create(tmpOut, fmCreate);
         if stub.Size > 0 then dst.WriteBuffer(stub.Memory^, stub.Size);  // the whole stub binary
         off := dst.Position;                  // the payload starts here
         if payload.Size > 0 then dst.WriteBuffer(payload.Memory^, payload.Size);
@@ -3688,11 +3766,17 @@ begin
         dst.Position := markAt;
         dst.WriteBuffer(PACK_MARK_PACKED[0], PACK_MARK_TAG_LEN);
         WLE64(dst, finished);
+        wroteOk := True;
       except
         on Ex: Exception do
         begin
           Writeln(StdErr, 'phosphor: cannot write to ', AOutExe, ': ', Ex.Message);
-          Exit(2);
+          Writeln(StdErr, '  nothing was written to that name.');
+          { NO `Exit` HERE, DELIBERATELY. The half-written temporary has to go, and
+            deleting it needs the handle closed -- which the finally below has not
+            run yet. Exiting from inside the except would skip the foot of this
+            function and leave the temporary behind, which is the first version of
+            this fix and it was wrong. The flag carries the failure out instead. }
         end;
       end;
     finally
@@ -3701,7 +3785,59 @@ begin
   finally
     payload.Free;
   end;
-  {$IFDEF UNIX} FpChmod(AOutExe, &755); {$ENDIF}   // make it runnable
+  { THE HANDLE IS CLOSED BY NOW -- the finally above frees dst -- and that is what
+    makes the move possible on Windows at all. }
+  if tmpOut <> '' then
+  begin
+    if not wroteOk then
+    begin
+      { The half-written temporary, and only ever that: tmpOut always carries the
+        .packing-<pid> suffix, so this can never name what the user asked for. The
+        name they asked for is left exactly as it was found. }
+      DeleteFile(tmpOut);
+      Exit(2);
+    end;
+    { THE TWO PLATFORMS HAVE TO ANSWER THIS THE SAME WAY, and without these four
+      lines they did not. MoveFileEx respects the read-only attribute and refuses;
+      rename(2) does not even look at the target's mode, because it needs write
+      permission on the DIRECTORY -- so the identical command refused on Windows
+      and silently replaced a chmod-444 application on Linux. Measured both ways
+      on 2026-10-04.
+
+      Refusing is also what the pre-fix code did on both, by accident of opening
+      the target with fmCreate, so this keeps a behaviour rather than inventing
+      one: a file its owner marked read-only is not replaced. }
+    {$IFDEF UNIX}
+    if FileExists(AOutExe) and (FpAccess(AOutExe, W_OK) <> 0) then
+    begin
+      Writeln(StdErr, 'phosphor: cannot write to ', AOutExe, ': it is read-only');
+      DeleteFile(tmpOut);
+      Exit(2);
+    end;
+    {$ENDIF}
+    {$IFDEF UNIX} FpChmod(tmpOut, &755); {$ENDIF}   // runnable, just before it is visible
+    if not ReplaceFileWith(tmpOut, AOutExe) then
+    begin
+      { ONE VOCABULARY FOR ONE FAILURE. `cannot write to <path>` is what compile
+        and the other output verbs say when they cannot put a file where they were
+        told, and a reader should not have to learn a second sentence because the
+        write now happens in two steps. Block I of scripts/test.ps1 and its bash twin asserts
+        that wording, and it is right to. }
+      Writeln(StdErr, 'phosphor: cannot write to ', AOutExe,
+              ': the application was built but could not be put there');
+      { AND NOTHING IS LEFT BEHIND. The first version of this kept the finished
+        temporary, arguing that the work had succeeded and only the last step
+        failed. The measurement refuses that: a whole pack is 27 ms, so redoing it
+        costs nothing -- while the leftover is megabytes under a name nothing will
+        ever clean up, and on Windows it RUNS if something invokes it explicitly
+        (measured: `cmd /c foo.exe.packing-1` gives exit 0 and a REPL banner).
+        Block I asserts that an unwritable output writes nothing, which is the
+        same judgement reached from the other side. }
+      DeleteFile(tmpOut);
+      Exit(2);
+    end;
+    tmpOut := '';   { moved: there is provably nothing left to remove }
+  end;
   Result := 0;
 end;
 

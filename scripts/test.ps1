@@ -1123,6 +1123,97 @@ if (($seenT[65001] -ne $seenT[850]) -or ($seenT[850] -ne $seenT[437])) {
 if ($okT) { Write-Host "PASS  T:a program's own output is its input, not its console (chcp 65001, 850, 437)" -ForegroundColor Green }
 else { Write-Host 'FAIL  T:the console codepage reached the program' -ForegroundColor Red }
 
+# --- U: THE FINAL NAME GETS A FILE ONLY WHEN THE PACK IS FINISHED --------------
+#
+# `pack` used to open the output with fmCreate and write the stub, the payload,
+# the trailer and finally the mark -- the mark last, because half of what it
+# records is the finished length. So between the stub landing and the trailer
+# being written, the file at the user's chosen name WAS A BARE STUB, and a bare
+# stub is the CLI by design (block K pins that, correctly): an interpreter prompt
+# that reads EOF and exits 0. A crash, a Ctrl+C or a full disk in that window
+# replaced an application with something that runs and succeeds having done
+# nothing that was asked.
+#
+# MEASURED on 2026-10-04, 80 kills at random points inside a 0.027 s pack: 4 left
+# exactly that, at 4,942,336 bytes against a complete 4,942,519 -- short by the
+# 151-byte payload and the 32-byte trailer, which places the kill precisely. A
+# report from PhosphorIDE had measured 2 of 80 plus one CI hang. After the repair,
+# 0 of 80 on Windows and 0 of 60 on Linux.
+#
+# THAT MEASUREMENT IS NOT THIS BLOCK, deliberately, and this block DOES NOT PIN
+# THE DEFECT. Both halves are measured, not assumed.
+#
+# Not here, because killing a 27 ms process at a random offset is a race, and a
+# racing assertion in a runner is a flake on its way to being switched off: this
+# tree spent three attempts on one such case in September, and the second attempt
+# was green, deterministic, better argued than what it replaced, and measured
+# NOTHING -- only mutating the code found that out.
+#
+# So the same question was asked of this block, the same way. With the repair
+# reverted -- packing straight into the final name again -- ALL THREE CHECKS BELOW
+# STILL PASS. They are a regression guard for what the repair must not break, and
+# they are not evidence that the repair is present. What distinguishes the two
+# builds is tests/pack_interrupt_probe.py, which caught the reverted build at 3 of
+# 60 and passes the repaired one at 0 of 80. Run it when you touch PackFile; it is
+# not run from here, and the paragraph above says why.
+#
+# What IS pinned here is every property of the repair that holds without a clock:
+#
+#   1. a rebuild over an existing application still produces the application,
+#      byte-exact. This is the case the kill harness never touched -- it deleted
+#      the target before every trial -- and it is the one the repair could have
+#      broken, because replacing now depends on a MOVE succeeding over an existing
+#      name where it used to be an fmCreate truncating in place.
+#   2. a target its owner marked read-only is refused, and survives. Both
+#      platforms, which they did NOT do when the repair first landed: MoveFileEx
+#      respects the attribute, rename(2) does not look at it, so Windows refused
+#      and Linux silently replaced. The explicit check makes them agree.
+#   3. a finished pack leaves no .packing-* file beside the output.
+$okU = $true
+
+# 1. the ordinary rebuild, over a name that already holds an application
+$reb = Join-Path $tmp 'phosphor_rebuild.exe'
+Copy-Item $packExe $reb -Force
+& $exe 'pack' $pbc $reb 2>&1 | Out-Null
+$rebCode = $LASTEXITCODE
+$outU = Join-Path $tmp 'phosphor_hello.U.actual'
+cmd /c "`"$reb`" < NUL > `"$outU`""
+$rebRun = $LASTEXITCODE
+if ($rebCode -ne 0 -or $rebRun -ne 0) {
+    Write-Host ("        U: a rebuild over an existing application: pack {0}, run {1}" -f $rebCode, $rebRun) -ForegroundColor DarkGray
+    $okU = $false
+} elseif (-not (Test-Golden 'U:rebuilt in place ' $outU $expectedBytes)) { $okU = $false }
+
+# 2. a read-only target is refused, and is still there afterwards
+$roU = Join-Path $tmp 'phosphor_readonly.exe'
+[System.IO.File]::WriteAllBytes($roU, [Text.Encoding]::ASCII.GetBytes('PRECIOUS'))
+[System.IO.File]::SetAttributes($roU, [System.IO.FileAttributes]::ReadOnly)
+$roOut = Join-Path $tmp 'phosphor_readonly.err'
+cmd /c "`"$exe`" pack `"$pbc`" `"$roU`" > `"$roOut`" 2>&1"
+$roCode = $LASTEXITCODE
+[System.IO.File]::SetAttributes($roU, [System.IO.FileAttributes]::Normal)
+$roBytes = [System.IO.File]::ReadAllBytes($roU)
+$roText = Get-Content -Raw $roOut
+if ($null -eq $roText) { $roText = '' }
+$roKept = ($roBytes.Length -eq 8) -and
+          ([Text.Encoding]::ASCII.GetString($roBytes) -eq 'PRECIOUS')
+if ($roCode -eq 0 -or -not $roKept) {
+    Write-Host ("        U: a read-only target: pack exited {0}, original kept={1}" -f $roCode, $roKept) -ForegroundColor DarkGray
+    Write-Host ("        U: it said '{0}'" -f ($roText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    $okU = $false
+}
+
+# 3. nothing left beside a finished output
+$litter = @(Get-ChildItem -Path $tmp -Filter '*.packing-*' -ErrorAction SilentlyContinue)
+if ($litter.Count -ne 0) {
+    Write-Host ("        U: {0} temporary file(s) left beside a finished pack: {1}" -f
+                $litter.Count, ($litter.Name -join ', ')) -ForegroundColor DarkGray
+    $okU = $false
+}
+
+if ($okU) { Write-Host 'PASS  U:pack writes the final name only when finished (rebuild, read-only, no litter)' -ForegroundColor Green }
+else { Write-Host 'FAIL  U:pack left the final name or a temporary in the wrong state' -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ -and $okR -and $okS -and $okT) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU) { exit 0 } else { exit 1 }

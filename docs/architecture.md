@@ -179,6 +179,20 @@ minefield otherwise.
    app.pbc app.exe` appends the payload to the stub binary, so the same
    binary is the CLI bare and the application packed. See
    [roadmap-phase3.md](roadmap-phase3.md), which carries the per-step record.
+
+   **`pack` puts a file on the output name only when it is finished**, and a build
+   script may rely on that: it writes `<output>.packing-<pid>` beside the target
+   and moves it over in one filesystem operation, so an interrupted pack leaves
+   the previous application in place or nothing at all, never a half-made one.
+   That matters because a *bare* stub is the CLI by design -- an interpreter
+   prompt that reads EOF and exits 0 -- so a pack that died mid-write used to
+   replace an application with something that ran and succeeded having done
+   nothing. Measured before the repair at 4 interrupted packs in 80 leaving
+   exactly that; `tests/pack_interrupt_probe.py` is the measurement, and it is a
+   probe rather than a suite block because the kill it needs is a race. A pack
+   that FAILS removes its temporary; one that is KILLED cannot, so an interrupted
+   pack may leave that file beside the output -- on Unix it is not executable,
+   on Windows it is, so do not glob a directory and run what you find.
    Those limits and `SandboxRoot` are ceilings and not a wall: what they do not
    bound — memory first — is listed in [embedding.md](embedding.md), "What the
    four ceilings do not bound".

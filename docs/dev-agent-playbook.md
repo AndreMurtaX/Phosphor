@@ -1524,6 +1524,27 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · A red runner after an unrelated commit was a clock, and it took
+  three measurements to say so.** Block R failed on the VM right after the d07
+  commit -- four checks in the `pause` session, nothing to do with file moves.
+  Re-run alone: 1 failure in 5. The first hypothesis (the loop finishes before
+  `pause` is sent) was MEASURED wrong: the program runs 7.2 s under the debug
+  host. A repro of that one session, logging every chunk on the monotonic clock,
+  found the real shape in 5 of 40 runs: ONE `recv` with a 1 s timeout returned
+  after 7.2 s, carrying `exited`. Then a third probe: on that 8-CPU VM a plain
+  0.1 s sleep oversleeps by 0.3-0.5 s while one phosphor process keeps a CPU busy,
+  and by 0.02 s without it. The host had sent nothing early and nothing late;
+  the TEST assumed "wait one second" takes one second and that the program would
+  still be running after it. The session now holds its program in a loop until a
+  sentinel file releases it, after the pause, so a late wake-up can slow the test
+  but cannot change its answer. **Lessons:** a flake is a hypothesis about timing,
+  so measure the timing before naming it -- the first guess here was wrong by a
+  factor of seven; and "the host did nothing wrong" was a fact only once the
+  per-chunk log showed no bytes arriving early. Same rule as the 2026-09-18
+  session-7 entry: a test that needs a clock to be honest is a test on its way
+  to being switched off.
+
+
 - **2026-10-05 · d07: a promise kept by accident on one platform, and a test
   that can only fail on the other.** `file_move` was one `RenameFile`; FPC makes
   that MoveFileW-without-flags on Windows (refuses an existing target) and

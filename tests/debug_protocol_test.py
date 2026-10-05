@@ -352,10 +352,32 @@ srv.close()
 # `exited`. A capability that lies is worse than one that is absent.
 #
 # This is thread timing, so it is the case that has to pass on Linux too.
+#
+# THE PROGRAM CANNOT FINISH UNTIL THIS SCRIPT RELEASES IT, and that is the repair
+# of 2026-10-05. It used to be a 6 000 000-iteration loop, about 7 s under the
+# debug host, on the assumption that it would still be running when `pause` went
+# out a second after `launch`. On the Linux VM it was not, in about 1 run in 8:
+# the one-second `recv` that asserts "nothing arrives unasked" did not wake for
+# 7.2 s -- measured on the monotonic clock, one `recv` call, then the `exited`
+# frame -- because that VM's timers oversleep badly while a phosphor process
+# keeps a CPU busy (0.3-0.5 s on a 0.1 s sleep, 0.02 s with nothing running).
+# By the time the test asked to pause, there was no program left. The host had
+# done nothing wrong. A sentinel file holds the program in its loop instead, so a
+# late wake-up can delay this test but cannot change what it measures.
 # ---------------------------------------------------------------------------
 BAS2 = os.path.join(WORK, 'loop.bas')
+GO2 = os.path.join(WORK, 'loop.go')
 with open(BAS2, 'w', newline='\n') as f:
-    f.write('t = 0\nfor i = 1 to 6000000\n  t = t + i\nnext\nprintln "t="; t\nend\n')
+    f.write('t = 0\n'
+            'while file_exists("%s") = 0\n'
+            '  t = t + 1\n'
+            'wend\n'
+            's = 0\n'
+            'for k = 1 to 1000\n'
+            '  s = s + k\n'
+            'next\n'
+            'println "s="; s\n'
+            'end\n' % GO2.replace(chr(92), '/'))
 
 srv2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -431,11 +453,15 @@ if ev and ev.get('event') == 'stopped':
     s = send2(cmd='continue')
     until2(lambda m: m.get('seq') == s, timeout=15)
 
+# Released only now, after the pause has been asked, answered and resumed -- so
+# nothing about how fast either process runs can let it finish early.
+open(GO2, 'w').close()
 ex2 = until2(lambda m: m.get('event') == 'exited', timeout=60)
 check('the paused program runs on to exit', ex2 is not None and ex2.get('exitCode') == 0, str(ex2))
 out2, _ = proc2.communicate(timeout=60)
+# 1 + 2 + ... + 1000 = 1000 * 1001 / 2 = 500500, computed after the release.
 check('and finished its own work after being paused',
-      b't=18000003000000' in out2.replace(b'\r\n', b'\n'), repr(out2[:60]))
+      b's=500500' in out2.replace(b'\r\n', b'\n'), repr(out2[:60]))
 conn2.close()
 srv2.close()
 

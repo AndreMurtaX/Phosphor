@@ -228,6 +228,74 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 
 ---
 
+## 5b. Audit of 2026-10-05 -- every open item read against HEAD
+
+The ledger is known to keep fixed items listed, so all 48 live items of the
+Open Ledger (the triage page; sections 1-5 here are its plan and its new finds)
+were read against `bdabc80` by four read-only passes, one per area, each item
+settled by reading the code and the git log -- and by a run only where a run is
+harmless (never a destructive, bomb or heap-corruption item). Citations below are
+by NAME; the line numbers in the sections above have drifted.
+
+**Closed: 5.** `d64` and `n13` (`e47e1a7`: one left-to-right comment alternation
+in `scripts/lib/boundary.{sh,ps1}`, gate `check-boundary.py` 11/11); `n4`
+(`6f3ca5d`, pinned in `tests/debug_protocol_test.py`); `m1` (`aae86e6`, the
+call-refusing evaluator, `evaluate: true` with `evaluateCalls: false`); `m2`
+(PhosphorIDE `0f19899` and `bd0d1c8`, the transport and the session driver, the
+Debug menu enabled from live state).
+
+**Partial: 4.**
+- `n5` -- two clauses closed (installed set, outer-frame lines), three open: the
+  `error` event carries no text (`TDebugProto.Handle`, the parse-failure branch);
+  `continued` and `trace` are never emitted; a command before `initialize` is
+  answered rather than refused -- and the comment in `TDebugProto.Session` that
+  says "nothing is answered before initialize" says the opposite of the code.
+- `n6` -- the shipped debugger AVOIDS it (`EvaluateExpr` evaluates in a fresh
+  VM, pinned by "err()/errmsg$() answer nothing at all afterwards"), but the
+  engine is unchanged: `Fault` still writes the error slots and
+  `TPhosphorVM.CallUserFunc` neither saves nor restores them, so an embedder
+  calling `CallFunction` from a stop -- which `docs/embedding.md` allows -- still
+  hands its fault to the resumed script. (Section 3's "already fixed in Wave 6" is
+  plan language about wave order, not a record of a fix.)
+- `d62` -- the doc half was corrected by `40ff75c` before the ledger was written
+  ("three of four" is two of four); the real defect stands: a refused write or
+  listing leaves `ioerror()` holding an earlier call's code.
+- `r1` -- `8425463` refuses the bare statement form; the assignment form
+  (`p$ = date$`, measured `[]` at exit 0) is still silent, now documented and
+  pinned as a known limit in `tests/probe_limits.lpr` and
+  `tests/suite/19_language_contract.bas` -- which must change with any fix.
+
+**Open: 39**, each measured or read today and still true as written unless noted:
+`d56 d57 d48 n8 d54 d53 d44 n12 d55 d51 n17` (harness and gates), `d14 n3 d07 d12
+d46 d47 n26 m5 m6 m7 n10 n7` (packages and I/O), `d18 n1 d45 d08 n9 d65 n14 m4 r3`
+(engine), `d10 n20 d42 n19 n11 d13 m3` (GUI, VM, handles). Notes on the ones whose
+shape moved:
+- `d53` is WORSE than written: the negative runners accept any non-zero exit,
+  and `phosphortest` exits 1 on a failed assertion -- so a negative "passes" by
+  containing a failing `assert`, without reaching its own rule at all.
+- `d55` is a test repair only: the feared engine state (stuck in-handler after a
+  `goto` out of a handler) does not occur -- a later handler fires normally.
+- `d18` now refuses under a budgeted host (a `BudgetAllows(pad)` was added) and
+  still allocates 2 GiB in the console host, which installs no budget; the wrap
+  in `f_center2`/`f_center3` is unchanged.
+- `n26`, `n7` and `d62` are DISCLOSED in their library pages, not fixed. A reader
+  of the docs alone can mistake them for closed.
+- `d47`'s exemption text in `scripts/check-budget.py` claims every expanding zip
+  path asks `ArchiveFitsBudget`; `f_zip_extract` and `f_zip_extractall` do not.
+  And the comment above `ArchiveFitsBudget` argues an archive "can only lie
+  DOWNWARD", which is `d46`. Both texts change with the fix.
+- `d10`/`n20` are documented as an accepted limit in `TGuiHandle`'s comment
+  ("do not free a tree while holding handles to its nodes") while
+  `control_free` itself frees exactly that kind of handle -- which is the double
+  free.
+
+**New, found by the audit:**
+- **The boundary strip treats Pascal string literals as code** (`n13`'s class):
+  a `'{'` inside a string would open a brace "comment". Harmless today -- every
+  such literal is in a routine body, after the `uses` clauses -- and no fixture
+  in `tests/boundary` covers it.
+
+
 ## 6. Struck from the ledger
 
 - **r2 — "the two guards inside `StoppableLines` that no compiled fixture can reach" — CLOSED.** `tests/probe_debug.lpr:480` `CheckStoppableGuards` exists for exactly this, headed at `:453` with those words; its fixture hand-builds the adversarial shape at `:506-507` (an `opNop` where the jump would be) and asserts line 40 is kept (`:490`), which is the `opJump` conjunct doing work; it is invoked at `:756`, corruptible at `:517` (`--fail` appends `,99`), and registered in **both** runners (`test-suite.ps1:283`, `test-suite.sh:208`). It landed in `2ee6b70`; `tests/probe_step.lpr:2089-2090` names it done in prose. **Residual filed as n11** (the `hdr >= 0` bound is reachable via a legal `.pbc` with `Entry = 0` and is untested — two `Emit` lines in the existing fixture). Separately: the `FInstrs[hdr].Op = opStmt` conjunct is **untestable by observation** — `PhosphorOpcodes.pas:506` already short-circuits on `opStmt` before `skip[]` is consulted, so deleting it is behaviour-preserving and a guaranteed mutation-test survivor **by construction, not by missing coverage**. Record that in a comment at `:498` so the next reviewer does not report it.

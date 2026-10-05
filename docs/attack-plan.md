@@ -289,11 +289,13 @@ resume that decides nothing — and both are pinned by tests watched failing fir
   thread's copies. Latent today — no thread in this host writes a diagnostic.
   (This entry used to say it would disappear under a `WriteStdErr` route; that
   route was not taken — see the entry above — so it stands on its own.)
-- **`Input` is not re-pointed by `crt_showconsole()`.** Found beside the entry
-  above and not measured yet: `TConsoleHost.ReadLine` still uses the stdin handle
-  taken at creation, and nothing points `Input` at `CONIN$`, so an `input` after a
-  re-shown console most likely reads the released one. Wants the same
-  attach-and-drive measurement (`WriteConsoleInputW`) before a repair.
+- ~~**`Input` is not re-pointed by `crt_showconsole()`.**~~ **CLOSED 2026-10-05.**
+  Measured first: a `line input` after a re-shown console read an EMPTY line
+  while the harness had typed a whole one into the new console. Same two causes
+  as the entry above, same two repairs — `PhosphorCrtLib` points `Input` at `NUL`
+  on hide (only when it was a console) and at `CONIN$` on show, and
+  `TConsoleHost.ReadLine` follows the `Input` record. Pinned in the same
+  `tests/console_reshow_test.py` (block V), watched failing with either half removed.
 - **A citation's line number rots invisibly.** `check-crossrefs.py` validates the
   path and never the line, and three citations about this very mechanism were
   wrong, one of them written the same day. All three are now written by NAME

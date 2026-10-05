@@ -339,7 +339,7 @@ begin
     the records are what crt_hideconsole and crt_showconsole re-point, so they
     are the one place that says where output goes NOW. At startup the two agree. }
   FStdOut := THandle(TextRec(System.Output).Handle);
-  FStdIn := StdInputHandle;
+  FStdIn := THandle(TextRec(System.Input).Handle);
   FStdErr := THandle(TextRec(StdErr).Handle);
   { GetConsoleMode succeeds only on a real console handle; a file/pipe fails it. }
   FOutIsConsole := (FOutFile = nil) and GetConsoleMode(FStdOut, mode);
@@ -361,7 +361,9 @@ end;
   console -- AllocConsole, with Output re-pointed at CONOUT$ -- and printed into
   the OLD one: measured by attaching to the new console and reading its screen
   buffer, which held neither a `println` nor the diagnostic of the fault that
-  followed. The write did not even fail, so nothing anywhere said so.
+  followed. The write did not even fail, so nothing anywhere said so. Reading
+  had the same shape: a `line input` after crt_showconsole read the released
+  console and got an empty line while the new one had a whole line waiting.
 
   The record's handle is the fact that acts: it is what crt_hideconsole sends to
   NUL and crt_showconsole sends to CONOUT$, and it is what TextIsTerminal asks
@@ -463,6 +465,9 @@ var
 begin
   ALine := '';
   {$IFDEF WINDOWS}
+  { The same rule as Output: read from where Input points NOW. crt_showconsole
+    re-points it at CONIN$, crt_hideconsole at NUL. }
+  Follow(System.Input, FStdIn, FInIsConsole);
   if FInIsConsole then
   begin
     w := '';

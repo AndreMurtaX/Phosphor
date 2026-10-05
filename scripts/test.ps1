@@ -1233,7 +1233,7 @@ $vText = Get-Content -Raw $vOut
 if ($null -eq $vText) { $vText = '' }
 $vTally = ([regex]::Match($vText, 'PASS \d+\s+FAIL \d+')).Value
 $okV = ($vCode -eq 0)
-if ($okV) { Write-Host ("PASS  V:a re-shown console gets println and diagnostics ({0})" -f $vTally) -ForegroundColor Green }
+if ($okV) { Write-Host ("PASS  V:a re-shown console gets println, diagnostics and input ({0})" -f $vTally) -ForegroundColor Green }
 else {
     Write-Host ("FAIL  V:a re-shown console (exit {0})" -f $vCode) -ForegroundColor Red
     $vText -split "`r?`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }

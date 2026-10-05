@@ -27,6 +27,13 @@ WATCHED FAILING, one half at a time: without StdErr re-pointed in
 crt_showconsole only the diagnostic is missing; without TConsoleHost following
 the Output record only the `println` is.
 
+AND THE KEYBOARD, added the same day with the same two causes: Input was left
+on the released console and ReadLine kept the stdin handle from creation, so a
+`line input` after crt_showconsole read an EMPTY line while the new console had
+a whole one waiting -- measured as `PROGRAM-READ[]`. The harness types a line
+into the new console's input buffer (WriteConsoleInputW) before letting the
+program ask. Watched failing with either half of that repair removed.
+
 Usage: console_reshow_test.py <phosphor.exe>
 Exit 0 pass, 1 fail, 2 the harness could not set the case up.
 """
@@ -55,9 +62,12 @@ with open(bas, 'w', newline='\n') as f:
             'n = file_writealltext("%s", str$(h) + str$(s))\n'
             'while file_exists("%s") = 0\n'
             'wend\n'
+            'line input "Q: "; got$\n'
+            'println "PROGRAM-READ[" + got$ + "]"\n'
             'x = 0\n'
             'y = 1 / x\n'
             'end\n' % (ready, go))
+TYPED = 'typed-by-harness'
 
 k = ctypes.WinDLL('kernel32', use_last_error=True)
 k.CreateFileW.restype = wt.HANDLE
@@ -70,6 +80,16 @@ class COORD(ctypes.Structure):
 class CSBI(ctypes.Structure):
     _fields_ = [('dwSize', COORD), ('dwCursorPosition', COORD), ('wAttributes', wt.WORD),
                 ('srWindow', wt.SHORT * 4), ('dwMaximumWindowSize', COORD)]
+
+
+class KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [('bKeyDown', wt.BOOL), ('wRepeatCount', wt.WORD),
+                ('wVirtualKeyCode', wt.WORD), ('wVirtualScanCode', wt.WORD),
+                ('UnicodeChar', wt.WCHAR), ('dwControlKeyState', wt.DWORD)]
+
+
+class INPUT_RECORD(ctypes.Structure):
+    _fields_ = [('EventType', wt.WORD), ('Key', KEY_EVENT_RECORD)]
 
 
 p = subprocess.Popen([EXE, bas], creationflags=subprocess.CREATE_NEW_CONSOLE)
@@ -100,8 +120,30 @@ if not k.AttachConsole(p.pid):
 h = k.CreateFileW('CONOUT$', 0x80000000 | 0x40000000, 3, None, 3, 0, None)
 mark = 'HARNESS-WROTE\r\n'
 k.WriteConsoleW(wt.HANDLE(h), mark, len(mark), ctypes.byref(wt.DWORD(0)), None)
+
+# TYPED INTO THE NEW CONSOLE'S INPUT BUFFER before the program asks, so the
+# `line input` finds a whole line waiting. Key-down and key-up per character, and
+# Enter, which is what a person's keystrokes put there.
+hin = k.CreateFileW('CONIN$', 0x80000000 | 0x40000000, 3, None, 3, 0, None)
+recs = (INPUT_RECORD * (2 * (len(TYPED) + 1)))()
+for i, ch in enumerate(TYPED + '\r'):
+    for j, down in enumerate((True, False)):
+        r = recs[2 * i + j]
+        r.EventType = 1                         # KEY_EVENT
+        r.Key.bKeyDown = down
+        r.Key.wRepeatCount = 1
+        r.Key.wVirtualKeyCode = 0x0D if ch == '\r' else 0
+        r.Key.UnicodeChar = ch
+wrote = wt.DWORD(0)
+k.WriteConsoleInputW(wt.HANDLE(hin), recs, len(recs), ctypes.byref(wrote))
+k.CloseHandle(wt.HANDLE(hin))
+
 open(go, 'w').close()
-code = p.wait(timeout=30)
+try:
+    code = p.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    p.kill()
+    code = 'TIMEOUT'
 
 info = CSBI()
 k.GetConsoleScreenBufferInfo(wt.HANDLE(h), ctypes.byref(info))
@@ -116,8 +158,10 @@ text = ' '.join(buf.value[:got.value].split())
 checks = [
     ('the reader sees the console (its own control line)', 'HARNESS-WROTE' in text),
     ("the program's println reached the new console", 'PROGRAM-PRINTED' in text),
+    ("the program's line input read the new console's keyboard",
+     'PROGRAM-READ[%s]' % TYPED in text),
     ("the host's diagnostic reached the new console",
-     'reshow.bas:9: division by zero' in text),
+     'reshow.bas:11: division by zero' in text),
     ('and the fault exits 1, a runtime error', code == 1),
 ]
 bad = 0

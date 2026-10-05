@@ -567,11 +567,28 @@ begin
   {$pop}
   if IOResult <> 0 then ;
 end;
+
+{ The READING twin of the two above: Reset, never Rewrite, because Input is
+  opened for reading. ADev is 'NUL' (every read is end of input, which is what
+  a program with no console should see) or 'CONIN$' (the new console's
+  keyboard). }
+procedure PointInputAt(const ADev: String);
+begin
+  {$push}{$I-}
+  Close(Input);
+  {$pop}
+  if IOResult <> 0 then ;
+  Assign(Input, ADev);
+  {$push}{$I-}
+  Reset(Input);
+  {$pop}
+  if IOResult <> 0 then ;
+end;
 {$ENDIF}
 
 function CrtHideOwnConsole: Boolean;
 {$IFDEF WINDOWS}
-var outWasConsole, errWasConsole: Boolean;
+var outWasConsole, errWasConsole, inWasConsole: Boolean;
 {$ENDIF}
 begin
   Result := False;
@@ -580,6 +597,7 @@ begin
   if GetConsoleWindow() = 0 then Exit;    // nothing attached to let go of
   outWasConsole := HandleIsConsole(STD_OUTPUT_HANDLE);
   errWasConsole := HandleIsConsole(STD_ERROR_HANDLE);
+  inWasConsole := HandleIsConsole(STD_INPUT_HANDLE);
   Flush(Output);
   {$push}{$I-}
   Flush(StdErr);
@@ -604,6 +622,11 @@ begin
     SendToNul(ErrOutput);
     SendToNul(StdErr);
   end;
+  // AND THE KEYBOARD. Input had been left on the released console, so after
+  // crt_showconsole() an `input` still read the old one -- measured: the line
+  // a harness typed into the NEW console came back empty. Redirected stdin, a
+  // file or a pipe, keeps its redirection exactly like the two above.
+  if inWasConsole then PointInputAt('NUL');
   gDetached := True;
   Result := True;
   {$ENDIF}
@@ -622,6 +645,7 @@ begin
   PointAtConsole(StdOut, 'CONOUT$');
   PointAtConsole(ErrOutput, 'CONOUT$');
   PointAtConsole(StdErr, 'CONOUT$');
+  PointInputAt('CONIN$');
   gDetached := False;
   Result := True;
   {$ENDIF}

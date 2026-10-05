@@ -55,9 +55,17 @@ type
     ANSWERED, never raised. Watch() asks the control to say when it dies; the
     reference is dropped and every later use resolves to gui_error 1.
 
-    A handle wrapping a NON-component (a TBitmap, a TTreeNode, a TListItem) cannot
-    be watched: FreeNotification is a TComponent service. Those keep the older,
-    weaker guarantee -- do not free a tree while holding handles to its nodes. }
+    A handle wrapping a NON-component cannot be watched itself: FreeNotification
+    is a TComponent service. A TBitmap is owned by its handle and dies only
+    through it. A TTreeNode or a TListItem is owned by a CONTROL, and that
+    control IS a component -- so since 2026-10-05 the handle watches the control
+    that holds it (Holder), and its death drops the reference exactly as a
+    control's own death does. Before that, this comment said "do not free a tree
+    while holding handles to its nodes", and control_free(tv@) followed by
+    control_free(node@) was a double free reachable from ordinary BASIC (ledger
+    n20); reading the node instead was an access violation (d10). A node can also
+    die with a node above it, which no notification reports: GuiForgetNodes
+    covers that, called before a node is freed. }
   TGuiHandle = class(TComponent)
   public
     // EXPLICIT visibility: TComponent is compiled {$M+}, so members with no section
@@ -70,6 +78,10 @@ type
       is the very access violation this class exists to prevent. Remembering the
       answer costs a byte and asks nothing of a dead pointer. }
     Watched: Boolean;
+    { The CONTROL that owns a non-component Control -- a node's tree view, an
+      item's list view -- watched in its place. nil for a component (watched
+      directly) and for anything owned by its own handle. }
+    Holder: TComponent;
     { Arm the death notice, when the wrapped object is able to send one. }
     procedure Watch;
     procedure Notification(AComponent: TComponent; Operation: TOperation); override;
@@ -574,13 +586,34 @@ procedure GuiLeaveLoop;
 
 procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
 
+{ BEFORE A TREE NODE OR A LIST ITEM IS FREED: every handle naming it -- and, for a
+  node, naming any node beneath it -- is dropped, so nothing is left pointing into
+  the subtree the free is about to destroy. No notification can report that
+  death: nodes are not components, and their tree view is still alive.
+
+  SAFE TO WALK BECAUSE OF AN INVARIANT, not because of luck: every non-nil
+  Control in the registry points at a live object. A component is watched
+  directly, a node or item through its Holder, and this routine covers the one
+  death neither reports. That is what lets `is TTreeNode` and HasAsParent read
+  each Control below without reading freed memory. }
+procedure GuiForgetNodes(AObj: TObject);
+
 implementation
+
+uses
+  ComCtrls;   // TTreeNode / TListItem: what a non-component handle can wrap
 
 procedure TGuiHandle.Watch;
 begin
   Watched := Control is TComponent;   // asked ONCE, while the pointer is certainly live
   if Watched then
-    TComponent(Control).FreeNotification(Self);
+    TComponent(Control).FreeNotification(Self)
+  else if Control is TTreeNode then
+    Holder := TTreeNode(Control).TreeView
+  else if Control is TListItem then
+    Holder := TListItem(Control).ListView;
+  if Holder <> nil then
+    Holder.FreeNotification(Self);
 end;
 
 procedure TGuiHandle.Notification(AComponent: TComponent; Operation: TOperation);
@@ -591,6 +624,45 @@ begin
   // state the resolver already knows how to refuse.
   if (Operation = opRemove) and (AComponent = Control) then
     Control := nil;
+  // AND SO IS THE CONTROL THAT HOLDS A NODE OR AN ITEM, which takes the node or
+  // item with it. Dropped the same way, for the same reason.
+  if (Operation = opRemove) and (Holder <> nil) and (AComponent = Holder) then
+  begin
+    Control := nil;
+    Holder := nil;
+  end;
+end;
+
+procedure GuiForgetNodes(AObj: TObject);
+var
+  id: Int64;
+  i: Integer;
+  o: TObject;
+  h: TGuiHandle;
+  dies: Boolean;
+begin
+  if AObj = nil then Exit;
+  id := FirstLiveHandle();
+  for i := 1 to LiveHandleCount() do
+  begin
+    if id = 0 then Break;
+    o := HandleObj(id);
+    if o is TGuiHandle then
+    begin
+      h := TGuiHandle(o);
+      dies := (h.Control <> nil) and (h.Holder <> nil) and
+              ((h.Control = AObj) or
+               ((AObj is TTreeNode) and (h.Control is TTreeNode) and
+                TTreeNode(h.Control).HasAsParent(TTreeNode(AObj))));
+      if dies then
+      begin
+        h.Holder.RemoveFreeNotification(h);
+        h.Holder := nil;
+        h.Control := nil;
+      end;
+    end;
+    id := NextLiveHandle(id);
+  end;
 end;
 
 destructor TGuiHandle.Destroy;
@@ -608,6 +680,12 @@ begin
   // notification already set Control to nil, so c is nil here and nothing is asked.
   if Watched and (c <> nil) then
     TComponent(c).RemoveFreeNotification(Self);
+  // A Holder still set is a live control: its notification would have nil'd it.
+  if Holder <> nil then
+  begin
+    Holder.RemoveFreeNotification(Self);
+    Holder := nil;
+  end;
   if Owns and (c <> nil) then
   begin
     // THE LEDGER'S OTHER CREDIT PATH, and the only one a TBitmap has: it is not a

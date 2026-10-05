@@ -263,7 +263,7 @@ var c: TControl; begin
 end;
 
 function f_free(const A: array of TValue; out E: TPhosphorError): TValue;
-var o: TObject; h: TGuiHandle;
+var o, obj: TObject; h: TGuiHandle;
 begin
   E := NoError;
   o := HandleObj(A[0].Hnd);
@@ -298,8 +298,13 @@ begin
   end;
   if (not h.Owns) and (h.Control <> nil) then
   begin
-    h.Control.Free;   // a non-owned control is freed here; the owning form frees its own
+    obj := h.Control;
+    // A TREE NODE OR A LIST ITEM (a handle with a Holder) takes a subtree with it
+    // that nothing will report: every handle into it is dropped FIRST, while the
+    // nodes are still alive to be compared. This one's own handle included.
+    if h.Holder <> nil then GuiForgetNodes(obj);
     h.Control := nil;
+    obj.Free;   // a non-owned control is freed here; the owning form frees its own
   end;
   if FreeHandle(A[0].Hnd) then Result := ValInt(1) else begin GGuiError := 1; Result := ValInt(0); end;
 end;

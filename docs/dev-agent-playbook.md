@@ -1524,6 +1524,26 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · A documented limitation was the defect, and the fix was to
+  watch the thing that CAN be watched.** `TGuiHandle`'s comment accepted that a
+  node handle could not be watched ("do not free a tree while holding handles to
+  its nodes") -- true of the NODE, which is not a component, and false as a
+  conclusion, because the tree that owns it is. Watching the holder closes three
+  of the four doors; the fourth (a node dying under a freed node) is reported by
+  nothing, so `control_free` sweeps the subtree first, which is safe only
+  because the first half makes every non-nil pointer in the registry live -- the
+  sweep's comment states that invariant rather than leaving it implicit. **The
+  test was written for the observable answer, not for the crash**: a double free
+  on Windows passes quietly, so a test that waited for one to crash would have
+  been green on the broken build. Asserting `0` with `gui_error()` 1 is
+  deterministic; the old build failed it at its first dead read. **And the
+  mutation itself was refused once**: `if False and ...` is an unreachable-code
+  WARNING, the GUI runner refuses a non-clean build, so the first mutant run
+  reported a build failure, not a test failure -- comment the line out instead.
+  The `.expected` count (41) was derived by counting `assert_` calls in the file,
+  never from a run.
+
+
 - **2026-10-05 · Expected answers from the spec's state machine, and a repair
   that wrote into a closed pipe.** Four segments were probed before anything was
   changed, each judged against the PDBP state machine rather than against a run.

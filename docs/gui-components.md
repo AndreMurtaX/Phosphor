@@ -224,9 +224,16 @@ tests therefore assert *wiring* (bind + read-back, and `button_click@` to fire
   from ordinary BASIC**, and a breach of this page's own rule that a freed handle is
   answered rather than raised.
 
-  A handle wrapping a **non-component** — a `bitmap@`, a `treenode@`, a `listitem@` —
-  cannot be watched, because `FreeNotification` is a `TComponent` service. Those keep
-  the weaker guarantee: do not free a tree while holding handles to its nodes.
+  A handle wrapping a **non-component** cannot be watched itself, because
+  `FreeNotification` is a `TComponent` service. A `bitmap@` is owned by its handle
+  and dies only through it. A `treenode@` or a `listitem@` is owned by its tree or
+  list view, which *is* a component — so the handle watches that control instead,
+  and freeing the tree, the list or the form above them answers `gui_error` 1 for
+  every node or item handle into them. Freeing a node with `control_free(node@)`
+  drops the handles of its whole subtree first. Until 2026-10-05 this paragraph
+  said "do not free a tree while holding handles to its nodes", and doing so was a
+  **double free** on the next `control_free(node@)` — heap corruption that passed
+  quietly on Windows. `tests/gui/22_node_lifetime.bas` pins every one of those deaths.
 - **Alignment is LCL-native and smaller.** `TAlign` has 7 values
   (`alNone/alTop/alBottom/alLeft/alRight/alClient/alCustom`), not FMX's 20. Phosphor
   exposes those plus **anchors** (`akLeft/akTop/akRight/akBottom`) through

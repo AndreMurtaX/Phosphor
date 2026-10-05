@@ -135,14 +135,18 @@ Two things worth noticing:
 
 **Lifetime.** A control handle knows when its control dies — `TGuiHandle` wires
 LCL's `FreeNotification`, so a child of a freed form resolves to `gui_error()` `1`
-like any other stale handle. Nodes and items **cannot** be watched that way,
-because `FreeNotification` is a `TComponent` service and they are not components.
-They keep the weaker guarantee described in
-[gui-components.md](../gui-components.md): do not free a tree or a list while you
-still hold handles to its nodes or items. Drop those handles first.
+like any other stale handle. Nodes and items are not components and cannot be
+watched themselves, so their handles watch the tree or list view that holds them:
+free the tree, the list or the form above it, and every node or item handle into
+it answers `""`/`0` with `gui_error()` `1`. A node or item is removed with
+`control_free(node@)` / `control_free(item@)`; a node takes its subtree with it,
+and every handle into that subtree is refused afterwards, as is a second free.
+(Until 2026-10-05 freeing the tree left node handles dangling, and freeing one of
+them then was a double free — see [gui-components.md](../gui-components.md).)
 
-**What is deliberately not here.** There is no removal (no way to delete a node, a
-row or a column), no selection (nothing answers which node is selected), no
+**What is deliberately not here.** There is no removal by index or by text (a node
+or item goes only through `control_free` on its handle), no column removal, no
+selection (nothing answers which node is selected), no
 expand/collapse, no sorting, and no events — a click on a node reaches BASIC only
 through the generic `control_onmousedown@` on the tree view control, which reports
 where the pointer was, not which node it hit. The escape hatch for anything the

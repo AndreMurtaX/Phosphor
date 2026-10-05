@@ -178,6 +178,13 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   which is true, and the gate is measuring the right thing again. **The documented route
   never hits this**: `git pull` stamps at checkout, so the window is exactly the case
   where a `tar` is carrying work that is not committed yet.
+  **And a `tar` that carries a NEW file wedges the later `git pull`**: the file
+  arrives untracked, so git refuses with *"untracked working tree files would be
+  overwritten by merge"* and the pull ABORTS -- after which the build and the suite
+  run against the old tree and the whole thing reads as the commit being broken.
+  It happened twice on 2026-10-04 alone, with `tests/suite/70_*.bas` and then
+  `tests/pack_interrupt_probe.py`. Remove that one file BY NAME and pull again;
+  never reach for anything recursive to tidy it.
 - **And a filter can hide the answer as easily as an exit code can.** Piping a run
   through `grep` for the line you expect shows nothing when the tool instead printed an
   error you did not expect — which reads like a silent pass. `scripts/test-suite.sh`

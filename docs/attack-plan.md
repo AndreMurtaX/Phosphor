@@ -439,8 +439,13 @@ stone never turned over is not a stone known to be clean.
   Linux. Watched failing: with the stub ignoring the NOCONSOLE flag, both
   `--no-console` cases fail on the released console. A handler fault does not
   end the program (`gui_error()` answers 2, as `docs/libraries/gui-timer.md`
-  documents) -- so a packed GUI app whose handler faults prints nothing anywhere;
-  that is the documented design, noted here rather than changed.
+  documents) -- so a packed GUI app whose handler faulted printed nothing
+  anywhere. **Changed the same day:** the rule stands, and the host now also
+  reports the fault on stderr, once per distinct handler/line/message, through a
+  hook (`GuiOnHandlerFault` in `host/gui/libs/PhosphorGuiCore.pas`) that a
+  headless test host leaves nil. Pinned in the same test: five faults on one
+  line give exactly one line on stderr, watched failing both without the report
+  and without the de-duplication.
 
 ## Decided 2026-09-18 — the compiled breakpoint condition stays uncached
 

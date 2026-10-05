@@ -34,6 +34,11 @@ Measured first on 2026-10-05 as a probe: all six Windows cases green on the
 first build that was run. WATCHED FAILING: with the packed-mark's NOCONSOLE flag
 ignored by the stub, both `--no-console` cases fail on "console released".
 
+THE FAULT CASE ALSO READS STDERR, since the same day: the handler faults on five
+ticks in a row and the host must say so ONCE, with the line, the message and the
+handler's name. Watched failing against the build before the report existed
+(stderr empty) and with the host's de-duplication removed (five lines).
+
 Usage: gui_pack_test.py <phosphor executable>
 Exit 0 pass, 1 fail, 2 could not set up (no display, say).
 """
@@ -127,8 +132,11 @@ def program(name, title, mode):
     go = fw(os.path.join(W, name + '.go'))
     res = fw(os.path.join(W, name + '.result'))
     if mode == 'fault':
-        act = ('    if faulted = 0 then\n'
-               '      faulted = 1\n'
+        # FIVE ticks in a row fault on the same line, then the sixth reports and
+        # quits. The counter goes up BEFORE the fault: a faulting handler does not
+        # reach its own later lines.
+        act = ('    faulted = faulted + 1\n'
+               '    if faulted <= 5 then\n'
                '      x = 0\n'
                '      y = 1 / x\n'
                '    end if\n'
@@ -228,6 +236,18 @@ def case(name, flags, own_console=False, mode='quit'):
     if mode == 'fault':
         check('a faulting handler is recorded, and the program carries on',
               result == 'gui_error=2', result)
+        # AND IT IS SAID, once. A packed application has no path to name, so the
+        # line has the no-path shape. The line number is derived from the program
+        # text written above, not from a run.
+        src = open(bas).read().split('\n')
+        fault_line = next(i for i, l in enumerate(src, 1) if l.strip() == 'y = 1 / x')
+        want_err = ('phosphor: %d: division by zero -- in the event handler on_tick; '
+                    'the program carries on' % fault_line).encode()
+        lines = [l for l in stderr.replace(b'\r\n', b'\n').split(b'\n') if l]
+        check('the fault is reported on stderr: line, message and handler',
+              want_err in lines, stderr[:200])
+        check('and reported ONCE, though it happened five times',
+              lines.count(want_err) == 1 and len(lines) == 1, lines)
     if not own_console:
         want = {'quit': b'BEFORE-APP-RUN\nPRINTED-FROM-HANDLER\nAFTER-APP-RUN\n',
                 'fault': b'BEFORE-APP-RUN\nAFTER-APP-RUN\n',

@@ -102,8 +102,15 @@ Two things worth noticing:
 
 - **A handler that fails does not abort the program.** If `on_click` divided by
   zero, the click would still return to LCL and the window would still be usable;
-  what changes is that `gui_error()` becomes `2`. That is the only way a program
-  learns a handler broke.
+  what changes is that `gui_error()` becomes `2`. That is the only way the
+  *program* learns a handler broke. The *person running it* learns too: the
+  `phosphor` host writes one line on stderr, in the shape of every other runtime
+  diagnostic and saying the program carries on --
+  `phosphor: app.bas:7: division by zero -- in the event handler on_click; the program carries on`
+  (no path for a packed application). Each distinct fault -- handler, line and
+  message -- is said once, so a timer that fails on every tick does not flood the
+  log; after 64 distinct ones the host says so and stops. Until 2026-10-05 nothing
+  was printed, and a packed GUI program with a broken handler simply did nothing.
 - **Closing the window works too.** The X button terminates the application,
   which also ends `app_run()`, so the `println` after it runs whether the user
   pressed *Done* or closed the window.

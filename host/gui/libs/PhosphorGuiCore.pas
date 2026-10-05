@@ -517,6 +517,21 @@ procedure GuiLeaveCallback(AObj: TObject);
 function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
   const AArgs: array of TValue): TValue;
 
+type
+  { A HANDLER THAT FAILED, TOLD TO THE HOST. The package's own rule stands -- the
+    tick returns, gui_error() answers 2, the program carries on -- but until
+    2026-10-05 that was ALL that happened: a packed GUI application whose handler
+    faulted said nothing on any stream, and tests/gui_pack_test.py showed it. A
+    library must not decide where a diagnostic goes, so it hands the fault to the
+    host through this one hook and the host decides. nil (the default) is the old
+    behaviour exactly, which is what a headless test host wants. }
+  TGuiHandlerFaultProc = procedure(const AHandler: String; ALine: Integer;
+    const AMessage: String) of object;
+
+var
+  { Set by the host that runs the program; read only inside GuiCallBack. }
+  GuiOnHandlerFault: TGuiHandlerFaultProc = nil;
+
 { The modifier keys as the short string the handler receives: "S", "C", "A", joined
   by spaces in that order, so all three read "S C A" exactly as the plan specified.
   A program tests one with instr(mods$, "C") > 0. }
@@ -654,7 +669,14 @@ begin
   if (AVM = nil) or (AHandler = '') then Exit;
   Result := AVM.CallUserFunc(AHandler, AArgs, err);
   if IsError(err) then
+  begin
     GGuiError := 2;   // a handler that failed is recorded, not raised
+    { ...and REPORTED, by whoever the host says. ErrorLine is the faulting
+      statement's line: CallUserFunc copies LastError out of the ExecFrom that
+      set both. }
+    if Assigned(GuiOnHandlerFault) then
+      GuiOnHandlerFault(AHandler, AVM.ErrorLine, err.Message);
+  end;
   { A handler that says END means the program is over. The engine records that
     instead of quietly ending only the handler's own activation, so the window it
     was clicked in has to go too -- otherwise `end` in a click handler is a

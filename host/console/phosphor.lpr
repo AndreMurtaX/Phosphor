@@ -133,6 +133,7 @@ type
   private
     FOutFile: TStream;       // non-nil only in --out file mode
     FSourceName: String;     // what a diagnostic calls the running program; '' = unnamed
+    FFaultsSaid: TStringList; // handler faults already reported, so each is said ONCE
     {$IFDEF WINDOWS}
     FStdOut, FStdIn, FStdErr: THandle;
     FOutIsConsole: Boolean;  // stdout is an interactive console (not redirected)
@@ -148,6 +149,8 @@ type
     function ReadLine(out ALine: String): Boolean; // False at end of input
     procedure Breakpoint(const AMessage: String; ALine: Integer;
                          const AOperands: array of TValue); // TPhosphorBreakpointProc
+    procedure HandlerFault(const AHandler: String; ALine: Integer;
+                           const AMessage: String);       // TGuiHandlerFaultProc
     function StdoutIsConsole: Boolean;
     function StdinIsConsole: Boolean;
     function StderrIsConsole: Boolean;
@@ -387,6 +390,11 @@ end;
 
 destructor TConsoleHost.Destroy;
 begin
+  { THE GUI'S HOOK POINTS AT THIS OBJECT; it must not outlive it. A REPL or an
+    embedding host builds more than one in a process. }
+  if TMethod(GuiOnHandlerFault).Data = Pointer(Self) then
+    GuiOnHandlerFault := nil;
+  FFaultsSaid.Free;  // nil-safe
   FOutFile.Free; // nil-safe
   inherited Destroy();
 end;
@@ -618,6 +626,66 @@ begin
   WriteStdErr(s + #10);
 end;
 
+{ AN EVENT HANDLER THAT FAILED: ONE LINE ON STDERR, AND THE PROGRAM CARRIES ON.
+
+  The GUI package's rule is unchanged -- the tick returns, gui_error() answers 2
+  -- and docs/libraries/gui-timer.md has always said so. What was missing is that
+  nobody was TOLD. A packed GUI application whose click handler divides by zero
+  showed a window that simply did nothing, and printed nothing on any stream;
+  tests/gui_pack_test.py is where that was seen. The shape is the one every other
+  runtime diagnostic here uses, with the handler named and the outcome said, so a
+  reader does not take it for the end of the program:
+
+      phosphor: <path>:<line>: <message> -- in the event handler <name>; the program carries on
+      phosphor: <line>: <message> -- in the event handler <name>; ...   (no path)
+
+  EACH DISTINCT FAULT IS SAID ONCE. A handler on a 50 ms timer that faults every
+  tick would otherwise write twenty lines a second for as long as the window is
+  open, burying the one that mattered and filling whatever log stderr goes to.
+  The key is handler, line and message, so a DIFFERENT fault in the same handler
+  is still reported. After BP_MAX_DISTINCT_FAULTS distinct ones the host says so
+  once and stops: the set is sized by the program, so it is capped by name. The
+  message is script-influenced text and is escaped and capped exactly as a
+  breakpoint message is. }
+const
+  BP_MAX_DISTINCT_FAULTS = 64;
+
+procedure TConsoleHost.HandlerFault(const AHandler: String; ALine: Integer;
+  const AMessage: String);
+var
+  key, msg, s: String;
+begin
+  if FFaultsSaid = nil then
+  begin
+    FFaultsSaid := TStringList.Create();
+    FFaultsSaid.Sorted := True;
+    FFaultsSaid.Duplicates := dupIgnore;
+  end;
+  key := AHandler + #9 + IntToStr(ALine) + #9 + AMessage;
+  if FFaultsSaid.IndexOf(key) >= 0 then Exit;
+  if FFaultsSaid.Count >= BP_MAX_DISTINCT_FAULTS then
+  begin
+    if FFaultsSaid.Count = BP_MAX_DISTINCT_FAULTS then
+    begin
+      FFaultsSaid.Add(#0'cap');   // sorts first; never equal to a real key
+      WriteStdErr(Format('phosphor: %d distinct event-handler faults reported; ' +
+        'further ones are not%s', [BP_MAX_DISTINCT_FAULTS, #10]));
+    end;
+    Exit;
+  end;
+  FFaultsSaid.Add(key);
+  msg := CapUtf8Bytes(AMessage, BP_MAX_MESSAGE_BYTES);
+  if Length(msg) < Length(AMessage) then
+    msg := EscapeForDiag(msg) + Format('...(%d bytes)', [Length(AMessage)])
+  else
+    msg := EscapeForDiag(msg);
+  if FSourceName <> '' then
+    s := Format('phosphor: %s:%d: %s', [FSourceName, ALine, msg])
+  else
+    s := Format('phosphor: %d: %s', [ALine, msg]);
+  WriteStdErr(s + ' -- in the event handler ' + AHandler + '; the program carries on'#10);
+end;
+
 { EVERY SEAM, AT EVERY DOOR, FROM ONE PLACE -- AND THAT IS THE POINT OF IT.
   This host builds an engine at every door that runs one. The count is not
   written here, because it has been wrong twice: grep for the calls.
@@ -655,6 +723,10 @@ begin
   AEng.OnOutput := @AHost.Output;
   AEng.OnInput := @AHost.ReadLine;
   AEng.OnBreakpoint := @AHost.Breakpoint;
+  { Not an engine seam -- the GUI package's hook -- but bound at the same one
+    place for the same reason: every door that runs a program then reports a
+    failing event handler, and none can forget to. }
+  GuiOnHandlerFault := @AHost.HandlerFault;
 end;
 
 { The six opt-in packages, and the seventeen GUI ones. Separate routines because

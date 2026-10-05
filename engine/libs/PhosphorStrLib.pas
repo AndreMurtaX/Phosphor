@@ -1139,11 +1139,18 @@ begin
   begin E := BudgetRefusal('rfill$'); Exit(ValStr('')); end;
   Result := ValStr(s + DupeString(f, w - n));
 end;
+{ center$ COMPARES BEFORE IT SUBTRACTS, like its four siblings. It used to compute
+  `pad := w - CpLen(s)` first, in 32 bits, from a width ArgI32 saturates to
+  Low(Integer) -- so a huge NEGATIVE width wrapped to a pad of 2147483647: the
+  console host, which installs no budget, built a 2 GiB string, and a budgeted
+  host refused a call that owed the string back unchanged (ledger d18; pinned in
+  scripts/probe_budget.lpr). Once w > CpLen(s) >= 0, the subtraction cannot wrap. }
 function f_center2(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, pad, l: Integer;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); pad := w - CpLen(s);
-  if pad <= 0 then Exit(ValStr(s));
+  E := NoError(); s := s0(A); w := ArgI32(A[1]);
+  if w <= CpLen(s) then Exit(ValStr(s));
+  pad := w - CpLen(s);
   if not BudgetAllows(pad) then begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
   l := pad div 2;
   Result := ValStr(StringOfChar(' ', l) + s + StringOfChar(' ', pad - l));
@@ -1151,8 +1158,9 @@ end;
 function f_center3(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f: String; w, pad, l: Integer;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2])); pad := w - CpLen(s);
-  if pad <= 0 then Exit(ValStr(s));
+  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2]));
+  if w <= CpLen(s) then Exit(ValStr(s));   // compare before subtracting: see f_center2
+  pad := w - CpLen(s);
   if not BudgetAllows(Int64(pad) * Length(f)) then
   begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
   l := pad div 2;

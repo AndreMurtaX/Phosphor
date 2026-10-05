@@ -213,6 +213,7 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 
 - **d12 is four doors, not one.** The RTL's rule is *"a line I cannot parse"*, not `#`: any unrecognised in-section line gets an empty `Ident` and is re-emitted with a spurious `=`; **a value containing a newline produces exactly such a line through `cfg_set@` alone** — no hand editor anywhere near it; a key beginning `;` is appended as a duplicate on every set and read back as the caller's default; a section beginning `;` is written without brackets and reloads as a comment.
 - ~~**d10 is four doors, not one**~~ **CLOSED 2026-10-05, all four doors, with n20.** A node or item handle now watches the control that HOLDS it (`TGuiHandle.Holder`, armed in `TGuiHandle.Watch`), so the tree, the list or the form above them dying drops the reference; and `control_free` on a node calls `GuiForgetNodes` first, dropping every handle into the subtree while the nodes are still alive to compare. Confirmed by reading, then by `tests/gui/22_node_lifetime.bas` (41 assertions) against the old build: `EAccessViolation in treenode_caption$` on its first dead read. Watched failing again with each half removed. The original text follows: `control_free(node@)`, `control_free(tv@)`, freeing the owning **form**, and freeing a node whose tree is already gone (n20). And the bookkeeping the class fix needs already exists one file away (`engine/libs/PhosphorJsonLib.pas:292`) and one function away in the GUI itself (`host/gui/libs/PhosphorGuiCore.pas:1490-1503`) — the mechanism is present and simply unapplied.
+- **d18 CLOSED 2026-10-05**: `f_center2`/`f_center3` in `engine/libs/PhosphorStrLib.pas` now compare `w <= CpLen(s)` before subtracting; scripts/probe_budget.lpr pins the negative half of the width axis for center$ (both forms) and the four siblings, and the unbudgeted door. The budgeted cases failed against the old engine with the wrapped pad (2147483645 units) refused; the unbudgeted case was deliberately not run there, because it would have allocated 2 GiB. With n1 also closed, the broken members of the grid below are none.
 - **d18's class swept to a grid** — a saturating `Arg*` used as an *operand* before it is clamped or compared. Broken: 2 sites (`center$` ×2) + n1. Correct-by-compare-first: 6. Correct-by-clamp-first: 9, **two of which are this same class already fixed once, with a comment at `PhosphorStrLib.pas:1178-1188` stating the rule** four lines below the site that still has the bug. And `scripts/probe_budget.lpr:262-263` already tests `center$("x", 2e9)`: the *positive* half of the width axis was swept and the negative half never was.
 - **Five gates enumerate by convention, not by derivation** — `coverage.py:141`, `check-sandbox.py:81-88`, `check-budget.py:80-82`, `check-codepage.py:229`, `check-suffix.py:108`. Each goes silently blind the day a sixth directory ships code, exactly as `check-seams.py` did when `lazarus/demo/` arrived. And `check-budget.py` **excludes `host/gui/libs` by design and says so**, so d42's entire class is gate-less by construction.
 - **`check-budget.py` can be satisfied without pricing anything.** `gated_names` resolves `GATE` hits transitively over callers, so both zip extractors would resolve as GATED the moment they were tainted — because they reach `BudgetAllows(AEntries.Count)` through `ArchiveLocalNamesAreSafe`. The gate asks whether a routine *reaches* a consultation, never whether the consultation prices *that routine's* work. Repairing the `NATIVES` substring taint alone would read green before and green after.
@@ -265,7 +266,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 34 after `d10`/`n20`, `d07`, `n1` and `n7` closed the same day**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 33 after `d10`/`n20`, `d07`, `n1`, `n7` and `d18` closed the same day**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -277,7 +278,7 @@ Debug menu enabled from live state).
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
 `d56 d57 d48 n8 d54 d53 d44 n12 d55 d51 n17` (harness and gates), `d14 n3 ~~d07~~ d12
-d46 d47 n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `d18 ~~n1~~ d45 d08 n9 d65 n14 m4 r3`
+d46 d47 n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ d45 d08 n9 d65 n14 m4 r3`
 (engine), `d42 n19 n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose
 shape moved:

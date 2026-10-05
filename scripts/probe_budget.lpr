@@ -404,6 +404,25 @@ begin
           'println "[" + ltab$("hello", 5) + "]"' + LF, '[hello]' + LF);
   Allowed('center$ still splits an odd pad the same way',
           'println "[" + center$("ab", 7, 45) + "]"' + LF, '[--ab---]' + LF);
+  { THE NEGATIVE HALF OF THE WIDTH AXIS, which the pad cases above never swept.
+    center$ computed `w - CpLen(s)` in 32 bits from a width ArgI32 had saturated
+    to Low(Integer), so a huge NEGATIVE width wrapped to a pad of 2147483647: a
+    budgeted host refused a call that owed the string back unchanged, and the
+    console host, which installs no budget, built a 2 GiB string (ledger d18).
+    "Too long for width: returned unchanged" is the documented answer, so that is
+    the expectation, for both forms and for the four siblings that compare first. }
+  Allowed('center$ at a huge negative width returns the string unchanged',
+          'println "[" + center$("abc", -1e18) + "]"' + LF, '[abc]' + LF);
+  Allowed('center$ with a fill char at a huge negative width, unchanged too',
+          'println "[" + center$("abc", -1e18, 45) + "]"' + LF, '[abc]' + LF);
+  Allowed('ltab$ at a huge negative width is unchanged',
+          'println "[" + ltab$("abc", -1e18) + "]"' + LF, '[abc]' + LF);
+  Allowed('rtab$ at a huge negative width is unchanged',
+          'println "[" + rtab$("abc", -1e18) + "]"' + LF, '[abc]' + LF);
+  Allowed('lfill$ at a huge negative width is unchanged',
+          'println "[" + lfill$("abc", -1e18, 46) + "]"' + LF, '[abc]' + LF);
+  Allowed('rfill$ at a huge negative width is unchanged',
+          'println "[" + rfill$("abc", -1e18, 46) + "]"' + LF, '[abc]' + LF);
   Allowed('json_pretty$ with an indent of zero still renders',
           'j@ = json_parse@("{""a"":1}")' + LF +
           'println len(json_pretty$(j@, 0)) > 0' + LF, 'true' + LF);
@@ -458,6 +477,12 @@ begin
              'println len(string$(1000000, 65))' + LF, '1000000' + LF);
   Unbudgeted('an unbudgeted host still gets the pads',
              'println "[" + center$("x", 5) + "]"' + LF, '[  x  ]' + LF);
+  { THE DOOR d18 ACTUALLY DAMAGED: with no budget, a huge negative width built a
+    2 GiB string. Not run against the unrepaired engine, deliberately -- it would
+    have allocated those 2 GiB on the machine running the suite; the budgeted
+    cases above saw the same wrapped pad (2147483645 units) refused instead. }
+  Unbudgeted('an unbudgeted host gets center$ at a huge negative width unchanged',
+             'println "[" + center$("abc", -1e18) + "]"' + LF, '[abc]' + LF);
   Unbudgeted('an unbudgeted host still gets dim@',
              'a@ = dim@(1000)' + LF + 'println ubound(a@, 1)' + LF, '1000' + LF);
   Unbudgeted('an unbudgeted host still gets a short pause',

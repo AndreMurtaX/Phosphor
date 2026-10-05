@@ -71,3 +71,4 @@
 70_string_index_assignment
 71_move_refuses_existing
 72_buffer_range_overflow
+73_strings_save_refused

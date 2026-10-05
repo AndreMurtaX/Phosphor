@@ -197,7 +197,7 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 
     THE RULE MOVED, AND SO DID THE CITATION. It was `docs/debug-protocol.md:163-173` when written and was correct then; PhosphorIDE's `e731b40` inserted the conditional-breakpoint section two days later and those lines are now that. The installed-set rule is at **`docs/debug-protocol.md:235-243`** — not 235-245, because `:245` begins a version-2 proposal and a mechanical offset would make a deferred design read as specified. **A citation into PhosphorIDE should be written by name and, if a pointer is needed, by section heading**: a heading survives an insertion above it and a line number does not, and `scripts/check-crossrefs.py` exempts that file by name so nothing here can catch the drift. This is the only line-numbered citation into the sibling in the whole tree, which is why the answer is a convention rather than a gate.
 - **n6 · `engine/PhosphorVM.pas:2225-2227`** — `Fault` writes `FErrCode`/`FErrMsg`/`FErrLine` unconditionally, and `CallUserFunc` (`:4423-4716`) never saves or restores them. So a host that evaluates a watch through `CallFunction` from a stop — **the re-entry `docs/embedding.md:956` explicitly blesses** — and whose watch faults, resumes the script with `err()`, `errmsg$()` and `erl()` answering the *debugger's* fault. Unpinned; no probe reads `err()` across a stop.
-- **n7 · `engine/libs/PhosphorStrListLib.pas:1215`** — `SaveTextToFile(...); Result := ValInt(l.Count);` discards the Boolean, so a sandbox-**refused** `strings_savetofile` answers the line count as if it had written them. A fabricated success, and a worse defect than d62's stale code.
+- ~~**n7**~~ **CLOSED 2026-10-05.** `t_strings_savetofile` answers the writer's Boolean -- the count when the write happened, `0` when it did not -- and `docs/libraries/str-list.md` stopped disclosing the defect and describes the fix. `tests/suite/73_strings_save_refused.bas` failed against the old engine on exactly that assertion (a first run failed for the wrong reason: a misspelled `strings_add@` that did not compile, read and corrected before it counted). Original text: **`engine/libs/PhosphorStrListLib.pas:1215`** — `SaveTextToFile(...); Result := ValInt(l.Count);` discards the Boolean, so a sandbox-**refused** `strings_savetofile` answers the line count as if it had written them. A fabricated success, and a worse defect than d62's stale code.
 - **n8 · `scripts/check-seams.py`** — the gate reports *"12 seams filled across 7 hosts"* for a tree that ships **six** `.lpr` under `host/`; the seventh is `host/console/backup/phosphor.lpr`, untracked and matched by `backup/` in `.gitignore`, counted a second time under the same basename key. The gate scans gitignored scratch.
 - **n9 · `engine/libs/PhosphorJsonLib.pas:787`** — `JsonNestsTooDeep` scans to `Length(AText)` and counts brackets fpjson never reads: a valid one-level object followed by 300 `[` is **refused** ("nests more than 256 levels deep") while `json_parse@`'s own parser accepts it. Opposite direction from d08, same mis-scoping. `JsonHasUEscape` (`:1259`) is the third copy — a `\u` in the ignored tail triggers a full re-spell and its budget charge for nothing.
 - **n10 · `engine/libs/PhosphorIoLib.pas:156`** — `file_readalltext$` sets `GIoError := 2` on any failure, so a **sandbox refusal is reported to the script as "file not found"**; and `IoErrorText` has no code meaning *refused* while the comment at `:535` says 3 means refused and the table at `:788` prints *path not found*.
@@ -265,7 +265,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 35 after `d10`/`n20`, `d07` and `n1` closed the same day**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 34 after `d10`/`n20`, `d07`, `n1` and `n7` closed the same day**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -277,7 +277,7 @@ Debug menu enabled from live state).
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
 `d56 d57 d48 n8 d54 d53 d44 n12 d55 d51 n17` (harness and gates), `d14 n3 ~~d07~~ d12
-d46 d47 n26 m5 m6 m7 n10 n7` (packages and I/O), `d18 ~~n1~~ d45 d08 n9 d65 n14 m4 r3`
+d46 d47 n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `d18 ~~n1~~ d45 d08 n9 d65 n14 m4 r3`
 (engine), `d42 n19 n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose
 shape moved:
@@ -289,8 +289,9 @@ shape moved:
 - `d18` now refuses under a budgeted host (a `BudgetAllows(pad)` was added) and
   still allocates 2 GiB in the console host, which installs no budget; the wrap
   in `f_center2`/`f_center3` is unchanged.
-- `n26`, `n7` and `d62` are DISCLOSED in their library pages, not fixed. A reader
-  of the docs alone can mistake them for closed.
+- `n26` and `d62` are DISCLOSED in their library pages, not fixed. A reader of the
+  docs alone can mistake them for closed. (`n7` was the third, and was fixed the
+  same day.)
 - `d47`'s exemption text in `scripts/check-budget.py` claims every expanding zip
   path asks `ArchiveFitsBudget`; `f_zip_extract` and `f_zip_extractall` do not.
   And the comment above `ArchiveFitsBudget` argues an archive "can only lie

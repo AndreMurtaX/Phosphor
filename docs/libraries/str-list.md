@@ -145,7 +145,7 @@ record an encoding name on the list; the two-argument forms record the default.
 
 | function | what it answers |
 | --- | --- |
-| `strings_savetofile(l@, path$ [, enc$]) → num` | the number of lines rendered — which it answers **even if the write never happened**, because the path was outside the sandbox or the disk refused it. Confirm with `file_exists` when it matters |
+| `strings_savetofile(l@, path$ [, enc$]) → num` | the number of lines written, or `0` when nothing was written — the path was outside the sandbox, its directory does not exist, or the disk refused it. An empty list also answers `0`. (Until 2026-10-05 it answered the line count even when the write never happened.) |
 | `strings_save(l@, path$) → num` | the short spelling of the same call |
 | `strings_loadfromfile(l@, path$ [, enc$]) → num` | the number of lines read, the list having been replaced. A missing or unreadable file is **not** an error: the list ends up empty and the answer is `0` — so a `0` means "no lines", from whichever cause |
 | `strings_load(l@, path$) → num` | the short spelling of the same call |

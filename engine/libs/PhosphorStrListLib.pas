@@ -1212,8 +1212,15 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
-  SaveTextToFile(Args[1].Str, RenderForSave(l));
-  Result := ValInt(l.Count);
+  { THE WRITE'S ANSWER IS THE ANSWER. This discarded SaveTextToFile's Boolean and
+    returned the line count whatever happened, so a write the sandbox refused, or
+    one into a directory that does not exist, reported every line as written --
+    a fabricated success, and the page said so instead of fixing it (ledger n7).
+    0 when nothing was written, which is what file_writealltext answers for the
+    same refusal; an empty list also answers 0, exactly as strings_loadfromfile's
+    0 means "no lines" from whichever cause. }
+  if SaveTextToFile(Args[1].Str, RenderForSave(l)) then
+    Result := ValInt(l.Count);
 end;
 
 function t_strings_loadfromfile(const Args: array of TValue; out Err: TPhosphorError): TValue;

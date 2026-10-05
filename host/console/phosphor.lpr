@@ -136,6 +136,7 @@ type
     FOutIsConsole: Boolean;  // stdout is an interactive console (not redirected)
     FInIsConsole: Boolean;   // stdin  is an interactive console
     FErrIsConsole: Boolean;  // stderr is an interactive console
+    procedure Follow(var AText: Text; var AHandle: THandle; var AIsConsole: Boolean);
     {$ENDIF}
     procedure WriteStdErr(const AText: String);
   public
@@ -333,9 +334,13 @@ begin
     FOutFile := TFileStream.Create(AOutPath, fmCreate);
   {$IFDEF WINDOWS}
   mode := 0;
-  FStdOut := StdOutputHandle;
+  { THE HANDLES INSIDE THE TEXT RECORDS, not the RTL's StdOutputHandle and
+    StdErrorHandle, which are read once at startup and never again. See Follow:
+    the records are what crt_hideconsole and crt_showconsole re-point, so they
+    are the one place that says where output goes NOW. At startup the two agree. }
+  FStdOut := THandle(TextRec(System.Output).Handle);
   FStdIn := StdInputHandle;
-  FStdErr := StdErrorHandle;
+  FStdErr := THandle(TextRec(StdErr).Handle);
   { GetConsoleMode succeeds only on a real console handle; a file/pipe fails it. }
   FOutIsConsole := (FOutFile = nil) and GetConsoleMode(FStdOut, mode);
   FInIsConsole := GetConsoleMode(FStdIn, mode);
@@ -346,6 +351,35 @@ begin
   FErrIsConsole := GetConsoleMode(FStdErr, mode);
   {$ENDIF}
 end;
+
+{$IFDEF WINDOWS}
+{ WRITE TO WHERE THE TEXT FILE POINTS NOW, and ask again whether that is a console
+  only when it has moved.
+
+  Until 2026-10-05 the handle and the answer were both taken once, in Create. A
+  program that called crt_hideconsole() and then crt_showconsole() got a NEW
+  console -- AllocConsole, with Output re-pointed at CONOUT$ -- and printed into
+  the OLD one: measured by attaching to the new console and reading its screen
+  buffer, which held neither a `println` nor the diagnostic of the fault that
+  followed. The write did not even fail, so nothing anywhere said so.
+
+  The record's handle is the fact that acts: it is what crt_hideconsole sends to
+  NUL and crt_showconsole sends to CONOUT$, and it is what TextIsTerminal asks
+  for the same reason. Comparing a handle per write is free; GetConsoleMode is a
+  call into the console driver, so it runs only on a change. }
+procedure TConsoleHost.Follow(var AText: Text; var AHandle: THandle;
+  var AIsConsole: Boolean);
+var
+  h: THandle;
+  mode: DWORD;
+begin
+  h := THandle(TextRec(AText).Handle);
+  if h = AHandle then Exit;
+  AHandle := h;
+  mode := 0;
+  AIsConsole := GetConsoleMode(h, mode);
+end;
+{$ENDIF}
 
 destructor TConsoleHost.Destroy;
 begin
@@ -400,6 +434,7 @@ begin
     Exit;
   end;
   {$IFDEF WINDOWS}
+  Follow(System.Output, FStdOut, FOutIsConsole);
   if FOutIsConsole then
   begin
     written := 0;
@@ -408,9 +443,12 @@ begin
       WriteConsoleW(FStdOut, PWideChar(w), Length(w), written, nil);
     Exit;
   end;
-  {$ENDIF}
-  { Redirected (pipe/file) or non-Windows: raw UTF-8 bytes, byte-exact. }
+  { Redirected (pipe/file, or NUL after crt_hideconsole): raw UTF-8 bytes. }
+  FileWrite(FStdOut, AText[1], Length(AText));
+  {$ELSE}
+  { Non-Windows: raw UTF-8 bytes, byte-exact. }
   FileWrite(StdOutputHandle, AText[1], Length(AText));
+  {$ENDIF}
 end;
 
 function TConsoleHost.ReadLine(out ALine: String): Boolean;
@@ -486,6 +524,7 @@ begin
   if Length(AText) = 0 then
     Exit;
   {$IFDEF WINDOWS}
+  Follow(StdErr, FStdErr, FErrIsConsole);
   if FErrIsConsole then
   begin
     written := 0;
@@ -494,9 +533,12 @@ begin
       WriteConsoleW(FStdErr, PWideChar(w), Length(w), written, nil);
     Exit;
   end;
-  {$ENDIF}
-  { Redirected (pipe/file) or non-Windows: raw UTF-8 bytes, byte-exact. }
+  { Redirected (pipe/file, or NUL after crt_hideconsole): raw UTF-8 bytes. }
+  FileWrite(FStdErr, AText[1], Length(AText));
+  {$ELSE}
+  { Non-Windows: raw UTF-8 bytes, byte-exact. }
   FileWrite(StdErrorHandle, AText[1], Length(AText));
+  {$ENDIF}
 end;
 
 { WHAT A BREAKPOINT NOW DOES IN THIS HOST: ONE LINE, ON STDERR, AND KEEP GOING.
@@ -4683,8 +4725,8 @@ begin
     from, which is not a property this host should have.
 
     THE WRITE THIS HOST MAKES FOR THE PROGRAM IS UNAFFECTED: the program's own
-    output leaves through FileWrite(StdOutputHandle, ...) at :404 as raw bytes and
-    has never passed through a Text file. That is what every byte-exact golden in
+    output leaves through TConsoleHost.Output as raw bytes -- FileWrite on the
+    handle the Output record carries -- and has never passed through a Text file. That is what every byte-exact golden in
     this tree compares, and it is why the five suites cannot tell the stderr half
     of this from a no-op -- see the case in tests/ that hexdumps stderr.
 

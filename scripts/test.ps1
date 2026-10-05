@@ -1214,6 +1214,31 @@ if ($litter.Count -ne 0) {
 if ($okU) { Write-Host 'PASS  U:pack writes the final name only when finished (rebuild, read-only, no litter)' -ForegroundColor Green }
 else { Write-Host 'FAIL  U:pack left the final name or a temporary in the wrong state' -ForegroundColor Red }
 
+# --- V: A CONSOLE MADE AGAIN GETS WHAT THE PROGRAM AND THE HOST WRITE ------------
+#
+# crt_hideconsole() then crt_showconsole() used to give a program a new console
+# that received nothing: not its `println`, not the host's diagnostic of the
+# fault that followed. Both went to the console it had let go of, and both
+# writes succeeded there, so nothing said so. tests/console_reshow_test.py
+# attaches to the new console and reads its screen buffer; its header records
+# the mechanism and the two mutations it was watched failing under.
+#
+# Windows only, and the bash twin says so: there is no console to let go of on
+# Linux. It opens a console window for about a second, by necessity -- the case
+# IS a process that owns its own console.
+$vOut = Join-Path $tmp 'phosphor_reshow.out'
+cmd /c "python `"$root\tests\console_reshow_test.py`" `"$exe`" > `"$vOut`" 2>&1"
+$vCode = $LASTEXITCODE
+$vText = Get-Content -Raw $vOut
+if ($null -eq $vText) { $vText = '' }
+$vTally = ([regex]::Match($vText, 'PASS \d+\s+FAIL \d+')).Value
+$okV = ($vCode -eq 0)
+if ($okV) { Write-Host ("PASS  V:a re-shown console gets println and diagnostics ({0})" -f $vTally) -ForegroundColor Green }
+else {
+    Write-Host ("FAIL  V:a re-shown console (exit {0})" -f $vCode) -ForegroundColor Red
+    $vText -split "`r?`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }
+}
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV) { exit 0 } else { exit 1 }

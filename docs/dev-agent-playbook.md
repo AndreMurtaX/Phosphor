@@ -1524,6 +1524,34 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · A filed defect's CONSEQUENCE was deduced, and it was wrong; its
+  proposed FIX would have repaired half.** The attack plan said: on win64 `StdErr`
+  and `ErrOutput` are separate records, `--no-console` re-points only
+  `ErrOutput`, so a faulting program raises writing its diagnostic and exits 3.
+  The first sentence was true (read in `systemh.inc`). The second was never run.
+  Run -- in a console the process owns, the only case where anything is released
+  -- all four doors exited 1: a write to the released console's handle SUCCEEDS.
+  Two lessons.
+
+  **(1) A FILED ENTRY IS A HYPOTHESIS UNTIL IT HAS BEEN SEEN.** The correct move
+  was to measure before mutating, and the measurement did not just shrink the
+  defect, it moved it: the real loss was after `crt_showconsole()`, where the new
+  console got NOTHING -- not the diagnostics, and not the program's own `println`
+  either, because `TConsoleHost` took its stdout handle once at creation. That
+  second cause was invisible from the entry's framing, and the entry's proposed
+  fix (route 108 `Writeln(StdErr)` sites through `WriteStdErr`) would have fixed
+  the diagnostics and left `println` dead. Measuring the symptom a person sees
+  found the cause the reasoning had not.
+
+  **(2) A CONTROL THAT SHARES THE DEFECT IS NOT A CONTROL.** The first reader of
+  the new console's buffer came back empty, so a control was added -- a `println`
+  -- and it came back empty too, which read as "the reader is broken". It was not:
+  the `println` went through the very cached handle under suspicion. The control
+  that settled it was one the HARNESS wrote itself, through a path the program
+  does not touch. Then each half of the repair was removed in turn and exactly one
+  symptom came back each time.
+
+
 - **2026-10-05 · `setBreakpoints` reads its `path`, and the deferral was right to
   wait for a measurement.** The handler never read the key, so a frame naming
   another file replaced this file's whole set. It had been filed rather than

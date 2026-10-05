@@ -581,12 +581,29 @@ begin
   outWasConsole := HandleIsConsole(STD_OUTPUT_HANDLE);
   errWasConsole := HandleIsConsole(STD_ERROR_HANDLE);
   Flush(Output);
+  {$push}{$I-}
+  Flush(StdErr);
+  {$pop}
+  if IOResult <> 0 then ;
   FreeConsole();
   // Only the handles that WERE consoles are rewired: a run redirected to a file
   // or a pipe keeps its redirection, which is how a windowed program still
   // writes a debug log with no window in sight.
-  if outWasConsole then SendToNul(Output);
-  if errWasConsole then SendToNul(ErrOutput);
+  // FOUR TEXT FILES, NOT TWO. On win64 StdOut and StdErr are records of their
+  // own, not aliases of Output and ErrOutput (systemh.inc: the alias exists only
+  // under FPC_STDOUT_TRUE_ALIAS, which no desktop target defines), and every
+  // host diagnostic is `Writeln(StdErr, ...)`. Rewiring ErrOutput alone left
+  // all of them on the console this process had just let go of.
+  if outWasConsole then
+  begin
+    SendToNul(Output);
+    SendToNul(StdOut);
+  end;
+  if errWasConsole then
+  begin
+    SendToNul(ErrOutput);
+    SendToNul(StdErr);
+  end;
   gDetached := True;
   Result := True;
   {$ENDIF}
@@ -602,7 +619,9 @@ begin
   if not gDetached then Exit;
   if not AllocConsole() then Exit;
   PointAtConsole(Output, 'CONOUT$');
+  PointAtConsole(StdOut, 'CONOUT$');
   PointAtConsole(ErrOutput, 'CONOUT$');
+  PointAtConsole(StdErr, 'CONOUT$');
   gDetached := False;
   Result := True;
   {$ENDIF}

@@ -936,4 +936,11 @@ else echo 'FAIL  U:pack left the final name or a temporary in the wrong state'; 
 
 if [ "$okS" -ne 0 ] || [ "$okT" -ne 0 ] || [ "$okU" -ne 0 ]; then fail=1; fi
 
+# --- V: A CONSOLE MADE AGAIN GETS WHAT THE PROGRAM AND THE HOST WRITE ------------
+# Windows only, and said here rather than left out, so the two runners still list
+# the same blocks: crt_hideconsole() and crt_showconsole() answer 0 on Linux,
+# where there is no console of its own to let go of. scripts/test.ps1 runs
+# tests/console_reshow_test.py, whose header records the defect it pins.
+echo 'SKIP  V:a re-shown console (Windows only: nothing to detach on this platform)'
+
 exit "$fail"

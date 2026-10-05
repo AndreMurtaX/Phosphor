@@ -267,19 +267,33 @@ resume that decides nothing — and both are pinned by tests watched failing fir
   still lands and only a genuinely different file is answered `ok` with `lines`
   empty. Pinned by the per-file session in `tests/debug_protocol_test.py`, watched
   red against the old build and red again with the identity half removed.
-- **`--no-console` rewires `ErrOutput`, and every diagnostic writes to `StdErr`.**
-  On win64 those are separate records (`FPC_STDOUT_TRUE_ALIAS` is defined only for
-  atari and embedded), so a packed `--no-console` application whose program faults
-  raises instead of printing and exits 3 — the code reserved for an interpreter
-  bug — where the honest answer is 1. Pre-existing. The fix is the same one that
-  would close it properly: route the ~108 `Writeln(StdErr, ...)` sites through
-  `TConsoleHost.WriteStdErr`, which already branches on whether the handle is a
-  console and gets both cases right. That is a large mechanical edit and wants its
-  own change, not a rider on a review.
+- ~~**`--no-console` rewires `ErrOutput`, and every diagnostic writes to `StdErr`.**~~
+  **CLOSED 2026-10-05 — and the entry's consequence was WRONG, which measuring
+  first is what found.** The records are separate (`FPC_STDOUT_TRUE_ALIAS` is
+  defined only for atari and embedded), but a faulting `--no-console` program does
+  not raise and exit 3: measured in a console of its own, all four doors (the flag,
+  `crt_hideconsole()`, a packed `--no-console` application, and a plain control)
+  exit 1, because a write to the released console's handle SUCCEEDS. The real loss
+  was quieter and wider: after `crt_hideconsole()` then `crt_showconsole()`, the
+  NEW console received neither the host's diagnostics (`StdErr` was never
+  re-pointed) nor the program's own `println` (`TConsoleHost` had taken its stdout
+  handle once, at creation). Repaired at both causes — `PhosphorCrtLib` re-points
+  all four text files, and `TConsoleHost.Follow` writes to the handle the record
+  carries NOW — instead of the 108-site rewrite this entry proposed, which would
+  have fixed the diagnostics and left `println` broken. Pinned by block V of
+  `scripts/test.ps1` (`tests/console_reshow_test.py`, which attaches to the new
+  console and reads its screen buffer), watched failing against the old build and
+  under each half removed.
 - **The standard text files are `threadvar`s.** Every thread FPC starts re-opens
   and re-stamps them, so the codepage pinned at the door is pinned for the main
-  thread's copies. Latent today — no thread in this host writes a diagnostic —
-  and it disappears entirely under the `WriteStdErr` route above.
+  thread's copies. Latent today — no thread in this host writes a diagnostic.
+  (This entry used to say it would disappear under a `WriteStdErr` route; that
+  route was not taken — see the entry above — so it stands on its own.)
+- **`Input` is not re-pointed by `crt_showconsole()`.** Found beside the entry
+  above and not measured yet: `TConsoleHost.ReadLine` still uses the stdin handle
+  taken at creation, and nothing points `Input` at `CONIN$`, so an `input` after a
+  re-shown console most likely reads the released one. Wants the same
+  attach-and-drive measurement (`WriteConsoleInputW`) before a repair.
 - **A citation's line number rots invisibly.** `check-crossrefs.py` validates the
   path and never the line, and three citations about this very mechanism were
   wrong, one of them written the same day. All three are now written by NAME

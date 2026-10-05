@@ -111,6 +111,34 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   of a directory built from `GetTempPath()`. Three cleanups were written that day: one
   sat after `exit` and was dead code, one hung, and the correct one removed nothing,
   because the directory always had files in it. The scripts now leave it and say why.
+- **A JUNCTION TO THIS REPOSITORY CAN BE SITTING INSIDE `.claude/worktrees/`, and a
+  recursive delete FOLLOWS IT.** Cleaning up 61 stale agent worktrees on 2026-10-04
+  left one entry that looked like an empty directory. `rmdir` refused it with *"Not
+  a directory"* -- **that refusal is the tell, and it is the only one you get**.
+  `Get-Item -Force` named it: `Attributes: Directory, ReparsePoint`, `LinkType:
+  Junction`, `Target: C:\Dev\Phosphor`. A sibling-checkout stub, created by a tool
+  and not by anyone here, so that a worktree's `../Phosphor` citations would
+  resolve.
+  `Remove-Item -Recurse` on that path would have walked the reparse point into the
+  whole repository. This is the fourteenth-working-copy scenario with a different
+  door, and the door is *inside a gitignored directory a cleanup is most likely to
+  treat as disposable*.
+  `[System.IO.Directory]::Delete(p)` is the right primitive here for a second
+  reason beyond the entry above: on a reparse point it removes THE LINK and does
+  not follow it. **And prove the target survived** -- count the entries in it
+  before and after; it was 18 and 18. A junction is also why anything that scans
+  `.claude/` recursively can double every count it makes, which
+  `PhosphorIDE/tools/gen-keywords.py` already records from the other side.
+  **The same cleanup taught one more thing about worktrees.** Judging them by
+  `git status` alone is not enough: all 61 were dirty but none was ahead of `main`,
+  and the files they held had landed -- some renumbered, with their `rem` comments
+  reworked, so `main` carried the LATER version. The gap was that a worktree's HEAD
+  can still be a commit `main` does not contain, which a file-by-file audit cannot
+  see. Three were: two on a commit that had been CHERRY-PICKED (so its content
+  landed under a new sha) and one on a superseded draft. Ask
+  `git merge-base --is-ancestor <its HEAD> main` for every worktree before removing
+  any, and tag what is not contained -- a tag costs nothing and `git worktree
+  remove` takes the last reference with it.
 - **`{$codepage UTF8}` corrupts binary string LITERALS.** Every unit sets it, so `#$8B`
   in source becomes two bytes. Build exact bytes at runtime with `Chr()`; runtime calls,
   stream writes and pointer casts are unaffected. Applies to gzip headers, `.pbc` magic,

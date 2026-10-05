@@ -1239,6 +1239,49 @@ else {
     $vText -split "`r?`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }
 }
 
+# --- W: A SECOND THREAD'S STDERR IS THE ONE THE MAIN THREAD SET UP ---------------
+#
+# The five standard text files are threadvars, and the RTL re-opens them in every
+# thread over the startup handles and the CONSOLE code page -- so block S's pin
+# held for the main thread's copies only. `phosphor --diag` writes one line from
+# the main thread and one from a second thread. Measured before the repair, stderr
+# to a file:
+#
+#   chcp 850    main c3 a9   thread 82
+#   chcp 65001  main c3 a9   thread c3 a9
+#   chcp 437    main c3 a9   thread 82
+#
+# host/packages/PhosphorStdIO.pas makes every thread copy the main thread's
+# decision before its first line, through the thread manager, so a thread written
+# tomorrow -- or started by a library -- cannot miss it. Watched failing with
+# InstallThreadConformance removed: 82 again under 850 and 437.
+$okW = $true
+foreach ($cp in 850, 65001, 437) {
+    $errW = Join-Path $tmp "w$cp.err"
+    $batW = Join-Path $tmp "w$cp.bat"
+    $bodyW = "@echo off`r`nchcp $cp >nul`r`n`"$exe`" --diag < NUL > NUL 2> `"$errW`"`r`nexit /b %ERRORLEVEL%`r`n"
+    [System.IO.File]::WriteAllBytes($batW, [Text.Encoding]::ASCII.GetBytes($bodyW))
+    cmd /c "`"$batW`"" | Out-Null
+    $codeW = $LASTEXITCODE
+    $textW = [Text.Encoding]::GetEncoding(28591).GetString([System.IO.File]::ReadAllBytes($errW))
+    foreach ($who in 'the main thread', 'a thread') {
+        $lineW = ($textW -split "`n") | Where-Object { $_ -like "stderr from $who*" } | Select-Object -First 1
+        $tailW = ''
+        if ($lineW) {
+            $tailW = ([Text.Encoding]::GetEncoding(28591).GetBytes(
+                ($lineW.Substring($lineW.IndexOf('caf') + 3)).TrimEnd("`r")) |
+                ForEach-Object { '{0:x2}' -f $_ }) -join ' '
+        }
+        if ($codeW -ne 0 -or $tailW -ne 'c3 a9') {
+            Write-Host ("        W: under chcp {0} (exit {1}) stderr from {2}: '{3}'" -f
+                        $cp, $codeW, $who, $tailW) -ForegroundColor DarkGray
+            $okW = $false
+        }
+    }
+}
+if ($okW) { Write-Host "PASS  W:a second thread's stderr is UTF-8 like the main thread's (chcp 850, 65001, 437)" -ForegroundColor Green }
+else { Write-Host "FAIL  W:a thread's standard files are not the main thread's" -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW) { exit 0 } else { exit 1 }

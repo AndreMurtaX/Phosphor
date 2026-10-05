@@ -943,4 +943,25 @@ if [ "$okS" -ne 0 ] || [ "$okT" -ne 0 ] || [ "$okU" -ne 0 ]; then fail=1; fi
 # tests/console_reshow_test.py, whose header records the defect it pins.
 echo 'SKIP  V:a re-shown console (Windows only: nothing to detach on this platform)'
 
+# --- W: A SECOND THREAD'S STDERR IS THE ONE THE MAIN THREAD SET UP ---------------
+# The twin of block W in scripts/test.ps1, whose comment carries the mechanism.
+# The standard text files are threadvars and the RTL re-opens them per thread;
+# LC_ALL=C is this platform's `chcp 850`, as block S says.
+okW=0
+for wloc in "${LANG:-C.UTF-8}" C; do
+  if LC_ALL="$wloc" "$exe" --diag < /dev/null > /dev/null 2> "$tmpdir/w.err"
+  then wcode=0; else wcode=$?; fi
+  [ "$wcode" -eq 0 ] || { echo "        W: under LC_ALL=$wloc --diag exited $wcode"; okW=1; }
+  for who in 'the main thread' 'a thread'; do
+    # ONE grep on the file, never `grep | grep -q` -- CLAUDE.md names that pipe.
+    if ! grep -q "stderr from $who: $(printf 'caf\303\251')" "$tmpdir/w.err"; then
+      echo "        W: under LC_ALL=$wloc stderr from $who was not UTF-8:"
+      grep "stderr from $who" "$tmpdir/w.err" | od -An -tx1 | tail -2 | sed 's/^/        /'
+      okW=1
+    fi
+  done
+done
+if [ "$okW" -eq 0 ]; then echo "PASS  W:a second thread's stderr is UTF-8 like the main thread's (two locales)"
+else echo "FAIL  W:a thread's standard files are not the main thread's"; fail=1; fi
+
 exit "$fail"

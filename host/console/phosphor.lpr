@@ -91,7 +91,9 @@ uses
   // so the binary builds and runs everywhere; only an actually-called function
   // whose library is absent reports an error, and the rest keep working.
   PhosphorCrtLib, PhosphorBase64Lib, PhosphorZipLib, PhosphorGzipLib,
-  PhosphorHttpLib, PhosphorSqliteLib;
+  PhosphorHttpLib, PhosphorSqliteLib,
+  // the standard files, the same in every thread
+  PhosphorStdIO;
 
 var
   { --no-console: hide the console window at startup, when this process owns one.
@@ -4311,16 +4313,40 @@ begin
   Halt(3);   // never a dialog, never a wait
 end;
 
+{ ONE LINE ON STDERR FROM A SECOND THREAD, for --diag. The standard files are
+  threadvars and the RTL re-opens them per thread, so this is the only way to
+  see from outside whether a thread's StdErr is the one the main thread set up
+  -- same destination, same encoding. See host/packages/PhosphorStdIO.pas. }
+function DiagThreadLine(AParam: Pointer): PtrInt;
+begin
+  Writeln(StdErr, 'stderr from a thread: café');
+  {$push}{$I-}
+  Flush(StdErr);
+  {$pop}
+  if IOResult <> 0 then ;
+  Result := 0;
+end;
+
 function Diag: Integer;
 var
   host: TConsoleHost;
+  tid: TThreadID;
+  th: TThreadID;
 begin
   host := TConsoleHost.Create('');
   try
     Writeln(StdErr, 'stdout is console: ', host.StdoutIsConsole());
     Writeln(StdErr, 'stdin  is console: ', host.StdinIsConsole());
     Writeln(StdErr, 'stderr is console: ', host.StderrIsConsole());
+    Writeln(StdErr, 'stderr from the main thread: café');
     Flush(StdErr);
+    tid := 0;
+    th := BeginThread(nil, DefaultStackSize, @DiagThreadLine, nil, 0, tid);
+    if th <> TThreadID(0) then
+    begin
+      WaitForThreadTerminate(th, 10000);
+      CloseThread(th);
+    end;
     host.Output('UTF-8 check: Olá — café — açúcar — ☕ — π ≈ 3.14159'#10);
     Result := 0;
   finally
@@ -4772,6 +4798,18 @@ begin
   if not TextIsTerminal(Output) then SetTextCodePage(Output, CP_UTF8);
   if not TextIsTerminal(StdErr) then SetTextCodePage(StdErr, CP_UTF8);
   if not TextIsTerminal(Input) then SetTextCodePage(Input, CP_UTF8);
+
+  { AND FOR EVERY THREAD, NOT JUST THIS ONE. The five standard files are
+    threadvars and the RTL re-opens them per thread over the startup handles
+    and the console code page, so the three lines above held for the main
+    thread's copies only -- measured through --diag: under chcp 850 and 437 a
+    second thread's StdErr wrote cafe-acute as the single CP850 byte 82 while
+    this thread wrote c3 a9. PublishStdIO records what was just decided;
+    InstallThreadConformance makes every thread started afterwards copy it
+    before its first line. crt_hideconsole and crt_showconsole publish again
+    when they re-point the files. See host/packages/PhosphorStdIO.pas. }
+  PublishStdIO();
+  InstallThreadConformance();
 
   // Then, before anything can raise: take the LCL's modal crash dialog out of
   // the picture. See TCrashGuard above -- linking Forms is what puts it there,

@@ -284,11 +284,21 @@ resume that decides nothing — and both are pinned by tests watched failing fir
   `scripts/test.ps1` (`tests/console_reshow_test.py`, which attaches to the new
   console and reads its screen buffer), watched failing against the old build and
   under each half removed.
-- **The standard text files are `threadvar`s.** Every thread FPC starts re-opens
-  and re-stamps them, so the codepage pinned at the door is pinned for the main
-  thread's copies. Latent today — no thread in this host writes a diagnostic.
-  (This entry used to say it would disappear under a `WriteStdErr` route; that
-  route was not taken — see the entry above — so it stands on its own.)
+- ~~**The standard text files are `threadvar`s.**~~ **CLOSED 2026-10-05.** Read
+  in the RTL first: `InitThread` calls `SysInitStdio`, which re-opens all five
+  over the STARTUP handles with the CONSOLE code page — so a thread inherited
+  neither the UTF-8 pin nor where `crt_hideconsole` / `crt_showconsole` had
+  pointed them. Then measured, through a line `phosphor --diag` now writes from
+  a second thread: under `chcp 850` and `437` it wrote e-acute as the CP850 byte
+  `82` while the main thread wrote `c3 a9`. Latent in the product (the one
+  shipped thread, `TDbgReader`, writes nothing), so it was repaired as a CLASS
+  rather than at that thread: `host/packages/PhosphorStdIO.pas` publishes the
+  main thread's five records and wraps the thread manager's `BeginThread`, so
+  every thread anyone starts copies them before its first line. Block W of both
+  runners, watched failing with the installation removed. **Not reachable
+  end-to-end:** a thread started after `crt_hideconsole` / `crt_showconsole` —
+  no script can start a thread, so that republish is exercised by reading, not
+  by a test.
 - ~~**`Input` is not re-pointed by `crt_showconsole()`.**~~ **CLOSED 2026-10-05.**
   Measured first: a `line input` after a re-shown console read an EMPTY line
   while the harness had typed a whole one into the new console. Same two causes

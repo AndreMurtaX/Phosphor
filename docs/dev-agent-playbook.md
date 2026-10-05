@@ -1524,6 +1524,23 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · A latent defect still gets measured, and a class still gets a
+  class fix.** The standard text files are threadvars; the RTL re-opens them in
+  every thread over the startup handles and the console code page, so a
+  thread's StdErr undid the UTF-8 pin. No shipped thread writes anything, which
+  is why the attack plan called it latent -- and latent was true and was not a
+  reason to reason instead of measure. A diagnostic line from a second thread in
+  `--diag` turned it into a fact (`82` against `c3 a9` under chcp 850/437) and
+  into a test that can fail. The repair went into the THREAD MANAGER, not into
+  `TDbgReader.Execute`: a fix at the one thread would have been the instance,
+  silent for the next thread anyone writes and unreachable for a thread a
+  library starts. Two small things worth keeping: the block's first run failed
+  on its own label ("main thread" for "the main thread"), which a reading of the
+  FAIL line separated from a host defect in one step; and the bash twin was
+  first written as `grep | grep -q`, the pipe CLAUDE.md names, and rewritten
+  before it ran.
+
+
 - **2026-10-05 · A filed defect's CONSEQUENCE was deduced, and it was wrong; its
   proposed FIX would have repaired half.** The attack plan said: on win64 `StdErr`
   and `ErrOutput` are separate records, `--no-console` re-points only

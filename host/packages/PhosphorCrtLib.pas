@@ -49,7 +49,7 @@ interface
 uses
   SysUtils,
   {$IFDEF WINDOWS}Windows,{$ELSE}BaseUnix, Unix, termio,{$ENDIF}
-  PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorStdIO;
 
 procedure RegisterCrtFuncs(Reg: TPhosphorRegistry);
 
@@ -627,6 +627,8 @@ begin
   // a harness typed into the NEW console came back empty. Redirected stdin, a
   // file or a pipe, keeps its redirection exactly like the two above.
   if inWasConsole then PointInputAt('NUL');
+  // What every thread started from now on copies (host/packages/PhosphorStdIO).
+  PublishStdIO();
   gDetached := True;
   Result := True;
   {$ENDIF}
@@ -646,6 +648,7 @@ begin
   PointAtConsole(ErrOutput, 'CONOUT$');
   PointAtConsole(StdErr, 'CONOUT$');
   PointInputAt('CONIN$');
+  PublishStdIO();   // and the new console is what every later thread gets
   gDetached := False;
   Result := True;
   {$ENDIF}

@@ -905,6 +905,88 @@ begin
     eng.Free;
     d.Free;
   end;
+
+  { THE SAME FOR A STEP OUT, which carries a clamp the other two do not and had
+    never been collided with anything. From line 9, inside add2, step out; line
+    10 is still inside the body (same depth, so no stop for dmStepOut) and is
+    armed, the host declines it, and the step must survive to the first boundary
+    in the caller -- line 3, since the rest of line 2 carries none. }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepInto, daStepInto, daStepOut, daKeep, daRun]);
+  try
+    eng.ArmDebug([10], True);
+    rc := eng.Run(FixStep);
+    CheckInt(rc, 0, 'keep: the step-out fixture runs');
+    CheckStr(d.Trace, Want('E1@0 S2@0 S9@1 B10@1 S3@0'),
+             'daKeep at a boundary inside the body a step out is leaving keeps the step out');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+end;
+
+{ A STEP WHOSE LANDING BOUNDARY IS ITSELF ARMED, AND THE HOST DECLINES THE MARK.
+
+  The collision CheckKeepDoesNotCancelAStep does not reach. There the declined
+  mark sits INSIDE a stepped-over call, at a boundary the step would not have
+  stopped at anyway. Here it sits exactly where the step LANDS -- the ordinary
+  "conditional breakpoint on the next line" -- and DebugPoll tests the armed line
+  before the step rule, under `if (not stop)`. So the boundary is reported as a
+  breakpoint, the host's condition is false, it answers daKeep, and the step's
+  own stop has already been decided away.
+
+  One case per step kind, every expectation derived from FixStep's listing (see
+  its header for which lines carry boundaries):
+    stepInto from line 2 enters add2 and lands on line 9, its first statement;
+    stepOut from line 9 returns into line 2's statement, whose remainder carries
+      no boundary, so it lands on line 3, the `for`;
+    stepOver from line 2 runs the call and lands on line 3.
+  In each, the landing line is armed and declined, and the step must still stop
+  THERE -- reported as the step it is. }
+procedure CheckStepLandsOnDeclinedMark;
+var
+  eng: TPhosphorEngine;
+  d: TDrive;
+  rc: Integer;
+begin
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepInto, daStepInto, daKeep, daRun]);
+  try
+    eng.ArmDebug([9], True);
+    rc := eng.Run(FixStep);
+    CheckInt(rc, 0, 'landing: the stepInto fixture runs');
+    CheckStr(d.Trace, Want('E1@0 S2@0 B9@1 S9@1'),
+             'a stepInto whose landing line is a declined mark still stops there');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepInto, daStepInto, daStepOut, daKeep, daRun]);
+  try
+    eng.ArmDebug([3], True);
+    rc := eng.Run(FixStep);
+    CheckInt(rc, 0, 'landing: the stepOut fixture runs');
+    CheckStr(d.Trace, Want('E1@0 S2@0 S9@1 B3@0 S3@0'),
+             'a stepOut whose landing line is a declined mark still stops there');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daStepOver, daStepOver, daKeep, daRun]);
+  try
+    eng.ArmDebug([3], True);
+    rc := eng.Run(FixStep);
+    CheckInt(rc, 0, 'landing: the stepOver fixture runs');
+    CheckStr(d.Trace, Want('E1@0 S2@0 B3@0 S3@0'),
+             'a stepOver whose landing line is a declined mark still stops there');
+  finally
+    eng.Free;
+    d.Free;
+  end;
 end;
 
 procedure CheckInterruptSharesBoundary;
@@ -3208,6 +3290,7 @@ begin
   CheckArmedLines();
   CheckPause();
   CheckKeepDoesNotCancelAStep();
+  CheckStepLandsOnDeclinedMark();
   CheckInterruptSharesBoundary();
   CheckStop();
   CheckSeamRaises();

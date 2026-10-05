@@ -414,9 +414,20 @@ Named on purpose. A review's silence is not coverage, and this project's own rul
 is that a stage which never rejects is measuring nothing — so it follows that a
 stone never turned over is not a stone known to be clean.
 
-- **`stepInto` and `stepOut` colliding with a frame.** Every step measurement in
-  the review, and every new test, is `stepOver`. `daKeep` applies to all three and
-  `dmStepOut` carries an extra clamp; nobody collided a frame with either.
+- ~~**`stepInto` and `stepOut` colliding with a frame.**~~ **CLOSED 2026-10-05, and
+  it found a defect in all three step kinds.** The collision nobody had tried was a
+  declined mark at the step's LANDING boundary: DebugPoll tests the armed line
+  first, the host declines a false condition with `daKeep`, and the step's own
+  verdict for that boundary had never been asked -- so it stopped one boundary
+  late. Measured in `tests/probe_step.lpr` (stepInto at 10 instead of 9, stepOut and
+  stepOver at 4 instead of 3) and through the real host in
+  `tests/debug_protocol_test.py` (stepInto at 9 instead of 8, stepOut at 5 instead
+  of 4). Repaired in the engine: the step verdict is computed on its own and a
+  declined mark where the step lands is re-asked as `srStep` at the same boundary;
+  a mark the host TAKES is still reported as a breakpoint, so no existing
+  expectation moved. Also pinned: `daKeep` inside the body a `stepOut` is leaving
+  keeps the step out (watched failing with `daKeep` made to cancel).
+  `docs/embedding.md` tells embedders a boundary can now call them twice.
 - **The rest of the command set in the entry segment.** Only `setBreakpoints`,
   `pause` and `disconnect` were ever sent with `launch`. `evaluate`, `stackTrace`
   and `variables` arriving there are untested, and `stackTrace` is state-guarded.

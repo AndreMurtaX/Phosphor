@@ -4173,10 +4173,74 @@ function TPhosphorVM.DebugPoll(ALine, APC, AStopFrameSP: Integer): Boolean;
 var
   reason: TPhosphorStopReason;
   act: TPhosphorDebugAction;
-  stop, interrupted: Boolean;
+  stop, interrupted, stepHere: Boolean;
   rel: Integer;
-  entriesFrom: QWord;
-  heapFrom, heapTo: PtrUInt;
+
+  { ONE CALL TO THE SEAM, with the parking it needs around it. A function because
+    a boundary can need TWO: see the re-ask after the first. False means the seam
+    raised, and LastError says so. }
+  function Ask(AReason: TPhosphorStopReason; out AAct: TPhosphorDebugAction): Boolean;
+  var
+    entriesFrom: QWord;
+    heapFrom, heapTo: PtrUInt;
+  begin
+    Result := True;
+    AAct := daRun;
+    { PARKED FROM HERE. Everything after this mark is the host's -- unless the host
+      spends the window running the SCRIPT, which the entry count catches for the
+      heap and CallUserFunc's re-mark catches for the two clocks.
+
+      THE CLOCKS ARE MARKED, NOT MEASURED AT THE END. See DebugCreditPark: a window
+      that is only credited when it closes leaves everything the host does INSIDE it
+      judged against the clock the run started with, and re-entering the engine from
+      in here is the documented use. FDbgSeamDepth is what tells the host calling
+      back in from the script doing it -- a `callfunc` inside an evaluation is
+      deeper, and only an activation at the depth the seam was entered at is the
+      host's own door. }
+    FDbgParkMark := GetTickCount64();
+    heapFrom := GetFPCHeapStatus().CurrHeapUsed;
+    entriesFrom := FExecEntries;
+    FDbgInSeam := True;
+    FDbgSeamDepth := FExecDepth;
+    try
+      try
+        AAct := OnDebug(AReason, ALine, FFrameSP);
+      except
+        on E: Exception do
+        begin
+          LastError := MakeError(peRuntime,
+            'the debug seam raised ' + E.ClassName + ': ' + E.Message);
+          ErrorLine := ALine;
+          Exit(False);
+        end;
+      end;
+    finally
+      FDbgInSeam := False;
+      { The LAST of however many credits this window took. If the host re-entered
+        the engine, the marks in CallUserFunc have already given back the idle
+        either side of each evaluation and charged the evaluations themselves; if it
+        did not, this is the whole window in one call. }
+      DebugCreditPark();
+      { The floor moves by what the host added, and only UPWARD. A host that FREED
+        while parked leaves the heap lower than it found it, and lowering the floor
+        to match would hand the script a tighter ceiling than it had a moment ago --
+        for memory it never held. RoomFor already lowers the floor when it has to,
+        by the rule it documents; this one only ever declines to charge.
+
+        AND NOT AT ALL IF THE HOST RAN SCRIPT CODE IN HERE. See the header: the two
+        kinds of byte are not separable after the fact, and crediting them was a way
+        out of MaxMemoryBytes that a script could ask a watch expression to take for
+        it. The entry count is read from the same field the three ExecFrom doors
+        move, so a re-entry through ANY of them -- CallFunction, ReplRun, a nested
+        Run -- lands here, and not only the one door a flag would have been set on. }
+      if FHeapBased and (FExecEntries = entriesFrom) then
+      begin
+        heapTo := GetFPCHeapStatus().CurrHeapUsed;
+        if heapTo > heapFrom then Inc(FHeapBase, heapTo - heapFrom);
+      end;
+    end;
+  end;
+
 begin
   Result := True;
   { RE-ENTRANCY, and the first thing asked because every other question is wrong
@@ -4249,7 +4313,11 @@ begin
   end;
   { HOW DEEP WE ARE AGAINST WHERE THE STEP WAS ASKED, computed ONCE and only when
     a step is pending: two of the three rules need it and dmRun needs nothing. }
-  if (not stop) and (FDbgMode <> dmRun) then
+  { COMPUTED WHETHER OR NOT THE MARK ALREADY WON, so that a declined mark on
+    the step's landing boundary can still be answered as the step -- see the
+    re-ask after the seam. It costs nothing when no step is pending. }
+  stepHere := False;
+  if FDbgMode <> dmRun then
   begin
     rel := DebugRelDepth();
     case FDbgMode of
@@ -4260,7 +4328,7 @@ begin
         makes `a = 1 : b = 2` one step rather than two: it is one line and a
         person stepping through a file steps through lines. }
       dmStepInto:
-        stop := (ALine <> FDbgLine) or (FFrameSP <> FDbgDepth) or
+        stepHere := (ALine <> FDbgLine) or (FFrameSP <> FDbgDepth) or
                 (APC = FDbgPC);
       { Never inside a call the step began outside of, so DEEPER is silence. At
         the same depth it is the dmStepInto rule; SHALLOWER, the step ran off the
@@ -4272,12 +4340,15 @@ begin
         walked every statement of the subroutine, reporting them as if they were
         the caller's own. }
       dmStepOver:
-        stop := (rel < 0) or
+        stepHere := (rel < 0) or
                 ((rel = 0) and ((ALine <> FDbgLine) or (APC = FDbgPC)));
       dmStepOut:
-        stop := rel < 0;
+        stepHere := rel < 0;
     end;
   end;
+  if (not stop) and stepHere then
+    stop := True;   // reason is still srStep
+
   { THE QUEUE, LAST. srPause is the reason only when nothing more specific won --
     which is what makes it mean "the host asked us to stop and there was no other
     reason to", rather than "a frame happened to arrive here". A pause that shares
@@ -4290,59 +4361,25 @@ begin
   end;
   if not stop then Exit;
 
-  { PARKED FROM HERE. Everything after this mark is the host's -- unless the host
-    spends the window running the SCRIPT, which the entry count catches for the
-    heap and CallUserFunc's re-mark catches for the two clocks.
+  if not Ask(reason, act) then Exit(False);
+  { A DECLINED MARK WHERE THE STEP LANDED IS STILL THE STEP'S STOP.
 
-    THE CLOCKS ARE MARKED, NOT MEASURED AT THE END. See DebugCreditPark: a window
-    that is only credited when it closes leaves everything the host does INSIDE it
-    judged against the clock the run started with, and re-entering the engine from
-    in here is the documented use. FDbgSeamDepth is what tells the host calling
-    back in from the script doing it -- a `callfunc` inside an evaluation is
-    deeper, and only an activation at the depth the seam was entered at is the
-    host's own door. }
-  FDbgParkMark := GetTickCount64();
-  heapFrom := GetFPCHeapStatus().CurrHeapUsed;
-  entriesFrom := FExecEntries;
-  FDbgInSeam := True;
-  FDbgSeamDepth := FExecDepth;
-  try
-    try
-      act := OnDebug(reason, ALine, FFrameSP);
-    except
-      on E: Exception do
-      begin
-        LastError := MakeError(peRuntime,
-          'the debug seam raised ' + E.ClassName + ': ' + E.Message);
-        ErrorLine := ALine;
-        Exit(False);
-      end;
-    end;
-  finally
-    FDbgInSeam := False;
-    { The LAST of however many credits this window took. If the host re-entered
-      the engine, the marks in CallUserFunc have already given back the idle
-      either side of each evaluation and charged the evaluations themselves; if it
-      did not, this is the whole window in one call. }
-    DebugCreditPark();
-    { The floor moves by what the host added, and only UPWARD. A host that FREED
-      while parked leaves the heap lower than it found it, and lowering the floor
-      to match would hand the script a tighter ceiling than it had a moment ago --
-      for memory it never held. RoomFor already lowers the floor when it has to,
-      by the rule it documents; this one only ever declines to charge.
+    The armed line is tested first and wins the boundary, which is right when
+    the host takes it. But a host DECLINES a mark -- a condition that is false,
+    the commonest breakpoint there is -- by answering daKeep, and until
+    2026-10-05 that was the end of it: the step's own verdict for this boundary
+    had never been asked, the step stayed pending, and it stopped at the NEXT
+    boundary instead. Measured in tests/probe_step.lpr for all three kinds:
+    stepInto landed on line 10 instead of 9, stepOut and stepOver on 4 instead
+    of 3 -- a conditional breakpoint on the next line made a step skip it.
 
-      AND NOT AT ALL IF THE HOST RAN SCRIPT CODE IN HERE. See the header: the two
-      kinds of byte are not separable after the fact, and crediting them was a way
-      out of MaxMemoryBytes that a script could ask a watch expression to take for
-      it. The entry count is read from the same field the three ExecFrom doors
-      move, so a re-entry through ANY of them -- CallFunction, ReplRun, a nested
-      Run -- lands here, and not only the one door a flag would have been set on. }
-    if FHeapBased and (FExecEntries = entriesFrom) then
-    begin
-      heapTo := GetFPCHeapStatus().CurrHeapUsed;
-      if heapTo > heapFrom then Inc(FHeapBase, heapTo - heapFrom);
-    end;
-  end;
+    So the step's verdict is computed on its own (stepHere, above), and when
+    the mark is declined at a boundary the step would have stopped at, the
+    host is asked again, here, as the step it is. Not by flipping the
+    precedence: a mark the host TAKES is still reported as a breakpoint, which
+    every existing stop depends on. }
+  if (act = daKeep) and (reason = srBreakpoint) and stepHere then
+    if not Ask(srStep, act) then Exit(False);
 
   case act of
     daRun:

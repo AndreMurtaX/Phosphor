@@ -718,6 +718,15 @@ was pending is still pending.
 
 The rule of thumb: if a person did not click something, answer `daKeep`.
 
+**One boundary can call you twice.** When a pending step *lands* on an armed line
+— a `stepInto` whose first statement carries a breakpoint, a `stepOut` into a
+caller line that does — the boundary is reported first as `srBreakpoint`. If you
+decline it with `daKeep` (its condition was false, say), the engine calls you
+again at the **same line and depth** with `srStep`, because that is still where
+the step stops. Answer the second call as you would any step. Until 2026-10-05
+there was no second call, and the step stopped one boundary late instead —
+a conditional breakpoint on the next line made a step skip it.
+
 **`eng.DebugVM` is how the seam reaches the engine.** The callback is given a line
 and a frame depth and nothing else; `Self` inside it is your adapter, not a VM.
 `DebugVM` answers the VM that is executing *right now* -- through `Run`,

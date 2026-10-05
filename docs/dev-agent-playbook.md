@@ -1524,6 +1524,25 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · "Collide stepInto/stepOut with a frame" found a defect in
+  stepOver too, by asking where the collision had NOT been put.** Every existing
+  collision test placed the declined mark INSIDE a stepped-over call -- a
+  boundary the step would not have stopped at anyway. Reading DebugPoll's
+  precedence (armed line first, the step rule only `if (not stop)`) said the
+  untested place was the step's LANDING boundary, and the prediction was exact
+  before a line was changed: all three kinds stopped one boundary late, at the
+  engine and through the real host. A conditional breakpoint on the next line --
+  the commonest one there is -- made a step skip it. **Lessons:** (1) when a
+  test exists for a class, ask what axis its fixtures never vary; here it was
+  WHERE the mark sat relative to the step's target, and the sweep had held it
+  constant. (2) The repair re-asks instead of flipping precedence, because
+  flipping would have moved the reason of stops that are correctly
+  `breakpoint` today -- a fix that edits existing expectations has to justify
+  each one, and this one did not need to. (3) A case written for behaviour that
+  already worked (daKeep inside a body a stepOut leaves) is only a test once it
+  is seen failing under a mutation; it was, with daKeep made to cancel.
+
+
 - **2026-10-05 · The product was fine; the harness was wrong twice, and a third
   time in its first design.** A packed GUI application had never been started
   by anything. Probed first, then made block X: compile, PACK, run, find the

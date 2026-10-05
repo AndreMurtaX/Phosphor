@@ -1861,6 +1861,61 @@ check('the other file did not replace this one: it stops at 4, not 2',
       (first11 or {}).get('reason') == 'breakpoint', str(first11))
 w11.close()
 
+# ---------------------------------------------------------------------------
+# stepInto AND stepOut, LANDING ON A MARK WHOSE CONDITION IS FALSE.
+#
+# Every step on the wire before this was stepOver. Here a conditional mark sits
+# exactly where each step LANDS -- the first statement of the function stepped
+# into, and the caller's next line stepped out to -- with a condition that is
+# false. Until 2026-10-05 the engine reported that boundary as the breakpoint,
+# the host declined it, and the step stopped at the boundary AFTER: one line
+# late. tests/probe_step.lpr measured all three step kinds at the engine; this
+# is the same collision through a real host, with a condition the host
+# evaluates. Lines are from the listing below, not from a run:
+#   1 rem   2 a = 1   3 b = twice(a)   4 c = b + 1   5 d = c + 1   6 end
+#   7 function twice(n) local r   8 r = n * 2   9 return r   10 endfunction
+# ---------------------------------------------------------------------------
+w12 = Wire('rem steps that land on a false-condition mark\n'
+           'a = 1\n'
+           'b = twice(a)\n'
+           'c = b + 1\n'
+           'd = c + 1\n'
+           'end\n'
+           'function twice(n) local r\n'
+           '  r = n * 2\n'
+           '  return r\n'
+           'endfunction\n', 'stepland.bas')
+w12.init()
+# 3: unconditional, to get a stop on the call line. 8: the landing of stepInto.
+# 4: the landing of stepOut. Both landings carry a condition that is false.
+w12.send(seq=2, cmd='setBreakpoints', path=w12.path, lines=[3, 8, 4],
+         conditions=['', 'a = 99', 'a = 99'])
+w12.recv(timeout=10)
+w12.send(seq=3, cmd='launch', stopAtEntry=False)
+
+
+def stop12(timeout=20):
+    for _ in range(40):
+        m = w12.recv(timeout=timeout)
+        if m is None or m.get('event') == 'exited':
+            return None
+        if m.get('event') == 'stopped':
+            return m
+    return None
+
+
+s12 = stop12()
+check('stepland: stops on the call line', (s12 or {}).get('line') == 3, str(s12))
+w12.send(seq=4, cmd='stepInto')
+s12 = stop12()
+check('stepInto lands on the callee\'s first line despite a false mark there',
+      (s12 or {}).get('line') == 8 and (s12 or {}).get('reason') == 'step', str(s12))
+w12.send(seq=5, cmd='stepOut')
+s12 = stop12()
+check('stepOut lands on the caller\'s next line despite a false mark there',
+      (s12 or {}).get('line') == 4 and (s12 or {}).get('reason') == 'step', str(s12))
+w12.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

@@ -1300,6 +1300,7 @@ type
       ACompileOnly: Boolean; out AValue, AKind, AError: String): Boolean;
     procedure DoEvaluate(ASeq, AFrameIx, ADepth: Integer; const AExpr: String);
     function Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
+    procedure RefuseQueued;
   public
     constructor Create(AEng: TPhosphorEngine; const APath, ASource: String);
     destructor Destroy; override;
@@ -2511,6 +2512,51 @@ end;
 
 { One request. Returns True when the answer resumes the program, so the stop loop
   knows to leave. ALine/ADepth are where the VM is; they are -1/0 while running. }
+{ FRAMES ALREADY READ BEHIND A `disconnect` ARE ANSWERED, NOT DROPPED.
+
+  The protocol's rule is that a command sent in the wrong state is answered
+  `ok:false` and never ignored, and after `disconnect` the state is terminated.
+  Until 2026-10-05 the drain broke on the disconnect and closed the socket with
+  whatever else the same segment carried still in the inbox: measured, at a stop
+  and at entry alike, a `stackTrace` sent behind a `disconnect` got no answer at
+  all, and the next thing on the wire was the socket closing. An editor holding
+  that seq cannot tell an abandoned request from a lost frame.
+
+  So every frame this host has READ is answered before it closes -- frames still
+  in flight when the socket closes cannot be, and the editor's own rule (a closed
+  socket is a disconnect) covers those. Only frames that parse and carry a seq are
+  answered; a line that does not parse arrived after the session ended and there
+  is no request to answer. #0 is the reader's closed-socket sentinel. }
+procedure TDebugProto.RefuseQueued;
+var
+  raw, cmd: String;
+  d: TJSONData;
+  seq: Integer;
+begin
+  while TakeLine(raw) do
+  begin
+    if raw = #0 then Continue;
+    d := nil;
+    try
+      try
+        d := GetJSON(raw);
+      except
+        on Exception do d := nil;
+      end;
+      if (d <> nil) and (d is TJSONObject) then
+      begin
+        seq := TJSONObject(d).Get('seq', 0);
+        cmd := TJSONObject(d).Get('cmd', '');
+        if seq > 0 then
+          SendError(seq, Format('%s arrived after disconnect; the session is closed',
+                                [cmd]));
+      end;
+    finally
+      d.Free;
+    end;
+  end;
+end;
+
 function TDebugProto.Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
 var
   d: TJSONData;
@@ -2766,6 +2812,10 @@ begin
       res.Add('seq', seq);
       res.Add('ok', True);
       SendJSON(res);
+      { BEFORE FClosed, which is what SendJSON reads to stop writing: a first
+        version of this called RefuseQueued after it, and every refusal went
+        nowhere -- the probe saw exactly the silence it was written to end. }
+      RefuseQueued();
       FDisconnected := True;
       if o.Get('terminate', False) then FAction := daStop else FAction := daRun;
       FClosed := True;

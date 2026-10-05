@@ -428,12 +428,21 @@ stone never turned over is not a stone known to be clean.
   expectation moved. Also pinned: `daKeep` inside the body a `stepOut` is leaving
   keeps the step out (watched failing with `daKeep` made to cancel).
   `docs/embedding.md` tells embedders a boundary can now call them twice.
-- **The rest of the command set in the entry segment.** Only `setBreakpoints`,
-  `pause` and `disconnect` were ever sent with `launch`. `evaluate`, `stackTrace`
-  and `variables` arriving there are untested, and `stackTrace` is state-guarded.
-- **A segment whose first frame closes the session.** The drain breaks on it, so
-  every frame behind it stays queued. Nobody asked what the editor is owed for
-  those.
+- ~~**The rest of the command set in the entry segment.**~~ **CLOSED 2026-10-05,
+  correct as it stood.** Measured first, against the spec's state machine: with a
+  `launch` carrying `stopAtEntry:false` the three queries are refused once each, naming the
+  state; with `stopAtEntry:true` the `stopped` event reaches the wire FIRST and the
+  three are then answered against the stopped program (`total + 1` is 1 before
+  line 2 runs). Pinned in `tests/debug_protocol_test.py`, the order included; the
+  refusal half watched failing with stackTrace's state guard removed.
+- ~~**A segment whose first frame closes the session.**~~ **CLOSED 2026-10-05 -- it
+  was a defect.** Frames already read behind a `disconnect` got no answer at all;
+  the next thing on the wire was the socket closing, at a stop and in the entry
+  segment alike. `TDebugProto.RefuseQueued` now answers each `ok:false` ("arrived
+  after disconnect") before the close, and the spec in PhosphorIDE says so. The
+  first version of the repair called it after `FClosed` was set, which is what
+  `SendJSON` reads to stop writing -- every refusal went nowhere, and the probe
+  showed the same silence. Watched failing against the old host (four checks).
 - ~~**The packed stub and the GUI door**, end to end.~~ **CLOSED 2026-10-05.**
   `tests/gui_pack_test.py`, block X of both runners: compiles and PACKS a program
   with a form and a timer inside `app_run()`, starts the packed executable, and

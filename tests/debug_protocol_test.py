@@ -1916,6 +1916,131 @@ check('stepOut lands on the caller\'s next line despite a false mark there',
       (s12 or {}).get('line') == 4 and (s12 or {}).get('reason') == 'step', str(s12))
 w12.close()
 
+# ---------------------------------------------------------------------------
+# THE REST OF THE COMMAND SET IN ONE SEGMENT WITH launch, AND FRAMES BEHIND A
+# disconnect.
+#
+# Only setBreakpoints, pause and disconnect had ever been sent with launch. The
+# spec's state machine decides every answer below, not a run: stackTrace,
+# variables and evaluate are valid only in `stopped`, and a command in the wrong
+# state is answered ok:false and never ignored.
+#   - launch(stopAtEntry false) + the three: the program is RUNNING when they are
+#     read, so all three are refused, each once, naming the state.
+#   - launch(stopAtEntry true) + the three: the entry stop is decided at the
+#     boundary that reads them, so `stopped` must reach the wire FIRST and the
+#     three are then answered against a stopped program. A stack for a program the
+#     editor still thinks is running would be the defect; the order is asserted.
+#   - disconnect FIRST, queries behind it: until 2026-10-05 the drain broke on the
+#     disconnect and the socket closed with them unanswered. Now each is refused
+#     before the close. terminate:false lets the program finish without a
+#     debugger, so its output is asserted too: 1 + 2 + 3 = 6.
+# The fixture's line 2 has not run at entry, so `total + 1` there is 0 + 1 = 1.
+# ---------------------------------------------------------------------------
+ENTRYSEG = ('rem the rest of the command set in the entry segment\n'
+            'total = 0\n'
+            'for i = 1 to 3\n'
+            '  total = total + i\n'
+            'next\n'
+            'println "total="; total\n'
+            'end\n')
+QUERIES = [{'seq': 11, 'cmd': 'stackTrace'},
+           {'seq': 12, 'cmd': 'variables', 'frame': 0},
+           {'seq': 13, 'cmd': 'evaluate', 'frame': 0, 'expr': 'total + 1'}]
+
+
+def seg13(w, frames):
+    w.raw(''.join(json.dumps(f) + chr(10) for f in frames))
+
+
+def collect13(w, until_exit=True, then=None):
+    """Everything on the wire, in order, until exited or the socket closes."""
+    seen = []
+    for _ in range(60):
+        m = w.recv(timeout=15)
+        if m is None:
+            seen.append('CLOSED')
+            break
+        seen.append(m)
+        if then and m.get('event') == 'stopped':
+            seg13(w, then)
+            then = None
+        if until_exit and m.get('event') == 'exited':
+            break
+    return seen
+
+
+def answers13(seen, seq):
+    return [m for m in seen if isinstance(m, dict) and m.get('seq') == seq]
+
+
+# (a) launch without an entry stop, then the three
+w13 = Wire(ENTRYSEG, 'entryseg_a.bas')
+w13.init()
+seg13(w13, [{'seq': 10, 'cmd': 'launch', 'stopAtEntry': False}] + QUERIES)
+seen = collect13(w13)
+for sq, name in ((11, 'stackTrace'), (12, 'variables'), (13, 'evaluate')):
+    a = answers13(seen, sq)
+    check('entry segment: %s with a running launch is answered once' % name, len(a) == 1, str(a))
+    check('  and refused, naming the state', a and a[0].get('ok') is False and
+          'only while stopped' in a[0].get('error', ''), str(a))
+check('  and the program still runs to its end',
+      any(isinstance(m, dict) and m.get('event') == 'exited' for m in seen), str(seen[-1:]))
+w13.close()
+
+# (b) launch WITH an entry stop, then the three: stopped first, then real answers
+w13 = Wire(ENTRYSEG, 'entryseg_b.bas')
+w13.init()
+seg13(w13, [{'seq': 10, 'cmd': 'launch', 'stopAtEntry': True}] + QUERIES)
+seen = collect13(w13, then=[{'seq': 20, 'cmd': 'continue'}])
+pos_stop = next((i for i, m in enumerate(seen)
+                 if isinstance(m, dict) and m.get('event') == 'stopped'), None)
+for sq, name in ((11, 'stackTrace'), (12, 'variables'), (13, 'evaluate')):
+    a = answers13(seen, sq)
+    pos = next((i for i, m in enumerate(seen) if isinstance(m, dict) and m.get('seq') == sq), None)
+    check('entry segment: %s with an entry-stop launch is answered once, ok' % name,
+          len(a) == 1 and a[0].get('ok') is True, str(a))
+    check('  and only AFTER the stopped event it answers about',
+          pos_stop is not None and pos is not None and pos_stop < pos, 'stopped@%r answer@%r' % (pos_stop, pos))
+ev = answers13(seen, 13)
+check('  and evaluate sees the program before line 2: total + 1 = 1',
+      ev and ev[0].get('result') == '1', str(ev))
+w13.close()
+
+# (c) at a stop: disconnect FIRST, the three behind it
+w13 = Wire(ENTRYSEG, 'entryseg_c.bas')
+w13.init()
+seg13(w13, [{'seq': 10, 'cmd': 'launch', 'stopAtEntry': True}])
+seen = collect13(w13, until_exit=False,
+                 then=[{'seq': 30, 'cmd': 'disconnect', 'terminate': False}] + QUERIES)
+check('behind a disconnect: the disconnect is answered ok',
+      [m.get('ok') for m in answers13(seen, 30)] == [True], str(seen))
+for sq, name in ((11, 'stackTrace'), (12, 'variables'), (13, 'evaluate')):
+    a = answers13(seen, sq)
+    check('behind a disconnect: %s is refused once, not dropped' % name,
+          len(a) == 1 and a[0].get('ok') is False and 'after disconnect' in a[0].get('error', ''),
+          str(a))
+check('  and then the socket closes', seen and seen[-1] == 'CLOSED', str(seen[-1:]))
+try:
+    out13, _ = w13.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    w13.proc.kill()
+    out13 = b''
+check('  and a terminate:false disconnect lets the program finish: total=6',
+      b'total=6' in out13.replace(b'\r\n', b'\n'), repr(out13[:60]))
+w13.close()
+
+# (d) in the entry segment itself: launch, disconnect, a query behind it
+w13 = Wire(ENTRYSEG, 'entryseg_d.bas')
+w13.init()
+seg13(w13, [{'seq': 10, 'cmd': 'launch', 'stopAtEntry': False},
+            {'seq': 30, 'cmd': 'disconnect', 'terminate': False},
+            {'seq': 11, 'cmd': 'stackTrace'}])
+seen = collect13(w13, until_exit=False)
+a = answers13(seen, 11)
+check('entry segment: a query behind launch+disconnect is refused once',
+      len(a) == 1 and a[0].get('ok') is False and 'after disconnect' in a[0].get('error', ''), str(a))
+w13.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

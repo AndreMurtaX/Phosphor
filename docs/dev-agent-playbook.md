@@ -1524,6 +1524,24 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · Expected answers from the spec's state machine, and a repair
+  that wrote into a closed pipe.** Four segments were probed before anything was
+  changed, each judged against the PDBP state machine rather than against a run.
+  Two were right already (queries with a running launch refused; with an entry
+  stop, `stopped` first and then real answers) and became regression tests, the
+  refusal half seen failing under a mutation. The other two were the defect the
+  attack plan had only gestured at: frames behind a `disconnect` were never
+  answered. **The lesson is in the first repair:** RefuseQueued was called after
+  `FClosed := True`, and SendJSON reads that flag to stop writing -- so the fix
+  produced exactly the silence it was written to end, and only re-running the
+  PROBE (not a test written to pass) showed it. A flag that means "the session is
+  over" is read by every writer; ask what reads it before setting it. Smaller:
+  the probe's own first `evaluate` failed on a field-name typo (`expression` for
+  `expr`), which the spec answered in one grep before it could be mistaken for a
+  host defect. And the budget gate caught the new loop on its first run; it is
+  exempt with its reason, like its neighbours.
+
+
 - **2026-10-05 · "Collide stepInto/stepOut with a frame" found a defect in
   stepOver too, by asking where the collision had NOT been put.** Every existing
   collision test placed the declined mark INSIDE a stepped-over call -- a

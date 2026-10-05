@@ -459,6 +459,11 @@ ALLOWED = {
         'the stop loop of a debugger: it turns once per frame the EDITOR sends '
         'and leaves on the first one that resumes. The seam it sits in is the one '
         'seam in this engine that MAY block, which is what a stop is',
+    'phosphor.lpr:TDebugProto.RefuseQueued':
+        'answers the frames the EDITOR already sent behind a `disconnect`, once '
+        'each, and stops when the inbox is empty -- the loop is as long as what '
+        'the reader has queued, each line capped at DBG_MAX_FRAME, and no script '
+        'can add to it',
     'phosphor.lpr:TDebugProto.Session':
         'waits for `initialize` and `launch` from the editor before anything '
         'runs; the script has not started and cannot influence it',

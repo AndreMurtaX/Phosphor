@@ -1288,6 +1288,66 @@ begin
   end;
 end;
 
+{ IS THE FILE AN EDITOR NAMED THE FILE THIS HOST IS RUNNING?
+
+  Two questions, asked in order, and a yes from either is a yes.
+
+  First the SPELLING, after ExpandFileName: a relative path, a `..` detour and
+  either separator all come out the same, and SameFileName ignores case exactly
+  where the platform's own filesystem does.
+
+  Then the IDENTITY, which no textual rule can reach: a hard link, a symlink, an
+  8.3 short name, a drive reached through a junction. Both names are opened and
+  the filesystem is asked which file each one IS -- device and inode on Unix
+  (FpStat follows a symlink to its target, which is the file that runs), volume
+  serial and file index on Windows. A name that does not open answers no.
+
+  Measured honestly: for a file that exists, the identity half alone answers
+  every case the spelling half does, so the spelling half is NOT what makes the
+  suite pass -- it is the cheap path for the ordinary frame, and the only one
+  left if the file has been deleted or renamed out from under a running session.
+  The identity half IS load-bearing: removed, the hard-link case in
+  tests/debug_protocol_test.py goes red.
+
+  WHY BOTH AND NOT A STRICT COMPARE: the two ways to be wrong here are not equal.
+  A path that wrongly fails to match leaves every mark in that file silently dead,
+  which is a debugger that does nothing; the comparison is built so that only a
+  path naming a genuinely different file says no. }
+function SameSourceFile(const AWanted, AKnown: String): Boolean;
+{$IFDEF WINDOWS}
+  function Identity(const P: String; out Info: TByHandleFileInformation): Boolean;
+  var
+    h: THandle;
+  begin
+    { Access 0 asks for no rights to the contents -- only enough to name the
+      file -- and BACKUP_SEMANTICS lets the same call open a directory, which
+      fails the compare below rather than the open. }
+    h := CreateFileW(PWideChar(UnicodeString(P)), 0,
+                     FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE,
+                     nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
+    if h = INVALID_HANDLE_VALUE then Exit(False);
+    Result := GetFileInformationByHandle(h, Info);
+    CloseHandle(h);
+  end;
+var
+  a, b: TByHandleFileInformation;
+{$ELSE}
+var
+  a, b: Stat;
+{$ENDIF}
+begin
+  if SameFileName(ExpandFileName(AWanted), ExpandFileName(AKnown)) then Exit(True);
+  {$IFDEF WINDOWS}
+  Result := Identity(AWanted, a) and Identity(AKnown, b)
+            and (a.dwVolumeSerialNumber = b.dwVolumeSerialNumber)
+            and (a.nFileIndexHigh = b.nFileIndexHigh)
+            and (a.nFileIndexLow = b.nFileIndexLow);
+  {$ELSE}
+  Result := (FpStat(AWanted, a) = 0) and (FpStat(AKnown, b) = 0)
+            and (a.st_dev = b.st_dev) and (a.st_ino = b.st_ino);
+  {$ENDIF}
+end;
+
 constructor TDebugProto.Create(AEng: TPhosphorEngine; const APath, ASource: String);
 begin
   inherited Create();
@@ -1909,7 +1969,7 @@ end;
      orthogonal to purity), so this host cannot tell `len` from `kill` and must
      not guess. The exceptions are `arr_get`, `strline$` and `strchar$`, and they
      are not a purity judgement about the library: they are what the COMPILER'S
-     OWN BRACKET SUGAR lowers to (PhosphorCompiler.pas:1035, :1046, :1056). A user
+     OWN BRACKET SUGAR lowers to (TPhosphorCompiler.ParsePrimary, cited by name). A user
      who writes `a@[1]` has written no call. Refusing them would mean a debugger
      that renders an array as `@1` in the variables pane and then refuses to look
      inside it, which is the only door out of that pane.
@@ -2400,7 +2460,7 @@ begin
 
         `a@[i]`, `s$[n]` and `s$[[n]]` still answer. They reach a call, but not
         one the user wrote: the compiler lowers bracket syntax to arr_get /
-        strline$ / strchar$ (PhosphorCompiler.pas:1035, :1046, :1056). The key is
+        strline$ / strchar$ (TPhosphorCompiler.ParsePrimary, cited by name). The key is
         about what a person may TYPE. }
       caps.Add('evaluateCalls', False);
       caps.Add('setVariable', False);
@@ -2428,25 +2488,37 @@ begin
       { Whole-set replacement, which makes the editor's view authoritative by
         construction.
 
-        `path` IS NOT READ, AND THIS COMMENT USED TO SAY IT WAS -- "a path this
-        host does not know matches nothing and is not an error", which is a
-        promise the handler below does not keep. It reads `lines` and
-        `conditions` and nothing else, so a frame naming ANOTHER file replaces
-        THIS file's whole set. An editor with several files open, arming them all
-        at launch, installs the last one's marks against this one: measured, a
-        stop on a line this file was never marked at and no stop on the line it
-        was. Harmless while only one file could be in flight, and fbf74d4 --
-        which taught the entry boundary to drain that queue -- is what newly
-        exposes it at exactly the moment an editor arms.
+        THE SET IS PER FILE, AND `path` SAYS WHICH. Until 2026-10-05 this handler
+        never read it, so a frame naming ANOTHER file replaced THIS file's whole
+        set: an editor arming several open files installed the last one's marks
+        here -- measured, a stop on a line this file was never marked at and no
+        stop on the line it was.
 
-        NOT REPAIRED HERE, DELIBERATELY. The obvious comparison is against FPath,
-        and a strict one fails WORSE than the bug: an editor that spells the same
-        file differently -- forward slashes, a relative path, a different case on
-        a case-insensitive filesystem, a symlink -- would have every one of its
-        breakpoints silently ignored, which is a dead debugger rather than a
-        confused one. It wants a measurement of what real editors actually send,
-        against a comparison built for that, and it is filed in
-        docs/attack-plan.md rather than guessed at from here. }
+        A frame for a file this host is not running is ANSWERED and changes
+        nothing: `ok` with `lines` empty, which is the truth about what it
+        installed, and is what the protocol document always promised -- a path
+        the host does not recognise is not an error, it matches nothing.
+
+        THE COMPARISON IS SameSourceFile, NOT `=`, because a strict compare fails
+        worse than the bug did: an editor spelling this file differently would
+        have every mark silently dead. What PhosphorIDE sends was measured before
+        choosing -- the same string it put on our command line -- so the ordinary
+        case is equal text; the rest is for every other editor.
+
+        A frame with no `path`, or one that is not a string, still means this
+        file. It can mean nothing else -- this host runs exactly one -- and
+        refusing it would break a client for a key that carries no information. }
+      el := o.Find('path');
+      if (el <> nil) and (el.JSONType = jtString) and (el.AsString <> '')
+         and not SameSourceFile(el.AsString, FPath) then
+      begin
+        res := TJSONObject.Create();
+        res.Add('seq', seq);
+        res.Add('ok', True);
+        res.Add('lines', TJSONArray.Create());
+        SendJSON(res);
+        Exit(False);
+      end;
       { EVERY ELEMENT IS CHECKED, not just the array. `lines` is optional, so a
         frame may leave it out entirely -- and when it IS there, fpjson's
         Integers[] CONVERTS: a string element raises EConvertError, a JSON null

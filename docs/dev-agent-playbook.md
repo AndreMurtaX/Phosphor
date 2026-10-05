@@ -1524,6 +1524,46 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · `setBreakpoints` reads its `path`, and the deferral was right to
+  wait for a measurement.** The handler never read the key, so a frame naming
+  another file replaced this file's whole set. It had been filed rather than
+  fixed because a strict compare against the launched path fails worse than the
+  bug -- every mark silently dead for an editor that spells the file differently.
+  Three lessons.
+
+  **(1) THE MEASUREMENT THE FILING ASKED FOR TOOK FIVE MINUTES AND DECIDED THE
+  SHAPE.** The one real editor sends the very string it put on the host's command
+  line, so the ordinary frame is equal text. That made the design obvious: a cheap
+  spelling compare for the ordinary case, and file IDENTITY (device+inode, volume
+  serial+file index) for every case no textual rule reaches -- a hard link, a
+  symlink, a short name. A deferral that names the measurement it is waiting for
+  is a task, not a debt; this one was closed by doing what it said.
+
+  **(2) MUTATE EACH HALF, AND SAY WHICH ONE IS LOAD-BEARING.** With the identity
+  half removed, the hard-link check went red and nothing else did. The spelling
+  half has no such check: for a file that exists, identity answers every case it
+  does. The comment says so instead of implying both are proven necessary.
+
+  **(3) THE STALE-BINARY GATE CAUGHT ME AGAIN, AND IT WAS RIGHT.** I reverted the
+  mutation, edited a comment, and ran the suite without rebuilding -- so the
+  binary on disk was the MUTANT, and `check-examples.py` refused it as older than
+  its source. Run alone a minute later it passed, which is exactly the shape that
+  invites calling it a flake. It was not: rebuild, then read the failure. And the
+  same round found a citation of this project's own rotted the round before
+  (`PhosphorCompiler.pas:1056` landing on an `end` after the string-index branch
+  was added), which is the third time a line number has rotted silently; it is
+  cited by name now, like the others. **Worse, in the sibling:** re-pointing
+  PhosphorIDE's citations after this repair, I READ each target, and six of the
+  seven line citations in its `phosphor-debugger-debts.md` already named
+  unrelated text -- an evaluator comment cited as the silent resume, a budget
+  comment cited as `DebugPoll`. The citation gate was green throughout, because
+  its lock fingerprints whatever a line says WHEN THE LOCK IS WRITTEN: **a
+  citation that was wrong at lock time is locked wrong, and the gate then defends
+  it.** No check can catch that; only reading the claim beside the number can.
+  That document describes code as it stood before `fce3db1`, so it now names
+  routines, not lines.
+
+
 - **2026-10-04 · I wrote a green, deterministic test that measured nothing,
   sixteen days after recording that exact lesson in this file.** The round itself
   was small and went well: a report from PhosphorIDE said `pack` writes straight

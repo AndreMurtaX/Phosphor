@@ -1768,6 +1768,99 @@ check('and it did not simply run to its end',
       b't=' not in out10.replace(b'\r\n', b'\n'), repr(out10[:40]))
 w10.close()
 
+# ---------------------------------------------------------------------------
+# `setBreakpoints` IS PER FILE, and the host decides which file by `path`.
+#
+# Until 2026-10-05 the handler never read `path`: a frame naming ANOTHER file
+# replaced this file's whole set, so an editor arming several open files
+# installed the last one's marks here -- a stop on a line never marked in this
+# file and none on the line that was.
+#
+# The two failure modes pull in opposite directions, and this session pins BOTH:
+#   * a frame for another file must not touch this file's set (the defect);
+#   * a frame for THIS file spelled differently must still land, because a
+#     strict string compare would turn every breakpoint off in silence -- a dead
+#     debugger, which is worse than the confused one it would replace.
+# The spellings are the ones a real path takes on its way through an editor: a
+# `..` detour (both OSes), forward slashes and another case (Windows), and a
+# HARD LINK, which no textual rule can see through and which has the same file
+# identity on NTFS and on ext4 alike. A symlink is added on Linux, where it needs
+# no privilege.
+#
+# The other file EXISTS, so the refusal is a comparison and not a missing file.
+#
+# WATCHED FAILING both ways: against the build before the repair, the last two
+# checks go red (`lines: [2]`, then a stop on line 2); with the host's file-identity
+# comparison removed, the hard-link check goes red and nothing else does.
+# ---------------------------------------------------------------------------
+w11 = Wire('rem breakpoints for this file and for another\n'
+           'a = 1\n'
+           'b = 2\n'
+           'c = 3\n'
+           'println "abc="; a + b + c\n'
+           'end\n', 'perfile.bas')
+other11 = os.path.join(WORK, 'otherfile.bas')
+with open(other11, 'w', newline='\n') as f:
+    f.write('rem a different program\nx = 1\ny = 2\nz = 3\nend\n')
+d11, n11 = os.path.split(w11.path)
+spellings11 = [('a .. detour', os.path.join(d11, '..', os.path.basename(d11), n11))]
+if os.name == 'nt':
+    spellings11.append(('forward slashes and upper case',
+                        w11.path.replace(chr(92), '/').upper()))
+hard11 = os.path.join(WORK, 'perfile_hardlink.bas')
+if os.path.exists(hard11):
+    os.remove(hard11)
+os.link(w11.path, hard11)
+spellings11.append(('a hard link', hard11))
+if os.name != 'nt':
+    soft11 = os.path.join(WORK, 'perfile_symlink.bas')
+    if os.path.lexists(soft11):
+        os.remove(soft11)
+    os.symlink(w11.path, soft11)
+    spellings11.append(('a symlink', soft11))
+w11.init()
+
+
+def bp11(seq, path, lines):
+    w11.send(seq=seq, cmd='setBreakpoints', path=path, lines=lines)
+    for _ in range(10):
+        m = w11.recv(timeout=10)
+        if m is None:
+            return None
+        if m.get('seq') == seq:
+            return m
+    return None
+
+
+seq11 = 2
+for label, spelled in spellings11:
+    r = bp11(seq11, spelled, [3])
+    check('the same file spelled as %s takes its marks' % label,
+          r is not None and r.get('ok') is True and r.get('lines') == [3], str(r))
+    seq11 += 1
+# The canonical spelling, then another file. The last frame for THIS file is [4].
+r = bp11(seq11, w11.path, [4])
+check('the launched path takes its marks', (r or {}).get('lines') == [4], str(r))
+seq11 += 1
+r = bp11(seq11, other11, [2])
+check('another file is answered, and installs nothing here',
+      r is not None and r.get('ok') is True and r.get('lines') == [], str(r))
+seq11 += 1
+
+w11.send(seq=seq11, cmd='launch', stopAtEntry=False)
+first11 = None
+for _ in range(40):
+    m = w11.recv(timeout=20)
+    if m is None or m.get('event') == 'exited':
+        break
+    if m.get('event') == 'stopped':
+        first11 = m
+        break
+check('the other file did not replace this one: it stops at 4, not 2',
+      (first11 or {}).get('line') == 4 and
+      (first11 or {}).get('reason') == 'breakpoint', str(first11))
+w11.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

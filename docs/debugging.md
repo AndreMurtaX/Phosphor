@@ -186,8 +186,12 @@ editor and drives one:
 python tests/debug_protocol_test.py bin/phosphor.exe
 ```
 
-It asserts 117 things across eight sessions — `initialize` and its capabilities,
-`setBreakpoints` before `launch`, a command refused in the wrong state, the stop at
+It asserts more than 150 things across its sessions (the run prints the exact
+tally) — `initialize` and its capabilities,
+`setBreakpoints` before `launch`, **`setBreakpoints` per file** (a frame naming
+another file changes nothing here, and this file spelled another way — a `..`
+detour, another case, a hard link, a symlink — still takes its marks), a command
+refused in the wrong state, the stop at
 the armed line, `stackTrace` with frame 0 innermost and `(main)` outermost,
 `variables` with name/value/kind/scope, `evaluate` over globals, locals, a
 shadowed name, a const and an array element — and twelve strings it must refuse,
@@ -244,8 +248,8 @@ guarantee it, in five steps, and the guarantee is checkable rather than promised
    its whole answer is Found/IsHost/Func — so this host cannot tell `len` from
    `kill` and does not guess. `a@[i]`, `s$[n]` and `s$[[n]]` DO answer: they reach
    a call, but not one the user wrote, because the compiler lowers bracket syntax
-   to `arr_get` / `strline$` / `strchar$` (`PhosphorCompiler.pas:1035`, `:1046`,
-   `:1056`), and refusing them would mean a debugger that renders an array as `@1`
+   to `arr_get` / `strline$` / `strchar$` (the bracket branch of
+   `TPhosphorCompiler.ParsePrimary` in `engine/PhosphorCompiler.pas`), and refusing them would mean a debugger that renders an array as `@1`
    in its variables pane and then declines to look inside it. Each is allowed only
    when the program defines no function of that name and arity: `opCall` asks
    `FindUserFunc` first, so a program defining `function arr_get(a@, k)` would turn

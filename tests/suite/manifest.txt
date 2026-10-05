@@ -69,3 +69,4 @@
 68_onerror_resume_reaches_past_the_handler_frame
 69_onerror_fault_in_a_fabricated_frame
 70_string_index_assignment
+71_move_refuses_existing

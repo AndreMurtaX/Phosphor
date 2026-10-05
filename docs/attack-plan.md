@@ -265,8 +265,18 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 37 after `d10`/`n20` closed the same day**, each measured or read today and still true as written unless noted:
-`d56 d57 d48 n8 d54 d53 d44 n12 d55 d51 n17` (harness and gates), `d14 n3 d07 d12
+**Open: 39 at the audit, 36 after `d10`/`n20` and `d07` closed the same day**, each measured or read today and still true as written unless noted:
+
+- **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
+  refuses a taken target (file, directory, or a symlink, dangling included) in
+  plain code on both platforms, lets a case-only rename of the same file through,
+  and asks the sandbox itself. `tests/suite/71_move_refuses_existing.bas` (19
+  assertions) passed on Windows BEFORE the repair, as predicted -- MoveFileW
+  refuses on its own -- and was watched failing on the Linux VM against the
+  unrepaired engine, 13 of 19, the first file_move having replaced its target.
+  The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
+  renameat2 is not bound by the RTL and the engine may not reach for it.
+`d56 d57 d48 n8 d54 d53 d44 n12 d55 d51 n17` (harness and gates), `d14 n3 ~~d07~~ d12
 d46 d47 n26 m5 m6 m7 n10 n7` (packages and I/O), `d18 n1 d45 d08 n9 d65 n14 m4 r3`
 (engine), `d42 n19 n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose

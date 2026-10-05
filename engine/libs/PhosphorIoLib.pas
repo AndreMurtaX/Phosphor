@@ -591,11 +591,47 @@ begin
   Result := ValInt(Ord(CopyTree(Args[0].Str, Args[1].Str)));
   if WalkRefused('dir_copy', Err) then Result := ValInt(0);
 end;
+{ IS THE TARGET OF A MOVE ALREADY TAKEN? docs/libraries/io.md promises file_move
+  and dir_move answer 0 "when the target already exists", and until 2026-10-05
+  that was true on Windows ONLY, by accident of the RTL: RenameFile is MoveFileW
+  with no flags there, which refuses, and rename(2) on Unix, which REPLACES -- so
+  on Linux file_move silently destroyed the file at the target and answered 1,
+  and dir_move replaced an empty directory. The promise is now kept in plain code,
+  identically on both.
+
+  "Taken" is anything that occupies the name: a file, a directory, or a symlink --
+  including a DANGLING one, which is why both tests are asked not to follow links
+  (rename(2) would replace the link itself). The engine may not use the Unix units,
+  and it does not need to: SysUtils' FollowLink=False forms ask lstat on Unix.
+
+  A NAME THAT DENOTES THE SOURCE ITSELF IS NOT TAKEN. On a case-insensitive
+  filesystem a rename that changes only the case of a name finds its "target"
+  existing -- it is the source -- and refusing it would trade one defect for
+  another. SameFileName compares the way the platform's filesystem does, which is
+  exactly the question.
+
+  WHAT THIS DOES NOT CLOSE, said rather than implied: the check and the rename are
+  two calls, so another process creating the target between them is still
+  replaced on Unix. Closing that needs renameat2(RENAME_NOREPLACE), which the RTL
+  does not bind and the engine may not reach for; the window is one syscall wide
+  and needs a second writer racing for the same name. }
+function MoveTargetTaken(const ASrc, ADst: String): Boolean;
+begin
+  { IT ASKS THE GATE ITSELF, though both callers already have: a helper that
+    probes the filesystem is a probe check-sandbox.py rightly will not trust to
+    its callers, and the next caller may not have asked. A refused name is
+    answered as taken, which makes the move answer 0 -- the refusal it owed. }
+  if not SandboxAllows(ADst, puWrite) then Exit(True);
+  if SameFileName(ExpandFileName(ASrc), ExpandFileName(ADst)) then Exit(False);
+  Result := FileExists(ADst, False) or DirectoryExists(ADst, False);
+end;
+
 function t_dir_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not (SandboxAllows(Args[0].Str, puDelete) and SandboxAllows(Args[1].Str, puWrite)) then
   begin GIoError := 3; Result := ValInt(0); Exit; end;
+  if MoveTargetTaken(Args[0].Str, Args[1].Str) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
 
@@ -619,6 +655,7 @@ begin
   Err := NoError();
   if not (SandboxAllows(Args[0].Str, puDelete) and SandboxAllows(Args[1].Str, puWrite)) then
   begin GIoError := 3; Result := ValInt(0); Exit; end;
+  if MoveTargetTaken(Args[0].Str, Args[1].Str) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
 function t_file_createempty(const Args: array of TValue; out Err: TPhosphorError): TValue;

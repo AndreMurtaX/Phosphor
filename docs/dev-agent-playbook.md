@@ -1524,6 +1524,27 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · d07: a promise kept by accident on one platform, and a test
+  that can only fail on the other.** `file_move` was one `RenameFile`; FPC makes
+  that MoveFileW-without-flags on Windows (refuses an existing target) and
+  rename(2) on Unix (replaces it), so the documented "0 when the target exists"
+  held on Windows only. The new suite file was run on Windows first and PASSED on
+  the unrepaired engine -- predicted, and the point: Windows cannot witness this
+  defect, so its see-it-fail had to happen on the VM, where the same file failed
+  13 of 19 (the first move replaced its target, everything after cascaded). The
+  attack plan had said exactly this a month ago ("do not let anyone verify d07
+  by simulating POSIX semantics on Windows"). **The test travelled by `tar -xm`
+  and the VM tree was put back BY NAME before the pull** -- two new files removed
+  individually and the manifest checked out -- because a tar-delivered new file
+  wedges the next `git pull` (CLAUDE.md). **Two smaller things:** a case-only
+  rename (`case.txt` to `CASE.txt`) is a "target exists" on a case-insensitive
+  filesystem and had to be let through explicitly, or the repair would have
+  broken a working Windows rename; and check-sandbox.py refused the new helper
+  because it probes the filesystem, and the right answer was to make the helper
+  ask the gate itself rather than exempt it -- a probe's safety should not depend
+  on every future caller having asked first.
+
+
 - **2026-10-05 · A documented limitation was the defect, and the fix was to
   watch the thing that CAN be watched.** `TGuiHandle`'s comment accepted that a
   node handle could not be watched ("do not free a tree while holding handles to

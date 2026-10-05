@@ -980,6 +980,14 @@ Read the evaluation's own verdict from the nested call, where it belongs and whe
 it is still reported; the outer call now answers only about itself. Every door
 does: one that succeeds reports no error.
 
+**And it is not the script's error either.** A watch evaluated from a stop that
+faults does not touch what the *script* reads afterwards: `err()`, `errmsg$()` and
+`erl()` answer exactly what they answered before the watch. Until 2026-10-05 they
+answered the watch's fault, so a script that resumed from a stop could take the
+debugger's mistake for its own. Outside a stop — a GUI event handler your host
+calls in a prepared session — a fault IS the program's, and stays in `err()` for
+its next handler to read, as it always did.
+
 **From inside a stop, `CallFunction` is the supported re-entry.** `Prepare`,
 `Run`, `RunBytecode`, `ReplRun` and `Finish` are not: each of them frees or
 replaces the VM your seam is standing in, and it returns into the object they

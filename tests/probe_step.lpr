@@ -78,7 +78,8 @@ program probe_step;
 
 uses
   SysUtils,
-  PhosphorValue, PhosphorOpcodes, PhosphorBudget, PhosphorEngine, PhosphorVM;
+  PhosphorValue, PhosphorOpcodes, PhosphorBudget, PhosphorEngine, PhosphorVM,
+  PhosphorErrors;   // peUnknownFunction, for an expectation derived from it
 
 var
   Ok: Integer = 0;
@@ -983,6 +984,122 @@ begin
     CheckInt(rc, 0, 'landing: the stepOver fixture runs');
     CheckStr(d.Trace, Want('E1@0 S2@0 B3@0 S3@0'),
              'a stepOver whose landing line is a declined mark still stops there');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+end;
+
+{ A WATCH THAT FAULTS MUST NOT BECOME THE SCRIPT'S ERROR (ledger n6).
+
+  `Fault` writes the three slots err(), errmsg$() and erl() read, and the host's
+  call door used to neither save nor restore them -- so a host that evaluated a
+  watch through CallFunction from a stop, which docs/embedding.md blesses, and
+  whose watch faulted, resumed the script with the DEBUGGER's fault in err().
+  The shipped console debugger never showed it only because it evaluates in a
+  fresh VM; an embedder using CallFunction did.
+
+  Two expectations, neither taken from a run of the repaired engine:
+    * a script that never faulted reads err() 0 and errmsg$() "" -- the
+      definition of "no error";
+    * a script that HAD its own fault reads the same three values with or
+      without the host's faulting watch in between -- a second path through the
+      engine to the same answer.
+  And the watch must really have faulted, or the case proves nothing. }
+procedure CheckErrSlotsSurviveAWatch;
+const
+  Fix =
+    'end'                                                   + #10 +   // 1
+    'function bad(n)'                                       + #10 +   // 2
+    '  return nao_existe(n)'                                + #10 +   // 3
+    'endfunction'                                           + #10 +   // 4
+    'function clean$(n)'                                    + #10 +   // 5
+    '  r$ = ""'                                             + #10 +   // 6
+    '  r$ = str$(err()) + "|" + errmsg$()'                  + #10 +   // 7 armed
+    '  return r$'                                           + #10 +   // 8
+    'endfunction'                                           + #10 +   // 9
+    'function h(code, msg$)'                                + #10 +   // 10
+    '  return 0'                                            + #10 +   // 11 resume next
+    'endfunction'                                           + #10 +   // 12
+    'function own$(n)'                                      + #10 +   // 13
+    '  on error call h'                                     + #10 +   // 14
+    '  y = 1 / (n - n)'                                     + #10 +   // 15
+    '  r$ = str$(err()) + "|" + errmsg$() + "|" + str$(erl())' + #10 + // 16 armed
+    '  return r$'                                           + #10 +   // 17
+    'endfunction'                                           + #10;    // 18
+var
+  eng: TPhosphorEngine;
+  d: TDrive;
+  v: TValue;
+  baseline: String;
+begin
+  { a script that never faulted }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daRun]);
+  try
+    d.ReentryAtStop := 1;
+    d.ReentryName := 'bad';
+    d.ReentryArg := 4;
+    CheckInt(eng.Prepare(Fix), 0, 'n6: the fixture prepares');
+    eng.ArmDebug([7], False);
+    v := eng.CallFunction('clean$', [ValInt(1)]);
+    Report(Pos('no function', d.ReenteredErr) > 0,
+           'n6: the host''s watch really faulted (' + d.ReenteredErr + ')');
+    CheckStr(ValToStr(v), '0|',
+             'n6: a script that never faulted still reads no error after a faulting watch');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  { a script with its own fault: first WITHOUT a watch, for the baseline }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daRun]);
+  try
+    CheckInt(eng.Prepare(Fix), 0, 'n6: the fixture prepares again');
+    eng.ArmDebug([16], False);
+    baseline := ValToStr(eng.CallFunction('own$', [ValInt(1)]));
+    Report(Pos('division by zero', baseline) > 0,
+           'n6: the baseline carries the script''s own fault (' + baseline + ')');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  { ...and WITH a faulting watch at the same stop }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daRun]);
+  try
+    d.ReentryAtStop := 1;
+    d.ReentryName := 'bad';
+    d.ReentryArg := 4;
+    CheckInt(eng.Prepare(Fix), 0, 'n6: the fixture prepares a third time');
+    eng.ArmDebug([16], False);
+    v := eng.CallFunction('own$', [ValInt(1)]);
+    Report(Pos('no function', d.ReenteredErr) > 0,
+           'n6: the watch faulted here too (' + d.ReenteredErr + ')');
+    CheckStr(ValToStr(v), baseline,
+             'n6: the script''s own err()/errmsg$()/erl() survive a faulting watch');
+  finally
+    eng.Free;
+    d.Free;
+  end;
+
+  { THE OTHER SIDE OF THE LINE, and the case that pins it: a host call made
+    OUTSIDE any stop -- a GUI event handler in a prepared session -- is the
+    program's own code, and its fault stays visible to the program's next call.
+    A restore made unconditional passed every case above and fails only here.
+    The expected text is derived from the engine's own definitions: the code is
+    peUnknownFunction's ordinal and the message is "no function " plus the
+    signature of a one-Int64 call. }
+  eng := TPhosphorEngine.Create();
+  d := NewDrive(eng, [daRun]);
+  try
+    CheckInt(eng.Prepare(Fix), 0, 'n6: the fixture prepares a fourth time');
+    eng.CallFunction('bad', [ValInt(4)]);                 // faults, no stop anywhere
+    v := eng.CallFunction('clean$', [ValInt(1)]);         // not armed: no stop
+    CheckStr(ValToStr(v), IntToStr(Ord(peUnknownFunction)) + '|no function nao_existe:%',
+             'n6: a host call OUTSIDE a stop leaves its fault for the program to read');
   finally
     eng.Free;
     d.Free;
@@ -3291,6 +3408,7 @@ begin
   CheckPause();
   CheckKeepDoesNotCancelAStep();
   CheckStepLandsOnDeclinedMark();
+  CheckErrSlotsSurviveAWatch();
   CheckInterruptSharesBoundary();
   CheckStop();
   CheckSeamRaises();

@@ -1524,6 +1524,26 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · n6: the guard was right and its stated reason was not, and only
+  a mutation showed it.** A watch evaluated through `CallFunction` from a stop
+  left its fault in the script's `err()`; saving the three slots and restoring
+  them at the host's door fixed it, measured both ways. The restore is gated on
+  that door, and the comment first justified the gate by `callfunc` and
+  `on error call` -- "the script's own code, whose faults are its to see". A
+  mutation that made the restore UNCONDITIONAL passed every test, and reading why
+  showed the comment's cases cannot observe the gate at all: a callfunc's fault is
+  re-raised in its caller, and a handler's slots already hold the same fault. The
+  only place the gate is visible is a host call OUTSIDE a stop (a GUI event in a
+  prepared session), so that case was written, watched catching the mutation, and
+  the comment rewritten to name it. **A guard nobody can see fail is a guard
+  with no test; ask which case would distinguish it before trusting the reason
+  written beside it.** Also on the way: the probe's handler had the wrong arity
+  for `on error call` (it takes code and message), which made a case fail for the
+  wrong reason first -- read before counted, as always. And one mutant run read
+  red only because `bin/phosphor` was stale against the edit; rebuilt, it read
+  green, which was the real answer.
+
+
 - **2026-10-05 · n1: a one-line repair, and a test case that measured nothing
   until it was read against the failing run.** `CheckRange` bounded `APos` and
   `ACount` separately and never their sum; `ACount > ALen - APos + 1` has no sum

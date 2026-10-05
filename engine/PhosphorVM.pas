@@ -4574,6 +4574,8 @@ var
   savedLimit: Boolean;
   savedMask: TFPUExceptionMask;
   evalAtSeamDoor: Boolean;
+  savedErrCode, savedErrLine: Integer;
+  savedErrMsg: String;
 begin
   Result := Default(TValue);
   Err := NoError();
@@ -4733,6 +4735,28 @@ begin
     giving back what this evaluation spent. }
   evalAtSeamDoor := FDbgInSeam and (FExecDepth = FDbgSeamDepth);
   if evalAtSeamDoor then DebugCreditPark();
+  { AND A WATCH'S FAULT IS NOT THE SCRIPT'S ERROR (ledger n6). Fault writes the
+    three slots err(), errmsg$() and erl() read, unconditionally, and this door
+    used to hand them back as the call left them: a host that evaluated a watch
+    from a stop, and whose watch faulted, resumed the script with err() 4 and
+    "no function ..." -- measured in tests/probe_step.lpr, where a script that had
+    its own division by zero at line 15 read the watch's fault at line 3 instead.
+    Saved here and put back in the finally, for the HOST's door AT A STOP only.
+    The narrowness is observable in one place, and it is pinned there: a host call
+    made OUTSIDE a stop -- a GUI event handler in a prepared session -- runs the
+    program's own code, and a fault it raises stays in err() for the program's
+    next handler to read, as it always did. (For a script's own `callfunc` or an
+    `on error call` handler a restore would change nothing visible: the fault is
+    re-raised in the caller, or was already the one in the slots, which is why a
+    mutation restoring unconditionally passed every case written for those and
+    needed the prepared-session case to fail.) The script's ON ERROR handler is not at risk
+    from this door -- Fault already refuses a handler installed below
+    AStopFrameSP -- so these three are the whole of what leaked. }
+  // Taken on every call (three field reads) so nothing is read uninitialised;
+  // put back only at the host's door.
+  savedErrCode := FErrCode;
+  savedErrMsg := FErrMsg;
+  savedErrLine := FErrLine;
   // The third of three ExecFrom entries. See FExecDepth.
   Inc(FExecDepth); Inc(FExecEntries);
   try
@@ -4814,7 +4838,13 @@ begin
       same reason: a watch expression really runs the script's code, and a rule
       that credited its milliseconds while charging its bytes and its instructions
       would be two different answers to one question. Read the value that ACTS. }
-    if evalAtSeamDoor then FDbgParkMark := GetTickCount64();
+    if evalAtSeamDoor then
+    begin
+      FDbgParkMark := GetTickCount64();
+      FErrCode := savedErrCode;   // see the save above: the watch's fault is not
+      FErrMsg := savedErrMsg;     // the script's, whatever the watch did
+      FErrLine := savedErrLine;
+    end;
     { THE THIRD WHOLESALE FRAME MOVE, AND THE ONLY ONE THAT IS SOMETIMES NOT ONE.
       On the success path opRetFunc has already popped the frame this pushed, so
       FFrameSP is `saved` and the line below writes back what is there -- an

@@ -245,13 +245,13 @@ call-refusing evaluator, `evaluate: true` with `evaluateCalls: false`); `m2`
 (PhosphorIDE `0f19899` and `bd0d1c8`, the transport and the session driver, the
 Debug menu enabled from live state).
 
-**Partial: 4.**
+**Partial: 4** (`n6` closed later the same day):
 - `n5` -- two clauses closed (installed set, outer-frame lines), three open: the
   `error` event carries no text (`TDebugProto.Handle`, the parse-failure branch);
   `continued` and `trace` are never emitted; a command before `initialize` is
   answered rather than refused -- and the comment in `TDebugProto.Session` that
   says "nothing is answered before initialize" says the opposite of the code.
-- `n6` -- the shipped debugger AVOIDS it (`EvaluateExpr` evaluates in a fresh
+- ~~`n6`~~ **CLOSED 2026-10-05**: `TPhosphorVM.CallUserFunc` saves the three error slots and restores them at the host's door at a stop; `CheckErrSlotsSurviveAWatch` in `tests/probe_step.lpr` failed against the old engine with the watch's fault (code 4, line 3) in place of the script's own (division by zero, line 15), and pins the other side too -- a host call OUTSIDE a stop keeps its fault visible, the one case that caught a restore made unconditional. Original text: the shipped debugger AVOIDS it (`EvaluateExpr` evaluates in a fresh
   VM, pinned by "err()/errmsg$() answer nothing at all afterwards"), but the
   engine is unchanged: `Fault` still writes the error slots and
   `TPhosphorVM.CallUserFunc` neither saves nor restores them, so an embedder

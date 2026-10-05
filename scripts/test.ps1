@@ -1282,6 +1282,31 @@ foreach ($cp in 850, 65001, 437) {
 if ($okW) { Write-Host "PASS  W:a second thread's stderr is UTF-8 like the main thread's (chcp 850, 65001, 437)" -ForegroundColor Green }
 else { Write-Host "FAIL  W:a thread's standard files are not the main thread's" -ForegroundColor Red }
 
+# --- X: A PACKED GUI APPLICATION, END TO END ------------------------------------
+#
+# Every other GUI check runs inside phosphorguitest, which is not what ships, and
+# examples/gui_demo.bas is only compiled. tests/gui_pack_test.py compiles and PACKS
+# a program with a form and a timer inside app_run(), starts the packed executable,
+# and asks the WINDOWING SYSTEM -- not the program -- whether a visible window with
+# that caption belongs to that process. Then it ends it through a sentinel or by
+# closing the window, and checks the exit code, the output and what the handler
+# saw. Six cases here, including --no-console releasing the console it was started
+# with; its header has the list and the mutation it was watched failing under.
+# Opens a few windows for about a second each, by necessity.
+$xOut = Join-Path $tmp 'phosphor_guipack.out'
+cmd /c "python `"$root\tests\gui_pack_test.py`" `"$exe`" > `"$xOut`" 2>&1"
+$xCode = $LASTEXITCODE
+$xText = Get-Content -Raw $xOut
+if ($null -eq $xText) { $xText = '' }
+$xTally = ([regex]::Match($xText, 'PASS \d+\s+FAIL \d+')).Value
+$okX = ($xCode -eq 0)
+if ($okX) { Write-Host ("PASS  X:a packed GUI application opens its window and exits clean ({0})" -f $xTally) -ForegroundColor Green }
+else {
+    Write-Host ("FAIL  X:a packed GUI application (exit {0})" -f $xCode) -ForegroundColor Red
+    $xText -split "`r?`n" | Where-Object { $_ -match 'FAIL|SETUP' } | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
+}
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
-    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW) { exit 0 } else { exit 1 }
+    $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
+    $okX) { exit 0 } else { exit 1 }

@@ -964,4 +964,25 @@ done
 if [ "$okW" -eq 0 ]; then echo "PASS  W:a second thread's stderr is UTF-8 like the main thread's (two locales)"
 else echo "FAIL  W:a thread's standard files are not the main thread's"; fail=1; fi
 
+# --- X: A PACKED GUI APPLICATION, END TO END ------------------------------------
+# The twin of block X in scripts/test.ps1, whose comment carries the reason.
+# UNDER xvfb-run, never the live desktop: a display of its own makes the run the
+# same on a headless box and on one with somebody logged in. Without xvfb-run
+# the block says SKIP and why -- it does not pass. Three cases here; closing a
+# window from outside needs a tool this machine does not have.
+if command -v xvfb-run > /dev/null 2>&1; then
+  if xvfb-run -a python3 "$root/tests/gui_pack_test.py" "$exe" > "$tmpdir/x.out" 2>&1
+  then xcode=0; else xcode=$?; fi
+  xtally=$(grep -o 'PASS [0-9]* *FAIL [0-9]*' "$tmpdir/x.out" | tail -1)
+  if [ "$xcode" -eq 0 ]; then
+    echo "PASS  X:a packed GUI application opens its window and exits clean ($xtally)"
+  else
+    echo "FAIL  X:a packed GUI application (exit $xcode)"
+    grep -E 'FAIL|SETUP' "$tmpdir/x.out" | sed 's/^/        /'
+    fail=1
+  fi
+else
+  echo 'SKIP  X:a packed GUI application (no xvfb-run on this machine)'
+fi
+
 exit "$fail"

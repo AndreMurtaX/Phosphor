@@ -1524,6 +1524,24 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · The product was fine; the harness was wrong twice, and a third
+  time in its first design.** A packed GUI application had never been started
+  by anything. Probed first, then made block X: compile, PACK, run, find the
+  window from outside the process, end it, check. Every product case was green
+  on the first build. Three things went wrong, all in the test. **(1) A case
+  designed against the documentation, not against it read:** a handler that
+  faults was expected to end the program; `gui-timer.md` says it records
+  `gui_error()` 2 and carries on, so the "hang" was a GUI waiting for a person
+  -- confirmed by running the same program UNPACKED before blaming the stub.
+  **(2) `check()` returned nothing**, so `if not check(...)` always returned and
+  the file reported PASS 6 FAIL 0 having started no program. Six checks for six
+  cases was the tell -- a count is information, read it. **(3) A greedy regex**
+  (`"(.*)"`) made every Linux window title compare unequal; the inspection that
+  found it showed the window viewable and owned by the right pid, i.e. the
+  product right and the measurement wrong. The order that saved time each time:
+  look at what the tool sees before deciding which side is broken.
+
+
 - **2026-10-05 · The sibling now cites this repository by NAME, and the reading
   that conversion forced was worth more than the conversion.** PhosphorIDE held
   fifty-four `file:line` citations into this tree, fingerprinted by its

@@ -423,8 +423,24 @@ stone never turned over is not a stone known to be clean.
 - **A segment whose first frame closes the session.** The drain breaks on it, so
   every frame behind it stays queued. Nobody asked what the editor is owed for
   those.
-- **The packed stub and the GUI door**, end to end — which is exactly where the
-  `--no-console` item above would bite.
+- ~~**The packed stub and the GUI door**, end to end.~~ **CLOSED 2026-10-05.**
+  `tests/gui_pack_test.py`, block X of both runners: compiles and PACKS a program
+  with a form and a timer inside `app_run()`, starts the packed executable, and
+  asks the windowing system -- EnumWindows on Windows, xwininfo/xprop under
+  xvfb-run on Linux -- whether a visible window with that caption belongs to that
+  process; then ends it by a sentinel or by closing the window, and checks exit
+  code, output order and what the handler saw. Windows 28 checks over six cases
+  (piped, `--no-console` with its console released, own console, a faulting
+  handler, closing the window with and without `--no-console`), Linux 15 over
+  three. **Nothing was broken** -- every case was green on the first build run.
+  What it found was in its own harness, twice, and both are recorded in it: a
+  harness helper `check` that returned nothing made the first draft report PASS 6 FAIL 0
+  having started no program, and a greedy regex hid three on-screen windows on
+  Linux. Watched failing: with the stub ignoring the NOCONSOLE flag, both
+  `--no-console` cases fail on the released console. A handler fault does not
+  end the program (`gui_error()` answers 2, as `docs/libraries/gui-timer.md`
+  documents) -- so a packed GUI app whose handler faults prints nothing anywhere;
+  that is the documented design, noted here rather than changed.
 
 ## Decided 2026-09-18 — the compiled breakpoint condition stays uncached
 

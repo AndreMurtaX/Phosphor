@@ -1524,6 +1524,20 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · n1: a one-line repair, and a test case that measured nothing
+  until it was read against the failing run.** `CheckRange` bounded `APos` and
+  `ACount` separately and never their sum; `ACount > ALen - APos + 1` has no sum
+  to overflow, because `APos` is already in `1..ALen+1` there. The test's first
+  draft failed 4 of 11 against the old engine -- and reading WHICH four showed
+  that both `buffer_copy` cases had passed on the broken build: each put one side
+  at position 1, and that side's check refused correctly, so the case never
+  reached the overflow. Both sides had to be at 2 or more. **A red run is not
+  automatically a measured one: read which assertions failed, and ask of each one
+  that passed whether it could have failed.** The class sweep (`pos + count - 1`
+  shaped comparisons across `engine/` and `host/`) found no other member; the one
+  `APos + 3` in PhosphorJsonLib uses an internal index, not a script value.
+
+
 - **2026-10-05 · A red runner after an unrelated commit was a clock, and it took
   three measurements to say so.** Block R failed on the VM right after the d07
   commit -- four checks in the `pause` session, nothing to do with file moves.

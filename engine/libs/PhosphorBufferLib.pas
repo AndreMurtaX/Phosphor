@@ -149,7 +149,16 @@ begin
       ' is outside 1..' + IntToStr(ALen + 1) + ' (buffer holds ' + IntToStr(ALen) + ' bytes)');
     Exit;
   end;
-  if APos + ACount - 1 > Int64(ALen) then
+  { COMPARED WITHOUT ADDING. This was `APos + ACount - 1 > ALen`, with each
+    operand bounded on its own and the SUM not at all: a count saturated to
+    High(Int64) at a position of 2 or more overflowed to a negative number and
+    passed, so buffer_fillrange reported 9223372036854775807 bytes filled in an
+    8-byte buffer and buffer_slice$ answered "" where it owed this error (ledger
+    n1; tests/suite/72_buffer_range_overflow.bas). APos is already in 1..ALen+1
+    here, so the right-hand side is 0..ALen and cannot overflow either. The
+    rule is the one PhosphorStrLib states beside its own pad family: clamp or
+    compare BEFORE subtracting or adding a script-supplied value. }
+  if ACount > Int64(ALen) - APos + 1 then
   begin
     Err := MakeError(peRuntime, AFn + ': ' + IntToStr(ACount) + ' bytes from position ' +
       IntToStr(APos) + ' runs past the end (buffer holds ' + IntToStr(ALen) + ' bytes)');

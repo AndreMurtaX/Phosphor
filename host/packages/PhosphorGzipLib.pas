@@ -44,7 +44,11 @@ implementation
 
 var
   GzipErr: Integer = 0;           // 0 = the last gzip op was clean; 1 = it failed
-  GzipSpent: Boolean = False;     // the last inflate stopped on the execution budget
+  // There USED TO BE a GzipSpent global here -- "the last inflate stopped on the
+  // budget" -- reset only when an inflate began. A call that never began one (its
+  // source was missing) read the previous call's answer and reported a missing
+  // file as a budget refusal (ledger n3). RawInflate now answers it through an
+  // out parameter, so there is no previous answer left to read.
   Crc32Table: array[0..255] of Cardinal;
 
 // --- CRC32 (IEEE, reflected 0xEDB88320) -- self-contained, no inline note ----
@@ -102,11 +106,11 @@ begin
   end;
 end;
 
-function RawInflate(const Src: RawByteString): RawByteString;
+function RawInflate(const Src: RawByteString; out Spent: Boolean): RawByteString;
 var inp, outs: TMemoryStream; ds: Tdecompressionstream; buf: array[0..65535] of Byte; n: LongInt;
 begin
   Result := '';
-  GzipSpent := False;
+  Spent := False;
   inp := TMemoryStream.Create();
   outs := TMemoryStream.Create();
   try
@@ -119,14 +123,15 @@ begin
         happens inside one opCall where no execution ceiling can see it -- the
         argument says nothing about how big the answer will be, so RULE 1 cannot
         apply and RULE 2 does: charge each 64 KB block as it comes out and stop
-        when the budget is spent. GzipSpent keeps a truncated result from reading
-        as a successful one. }
+        when the budget is spent. Spent keeps a truncated result from reading as a
+        successful one -- and the CALLER must ask it before doing anything with
+        the result, which is where d14 was. }
       repeat
         n := ds.Read(buf, SizeOf(buf));
         if n > 0 then outs.WriteBuffer(buf, n);
         if (n > 0) and (not BudgetCharge(n)) then
         begin
-          GzipSpent := True;
+          Spent := True;
           Break;
         end;
       until n < SizeOf(buf);   // a short read means the DEFLATE stream ended
@@ -270,14 +275,14 @@ begin
 end;
 
 function f_gzip_decompress(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var body, plain: RawByteString;
+var body, plain: RawByteString; spent: Boolean;
 begin
   Err := NoError();
   try
     if GzipUnwrap(Args[0].Str, body) then
     begin
-      plain := RawInflate(body);
-      if GzipSpent then
+      plain := RawInflate(body, spent);
+      if spent then
       begin
         Err := BudgetRefusal('gzip_decompress$');
         GzipErr := 1;
@@ -329,21 +334,27 @@ begin
   end;
 end;
 
+{ DECIDE, THEN WRITE (ledger d14). This was one boolean chain ending in
+  SaveFileStr(Dst, RawInflate(body)), with the budget asked AFTER it: a refused
+  inflate had already truncated the destination and written whatever fitted over
+  it, so the refusal arrived after the damage. The destination is now touched only
+  by an inflate that finished. }
 function f_gzip_decompressfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var raw, body: RawByteString;
+var raw, body, plain: RawByteString; spent: Boolean;
 begin
   Err := NoError();
+  Result := ValInt(0);
+  GzipErr := 1;
   try
-    if LoadFileStr(Args[0].Str, raw) and GzipUnwrap(raw, body) and
-       SaveFileStr(Args[1].Str, RawInflate(body)) then
-    begin Result := ValInt(1); GzipErr := 0; end
-    else begin Result := ValInt(0); GzipErr := 1; end;
-    if GzipSpent then
+    if not (LoadFileStr(Args[0].Str, raw) and GzipUnwrap(raw, body)) then Exit;
+    plain := RawInflate(body, spent);
+    if spent then
     begin
       Err := BudgetRefusal('gzip_decompressfile');
-      GzipErr := 1;
-      Exit(ValInt(0));
+      Exit;
     end;
+    if SaveFileStr(Args[1].Str, plain) then
+    begin Result := ValInt(1); GzipErr := 0; end;
   except
     Result := ValInt(0); GzipErr := 1;
   end;

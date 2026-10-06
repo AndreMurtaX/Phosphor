@@ -742,7 +742,7 @@ introduces a defect.
     2026-09-15, having been listed as open for months after it was fixed.
 12. **engine/libs/PhosphorConfigLib.pas:83** [medium] -- cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
 13. **engine/PhosphorEngine.pas:286** [low] -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
-14. **host/packages/PhosphorGzipLib.pas:338** [low] -- A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
+14. ~~**host/packages/PhosphorGzipLib.pas:338** [low]~~ -- CLOSED 2026-10-06 with n3: decide-then-write, and the spent flag is an out parameter, not a global; scripts/probe_budget.lpr section (j). Original text: A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
 
 ### Crashes (4)
 
@@ -1523,6 +1523,20 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d14 and n3: a refusal that lands after the write is not a
+  refusal, and a flag that outlives its call answers for the next one.** One
+  boolean chain in gzip_decompressfile ended `SaveFileStr(dst, RawInflate(b))`
+  and asked the budget afterwards, so the file was already truncated when the
+  error arrived. The flag it asked was a unit global reset only when an inflate
+  began, so a call that failed before beginning one -- a missing source --
+  inherited the last refusal. Fixed as a class, not an instance: the global is
+  gone and the inflate answers through an `out` parameter, and the call is now
+  decide-then-write. The probe was the first thing in the tree that could see a
+  package refusal at all, which is why the plan put it first in its wave; it was
+  watched failing on both counts before the fix, and it asserts the in-budget
+  full inflate too, so a fix that refused everything would not pass.
+
 
 - **2026-10-06 · d44: a gate that prints "every" must enumerate everything, and
   a gate that cannot reach zero yet needs a ratchet, not an exemption.**

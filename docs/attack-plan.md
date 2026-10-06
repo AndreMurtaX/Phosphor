@@ -186,7 +186,7 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 **New defects, with anchors.**
 
 - ~~**n1**~~ **CLOSED 2026-10-05.** `CheckRange` now compares `ACount > ALen - APos + 1`, with no sum to overflow; `tests/suite/72_buffer_range_overflow.bas` (10 assertions) failed 5 of 10 against the old engine -- after its `buffer_copy` case was rewritten, because a first draft put one side at position 1, where the old check already refused, and measured nothing. Original text: **`engine/libs/PhosphorBufferLib.pas:152`** — `if APos + ACount - 1 > Int64(ALen) then`: the operands are bounds-checked individually and the **sum is not**, so a saturating `ArgI64` at `APos >= 2` wraps negative and the guard passes. Six registered names through one shared guard. Measured on `bin/phosphor.exe`, 8-byte buffer, exit 0: `buffer_fillrange` and `buffer_copy` answer **9223372036854775807** bytes they never touched, `buffer_slice$` answers `""` where it owes an error. `p=1` is correctly refused, which is why a sweep that tried only position 1 saw nothing. **Its own ledger entry — different file from d18, and its failing test needs no budget.**
-- **n3 · `host/packages/PhosphorGzipLib.pas:341`** — `GzipSpent` is a unit global reset only at the top of `RawInflate`, and Pascal's short-circuit `and` means a failed `LoadFileStr`/`GzipUnwrap` never calls it, so a **missing source file after any refused inflate is reported as a budget refusal** with `peLimit`. Same three lines as d14.
+- ~~**n3**~~ **CLOSED 2026-10-06 with d14**: the `GzipSpent` global is gone -- `RawInflate` answers whether it stopped on the budget through an `out` parameter, so no call can read another's answer -- and `f_gzip_decompressfile` decides before it writes: load, unwrap, inflate, refuse if spent, and only then open the destination. `scripts/probe_budget.lpr` section (j) failed against the old code on both (the refused call left `AAAA...` where `KEEP` had been; the missing source after it came back rc=3) and passes with the refusal, the untouched destination and the in-budget full inflate all asserted. Original text: **`host/packages/PhosphorGzipLib.pas:341`** — `GzipSpent` is a unit global reset only at the top of `RawInflate`, and Pascal's short-circuit `and` means a failed `LoadFileStr`/`GzipUnwrap` never calls it, so a **missing source file after any refused inflate is reported as a budget refusal** with `peLimit`. Same three lines as d14.
 - ~~**n4** — a `setBreakpoints` frame with no `lines` key reaches `arr.Clone` with `arr` nil and kills the debuggee.~~ **CLOSED 2026-09-15 by `6f3ca5d`**, and verified closed on 2026-09-18: the only `arr.Clone` left in the file is inside the comment at `host/console/phosphor.lpr:1521` explaining that it used to be there. Every element of `lines` is type-checked now, not just the array — a string, a JSON null and a nested array each used to raise from inside the parse loop.
 - **n5 — five clauses, and on 2026-09-18 three of them are closed.** Each was read before it was struck; the file has been edited many times since the list was written and every line number in it had drifted.
     - ~~`setBreakpoints` answers the **requested** set rather than the installed one.~~ **CLOSED by `6f3ca5d`.** `host/console/phosphor.lpr:1521` says so in the past tense and introduces `EnsureStoppable`. This is the clause the citation below was for.
@@ -266,7 +266,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -277,7 +277,7 @@ Debug menu enabled from live state).
   unrepaired engine, 13 of 19, the first file_move having replaced its target.
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
-`d56 d57 d48 n8 d54 d53 ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `d14 n3 ~~d07~~ d12
+`d56 d57 d48 n8 d54 d53 ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `~~d14~~ ~~n3~~ ~~d07~~ d12
 d46 d47 n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ d45 ~~d08~~ ~~n9~~ d65 n14 m4 r3`
 (engine), `~~d42~~ ~~n19~~ n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose

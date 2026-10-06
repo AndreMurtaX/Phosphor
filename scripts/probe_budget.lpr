@@ -39,11 +39,13 @@ program probe_budget;
 
 uses
   SysUtils, PhosphorErrors, PhosphorEngine, PhosphorBudget,
-  // One OPT-IN package, registered below: base64_valid is a quadratic-append
-  // door of exactly the family this probe pins, and it lives in host/packages
-  // rather than engine/libs, so a probe that only linked the engine could not
-  // reach it. host\packages is already on this probe's unit path.
-  PhosphorBase64Lib;
+  // Two OPT-IN packages, registered below: base64_valid is a quadratic-append
+  // door of exactly the family this probe pins, and gzip_decompressfile is the
+  // one package door whose refusal used to land AFTER its damage (ledger d14).
+  // Both live in host/packages rather than engine/libs, so a probe that only
+  // linked the engine could not reach them. host\packages is already on this
+  // probe's unit path.
+  PhosphorBase64Lib, PhosphorGzipLib;
 
 const
   LF = #10;
@@ -89,6 +91,7 @@ begin
   try
     eng.OnOutput := @Sink.Take;
     RegisterBase64Funcs(eng.Registry);
+    RegisterGzipFuncs(eng.Registry);
     eng.MaxSteps := ASteps;
     eng.TimeoutMs := ATimeoutMs;
     t0 := GetTickCount64();
@@ -945,6 +948,50 @@ begin
           'file_writealltext(p$, "x")' + LF +
           'println file_readalltext$(p$)' + LF +
           'file_delete(p$)' + LF, 'x' + LF);
+
+  { (j) A REFUSED gzip_decompressfile LEAVES ITS DESTINATION ALONE (ledger d14),
+    AND THE NEXT CALL IS NOT TOLD ABOUT IT (ledger n3).
+
+    d14: the call inflated, WROTE the result over the destination, and only then
+    asked whether the inflate had stopped on the budget -- so a refused call had
+    already truncated the file to whatever fitted, and the refusal arrived after
+    the damage. n3: whether it stopped was a unit global, reset only when an
+    inflate began; a call whose source was missing never began one, so it read
+    the PREVIOUS call's answer and reported a missing file as a budget refusal.
+    The global survives from one engine to the next in a process, which is what
+    the second case below relies on.
+
+    The numbers: 1000 steps buy 1000 * 256 = 256000 units, and an inflate is
+    charged one unit an output byte, so two million bytes of 'A' cannot fit and
+    a few instructions of script easily do. The setup and the reads run
+    unbudgeted, so only the call under test is measured. }
+  Unbudgeted('gzip: the d14 fixture is made',
+          'p$ = path_combine$(temppath$(), "probe_budget_d14.txt")' + LF +
+          'g$ = path_combine$(temppath$(), "probe_budget_d14.gz")' + LF +
+          'd$ = path_combine$(temppath$(), "probe_budget_d14.out")' + LF +
+          'file_writealltext(p$, string$(2000000, 65))' + LF +
+          'println gzip_compressfile(p$, g$)' + LF +
+          'file_writealltext(d$, "KEEP")' + LF +
+          'file_delete(p$)' + LF, '1' + LF);
+  RefusedUnder('gzip_decompressfile past the budget is refused',
+          'g$ = path_combine$(temppath$(), "probe_budget_d14.gz")' + LF +
+          'd$ = path_combine$(temppath$(), "probe_budget_d14.out")' + LF +
+          'x = gzip_decompressfile(g$, d$)' + LF, 1000, 0);
+  Unbudgeted('and the refused call left its destination as it was',
+          'd$ = path_combine$(temppath$(), "probe_budget_d14.out")' + LF +
+          'println file_readalltext$(d$)' + LF, 'KEEP' + LF);
+  Unbudgeted('a missing source after a refusal is a missing source, not a refusal',
+          'g$ = path_combine$(temppath$(), "probe_budget_n3_missing.gz")' + LF +
+          'd$ = path_combine$(temppath$(), "probe_budget_n3.out")' + LF +
+          'println gzip_decompressfile(g$, d$)' + LF +
+          'println gzip_error()' + LF, '0' + LF + '1' + LF);
+  AllowedUnder('and inside the budget the same file inflates in full',
+          'g$ = path_combine$(temppath$(), "probe_budget_d14.gz")' + LF +
+          'd$ = path_combine$(temppath$(), "probe_budget_d14.out")' + LF +
+          'println gzip_decompressfile(g$, d$)' + LF +
+          'println len(file_readalltext$(d$))' + LF +
+          'file_delete(g$)' + LF +
+          'file_delete(d$)' + LF, '1' + LF + '2000000' + LF, 1000000, 0);
 
   Sink.Free;
   Writeln('ok: ', Ok);

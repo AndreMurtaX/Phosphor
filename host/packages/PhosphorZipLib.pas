@@ -70,6 +70,53 @@ type
     ZipErr := 1 and a zero handle, which is the refusal the script sees. }
   EPhosphorZipRefused = class(Exception);
 
+  { AN UNZIPPER THAT CHARGES WHAT IT WRITES (ledger d46, d47).
+
+    Every expansion used to be priced from the archive's CENTRAL DIRECTORY --
+    ArchiveFitsBudget, or BudgetAllows(Entries[i].Size) -- which is the archive's
+    own claim about itself. The inflate loop (TInflater.DeCompress, zipper.pp)
+    reads until the DEFLATE stream ends, whatever the directory said, so an entry
+    that declares one byte expands to whatever it really holds: the guard checked
+    a different copy of the value than the one that acts (d46). And two of the
+    three extractors, zip_extract and zip_extractall, asked nothing at all, which
+    check-budget.py could not see because they reach the unzipper through a field
+    (d47).
+
+    So the meter is in the TYPE, not at the doors. OnProgressEx reports the real
+    output position as the inflate goes; every byte past the last report is
+    charged, and when the budget refuses, Terminate stops the inflate loop. A
+    stopped entry then fails its CRC check and raises, which every caller already
+    turns into a failure -- Spent is what tells that failure apart as a refusal.
+    UnZipAllFiles is virtual, and UnZipFiles calls it, so the reset at the top of
+    each extraction cannot be skipped by a door that forgets it.
+
+    THE PARTIAL FILE IS REMOVED. A refusal mid-entry leaves a file that was opened
+    with fmCreate and holds only what fitted; the unzipper names it in OnStartFile
+    and this deletes exactly that file -- never a directory, never anything
+    recursive, and never in the in-memory mode zip_read$ uses, where there is no
+    file. Its path was already judged by ArchiveIsSafe and
+    ArchiveLocalNamesAreSafe and sits under a destination the sandbox allowed.
+    Entries that finished before the refusal stay, and the docs say so.
+
+    WHAT IS NOT CHARGED: a STORED entry (method 0) is copied with CopyFrom and
+    reports no progress. It cannot amplify -- it copies only bytes the archive
+    already holds on disk -- so the work is bounded by a file the sandbox let the
+    program open. The up-front ArchiveFitsBudget still runs and still refuses an
+    honest archive that declares too much, before anything is written. }
+  TMeteredUnZipper = class(TUnZipper)
+  private
+    FCharged: Int64;     // output already charged in this extraction
+    FPartial: String;    // the disk file being written now; '' between entries
+    procedure Meter(Sender: TObject; const ATotPos, ATotSize: Int64);
+    procedure Started(Sender: TObject; const AFileName: String);
+  protected
+    procedure UnZipOneFile(Item: TFullZipFileEntry); override;
+  public
+    Spent: Boolean;      // this extraction was stopped by the execution budget
+    constructor Create;
+    procedure UnZipAllFiles; override;
+  end;
+
   { A write handle: a TZipper plus the in-memory streams that back its
     string entries. The streams must outlive the AddFileEntry call and stay
     alive until ZipAllFiles has read them, so the writer owns and frees them. }
@@ -86,7 +133,7 @@ type
   { A read handle: a TUnZipper already Examined, so its entry list is ready to
     inspect. FScratch is used only during an in-memory ReadEntry. }
   TZipReader = class
-    UZ: TUnZipper;
+    UZ: TMeteredUnZipper;
     FScratch: TMemoryStream;
     FSpent: Boolean;   // the last ReadEntry was refused by the execution budget
     constructor Create(const APath: String);
@@ -96,6 +143,65 @@ type
     procedure DoCreateStream(Sender: TObject; var AStream: TStream; AItem: TFullZipFileEntry);
     procedure DoDoneStream(Sender: TObject; var AStream: TStream; AItem: TFullZipFileEntry);
   end;
+
+{ TMeteredUnZipper }
+
+constructor TMeteredUnZipper.Create;
+begin
+  inherited Create();
+  OnProgressEx := @Meter;
+  OnStartFile := @Started;
+end;
+
+procedure TMeteredUnZipper.Meter(Sender: TObject; const ATotPos, ATotSize: Int64);
+var delta: Int64;
+begin
+  // ATotPos is the output written so far in THIS extraction, across entries; it
+  // only grows. Sender is the decompressor, or the unzipper itself at the end.
+  delta := ATotPos - FCharged;
+  if delta <= 0 then Exit;
+  FCharged := ATotPos;
+  if (not Spent) and (not BudgetCharge(delta)) then
+  begin
+    Spent := True;
+    Terminate();
+  end;
+end;
+
+procedure TMeteredUnZipper.Started(Sender: TObject; const AFileName: String);
+begin
+  // In-memory mode (OnCreateStream set) hands over a name that is no file at all.
+  if Assigned(OnCreateStream) then FPartial := '' else FPartial := AFileName;
+end;
+
+procedure TMeteredUnZipper.UnZipOneFile(Item: TFullZipFileEntry);
+begin
+  FPartial := '';
+  inherited UnZipOneFile(Item);
+  FPartial := '';            // this entry finished; it is not a partial any more
+end;
+
+procedure TMeteredUnZipper.UnZipAllFiles;
+begin
+  FCharged := 0;
+  FPartial := '';
+  Spent := False;
+  try
+    inherited UnZipAllFiles();
+  except
+    // One file, the one opened for the stopped entry -- and asked about like any
+    // other path this unit touches, though the extractor already had to be.
+    if Spent and (FPartial <> '') and SandboxAllows(FPartial, puWrite) then
+      DeleteFile(FPartial);
+    FPartial := '';
+    raise;
+  end;
+  // The last charge can be refused at the END of an entry, after its bytes are
+  // complete and its CRC has passed: nothing raised, but the loop stopped before
+  // the next entry. It is still a refusal, and it must not read as success.
+  if Spent then
+    raise EZipError.Create('stopped by the execution budget');
+end;
 
 { TZipWriter }
 
@@ -203,7 +309,7 @@ constructor TZipReader.Create(const APath: String);
 begin
   if not SandboxAllows(APath, puRead) then
     raise EPhosphorZipRefused.Create('refused: the path is outside the sandbox root');
-  UZ := TUnZipper.Create();
+  UZ := TMeteredUnZipper.Create();
   UZ.FileName := APath;
   UZ.Examine;              // populates Entries; raises on a missing/corrupt file
   FScratch := nil;
@@ -244,8 +350,10 @@ begin
   AData := '';
   FSpent := False;
   // One entry, one declared size, one RULE 1 question -- asked before UnZipFiles
-  // is entered rather than after the memory is gone. FSpent tells the caller that
-  // False here means "refused", not "no such entry".
+  // is entered, so an archive that admits to being too big costs nothing. It is
+  // only the FIRST answer: the declared size is the archive's claim, and the
+  // metered unzipper charges what the entry really becomes (d46). FSpent tells
+  // the caller that False here means "refused", not "no such entry".
   idx := IndexOf(AName);
   if (idx >= 0) and (not BudgetAllows(UZ.Entries[idx].Size)) then
   begin
@@ -260,10 +368,21 @@ begin
     UZ.OnDoneStream := @DoDoneStream;
     try
       UZ.UnZipFiles(sl);
-    finally
+    except
+      // A stopped or failed entry leaves FScratch holding what got out; it is not
+      // an answer, and nothing else would free it before the next read.
+      FreeAndNil(FScratch);
       UZ.OnCreateStream := nil;
       UZ.OnDoneStream := nil;
+      if UZ.Spent then
+      begin
+        FSpent := True;
+        Exit(False);
+      end;
+      raise;
     end;
+    UZ.OnCreateStream := nil;
+    UZ.OnDoneStream := nil;
   finally
     sl.Free;
   end;
@@ -444,10 +563,16 @@ end;
   central directory, so the total uncompressed size is known BEFORE a byte is
   written -- which turns the decompression bomb into a RULE 1 case after all:
   forty kilobytes that declare ten gigabytes are refused here rather than inside
-  UnZipAllFiles, which is native and cannot be interrupted once entered. The
-  declared size is what a zip's directory claims and a malicious archive may lie,
-  but it can only lie DOWNWARD into a smaller claim, and a smaller claim is the
-  one this check would have let through anyway. }
+  UnZipAllFiles writes anything.
+
+  IT IS THE FIRST ANSWER, NOT THE LAST. This comment used to say that a lying
+  archive "can only lie DOWNWARD into a smaller claim, and a smaller claim is the
+  one this check would have let through anyway" -- which is true and is exactly
+  the defect (ledger d46): a downward lie is LET THROUGH, and the inflate then
+  reads until the stream ends, not until the claim is used up. The bytes that
+  actually come out are charged by TMeteredUnZipper as they come out. This check
+  stays because an honest archive that admits to being too big should be refused
+  before a single file is created. }
 function ArchiveFitsBudget(AUz: TUnZipper): Boolean;
 var i: Integer; total: Int64;
 begin
@@ -675,7 +800,7 @@ begin
 end;
 
 function f_unzip_extract(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var uz: TUnZipper; why: String; unread: Boolean;
+var uz: TMeteredUnZipper; why: String; unread: Boolean;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -688,7 +813,7 @@ begin
     directory the script had no business writing to, which is the whole escape. }
   if not SandboxAllows(Args[1].Str, puWrite) then begin ZipErr := 1; Exit; end;
   try
-    uz := TUnZipper.Create();
+    uz := TMeteredUnZipper.Create();
     try
       uz.FileName := Args[0].Str;
       uz.OutputPath := Args[1].Str;
@@ -719,7 +844,18 @@ begin
         Err := BudgetRefusal('unzip_extract');
         Exit;
       end;
-      uz.UnZipAllFiles;
+      try
+        uz.UnZipAllFiles;
+      except
+        // The meter stopped it: a refusal, not a corrupt archive.
+        if uz.Spent then
+        begin
+          ZipErr := 1;
+          Err := BudgetRefusal('unzip_extract');
+          Exit;
+        end;
+        raise;
+      end;
       Result := ValInt(1);
       ZipErr := 0;
     finally
@@ -948,7 +1084,7 @@ begin
     begin
       ZipErr := 1;
       // A refusal is not a missing entry, and must not read as one.
-      if r.FSpent then Err := BudgetRefusal('zipr_read$');
+      if r.FSpent then Err := BudgetRefusal('zip_read$');
     end;
   except
     Result := ValStr('');
@@ -1038,8 +1174,27 @@ begin
         ZipErr := 1;
         Exit;
       end;
+      { THE BUDGET, WHICH THIS DOOR NEVER ASKED (ledger d47). The declared size
+        first, so an entry that admits to being too big writes nothing; then the
+        metered unzipper charges what it really becomes. }
+      if not BudgetAllows(r.UZ.Entries[r.IndexOf(Args[1].Str)].Size) then
+      begin
+        ZipErr := 1;
+        Err := BudgetRefusal('zip_extract');
+        Exit;
+      end;
       r.UZ.OutputPath := Args[2].Str;
-      r.UZ.UnZipFiles(sl);
+      try
+        r.UZ.UnZipFiles(sl);
+      except
+        if r.UZ.Spent then
+        begin
+          ZipErr := 1;
+          Err := BudgetRefusal('zip_extract');
+          Exit;
+        end;
+        raise;
+      end;
       Result := ValInt(1);
       ZipErr := 0;
     except
@@ -1088,9 +1243,27 @@ begin
       ZipErr := 1;
       Exit;
     end;
+    { THE BUDGET, WHICH THIS DOOR NEVER ASKED (ledger d47): the declared total
+      first, as unzip_extract asks it, then the meter on what really comes out. }
+    if not ArchiveFitsBudget(r.UZ) then
+    begin
+      ZipErr := 1;
+      Err := BudgetRefusal('zip_extractall');
+      Exit;
+    end;
     r.UZ.Files.Clear();               // a prior single-entry op left a filter behind;
     r.UZ.OutputPath := Args[1].Str; // an empty list means "every file"
-    r.UZ.UnZipAllFiles;
+    try
+      r.UZ.UnZipAllFiles;
+    except
+      if r.UZ.Spent then
+      begin
+        ZipErr := 1;
+        Err := BudgetRefusal('zip_extractall');
+        Exit;
+      end;
+      raise;
+    end;
     Result := ValInt(1);
     ZipErr := 0;
   except

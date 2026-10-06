@@ -39,13 +39,14 @@ program probe_budget;
 
 uses
   SysUtils, PhosphorErrors, PhosphorEngine, PhosphorBudget,
-  // Two OPT-IN packages, registered below: base64_valid is a quadratic-append
-  // door of exactly the family this probe pins, and gzip_decompressfile is the
-  // one package door whose refusal used to land AFTER its damage (ledger d14).
-  // Both live in host/packages rather than engine/libs, so a probe that only
-  // linked the engine could not reach them. host\packages is already on this
-  // probe's unit path.
-  PhosphorBase64Lib, PhosphorGzipLib;
+  // Three OPT-IN packages, registered below: base64_valid is a quadratic-append
+  // door of exactly the family this probe pins; gzip_decompressfile is the
+  // package door whose refusal used to land AFTER its damage (ledger d14); and
+  // the zip extractors trusted an archive's own size claim, or asked nothing
+  // (d46, d47). All live in host/packages rather than engine/libs, so a probe
+  // that only linked the engine could not reach them. host\packages is already
+  // on this probe's unit path.
+  Classes, PhosphorBase64Lib, PhosphorGzipLib, PhosphorZipLib;
 
 const
   LF = #10;
@@ -92,6 +93,7 @@ begin
     eng.OnOutput := @Sink.Take;
     RegisterBase64Funcs(eng.Registry);
     RegisterGzipFuncs(eng.Registry);
+    RegisterZipFuncs(eng.Registry);
     eng.MaxSteps := ASteps;
     eng.TimeoutMs := ATimeoutMs;
     t0 := GetTickCount64();
@@ -200,6 +202,44 @@ begin
   if rc = 0 then Result := Captured else Result := '';
 end;
 
+{ A PATH A SCRIPT CAN QUOTE. In a BASIC string literal a backslash is an escape,
+  so the temp directory goes in with forward slashes, which Windows accepts. }
+function ScriptPath(const AName: String): String;
+begin
+  Result := StringReplace(GetTempDir(False) + AName, '\', '/', [rfReplaceAll]);
+end;
+
+{ THE LIE d46 IS ABOUT, made the way an attacker makes it: take a real archive
+  and rewrite the uncompressed size in its CENTRAL DIRECTORY -- the field
+  TUnZipper.Examine reads and Entries[i].Size reports -- to one byte. The DEFLATE
+  stream and the CRC are untouched, so extraction succeeds and produces every
+  byte the stream really holds. The central header's signature is PK 1 2 and its
+  uncompressed size is the four bytes at offset 24 (APPNOTE 4.3.12). Bytes are
+  built with Chr() at run time: under codepage UTF8 a literal would not be one
+  byte. Answers False when the archive is not the shape this expects. }
+function UnderReport(const APath: String): Boolean;
+var fs: TFileStream; s, sig: RawByteString; i, at: Integer;
+begin
+  Result := False;
+  fs := TFileStream.Create(APath, fmOpenReadWrite);
+  try
+    SetLength(s, fs.Size);
+    if fs.Size > 0 then fs.ReadBuffer(s[1], fs.Size);
+    sig := Chr($50) + Chr($4B) + Chr($01) + Chr($02);
+    at := 0;
+    for i := 1 to Length(s) - 3 do
+      if Copy(s, i, 4) = sig then at := i;
+    if (at = 0) or (at + 27 > Length(s)) then Exit;
+    s[at + 24] := Chr(1); s[at + 25] := Chr(0);
+    s[at + 26] := Chr(0); s[at + 27] := Chr(0);
+    fs.Position := 0;
+    fs.WriteBuffer(s[1], Length(s));
+    Result := True;
+  finally
+    fs.Free;
+  end;
+end;
+
 { The pattern judgement, checked directly, over the shapes real programs write
   and the shapes that blow up. }
 procedure Pattern(const APattern: String; AWantBounded: Boolean);
@@ -223,6 +263,9 @@ end;
 var
   aaa: String;
   remMs: Int64;
+  ZipLie, ZipTrue: String;
+  ZipOut: array[1..6] of String;
+  i: Integer;
 begin
   Sink := TSink.Create();
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
@@ -992,6 +1035,76 @@ begin
           'println len(file_readalltext$(d$))' + LF +
           'file_delete(g$)' + LF +
           'file_delete(d$)' + LF, '1' + LF + '2000000' + LF, 1000000, 0);
+
+  { (k) THE ZIP EXTRACTORS PAY FOR WHAT COMES OUT, NOT FOR WHAT THE ARCHIVE SAYS
+    (ledger d46), AND ALL THREE OF THEM ASK (d47).
+
+    The archive holds two million bytes of 'A' -- a few kilobytes deflated -- and
+    UnderReport rewrites its central directory to say the entry is ONE byte. The
+    old guard priced that claim, found it tiny, and let the inflate run to the end
+    of the stream; zip_extract and zip_extractall did not ask at all. 1000 steps
+    buy 256000 units at one unit an output byte, so two million cannot fit.
+
+    Every refusal is checked for its DAMAGE too: the entry it stopped in is a
+    partial file, and the plan of record decided it is removed rather than left
+    holding whatever fitted. An honest archive that admits to being too big is
+    refused before a single file is created. And within a budget, and with none,
+    the same lying archive still extracts in full -- a meter that refused
+    everything would pass every refusal above. }
+  ZipLie := ScriptPath('probe_budget_d46.zip');
+  ZipTrue := ScriptPath('probe_budget_d47.zip');
+  for i := 1 to 6 do
+    ZipOut[i] := ScriptPath('probe_budget_d46_out' + IntToStr(i));
+  Unbudgeted('zip: the d46 and d47 archives are made',
+          'h@ = zip_create@("' + ZipLie + '")' + LF +
+          'x = zip_addstr(h@, string$(2000000, 65), "big.txt")' + LF +
+          'println zip_close(h@)' + LF +
+          'h@ = zip_create@("' + ZipTrue + '")' + LF +
+          'x = zip_addstr(h@, string$(2000000, 65), "big.txt")' + LF +
+          'println zip_close(h@)' + LF, '1' + LF + '1' + LF);
+  Report(UnderReport(StringReplace(ZipLie, '/', PathDelim, [rfReplaceAll])),
+         'zip: the d46 archive now under-reports its entry');
+  Unbudgeted('zip: and the archive says its entry is one byte',
+          'h@ = zip_open@("' + ZipLie + '")' + LF +
+          'println zip_entrysize(h@, "big.txt")' + LF, '1' + LF);
+  RefusedUnder('zip_read$ of an entry that lies about its size is refused',
+          'h@ = zip_open@("' + ZipLie + '")' + LF +
+          's$ = zip_read$(h@, "big.txt")' + LF, 1000, 0);
+  RefusedUnder('unzip_extract of an entry that lies about its size is refused',
+          'x = unzip_extract("' + ZipLie + '", "' + ZipOut[1] + '")' + LF, 1000, 0);
+  RefusedUnder('zip_extract of an entry that lies about its size is refused',
+          'h@ = zip_open@("' + ZipLie + '")' + LF +
+          'x = zip_extract(h@, "big.txt", "' + ZipOut[2] + '")' + LF, 1000, 0);
+  RefusedUnder('zip_extractall of an entry that lies about its size is refused',
+          'h@ = zip_open@("' + ZipLie + '")' + LF +
+          'x = zip_extractall(h@, "' + ZipOut[3] + '")' + LF, 1000, 0);
+  Unbudgeted('and none of the three left a partial file behind',
+          'println file_exists("' + ZipOut[1] + '/big.txt")' + LF +
+          'println file_exists("' + ZipOut[2] + '/big.txt")' + LF +
+          'println file_exists("' + ZipOut[3] + '/big.txt")' + LF,
+          '0' + LF + '0' + LF + '0' + LF);
+  RefusedUnder('zip_extractall of an honest archive too big for the budget is refused',
+          'h@ = zip_open@("' + ZipTrue + '")' + LF +
+          'x = zip_extractall(h@, "' + ZipOut[4] + '")' + LF, 1000, 0);
+  Unbudgeted('before it created anything',
+          'println dir_exists("' + ZipOut[4] + '")' + LF, '0' + LF);
+  AllowedUnder('within the budget the lying archive still extracts in full',
+          'println unzip_extract("' + ZipLie + '", "' + ZipOut[5] + '")' + LF +
+          'println len(file_readalltext$("' + ZipOut[5] + '/big.txt"))' + LF +
+          'file_delete("' + ZipOut[5] + '/big.txt")' + LF,
+          '1' + LF + '2000000' + LF, 1000000, 0);
+  Unbudgeted('and an unbudgeted host reads it in full',
+          'h@ = zip_open@("' + ZipLie + '")' + LF +
+          'println len(zip_read$(h@, "big.txt"))' + LF +
+          'println zip_extractall(h@, "' + ZipOut[6] + '")' + LF +
+          'file_delete("' + ZipOut[6] + '/big.txt")' + LF,
+          '2000000' + LF + '1' + LF);
+  // Tidy up: two files and the EMPTY directories the extractions made. RemoveDir
+  // is rmdir -- it cannot remove a directory that still holds anything.
+  DeleteFile(StringReplace(ZipLie, '/', PathDelim, [rfReplaceAll]));
+  DeleteFile(StringReplace(ZipTrue, '/', PathDelim, [rfReplaceAll]));
+  for i := 1 to 6 do
+    RemoveDir(StringReplace(ZipOut[i], '/', PathDelim, [rfReplaceAll]));
 
   Sink.Free;
   Writeln('ok: ', Ok);

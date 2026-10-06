@@ -54,6 +54,21 @@ An entry whose attributes mark it a **symbolic link** is refused too, on both
 operating systems. A link's target is its content and not its name, so no name
 check can see where it points, and no function here is meant to create one.
 
+The third shape is a **size that lies**, and it only matters to a host that sets an
+execution budget (see [embedding](../embedding.md)). A zip's directory states each
+entry's uncompressed size, but the decompressor reads until the compressed stream
+ends, whatever the directory said — so a few kilobytes that declare one byte can
+unpack to gigabytes. Under a budget, `unzip_extract`, `zip_extract`,
+`zip_extractall` and `zip_read$` therefore ask twice: the declared size first, so
+an archive that admits to being too big is refused before a single file is
+created; and then every byte that actually comes out is charged as it comes out,
+and the extraction stops when the budget does. Either refusal is **raised** as a
+runtime error. When it stops part-way through an entry, the half-written file of
+that entry is deleted rather than left holding whatever fitted; entries that
+finished before it stay where they were written. A *stored* (uncompressed) entry is
+copied without being metered — it cannot expand, so its cost is the bytes the
+archive file already holds.
+
 Two more things worth knowing before you are surprised by them:
 `zip_compress` takes only the files **directly in** the directory, not
 subdirectories, and it sorts entry names byte-wise so the same folder produces the

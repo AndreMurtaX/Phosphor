@@ -266,7 +266,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`, and 23 after `d46` and `d47`**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -278,7 +278,7 @@ Debug menu enabled from live state).
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
 `d56 d57 d48 n8 d54 d53 ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `~~d14~~ ~~n3~~ ~~d07~~ d12
-d46 d47 n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ d45 ~~d08~~ ~~n9~~ d65 n14 m4 r3`
+~~d46~~ ~~d47~~ n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ d45 ~~d08~~ ~~n9~~ d65 n14 m4 r3`
 (engine), `~~d42~~ ~~n19~~ n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose
 shape moved:
@@ -293,7 +293,7 @@ shape moved:
 - `n26` and `d62` are DISCLOSED in their library pages, not fixed. A reader of the
   docs alone can mistake them for closed. (`n7` was the third, and was fixed the
   same day.)
-- `d47`'s exemption text in `scripts/check-budget.py` claims every expanding zip
+- *(d46 and d47 CLOSED 2026-10-06, as one change, as Track B said: a `TMeteredUnZipper` subclass in `host/packages/PhosphorZipLib.pas` charges every byte `OnProgressEx` reports and calls `Terminate` when the budget refuses, so the meter is in the TYPE and the reset sits in its virtual `UnZipAllFiles` -- not at each door. The declared-size checks stay as the FIRST answer, and `zip_extract`/`zip_extractall` now ask them too. Per decision 5 the half-written entry is deleted (one file, named by `OnStartFile`, never in `zip_read$`'s in-memory mode). `scripts/probe_budget.lpr` section (k) failed 7 of its 12 against the old code -- all four doors extracted a central directory that claimed one byte for two million, and `zip_extractall` let an honest too-big archive through -- and passes now. `check-budget.py` gained the rule the plan said it lacked: an archive expanded through a PLAIN `TUnZipper`, local or field, fails; run over the pre-fix file it names both `f_unzip_extract` and `field UZ`, and the first draft of that rule missed the field, because a unit's interface declares a routine before the implementation's types.)* `d47`'s exemption text in `scripts/check-budget.py` claims every expanding zip
   path asks `ArchiveFitsBudget`; `f_zip_extract` and `f_zip_extractall` do not.
   And the comment above `ArchiveFitsBudget` argues an archive "can only lie
   DOWNWARD", which is `d46`. Both texts change with the fix.

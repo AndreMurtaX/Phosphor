@@ -340,9 +340,12 @@ ALLOWED = {
     # ---- guarded by the registered function that calls them -------------------
     'PhosphorZipLib.pas:TZipWriter.Create':
         'constructs an empty TZipper and binds a path; nothing is read or written yet',
-    'PhosphorZipLib.pas:TZipReader.Create':
-        'Examine reads the central directory only; every path that then EXPANDS '
-        'an entry (ReadEntry, unzip_extract) asks ArchiveFitsBudget first',
+    # TZipReader.Create WAS HERE, exempted on the claim that "every path that then
+    # EXPANDS an entry (ReadEntry, unzip_extract) asks ArchiveFitsBudget first".
+    # Two of the three extractors did not (d47), and the one that did priced the
+    # archive's own claim (d46). It now builds a TMeteredUnZipper, which charges
+    # what it writes, so it is no longer a native this gate lists -- and the rule
+    # UNMETERED below is what keeps an expanding door from using any other kind.
     'PhosphorZipLib.pas:f_unzip_count':
         'reads the central directory and answers how many entries it lists',
     'PhosphorZipLib.pas:f_unzip_entry':
@@ -805,6 +808,53 @@ def scan(dirs, allowed):
     return holes, gated, used
 
 
+#  --- an unzipper that EXPANDS must be the metered one (ledger d46, d47) --------
+# The rule above asks whether a routine REACHES a consultation; it cannot ask
+# whether that consultation prices the work. Both zip defects lived in that gap:
+# three extractors priced an archive's own size claim or asked nothing, and two
+# of them reached the unzipper through a FIELD, so no routine of theirs named a
+# native at all. PhosphorZipLib's TMeteredUnZipper charges every byte it writes
+# and stops when the budget does, so the question becomes mechanical: every
+# name declared as a PLAIN TUnZipper -- a local, or a field -- must never be
+# asked to extract. A plain one may still Examine; that reads the directory.
+PLAIN_UNZIPPER = re.compile(r'\b([A-Za-z_]\w*)\s*:\s*TUnZipper\s*;', re.I)
+EXPANDS = r'\bUnZip(?:AllFiles|Files|File)\b'
+CLASS_UNZIP = re.compile(r'\bTUnZipper\s*\.\s*Unzip\b', re.I)
+# A class body: from `= class` to the `end;` that closes it. Method DECLARATIONS
+# carry no `end`, so the first one is the class's own.
+CLASS_BLOCK = re.compile(r'=\s*class\b(.*?)\bend\s*;', re.I | re.S)
+
+
+def unmetered(dirs):
+    """Routines (or fields) that expand an archive through a plain TUnZipper."""
+    bad = []
+    for path in sources(dirs):
+        base = os.path.basename(path)
+        with open(path, encoding='utf-8') as fh:
+            text = strip_comments(fh.read())
+        routines = list(routines_of(text))
+        # A FIELD is declared in a class body and can be used from any routine --
+        # r.UZ.UnZipAllFiles is exactly that shape. Found by its class block, NOT
+        # by "the text before the first routine": a unit's interface declares
+        # routines too, so that span ends before the implementation's types, and
+        # the first draft of this rule missed the very field d47 was about.
+        for blk in CLASS_BLOCK.findall(text):
+            for fld in PLAIN_UNZIPPER.findall(blk):
+                if re.search(r'\b' + re.escape(fld) + r'\s*\.\s*' + EXPANDS, text, re.I):
+                    bad.append('%s:field %s' % (base, fld))
+        for name, body in routines:
+            # A routine's span runs to the next routine, so it can swallow a type
+            # section; its class fields were judged above, not as locals here.
+            body = CLASS_BLOCK.sub('', body)
+            for loc in PLAIN_UNZIPPER.findall(body):
+                if re.search(r'\b' + re.escape(loc) + r'\s*\.\s*' + EXPANDS, body, re.I):
+                    bad.append('%s:%s' % (base, name))
+            # The class shortcuts build a plain unzipper of their own and expand.
+            if CLASS_UNZIP.search(body):
+                bad.append('%s:%s' % (base, name))
+    return sorted(set(bad))
+
+
 def report(holes):
     print('BUDGET HOLES -- these can run long without consulting the budget:')
     for key, hits in holes:
@@ -1016,6 +1066,41 @@ def prove():
             print('PROVE FAILED: the REVIEWED narrowing was not accepted (%s).' % bad)
             return 1
         print('prove: the same narrowing, listed as reviewed, is accepted.')
+
+        # And the unzip rule, in both of the shapes d47 had: a LOCAL plain
+        # unzipper asked to extract, and a FIELD reached through a handle. Then
+        # the same two declared metered, which must go quiet.
+        for kind in ('TUnZipper', 'TMeteredUnZipper'):
+            with open(os.path.join(d, 'PhosphorPlantedLib.pas'), 'w',
+                      encoding='utf-8') as fh:
+                # The interface DECLARES a routine before the implementation's
+                # type section, as every real unit does -- the shape that hid the
+                # field from the first draft of this rule.
+                fh.write('unit PhosphorPlantedLib;\ninterface\n'
+                         'procedure ViaLocal(const P: String);\n'
+                         'implementation\n'
+                         'type TPlantedReader = class\n'
+                         '  Z: %s;\n'
+                         'end;\n'
+                         'procedure ViaLocal(const P: String);\n'
+                         'var u: %s;\n'
+                         'begin\n'
+                         '  u := %s.Create();\n'
+                         '  u.UnZipAllFiles;\n'
+                         'end;\n'
+                         'procedure ViaField(r: TPlantedReader);\n'
+                         'begin\n'
+                         '  r.Z.UnZipFiles(nil);\n'
+                         'end;\n'
+                         'end.\n' % (kind, kind, kind))
+            bad = unmetered([d])
+            want = ['PhosphorPlantedLib.pas:ViaLocal',
+                    'PhosphorPlantedLib.pas:field Z'] if kind == 'TUnZipper' else []
+            if sorted(bad) != sorted(want):
+                print('PROVE FAILED: the unzip rule over %s reported %s, wanted %s'
+                      % (kind, bad, want))
+                return 1
+            print('prove: the unzip rule over %s reports %s.' % (kind, bad or 'nothing'))
         return 0
 
 
@@ -1055,6 +1140,17 @@ def main():
         for key in sorted(unused):
             print('  ' + key)
         return 1
+    plain = unmetered(SCAN_DIRS)
+    if plain:
+        print('AN ARCHIVE EXPANDED THROUGH AN UNMETERED UNZIPPER:')
+        for key in plain:
+            print('  ' + key)
+        print('')
+        print('Declare it TMeteredUnZipper (host/packages/PhosphorZipLib.pas), which')
+        print('charges every byte it writes. A plain TUnZipper prices nothing it')
+        print('inflates, and an archive decides how much that is (ledger d46).')
+        return 1
+    print('unzip gate: no archive is expanded through an unmetered unzipper')
     # The narrowing sweep runs on every plain invocation too: a second rule that
     # has to be REMEMBERED is a rule half the runs do not have.
     return narrowing()

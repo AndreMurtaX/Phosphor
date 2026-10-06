@@ -1524,6 +1524,19 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · n17: a meter nobody armed cannot fail.** Both package runners
+  ran every file with `MaxSteps` and `TimeoutMs` at 0, so `BudgetBegin` left the
+  budget inert and every `BudgetAllows`/`BudgetCharge` in zip, gzip, base64 and
+  sqlite answered yes without measuring. They now install the ceiling
+  docs/embedding.md prescribes, and a test per runner asks the engine whether it
+  is armed -- per runner, because the http runner is a separate host and a fix
+  to one would have left the other open, which is exactly the shape n17 had.
+  Both tests were seen failing on "expected 1, got 0" before the runners
+  changed. On the way, check-crossrefs refused a comment that cited the new
+  test by a name it had before it was numbered: the gate read the sentence the
+  way the next person would have.
+
+
 - **2026-10-05 · d08 and n9 were one mis-scoping, fixed once; and two traps this
   file names fired anyway.** fpjson reads ONE value and ignores the rest unless
   joStrict is set -- read in `TBaseJSONReader.DoExecute` before anything was

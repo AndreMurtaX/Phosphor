@@ -83,6 +83,15 @@ begin
   // working directory is the root -- every test writes under bin/ , which is
   // inside it -- so nothing a test names can resolve outside the checkout.
   eng.SandboxRoot := GetCurrentDir;
+  // AND ALWAYS BUDGETED (ledger n17). With no ceiling the library budget is
+  // inert -- BudgetAllows and BudgetCharge answer "go ahead" without measuring --
+  // so every meter in every package ran unexercised and a broken one could not
+  // fail a test here. This is the ceiling docs/embedding.md prescribes, so the
+  // corpus also proves each package works within what an embedder is told to
+  // set. Steps and not TimeoutMs: a step ceiling is deterministic, and the Linux
+  // VM's timers have been measured oversleeping sevenfold.
+  // tests/packages/12_budget_live.bas asserts it is armed.
+  eng.MaxSteps := 1000000;
 
   try
     RegisterTestFuncs(eng.Registry);

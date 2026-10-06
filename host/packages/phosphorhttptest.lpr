@@ -257,6 +257,10 @@ begin
   // working directory is the root -- every test writes under bin/ , which is
   // inside it -- so nothing a test names can resolve outside the checkout.
   eng.SandboxRoot := GetCurrentDir;
+  // AND ALWAYS BUDGETED (ledger n17) -- the same ceiling, for the same reason,
+  // as phosphorpkgtest.lpr, which says why. tests/packages/13_http_budget_live.bas
+  // asserts it is armed in THIS runner, which a fix to the other would not reach.
+  eng.MaxSteps := 1000000;
 
   try
     RegisterTestFuncs(eng.Registry);

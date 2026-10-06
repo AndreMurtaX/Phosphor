@@ -39,3 +39,5 @@
 09_safety
 10_sqlite_sandbox
 11_zipslip
+12_budget_live
+13_http_budget_live

@@ -51,6 +51,9 @@ procedure ResetTestState;
 
 implementation
 
+uses
+  PhosphorBudget;   // BudgetActive, for test_budget_active
+
 type
   { Two distinct throwaway classes registered in the handle registry, so a probe
     handle can be discriminated by class (is-this-handle-a-TProbeA) exactly the
@@ -340,6 +343,19 @@ begin
   Result := ValInt(ProbeLiveCount);
 end;
 
+{ IS THE RUN'S BUDGET LIVE? 1 when the host installed a ceiling, 0 when every
+  meter is inert. A HARNESS question, not a language one -- which is why it lives
+  here and nowhere a shipped binary links. It exists for ledger n17: the package
+  runner installed no ceiling, so every BudgetAllows/BudgetCharge in every package
+  answered "go ahead" without measuring anything, and a broken meter could not
+  fail a single package test. tests/packages/12_budget_live.bas and
+  13_http_budget_live.bas (one per runner) assert this is 1. }
+function t_test_budget_active(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(BudgetActive()));
+end;
+
 procedure RegisterTestFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('test_case:$', @t_test_case);
@@ -371,6 +387,7 @@ begin
   Reg.Add('probe_is_b:@',    @t_probe_is_b);
   Reg.Add('probe_free:@',    @t_probe_free);
   Reg.Add('probe_count:',    @t_probe_count);
+  Reg.Add('test_budget_active:', @t_test_budget_active);
 end;
 
 procedure ResetTestState;

@@ -24,3 +24,4 @@
 20_file_door_depth
 21_loop_lifecycle
 22_node_lifetime
+23_image_setbitmap

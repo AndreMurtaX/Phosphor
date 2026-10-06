@@ -316,8 +316,10 @@ rem passed its own cap, and together they were 2132 MB.
 rem =================================================================
 
 test_case("size/four bitmaps fit the budget and the fifth does not")
-rem 6688^2 costs 268400416 bytes each; four is 1073601664, which is
-rem 140160 short of the budget, and a fifth cannot fit whatever it is.
+rem 6688^2 costs 44729344 * 6 + 6688 * 4 = 268402816 bytes each; four
+rem is 1073611264, which is 130560 short of the budget, and a fifth
+rem cannot fit whatever it is. (This comment said 268400416 and 140160
+rem until 2026-10-06; the assertions never depended on either.)
 raised = 0
 gui_clearerror()
 p1@ = bitmap@(6688, 6688)

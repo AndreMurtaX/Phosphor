@@ -1183,7 +1183,7 @@ introduces a defect.
    What it costs, stated because the first version's comment sold only the win: a
    slot went from 8 bytes to 24, so a program holding a million handles LIVE pays
    25.2 MB of table against 8.39 MB. Bounded 24 in place of unbounded 8.
-42. **host/gui/libs/PhosphorCanvasLib.pas:193** [high] -- image_setbitmap@ assigns a full surface copy into a TImage with no ledger charge, so live GUI surface accumulates while GuiChargeRoom reads zero
+42. ~~**host/gui/libs/PhosphorCanvasLib.pas:193** [high]~~ -- CLOSED 2026-10-06. image_setbitmap@ assigned a full surface copy into a TImage with no ledger charge, so live GUI surface accumulated while GuiChargeRoom read zero. It now charges the image a surface of the bitmap's size before the copy, through the setter rather than the converting getter (n19); tests/gui/23_image_setbitmap.bas.
 43. ~~**engine/PhosphorValue.pas:674** [low]~~ -- CLOSED 2026-09-10, and it was not
    low. The finding calls it "not a leak -- it is released", which is true and
    beside the point: the transient is EIGHT BYTES PER INPUT BYTE, on every len(),
@@ -1523,6 +1523,24 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d42 and n19: two of the test's own cases passed by
+  coincidence, and only mutating the ledger showed it.** image_setbitmap@ now
+  charges the image before the copy and writes Picture.Bitmap instead of reading
+  it. The first draft of the test re-made an image on every pass of its credit
+  loop, and with FreeNotification removed from the ledger the loop still
+  passed: the allocator handed each new TImage the address of the one just
+  freed, and a ledger keyed by pointer took it for the same object. The room is
+  now proved with a bitmap -- another class, another size, an address no dead
+  image can share. A second assertion measured nothing at all: image_empty
+  answers 1 for an image holding a lazy, never-drawn bitmap, so "the refused
+  image is empty" passed against the unfixed build. Both were found only
+  because each mutation's run was read case by case, not by its count. The
+  charge-after-copy mutation was caught by one assertion only -- the refused
+  image keeps the picture it had -- which is what the attack plan's exit gate
+  said in advance; the test was changed to give that image a picture first so
+  that assertion could exist.
+
 
 - **2026-10-05 · n17: a meter nobody armed cannot fail.** Both package runners
   ran every file with `MaxSteps` and `TimeoutMs` at 0, so `BudgetBegin` left the

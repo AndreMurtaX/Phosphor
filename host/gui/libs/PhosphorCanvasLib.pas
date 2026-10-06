@@ -185,12 +185,29 @@ function f_textout(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TCanvas; begin E := NoError; if Cnv(A[0].Hnd, c) then c.TextOut(I(A[1]), I(A[2]), A[3].Str); Result := A[0]; end;
 
 // --- show a bitmap in an image control --------------------------------------
+{ THE IMAGE HOLDS A SURFACE OF ITS OWN, so it is charged for one (ledger d42).
+  This was the only surface-producing name in host/gui with no ledger call: any
+  number of images could each hold a full copy of a bitmap while the ledger read
+  only the bitmap. LCL shares the pixels on assignment (TRasterImage.Assign) and
+  splits them the first time either side is drawn on, so the copy is real the
+  moment the program keeps drawing -- which is what a program that calls this
+  does. The charge REPLACES the image's own (an image re-given a picture of the
+  same size costs nothing new), it is made BEFORE the assignment so that it can
+  refuse, and a TImage is a TComponent, so FreeNotification credits it however
+  it dies.
+
+  AND THE SETTER, NOT THE GETTER (n19). Picture.Bitmap READ is TPicture.GetBitmap,
+  which calls ForceType: an image holding a PNG from image_load@ was converted
+  into a new full-size TBitmap, uncharged, only to be replaced on the next line.
+  Picture.Bitmap WRITTEN is SetGraphic, which makes the new graphic and frees the
+  old one and converts nothing (lcl/include/picture.inc). }
 function f_image_setbitmap(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; b: TBitmap;
 begin
   E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TImage, c) and Bmp(A[1].Hnd, b) then
-    TImage(c).Picture.Bitmap.Assign(b);
+  if not (GuiResolve(A[0].Hnd, TImage, c) and Bmp(A[1].Hnd, b)) then Exit;  if not GuiChargeSet(TImage(c), Format('picture %d x %d', [b.Width, b.Height]),
+                      GuiSurfaceBytes(b.Width, b.Height), E) then Exit;
+  TImage(c).Picture.Bitmap := b;
 end;
 
 // --- TShape control ---------------------------------------------------------

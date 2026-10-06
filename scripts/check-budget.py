@@ -156,6 +156,18 @@ SCAN_DIRS = [
 # outcome this file's own reasoning warns about -- it teaches the next reader to
 # widen ALLOWED instead of fixing anything -- so the directory stays out until
 # that rule exists rather than going in behind a list.
+#
+# AND SCANNING IT WOULD NOT HAVE FOUND d42 (closed 2026-10-06), which is worth
+# saying because the attack plan filed that defect's whole class as "gate-less by
+# construction" on the strength of this exclusion. image_setbitmap@ put a full
+# copy of a bitmap into an image with no GUI-ledger charge -- but the copy is
+# sized by a bitmap ALREADY IN MEMORY, which this gate counts as derived and
+# therefore bounded, correctly by its own rule. What d42 broke is a different
+# invariant: every place that makes a GUI surface is charged to the GUI ledger.
+# This gate asks whether a SCRIPT-SUPPLIED NUMBER reaches an allocation unguarded;
+# it never could have asked that, in or out of SCAN_DIRS. That invariant is held
+# today by one door per surface (bitmap@, image_load@, the image list, the grid,
+# and now image_setbitmap@) and pinned by tests/gui/19, 20 and 23, not by a gate.
 
 GATE = re.compile(r'\bBudget(Allows|Append|Charge|Active|Refusal|Sleep|Spent|PatternBounded|'
                   r'UnitsPerStep|UnitsPerMs)\b')

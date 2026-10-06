@@ -77,6 +77,12 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
 - **Not every assert has a message overload.** `assert_int` is `:%%` only — a third
   argument raises `no function assert_int:%%$` and halts the file. Cite the reason in a
   `rem` above.
+- **A negative needs a REASON, not just a failure.** `tests/negative/manifest.txt`
+  holds `name|reason` for every file there; the runner demands exit 2 (a rejection
+  -- a failed assert is 1) and the diagnostic containing that reason. Derive the
+  reason from the file's own `rem` header, never off a run. Until 2026-10-06 any
+  non-zero exit passed, and one file was being rejected by a different rule than
+  its header named (d53).
 - **A backslash in a string literal is an escape.** `"\2"` is a rejected unknown escape;
   `"\\"` collapses to one. Keep paths and cited expressions out of `msg$`, or double them.
 - **`resume next` continues in CONTROL-FLOW order, and did not until 2026-09-10.**

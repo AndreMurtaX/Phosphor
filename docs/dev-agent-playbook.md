@@ -1228,7 +1228,7 @@ introduces a defect.
     on either platform, so the exclusion filter stayed narrow. Green both OSes.
 51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
 52. ~~**tests/gui/manifest.txt:1** [medium]~~ -- 2026-10-06: a duplicate of #44, folded into it and closed with it; its stricter count was the right one and the gate measured 80 (79 + canvas_ellipse@, called only in a compile-only example). Original text: scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
-53. **tests/negative/11_unknown_escape.bas:4** [medium] -- scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)
+53. ~~**tests/negative/11_unknown_escape.bas:4** [medium]~~ -- CLOSED 2026-10-06: tests/negative/manifest.txt holds each negative's reason; the runners demand exit 2 and that reason; -ProveFailure proves both halves. Original text: scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)
 54. **tests/skeleton/hello.bas:1** [low] -- check-manifests.py enumerates nothing: tests/skeleton and tests/gui/hostmode are in neither CORPORA nor NO_MANIFEST, so a .bas dropped there is invisible to the gate while coverage.py still credits it as exercised (defect is in scripts/check-manifests.py:39-51,68, not in tests/skeleton/hello.bas)
 
 ### Test gaps (3)
@@ -1523,6 +1523,23 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d53: writing down WHY a test fails found a test failing for the
+  wrong reason.** The negative corpus passed on any non-zero exit, so it could
+  not tell "rejected by the rule this file is about" from "rejected by some other
+  rule" or from "an assert failed". Each of the 44 files now has a reason in
+  tests/negative/manifest.txt, taken from its own header before its output was
+  compared. Forty-three matched; the forty-fourth, 10_fabricated_classname, said
+  classname$ on nil is "still an error", and classname$ on nil has answered ""
+  since the registry check -- the file stayed red only because the line after it
+  asked strings_count of a nil handle. Nothing could have said so while the
+  judge was an exit code. It was renamed after the rule it does test rather than
+  rewritten to look like the old one. The reasons went into a manifest and not
+  into the files because two negatives depend on their own bytes -- 32 cites its
+  own line 13, 29 has no final newline -- and a `rem expect:` line would have
+  moved one and broken the other. -ProveFailure exercises the exit half and the
+  reason half separately, each with a case only that half can catch.
+
 
 - **2026-10-06 · d45: the gate called each loop linear and never multiplied.**
   buffer_indexof had two bodies, one per registered form, and only one asked the

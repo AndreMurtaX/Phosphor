@@ -103,6 +103,49 @@ allok=0
 # 2026-09-15 that rule was measured to exist in THIS FILE ONLY while five sibling
 # runners ignored the canonical spelling in silence.
 
+# A NEGATIVE IS REJECTED FOR ITS OWN REASON, OR IT IS NOT A TEST (ledger d53).
+# This used to accept any non-zero exit. phosphortest exits 1 on a failed assert
+# and 2 on a compile or runtime error, so a negative that merely contained a
+# failing assert read as a correct rejection -- and so did one rejected by some
+# OTHER rule than the one it was written for, which is what 10_ turned out to be.
+# Exit 2 and the diagnostic carrying the reason tests/negative/manifest.txt
+# records for the file -- a reason derived from the file's own rem header. The
+# twin of Judge-Negative in test-suite.ps1.
+neg_reason() {   # the reason recorded for basename $1, or nothing
+  [ -f "$neg/manifest.txt" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line%%#*}"
+    case "$line" in *"|"*) ;; *) continue ;; esac
+    k="${line%%|*}"; k="${k//[[:space:]]/}"
+    if [ "$k" = "$1" ]; then
+      r="${line#*|}"
+      r="${r#"${r%%[![:space:]]*}"}"; r="${r%"${r##*[![:space:]]}"}"
+      printf '%s' "$r"; return 0
+    fi
+  done < "$neg/manifest.txt"
+}
+judge_negative() {   # $1 program, $2 reason, $3 label; 0 when rejected for its reason
+  local code why
+  "$exe" "$1" > "$out" 2> "$err"; code=$?
+  why="$(cat "$err")"
+  if [ "$code" -eq 2 ] && [ -n "$2" ]; then
+    case "$why" in *"$2"*) echo "PASS  reject: $3  (exit 2)"; echo "         $why"; return 0 ;; esac
+  fi
+  if [ "$code" -eq 0 ]; then
+    echo "FAIL  reject: $3  ran instead of being rejected"
+  elif [ "$code" -ne 2 ]; then
+    echo "FAIL  reject: $3  exit $code, wanted 2 -- that is not a rejection (1 is a failed assert)"
+  elif [ -z "$2" ]; then
+    echo "FAIL  reject: $3  has no reason in tests/negative/manifest.txt, so nothing says WHICH rule rejected it"
+  else
+    echo "FAIL  reject: $3  rejected, but not for its reason"
+    echo "  wanted: $2"
+    echo "  said:   $why"
+  fi
+  return 1
+}
+
 if [ "$runner_prove" -eq 1 ]; then
   bad="$(mktemp)"
   sed 's/assert_eq(2 + 3, 5)/assert_eq(2 + 3, 6)/' "$suite/00_harness.bas" > "$bad"
@@ -114,6 +157,24 @@ if [ "$runner_prove" -eq 1 ]; then
     echo "ProveFailure: mismatch correctly detected"
   fi
   rm -f "$bad"
+  # AND THE NEGATIVE JUDGE, both of its halves (d53): a real negative against a
+  # reason its diagnostic does not carry, then a program that only fails an
+  # assert (exit 1) judged with a reason its output DOES carry, so only the exit
+  # half can catch it. Each must be judged a failure.
+  echo "ProveFailure: one negative reason corrupted"
+  if judge_negative "$neg/02_fabricated_array_handle.bas" "a reason this diagnostic does not carry" "02_fabricated_array_handle (corrupted reason)"; then
+    echo "ProveFailure: wrong reason NOT detected -- the negative judge is broken"; allok=1
+  else
+    echo "ProveFailure: wrong reason correctly detected"
+  fi
+  asserts="$(mktemp)"
+  printf 'test_case("prove")\nassert_eq(1, 2, "only an assert fails here")\n' > "$asserts"
+  if judge_negative "$asserts" "expected 2, got 1" "a failing assert (exit 1)"; then
+    echo "ProveFailure: a failed assert WAS taken for a rejection -- the negative judge is broken"; allok=1
+  else
+    echo "ProveFailure: a failed assert correctly not taken for a rejection"
+  fi
+  rm -f "$asserts"
   echo
   if [ "$allok" -eq 0 ]; then echo "SUITE OK"; exit 0; else echo "SUITE FAILED"; exit 1; fi
 fi
@@ -157,15 +218,13 @@ if [ "$negcount" -eq 0 ]; then
   echo "FAIL  negatives: no .bas files found in tests/negative -- the suite proves nothing about rejection"
   allok=1
 fi
+if [ "$negcount" -gt 0 ] && [ ! -f "$neg/manifest.txt" ]; then
+  echo "FAIL  negatives: tests/negative/manifest.txt is missing -- no negative has a reason to be judged against"
+  allok=1
+fi
 for f in "$neg"/*.bas; do
   [ -f "$f" ] || continue          # the unexpanded pattern, already reported above
-  "$exe" "$f" > "$out" 2> "$err"; code=$?
-  if [ "$code" -ne 0 ]; then
-    echo "PASS  reject: $(basename "$f")  (exit $code)"
-    [ -s "$err" ] && echo "         $(cat "$err")"
-  else
-    echo "FAIL  reject: $(basename "$f")  ran instead of being rejected"; allok=1
-  fi
+  judge_negative "$f" "$(neg_reason "$(basename "$f" .bas)")" "$(basename "$f")" || allok=1
 done
 
 # Pascal probes + the embed host: host-facing programs a .bas file cannot express

@@ -17,7 +17,7 @@ rem
 rem Measured: with the lowering removed -- and only with the lowering removed --
 rem every other file in every corpus on both operating systems stays green and
 rem this one runs instead of being rejected. tests/suite/65 and /67 are the
-rem correct programs from the same state, and tests/negative/43 is this program
+rem correct programs from the same state, and tests/negative/45 is this program
 rem WITHOUT the resume, where the mark is still standing and the range's upper
 rem end is what sees over it.
 function deep(n)

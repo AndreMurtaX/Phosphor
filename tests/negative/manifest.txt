@@ -1,0 +1,62 @@
+# Negative corpus: every program here must be REJECTED, and rejected FOR ITS OWN
+# REASON. Read by test-suite.{ps1,sh} and by scripts/check-manifests.py.
+#
+# One line per file:   basename|reason
+#
+# A negative passes only when phosphortest exits 2 -- a compile or runtime error,
+# not the 1 a failed assert gives -- AND its diagnostic contains the reason. Until
+# 2026-10-06 any non-zero exit passed (ledger d53), so a negative that stopped
+# reaching its rule, or never reached it, still read as PASS: one that merely held
+# a failing assert, or one rejected by a DIFFERENT rule, was indistinguishable from
+# a real rejection. 10 was exactly that: its header pinned classname$ on nil, which
+# answers "" today, and what kept it red was a nil string-list handle on the line
+# below.
+#
+# EACH REASON IS DERIVED FROM ITS FILE'S OWN rem HEADER -- the rule that header
+# says the program breaks -- never copied off a run. When the wording of a
+# diagnostic changes, the header and this line change together, deliberately.
+# No reason may contain a hash sign: this file's comment character.
+02_fabricated_array_handle|not a valid array handle
+03_fabricated_dict_handle|not a valid dictionary handle
+04_fabricated_arr_free|not a valid array handle
+05_bool_to_number_var|cannot store bool into number variable
+06_number_as_condition|is not a condition
+07_bool_literal_to_number_var|cannot store bool into number variable
+08_bool_literal_as_condition|is not a condition
+09_fabricated_stringlist|not a valid string list handle
+10_nil_stringlist_handle|not a valid string list handle
+11_unknown_escape|unknown escape sequence
+12_callfunc_unknown|no function no_such_routine
+13_resume_no_handler|resume without an active error handler
+14_on_error_call_abort|division by zero
+15_spaced_compound_operator|unexpected token in expression
+16_let_list_with_a_value|a 'let' list declares names only
+17_number_before_text|cannot add text to a number
+18_assign_to_a_constant|cannot assign to constant
+19_const_from_an_expression|const value must be a single number or string literal
+20_redefine_file_form|cannot be redefined
+21_orphan_next|'next' without a matching 'for'
+22_orphan_then|'then' belongs on an 'if' line
+23_expression_nests_too_deep|expression nests more than 256 levels deep
+24_orphan_before_else|'next' without a matching 'for'
+25_exponent_number_out_of_range|is out of range
+26_blocks_nest_too_deep|blocks nest more than 256 levels deep
+27_unary_chain_nests_too_deep|expression nests more than 256 levels deep
+28_goto_leaves_a_function|would leave the function body and never come back
+29_unterminated_string_at_eof|unterminated string
+30_on_goto_leaves_a_function|would leave the function body and never come back
+31_break_leaves_a_function|'break' outside a loop
+32_const_literal_wrong_for_its_suffix|.bas:13: cannot store int into string constant
+33_onerror_handler_abandons_a_call|ran to the end of the program without 'resume'
+34_onerror_handler_abandons_a_callfunc|ran to the end of the program without 'resume'
+35_onerror_handler_disarms_then_abandons|ran to the end of the program without 'resume'
+36_onerror_handler_switches_mode_then_abandons|ran to the end of the program without 'resume'
+37_onerror_handler_abandons_then_an_inner_resume|ran to the end of the program without 'resume'
+38_onerror_handler_abandons_then_an_inner_resume_direct|ran to the end of the program without 'resume'
+39_gosub_out_of_a_function_never_returns|control reached the end of the program inside risky
+40_gosub_out_of_a_function_never_returns_direct|control reached the end of the program inside risky
+41_onerror_stale_deep_install_then_abandons|ran to the end of the program without 'resume'
+42_onerror_stale_deep_install_abandons_then_inner_resume|ran to the end of the program without 'resume'
+43_bare_call_without_parentheses|on its own does nothing -- a call needs parentheses
+45_gosub_abandons_after_a_stale_deep_fault|control reached the end of the program inside risky
+46_gosub_abandons_after_a_stale_deep_fault_resumed|control reached the end of the program inside risky

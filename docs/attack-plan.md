@@ -266,7 +266,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`, and 23 after `d46` and `d47`, and 22 after `d45`**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`, and 23 after `d46` and `d47`, and 22 after `d45`, and 21 after `d53`**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -277,12 +277,12 @@ Debug menu enabled from live state).
   unrepaired engine, 13 of 19, the first file_move having replaced its target.
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
-`d56 d57 d48 n8 d54 d53 ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `~~d14~~ ~~n3~~ ~~d07~~ d12
+`d56 d57 d48 n8 d54 ~~d53~~ ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `~~d14~~ ~~n3~~ ~~d07~~ d12
 ~~d46~~ ~~d47~~ n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ ~~d45~~ ~~d08~~ ~~n9~~ d65 n14 m4 r3`
 (engine), `~~d42~~ ~~n19~~ n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose
 shape moved:
-- `d53` is WORSE than written: the negative runners accept any non-zero exit,
+- *(d53 CLOSED 2026-10-06: `tests/negative/manifest.txt` records a reason per file, derived from its `rem` header; both suite runners demand exit 2 AND that reason in the diagnostic, and `-ProveFailure` watches each half catch its own corruption -- a wrong reason, and an assert-only program at exit 1 carrying the right text. Writing the 44 reasons found what the plan warned of: `10_fabricated_classname` pinned `classname$` on nil, which answers "" today, and was red only because of a nil string-list handle on the next line. Renamed `10_nil_stringlist_handle` after the rule it tests. `check-manifests.py` now counts the corpus.)* `d53` is WORSE than written: the negative runners accept any non-zero exit,
   and `phosphortest` exits 1 on a failed assertion -- so a negative "passes" by
   containing a failing `assert`, without reaching its own rule at all.
 - `d55` is a test repair only: the feared engine state (stuck in-handler after a

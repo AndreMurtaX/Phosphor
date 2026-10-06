@@ -20,11 +20,12 @@ BOTH DIRECTIONS, because both have a way to go wrong:
   - a .bas on disk that the manifest does not name  -- a test nothing runs
   - a name in the manifest with no .bas on disk     -- a run that silently skips
 
-tests/classic and tests/negative have no manifest and are driven straight off the
-directory, so there is nothing here for them to drift from. They are listed in
-NO_MANIFEST rather than left out silently, so adding a fifth corpus with a
-manifest cannot be missed by this gate the way the third was missed by the
-runners.
+tests/classic has no manifest and is driven straight off the directory, so there
+is nothing here for it to drift from. It is listed in NO_MANIFEST rather than left
+out silently, so adding a corpus with a manifest cannot be missed by this gate the
+way the third was missed by the runners. tests/negative was listed there too until
+2026-10-06, when each negative gained a recorded reason it is judged against
+(ledger d53) and the list of reasons became its manifest -- a fifth corpus.
 
 Exit 0 when every corpus agrees, non-zero with the offending names otherwise.
 """
@@ -41,13 +42,16 @@ CORPORA = {
     os.path.join('tests', 'packages'): 'manifest.txt',
     os.path.join('tests', 'gui'): 'manifest.txt',
     'examples': 'manifest.txt',
+    # Since 2026-10-06 (ledger d53) a negative is judged against the REASON its
+    # manifest line records, so a file with no line has nothing to be judged
+    # against -- the runner fails it, and this names it before the runner does.
+    os.path.join('tests', 'negative'): 'manifest.txt',
 }
 
 # Directory-driven corpora: the runner globs them, so there is no second list to
 # disagree with. Named here rather than omitted, so a reader can see the choice.
 NO_MANIFEST = {
     os.path.join('tests', 'classic'): 'test-classic runs every .bas it finds',
-    os.path.join('tests', 'negative'): 'test-suite rejects every .bas it finds',
 }
 
 

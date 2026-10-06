@@ -181,6 +181,51 @@ function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string
     return $false
 }
 
+# A NEGATIVE IS REJECTED FOR ITS OWN REASON, OR IT IS NOT A TEST (ledger d53).
+# This used to accept any non-zero exit. phosphortest exits 1 on a failed assert
+# and 2 on a compile or runtime error, so a negative that merely contained a
+# failing assert read as a correct rejection -- and so did one rejected by some
+# OTHER rule than the one it was written for, which is what 10_ turned out to be.
+# Exit 2 and the diagnostic carrying the reason tests/negative/manifest.txt
+# records for the file -- a reason derived from the file's own rem header.
+$negManifest = Join-Path $negDir 'manifest.txt'
+function Read-NegReasons([string] $path) {
+    $map = @{}
+    if (-not (Test-Path $path)) { return $map }
+    foreach ($line in Get-Content $path) {
+        $t = $line.Split('#')[0].Trim()
+        if (-not $t) { continue }
+        $k = $t.IndexOf('|')
+        if ($k -lt 1) { continue }
+        $map[$t.Substring(0, $k).Trim()] = $t.Substring($k + 1).Trim()
+    }
+    return $map
+}
+function Judge-Negative([string] $basPath, [string] $reason, [string] $label) {
+    $out = Join-Path $tmp 'phosphortest.out'
+    $err = Join-Path $tmp 'phosphortest.err'
+    cmd /c "`"$exe`" `"$basPath`" > `"$out`" 2> `"$err`""
+    $code = $LASTEXITCODE
+    $why = Read-Text $err
+    if (($code -eq 2) -and $reason -and $why.Contains($reason)) {
+        Write-Host ("PASS  reject: {0}  (exit 2)" -f $label) -ForegroundColor Green
+        Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray
+        return $true
+    }
+    if ($code -eq 0) {
+        Write-Host ("FAIL  reject: {0}  ran instead of being rejected" -f $label) -ForegroundColor Red
+    } elseif ($code -ne 2) {
+        Write-Host ("FAIL  reject: {0}  exit {1}, wanted 2 -- that is not a rejection (1 is a failed assert)" -f $label, $code) -ForegroundColor Red
+    } elseif (-not $reason) {
+        Write-Host ("FAIL  reject: {0}  has no reason in tests\negative\manifest.txt, so nothing says WHICH rule rejected it" -f $label) -ForegroundColor Red
+    } else {
+        Write-Host ("FAIL  reject: {0}  rejected, but not for its reason" -f $label) -ForegroundColor Red
+        Write-Host ("  wanted: {0}" -f $reason)
+        Write-Host ("  said:   {0}" -f $why)
+    }
+    return $false
+}
+
 $allOk = $true
 
 if ($ProveFailure) {
@@ -196,6 +241,22 @@ if ($ProveFailure) {
     $detected = -not (Run-One $bad $goodGolden 0 '00_harness (corrupted, expect mismatch)')
     if ($detected) { Write-Host 'ProveFailure: mismatch correctly detected' -ForegroundColor Green }
     else { Write-Host 'ProveFailure: NOT detected -- the check is broken' -ForegroundColor Red; $allOk = $false }
+
+    # AND THE NEGATIVE JUDGE, both of its halves (d53). First a real negative
+    # judged against a reason its diagnostic does not carry: the REASON half.
+    # Then a program that is not rejected at all but fails an assert -- exit 1 --
+    # judged with a reason its output DOES carry, so only the EXIT half can catch
+    # it. Each must be judged a failure.
+    Write-Host 'ProveFailure: one negative reason corrupted' -ForegroundColor Yellow
+    $wrong = Judge-Negative (Join-Path $negDir '02_fabricated_array_handle.bas') 'a reason this diagnostic does not carry' '02_fabricated_array_handle (corrupted reason)'
+    if (-not $wrong) { Write-Host 'ProveFailure: wrong reason correctly detected' -ForegroundColor Green }
+    else { Write-Host 'ProveFailure: wrong reason NOT detected -- the negative judge is broken' -ForegroundColor Red; $allOk = $false }
+    $asserts = Join-Path $tmp 'negative_by_assert.bas'
+    Set-Content -LiteralPath $asserts -NoNewline -Encoding ascii -Value "test_case(`"prove`")`nassert_eq(1, 2, `"only an assert fails here`")`n"
+    $byAssert = Judge-Negative $asserts 'expected 2, got 1' 'a failing assert (exit 1)'
+    if (-not $byAssert) { Write-Host 'ProveFailure: a failed assert correctly not taken for a rejection' -ForegroundColor Green }
+    else { Write-Host 'ProveFailure: a failed assert WAS taken for a rejection -- the negative judge is broken' -ForegroundColor Red; $allOk = $false }
+    Remove-Item -LiteralPath $asserts
 }
 else {
     # THE MANIFEST MUST COVER THE DIRECTORY, BOTH WAYS. Nothing used to check this. A
@@ -252,19 +313,13 @@ else {
     }
     if ($negFiles.Count -gt 0) {
         Write-Host ''
+        if (-not (Test-Path $negManifest)) {
+            Write-Host 'FAIL  negatives: tests\negative\manifest.txt is missing -- no negative has a reason to be judged against' -ForegroundColor Red
+            $allOk = $false
+        }
+        $reasons = Read-NegReasons $negManifest
         foreach ($neg in $negFiles) {
-            $out = Join-Path $tmp 'phosphortest.out'
-            $err = Join-Path $tmp 'phosphortest.err'
-            cmd /c "`"$exe`" `"$($neg.FullName)`" > `"$out`" 2> `"$err`""
-            $code = $LASTEXITCODE
-            if ($code -ne 0) {
-                $why = Read-Text $err
-                Write-Host ("PASS  reject: {0}  (exit {1})" -f $neg.Name, $code) -ForegroundColor Green
-                if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
-            } else {
-                Write-Host ("FAIL  reject: {0}  ran instead of being rejected" -f $neg.Name) -ForegroundColor Red
-                $allOk = $false
-            }
+            if (-not (Judge-Negative $neg.FullName $reasons[$neg.BaseName] $neg.Name)) { $allOk = $false }
         }
     }
 

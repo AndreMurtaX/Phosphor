@@ -279,7 +279,7 @@ turned out to be false and nothing could tell:
 
 | gate | the rule it enforces |
 |---|---|
-| `coverage.py` | every registered name is exercised by a test **and** listed in the reference — both directions |
+| `coverage.py` | every registered name -- the 426 GUI names included -- is CALLED by an executed test (a `rem`, a string or a compile-only example does not count), or sits on its dated GUI worklist, which can only shrink; **and** is listed in the reference — both directions |
 | `check-codepage.py` | no `Char` is concatenated into a code-page string (bytes ≥ 128) |
 | `check-sandbox.py` | every routine reachable from a script that touches the filesystem asks the gate |
 | `check-seams.py` | every host answers for every engine seam, in writing — a nil seam fails silently |

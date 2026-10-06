@@ -1197,7 +1197,7 @@ introduces a defect.
 
 ### Gate blind spots (11)
 
-44. **scripts/coverage.py:141** [high] -- coverage.py's "exercised by a test" loop globs only engine/libs and host/packages (line 141) -- the 426 host/gui/libs names are outside it, 76 of them are called by no .bas, and the gate still prints "every registered function is exercised by a test"
+44. ~~**scripts/coverage.py:141** [high]~~ -- CLOSED 2026-10-06 (with its duplicate #52): the table now covers host/gui/libs, a name counts only when an EXECUTED program CALLS it (comments and strings stripped, compile-only examples skipped), and the 80 GUI names nothing calls are a dated GUI_WORKLIST that fails when an entry is called or unregistered and when a name not on it goes uncalled. Original text: coverage.py's "exercised by a test" loop globs only engine/libs and host/packages (line 141) -- the 426 host/gui/libs names are outside it, 76 of them are called by no .bas, and the gate still prints "every registered function is exercised by a test"
 45. **engine/libs/PhosphorBufferLib.pas:436** [medium] -- buffer_indexof's 3-argument form bypasses the execution budget entirely -- a one-token escape from the ceiling that exists to make untrusted scripts safe to embed
 46. **host/packages/PhosphorZipLib.pas:447** [medium] -- The decompression-bomb guard prices the work from the archive's own central directory: an under-reporting entry writes 1.99 GB in 8.3 s under a 256,000,000-unit / 2,000 ms budget
 47. **host/packages/PhosphorZipLib.pas:840** [medium] -- zip_extract and zip_extractall never consult the execution budget: two of the three extractors walk into UnZipFiles/UnZipAllFiles unbounded, and check-budget.py cannot see them because they reach the unzipper through a field
@@ -1227,7 +1227,7 @@ introduces a defect.
     services object. All three fixed in the same commit. No LCL/gtk2 note appeared
     on either platform, so the exclusion filter stayed narrow. Green both OSes.
 51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
-52. **tests/gui/manifest.txt:1** [medium] -- scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
+52. ~~**tests/gui/manifest.txt:1** [medium]~~ -- 2026-10-06: a duplicate of #44, folded into it and closed with it; its stricter count was the right one and the gate measured 80 (79 + canvas_ellipse@, called only in a compile-only example). Original text: scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
 53. **tests/negative/11_unknown_escape.bas:4** [medium] -- scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)
 54. **tests/skeleton/hello.bas:1** [low] -- check-manifests.py enumerates nothing: tests/skeleton and tests/gui/hostmode are in neither CORPORA nor NO_MANIFEST, so a .bas dropped there is invisible to the gate while coverage.py still credits it as exercised (defect is in scripts/check-manifests.py:39-51,68, not in tests/skeleton/hello.bas)
 
@@ -1523,6 +1523,22 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d44: a gate that prints "every" must enumerate everything, and
+  a gate that cannot reach zero yet needs a ratchet, not an exemption.**
+  coverage.py tabled 717 engine and package names and printed that every
+  registered function was exercised, while 426 GUI names were outside its world.
+  Widening the glob was the instance fix; the class was that "referenced" meant
+  "appears in the text", so a `rem` naming msgbox counted as a test of it. The
+  corpus is now what RUNS, read without comments or string contents, and that
+  moved four GUI names and no other -- measured before the rule was adopted,
+  with the attack plan's own warning in hand that an engine name moving would
+  be a bigger finding. The 80 the gate then reported are not a pass with an
+  excuse: they are printed on every run, and the list fails in both directions
+  -- a name a test now calls must be deleted from it, and a name not on it that
+  no test calls fails on the spot. Each of those four failures was watched,
+  plus the empty-list run, before anything was committed.
+
 
 - **2026-10-06 · d42 and n19: two of the test's own cases passed by
   coincidence, and only mutating the ledger showed it.** image_setbitmap@ now

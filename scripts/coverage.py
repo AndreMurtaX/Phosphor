@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Coverage report for the Phosphor libraries: tests AND documentation.
 
-Enumerates every built-in function registered in engine/libs and host/packages
-(the authoritative source is each `Reg.Add('name:sig', ...)` / `Reg.AddHost(...)`
-line), then checks whether each function's name is referenced by any test program
-(tests/**/*.bas) or example. Prints a per-library tally and exits non-zero if any
-function is uncovered.
+Enumerates every built-in function registered in engine/libs, host/packages and
+host/gui/libs (the authoritative source is each `Reg.Add('name:sig', ...)` /
+`Reg.AddHost(...)` line), then checks whether each function's name is CALLED by a
+program that runs -- a test (tests/**/*.bas, negatives excluded) or an example the
+manifest runs -- with comments and string literals stripped first. Prints a
+per-library tally and exits non-zero if any function is uncovered and not on the
+dated GUI_WORKLIST, or if a worklist entry has gone stale.
 
 A handful of built-ins are reached only through SYNTAX SUGAR, never by name -- an
 `a@[i]` compiles to `arr_get`/`arr_set@`, `s$[n]`/`s$[[n]]` to `strline$`/`strchar$`
@@ -45,6 +47,69 @@ SUGAR_BACKED = {
     'json_pushval@', 'json_pushnull@',
     'json_setval@', 'json_setnull@',
 }
+
+# --- the GUI names no test runs, DATED 2026-10-06 (ledger d44) ---------------
+# Until this date the table below was built from engine/libs and host/packages
+# only, and printed "every registered function is exercised by a test" while the
+# 426 names under host/gui/libs were outside it. Seventy-six of them had no call
+# site; eighty, once a mention in a comment, a string or a compile-only example
+# stopped counting as one (see load_corpus). d10 and d42 were both defects in that
+# unseen part, found by a person reading it.
+#
+# The GUI is now IN the table, and these are what it found. This is a WORKLIST,
+# not an excuse list, built like PENDING_NAMES below so it can only shrink:
+#   * the count is printed on every run, and --list prints every name;
+#   * an entry that a test now calls FAILS, naming the line to delete;
+#   * an entry that is no longer registered FAILS the same way;
+#   * a NEW untested name -- GUI or not -- matches nothing and fails on the spot,
+#     which is the property this gate did not have for the GUI at all.
+# The end state is an empty table, and then no table.
+_MODAL = 'MODAL: waits for a person; needs a host seam that dismisses it before a test can call it'
+_WAVE4 = 'WAVE 4: no test calls it'
+GUI_WORKLIST = dict(
+    [(n, _MODAL) for n in (
+        'dialog_execute', 'inputbox$', 'msgbox', 'msgbox_confirm', 'openfile$',
+        'openpicture$', 'savefile$', 'savepicture$', 'selectdir$')] +
+    [(n, _WAVE4) for n in (
+        # PhosphorButtonLib
+        'bitbtn_caption$', 'speedbutton_caption$', 'speedbutton_caption@',
+        'speedbutton_click@', 'speedbutton_onclick@',
+        # PhosphorCanvasLib
+        'canvas_clear@', 'canvas_ellipse@', 'canvas_fontcolor@', 'canvas_fontsize@',
+        'canvas_penwidth@', 'paintbox_onpaint@', 'shape_pencolor', 'shape_pencolor@',
+        # PhosphorChoiceLib
+        'checkgroup_caption$', 'checkgroup_caption@', 'checkgroup_clear@',
+        'checkgroup_item$', 'combo_onchange@', 'combo_text$', 'list_clear@',
+        'list_onclick@', 'radio_onchange@', 'radiogroup_caption@',
+        'radiogroup_onchange@', 'togglebox_onchange@',
+        # PhosphorContainerLib
+        'tabcontrol_onchange@', 'tabsheet_caption@',
+        # PhosphorControlLib
+        'control_align', 'control_align@', 'control_focused', 'control_fontcolor',
+        'control_fontcolor@', 'control_height@', 'control_italic', 'control_italic@',
+        'control_maxheight', 'control_maxheight@', 'control_minheight',
+        'control_minheight@', 'control_underline', 'control_underline@',
+        'control_visible@',
+        # PhosphorDialogLib -- the two that do not wait for anyone
+        'fontdialog_fontcolor', 'fontdialog_fontcolor@',
+        # PhosphorEditLib
+        'edit_selectall@', 'maskedit_text$', 'maskedit_text@', 'memo_onchange@',
+        'memo_readonly', 'memo_readonly@', 'memo_wordwrap', 'memo_wordwrap@',
+        'spinedit_onchange@',
+        # PhosphorGuiCore
+        'app_processmessages',
+        # PhosphorImageLib
+        'image_proportional', 'image_proportional@',
+        # PhosphorMiscLib
+        'trayicon_hide@', 'trayicon_onclick@', 'trayicon_show@',
+        # PhosphorRangeLib
+        'progressbar_max', 'progressbar_min', 'progressbar_min@', 'scrollbar_max',
+        'scrollbar_min', 'scrollbar_min@', 'trackbar_min', 'trackbar_onchange@',
+        'updown_max', 'updown_min',
+        # PhosphorTimerLib
+        'timer_enabled@',
+        # PhosphorTreeListLib
+        'listitem_caption@')])
 
 # --- registrations whose NAME is computed ------------------------------------
 # Two libraries register a family by walking a const array of spellings:
@@ -104,14 +169,71 @@ def load_corpus():
     proving it worked was a file asserting that it does not.
 
     A name that appears ONLY here is therefore uncovered, and this gate says so.
+
+    THE SAME REASONING, TWO MORE TIMES (d44, 2026-10-06):
+      * an example the manifest marks `compile` is compiled and never run --
+        examples/gui_demo.bas calls app_run(), which never returns -- so a name
+        that appears only there is not exercised either;
+      * a name inside a COMMENT or a STRING LITERAL is not a call. The corpus is
+        read through strip_code, so a `rem` that mentions msgbox no longer counts
+        as a test of it. Measured when this landed: no engine or package name
+        changed state, and four GUI names did -- inputbox$, msgbox and openfile$
+        were named only in comments, canvas_ellipse@ only in gui_demo.
     """
+    skip = compile_only_examples()
     text = ''
     for p in glob.glob(os.path.join(ROOT, 'tests', '**', '*.bas'), recursive=True) + \
              glob.glob(os.path.join(ROOT, 'examples', '*.bas')):
         if os.sep + 'negative' + os.sep in p:
             continue
-        text += open(p, encoding='utf-8', errors='ignore').read().lower()
+        if os.path.normcase(os.path.abspath(p)) in skip:
+            continue
+        text += strip_code(open(p, encoding='utf-8', errors='ignore').read().lower()) + '\n'
     return text
+
+def compile_only_examples():
+    """Absolute paths of the examples the manifest compiles but never runs."""
+    out = set()
+    mf = os.path.join(ROOT, 'examples', 'manifest.txt')
+    for line in open(mf, encoding='utf-8', errors='ignore'):
+        line = line.strip()
+        if not line or line.startswith('#') or '|' not in line:
+            continue
+        name, mode = line.split('|', 1)
+        if mode.strip() == 'compile':
+            out.add(os.path.normcase(os.path.abspath(
+                os.path.join(ROOT, 'examples', name.strip() + '.bas'))))
+    return out
+
+def strip_code(src):
+    """The source with comments removed and string literals emptied.
+
+    The lexer's rules (engine/PhosphorLexer.pas): a `'` outside a string, or the
+    word `rem`, comments out the rest of the line; a string is double-quoted and a
+    backslash escapes the character after it. A literal is kept as an empty `""`
+    so the code around it still reads as code."""
+    out = []
+    for line in src.split('\n'):
+        res, i, n = [], 0, len(line)
+        while i < n:
+            ch = line[i]
+            if ch == '"':
+                i += 1
+                while i < n and line[i] != '"':
+                    i += 2 if line[i] == '\\' else 1
+                i += 1
+                res.append('""')
+                continue
+            if ch == "'":
+                break
+            if (line[i:i + 3] == 'rem'
+                    and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] in '_$%@'))
+                    and (i + 3 == n or not (line[i + 3].isalnum() or line[i + 3] in '_$%@'))):
+                break
+            res.append(ch)
+            i += 1
+        out.append(''.join(res))
+    return '\n'.join(out)
 
 def lib_slug(path):
     """docs/libraries/<slug>.md for a library source.
@@ -142,14 +264,22 @@ def main():
     corpus = load_corpus()
     libs = sorted(glob.glob(os.path.join(ROOT, 'engine', 'libs', '*.pas'))) + \
            sorted(glob.glob(os.path.join(ROOT, 'host', 'packages', '*.pas')))
+    # The function-reference gate below is about engine + package names only, so
+    # `libs` stays that; the EXERCISED table is about every registered name.
+    gui_libs = sorted(glob.glob(os.path.join(ROOT, 'host', 'gui', 'libs', '*.pas')))
     total = covered = 0
     uncovered_all = []
+    worklisted = []
+    gui_seen = set()
     print(f"{'library':<26}{'fns':>5}{'covered':>9}{'gap':>5}")
     print('-' * 45)
-    for lib in libs:
+    for lib in libs + gui_libs:
         names = registered_names(lib)
         if not names:
             continue
+        is_gui = lib in gui_libs
+        if is_gui:
+            gui_seen |= names
         cov = 0
         uncovered = []
         for n in sorted(names):
@@ -159,7 +289,11 @@ def main():
                 uncovered.append(n)
         total += len(names)
         covered += cov
-        uncovered_all += [(os.path.basename(lib), n) for n in uncovered]
+        for n in uncovered:
+            if is_gui and n in GUI_WORKLIST:
+                worklisted.append((os.path.basename(lib), n))
+            else:
+                uncovered_all.append((os.path.basename(lib), n))
         flag = '' if not uncovered else '  <-- ' + ', '.join(uncovered)
         print(f"{os.path.basename(lib):<26}{len(names):>5}{cov:>9}{len(uncovered):>5}"
               + (flag if show else ''))
@@ -167,16 +301,43 @@ def main():
     pct = (100 * covered // total) if total else 0
     print(f"{'TOTAL':<26}{total:>5}{covered:>9}{total-covered:>5}")
     print(f"\ncoverage: {covered}/{total} = {pct}%  "
-          f"({len(SUGAR_BACKED)} sugar-backed counted as covered)")
+          f"({len(SUGAR_BACKED)} sugar-backed counted as covered; a mention in a "
+          f"comment, a string or a compile-only example is not a call)")
     rc = 0
     if uncovered_all:
         print()
-        print("UNTESTED:")
+        print("UNTESTED, AND ON NO WORKLIST:")
         for lib, n in uncovered_all:
             print(f"  {lib}: {n}")
         rc = 1
-    else:
+    # THE RATCHET. An entry whose name a test now calls, or that is no longer
+    # registered at all, is a line to delete -- and a list nobody shortens when the
+    # work lands stops describing the work.
+    uncov_names = {n for _, n in worklisted}
+    stale = sorted(n for n in GUI_WORKLIST if n not in gui_seen)
+    done = sorted(n for n in GUI_WORKLIST if n in gui_seen and n not in uncov_names)
+    if stale or done:
+        print()
+        print("GUI_WORKLIST ENTRIES TO DELETE (scripts/coverage.py):")
+        for n in done:
+            print(f"  {n}: a test calls it now")
+        for n in stale:
+            print(f"  {n}: no GUI library registers it")
+        rc = 1
+    if worklisted:
+        by_reason = collections.Counter(GUI_WORKLIST[n] for _, n in worklisted)
+        print()
+        print(f"NOT EXERCISED BY ANY TEST: {len(worklisted)} GUI names, on the dated "
+              f"worklist in this file (ledger d44){'' if show else '; --list names them'}")
+        for reason, k in sorted(by_reason.items()):
+            print(f"  {k:>3}  {reason}")
+        if show:
+            for lib, n in worklisted:
+                print(f"       {lib}: {n}")
+    if not uncovered_all and not worklisted:
         print("every registered function is exercised by a test.")
+    elif not uncovered_all:
+        print(f"every other registered function is exercised by a test.")
 
     # --- documentation gate ----------------------------------------------------
     # The reference calls itself the complete catalog; hold it to that.

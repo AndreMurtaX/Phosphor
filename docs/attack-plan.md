@@ -167,7 +167,7 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 2. **d56's `Halt` from inside a `TTimer.OnTimer` dispatch is unmeasured on gtk2.** Finalization unwinds with the message loop, the widgetset and possibly live forms on the stack. If gtk2 teardown blocks or re-enters there, the watchdog becomes a *permanent* hang — precisely the thing it exists to prevent, and indistinguishable from the bug it was added for. **This is the estimate I trust least in Wave 1.** If it blocks, d56 leaves Wave 1, becomes its own investigation, and Wave 4 moves behind it.
 3. **d12 was verified entirely by reading**, on the stated belief that `bin/phosphor.exe` was absent. **It is present and current** — I confirmed it exists, dated Sep 12 20:49, with no `engine/` or `host/` `.pas` newer than it. The reading is decisive line by line, but the four symptoms should be probed once in a scratch directory before the fix lands; there was no reason not to.
 4. **d46/d47's headline number was never reproduced** (correctly — it is a bomb). The mechanism is read from `zipper.pp:1093` and `:2747`; the 1.99 GB / 8.3 s figure is not evidence and should not be quoted.
-5. **d44's "79"** came from `coverage.py`'s own `load_corpus`/`is_referenced` under a stricter stripping rule written for the occasion. It may move by one or two. It must not move *down to 76* — that is the count a `rem` can satisfy.
+5. *(d44 CLOSED 2026-10-06: the gate measured **80** under the strict rule -- 76 under the loose one, and the four between are `inputbox$`, `msgbox` and `openfile$`, named only in comments, and `canvas_ellipse@`, called only in the compile-only `examples/gui_demo.bas`. No engine or package name moved. `scripts/coverage.py` now tables all 1143 names and carries the 80 as `GUI_WORKLIST`, a ratchet: 9 modal dialogs that wait for a person, and 71 that no test calls -- the Wave 4 worklist this section predicted.)* **d44's "79"** came from `coverage.py`'s own `load_corpus`/`is_referenced` under a stricter stripping rule written for the occasion. It may move by one or two. It must not move *down to 76* — that is the count a `rem` can satisfy.
 6. **m2 is the largest single estimate with the least harness behind it.** The accept-on-the-UI-thread failure cannot be caught by any headless test, because `tests/phosphoridetest.lpr` deliberately creates no widgetset. "Medium for item 7 alone" is a guess sized against `uphosphorrun.pas`'s existing pipe machinery, not against a measurement.
 7. **d10's class fix is sized "small"** on the basis that the invalidation walk already exists (`PhosphorJsonLib`'s `InvalidateBorrowed`, `GuiOtherFormShown`). If node→`TreeView` / item→`Owner.Owner` resolution is unreliable for some registration path, it grows — and the instance fix (refuse the free) is the documented contract anyway, so take that first and let the class fix be a separate decision.
 
@@ -266,7 +266,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -277,7 +277,7 @@ Debug menu enabled from live state).
   unrepaired engine, 13 of 19, the first file_move having replaced its target.
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
-`d56 d57 d48 n8 d54 d53 d44 n12 d55 d51 ~~n17~~` (harness and gates), `d14 n3 ~~d07~~ d12
+`d56 d57 d48 n8 d54 d53 ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `d14 n3 ~~d07~~ d12
 d46 d47 n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ d45 ~~d08~~ ~~n9~~ d65 n14 m4 r3`
 (engine), `~~d42~~ ~~n19~~ n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose

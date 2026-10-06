@@ -32,6 +32,7 @@ Exit 0 when every corpus agrees, non-zero with the offending names otherwise.
 import glob
 import io
 import os
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,6 +55,39 @@ NO_MANIFEST = {
     os.path.join('tests', 'classic'): 'test-classic runs every .bas it finds',
 }
 
+# Corpora whose runner names its files ONE BY ONE in its own source, so a .bas
+# dropped beside them is never run -- and, until 2026-10-06, was credited by
+# coverage.py all the same, because that gate reads every .bas under tests/. These
+# two were in neither table above, so this gate could not see them at all (ledger
+# d54). The list here is the runner's own list; a file that is not on it fails.
+FIXED = {
+    os.path.join('tests', 'skeleton'): (
+        ['hello'],
+        'test.{ps1,sh} run hello.bas by name and byte-compare it with hello.expected'),
+    os.path.join('tests', 'gui', 'hostmode'): (
+        ['fails', 'gui', 'hello'],
+        'test-gui.{ps1,sh} run each of these by name in a hostmode case of its own'),
+}
+
+
+def bas_dirs():
+    """Every directory that holds a .bas, DERIVED rather than listed.
+
+    THE TABLES ABOVE USED TO BE THE WHOLE WORLD. This gate iterated CORPORA and
+    nothing else, so a directory in no table was in no category, and the gate
+    reported green about a set of corpora somebody had written down (ledger d54).
+    The candidates now come from git: tracked files plus untracked ones that are
+    not ignored -- so a test written a minute ago counts, and a gitignored backup
+    copy does not. None means git could not answer, which is a failure, not an
+    empty tree."""
+    try:
+        out = subprocess.run(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '--', '*.bas'],
+            cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return sorted({os.path.normpath(os.path.dirname(p)) for p in out.splitlines() if p})
+
 
 def listed(path):
     """The basenames a manifest names. A line may carry a '|mode' suffix."""
@@ -69,6 +103,34 @@ def listed(path):
 def main():
     bad = []
     total = 0
+    dirs = bas_dirs()
+    if dirs is None:
+        print('check-manifests: git could not list the tree, so this gate cannot say '
+              'which directories hold tests. Run it from a git checkout.')
+        return 1
+    classified = set(CORPORA) | set(NO_MANIFEST) | set(FIXED)
+    for d in dirs:
+        if d not in classified:
+            bad.append('%s holds .bas files and is in no table here -- add it to '
+                       'CORPORA, NO_MANIFEST or FIXED with how its runner finds them'
+                       % d)
+    # AND THE OTHER WAY: a table entry for a directory with no test in it is a
+    # category that classifies nothing, which reads exactly like one that is fine.
+    for d in sorted(classified):
+        if not glob.glob(os.path.join(ROOT, d, '*.bas')):
+            bad.append('%s is listed here but holds no .bas -- remove the entry, '
+                       'or put back what it named' % d)
+    for rel, (names, why) in sorted(FIXED.items()):
+        on_disk = sorted(os.path.splitext(os.path.basename(p))[0]
+                         for p in glob.glob(os.path.join(ROOT, rel, '*.bas')))
+        total += len(on_disk)
+        for n in on_disk:
+            if n not in names:
+                bad.append('%s/%s.bas is not one of the files its runner names (%s) '
+                           '-- it never runs' % (rel, n, why))
+        for n in names:
+            if n not in on_disk:
+                bad.append('%s/%s.bas is named by its runner but is not there' % (rel, n))
     for rel, mf in sorted(CORPORA.items()):
         d = os.path.join(ROOT, rel)
         mpath = os.path.join(d, mf)
@@ -112,7 +174,8 @@ def main():
 
     print('manifests: %d test files across %d corpora, every one listed and '
           'every listing real (%d directory-driven corpora have no manifest to '
-          'drift from)' % (total, len(CORPORA), len(NO_MANIFEST)))
+          'drift from; %d directories holding .bas, all classified)'
+          % (total, len(CORPORA) + len(FIXED), len(NO_MANIFEST), len(dirs)))
     return 0
 
 

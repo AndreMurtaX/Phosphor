@@ -35,6 +35,7 @@ Exit 0 = every seam of every host is either filled or explained.
 import glob
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -145,6 +146,16 @@ EXEMPT = {
     'phosphorhttptest.lpr:OnBreakpoint': 'same as phosphortest',
     'phosphorhttptest.lpr:HostServices': 'no window in the http runner',
 
+    # THE LAZARUS DEMO, which this gate could not see until 2026-10-06 (d48): it is
+    # a .pas outside host/, and the glob was `host/**/*.lpr`. Its first run on the
+    # derived domain named these four, and they are answers an embedder COPYING the
+    # demo inherits -- which is why each says what that embedder has to decide.
+    # lazarus/README.md says the same beside "the nine lines".
+    'phosphordemorunner.pas:OnInput': 'none of the five demo scripts reads input, so INPUT answering empty is never reached; an application whose scripts do read must hang its own prompt here (docs/embedding.md)',
+    'phosphordemorunner.pas:OnBreakpoint': 'the demo shows running and failing, not pausing; BREAKPOINT is a no-op in it as in any host that installs nothing',
+    'phosphordemorunner.pas:OnDebug': 'the demo does not debug; tests/probe_step.lpr is the worked example of a host that does',
+    'phosphordemorunner.pas:HostServices': 'the runner holds no LCL by design (its header says why), so it has no event pump or clipboard to offer; processmessages() and the clipboard answer their documented absent values',
+
     # The embedding demonstration shows the API, not a terminal.
     'phosphorembed.lpr:OnInput': 'the embedding demo drives the engine from Pascal; nothing asks for a line',
     'phosphorembed.lpr:OnBreakpoint': 'an embedder that wants a pause installs one; the demo shows the seam exists',
@@ -237,11 +248,77 @@ def engine_seams():
     return seams
 
 
-def hosts():
+# WHAT A HOST IS, DERIVED (ledger d48, n8). This used to be `host/**/*.lpr`, a glob
+# that was wrong in both directions at once. It could not see
+# lazarus/demo/phosphordemorunner.pas -- a .pas, outside host/, and the file
+# lazarus/README.md calls the integration an embedder comes to copy, with four of
+# its five seams nil -- while it COUNTED host/console/backup/phosphor.lpr, a
+# gitignored editor copy, as a seventh host. Widening the glob would have been the
+# instance fix and a worse one: it sweeps in a dozen Pascal probes that null seams
+# on purpose, each needing exemption rows nobody reads.
+#
+# So a host is what the source says it is: a file git knows about (tracked, or new
+# and not ignored) that CONSTRUCTS an engine. Each such file is then classified by
+# where it lives, and one in an unclassified place fails -- a new kind of program
+# that makes an engine has to be answered for before the gate says anything else.
+CLASSES = [
+    # (path prefix, kind, why)
+    ('host/', 'host', 'a shipped host or one of its runners'),
+    ('lazarus/', 'host', 'the Lazarus demo -- the integration lazarus/README.md tells '
+                         'an embedder to copy'),
+    ('tests/', 'probe', 'a Pascal probe: it installs and clears seams case by case and '
+                        'asserts what each case did, so a table here would repeat it'),
+    ('scripts/', 'probe', 'the same, for the probes that live beside the gates'),
+]
+CREATES = re.compile(r'\bTPhosphorEngine\s*\.\s*Create\b', re.I)
+
+
+def tracked_sources():
+    """Pascal sources git knows about, as repo-relative '/' paths; None when git
+    cannot answer -- a failure, never an empty tree."""
+    try:
+        out = subprocess.run(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '--',
+             '*.pas', '*.lpr'],
+            cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return sorted(p for p in out.splitlines() if p)
+
+
+def engine_creators(rels):
+    """The sources among rels that construct a TPhosphorEngine -- in code, not in
+    a comment, and not the constructor's own definition."""
     out = []
-    for p in sorted(glob.glob(os.path.join(ROOT, 'host', '**', '*.lpr'), recursive=True)):
-        out.append(p)
+    for rel in rels:
+        with open(os.path.join(ROOT, rel), encoding='utf-8', errors='ignore') as fh:
+            src = strip_comments(fh.read())
+        for m in CREATES.finditer(src):
+            if not re.search(r'\bconstructor\s*$', src[:m.start()], re.I):
+                out.append(rel)
+                break
     return out
+
+
+def classify(rel):
+    for prefix, kind, why in CLASSES:
+        if rel.startswith(prefix):
+            return kind
+    return None
+
+
+def hosts():
+    rels = tracked_sources()
+    if rels is None:
+        return None, []
+    found, unclassified = [], []
+    for rel in engine_creators(rels):
+        kind = classify(rel)
+        if kind == 'host':
+            found.append(os.path.join(ROOT, rel))
+        elif kind is None:
+            unclassified.append(rel)
+    return found, unclassified
 
 
 def main():
@@ -254,7 +331,15 @@ def main():
     problems = []
     filled = 0
     unused = set(EXEMPT)
-    for path in hosts():
+    found, unclassified = hosts()
+    if found is None:
+        print('check-seams: git could not list the tree, so this gate cannot say '
+              'which programs are hosts. Run it from a git checkout.')
+        return 1
+    for rel in unclassified:
+        problems.append('%-44s constructs an engine and lives nowhere CLASSES names '
+                        '-- say whether it is a host or a probe' % rel)
+    for path in found:
         base = os.path.basename(path)
         with open(path, encoding='utf-8') as fh:
             src = strip_comments(fh.read())
@@ -295,7 +380,7 @@ def main():
         return 1
 
     print('seam gate: %d seams filled across %d hosts, %d deliberately nil with a '
-          'reason' % (filled, len(hosts()), len(EXEMPT)))
+          'reason' % (filled, len(found), len(EXEMPT)))
     return 0
 
 

@@ -1201,7 +1201,7 @@ introduces a defect.
 45. ~~**engine/libs/PhosphorBufferLib.pas:436** [medium]~~ -- CLOSED 2026-10-06: one body, BufferIndexOf, holds both the question and the search, priced over the whole buffer; check-budget.py reads a hand-rolled nested search as the product it is; scripts/probe_budget.lpr asks from positions 1 and 2. Original text: buffer_indexof's 3-argument form bypasses the execution budget entirely -- a one-token escape from the ceiling that exists to make untrusted scripts safe to embed
 46. ~~**host/packages/PhosphorZipLib.pas:447** [medium]~~ -- CLOSED 2026-10-06 with #47: TMeteredUnZipper charges what the inflate really writes; scripts/probe_budget.lpr section (k). Original text: The decompression-bomb guard prices the work from the archive's own central directory: an under-reporting entry writes 1.99 GB in 8.3 s under a 256,000,000-unit / 2,000 ms budget
 47. ~~**host/packages/PhosphorZipLib.pas:840** [medium]~~ -- CLOSED 2026-10-06 with #46 (the line was f_zip_addfile; the extractors were at 989 and 1054): every extractor builds or holds a TMeteredUnZipper, and check-budget.py refuses an expansion through a plain TUnZipper. Original text: zip_extract and zip_extractall never consult the execution budget: two of the three extractors walk into UnZipFiles/UnZipAllFiles unbounded, and check-budget.py cannot see them because they reach the unzipper through a field
-48. **scripts/check-seams.py:212** [medium] -- check-seams.py:212 globs only host/**/*.lpr, so lazarus/demo/phosphordemorunner.pas -- a suite-built, documented host that fills OnOutput and leaves OnInput, OnBreakpoint and HostServices nil -- is outside the gate, while README.md and the playbook claim it covers "every host"
+48. ~~**scripts/check-seams.py:212** [medium]~~ -- CLOSED 2026-10-06 with n8: a host is any file git knows that constructs an engine, classified by directory; the demo's four nil seams are answered. Original text: check-seams.py:212 globs only host/**/*.lpr, so lazarus/demo/phosphordemorunner.pas -- a suite-built, documented host that fills OnOutput and leaves OnInput, OnBreakpoint and HostServices nil -- is outside the gate, while README.md and the playbook claim it covers "every host"
 49. **scripts/test-examples.sh:28** [medium] -- Only test-suite.sh rejects an unknown ProveFailure spelling; test-examples.sh silently ignores the canonical `-ProveFailure` and prints EXAMPLES OK exit 0, test-classic.sh does the same for `--prove-failure`, and test.sh/test-packages/test-gui have no prove mode at all
     **CLOSED 2026-09-15.** All twelve runners parse arguments through
     `scripts/lib/runner.{sh,ps1}` as their FIRST act -- before the fpc lookup, before
@@ -1229,7 +1229,7 @@ introduces a defect.
 51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
 52. ~~**tests/gui/manifest.txt:1** [medium]~~ -- 2026-10-06: a duplicate of #44, folded into it and closed with it; its stricter count was the right one and the gate measured 80 (79 + canvas_ellipse@, called only in a compile-only example). Original text: scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
 53. ~~**tests/negative/11_unknown_escape.bas:4** [medium]~~ -- CLOSED 2026-10-06: tests/negative/manifest.txt holds each negative's reason; the runners demand exit 2 and that reason; -ProveFailure proves both halves. Original text: scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)
-54. **tests/skeleton/hello.bas:1** [low] -- check-manifests.py enumerates nothing: tests/skeleton and tests/gui/hostmode are in neither CORPORA nor NO_MANIFEST, so a .bas dropped there is invisible to the gate while coverage.py still credits it as exercised (defect is in scripts/check-manifests.py:39-51,68, not in tests/skeleton/hello.bas)
+54. ~~**tests/skeleton/hello.bas:1** [low]~~ -- CLOSED 2026-10-06: every directory holding a .bas, derived from git, must be classified, and tests/skeleton and tests/gui/hostmode are FIXED lists their runners name. Original text: check-manifests.py enumerates nothing: tests/skeleton and tests/gui/hostmode are in neither CORPORA nor NO_MANIFEST, so a .bas dropped there is invisible to the gate while coverage.py still credits it as exercised (defect is in scripts/check-manifests.py:39-51,68, not in tests/skeleton/hello.bas)
 
 ### Test gaps (3)
 
@@ -1523,6 +1523,22 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d48, n8, d54: two gates read a list somebody wrote, and both
+  the list and the world had moved.** check-seams.py globbed host/**/*.lpr and so
+  both missed the Lazarus demo -- a .pas, outside host/, the integration the
+  README tells an embedder to copy -- and counted a gitignored backup copy as a
+  host; check-manifests.py iterated its own table, so two directories of tests
+  were in no category at all. Both now ask git what exists (tracked, plus new
+  and not ignored) and classify it, failing on what they cannot classify. The
+  plan predicted the host count would fall to six; it stayed at seven, because
+  the backup left and the demo joined, and the arithmetic -- 12 filled seams,
+  minus the backup's 5, plus the demo's 1 -- was checked against the old gate
+  run from HEAD rather than assumed. Every direction was watched failing with
+  planted files removed by name afterwards. And the demo's snippet, the nine
+  lines a reader copies, turned out to show three of the four ceilings its own
+  runner sets; it shows four now.
+
 
 - **2026-10-06 · d53: writing down WHY a test fails found a test failing for the
   wrong reason.** The negative corpus passed on any non-zero exit, so it could

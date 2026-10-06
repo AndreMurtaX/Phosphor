@@ -288,11 +288,11 @@ turned out to be false and nothing could tell:
 | `coverage.py` | every registered name -- the 426 GUI names included -- is CALLED by an executed test (a `rem`, a string or a compile-only example does not count), or sits on its dated GUI worklist, which can only shrink; **and** is listed in the reference — both directions |
 | `check-codepage.py` | no `Char` is concatenated into a code-page string (bytes ≥ 128) |
 | `check-sandbox.py` | every routine reachable from a script that touches the filesystem asks the gate |
-| `check-seams.py` | every host answers for every engine seam, in writing — a nil seam fails silently |
+| `check-seams.py` | every host answers for every engine seam, in writing — a nil seam fails silently. A host is DERIVED: any file git knows that constructs an engine, classified by where it lives; one in an unclassified place fails |
 | `check-examples.py` | every ```basic block in the docs compiles |
 | `check-suffix.py` | a registered name's suffix is the kind its body returns |
 | `check-budget.py` | a loop or an allocation over a script-supplied count consults the budget, or is exempt with a reason |
-| `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test |
+| `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test. Every directory holding a `.bas` is classified (manifest, directory-driven, or a FIXED list its runner names), derived from git, not from a table |
 | `check-crossrefs.py` | a repo path named in prose exists (renumbering a test file breaks every comment citing it, and no other gate reads a sentence); both suite runners build the same probes from the same sources — a probe registered in one runs on one OS; and **every runner refuses an argument it does not know**, asked by running it, because `-ProveFailure` was a silent full run on five of six bash runners |
 | `check-boundary.py` | the two halves of the engine boundary check are right, **and agree** — asked by RUNNING each over `tests/boundary`, whose eleven expected answers are derived from Pascal and not from any implementation. The first time anyone asked, the bash halves scored 8/11 and the PowerShell halves 10/11: the bash ones never stripped `(* *)` at all, and all four stripped `//` before the block forms, which lets a brace comment lose its terminator to a `//` on the same line and then swallow a real `uses` clause |
 

@@ -75,7 +75,7 @@ headless, on both operating systems, on every suite run — it is `probe_demo` i
 `test-suite`. The window itself is compiled by `test-gui`, which catches a demo
 that stopped building.
 
-The integration you came here to copy is nine lines, and it is in
+The integration you came here to copy is ten lines, and it is in
 `phosphordemorunner.pas`:
 
 ```pascal
@@ -86,12 +86,26 @@ eng.Registry.Add('app_log:$',  @h_app_log);
 eng.MaxSteps := 2000000;                // ceilings, for a script you did not write
 eng.TimeoutMs := 3000;
 eng.MaxOutputBytes := 1024 * 1024;
+eng.MaxMemoryBytes := 256 * 1024 * 1024;
 eng.ContainFaults := True;              // keep your process if the engine faults
 rc := eng.Run(source);
 ```
 
 The suffix on a registered **name** is its return type: `app_name$` answers a
 string, `app_log` answers a number. The codes after the `:` are its arguments.
+
+All four ceilings, as the runner sets them. This snippet used to show three and
+leave memory out, which is the one a script can spend fastest.
+
+**What the demo leaves empty, and you may not want to.** It fills one seam,
+`OnOutput`. `OnInput` is empty because none of its scripts reads input -- a
+script of yours that does gets an empty line until you hang a prompt there.
+`OnBreakpoint` and `OnDebug` are empty because it does not pause or debug
+(`tests/probe_step.lpr` is a host that does), and `HostServices` because the
+runner holds no LCL, so `processmessages()` and the clipboard answer their
+documented absent values. `scripts/check-seams.py` records each of these with
+its reason, and fails if the demo starts filling one without the record
+changing. [docs/embedding.md](../docs/embedding.md) describes every seam.
 
 ### Two handlers, not one
 

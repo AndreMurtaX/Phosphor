@@ -699,6 +699,55 @@ def appends_in_loops(body):
     return hits
 
 
+LENGTH_OF = re.compile(r'\bLength\s*\(\s*([A-Za-z_][\w.\[\]]*)\s*\)', re.I)
+
+
+def nested_searches(body):
+    """A HAND-ROLLED SEARCH: a for loop bounded by the length of one thing, inside
+    a for loop bounded by the length of ANOTHER (ledger d45).
+
+    Each bound alone is `Length(...)`, which DERIVED rightly calls bounded -- and
+    that is how IndexOfFrom in PhosphorBufferLib read as two linear loops while
+    doing Length(hay) * Length(needle) comparisons, the same product SEARCHES
+    names for Pos. buffer_indexof's three-argument form reached it without asking
+    the budget, and nothing here could say so. A bound held in a local is read
+    through the assignment that set it (`last := Length(AHay) - ...`)."""
+    assigned = {}
+    for m in ASSIGN.finditer(body):
+        assigned.setdefault(m.group(1).lower(), m.group(2))
+
+    def lengths(expr):
+        seen = set(x.lower() for x in LENGTH_OF.findall(expr))
+        for nm in NAMES.findall(expr):
+            if nm.lower() in assigned:
+                seen |= set(x.lower() for x in LENGTH_OF.findall(assigned[nm.lower()]))
+        return seen
+
+    loops = []
+    for m in FORLOOP.finditer(body):
+        limit = m.group(3) if m.group(2).lower() == 'to' else m.group(1)
+        d = DOWORD.search(body, m.start())
+        if d is None:
+            continue
+        rest = body[d.end():]
+        stripped = rest.lstrip()
+        if stripped[:5].lower() == 'begin':
+            at = d.end() + (len(rest) - len(stripped))
+            span = (at, block_end(body, at))
+        else:
+            semi = body.find(';', d.end())
+            span = (d.end(), semi if semi >= 0 else len(body))
+        loops.append((m.start(), span, lengths(limit)))
+    hits = []
+    for _, (lo, hi), outer in loops:
+        for start, _, inner in loops:
+            if lo <= start < hi and outer and inner and \
+               any(a != b for a in outer for b in inner):
+                hits.append('for .. Length(%s) inside for .. Length(%s)'
+                            % ('/'.join(sorted(inner)), '/'.join(sorted(outer))))
+    return hits
+
+
 def amplifiers(body):
     """Every amplifying construct in one routine body, as short labels."""
     derived, tainted = flow(body)
@@ -737,6 +786,7 @@ def amplifiers(body):
         if sea in body:
             hits.append(sea.rstrip('('))
     hits.extend(appends_in_loops(body))
+    hits.extend(nested_searches(body))
     return sorted(set(hits))
 
 
@@ -1021,6 +1071,21 @@ def prove():
              '  for i := 1 to Length(s) do r := r + Copy(s, i, 1);\n'
              '  Result := ValStr(r);\n'
              'end;\n'),
+            # ROUND FOUR (d45). Both loops bounded by a Length, no allocation, no
+            # native, no RTL search and no append -- only the nested-search rule
+            # can see it, the way only it could see IndexOfFrom. The outer bound
+            # goes through a local, as IndexOfFrom's did.
+            ('a hand-rolled nested search',
+             'f_planted_search2',
+             'var i, j, last: Integer; h, n: String;\n'
+             'begin\n'
+             '  h := A[0].Str; n := A[1].Str;\n'
+             '  last := Length(h) - Length(n) + 1;\n'
+             '  for i := 1 to last do\n'
+             '    for j := 1 to Length(n) do\n'
+             '      if h[i + j - 1] <> n[j] then Break;\n'
+             '  Result := ValInt(0);\n'
+             'end;\n'),
         ]
         for label, fname, tail in widened:
             head = ('unit PhosphorPlantedLib;\ninterface\nimplementation\n')
@@ -1043,6 +1108,12 @@ def prove():
                 print('PROVE FAILED: the planted append was reported by some '
                       'OTHER rule (%s), so the append rule is unproven.'
                       % holes[0][1])
+                return 1
+            if fname == 'f_planted_search2' and \
+               not all(' inside for ' in h for h in holes[0][1]):
+                print('PROVE FAILED: the planted nested search was reported by '
+                      'another rule as well (%s), so the nested-search rule is '
+                      'unproven.' % holes[0][1])
                 return 1
             print('prove: %s is reported (%s).' % (label, holes[0][1]))
 

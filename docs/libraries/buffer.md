@@ -78,7 +78,7 @@ never dereferenced.
 | `buffer_slice$(b@, i, n) → str` | `n` bytes from `i`. `n = 0` gives `""` (legal, including at length + 1); a count that runs past the end is an error, never a shortened slice |
 | `buffer_write(b@, i, s$) → num` | how many bytes it wrote, `bytelen(s$)`. An empty string writes `0` and is legal; a string longer than the room left at `i` is refused whole — no partial write |
 | `buffer_copy(dst@, di, src@, si, n) → num` | how many bytes it copied, `n`. **Overlap-safe**, so a buffer may be copied onto itself in either direction to shift bytes. Either range running off its end is an error, and the message says which side |
-| `buffer_indexof(b@, pat$ [, from]) → num` | the base-1 position of the first match at or after `from` (default 1), or `0` when there is none. An **empty pattern matches nothing, not everything** — it answers `0`. `from` is the one position in this package that is clamped rather than checked: below 1 it searches from 1, past the end it simply finds nothing |
+| `buffer_indexof(b@, pat$ [, from]) → num` | the base-1 position of the first match at or after `from` (default 1), or `0` when there is none. An **empty pattern matches nothing, not everything** — it answers `0`. `from` is the one position in this package that is clamped rather than checked: below 1 it searches from 1, past the end it simply finds nothing. Under a host that sets an execution budget, a search whose comparisons would exceed it is refused as a runtime error before it starts — with or without `from`, and priced over the whole buffer whatever `from` is |
 | `buffer_equal(a@, b@) → num` | `1` when the two hold the same length and the same bytes, `0` otherwise — different lengths never match, and two empty buffers do |
 
 ### Fixed-width numbers

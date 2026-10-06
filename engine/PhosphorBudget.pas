@@ -1,4 +1,4 @@
-﻿{******************************************************************************
+{******************************************************************************
   Phosphor BASIC -- the execution budget (the ceilings, inside a library call)
 
   MIT License. Copyright (c) 2026 Andre Murta.
@@ -294,7 +294,7 @@ function BudgetAppend(ALen: Int64): Boolean;
 
       if (SubStr[1] = pc^) and (CompareByte(Substr[1], pc^, SubLen) = 0) then ...
 
-  and PhosphorBufferLib's IndexOfFrom, which breaks its inner loop at the first
+  and PhosphorBufferLib's BufferIndexOf, which breaks its inner loop at the first
   mismatch. So the work is Length(hay) first-byte tests plus at most one full
   needle comparison per position where that first byte occurs:
 

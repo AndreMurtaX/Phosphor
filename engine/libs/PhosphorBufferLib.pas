@@ -400,7 +400,7 @@ end;
   below are the cost, and both lengths are in hand before either starts.
 
   ROUND THREE: priced by the SAME model as instr rather than by a private copy of
-  the worst case. IndexOfFrom breaks its inner loop at the first mismatch exactly
+  the worst case. BufferIndexOf breaks its inner loop at the first mismatch exactly
   as the RTL's Pos does, so BudgetSearchCost describes it too -- and while that
   worst case stood here, finding a 300-character quotation in a 990 KB buffer was
   refused ("296910300 units of work and only 255010000 are left") for work that
@@ -411,38 +411,52 @@ begin
   Result := BudgetSearchCost(AHay, ANeedle);
 end;
 
-function IndexOfFrom(const AHay, ANeedle: String; AFrom: Integer): Integer;
-var i, j, last: Integer; ok: Boolean;
+{ ONE BODY FOR BOTH FORMS (ledger d45). There used to be two: the two-argument
+  one asked the budget and the three-argument one did not, so a third argument
+  was a one-token escape from the ceiling -- a 20001-byte needle in a megabyte ran
+  for twelve seconds under a two-second host, answering success. The question now
+  lives in the only body, so a form added later cannot be the one that forgot.
+
+  Priced over the WHOLE haystack, whatever the start: an over-estimate when the
+  start is late, never an under-estimate, and it reads the buffer in place. The
+  tempting alternative -- pricing Copy(hay, from, ...) -- allocates a copy of the
+  tail inside the very check that exists to bound allocation.
+
+  AND THE SEARCH IS IN HERE TOO, not in a helper. It was IndexOfFrom, two loops
+  each bounded by a Length, which check-budget.py read as linear; its rule for a
+  hand-rolled nested search now reads the product, and finds it in this routine
+  beside the question that prices it. A helper the callers had to remember to
+  guard is the shape this defect had. }
+function BufferIndexOf(const A: array of TValue; AFrom: Integer;
+                       out E: TPhosphorError): TValue;
+var b: TPhosphorBytes; hay, needle: String; i, j, last: Integer; ok: Boolean;
 begin
-  Result := 0;
-  if ANeedle = '' then Exit;                 // an empty pattern matches nothing, not everything
-  last := Length(AHay) - Length(ANeedle) + 1;
+  Result := ValInt(0);
+  if not GetBuf('buffer_indexof', A[0], b, E) then Exit;
+  hay := b.Data;
+  needle := A[1].Str;
+  if not BudgetAllows(SearchUnits(hay, needle)) then
+  begin E := BudgetRefusal('buffer_indexof'); Exit; end;
+  if needle = '' then Exit;          // an empty pattern matches nothing, not everything
+  last := Length(hay) - Length(needle) + 1;
   if AFrom < 1 then AFrom := 1;
   for i := AFrom to last do
   begin
     ok := True;
-    for j := 1 to Length(ANeedle) do
-      if AHay[i + j - 1] <> ANeedle[j] then begin ok := False; Break; end;
-    if ok then Exit(i);
+    for j := 1 to Length(needle) do
+      if hay[i + j - 1] <> needle[j] then begin ok := False; Break; end;
+    if ok then Exit(ValInt(i));
   end;
 end;
 
 function f_buffer_indexof2(const A: array of TValue; out E: TPhosphorError): TValue;
-var b: TPhosphorBytes;
 begin
-  Result := ValInt(0);
-  if not GetBuf('buffer_indexof', A[0], b, E) then Exit;
-  if not BudgetAllows(SearchUnits(b.Data, A[1].Str)) then
-  begin E := BudgetRefusal('buffer_indexof'); Exit; end;
-  Result := ValInt(IndexOfFrom(b.Data, A[1].Str, 1));
+  Result := BufferIndexOf(A, 1, E);
 end;
 
 function f_buffer_indexof3(const A: array of TValue; out E: TPhosphorError): TValue;
-var b: TPhosphorBytes;
 begin
-  Result := ValInt(0);
-  if not GetBuf('buffer_indexof', A[0], b, E) then Exit;
-  Result := ValInt(IndexOfFrom(b.Data, A[1].Str, ArgI32(A[2])));
+  Result := BufferIndexOf(A, ArgI32(A[2]), E);
 end;
 
 function f_buffer_equal(const A: array of TValue; out E: TPhosphorError): TValue;

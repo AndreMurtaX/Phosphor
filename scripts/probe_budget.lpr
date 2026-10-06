@@ -716,6 +716,21 @@ begin
   Refused('buffer_indexof refuses it too',
           'b@ = buffer_fromstr@(string$(1000000, 65))' + LF +
           'println buffer_indexof(b@, string$(20000, 65) + "B")' + LF);
+  { AND ITS THREE-ARGUMENT FORM (ledger d45). One registered name, two bodies,
+    and only the two-argument one asked: a third argument was a one-token escape
+    from the ceiling. Asked at position 1 AND 2 -- n1 hid behind "position 1 is
+    refused", because a sweep that tried only position 1 saw nothing. }
+  Refused('buffer_indexof from position 1 refuses it too',
+          'b@ = buffer_fromstr@(string$(1000000, 65))' + LF +
+          'println buffer_indexof(b@, string$(20000, 65) + "B", 1)' + LF);
+  Refused('buffer_indexof from position 2 refuses it too',
+          'b@ = buffer_fromstr@(string$(1000000, 65))' + LF +
+          'println buffer_indexof(b@, string$(20000, 65) + "B", 2)' + LF);
+  { And the three-argument form still answers. "xyzABC" twice: ABC sits at 4
+    and at 10, so from 5 the first one is skipped and the answer is 10. }
+  Allowed('buffer_indexof from a position still finds the later match',
+          'b@ = buffer_fromstr@("xyzABCxyzABC")' + LF +
+          'println buffer_indexof(b@, "ABC", 5)' + LF, '10' + LF);
   Allowed('a short needle in a long haystack is untouched',
           'h$ = string$(1000000, 97) + "zzz"' + LF +
           'println instr(h$, "zzz"); countstr(h$, "zz"); containsstr(h$, "zzz")' + LF,

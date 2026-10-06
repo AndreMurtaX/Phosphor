@@ -83,7 +83,7 @@ rem was tests/negative/04_fabricated_arr_free.bas -- a program the suite require
 rem to be REJECTED -- and coverage.py counted that as coverage, so a function
 rem whose only proof was a file asserting that it FAILS read as exercised.
 rem
-rem What the page promises (docs/libraries/array.md:89): it releases the array,
+rem What the page promises (docs/libraries/array.md#bracket-sugar-and-handles-themselves): it releases the array,
 rem revokes the handle and answers 1; freeing the same handle twice is the error
 rem "not a valid array handle", not a quiet 0; and ids are never reused within a
 rem run, so a stale handle stays detectably stale. The first half is asserted

@@ -225,7 +225,7 @@ Placed above the budget wave because the damage is to the *host's heap* and is a
 - **d18 is two units and a gate rule**, not one function. **d47's cited line 840 is `f_zip_addfile`**; the extractors are at 989 and 1054. **d46 has a second site** the item does not name: `PhosphorZipLib.pas:250`, `zip_read$`, same declared-size trust, expanding into memory.
 - **m4 is already half-done** — the cap was decided against and the test imported on 2026-09-01 (`ee359f9`); what is left is `docs/roadmap.md:126,135-136` still calling it undecided while `:286` of the same file records it resolved, an orphaned sentence fragment at `:292-293`, and a `rem` in `13_global_limit.bas` stating Plan9Basic's HeapMem as if it were ours — **at exactly 513 globals**, so a reintroduced 513 cap ships byte-exact green.
 - **m3 is not blocked by d13**, and **m5's blocker is not SNI plumbing** (FPC performs no hostname verification at all), and **m6's blocker is not AF_INET6** (`TFPCustomHTTPClient.FSocket` is private with no seam; the AAAA half is free in `netdb.pp`), and **r3's cause is not registration** (it is the lexer, and it is every identifier). Four recorded reasons that are stale in a way no gate can see.
-- **n12 · seven stale line citations found in one pass** — playbook `:799` cites `PhosphorStrLib.pas:860` (real: 1053), d65's `2228/2240` (real: 2564/2576), d13's `PhosphorEngine.pas:286` (now `SandboxRoot`'s declaration), d62's `embedding.md:296-298` (real: 445-452), d47's 840, d48's `check-seams.py:212` (real: 242), d50's 220 (real: 344 and 83). `check-crossrefs.py` gates that a **path** named in prose exists and never the line after it, so every citation in a 1400-line playbook can drift silently. **That gap is worth a gate more than most of the items it mis-cites.**
+- ~~**n12**~~ **CLOSED 2026-10-06**: `check-crossrefs.py` refuses `path:LINE` in live text and checks every `path#Name` against the headings or routines of that file; the dated records keep their lines, bounded by the file, and the open playbook items #13, #62 and #65 carry a name anchor beside theirs. Its first run found 4 of the 7 live line citations pointing at the wrong place, none past its file's end. Original text: **seven stale line citations found in one pass** — playbook `:799` cites `PhosphorStrLib.pas:860` (real: 1053), d65's `2228/2240` (real: 2564/2576), d13's `PhosphorEngine.pas:286` (now `SandboxRoot`'s declaration), d62's `embedding.md:296-298` (real: 445-452), d47's 840, d48's `check-seams.py:212` (real: 242), d50's 220 (real: 344 and 83). `check-crossrefs.py` gates that a **path** named in prose exists and never the line after it, so every citation in a 1400-line playbook can drift silently. **That gap is worth a gate more than most of the items it mis-cites.**
 
 ---
 
@@ -266,7 +266,7 @@ Debug menu enabled from live state).
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.
 
-**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`, and 23 after `d46` and `d47`, and 22 after `d45`, and 21 after `d53`, and 18 after `d48`, `n8` and `d54`**, each measured or read today and still true as written unless noted:
+**Open: 39 at the audit, 30 after `d10`/`n20`, `d07`, `n1`, `n7`, `d18`, `d08`, `n9` and `n17` closed the same day, and 28 after `d42` and `n19` closed on 2026-10-06, and 27 after `d44` (with its duplicate `d52`) the same day, and 25 after `d14` and `n3`, and 23 after `d46` and `d47`, and 22 after `d45`, and 21 after `d53`, and 18 after `d48`, `n8` and `d54`, and 17 after `n12`**, each measured or read today and still true as written unless noted:
 
 - **`d07` CLOSED 2026-10-05.** `MoveTargetTaken` in `engine/libs/PhosphorIoLib.pas`
   refuses a taken target (file, directory, or a symlink, dangling included) in
@@ -277,7 +277,7 @@ Debug menu enabled from live state).
   unrepaired engine, 13 of 19, the first file_move having replaced its target.
   The check-then-rename window is disclosed in docs/libraries/io.md, not closed:
   renameat2 is not bound by the RTL and the engine may not reach for it.
-`d56 d57 ~~d48~~ ~~n8~~ ~~d54~~ ~~d53~~ ~~d44~~ n12 d55 d51 ~~n17~~` (harness and gates), `~~d14~~ ~~n3~~ ~~d07~~ d12
+`d56 d57 ~~d48~~ ~~n8~~ ~~d54~~ ~~d53~~ ~~d44~~ ~~n12~~ d55 d51 ~~n17~~` (harness and gates), `~~d14~~ ~~n3~~ ~~d07~~ d12
 ~~d46~~ ~~d47~~ n26 m5 m6 m7 n10 ~~n7~~` (packages and I/O), `~~d18~~ ~~n1~~ ~~d45~~ ~~d08~~ ~~n9~~ d65 n14 m4 r3`
 (engine), `~~d42~~ ~~n19~~ n11 d13 m3` (GUI, VM, handles) -- `d10` and `n20` were in this
 list when it was written and were closed the same day, after it. Notes on the ones whose

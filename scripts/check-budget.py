@@ -125,7 +125,7 @@ SCAN_DIRS = [
 # THE EXPERIMENT HAS BEEN RUN, so the gap is now measured rather than suspected.
 # Adding the directory names five routines, of which
 #
-#     host/gui/libs/PhosphorCanvasLib.pas:114
+#     host/gui/libs/PhosphorCanvasLib.pas#f_bitmap
 #     b.SetSize(ArgI32(A[0]), ArgI32(A[1]))
 #
 # is the one that matters: bitmap@(20000,20000) commits 2.35 GB and

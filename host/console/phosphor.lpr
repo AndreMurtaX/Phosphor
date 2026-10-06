@@ -237,7 +237,7 @@ begin
 end;
 
 { THE LANGUAGE'S OWN ESCAPE SET, TAKEN FROM THE LEXER AND NOT FROM TASTE.
-  engine/PhosphorLexer.pas:10 lists what a source literal accepts -- \n \t \r \0
+  the header of engine/PhosphorLexer.pas lists what a source literal accepts -- \n \t \r \0
   \a \b \f \v \\ \" -- and tests/suite/46_string_escapes.bas is its authority. A
   breakpoint message and a string operand are arbitrary RUNTIME text, so rendering
   them with exactly that set means the diagnostic reads back as the literal that

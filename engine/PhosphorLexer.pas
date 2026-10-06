@@ -12,7 +12,7 @@
   for. THIS PARAGRAPH SAID THE OPPOSITE UNTIL 2026-09-08: it claimed the doubled
   quote was the only escape, "since '\' is now integer division". That was the
   frozen decision, and the oracle import SUPERSEDED it on 2026-09-02 -- see
-  docs/decisions.md:155, which records the supersession the comment never got.
+  docs/decisions.md#what-this-language-refuses-that-plan9basic-accepts, which records the supersession the comment never got.
   Outside a string literal '\' is still integer division, which is why a Windows
   path written as a literal needs its separators doubled. Identifiers carry an optional
   trailing type suffix ($ % @ ?) as part of the name; names are case-insensitive.

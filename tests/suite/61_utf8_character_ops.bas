@@ -1,7 +1,7 @@
 rem ---------------------------------------------------------------
 rem  CHARACTER OPERATIONS COUNT CHARACTERS.
 rem
-rem  docs/language-reference.md:372 -- "Strings are 1-based and
+rem  docs/language-reference.md#strings -- "Strings are 1-based and
 rem  Unicode-aware (character operations count codepoints)" -- and
 rem  byte access is deliberately a separate family (bytelen, byteat,
 rem  bytestr$, bytemid$).  Six places in the engine measured or cut

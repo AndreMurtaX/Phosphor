@@ -113,6 +113,111 @@ def tracked():
             new.decode('utf-8', 'replace').splitlines())
 
 
+# --- WHERE in a file, not just WHICH file (ledger n12) -------------------------
+# The rule above checks that a cited PATH exists and never looked at what followed
+# it. A `path:LINE` citation is the one shape no gate can check: a line number stays
+# in range while the code moves under it, so it goes on pointing somewhere, just not
+# where it meant. Measured when this landed: of seven line citations in live
+# sources, four pointed at the wrong place -- line 372 of the language reference was
+# cited twice for "Strings are 1-based and Unicode-aware" and holds `return n * r`,
+# and line 435 for PRINT USING's `!` and holds string splicing. None was past the end of its
+# file, so a range check would have passed all four.
+#
+# So a citation names a PLACE by its name: `path#Name`, where Name is a heading's
+# slug in a .md, or a routine the file defines -- both things this gate can look up,
+# and both of which survive an edit above them. PhosphorIDE reached the same rule by
+# the same road (tools/check-citations.py there).
+#
+# DATED records keep their line numbers. The playbook's ledger and the attack plan
+# say what was where ON THE DAY they were written; rewriting each anchor to today's
+# line would make the record wrong about its own date. A line there must still be
+# INSIDE the file -- the one thing a line number can be checked for -- and an open
+# item that a reader will act on carries a name anchor beside it.
+NAMED = re.compile(CITE.pattern + r'#([A-Za-z0-9_-]+)')
+LINED = re.compile(CITE.pattern + r':(\d+)')
+DATED = {
+    'docs/dev-agent-playbook.md',
+    'docs/attack-plan.md',
+}
+
+
+def md_slug(heading):
+    """GitHub's anchor for a markdown heading: lowercase, punctuation dropped,
+    spaces to hyphens (so an em dash between two words leaves two hyphens)."""
+    s = heading.strip().lower()
+    s = re.sub(r'[^\w\- ]', '', s)
+    return s.replace(' ', '-')
+
+
+def anchors_of(rel, cache={}):
+    """The names a `path#Name` citation may use for this file."""
+    if rel in cache:
+        return cache[rel]
+    try:
+        text = io.open(os.path.join(ROOT, rel), encoding='utf-8', errors='replace').read()
+    except (IOError, OSError):
+        cache[rel] = set()
+        return cache[rel]
+    if rel.endswith('.md'):
+        names = {md_slug(m.group(1)) for m in re.finditer(r'(?m)^#+\s+(.+?)\s*#*\s*$', text)}
+    else:
+        names = set()
+        for pat in (r'(?im)^\s*(?:class\s+)?(?:procedure|function|constructor|destructor)'
+                    r'\s+(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)',      # Pascal, PowerShell, BASIC
+                    r'(?m)^\s*def\s+([A-Za-z_]\w*)',             # Python
+                    r'(?m)^\s*([A-Za-z_]\w*)\s*\(\)\s*\{'):      # shell
+            names |= set(re.findall(pat, text))
+    cache[rel] = {n.lower() for n in names}
+    return cache[rel]
+
+
+def line_count(rel):
+    try:
+        return io.open(os.path.join(ROOT, rel), encoding='utf-8',
+                       errors='replace').read().count('\n') + 1
+    except (IOError, OSError):
+        return 0
+
+
+def check_places(files):
+    """`path#Name` must name something there; `path:LINE` is refused outside the
+    dated records, and inside them must at least be inside the file."""
+    bad = []
+    for rel in files:
+        if not rel.endswith(TEXT_EXT):
+            continue
+        try:
+            text = io.open(os.path.join(ROOT, rel), encoding='utf-8',
+                           errors='replace').read()
+        except (IOError, OSError):
+            continue
+        for m in NAMED.finditer(text):
+            path, name = m.group(1), m.group(2)
+            if path in EXEMPT or not os.path.isfile(os.path.join(ROOT, path)):
+                continue      # a missing path is reported by check_citations
+            if name.lower() not in anchors_of(path):
+                bad.append('%s cites %s#%s, and %s has no heading or routine by that '
+                           'name' % (rel, path, name, path))
+        for m in LINED.finditer(text):
+            path, line = m.group(1), int(m.group(2))
+            if path in EXEMPT or not os.path.isfile(os.path.join(ROOT, path)):
+                continue
+            if rel not in DATED:
+                bad.append('%s cites %s:%d -- a line number cannot be checked and '
+                           'drifts in silence; cite %s#Name (a heading or a routine)'
+                           % (rel, path, line, path))
+            elif line > line_count(path):
+                bad.append('%s cites %s:%d, past the end of a %d-line file'
+                           % (rel, path, line, line_count(path)))
+    if bad:
+        print('CITATIONS THAT DO NOT SAY WHERE:')
+        for b in bad:
+            print('  ' + b)
+        print('')
+        return 1
+    return 0
+
+
 def check_citations(files):
     """Every repo path named in a text file must exist, or be exempt with a reason."""
     on_disk = set(files)
@@ -366,14 +471,16 @@ def check_runners(files):
 def main():
     files = tracked()
     scanned, bad_cites = check_citations(files)
+    bad_places = check_places(files)
     probes, bad_probes = check_probes()
     runners, bad_runners = check_runners(files)
 
-    if bad_cites or bad_probes or bad_runners:
+    if bad_cites or bad_places or bad_probes or bad_runners:
         return 1
 
     print('crossrefs: every cited path in %d text files exists (%d retired or '
-          'oracle paths exempt with a reason), both suite runners build the '
+          'oracle paths exempt with a reason), every path#Name names something '
+          'there and no live text cites a line, both suite runners build the '
           'same %d probes, and %d runners refused an argument they do not know'
           % (scanned, len(EXEMPT), probes, runners))
     return 0

@@ -1749,7 +1749,7 @@ begin
         BYTE of a two-byte character -- `print using "[!]"; "ecole"` with an
         accented e wrote 5B C3 5D, a lone 0xC3 between the brackets. The comment
         above was right that a Char must not be concatenated and wrong that a
-        one-byte Copy is therefore safe: docs/language-reference.md:435 defines
+        one-byte Copy is therefore safe: docs/language-reference.md#print-using--formatted-output defines
         '!' as "its first character", and stdout gets raw bytes, so the pipe or
         the file was left holding half a codepoint. }
       if sv <> '' then Result := Result + Utf8Left(sv, 1) else Result := Result + ' ';

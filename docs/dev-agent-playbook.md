@@ -741,7 +741,7 @@ introduces a defect.
     **CLOSED by A3** -- the 17-digit ladder is in `engine/PhosphorValue.pas`. Struck
     2026-09-15, having been listed as open for months after it was fixed.
 12. **engine/libs/PhosphorConfigLib.pas:83** [medium] -- cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
-13. **engine/PhosphorEngine.pas:286** [low] -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
+13. **engine/PhosphorEngine.pas:286** [low] -- *(that line has since become SandboxRoot's declaration; the table is engine/PhosphorHandles.pas#ResetHandles, 2026-10-06)* -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
 14. ~~**host/packages/PhosphorGzipLib.pas:338** [low]~~ -- CLOSED 2026-10-06 with n3: decide-then-write, and the spent flag is an out parameter, not a global; scripts/probe_budget.lpr section (j). Original text: A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
 
 ### Crashes (4)
@@ -1328,7 +1328,7 @@ introduces a defect.
    count were already right, because `coverage.py` gates exactly those two numbers.
    Everything a gate does not read is what drifted, which is the whole argument for
    gates.
-62. **docs/embedding.md:298** [low] -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run. **The sentence was corrected on 2026-09-10** to name which two report the refusal (`file_readalltext$` sets 2, `dir_delete` sets 3) and to say the other two leave the slot alone; the finding stays OPEN because the better fix is probably in `PhosphorIoLib.pas`, where a refused write could set 3 like `file_delete` next door does, and that is a code change this documentation pass may not make.
+62. **docs/embedding.md:298** [low] -- *(the paragraph is now under docs/embedding.md#the-filesystem-sandbox, 2026-10-06)* -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run. **The sentence was corrected on 2026-09-10** to name which two report the refusal (`file_readalltext$` sets 2, `dir_delete` sets 3) and to say the other two leave the slot alone; the finding stays OPEN because the better fix is probably in `PhosphorIoLib.pas`, where a refused write could set 3 like `file_delete` next door does, and that is a code change this documentation pass may not make.
 63. ~~**docs/function-reference.md:88** [low]~~ -- CLOSED 2026-09-10, and the numbers
    were counted off the source rather than taken from the finding: Str is 64 names /
    69 entries, the page's twenty-three headings now sum to 828, and 715 names is
@@ -1359,7 +1359,7 @@ introduces a defect.
 
 ### Breakage (1)
 
-65. **engine/PhosphorCompiler.pas:2228** [low] -- `print`/`println` rejects the `:` statement separator wherever an item is expected -- after the bare keyword, and after a trailing `;` or `,` -- because lines 2228/2240 omit tkColon that all five sibling parsers, including `print using`, include
+65. **engine/PhosphorCompiler.pas:2228** [low] -- *(the print branch of engine/PhosphorCompiler.pas#ParseStatementBody, 2026-10-06)* -- `print`/`println` rejects the `:` statement separator wherever an item is expected -- after the bare keyword, and after a trailing `;` or `,` -- because lines 2228/2240 omit tkColon that all five sibling parsers, including `print using`, include
 
 ### Killed by the refuters (13, kept so they are not re-found)
 
@@ -1523,6 +1523,20 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · n12: a line number is the one citation a gate cannot check, so
+  cite a name.** check-crossrefs.py verified that a cited path exists and never
+  read the `:LINE` after it. Measured first: 160 line citations, 153 of them in
+  the two dated records and 7 in live sources -- and four of those seven already
+  pointed at the wrong place while staying inside their file, two of them at a
+  line of a factorial example where "Strings are 1-based" had been. A range check
+  would have passed all four, so the rule is not "check the line" but "do not use
+  one": live text cites `path#Name`, a heading slug or a routine the gate looks
+  up, and the dated records keep their lines as records of their date, bounded by
+  the file, with a name anchor beside each OPEN item a reader will act on. The
+  gate's own new comment was its first catch -- it quoted the bad citation as an
+  example, in the form it forbids.
+
 
 - **2026-10-06 · d48, n8, d54: two gates read a list somebody wrote, and both
   the list and the world had moved.** check-seams.py globbed host/**/*.lpr and so

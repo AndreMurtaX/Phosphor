@@ -218,7 +218,7 @@ function ValToStr(const V: TValue): String;                // locale-independent
 // The UTF-8 codepoint layer --------------------------------------------------
 { ONE PLACE THAT KNOWS WHERE A CHARACTER STARTS, AND WHY IT LIVES HERE.
 
-  docs/language-reference.md:372 -- "Strings are 1-based and Unicode-aware
+  docs/language-reference.md#strings -- "Strings are 1-based and Unicode-aware
   (character operations count codepoints)" -- is a promise made by the whole
   engine, not by one library. Three units have to keep it:
 

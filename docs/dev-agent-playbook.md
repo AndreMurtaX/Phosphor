@@ -1524,6 +1524,23 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-05 · d08 and n9 were one mis-scoping, fixed once; and two traps this
+  file names fired anyway.** fpjson reads ONE value and ignores the rest unless
+  joStrict is set -- read in `TBaseJSONReader.DoExecute` before anything was
+  changed, because narrowing the depth guard is only safe if the parser can never
+  recurse into the tail. Three scanners judged the whole text; one helper,
+  `JsonValueEnd`, now tells all three where the parser stops, and a value that
+  does not close answers the whole text, so a document the parser rejects is
+  handled exactly as before. Two things went wrong on the way, both already in
+  CLAUDE.md: a comment quoting the measured document put an object's braces
+  inside a `{ }` comment (Comment level 2, a warning, a red build), and the new
+  loops' bound `JsonValueEnd(AText)` was a shape check-budget.py could not read
+  as linear -- the loops keep their `Length` bound and `Break` at the value's
+  end, which is the same work and says so. The test's old-engine run was read
+  line by line before it counted: the one passing assertion was the no-tail
+  case, the three failures the tail cases, and the abort the n9 refusal.
+
+
 - **2026-10-05 · n6: the guard was right and its stated reason was not, and only
   a mutation showed it.** A watch evaluated through `CallFunction` from a stop
   left its fault in the script's `err()`; saving the three slots and restoring

@@ -48,7 +48,7 @@ difference when it matters.
 | --- | --- |
 | `json_object@() → handle` | a new empty object, owning its own tree |
 | `json_array@() → handle` | a new empty array |
-| `json_parse@(text$) → handle` | the document `text$` describes. Malformed text is a runtime error (`invalid json: ...`); so is empty or whitespace-only input, rather than a live handle onto nothing |
+| `json_parse@(text$) → handle` | the document `text$` describes. Malformed text is a runtime error (`invalid json: ...`); so is empty or whitespace-only input, rather than a live handle onto nothing. Only the FIRST value is read: anything after it is ignored, unread, and since 2026-10-05 nothing in that tail can affect the result either — before, a stray quote there switched off the escape repair and brackets there counted as nesting |
 | `json_null@() → handle` | a JSON null as a value in its own right |
 | `json_bool@(n) → handle` | a JSON boolean; any non-zero `n` is true |
 | `json_number@(n) → handle` | a JSON number — stored as an integer when `n` is whole and within int64 range, as a float otherwise |

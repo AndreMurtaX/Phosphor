@@ -784,10 +784,77 @@ begin Err := NoError(); Result := RegJson(TJSONArray.Create(), True, 1); end;
   JsonHasUEscape and JsonRespellText both hold the opening delimiter in a Char for
   exactly this reason, and say so in their own comments. This one was not brought
   along: the completeness half of the same defect, a third time. }
+{ WHERE THE PARSER STOPS READING: the index of the last character of the FIRST
+  JSON value in AText, or Length(AText) when that value does not close.
+
+  fpjson parses exactly one value and never looks past it unless joStrict is set
+  (jsonreader.pp, TBaseJSONReader.DoExecute: the garbage check is inside
+  `if joStrict in Options`), and t_json_parse does not set it -- so a document may
+  carry ANY tail, and the parser accepts it unread. Three scanners here used to
+  judge the whole text anyway, and each was wrong in its own direction (ledger
+  d08 and n9): the escape rewrite abandoned itself over an unmatched quote in the
+  tail and handed fpjson the original, restoring every escape defect it exists to
+  repair; the depth guard counted brackets in the tail and refused valid JSON;
+  and the \u probe engaged the rewrite for an escape the parser would never see.
+  All three now stop where the parser stops.
+
+  The scan is fpjson's own lexical rule, the same one the three scanners already
+  used: a literal opens on " or ' and closes on the SAME delimiter, backslash
+  escapes the next character, and brackets inside a literal are text. A value
+  that never closes -- an unterminated literal, an unbalanced bracket -- answers
+  the whole text, which is exactly what every caller did before, so a document
+  the parser will REJECT is treated as it always was. }
+function JsonValueEnd(const AText: String): Integer;
+var
+  i, depth: Integer;
+  delim: Char;
+  esc: Boolean;
+begin
+  Result := Length(AText);
+  i := 1;
+  while (i <= Length(AText)) and (AText[i] in [' ', #9, #10, #13]) do Inc(i);
+  if i > Length(AText) then Exit;
+  depth := 0;
+  delim := #0;
+  esc := False;
+  if not (AText[i] in ['{', '[', '"', '''']) then
+  begin
+    // A bare scalar: it ends at the first byte that cannot continue one.
+    while (i <= Length(AText)) and
+          not (AText[i] in [' ', #9, #10, #13, ',', ':', '[', ']', '{', '}', '"', '''']) do
+      Inc(i);
+    Exit(i - 1);
+  end;
+  while i <= Length(AText) do
+  begin
+    if delim <> #0 then
+    begin
+      if esc then esc := False
+      else if AText[i] = '\' then esc := True
+      else if AText[i] = delim then
+      begin
+        delim := #0;
+        if depth = 0 then Exit(i);       // a top-level string literal is done
+      end;
+    end
+    else
+      case AText[i] of
+        '"', '''': delim := AText[i];
+        '[', '{': Inc(depth);
+        ']', '}':
+          begin
+            Dec(depth);
+            if depth = 0 then Exit(i);   // the first value's closer
+          end;
+      end;
+    Inc(i);
+  end;
+end;
+
 function JsonNestsTooDeep(const AText: String; ALimit: Integer;
   out APos: Int64): Boolean;
 var
-  i, depth: Int64;
+  i, depth, stop: Int64;
   delim: Char;
   esc: Boolean;
 begin
@@ -795,8 +862,13 @@ begin
   depth := 0;
   delim := #0;                          // #0 = not inside a literal
   esc := False;
+  // Only as far as the parser reads: see JsonValueEnd (ledger n9). The loop keeps
+  // its Length bound -- the shape check-budget.py reads as linear in text the
+  // script already holds -- and leaves at the value's end.
+  stop := JsonValueEnd(AText);
   for i := 1 to Length(AText) do
   begin
+    if i > stop then Break;
     if delim <> #0 then
     begin
       if esc then esc := False
@@ -1264,15 +1336,20 @@ end;
   because no rewrite was ever started. }
 function JsonHasUEscape(const AText: String): Boolean;
 var
-  i: Integer;
+  i, stop: Integer;
   delim: Char;
   esc: Boolean;
 begin
   Result := False;
   delim := #0;                          // #0 = not inside a literal
   esc := False;
+  // Only as far as the parser reads: an escape in an unread tail is not one the
+  // rewrite has any reason to engage for. See JsonValueEnd, and the note in
+  // JsonNestsTooDeep on why the loop keeps its Length bound.
+  stop := JsonValueEnd(AText);
   for i := 1 to Length(AText) do
   begin
+    if i > stop then Break;
     if delim = #0 then
     begin
       if (AText[i] = '"') or (AText[i] = '''') then delim := AText[i];
@@ -1301,16 +1378,27 @@ function JsonRespellText(const AText: String; out AOut: String;
   out ABudget: Boolean): Boolean;
 var
   b: TTxtBuf;
-  i, runStart: Integer;
+  i, runStart, stop: Integer;
   delim: Char;
 begin
   AOut := '';
   Result := False;
   ABudget := False;
   TxtInit(b, True);
+  { ONLY THE VALUE THE PARSER READS IS RE-SPELLED; the tail after it is copied
+    byte for byte. Re-spelling the whole text meant a literal the rewrite could
+    not handle in a tail fpjson ignores -- an unmatched quote, an undefined
+    escape -- abandoned the entire rewrite, and the original went to fpjson with
+    every defect this exists to repair back in place: measured, a one-member
+    object whose string value held a u0000 escape between two letters answered
+    a 3-byte value alone and a 2-byte one, the NUL gone, with one quote appended
+    after its closing brace (ledger d08; tests/suite/74_json_tail.bas). The tail is still
+    passed on, unchanged, so a parser that one day reads it reads what the caller
+    wrote. }
+  stop := JsonValueEnd(AText);
   i := 1;
   runStart := 1;
-  while i <= Length(AText) do
+  while i <= stop do
   begin
     if (AText[i] <> '"') and (AText[i] <> '''') then begin Inc(i); Continue; end;
     delim := AText[i];

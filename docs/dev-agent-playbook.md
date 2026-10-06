@@ -1233,7 +1233,7 @@ introduces a defect.
 
 ### Test gaps (3)
 
-55. **tests/suite/49_on_error.bas:76** [medium] -- tests/suite/49_on_error.bas:76: the only assertion in the "error inside a called function" case is dead code -- h5 leaves by `goto done`, jumping past it (and past line 77, which leaves the VM stuck in-handler -- NOT, as the finder says, "h5 still installed")
+55. ~~**tests/suite/49_on_error.bas:76** [medium]~~ -- CLOSED 2026-10-06: the checks sit after the label both paths reach, and the golden counts every assert in the file. Original text: tests/suite/49_on_error.bas:76: the only assertion in the "error inside a called function" case is dead code -- h5 leaves by `goto done`, jumping past it (and past line 77, which leaves the VM stuck in-handler -- NOT, as the finder says, "h5 still installed")
 56. **host/gui/phosphorguitest.lpr:177** [low] -- The GUI test runner's hang watchdog calls Application.Terminate instead of ending the process, permanently disabling the message loop for every later app_run() in the same file
 57. **tests/PhosphorTestLib.pas:76** [low] -- tests/PhosphorTestLib.pas:76 -- assert_eq's relative 1e-12 epsilon loses all resolution above ~1e12, and because assert_int has no `:%%$` message overload, six live assertions that need a message fall back onto it (57_buffer.bas:412/415/416, gui/18_faults.bas:73, gui/19_argord_and_size.bas:122) where their expected literal can be mutated without failing
 
@@ -1523,6 +1523,20 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d55: a golden that counts passes can count the assertion that
+  never ran out of existence.** 49_on_error's "error inside a called function"
+  case put its only assert on the line after the faulting call, and the handler
+  left by `goto`, so the assert was jumped over every run -- and the golden said
+  `passed: 13`, faithfully, for a file with fourteen asserts. A golden written by
+  reading a run records the run. The count is now derived the other way: the
+  number of assert lines in the file, all of which must execute, and the checks
+  sit after the label both paths reach. The repair was watched failing twice,
+  and the second mutation said something the first could not: turning the
+  handler's `goto` into `resume next` also changes `r`, because resume next goes
+  back INTO risky() and the call completes -- which the new assertion on r was
+  there to see.
+
 
 - **2026-10-06 · n12: a line number is the one citation a gate cannot check, so
   cite a name.** check-crossrefs.py verified that a cited path exists and never

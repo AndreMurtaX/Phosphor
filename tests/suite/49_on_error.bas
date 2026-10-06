@@ -70,16 +70,29 @@ h4:
 skip4:
 
 test_case("onerror/an error inside a called function is caught")
+rem The checks sit AFTER `done:`, the one label both paths reach. Until
+rem 2026-10-06 the only assertion here sat on the line after the call --
+rem which the fault jumps over, since this handler leaves by `goto`, not
+rem `resume` -- so it never ran, and neither did the `on error goto 0`
+rem beside it; the golden counted 13 passes for a file with 14 asserts,
+rem recording the gap as correct (ledger d55). The handler is installed
+rem at TOP level, so going to a label abandons nothing: the fault already
+rem unwound risky()'s frame to the depth the handler was installed at.
+rem fcaught counts in ones from the handler and in hundreds from the line
+rem after the call, so 1 says the handler ran once and that line did not.
 fcaught = 0
+r = -1
 on error goto h5
 r = risky(0)
-assert_eq(fcaught, 1, "the handler caught an error raised inside risky()")
-on error goto 0
+fcaught = fcaught + 100
 goto done
 h5:
-  fcaught = 1
+  fcaught = fcaught + 1
   goto done
 done:
+on error goto 0
+assert_eq(fcaught, 1, "the handler caught an error raised inside risky(), once")
+assert_eq(r, -1, "and the assignment the fault interrupted never happened")
 
 test_case("onerror/call a handler function")
 rem `on error call func` runs func(code%, msg$) on a fault; returning 0 resumes

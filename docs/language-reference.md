@@ -73,6 +73,17 @@ println x
 42
 ```
 
+A `:` puts several statements on one line. A `:` with no statement after it is an
+*empty statement*, as in classic BASIC, and is accepted wherever a statement may
+begin — after a line number or a label, at the start or end of a line, twice in a
+row, inside a block or a one-line `if`:
+
+```basic
+x = 1 : : y = 2
+10 : println "after a line number"
+again: : println "after a label"
+```
+
 An explicit `end` stops the program early (handy before a block of subroutines or
 functions — see below). It ends the *program*, not the routine that says it: a
 host that has called into the script gets no return value from that call and can
@@ -202,6 +213,22 @@ endif
 
 ```
 pass
+```
+
+The one-line form governs **the rest of the line**: `if c then a : b` runs neither
+`a` nor `b` when `c` is false. An `else` on the same line ends the `then` branch,
+including a statement whose operand is optional — a bare `println`, a `print`
+ending in `;`, a bare `close` or `return`:
+
+```basic
+for i = 1 to 2
+  if i = 1 then println else println "second pass"
+next
+```
+
+```
+
+second pass
 ```
 
 > **Conditions must be comparisons or logical expressions.** A bare value is

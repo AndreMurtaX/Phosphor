@@ -1525,6 +1525,25 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · n14 and n27: where a statement begins and where it ends,
+  each said once.** An empty statement (`10 : print`, `x = 1 : : y = 2`) failed
+  in all three loops that sequence statements, because each expected a
+  statement after every `:`; and a bare println or return before a one-line
+  if's `else` failed because ten statements each carried their own copy of the
+  end-of-statement set, none of which knew `else`. The second fix is one
+  function, `AtStatementEnd`, and the ten copies now call it -- the copy that
+  was missing a case is the defect class, not the one statement where it was
+  noticed. The test runs both arms of every if, because an `else` that parsed
+  but jumped to the wrong place would print the wrong bytes and compile fine;
+  the old compiler fails it, and each of the twelve parts of the fix removed
+  ALONE fails it too, so no part is decoration -- after one round: the first
+  sweep had a survivor, `print using` with `else` straight after the format,
+  a shape the test had not written. One rule was kept on purpose:
+  `then else`, a branch with no text, is still refused -- a `:` stands for an
+  empty statement, an absence does not, because a missing branch is far more
+  often a line cut short than a choice.
+
+
 - **2026-10-07 · d65: a two-token fix, tested on the bytes, and the probe found
   the next defect and a runner bug.** print/println stopped at the end of a line
   and not at ":", in two places. The plan said a compile-acceptance test could

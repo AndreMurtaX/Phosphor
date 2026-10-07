@@ -76,6 +76,7 @@ type
       only the second one means "read another line". }
     FParseDone: Boolean;
     FExprDepth: Integer;
+    FInlineDepth: Integer; // > 0 inside a one-line IF; see AtStatementEnd
     FStmtDepth: Integer;   // block nesting; see THE PARSER'S DEPTH BUDGET
     FBool: Boolean;
     FVarNames: array of String;
@@ -121,6 +122,7 @@ type
       const ATerminators: array of String; AOpenLine: Integer);
     procedure Expect(AKind: TTokenKind; const AWhat: String);
     function IsKeyword(const AKw: String): Boolean;
+    function AtStatementEnd: Boolean;
     function CurIsTerm(const ATerms: array of String): Boolean;
     function VarIndex(const AName: String): Integer;
     function NewHiddenVar(AType: TVarType): Integer;
@@ -397,6 +399,20 @@ end;
 function TPhosphorCompiler.IsKeyword(const AKw: String): Boolean;
 begin
   Result := (FLex.Cur().Kind = tkIdent) and (FLex.Cur().StrVal = AKw);
+end;
+
+{ WHERE A STATEMENT ENDS, in one place (ledger n27). The end of the line, the
+  end of the input, a ':' separator -- and, inside a one-line IF, the `else`
+  that ends its THEN branch. A statement whose operand is optional (a bare
+  print/println, close, return) asks this before it reads one; each used to
+  carry its own copy of the first three, so `if c then println else ...`
+  took `else` for an expression and failed. An expression already stops at
+  `else` (it is an identifier no operator follows), which is why only the
+  optional-operand statements needed it. }
+function TPhosphorCompiler.AtStatementEnd: Boolean;
+begin
+  Result := (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) or
+            ((FInlineDepth > 0) and IsKeyword('else'));
 end;
 
 function TPhosphorCompiler.CurIsTerm(const ATerms: array of String): Boolean;
@@ -1479,7 +1495,8 @@ procedure TPhosphorCompiler.ParseBlockUntil(const ATerms: array of String);
 begin
   while not FFailed do
   begin
-    while FLex.Cur().Kind = tkEOL do FLex.Advance();
+    // an EMPTY statement -- a ':' where a statement may begin -- is skipped (n14)
+    while FLex.Cur().Kind in [tkEOL, tkColon] do FLex.Advance();
     if FLex.Cur().Kind = tkEOF then Exit;
     if CurIsTerm(ATerms) then Exit;
     ParseStatement();
@@ -1560,16 +1577,28 @@ begin
 end;
 
 { The statements an inline IF (or its ELSE) governs: everything up to the end of
-  the line, or up to an ELSE, with ':' between them. }
+  the line, or up to an ELSE, with ':' between them. A run of ':' is empty
+  statements (n14), before the first statement as between two; what is not
+  accepted is NOTHING AT ALL -- `then else` and `else` at the end of a line
+  still need a statement, or a ':' standing for an empty one, because a
+  branch with no text is far more often a line cut short than a choice.
+  FInlineDepth tells AtStatementEnd that `else` ends a statement here (n27). }
 procedure TPhosphorCompiler.ParseInlineStatements;
+var any: Boolean;
 begin
-  ParseStatement();
-  while (not FFailed) and (FLex.Cur().Kind = tkColon) do
-  begin
-    FLex.Advance();
-    if FLex.Cur().Kind in [tkEOL, tkEOF] then Break;
-    if IsKeyword('else') then Break;
-    ParseStatement();
+  Inc(FInlineDepth);
+  try
+    any := False;
+    while not FFailed do
+    begin
+      while FLex.Cur().Kind = tkColon do begin FLex.Advance(); any := True; end;
+      if any and ((FLex.Cur().Kind in [tkEOL, tkEOF]) or IsKeyword('else')) then Break;
+      ParseStatement();
+      any := True;
+      if FLex.Cur().Kind <> tkColon then Break;
+    end;
+  finally
+    Dec(FInlineDepth);
   end;
 end;
 
@@ -1834,7 +1863,7 @@ var ln: Integer;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance();   // 'trace'
-  if (FLex.Cur().Kind = tkEOL) or (FLex.Cur().Kind = tkEOF) or (FLex.Cur().Kind = tkColon) then
+  if AtStatementEnd() then
   begin Fail('''trace'' needs a value (0 turns tracing off)', ln); Exit; end;
   ParseExpr();
   if FFailed then Exit;
@@ -1853,7 +1882,7 @@ var ln, nops: Integer;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance();   // 'breakpoint'
-  if (FLex.Cur().Kind = tkEOL) or (FLex.Cur().Kind = tkEOF) or (FLex.Cur().Kind = tkColon) then
+  if AtStatementEnd() then
   begin Fail('''breakpoint'' needs a message', ln); Exit; end;
   ParseExpr();      // the message
   if FFailed then Exit;
@@ -1994,7 +2023,7 @@ var ln: Integer;
 begin
   ln := FLex.Cur().Line;
   FLex.Advance();   // 'close'
-  if FLex.Cur().Kind in [tkEOL, tkEOF, tkColon] then
+  if AtStatementEnd() then
   begin FProg.Emit(opCloseFile, 1, 0, ln); Exit; end;   // close every channel
   repeat
     if FLex.Cur().Kind = tkHash then FLex.Advance();
@@ -2036,7 +2065,7 @@ begin
   chTmp := NewHidden(vtNumber);
   EmitStoreHidden(chTmp, ln);
   if FLex.Cur().Kind = tkComma then FLex.Advance();   // the comma after #n
-  while (not FFailed) and not (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) do
+  while (not FFailed) and not AtStatementEnd() do
   begin
     EmitLoadHidden(chTmp, ln);
     ParseExpr();
@@ -2072,13 +2101,13 @@ begin
   if FLex.Cur().Kind in [tkSemicolon, tkComma] then FLex.Advance()
   else begin Fail('PRINT USING needs '';'' after the format', FLex.Cur().Line); Exit; end;
   argc := 0;
-  if not (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) then
+  if not AtStatementEnd() then
   begin
     ParseExpr(); Inc(argc);
     while (not FFailed) and (FLex.Cur().Kind in [tkSemicolon, tkComma]) do
     begin
       FLex.Advance();
-      if FLex.Cur().Kind in [tkEOL, tkEOF, tkColon] then Break;
+      if AtStatementEnd() then Break;
       ParseExpr(); Inc(argc);
     end;
   end;
@@ -2434,7 +2463,7 @@ begin
       begin
         // a function return carries a value (default of the return type if bare:
         // at end of line, before a ':' separator, or at end of input)
-        if (FLex.Cur().Kind = tkEOL) or (FLex.Cur().Kind = tkEOF) or (FLex.Cur().Kind = tkColon) then
+        if AtStatementEnd() then
           FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(FRetType)), 0, t.Line)
         else
           ParseExpr();
@@ -2633,8 +2662,9 @@ begin
       // `print "a"; : ...` took ':' for the start of an expression and failed
       // to compile; the other eight statement parsers already stop at it.
       // tests/classic/17_print_colon.bas pins the BYTES, not just that it
-      // compiles: a bare println still writes exactly one line break.
-      if not (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) then
+      // compiles: a bare println still writes exactly one line break. Both
+      // now ask AtStatementEnd, which adds a one-line IF's `else` (n27).
+      if not AtStatementEnd() then
       begin
         ParseExpr();
         FProg.Emit(opPrint, 0, 0, t.Line);
@@ -2646,7 +2676,7 @@ begin
             FProg.Emit(opPrint, 0, 0, t.Line);
           end;
           FLex.Advance();
-          if FLex.Cur().Kind in [tkEOL, tkEOF, tkColon] then Break;
+          if AtStatementEnd() then Break;
           ParseExpr();
           FProg.Emit(opPrint, 0, 0, t.Line);
         end;
@@ -2681,7 +2711,7 @@ begin
       // The value is a single literal, not an expression: anything other than
       // the end of the statement here (e.g. `const N = 2 + 3`) is rejected for
       // its own reason rather than a bare "expected end of line".
-      if not (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) then
+      if not AtStatementEnd() then
       begin
         Fail('const value must be a single number or string literal, not an expression', FLex.Cur().Line); Exit;
       end;
@@ -3007,17 +3037,17 @@ begin
     end;
     while (not FFailed) and (FLex.Cur().Kind <> tkEOF) do
     begin
-      if FLex.Cur().Kind = tkEOL then begin FLex.Advance(); Continue; end;
+      // a line break, or an EMPTY statement -- a ':' where a statement may
+      // begin, as in `x = 1 : : y = 2` or a line that opens with ':' (n14)
+      if FLex.Cur().Kind in [tkEOL, tkColon] then begin FLex.Advance(); Continue; end;
       // a leading line number is a label
       if FLex.Cur().Kind = tkInt then
       begin
         RecordLabel(IntToStr(FLex.Cur().IntVal), FProg.Count, FLex.Cur().Line);
         FLex.Advance();
-        if (FLex.Cur().Kind = tkEOL) or (FLex.Cur().Kind = tkEOF) then
-        begin
-          if FLex.Cur().Kind = tkEOL then FLex.Advance();
-          Continue;
-        end;
+        // `10 : println` -- the ':' is left for the top of the loop, which
+        // reads it as the empty statement it is (n14)
+        if FLex.Cur().Kind in [tkEOL, tkEOF, tkColon] then Continue;
       end;
       // a leading `name:` is a named label. An identifier alone is never a
       // statement, so `ident :' at the start of one can only be a label --

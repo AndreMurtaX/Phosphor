@@ -74,9 +74,11 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
 `case` label takes its own line. `on error goto LABEL` + `resume next`; `err()` and
 `errmsg$()` describe it.
 
-- **Not every assert has a message overload.** `assert_int` is `:%%` only — a third
-  argument raises `no function assert_int:%%$` and halts the file. Cite the reason in a
-  `rem` above.
+- **Every assert has a message overload** -- `assert_int:%%$` was the last, added
+  2026-10-06 (d57). Use it for an `int%` check: `assert_eq` compares as Doubles. Two
+  INTEGRAL values compare exactly there; a fraction gets four ULPs, or 1e-12 near
+  zero. Until that date `assert_eq` forgave 1e-12 of the magnitude, ±9007 at 2^53, so
+  a big-integer assertion written before it may have been a range check.
 - **A negative needs a REASON, not just a failure.** `tests/negative/manifest.txt`
   holds `name|reason` for every file there; the runner demands exit 2 (a rejection
   -- a failed assert is 1) and the diagnostic containing that reason. Derive the

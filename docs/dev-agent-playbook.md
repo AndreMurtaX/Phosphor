@@ -195,8 +195,8 @@ Rules, in order of how easily they are got wrong:
   "only these" — a reused reader silently extracts just the last filter. `UZ.Files.Clear`
   before `UnZipAllFiles`. (And a predicate returns 1/0, not a Pascal bool.
   `assert_true` today has all four forms — `:n`, `:n$`, `:?`, `:?$`
-  (`tests/PhosphorTestLib.pas:344`); `assert_int` is `:%%` ONLY, and a third
-  argument to it raises `no function assert_int:%%$` and halts the file.)
+  (`tests/PhosphorTestLib.pas:344`); `assert_int` was `:%%` ONLY until 2026-10-06,
+  when `:%%$` was added (d57) -- every assert now has a message form.)
 - **A CONSTANT-FOLDED CONDITION IS DEAD CODE ON ONE TARGET AND LIVE ON THE OTHER.**
   `if DirectorySeparator <> '/'` is a compile-time constant per target: on Linux FPC
   reports the body as unreachable and `-vewn` fails the build, while Windows compiles
@@ -225,9 +225,10 @@ Rules, in order of how easily they are got wrong:
   guarded out.
 - Never let a test hang the suite: any interactive/terminal/network call must have a
   non-interactive fast path (empty/0), proven with `< /dev/null` and a `timeout`.
-- **Not every assert has a message overload.** `assert_int` is `:%%` only (no `:%%$`);
-  passing a 3rd message arg raises `no function assert_int:%%$` and halts the file. When
-  citing a doc/reason on such an assert, put it in a `rem` above, not a 3rd argument.
+- **Every assert has a message overload** since 2026-10-06 (d57): `assert_int:%%$` was
+  the last one missing. Before that a third argument to `assert_int` raised `no function
+  assert_int:%%$`, and an int% check that wanted a message fell back on `assert_eq`,
+  whose tolerance then grew with the number -- see the d57 retrospective.
 - **A backslash in a string literal is an escape** (`"\2"` is a rejected unknown escape,
   `"\\"` collapses to one backslash) — keep backslashes out of assertion messages, or
   double them. This bites file paths and cited expressions in `msg$`.
@@ -1235,7 +1236,7 @@ introduces a defect.
 
 55. ~~**tests/suite/49_on_error.bas:76** [medium]~~ -- CLOSED 2026-10-06: the checks sit after the label both paths reach, and the golden counts every assert in the file. Original text: tests/suite/49_on_error.bas:76: the only assertion in the "error inside a called function" case is dead code -- h5 leaves by `goto done`, jumping past it (and past line 77, which leaves the VM stuck in-handler -- NOT, as the finder says, "h5 still installed")
 56. **host/gui/phosphorguitest.lpr:177** [low] -- The GUI test runner's hang watchdog calls Application.Terminate instead of ending the process, permanently disabling the message loop for every later app_run() in the same file
-57. **tests/PhosphorTestLib.pas:76** [low] -- tests/PhosphorTestLib.pas:76 -- assert_eq's relative 1e-12 epsilon loses all resolution above ~1e12, and because assert_int has no `:%%$` message overload, six live assertions that need a message fall back onto it (57_buffer.bas:412/415/416, gui/18_faults.bas:73, gui/19_argord_and_size.bas:122) where their expected literal can be mutated without failing
+57. ~~**tests/PhosphorTestLib.pas:76** [low]~~ -- CLOSED 2026-10-06: integral values compare exactly under assert_eq, fractions get four ULPs, and assert_int has its message form. Original text: tests/PhosphorTestLib.pas:76 -- assert_eq's relative 1e-12 epsilon loses all resolution above ~1e12, and because assert_int has no `:%%$` message overload, six live assertions that need a message fall back onto it (57_buffer.bas:412/415/416, gui/18_faults.bas:73, gui/19_argord_and_size.bas:122) where their expected literal can be mutated without failing
 
 ### Documentation errors (6)
 
@@ -1523,6 +1524,22 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d57: the harness had a tolerance that grew with the number, and
+  a missing overload that pushed tests onto it.** assert_eq forgave 1e-12 of the
+  larger magnitude -- +/-9007 at 2^53 -- so every big-integer assertion in the
+  tree was a range check; and assert_int, the exact one, had no message form,
+  which is how those assertions ended up on assert_eq. Both mutations the plan
+  named were run against the OLD harness first and SURVIVED -- the defect,
+  measured -- then failed under the new one. The new rule is two questions, not
+  one tighter number: two integral values are compared exactly, and only a
+  fraction gets slack, four ULPs or 1e-12 near zero. Every runner stayed green,
+  so no legitimate assertion had been leaning on the slack; and 00_harness now
+  pins the slack that must survive, so a future tightening that refused 0.1 + 0.2
+  = 0.3 fails there instead of in somebody's test. The overload went in a
+  separate commit, as decision 13 asked, because it retires an instruction
+  CLAUDE.md gave every session.
+
 
 - **2026-10-06 · d51: a test of a guard must ask the guard something.** The
   hostmode case "the sandbox root reaches a GUI program" ran a fixture that

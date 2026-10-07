@@ -119,16 +119,16 @@ rem the same coercion. The refusals -- `const s$ = 5` and friends -- live in
 rem tests/negative, because a compile error cannot be asserted from inside the
 rem program it kills. This holds the half that still compiles.
 rem
-rem assert_int is `:%%` ONLY, so it takes no message argument -- a third one
-rem raises `no function assert_int:%%$` and halts the file. It is used here
-rem precisely because `%` accepts an int% and NOTHING ELSE: it asserts the KIND
-rem the constant holds, not merely the number it prints. Before the fix
-rem ROUNDED% held a Double and this line failed with `no function assert_int:n%`.
+rem assert_int is used here precisely because `%` accepts an int% and NOTHING
+rem ELSE: it asserts the KIND the constant holds, not merely the number it
+rem prints. Before the fix ROUNDED% held a Double and this line failed with
+rem `no function assert_int:n%`. (It took no message until 2026-10-06, when
+rem `:%%$` was added -- ledger d57 -- and these two say why they are here.)
 const ROUNDED% = 1.5
-assert_int(ROUNDED%, 2)
+assert_int(ROUNDED%, 2, "a % const rounds its literal and holds an int%")
 assert_eq(ROUNDED% * 2, 4, "the rounded value is what arithmetic sees")
 const WHOLE% = 7
-assert_int(WHOLE%, 7)
+assert_int(WHOLE%, 7, "and a whole literal is an int% as written")
 rem And the unsuffixed and `$` forms are untouched: a plain name still takes
 rem either kind of number, and a `$` name still takes text.
 const EXACT = 2.5

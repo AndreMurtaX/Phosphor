@@ -287,6 +287,19 @@ begin
   Result := ValInt(Ord(ok));
 end;
 
+{ AND ITS MESSAGE FORM (ledger d57). assert_int was `:%%` alone, so an int% check
+  that wanted to say why had two choices: put the reason in a rem, or fall back on
+  assert_eq -- which compared the two as Doubles with a slack that grew with the
+  number. The second is how big-integer assertions became range checks. }
+function t_assert_int_msg(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var ok: Boolean;
+begin
+  Err := NoError();
+  ok := Args[0].Int = Args[1].Int;
+  Check(ok, Args[2].Str, 'expected int ' + IntToStr(Args[1].Int) + ', got ' + IntToStr(Args[0].Int));
+  Result := ValInt(Ord(ok));
+end;
+
 // The checked add of two int64s overflows -- a catchable result, not a raise
 // and not a silent double.
 function t_assert_add_overflows(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -400,6 +413,7 @@ begin
   Reg.Add('assert_near:nnn$', @t_assert_near_msg);
 
   Reg.Add('assert_int:%%',            @t_assert_int);
+  Reg.Add('assert_int:%%$',           @t_assert_int_msg);
   Reg.Add('assert_add_overflows:%%',  @t_assert_add_overflows);
 
   Reg.Add('probe_new_a@:',   @t_probe_new_a);

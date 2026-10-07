@@ -1525,6 +1525,22 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · m5 measured: two controls caught two broken measurements
+  before either became a finding.** The question was one symbol in one library,
+  and the first answer was wrong twice. `nm -D` lists versioned names, so an
+  exact match reported every symbol absent -- caught only because `SSL_ctrl` and
+  `X509_free`, which certainly exist, were in the list on purpose. Then a TLS
+  probe printed "connected" having opened nothing: `TInetSocket.Create` connects
+  only when it is given NO handler, and the tell was that `DoVerifyCert`'s output
+  never appeared. The measurement that survived both is the one the plan feared:
+  FPC's peer-certificate binding is nil on OpenSSL 3 (Linux) and live on 1.1
+  (Windows, where Git's copy happens to be on PATH), so a hostname check built on
+  it would pass every Windows run and be wrong on every Linux one. The same probe
+  showed the symbols bound by hand work on both, which is what keeps m5 medium.
+  Put a value that must pass and one that must fail in every measurement, not
+  only in every test.
+
+
 - **2026-10-07 · n28: the same defect, fixed under one name and left under
   another.** dir_create and dir_delete stopped answering 1 regardless a month
   ago; mkdir, rmdir, chdir and kill are the same operations under their classic

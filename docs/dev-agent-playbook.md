@@ -1525,6 +1525,27 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · m4: the cap was declined, and the clock kept one.** The item
+  was "prose plus a test past 513", and the obvious test was one .bas with more
+  globals. Measuring the size first found the real defect: every name table was
+  a front-to-back scan per name, so the count was free and the cost was
+  quadratic -- 32 000 globals, 2.67 s; a megabyte of source would have taken
+  minutes, with no ceiling anyone had written. The same scan sat in four tables,
+  and one was on the RUNTIME path (FindUserFunc, at every call), so the fix is
+  one index unit used four times, not one table patched. A cost is tested as a
+  RATIO, not a time: the small program prepared eight times against the big one
+  once, best of three, so a loaded machine must be wrong in the same direction
+  six times to fail it; each table given back its scan alone fails it on that
+  table and only that one. The meaning half of the sweep was more instructive:
+  all three `Clear` mutations SURVIVED. Two were each other's redundancy (the
+  end of one function and the start of the next clear the same index), so one
+  went and the other is now watched failing. The third was a real gap -- a
+  reused compiler, which the code promises and nothing in the tree exercises,
+  because the engine builds a fresh compiler per call. A mutation that survives
+  because the code is redundant and one that survives because nothing looks are
+  different findings; tell them apart before writing either test.
+
+
 - **2026-10-07 · r3: a name has an identity and a spelling, and the first
   version guessed how far apart they sit.** The lexer folded every identifier,
   so a debugger showed `greet$` for `Greet$` and every variable in lowercase. The

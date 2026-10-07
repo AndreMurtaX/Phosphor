@@ -123,7 +123,7 @@ and is unverifiable until the engine exists).
    06/08 reject with the strict-boolean diagnostic; a jump-backpatch nesting probe
    passes.
 
-5. **User functions.** *(DONE 2026-09-01 — functions; global cap deferred.)*
+5. **User functions.** *(DONE 2026-09-01 — functions; the global cap was decided against, see below.)*
    `function name(params) [local ...] ... endfunction`, `return <expr>`,
    recursion, per-call frames (params + locals isolated from globals: a name in
    the local list is a frame slot, any other name is a global). Calls resolve to
@@ -133,7 +133,10 @@ and is unverifiable until the engine exists).
    (`func/pointer-return`) and the string lib `stri$` (`func/mixed-args`) for the
    rest. **Both arrived at step 8** and `eb4171d` replaced the subset with the
    full `tests/suite/03_functions.bas`, which is what the manifest runs now. The global cap (negative 01 / 13_global_limit)
-   is deferred with those files; its value is Claude/council's to decide.
+   was decided the other way the same day -- there is none; see item 5 under
+   STILL PENDING below and [decisions.md](decisions.md) "No fixed global-variable
+   cap". `13_global_limit` now declares 1027 globals, and since 2026-10-07 every
+   name table is indexed, so the count costs what it weighs.
    **Original gate:** `03_functions` green; negative 01 rejects for the intended
    reason; a recursion/frame-teardown probe shows no local leakage.
 
@@ -287,5 +290,3 @@ STILL PENDING (needed before its step, not before increment 1):
    globals live in a dynamic array sized from the program, so there is no ceiling
    to pick and no negative test to write. Kept here struck through rather than
    deleted, because a plan that quietly loses an item cannot be audited.
-   value or choose a new one, and enforce at compile or run time? Needed before
-   step 5.

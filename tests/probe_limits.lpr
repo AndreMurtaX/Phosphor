@@ -1010,6 +1010,200 @@ begin
 end;
 
 { The same, but asserting that the exception DOES escape -- the default. }
+{ THERE IS NO CAP ON A PROGRAM'S NAMES, AND THEY COST WHAT THEY WEIGH (ledger m4).
+
+  docs/decisions.md ("No fixed global-variable cap") declined Plan9Basic's 513:
+  globals live in a dynamic array addressed by a 32-bit index. Two things make
+  that true rather than merely stated, and both are asserted here.
+
+  THE COUNT. 65 537 globals -- one past anything a 16-bit index could address --
+  compile, run, and the last one holds its value. tests/suite/13_global_limit.bas
+  only ever reached 513, which is exactly the count a reintroduced 513 cap still
+  accepts.
+
+  THE COST. Every name table was a front-to-back scan per name, so N globals
+  compiled in N^2/2 compares: 16 000 took 0.70 s and 32 000 took 2.67 s on the
+  console host, and labels, locals and user functions grew the same way. A cap
+  nobody wrote was being enforced by the clock. Each table is indexed now
+  (PhosphorNameIndex), and the check is a RATIO, because a ratio survives a slow
+  or loaded machine and an absolute time does not: the small program is prepared
+  EIGHT times, the program eight times its size once. Linear, the two take the
+  same time; quadratic, the second takes eight times as long. The threshold is 3,
+  best of three trials each, so a loaded machine has to be wrong in the same
+  direction six times to fail it. GetTickCount64 ticks every ~16 ms on Windows,
+  which is why both sides are sized to take a few hundred. }
+function NamesProgram(AKind: Char; AN: Integer): String;
+var
+  sl, names: TStringList;
+  i: Integer;
+  s: String;
+begin
+  sl := TStringList.Create();
+  try
+    sl.LineBreak := LF;
+    case AKind of
+      'g': begin
+             for i := 1 to AN do sl.Add('v' + IntToStr(i) + ' = ' + IntToStr(i));
+           end;
+      'l': begin
+             // joined by the list, not by AN concatenations: the generator must
+             // not be the quadratic thing in a probe that measures for one
+             names := TStringList.Create();
+             try
+               names.Delimiter := ',';
+               names.StrictDelimiter := True;
+               for i := 1 to AN do names.Add('a' + IntToStr(i));
+               s := 'function big(x) local ' + names.DelimitedText;
+             finally
+               names.Free;
+             end;
+             sl.Add(s);
+             for i := 1 to AN do sl.Add('  a' + IntToStr(i) + ' = x');
+             sl.Add('  return a' + IntToStr(AN));
+             sl.Add('endfunction');
+             sl.Add('y = big(7)');
+           end;
+      'j': begin
+             sl.Add('goto l1');
+             for i := 1 to AN do
+             begin
+               sl.Add('l' + IntToStr(i) + ':');
+               if i < AN then sl.Add('goto l' + IntToStr(i + 1)) else sl.Add('goto done');
+             end;
+             sl.Add('done:');
+           end;
+      'f': begin
+             sl.Add('t = 0');
+             for i := 1 to AN do sl.Add('t = t + f' + IntToStr(i) + '()');
+             sl.Add('end');
+             for i := 1 to AN do
+             begin
+               sl.Add('function f' + IntToStr(i) + '()');
+               sl.Add('  return 1');
+               sl.Add('endfunction');
+             end;
+           end;
+    end;
+    Result := sl.Text;
+  finally
+    sl.Free;
+  end;
+end;
+
+{ Milliseconds to prepare ASource ATimes over, best of three trials; -1 if a
+  prepare failed, which is its own failure and must not read as fast. }
+function PrepareMs(const ASource: String; ATimes: Integer): Int64;
+var
+  trial, k: Integer;
+  t0, dt: QWord;
+  eng: TPhosphorEngine;
+begin
+  Result := High(Int64);
+  for trial := 1 to 3 do
+  begin
+    t0 := GetTickCount64();
+    for k := 1 to ATimes do
+    begin
+      eng := TPhosphorEngine.Create();
+      try
+        if eng.Prepare(ASource) <> 0 then Exit(-1);
+      finally
+        eng.Free;
+      end;
+    end;
+    dt := GetTickCount64() - t0;
+    if Int64(dt) < Result then Result := Int64(dt);
+  end;
+end;
+
+procedure CheckNameTablesScale;
+const
+  Kinds: array[0..3] of Char = ('g', 'l', 'j', 'f');
+  KindName: array[0..3] of String = ('globals', 'locals of one function',
+                                     'labels, each reached by a goto',
+                                     'user functions, each called once');
+  Small = 4000;
+var
+  eng: TPhosphorEngine;
+  prog: TProgram;
+  vm: TPhosphorVM;
+  k: Integer;
+  big, small8, limit: Int64;
+  v: TValue;
+begin
+  eng := TPhosphorEngine.Create();
+  try
+    if eng.Prepare(NamesProgram('g', 65537)) <> 0 then
+      Report(False, '65 537 globals prepare (' + eng.ErrorMessage + ')')
+    else
+    begin
+      prog := eng.PreparedProgram;
+      vm := eng.PreparedVM;
+      Report(prog.VarCount = 65537, '65 537 globals: one past a 16-bit index, all in the table');
+      Report(prog.GlobalName(prog.VarCount - 1) = 'v65537', '  and the last is v65537');
+      v := vm.DbgGlobal(prog.VarCount - 1);
+      Report(ValToStr(v) = '65537', '  and it holds 65537 after the run');
+    end;
+  finally
+    eng.Free;
+  end;
+
+  for k := 0 to High(Kinds) do
+  begin
+    small8 := PrepareMs(NamesProgram(Kinds[k], Small), 8);
+    big := PrepareMs(NamesProgram(Kinds[k], Small * 8), 1);
+    if (small8 < 0) or (big < 0) then
+    begin
+      Report(False, KindName[k] + ': a scaling program failed to prepare');
+      Continue;
+    end;
+    { The small side can measure 0 on a fast machine; a floor of one tick keeps
+      the comparison meaningful rather than dividing by it. }
+    limit := 3 * small8;
+    if limit < 48 then limit := 48;
+    // Always printed: the numbers are the evidence, pass or fail.
+    Writeln(Format('scale: %s: %d ms for %d once, %d ms for %d eight times (limit %d)',
+                   [KindName[k], big, Small * 8, small8, Small, limit]));
+    Report(big <= limit, KindName[k] + ' cost what they weigh: eight times the names, ' +
+                         'not sixty-four times the time');
+  end;
+end;
+
+{ A REUSED COMPILER STARTS FROM NO NAMES. The indexes are the compiler's, not the
+  program's, so they outlive a Compile -- and TPhosphorEngine makes a fresh
+  compiler per call, so nothing in the tree would notice if they were not
+  cleared. An embedder holding one would: the second program's globals would
+  resolve to the first program's slots, and a label both programs use would be
+  refused as a duplicate. Derived from the two listings, not a run: B declares
+  `b` before `a`, so its table is b, a; and B's `again:` is its only label. }
+procedure CheckReusedCompilerNames;
+const
+  ProgA = 'a = 1' + LF + 'b = 2' + LF + 'again:' + LF + 'end' + LF;
+  ProgB = 'b = 3' + LF + 'a = 4' + LF + 'again:' + LF + 'end' + LF;
+var
+  comp: TPhosphorCompiler;
+  pa, pb: TProgram;
+begin
+  comp := TPhosphorCompiler.Create();
+  pa := nil; pb := nil;
+  try
+    Report(comp.Compile(ProgA, pa), 'reused compiler: the first program compiles');
+    Report(comp.Compile(ProgB, pb),
+           'reused compiler: the second compiles -- its label is not the first one''s (' +
+           comp.ErrorMessage + ')');
+    if pb <> nil then
+    begin
+      Report(pb.VarCount = 2, 'reused compiler: the second program has its own two globals');
+      Report((pb.GlobalName(0) = 'b') and (pb.GlobalName(1) = 'a'),
+             'reused compiler: in its own order, b then a');
+    end;
+  finally
+    pa.Free;
+    pb.Free;
+    comp.Free;
+  end;
+end;
+
 procedure CheckFaultEscapes(const AName, ASource: String);
 var
   eng: TPhosphorEngine;
@@ -1712,6 +1906,9 @@ begin
            'next' + LF +
            'goto fin' + LF + 'oops:' + LF + 'resume next' + LF + 'fin:' + LF,
            32 * 1024 * 1024, 'memory limit exceeded');
+
+  CheckNameTablesScale();
+  CheckReusedCompilerNames();
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

@@ -27,7 +27,7 @@ unit PhosphorCompiler;
 interface
 
 uses
-  SysUtils, PhosphorErrors, PhosphorValue, PhosphorOpcodes, PhosphorLexer;
+  SysUtils, PhosphorErrors, PhosphorValue, PhosphorOpcodes, PhosphorLexer, PhosphorNameIndex;
 
 type
   { WHERE A STATEMENT'S HIDDEN TEMPORARY LIVES, and it is not a property of the
@@ -106,6 +106,10 @@ type
     FLabelName: array of String;
     FLabelPos: array of Integer;
     FLabelCount: Integer;
+    { The three name tables above, indexed (docs/decisions.md, "No fixed
+      global-variable cap"): each was a front-to-back scan per name, so N globals
+      compiled in N^2/2 compares. Cleared with the table each one indexes. }
+    FVarIdx, FLocalIdx, FLabelIdx: TNameIndex;
     FGotoInstr: array of Integer;
     FGotoName: array of String;
     { THE LINE OF THE JUMP, remembered because the only place that can report on
@@ -190,6 +194,7 @@ type
     procedure ParseStatement;      // the depth-guarded door; calls the body below
     procedure ParseStatementBody;
   public
+    destructor Destroy; override;
     function Compile(const ASource: String; out AProg: TProgram): Boolean;
     property ErrorMessage: String read FErr;
     property ErrorLine: Integer read FErrLine;
@@ -438,10 +443,9 @@ begin
 end;
 
 function TPhosphorCompiler.VarIndex(const AName: String): Integer;
-var i: Integer;
 begin
-  for i := 0 to FVarCount - 1 do
-    if FVarNames[i] = AName then Exit(i);
+  Result := FVarIdx.Find(AName);
+  if Result >= 0 then Exit;
   if FVarCount = Length(FVarNames) then
   begin
     SetLength(FVarNames, (FVarCount + 1) * 2);
@@ -451,6 +455,7 @@ begin
   FVarNames[FVarCount] := AName;
   FVarSpellings[FVarCount] := SpellingFor(AName);
   FVarTypes[FVarCount] := VarTypeOf(AName);
+  FVarIdx.Put(AName, FVarCount);
   Result := FVarCount;
   Inc(FVarCount);
 end;
@@ -513,12 +518,10 @@ begin
 end;
 
 function TPhosphorCompiler.LocalIndex(const AName: String): Integer;
-var i: Integer;
 begin
   Result := -1;
   if not FInFunction then Exit;
-  for i := 0 to FLocalCount - 1 do
-    if FLocalNames[i] = AName then Exit(i);
+  Result := FLocalIdx.Find(AName);
 end;
 
 function TPhosphorCompiler.ConstIndex(const AName: String): Integer;
@@ -540,6 +543,7 @@ begin
   FLocalNames[FLocalCount] := AName;
   FLocalSpellings[FLocalCount] := SpellingFor(AName);
   FLocalTypes[FLocalCount] := VarTypeOf(AName);
+  FLocalIdx.Put(AName, FLocalCount);
   Inc(FLocalCount);
 end;
 
@@ -654,6 +658,7 @@ begin
   Expect(tkLParen, '''(''');
   if FFailed then Exit;
   FLocalCount := 0;
+  FLocalIdx.Clear();   // this function's names only: the index is the table's, and the table starts here
   paramCount := 0;
   if FLex.Cur().Kind <> tkRParen then
     while not FFailed do
@@ -823,14 +828,12 @@ end;
   found here, at the second spelling, which is the one the author has to delete.
   Both callers -- the two arms of Compile's top-level loop -- hold it. }
 procedure TPhosphorCompiler.RecordLabel(const AName: String; APos, ALine: Integer);
-var l: Integer;
 begin
-  for l := 0 to FLabelCount - 1 do
-    if FLabelName[l] = AName then
-    begin
-      Fail('duplicate label ' + AName, ALine);
-      Exit;
-    end;
+  if FLabelIdx.Find(AName) >= 0 then
+  begin
+    Fail('duplicate label ' + AName, ALine);
+    Exit;
+  end;
   if FLabelCount = Length(FLabelName) then
   begin
     SetLength(FLabelName, (FLabelCount + 1) * 2);
@@ -838,6 +841,7 @@ begin
   end;
   FLabelName[FLabelCount] := AName;
   FLabelPos[FLabelCount] := APos;
+  FLabelIdx.Put(AName, FLabelCount);
   Inc(FLabelCount);
 end;
 
@@ -939,8 +943,8 @@ begin
   for g := 0 to FGotoCount - 1 do
   begin
     pos := -1;
-    for l := 0 to FLabelCount - 1 do
-      if FLabelName[l] = FGotoName[g] then begin pos := FLabelPos[l]; Break; end;
+    l := FLabelIdx.Find(FGotoName[g]);
+    if l >= 0 then pos := FLabelPos[l];
     if pos < 0 then
     begin
       Fail('undefined label ' + FGotoName[g], FGotoLine[g]);
@@ -3019,6 +3023,14 @@ begin
   FProg.Emit(opPop, 0, 0, t.Line);
 end;
 
+destructor TPhosphorCompiler.Destroy;
+begin
+  FVarIdx.Free;
+  FLocalIdx.Free;
+  FLabelIdx.Free;
+  inherited Destroy();
+end;
+
 function TPhosphorCompiler.Compile(const ASource: String; out AProg: TProgram): Boolean;
 begin
   FFailed := False; FErr := ''; FErrLine := 0;
@@ -3039,6 +3051,12 @@ begin
   FLabelCount := 0; FGotoCount := 0; FBool := False;
   FInFunction := False; FLocalCount := 0; FRetType := vtNumber;
   FConstCount := 0;
+  // Created on the first Compile and cleared on every one: a reused compiler
+  // must not find the last program's names, which the counts above reset.
+  if FVarIdx = nil then FVarIdx := TNameIndex.Create();
+  if FLocalIdx = nil then FLocalIdx := TNameIndex.Create();
+  if FLabelIdx = nil then FLabelIdx := TNameIndex.Create();
+  FVarIdx.Clear(); FLocalIdx.Clear(); FLabelIdx.Clear();
   FProg := TProgram.Create();
   FLex := TLexer.Create(ASource);
   try

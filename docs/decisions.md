@@ -359,8 +359,18 @@ as a language rule with no technical justification — exactly the kind of thing
 "not a port" means to avoid.
 
 Consequences:
-- `tests/suite/13_global_limit.bas` (513 globals must compile) is imported and
-  passes — Phosphor compiles it with room to spare.
+- `tests/suite/13_global_limit.bas` is imported, and since 2026-10-07 goes past
+  the cap it came from: 1027 globals. It used to stop at exactly 513, the one
+  count a reintroduced 513 cap still accepts.
+- **The count was free and the COST was not, until 2026-10-07.** Every name table
+  -- globals, a function's locals, labels, user functions -- was a front-to-back
+  scan per name, so N globals compiled in N^2/2 compares: 16 000 took 0.70 s and
+  32 000 took 2.67 s, and the other three grew the same way. No cap was written
+  and the clock enforced one anyway. Each table is indexed now
+  (`engine/PhosphorNameIndex.pas`): 131 072 globals compile and run in 0.42 s, and
+  `tests/probe_limits.lpr#CheckNameTablesScale` asserts eight times the names
+  take no more than three times the time, for all four tables, and that 65 537
+  globals -- past any 16-bit index -- compile and hold their values.
 - `tests/negative/01_too_many_globals.bas` is **NOT** imported: it guards a limit
   Phosphor deliberately does not have. If a cap is ever wanted (say for a future
   on-disk format), it would be a large, explicit, documented number — not 513.

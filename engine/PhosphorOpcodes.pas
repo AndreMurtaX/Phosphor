@@ -25,7 +25,7 @@ unit PhosphorOpcodes;
 interface
 
 uses
-  SysUtils, PhosphorValue;
+  SysUtils, PhosphorValue, PhosphorNameIndex;
 
 type
   { Append only. The literal after each name IS the on-disk opcode number. }
@@ -156,6 +156,10 @@ type
       one comes OUT. }
     FVarNames: array of String;
     FVarSpellings: array of String;
+    { name + '/' + arity -> UserFuncs index. FindUserFunc runs at every opCall
+      and once per call site when a .pbc is validated, and it was a scan over
+      every function. Kept by AddUserFunc, the only writer of a Name. }
+    FFuncIdx: TNameIndex;
     FHasNames: Boolean;
     FInstrs: array of TInstr;
     FCount: Integer;
@@ -310,12 +314,14 @@ constructor TProgram.Create;
 begin
   inherited Create();
   Consts := TConstPool.Create();
+  FFuncIdx := TNameIndex.Create();
   FCount := 0;
 end;
 
 destructor TProgram.Destroy;
 begin
   Consts.Free;
+  FFuncIdx.Free;
   inherited Destroy();
 end;
 
@@ -369,6 +375,7 @@ begin
   if UserFuncCount = Length(UserFuncs) then
     SetLength(UserFuncs, (UserFuncCount + 1) * 2);
   UserFuncs[UserFuncCount].Name := LowerCase(AName);
+  FFuncIdx.Put(LowerCase(AName) + '/' + IntToStr(AParamCount), UserFuncCount);
   UserFuncs[UserFuncCount].Entry := AEntry;
   UserFuncs[UserFuncCount].ParamCount := AParamCount;
   CopyLocalTable(UserFuncs[UserFuncCount], ALocalTypes, ALocalNames);
@@ -591,13 +598,9 @@ begin
 end;
 
 function TProgram.FindUserFunc(const AName: String; AArgCount: Integer): Integer;
-var i: Integer; ln: String;
 begin
-  ln := LowerCase(AName);
-  for i := 0 to UserFuncCount - 1 do
-    if (UserFuncs[i].Name = ln) and (UserFuncs[i].ParamCount = AArgCount) then
-      Exit(i);
-  Result := -1;
+  // '/' cannot occur in an identifier, so name and arity cannot run together.
+  Result := FFuncIdx.Find(LowerCase(AName) + '/' + IntToStr(AArgCount));
 end;
 
 procedure TProgram.AddData(const V: TValue);

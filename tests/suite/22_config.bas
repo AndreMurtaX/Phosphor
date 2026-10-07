@@ -125,9 +125,11 @@ rem larger, deterministically, on every machine, which is exactly why a
 rem byte-exact golden over an .ini file never noticed.
 rem
 rem The differences are asserted to be EXACTLY zero rather than comparing the
-rem values: assert_eq's numeric form allows a relative 1e-12, and the old error
-rem here was 2.4e-15, so the obvious spelling of this test passes against the
-rem defect it was written for.
+rem values: assert_eq's numeric form allowed a relative 1e-12 when this was
+rem written, and the old error here was 2.4e-15, so the obvious spelling of this
+rem test passed against the defect it was written for. Since 2026-10-06 (d57)
+rem two integral values compare exactly, so it would not today -- the
+rem difference form stays because it says what is being measured.
 id% = 1234567890123457
 cfg_setns@(c@, "userid", id%)
 assert_eq(cfg_getns(c@, "userid", -1) - 1234567890123457, 0, "an exact integer past 15 digits survives")

@@ -74,12 +74,34 @@ begin
   Result := NumToInv(V);
 end;
 
+{ WHAT assert_eq FORGIVES, AND WHAT IT MUST NOT (ledger d57).
+
+  It used to forgive 1e-12 of the larger magnitude, with 1.0 as the floor -- a
+  RELATIVE tolerance, so the slack grew with the number. At 9.007e15, where this
+  tree asserts 64-bit buffer reads and PtrInt properties, that is +/-9007: a
+  mutation of nine thousand passed, and every big-integer assertion in the suite
+  was a range check wearing an equals sign.
+
+  Two cases now, because they are two different questions:
+    * BOTH VALUES INTEGRAL -- equality between integers has no rounding to
+      forgive, so it is exact. This is what the big-integer assertions mean.
+    * OTHERWISE -- a computed fraction may differ from the literal written
+      beside it by its last bits; four units in the last place of the larger
+      magnitude (4 * 2^-52, relative) forgive that and nothing a person would
+      notice. Near zero the old absolute floor of 1e-12 stays, so sin(pi)
+      still equals 0.
+  A computed value one ULP off an integral literal is not integral itself, so it
+  takes the second branch and is still forgiven. }
 function NumEquals(const A, B: Double): Boolean;
 var
-  Eps: Double;
+  Eps, M: Double;
 begin
   if A = B then Exit(True);
-  Eps := 1E-12 * Max(1.0, Max(Abs(A), Abs(B)));
+  if IsNan(A) or IsNan(B) or IsInfinite(A) or IsInfinite(B) then Exit(False);
+  if (Frac(A) = 0) and (Frac(B) = 0) then Exit(False);
+  M := Max(Abs(A), Abs(B));
+  Eps := 4 * 2.220446049250313E-16 * M;
+  if M < 1.0 then Eps := Max(Eps, 1E-12);
   Result := Abs(A - B) <= Eps;
 end;
 

@@ -109,20 +109,24 @@ Check the result before using it. An empty string joined to a filename produces 
 
 ### Directories and files
 
-`0` from any of these means **refused**, not failed — see the third paragraph
-above. An empty path, or a bare drive root such as `C:\` or `/`, is refused by
+`1` means the operation **happened** and `0` that it did not, and `ioerror()` says
+which kind of `0`: `3` when it was tried and failed, `5` when it was refused —
+see the third paragraph above. A success sets it back to `0`, so it is always
+this call's. Until 2026-10-07 `mkdir`, `rmdir`, `chdir` and `kill` answered `1`
+whatever the filesystem said, which is what Plan9Basic does; that told a program
+nothing. An empty path, or a bare drive root such as `C:\` or `/`, is refused by
 every destructive one of them even with no sandbox in force. A refusal also
 records `5` in `ioerror()` (`iostrerror$()` answers `access denied`), so a `0`
 here can be told from whatever the previous file call left in that slot.
 
 | function | what it answers |
 | --- | --- |
-| `mkdir(path$) → num` | `1`, having attempted to create the directory. Also `1` when it already existed, and when the parent does not exist and nothing was created. `0` only when refused |
-| `rmdir(path$) → num` | `1`, having attempted to remove the directory. Also `1` for a directory that was never there, and for a non-empty one it could not remove. `0` only when refused. Removes one level: it is not recursive |
+| `mkdir(path$) → num` | `1` when it created the directory. `0` when the directory already existed, when its parent does not exist, or when refused. One level: `forcedirectories` makes a chain |
+| `rmdir(path$) → num` | `1` when it removed the directory. `0` for a directory that is not there, for one that is not empty (it stays), or when refused. Removes one level: it is not recursive |
 | `forcedirectories(path$) → num` | the odd one out, and the one to prefer: `1` when the whole chain of directories exists afterwards — creating however many levels were missing — and `0` when it could not be made, or was refused |
-| `chdir(path$) → num` | `1`, having attempted to change the process working directory. Also `1` for a directory that does not exist, and for `""`, neither of which changes anything. `0` only when refused, which for this one means outside the sandbox root — it is a read, so the drive-root rule does not apply |
+| `chdir(path$) → num` | `1` when the process working directory moved. `0` for a directory that does not exist, which moves nothing, and when refused — for this one that means outside the sandbox root, or `""`; it is a read, so the drive-root rule does not apply |
 | `fileexists(path$, followlink) → num` | `1` when the file is there, `0` when it is not. A non-zero `followlink` resolves a symbolic link and asks about its target; `0` asks about the link itself. A refused path also answers `0`, which is indistinguishable from absent |
-| `kill(path$) → num` | `1`, having attempted to delete the file. Also `1` for a file that was not there and for one the OS would not delete, so it is not a confirmation — call `fileexists` if you need one. `0` only when refused. Files only; a directory needs `rmdir` |
+| `kill(path$) → num` | `1` when it deleted the file. `0` for a file that is not there, for a directory (`rmdir` removes those), for one the OS would not delete, or when refused |
 
 ### Environment
 

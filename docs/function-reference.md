@@ -849,12 +849,12 @@ on desktop by design.
 | `tempfilename$() → str` | a fresh temp file name |
 | `randomfilename$() → str` | a random name (GUID hex, no separators) |
 | `guidfilename$(withdashes) → str` | a GUID-based name, with or without dashes |
-| `mkdir(path$) → num` | create a directory (returns 1) |
-| `rmdir(path$) → num` | remove a directory (returns 1) |
+| `mkdir(path$) → num` | create a directory: `1` if created, `0` if not (`ioerror()` `3`) or refused (`5`) |
+| `rmdir(path$) → num` | remove an empty directory: `1` if removed, `0` if not (`ioerror()` `3`) or refused (`5`) |
 | `forcedirectories(path$) → num` | create a directory tree; reports success |
-| `chdir(path$) → num` | change the working directory (returns 1) |
+| `chdir(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`) |
 | `fileexists(path$, followlinks) → num` | 1 if a file exists |
-| `kill(path$) → num` | delete a file (returns 1) |
+| `kill(path$) → num` | delete a file: `1` if deleted, `0` if not (`ioerror()` `3`) or refused (`5`) |
 | `environ$(name$) → str` | an environment variable's value |
 | `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal. It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
 | `colortostr$(n) → str` | the colour name for an RGB number (or `$rrggbb`) |

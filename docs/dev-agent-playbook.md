@@ -1525,6 +1525,21 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · n28: the same defect, fixed under one name and left under
+  another.** dir_create and dir_delete stopped answering 1 regardless a month
+  ago; mkdir, rmdir, chdir and kill are the same operations under their classic
+  names and kept doing it, with a comment that said it was for the oracle. Two
+  siblings were half-fixed in the other direction -- the truth answered, the
+  error slot untouched -- which d62's closure had described as impossible. So
+  the fix is one helper all six answer through, not four edits, and the test
+  watches the slot after every call, success and failure alternating so a code
+  can only be the call's own. Running it against the old engine corrected one
+  of my own expectations: chdir("") is refused by the gate, not attempted, and
+  the rem now says so. The surviving lesson is the comment: "kept for the
+  oracle" is a reason to import a test, never a reason to keep a wrong answer
+  the house rules forbid.
+
+
 - **2026-10-07 · m3: a ceiling whose wrong versions were named before the
   right one was written.** The gate said which two plausible variants must fail
   -- latching (a total, not a level) and always-on (no guard for 0) -- and that

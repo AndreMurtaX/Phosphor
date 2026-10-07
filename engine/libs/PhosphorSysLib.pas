@@ -105,20 +105,25 @@ function t_guidfilename(const Args: array of TValue; out Err: TPhosphorError): T
 begin Err := NoError(); Result := ValStr(GuidHex(AsDouble(Args[0]) <> 0)); end;
 
 // --- directories, files -----------------------------------------------------
-// These answer 1 for the oracle, whatever the filesystem said -- but a REFUSED
-// call answers 0, because reporting success for something that was not even
-// attempted is the fabricated-answer shape the house rule forbids.
+// THEY ANSWER WHAT HAPPENED. Until 2026-10-07 these four answered 1 whatever
+// the filesystem said -- Plan9Basic's behaviour, kept "for the oracle" -- so
+// mkdir of a directory that existed, rmdir of a full one, chdir to nowhere and
+// kill of a missing file all reported success and set no error. dir_create
+// and dir_delete had been fixed for exactly that a month before; the classic
+// names are the same operations and had been left behind. Now 1 means it
+// happened, 0 means it did not, and ioerror() says which kind of 0: 3 tried
+// and failed, 5 refused (see IoAnswer). tests/suite/77_sys_answers.bas.
 function t_mkdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
-  CreateDir(Args[0].Str); Result := ValInt(1);
+  Result := IoAnswer(CreateDir(Args[0].Str));
 end;
 function t_rmdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
-  RemoveDir(Args[0].Str); Result := ValInt(1);
+  Result := IoAnswer(RemoveDir(Args[0].Str));
 end;
 function t_forcedirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -130,7 +135,7 @@ function t_chdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
-  SetCurrentDir(Args[0].Str); Result := ValInt(1);
+  Result := IoAnswer(SetCurrentDir(Args[0].Str));
 end;
 function t_fileexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -142,7 +147,7 @@ function t_kill(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
-  DeleteFile(Args[0].Str); Result := ValInt(1);
+  Result := IoAnswer(DeleteFile(Args[0].Str));
 end;
 
 // --- environment ------------------------------------------------------------

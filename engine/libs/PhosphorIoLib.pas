@@ -42,8 +42,16 @@ type
   previous call put there, a stale answer read as this call's. }
 const
   IOERR_REFUSED = 5;   // 'access denied' in IoErrorText
+  IOERR_FAILED = 3;    // the operation was attempted and did not happen
 
 function IoGate(const APath: String; AUse: TPathUse): Boolean;
+{ THE ANSWER OF A FILESYSTEM MUTATOR, in one place: 1 when the operation
+  happened and 0 when it did not, with ioerror() set to match -- 0 on success,
+  IOERR_FAILED on failure. Pass it what the RTL call returned. A refusal never
+  gets here: IoGate has already answered it and recorded IOERR_REFUSED, so a
+  script can tell "refused" (5) from "tried and failed" (3). mkdir, rmdir,
+  chdir, kill, file_delete and dir_setcurrent all answer through it. }
+function IoAnswer(AOk: Boolean): TValue;
 
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
 
@@ -195,7 +203,7 @@ begin
   Err := NoError();
   if not IoGate(Args[0].Str, puDelete) then
   begin Result := ValInt(0); Exit; end;
-  Result := ValInt(Ord(DeleteFile(Args[0].Str)));
+  Result := IoAnswer(DeleteFile(Args[0].Str));
 end;
 
 // savetext$/opentext$: the encoding argument is accepted; utf-8 is raw bytes,
@@ -505,6 +513,12 @@ function StrToDt(const S: String): Double;
 var i: Int64;
 begin i := StrToInt64Def(S, 0); Result := PDouble(@i)^; end;
 
+function IoAnswer(AOk: Boolean): TValue;
+begin
+  if AOk then GIoError := 0 else GIoError := IOERR_FAILED;
+  Result := ValInt(Ord(AOk));
+end;
+
 // --- directory functions ----------------------------------------------------
 function t_dir_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -605,7 +619,7 @@ begin
   // after it resolve outside too, so the move itself is what has to be refused.
   Err := NoError();
   if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
-  Result := ValInt(Ord(SetCurrentDir(Args[0].Str)));
+  Result := IoAnswer(SetCurrentDir(Args[0].Str));
 end;
 function t_dir_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin

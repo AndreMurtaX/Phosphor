@@ -90,11 +90,12 @@ if len(guidfilename$(0)) < len(guidfilename$(1)) then shorter = 1
 assert_true(shorter, "and dropping the separators makes it shorter")
 
 test_case("sys/directories")
-rem mkdir and rmdir are the Pascal built-ins: they raise on failure and
-rem answer 1 whatever happens, so the 1 carries no information. Calling
-rem rmdir on a directory that is not there is a runtime error, not a
-rem zero, which is why the guard below is dir_exists and not the return
-rem value. forcedirectories is the odd one out and does report.
+rem In Plan9Basic mkdir and rmdir answer 1 whatever happens, so the 1
+rem carries no information, and rmdir of a missing directory is a
+rem runtime error. Phosphor answers what happened: 1 when it was done,
+rem 0 when it was not, with ioerror() saying why -- the failures are
+rem pinned in 77_sys_answers. These are the successes. The guard below
+rem asks dir_exists only so the directory starts out absent.
 d$ = "bin/p9b_sys_dir"
 deep$ = "bin/p9b_sys_deep/a/b"
 if dir_exists(d$) <> 0 then rmdir(d$)

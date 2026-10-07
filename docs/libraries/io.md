@@ -66,7 +66,7 @@ not allowed to read.
 | `file_writealltext(path$, text$) → num` | `1` when the bytes were written (creating or replacing the file), `0` when the path was refused or could not be opened. Writing `""` makes an empty file |
 | `file_appendalltext(path$, text$) → num` | `1` when the text was added to the end; a file that does not exist is created. It reads the file and rewrites it, so the cost is the size of the **file**, not of the addition — for repeated appending, open a channel instead |
 | `file_exists(path$) → num` | `1` if the file is there. `0` for a directory, and `0` for anything outside the sandbox root whether it exists or not |
-| `file_delete(path$) → num` | `1` when the file is gone by this call. `0` when it was missing, in use, or refused — a refusal also sets `ioerror()` to `5`, a plain failure sets nothing |
+| `file_delete(path$) → num` | `1` when the file is gone by this call. `0` when it was missing, in use, or refused — `ioerror()` is `3` for a plain failure, `5` for a refusal, and `0` again after a success |
 | `file_copy(src$, dst$ [, overwrite]) → num` | `1` when the bytes arrived. `0` when either end was refused, the source could not be read — or the three-argument form was given `0` and the target already exists. **The two-argument form always overwrites** |
 | `file_move(src$, dst$) → num` | `1` when the rename happened. `0` when refused, when the target already exists — a file, a directory or a symlink, on every platform (until 2026-10-05 Linux replaced an existing file instead) — or when the two paths are on different volumes: it is one rename, with no copy-and-delete fallback. A rename that changes only the case of a name still works. The existence check and the rename are two calls, so a second process creating the target between them can still lose it on Linux |
 | `file_createempty(path$) → num` | `1` when a zero-length file exists afterwards — it **truncates** one that was already there. `0` when refused |
@@ -109,7 +109,7 @@ Times are **date numbers**, the same values `now` and `strtodate` speak.
 | `dir_getparent$(path$) → str` | everything before the last separator, a trailing separator on the input ignored first. `""` when there is no separator — a bare name has no parent to name, and neither does a root |
 | `dir_isrelativepath(path$) → num` | `1` when the path has no leading separator and no drive letter. `""` answers `1` |
 | `dir_getcurrent$() → str` | the process working directory. Not filtered by the sandbox — it is where relative paths resolve from, whether or not the script may read it |
-| `dir_setcurrent(path$) → num` | `1` when the working directory moved. `0` when the directory does not exist, or when it is outside the root — the move is refused rather than the writes that would follow it |
+| `dir_setcurrent(path$) → num` | `1` when the working directory moved. `0` when the directory does not exist (`ioerror()` `3`), or when it is outside the root (`5`) — the move is refused rather than the writes that would follow it |
 | `dir_copy(src$, dst$) → num` | `1` when the destination root was created and both ends were permitted, having then copied the tree file by file. A single file inside that could not be copied is **not** reported: the answer covers the destination, not every leaf |
 | `dir_move(src$, dst$) → num` | `1` when the rename happened. `0` when refused, when the target exists — even an empty directory, which Linux used to replace — or across volumes; like `file_move`, there is no copy fallback |
 

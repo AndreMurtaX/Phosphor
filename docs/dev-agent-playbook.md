@@ -741,7 +741,7 @@ introduces a defect.
 11. **engine/PhosphorValue.pas:632** [medium] -- str$/print/print# format a Double with FloatToStr's 15-significant-digit default, so most computed Doubles silently change value across a str$/print#/input# round-trip, and str$(MaxDouble) rounds up past MaxDouble into text val() rejects as an overflow
     **CLOSED by A3** -- the 17-digit ladder is in `engine/PhosphorValue.pas`. Struck
     2026-09-15, having been listed as open for months after it was fixed.
-12. **engine/libs/PhosphorConfigLib.pas:83** [medium] -- cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
+12. ~~**engine/libs/PhosphorConfigLib.pas:83** [medium]~~ -- CLOSED 2026-10-06: a line layer keeps every line the RTL cannot place, and the setters refuse what cannot be read back; tests/suite/75_config_lines.bas. Original text: cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
 13. **engine/PhosphorEngine.pas:286** [low] -- *(that line has since become SandboxRoot's declaration; the table is engine/PhosphorHandles.pas#ResetHandles, 2026-10-06)* -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
 14. ~~**host/packages/PhosphorGzipLib.pas:338** [low]~~ -- CLOSED 2026-10-06 with n3: decide-then-write, and the spent flag is an out parameter, not a global; scripts/probe_budget.lpr section (j). Original text: A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
 
@@ -1524,6 +1524,22 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d12: probe before you fix found nine doors where reading found
+  four, and one suspected door that was not there.** The config library let
+  TMemIniFile own the file, and its rule for anything but `key=value` and `;` is
+  "a line I cannot parse": comments mangled or dropped, and the library's own
+  setters writing lines it could not read back. Writing each suspect and reading
+  it back took one script and turned four doors into nine -- and cleared one, a
+  trailing backslash, which would otherwise have been refused for nothing. The
+  fix is a thin layer of lines (a private marker wraps what the RTL would mangle;
+  a bijection, so no file can be unwrapped into something it did not say) and a
+  refusal in every setter, following the plan's decision 6 over its own
+  contradicting gate line. Two proofs the golden could not give were taken
+  separately: the new test's 23 failures against the old library were read one
+  by one, and a library-written .ini was compared byte for byte across the change.
+  The gates earned their keep again: check-sandbox.py named the new layer's read
+  and write the moment the RTL stopped doing them out of its sight.
 
 - **2026-10-06 · A one-off probe failure the runner could not name, and seven
   checks that assumed the machine was quick.** The Linux suite printed

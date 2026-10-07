@@ -322,6 +322,12 @@ ALLOWED = {
         'before calling it',
     'PhosphorStrLib.pas:SplitBy':
         'one slot per separator found in a string already in memory',
+    'PhosphorConfigLib.pas:WrapForeign':
+        'Pos with a ONE-CHARACTER needle ("=") is a scan, not a product: linear in '
+        'one line of a file already read into memory, once per line',
+    'PhosphorConfigLib.pas:UnstorableWhy':
+        'Pos with one-character needles (a line break, "=") over a section, key '
+        'or value the script already holds: linear in each, and asked once per set',
     'PhosphorStrLib.pas:ToRadix':
         'a number in a base: at most 64 digits',
     'PhosphorStrListLib.pas:TPhosphorStringList.MoveItem':

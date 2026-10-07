@@ -36,12 +36,69 @@ type
     FileName: String;
     Modified: Boolean;
     AutoSave: Boolean;
+    Enc: TEncoding;       // the encoding the file was read in, as ReadIniValues keeps it
+    OwnsEnc: Boolean;
+    Bom: Boolean;
     constructor Create(const APath: String; AAuto: Boolean);
     destructor Destroy; override;
     procedure Touch;
     function Save: Boolean;
     procedure Reload;
+    procedure LoadFile;
   end;
+
+{ THE LINES THE RTL CANNOT KEEP (ledger d12).
+
+  TMemIniFile has ONE comment marker, ';' (inifiles.pp, the Comment constant), and
+  its rule for the rest is "a line I cannot parse": inside a section, a line with
+  no '=' becomes a key with an EMPTY name and goes back out as "=" + the line, and
+  before the first section anything that is not a ';' comment is dropped. So a
+  hand-edited .ini -- which docs/libraries/config.md invites -- lost its "# top"
+  and saved "# inner" as "=# inner", and cfg_keycount counted the comment as a key.
+
+  So the file passes through a thin layer of lines on its way in and out. Coming
+  in, every line the RTL would mangle is WRAPPED as a ';' comment carrying a
+  private marker, which the RTL keeps untouched; going out, the marker is removed
+  and the line is written exactly as it was read. A line that already begins with
+  the marker is wrapped too, so the mapping is a bijection and no file can be
+  unwrapped into something it did not say. The marker is a control character
+  after ';' -- it lives in memory only and is never written.
+
+  What is wrapped:
+    * before the first section: anything that is not a ';' comment;
+    * inside a section: a '#' line, and any line with no '=';
+    * anywhere: a line that begins with the marker. }
+const
+  WrapMark = ';' + #1;
+
+function IsWrapped(const S: String): Boolean;
+begin
+  Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #1);
+end;
+
+function IsHeader(const T: String): Boolean;
+begin
+  Result := (Length(T) >= 2) and (T[1] = '[') and (T[Length(T)] = ']');
+end;
+
+procedure WrapForeign(L: TStrings);
+var
+  i: Integer;
+  t: String;
+  inSection: Boolean;
+begin
+  inSection := False;
+  for i := 0 to L.Count - 1 do
+  begin
+    t := Trim(L[i]);
+    if t = '' then Continue;
+    if IsWrapped(t) then begin L[i] := WrapMark + L[i]; Continue; end;
+    if IsHeader(t) then begin inSection := True; Continue; end;
+    if t[1] = ';' then Continue;                          // the RTL keeps these
+    if (not inSection) or (t[1] = '#') or (Pos('=', t) = 0) then
+      L[i] := WrapMark + L[i];
+  end;
+end;
 
 constructor TPhosphorConfig.Create(const APath: String; AAuto: Boolean);
 var
@@ -56,31 +113,113 @@ begin
   // while file_writealltext to the same path was refused.
   if SandboxAllows(APath, puWrite) then bound := APath else bound := '';
   FileName := bound;
-  Ini := TMemIniFile.Create(bound);   // reads the file if it exists
+  // The RTL is given NO file name: it never reads or writes the disk itself, so
+  // every byte in and out goes through the line layer above.
+  Ini := TMemIniFile.Create('');
+  Enc := nil;
+  OwnsEnc := False;
+  Bom := False;
+  LoadFile();
   Modified := False;
   AutoSave := AAuto;
 end;
 
 destructor TPhosphorConfig.Destroy;
 begin
-  // TMemIniFile flushes pending changes when it is freed, which would recreate a
-  // file the program had deleted. Drop the file binding first so that flush (on
-  // the finalization sweep) writes nothing -- an explicit cfg_save is the only
-  // way a config reaches disk.
-  Ini.Rename('', False);
+  // TMemIniFile flushes pending changes when it is freed. It holds no file name
+  // now, so that flush has nowhere to go -- an explicit cfg_save is the only way
+  // a config reaches disk, as it always was.
   Ini.Free;
+  if OwnsEnc then Enc.Free;
   inherited Destroy();
 end;
 
+{ Read the bound file the way TIniFile.ReadIniValues does -- same BOM handling,
+  same encoding detection -- then wrap what the RTL would mangle, and hand it the
+  lines. No file, or none bound, is an empty config. }
+procedure TPhosphorConfig.LoadFile;
+var
+  sl: TStringList;
+begin
+  sl := TStringList.Create();
+  try
+    // Asked HERE, where the file is read -- the path was judged at cfg_open@, and
+    // that judgement is not this read. (check-sandbox.py named both halves of the
+    // line layer the day they were written; the RTL used to do this read, out of
+    // the gate's sight.)
+    if (FileName <> '') and SandboxAllows(FileName, puRead) and FileExists(FileName) then
+    begin
+      sl.Options := sl.Options + [soPreserveBOM];
+      sl.LoadFromFile(FileName, nil);
+      if OwnsEnc then Enc.Free;
+      if TEncoding.IsStandardEncoding(sl.Encoding) then
+      begin
+        Enc := sl.Encoding;
+        OwnsEnc := False;
+      end
+      else
+      begin
+        Enc := sl.Encoding.Clone;
+        OwnsEnc := True;
+      end;
+      Bom := sl.WriteBOM;
+      WrapForeign(sl);
+    end;
+    Ini.SetStrings(sl);
+  finally
+    sl.Free;
+  end;
+end;
+
 function TPhosphorConfig.Save: Boolean;
+var
+  raw, sl: TStringList;
+  i: Integer;
+  prevBlank, headerIsComment: Boolean;
+  d: String;
 begin
   // No file bound means the path was refused when this was opened. Answering
-  // False is what lets cfg_save report it; UpdateFile on an empty name would
-  // write into the process's working directory, which is precisely the escape
-  // this exists to stop.
-  Result := FileName <> '';
+  // False is what lets cfg_save report it; writing on an empty name would land
+  // in the process's working directory, which is precisely the escape this
+  // exists to stop. (This refusal used to sit in front of Ini.UpdateFile; it
+  // sits in front of the line layer's writer now, unchanged.)
+  Result := (FileName <> '') and SandboxAllows(FileName, puWrite);
   if not Result then Exit;
-  Ini.UpdateFile;
+  raw := TStringList.Create();
+  sl := TStringList.Create();
+  try
+    Ini.GetStrings(raw);
+    { GetStrings and UpdateFile disagree about ONE blank line: UpdateFile writes
+      none after a section whose header is a comment (the comments before the
+      first section), GetStrings writes one after every section. UpdateFile's
+      rule is what every .ini this library ever saved was written with, so it is
+      the one kept -- a Phosphor-authored file comes out byte for byte as before.
+      A header is the first line or a line after a blank: the RTL keeps no blank
+      line INSIDE a section, so a blank is always a separator. }
+    prevBlank := True;
+    headerIsComment := False;
+    for i := 0 to raw.Count - 1 do
+    begin
+      if raw[i] = '' then
+      begin
+        if not headerIsComment then sl.Add('');
+        prevBlank := True;
+        Continue;
+      end;
+      if prevBlank then headerIsComment := raw[i][1] = ';';
+      prevBlank := False;
+      if IsWrapped(raw[i]) then sl.Add(Copy(raw[i], 3, MaxInt))
+      else sl.Add(raw[i]);
+    end;
+    sl.WriteBOM := Bom;
+    d := ExtractFilePath(FileName);
+    if (d <> '') and not ForceDirectories(d) then
+      raise EInOutError.CreateFmt('could not create %s', [d]);
+    sl.SaveToFile(FileName, Enc);
+  finally
+    sl.Free;
+    raw.Free;
+  end;
   Modified := False;
 end;
 
@@ -92,11 +231,57 @@ end;
 
 procedure TPhosphorConfig.Reload;
 begin
-  // Re-read from disk, discarding cached in-memory changes. Rename (to the same
-  // file, Reload=True) is the reload path; freeing and re-creating would flush
-  // the pending changes on the way out.
-  Ini.Rename(FileName, True);
+  // Re-read from disk, discarding cached in-memory changes, through the same
+  // line layer the first read went through.
+  LoadFile();
   Modified := False;
+end;
+
+{ WHAT CANNOT BE WRITTEN AND READ BACK AS ITSELF IS REFUSED, AS A VALUE (ledger
+  d12, the attack plan's decision 6: errors are values in this engine, and an
+  escape would invent a convention a hand editor cannot see). Each rule below was
+  MEASURED on the unfixed build before it was written, by writing the thing and
+  reading it back:
+    * a newline in a section, key or value -- the value came back cut at it, and
+      the rest was a loose line the next save mangled;
+    * a section beginning ';' -- written without brackets, reloaded as a comment,
+      its keys gone;
+    * a key beginning ';' -- written WITHOUT its value, as a comment;
+    * a key beginning '#' -- it round-tripped through the RTL, but the line layer
+      above reads a '#' line as a comment, which is what a hand editor means by it;
+    * a key containing '=' -- read back as a shorter key holding the rest;
+    * an empty key -- never written at all;
+    * leading or trailing blanks on a key or a value -- the reader trims them.
+  A value ending in a backslash was suspected (ifoEscapeLineFeeds) and measured to
+  survive, so it is NOT refused. Answers '' when the triple can be stored. }
+function UnstorableWhy(const Sec, Key, Val: String; CheckVal: Boolean): String;
+  function HasNewline(const S: String): Boolean;
+  begin
+    Result := (Pos(#10, S) > 0) or (Pos(#13, S) > 0);
+  end;
+begin
+  Result := '';
+  if HasNewline(Sec) then Exit('the section name contains a line break');
+  if (Sec <> '') and (Sec[1] = ';') then Exit('a section name may not begin with ";", which makes it a comment');
+  if Key = '' then Exit('the key is empty');
+  if HasNewline(Key) then Exit('the key contains a line break');
+  if Key[1] = ';' then Exit('a key may not begin with ";", which makes it a comment');
+  if Key[1] = '#' then Exit('a key may not begin with "#", which makes it a comment');
+  if Pos('=', Key) > 0 then Exit('a key may not contain "=", which ends it');
+  if Trim(Key) <> Key then Exit('a key may not begin or end with blanks, which the reader trims');
+  if not CheckVal then Exit;
+  if HasNewline(Val) then Exit('the value contains a line break');
+  if Trim(Val) <> Val then Exit('a value may not begin or end with blanks, which the reader trims');
+end;
+
+function Storable(const AWho, Sec, Key, Val: String; CheckVal: Boolean;
+                  out Err: TPhosphorError): Boolean;
+var why: String;
+begin
+  why := UnstorableWhy(Sec, Key, Val, CheckVal);
+  Result := why = '';
+  if not Result then
+    Err := MakeError(peRuntime, AWho + ': cannot be stored in an .ini and read back -- ' + why);
 end;
 
 // --- helpers ----------------------------------------------------------------
@@ -164,6 +349,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not Storable('cfg_set@', Args[1].Str, Args[2].Str, Args[3].Str, True, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, Args[3].Str);
   c.Touch();
 end;
@@ -180,6 +366,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not Storable('cfg_sets@', '', Args[1].Str, Args[2].Str, True, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, Args[2].Str);
   c.Touch();
 end;
@@ -238,6 +425,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not Storable('cfg_setn@', Args[1].Str, Args[2].Str, '', False, Err) then Exit;
   WriteNum(c, SecName(Args[1].Str), Args[2].Str, AsDouble(Args[3]));
 end;
 function t_cfg_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -252,6 +440,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not Storable('cfg_setns@', '', Args[1].Str, '', False, Err) then Exit;
   WriteNum(c, 'General', Args[1].Str, AsDouble(Args[2]));
 end;
 function t_cfg_getns(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -275,6 +464,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not Storable('cfg_setb@', Args[1].Str, Args[2].Str, '', False, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, IntToStr(Ord(AsDouble(Args[3]) <> 0)));
   c.Touch();
 end;
@@ -290,6 +480,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not Storable('cfg_setbs@', '', Args[1].Str, '', False, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, IntToStr(Ord(AsDouble(Args[2]) <> 0)));
   c.Touch();
 end;

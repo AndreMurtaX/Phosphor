@@ -64,9 +64,21 @@
   box with no CA bundle in a standard place (e.g. Windows) fails closed until
   http_ca_file$() supplies one -- secure by default, never a blanket trust-all. A
   script that genuinely means to talk to a self-signed dev server opts out explicitly
-  with http_verify_peer(0). (Known gap: this validates the certificate CHAIN, not yet
-  the hostname -- a cert valid for another host would still pass; hostname
-  verification is the next refinement.)
+  with http_verify_peer(0), which turns off the NAME check below as well.
+
+  HOSTNAME VERIFICATION (ledger m5). A valid chain is not enough: a certificate a
+  trusted CA issued for ANOTHER host chains just as well. After the handshake the
+  peer certificate must name the host that was dialled -- X509_check_host for a
+  name, X509_check_ip_asc for a dotted quad -- or the connection is refused and
+  http_error() says why (HTTP_EHOST). FPC 3.2.2 does none of this, and the obvious
+  way to add it is broken in a way only the second machine shows: its
+  SSL.PeerCertificate binds SSL_get_peer_certificate, which OpenSSL 3 does not
+  export (a header macro there), so it answers nil after a perfectly good
+  handshake on Ubuntu 24.04 while answering a certificate on a Windows box that
+  loaded 1.1. Measured 2026-10-07 on both. So the four symbols are bound HERE, by
+  name, from the libraries FPC already loaded -- SSL_get1_peer_certificate first,
+  SSL_get_peer_certificate for 1.1 -- and a missing one REFUSES the connection:
+  a check that cannot run must not read as a check that passed.
 
   MULTI-ADDRESS FALLBACK. FPC 3.2.2's socket layer (TInetSocket) resolves a host to
   the FIRST of its A records and connects only to that one -- if that single IP is
@@ -88,6 +100,7 @@ interface
 uses
   SysUtils, Classes, Types, StrUtils, base64, fphttpclient, opensslsockets, openssl,
   ssockets, sslsockets, sslbase, resolve, sockets, URIParser,
+  dynlibs, ctypes, fpopenssl,   // m5: the TLS names bound by hand, and TSSL
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget;
 
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
@@ -111,6 +124,17 @@ var
     is the only way to see a connect that went around the proxy (ledger n26). }
   HttpResolveHook: THttpResolveHook = nil;
 
+type
+  THttpTlsWithhold = function(const AName: String): Boolean;
+
+var
+  { A SECOND TEST SEAM, nil in every shipped host. When set and it answers True
+    for one of the four OpenSSL names the hostname check binds by hand, that name
+    is treated as missing -- the one way to reach the FAIL-CLOSED branch on a
+    machine whose OpenSSL has all four, which is every machine anyone runs (ledger
+    m5). Consulted once, at the first binding, like the binding itself. }
+  HttpTlsWithhold: THttpTlsWithhold = nil;
+
 implementation
 
 var
@@ -122,6 +146,18 @@ var
   gCAFile: String = '';
 
 type
+  { THE TLS HANDLER EVERY https REQUEST GETS: FPC's OpenSSL handler, plus the name
+    check in DoVerifyCert -- which the RTL calls right after SSL_connect, before the
+    socket is used, and which FPC leaves empty. HostRefused is how a refusal gets
+    back out: the socket layer turns a False here into a plain connect failure. }
+  THostCheckedHandler = class(TOpenSSLSocketHandler)
+  public
+    HostRefused: Boolean;
+    Client: TObject;     // the TPinnedClient this request belongs to
+  protected
+    function DoVerifyCert: Boolean; override;
+  end;
+
   { TFPHTTPClient derives BOTH the connect target and the Host: header from the request
     URI. Overriding ConnectToServer lets us dial one chosen IP while SendRequest keeps
     building Host: from the original URI -- the seam the fallback needs. GetSocketHandler
@@ -131,6 +167,7 @@ type
   public
     ConnectIP: String;
     VerifyPeer: Boolean;   // per request: the global switch, AND a client's own
+    HostRefused: Boolean;  // a TLS handler of this request refused the peer's name
   protected
     procedure ConnectToServer(const AHost: String; APort: Integer;
       UseSSL: Boolean = False); override;
@@ -146,9 +183,98 @@ begin
     inherited ConnectToServer(AHost, APort, UseSSL);
 end;
 
+type
+  TGetPeerCert = function(ssl: PSSL): PX509; cdecl;
+  TCheckHost = function(x: PX509; chk: PAnsiChar; chklen: csize_t; flags: cuint;
+                        peername: PPAnsiChar): cint; cdecl;
+  TCheckIPAsc = function(x: PX509; address: PAnsiChar; flags: cuint): cint; cdecl;
+  TX509Free = procedure(x: PX509); cdecl;
+
+var
+  gTlsBound: Boolean = False;
+  gGetPeerCert: TGetPeerCert = nil;
+  gCheckHost: TCheckHost = nil;
+  gCheckIPAsc: TCheckIPAsc = nil;
+  gX509Free: TX509Free = nil;
+
+{ Bind the four names once, from the libraries FPC loaded for the handshake that is
+  calling us. See the unit header for why FPC's own binding cannot be used. }
+function TlsSym(AHandle: TLibHandle; const AName: String): Pointer;
+begin
+  if Assigned(HttpTlsWithhold) and HttpTlsWithhold(AName) then Exit(nil);
+  Result := GetProcedureAddress(AHandle, AName);
+end;
+
+procedure BindTlsNames;
+begin
+  if gTlsBound then Exit;
+  gTlsBound := True;
+  gGetPeerCert := TGetPeerCert(TlsSym(SSLLibHandle, 'SSL_get1_peer_certificate'));
+  if not Assigned(gGetPeerCert) then
+    gGetPeerCert := TGetPeerCert(TlsSym(SSLLibHandle, 'SSL_get_peer_certificate'));
+  gCheckHost := TCheckHost(TlsSym(SSLUtilHandle, 'X509_check_host'));
+  gCheckIPAsc := TCheckIPAsc(TlsSym(SSLUtilHandle, 'X509_check_ip_asc'));
+  gX509Free := TX509Free(TlsSym(SSLUtilHandle, 'X509_free'));
+end;
+
+{ Does the peer certificate of ASsl name AHost? A dotted quad is matched against the
+  certificate's IP addresses, anything else against its DNS names (wildcards as
+  OpenSSL allows them). False for an empty host, a missing certificate, an OpenSSL
+  error (a negative answer), and a missing symbol -- every doubt refuses. }
+function IsIPv4Literal(const AHost: String): Boolean; forward;
+
+function CertNamesHost(ASsl: PSSL; const AHost: String): Boolean;
+var
+  c: PX509;
+  h: AnsiString;
+begin
+  Result := False;
+  if (AHost = '') or (ASsl = nil) then Exit;
+  BindTlsNames();
+  if not (Assigned(gGetPeerCert) and Assigned(gX509Free) and Assigned(gCheckHost) and
+          Assigned(gCheckIPAsc)) then Exit;
+  c := gGetPeerCert(ASsl);
+  if c = nil then Exit;
+  try
+    h := AnsiString(AHost);
+    if IsIPv4Literal(AHost) then
+      Result := gCheckIPAsc(c, PAnsiChar(h), 0) = 1
+    else
+      Result := gCheckHost(c, PAnsiChar(h), Length(h), 0, nil) = 1;
+  finally
+    gX509Free(c);   // both getters hand back a reference the caller owns
+  end;
+end;
+
+{ THE NAME THAT IS CHECKED IS THE ONE THAT WAS DIALLED: the socket's own host. It is
+  what SNI sent, and after a redirect it is the new host, not the first URL's. An
+  https request never pins a resolved IP (FetchCore), so this is the URL's name; if
+  that ever changed, an IP here would fail the name check rather than pass it. The
+  opt-out is the chain's opt-out: with VerifyPeerCert off nothing is checked. }
+function THostCheckedHandler.DoVerifyCert: Boolean;
+var host: String;
+begin
+  Result := inherited DoVerifyCert();
+  if (not Result) or (not VerifyPeerCert) then Exit;
+  host := '';
+  if Socket is TInetSocket then host := TInetSocket(Socket).Host;
+  Result := CertNamesHost(SSL.SSL, host);
+  if not Result then
+  begin
+    HostRefused := True;
+    if Client is TPinnedClient then TPinnedClient(Client).HostRefused := True;
+    SSLLastErrorString := 'the certificate is not for ' + host;
+  end;
+end;
+
 function TPinnedClient.GetSocketHandler(const UseSSL: Boolean): TSocketHandler;
 begin
-  Result := inherited GetSocketHandler(UseSSL);   // the registered OpenSSL handler
+  { An https request gets THIS handler and not the registered default, which is a
+    plain TOpenSSLSocketHandler: the subclass is that plus the name check. }
+  if UseSSL then
+    Result := THostCheckedHandler.Create()
+  else
+    Result := inherited GetSocketHandler(UseSSL);
   if UseSSL and (Result is TSSLSocketHandler) then
   begin
     { VerifyPeerCert => SSL_VERIFY_PEER, and CertCA.FileName is LoadVerifyLocations'd
@@ -158,6 +284,7 @@ begin
     TSSLSocketHandler(Result).VerifyPeerCert := VerifyPeer;
     if VerifyPeer and (gCAFile <> '') then
       TSSLSocketHandler(Result).CertificateData.CertCA.FileName := gCAFile;
+    THostCheckedHandler(Result).Client := Self;
   end;
 end;
 
@@ -190,6 +317,18 @@ begin
   end;
 end;
 
+const
+  HTTP_OK      = 0;
+  HTTP_EHANDLE = 1;   // an invalid / fabricated client or form handle
+  HTTP_EPROXY  = 2;   // a proxy this client cannot honour; nothing was sent
+  HTTP_EHOST   = 3;   // https: the server's certificate is not for this host
+
+var
+  { What http_error() answers: the last configuration op's result, and since m5
+    the last REQUEST's too -- 0 when it was not refused, HTTP_EHOST when its peer's
+    certificate named another host. Declared above FetchCore because it writes it. }
+  gHttpErr: Integer = 0;
+
 { Applies a client handle's whole configuration to one request. Declared here and
   written beside the client type it reads, further down. }
 procedure ApplyClient(c: TPinnedClient; ACfg: TObject); forward;
@@ -206,7 +345,7 @@ var
   uri: TURI;
   host, body: String;
   i: Integer;
-  connected: Boolean;
+  connected, hostRefused: Boolean;
 
   { One attempt against a single connect target ('' = dial the URL's host as written).
     AConnected separates a connection-level failure (try the next address) from a
@@ -261,6 +400,7 @@ var
         end;
         AStatus := c.ResponseStatusCode;
         if AConnected then Result := resp.DataString;
+        if c.HostRefused then hostRefused := True;
       finally
         if Assigned(c.RequestBody) then
         begin
@@ -277,6 +417,8 @@ var
 begin
   Result := '';
   AStatus := 0;
+  hostRefused := False;
+  gHttpErr := HTTP_OK;
 
   if Length(AForceAddrs) > 0 then
   begin
@@ -321,7 +463,9 @@ begin
       Exit;
     end;
   end;
-  { nothing connected: Result '' and AStatus 0 (from the last Attempt) }
+  { nothing connected: Result '' and AStatus 0 (from the last Attempt) -- and if
+    a peer was refused for its NAME, say so; it is not a dead address. }
+  if hostRefused then gHttpErr := HTTP_EHOST;
 end;
 
 function HttpFetch(const AMethod, AUrl, ABody: String;
@@ -377,14 +521,6 @@ end;
   A client handle is a config accumulator (its own record), a form handle collects
   fields and files, and the encoders are pure. Nothing here reaches the network.
   =========================================================================== }
-
-const
-  HTTP_OK      = 0;
-  HTTP_EHANDLE = 1;   // an invalid / fabricated client or form handle
-  HTTP_EPROXY  = 2;   // a proxy this client cannot honour; nothing was sent
-
-var
-  gHttpErr: Integer = 0;   // ioerror/valcode: last config-op result, read by http_error
 
 type
   { A name/value bag with replace-on-duplicate semantics, backed by two parallel
@@ -1345,6 +1481,7 @@ begin
     HTTP_OK:      Result := ValStr('no error');
     HTTP_EHANDLE: Result := ValStr('invalid handle');
     HTTP_EPROXY:  Result := ValStr('the request cannot go through this proxy');
+    HTTP_EHOST:   Result := ValStr('the server''s certificate is not for this host');
   else
     Result := ValStr('unknown error');
   end;
@@ -1604,6 +1741,23 @@ begin
       Exit(CANDIDATES[i]);
 end;
 
+{$IFDEF WIN64}
+procedure PreferOpenSSL3Pair;
+var hs, hc: TLibHandle;
+begin
+  hc := LoadLibrary('libcrypto-3-x64.dll');
+  hs := LoadLibrary('libssl-3-x64.dll');
+  if (hc <> NilHandle) and (hs <> NilHandle) then
+  begin
+    openssl.DLLUtilName := 'libcrypto-3-x64.dll';
+    openssl.DLLSSLName := 'libssl-3-x64.dll';
+  end;
+  // The probe's own references; the loader takes its own when https first runs.
+  if hs <> NilHandle then FreeLibrary(hs);
+  if hc <> NilHandle then FreeLibrary(hc);
+end;
+{$ENDIF}
+
 initialization
   {$IFDEF UNIX}
   { FPC 3.2.2's OpenSSL loader predates OpenSSL 3 -- its Unix soname list (openssl.pp
@@ -1614,6 +1768,16 @@ initialization
     tried in order, so real 1.1 boxes still match '.1.1' first; only a 3-only box falls
     through to '.3'. Windows loads by DLL name, not this list, so this is Unix-only. }
   openssl.DLLVersions[High(openssl.DLLVersions)] := '.3';
+  {$ENDIF}
+  {$IFDEF WIN64}
+  { THE WINDOWS TWIN OF THE LINE ABOVE (ledger m5). FPC 3.2.2's Windows names stop at
+    OpenSSL 1.1 (libssl-1_1-x64.dll); a box with only OpenSSL 3 had no https at all,
+    and the dev machine had it only because Git's 1.1 happened to be on PATH. The
+    loader takes libcrypto and libssl from SEPARATE name lists, so a 3.x libcrypto
+    beside a 1.1 libssl is a reachable pairing -- and a crash. The 3.x names go into
+    the FIRST slot only when BOTH halves load, so the pair is whole or untouched. The
+    slot they take is OpenSSL 1.0's, end-of-life since 2019. }
+  PreferOpenSSL3Pair();
   {$ENDIF}
   gCAFile := LocateCABundle();
 

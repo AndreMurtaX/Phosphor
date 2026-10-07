@@ -1525,6 +1525,23 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · m5: the fixture decided what the test could see.** The
+  hostname check is twenty lines; most of the work was making its absence
+  visible. A self-signed certificate cannot test a name -- the chain fails
+  first -- so the fixture became a throwaway CA and certificates it signed, and
+  the CA's key was destroyed the day it was made (which meant regenerating all
+  of them twice, once for a duplicated extension the default config added and
+  once for the CN). The mutation sweep found the second fixture problem: an IP
+  checked as a DNS name still passed, because X509_check_host falls back to the
+  CN when there is no DNS SAN, and the IP certificate's CN was the address. Two
+  more branches nothing could reach got seams rather than prose: a withheld
+  OpenSSL symbol, to watch the check fail closed, and the runner asking Windows
+  independently which OpenSSL pair exists, to watch the loader prefer 3. The
+  most useful result came free: once Windows loaded OpenSSL 3, binding only the
+  name FPC binds failed on Windows too -- the platform split the measurement
+  found is now visible on the machine that used to hide it.
+
+
 - **2026-10-07 · m5 measured: two controls caught two broken measurements
   before either became a finding.** The question was one symbol in one library,
   and the first answer was wrong twice. `nm -D` lists versioned names, so an

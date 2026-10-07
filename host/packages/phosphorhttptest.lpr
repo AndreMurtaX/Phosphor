@@ -29,16 +29,21 @@ program phosphorhttptest;
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
+  dynlibs, ctypes,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib;
 
 const
   SRV_PORT     = 18099;
   SRV_PORT_TLS = 18443;
+  SRV_PORT_TLS_IP = 18444;   // the same CA, a certificate for IP:127.0.0.1 only (m5)
 
 var
   BaseURL: String;
   BaseURLHttps: String;
+  CAFile: String;   // the throwaway CA the TLS fixture chains to (ledger m5)
+  BaseURLHttpsIP: String;
+  Withheld: String = '';   // http_tls_withhold's name, consulted by the library's seam
 
 { ---- the local test server -------------------------------------------------}
 
@@ -139,6 +144,84 @@ begin
   Result := ValStr(BaseURLHttps);
 end;
 
+{ server_ca_file$() -> the path of the throwaway CA that signed the TLS fixture. The
+  fixture names `localhost` and nothing else, so with this CA trusted a request to
+  https://localhost verifies end to end and one to https://127.0.0.1 -- the same
+  server, the same chain -- must be refused for its NAME. Handed over by the runner
+  because it knows where the fixture lives and the script's working directory does
+  not. }
+function f_server_ca_file(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValStr(CAFile);
+end;
+
+{ server_url_https_ip$() -> the base URL of a third server, same routes, whose
+  certificate (same throwaway CA) carries IP:127.0.0.1 and no DNS name. With the CA
+  trusted, https://127.0.0.1 there must verify and https://localhost must not -- the
+  mirror of the first TLS server, and the case that tells an IP checked as an IP
+  from an IP checked as a DNS name. }
+function f_server_url_https_ip(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValStr(BaseURLHttpsIP);
+end;
+
+function WithholdHook(const AName: String): Boolean;
+begin
+  Result := (Withheld <> '') and (AName = Withheld);
+end;
+
+{ http_tls_withhold(name$) -> 1. From now on the package's hostname check finds
+  that OpenSSL name missing (PhosphorHttpLib's HttpTlsWithhold seam). The check binds
+  once per process, so a script must call this BEFORE its first https request. }
+function f_http_tls_withhold(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Withheld := Args[0].Str;
+  HttpTlsWithhold := @WithholdHook;
+  Result := ValInt(1);
+end;
+
+type
+  TOpenSSLVersionFn = function(t: cint): PAnsiChar; cdecl;
+
+{ server_openssl_version$() -> the version string of the OpenSSL this process
+  loaded for https ("OpenSSL 3.0.13 30 Jan 2024"), asked of the library itself.
+  "" when none loaded. }
+function f_server_openssl_version(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var fn: TOpenSSLVersionFn;
+begin
+  Err := NoError();
+  Result := ValStr('');
+  if not InitSSLInterface then Exit;
+  fn := TOpenSSLVersionFn(GetProcedureAddress(SSLUtilHandle, 'OpenSSL_version'));
+  if not Assigned(fn) then
+    fn := TOpenSSLVersionFn(GetProcedureAddress(SSLUtilHandle, 'SSLeay_version'));
+  if Assigned(fn) then Result := ValStr(String(fn(0)));
+end;
+
+{ server_openssl3_pair() -> 1 when this is 64-bit Windows and BOTH OpenSSL 3 DLLs
+  load, 0 when it is Windows and they do not, -1 anywhere else. Asked here with
+  LoadLibrary, independently of the package, so a test can derive which OpenSSL the
+  package OUGHT to have loaded on Windows and compare it with the one it did. }
+function f_server_openssl3_pair(const Args: array of TValue; out Err: TPhosphorError): TValue;
+{$IFDEF WIN64}
+var hs, hc: TLibHandle;
+{$ENDIF}
+begin
+  Err := NoError();
+  {$IFDEF WIN64}
+  hc := LoadLibrary('libcrypto-3-x64.dll');
+  hs := LoadLibrary('libssl-3-x64.dll');
+  Result := ValInt(Ord((hc <> NilHandle) and (hs <> NilHandle)));
+  if hs <> NilHandle then FreeLibrary(hs);
+  if hc <> NilHandle then FreeLibrary(hc);
+  {$ELSE}
+  Result := ValInt(-1);
+  {$ENDIF}
+end;
+
 { Test-only: GET url$ but FORCE the candidate connect addresses (comma-separated),
   so the package's multi-address fallback can be proven deterministically -- no DNS,
   no real network. e.g. http_get_via$(url$, "127.0.0.9,127.0.0.1") must skip the dead
@@ -212,8 +295,8 @@ end;
 
 var
   eng: TPhosphorEngine;
-  srv, srvTls: TBoundHttpServer;
-  th, thTls: TServerThread;
+  srv, srvTls, srvTlsIP: TBoundHttpServer;
+  th, thTls, thTlsIP: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
 begin
@@ -245,6 +328,7 @@ begin
 
   BaseURL      := 'http://127.0.0.1:' + IntToStr(SRV_PORT);
   BaseURLHttps := 'https://127.0.0.1:' + IntToStr(SRV_PORT_TLS);
+  BaseURLHttpsIP := 'https://127.0.0.1:' + IntToStr(SRV_PORT_TLS_IP);
 
   { Stand up the local server in a background thread. Bind loopback ONLY, so that a
     127.0.0.x address other than .1 is genuinely dead -- the fallback test relies on
@@ -259,8 +343,12 @@ begin
   th.FreeOnTerminate := False;
   th.Start;
 
-  { A second server over TLS, same routes, using a checked-in self-signed test
-    certificate (tls_test_cert.pem / _key.pem, alongside the .bas). We load a fixture
+  { A second server over TLS, same routes, using a checked-in test certificate
+    (tls_test_cert.pem / _key.pem, alongside the .bas). Since m5 it is not
+    self-signed: a throwaway CA (tls_test_ca.pem, whose key was discarded the day
+    it was made) signed it for DNS:localhost only. Untrusted by default all the
+    same, which is what 04_https needs; trusted through server_ca_file$, it lets
+    15_https_hostname tell a right name from a wrong one on one chain. We load a fixture
     rather than auto-generating one at runtime: FPC 3.2.2's in-process X.509 generation
     uses OpenSSL APIs that OpenSSL 3 changed, so the auto-signed path silently produced
     no working cert on the OpenSSL-3 VM (the handshake then failed even with
@@ -273,6 +361,7 @@ begin
   srvTls.Threaded := True;
   srvTls.UseSSL := True;
   certDir := ExtractFilePath(ExpandFileName(path));
+  CAFile := certDir + 'tls_test_ca.pem';
   if FileExists(certDir + 'tls_test_cert.pem') then
   begin
     srvTls.CertificateData.Certificate.FileName := certDir + 'tls_test_cert.pem';
@@ -284,9 +373,26 @@ begin
   thTls.FreeOnTerminate := False;
   thTls.Start;
 
+  { The third: the same CA, a certificate for IP:127.0.0.1 and no DNS name. }
+  srvTlsIP := TBoundHttpServer.Create(nil);
+  srvTlsIP.Address := '127.0.0.1';
+  srvTlsIP.Port := SRV_PORT_TLS_IP;
+  srvTlsIP.Threaded := True;
+  srvTlsIP.UseSSL := True;
+  if FileExists(certDir + 'tls_test_ip_cert.pem') then
+  begin
+    srvTlsIP.CertificateData.Certificate.FileName := certDir + 'tls_test_ip_cert.pem';
+    srvTlsIP.CertificateData.PrivateKey.FileName  := certDir + 'tls_test_ip_key.pem';
+  end;
+  thTlsIP := TServerThread.Create(True);
+  thTlsIP.Srv := srvTlsIP;
+  srvTlsIP.OnRequest := @thTlsIP.HandleRequest;
+  thTlsIP.FreeOnTerminate := False;
+  thTlsIP.Start;
+
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
-  while ((not srv.Active) or (not srvTls.Active)) and (waited < 3000) do
+  while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 
@@ -316,6 +422,11 @@ begin
     RegisterHttpFuncs(eng.Registry);
     eng.Registry.Add('server_url$:', @f_server_url);
     eng.Registry.Add('server_url_https$:', @f_server_url_https);
+    eng.Registry.Add('server_ca_file$:', @f_server_ca_file);
+    eng.Registry.Add('server_url_https_ip$:', @f_server_url_https_ip);
+    eng.Registry.Add('http_tls_withhold:$', @f_http_tls_withhold);
+    eng.Registry.Add('server_openssl_version$:', @f_server_openssl_version);
+    eng.Registry.Add('server_openssl3_pair:', @f_server_openssl3_pair);
     eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
     eng.Registry.Add('http_resolve_as$:$$', @f_http_resolve_as);
     ResetTestState();

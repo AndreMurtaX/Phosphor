@@ -74,7 +74,11 @@ trust-all.
 - **Gate — MET.** With a real CA bundle the badssl probe inverts as intended:
   `example.com` → 200 (valid cert accepted), `expired`/`self-signed` → 0 (refused).
   Deterministic proof is Step 2.
-- **Known gap, recorded:** this validates the certificate **chain**, not the
+- ~~**Known gap, recorded:**~~ **CLOSED 2026-10-07 (ledger m5):** the hostname is
+  verified now -- `X509_check_host`/`X509_check_ip_asc` in the TLS handler's
+  `DoVerifyCert`, the symbols bound by hand because FPC's peer-certificate binding is
+  nil on OpenSSL 3; see `docs/libraries/http.md`. Original text: this validates the
+  certificate **chain**, not the
   **hostname** — `wrong.host.badssl.com` (a valid cert for another name) still returns
   200. Hostname verification (an `OnVerifyCertificate` `X509_check_host`, or setting
   the verify host param) is the next refinement; chain validation is the bulk of the

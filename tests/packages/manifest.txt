@@ -42,3 +42,5 @@
 12_budget_live
 13_http_budget_live
 14_http_client
+15_https_hostname
+16_https_fail_closed

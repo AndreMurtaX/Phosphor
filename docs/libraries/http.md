@@ -66,7 +66,7 @@ again.
 | `http_get$(c@, path$) → str` | GET `path$` on the client's base url, with everything the client carries; the body on the same terms as `http_get$(url$)`. `""` with `http_error()` `1` for a bad handle and `2` for a proxy it cannot use |
 | `http_status(c@, path$) → num` | the same request, answering its status; `0` when nothing connected or nothing was sent. Under a host that sets an execution budget, a query built from more params than the budget allows is a runtime error, the same refusal for all three client verbs |
 | `http_post$(c@, path$, body$) → str` | POST `body$` the same way; the client's content type, if set, goes with it |
-| `http_verify_peer(on) → num` | turn https certificate verification on (the default) or off, for the whole process; answers the value it set (`1`/`0`). `0` is the explicit opt-out for a self-signed dev server, never the default |
+| `http_verify_peer(on) → num` | turn https certificate verification on (the default) or off, for the whole process; answers the value it set (`1`/`0`). `0` is the explicit opt-out for a self-signed dev server, never the default Off means off for the **name** as well as the chain. |
 | `http_ca_file$(path$) → str` | verify against this CA bundle (PEM); answers `path$` back, unchanged and unchecked — a path that does not exist is accepted here and shows up later as a failed connection |
 
 ### The client handle
@@ -171,9 +171,9 @@ No handle, no network, no error code — these four are total functions on a str
 
 | function | what it answers |
 | --- | --- |
-| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent). A bare-url request never sets it, and a request that was sent does not either: a 404, a dead host and a rejected certificate are all read from `http_status`, not from here |
+| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to. Every request — bare-url or client — sets it: `0` when it was not refused, `3` when it was. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
 | `http_clearerror() → num` | `0`, always; the code is reset to `0` |
-| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"unknown error"` for anything else — including a code this library would never produce |
+| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"the server's certificate is not for this host"` for `3`, `"unknown error"` for anything else — including a code this library would never produce |
 
 ## A worked example
 
@@ -223,8 +223,23 @@ startup) so a bad certificate makes the connection *fail* instead of silently
 succeeding. Two consequences a caller meets in practice: a box with no CA bundle in
 a standard place — Windows, notably — **fails closed** until `http_ca_file$` points
 at a PEM; and a self-signed dev server needs an explicit `http_verify_peer(0)`,
-which stays off for the whole process until something turns it back on. Known gap:
-this validates the certificate *chain*, not yet the hostname.
+which stays off for the whole process until something turns it back on.
+
+**The certificate must also be for the host.** A valid chain is not enough — a
+trusted CA issues certificates for every other host too. After the handshake the
+certificate must name the host that was dialled: its DNS names (wildcards as
+OpenSSL allows them) for a name, its IP addresses for a dotted quad such as
+`https://127.0.0.1`. Otherwise the request fails, `http_status` answers `0`, and
+`http_error()` answers `3` so a program can tell this refusal from a dead host.
+After a redirect it is the new host that must be named. FPC does none of this,
+and its one binding for reading the peer certificate answers nothing on OpenSSL 3,
+so the check binds the OpenSSL functions it needs itself; on an OpenSSL that lacks
+one of them, every verified request is **refused**, never waved through.
+`http_verify_peer(0)` and `http_validatessl(c@, 0)` turn the name check off along
+with the chain. On Windows the library prefers OpenSSL 3 — `libssl-3-x64.dll`
+beside `libcrypto-3-x64.dll` — when both are on the DLL search path, and falls
+back to the OpenSSL 1.1 names FPC knows; it never pairs halves of different
+versions.
 
 **A host name with several A records is tried in turn.** FPC's socket layer
 resolves a host to its first A record and connects only to that one, so a single

@@ -322,6 +322,9 @@ ALLOWED = {
         'before calling it',
     'PhosphorStrLib.pas:SplitBy':
         'one slot per separator found in a string already in memory',
+    'phosphorhttptest.lpr:TServerThread.HandleRequest':
+        'the TEST server: Pos with the constant needle "/inspect" over one request '
+        'target the runner already received -- a scan, and no script reaches it',
     'PhosphorConfigLib.pas:WrapForeign':
         'Pos with a ONE-CHARACTER needle ("=") is a scan, not a product: linear in '
         'one line of a file already read into memory, once per line',
@@ -560,13 +563,54 @@ ALLOWED = {
 
 
 def strip_comments(text):
-    """Pascal comments and string literals out. A primitive named in prose is
-    documentation -- and this file's own libraries explain their amplifiers at
-    length, which is exactly the text that must not be mistaken for code."""
-    text = re.sub(r'(?m)//.*?$', ' ', text)
-    text = re.sub(r'(?s)\{.*?\}', ' ', text)
-    text = re.sub(r'(?s)\(\*.*?\*\)', ' ', text)
-    return re.sub(r"'(?:[^']|'')*'", "''", text)
+    """Pascal comments and string literals out, in ONE left-to-right pass.
+
+    Whichever opens first -- a string, a '//', a '{' or a '(*' -- decides how far
+    that stretch runs, which is how the compiler reads it. This used to be four
+    regex substitutions run in a fixed order, '//' first, so a '//' INSIDE a
+    string literal -- 'http://' -- was taken for a comment and ate the closing
+    quote, and every literal after it paired with the wrong partner: on
+    2026-10-06 that hid PhosphorHttpLib's LocateCABundle from this gate entirely
+    (ledger n26). check-boundary.py found the same ordering defect in the boundary
+    checks; this is the same class, in a gate that had not been asked. Line
+    breaks inside a comment are kept, so a routine header stays on its line."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if j + 1 < n and text[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                if text[j] == '\n':          # a Pascal literal never spans a line
+                    break
+                j += 1
+            out.append("''")
+            i = j + 1 if j < n and text[j] == "'" else j
+            continue
+        if c == '/' and text.startswith('//', i):
+            j = text.find('\n', i)
+            i = n if j < 0 else j
+            continue
+        if c == '{':
+            j = text.find('}', i + 1)
+            end = n if j < 0 else j + 1
+            out.append('\n' * text.count('\n', i, end) or ' ')
+            i = end
+            continue
+        if c == '(' and text.startswith('(*', i):
+            j = text.find('*)', i + 2)
+            end = n if j < 0 else j + 2
+            out.append('\n' * text.count('\n', i, end) or ' ')
+            i = end
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
 
 
 def routines_of(text):
@@ -1076,6 +1120,19 @@ def prove():
              "  r := '';\n"
              '  for i := 1 to Length(s) do r := r + Copy(s, i, 1);\n'
              '  Result := ValStr(r);\n'
+             'end;\n'),
+            # THE STRIPPER ITSELF (n26). A '//' inside a string literal, then an
+            # amplifier, then another literal: the old order-dependent stripper
+            # took the '//' for a comment, lost the closing quote, and paired the
+            # first quote with the last -- swallowing the loop between them.
+            ('a loop after a string holding //',
+             'f_planted_url',
+             "var i, n: Integer; u: String;\n"
+             'begin\n'
+             "  u := 'http://x';\n"
+             '  n := ArgI32(A[0]);\n'
+             '  for i := 1 to n do u := u;\n'
+             "  Result := ValStr('');\n"
              'end;\n'),
             # ROUND FOUR (d45). Both loops bounded by a Length, no allocation, no
             # native, no RTL search and no append -- only the nested-search rule

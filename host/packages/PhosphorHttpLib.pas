@@ -14,6 +14,10 @@
     http_get$(url$)          GET url$, return the response body
     http_status(url$)        GET url$, return the HTTP status code (0 on failure)
     http_post$(url$, body$)  POST body$ to url$, return the response body
+    http_get$(c@, path$) / http_status(c@, path$) / http_post$(c@, path$, body$)
+                             the same three on a CLIENT HANDLE: its base url, params,
+                             headers, cookies, auth, timeouts, redirects and proxy are
+                             all applied (see "THE CLIENT VERBS" below)
     http_verify_peer(on%)    turn https certificate verification on (default) / off
     http_ca_file$(path$)     use a specific CA bundle for verification
 
@@ -96,6 +100,17 @@ function HttpFetch(const AMethod, AUrl, ABody: String;
   const AForceAddrs: array of String; out AStatus: Integer;
   AConnectMs: Integer = 5000): String;
 
+type
+  THttpResolveHook = function(const AHost: String): TStringDynArray;
+
+var
+  { A TEST SEAM, nil in every shipped host, exposed for the same reason HttpFetch
+    is: so the harness can drive address resolution deterministically with no
+    DNS. When set, it answers a host's A records in place of the resolver. The
+    proxy test needs it -- a destination that resolves somewhere the proxy is NOT
+    is the only way to see a connect that went around the proxy (ledger n26). }
+  HttpResolveHook: THttpResolveHook = nil;
+
 implementation
 
 var
@@ -115,6 +130,7 @@ type
   TPinnedClient = class(TFPHTTPClient)
   public
     ConnectIP: String;
+    VerifyPeer: Boolean;   // per request: the global switch, AND a client's own
   protected
     procedure ConnectToServer(const AHost: String; APort: Integer;
       UseSSL: Boolean = False); override;
@@ -139,8 +155,8 @@ begin
       into the context (see opensslsockets InitContext/InitSslKeys). Together that
       makes SSL_connect FAIL on an expired, self-signed, or untrusted-CA certificate,
       instead of FPC's default of accepting anything. }
-    TSSLSocketHandler(Result).VerifyPeerCert := gVerifyPeer;
-    if gVerifyPeer and (gCAFile <> '') then
+    TSSLSocketHandler(Result).VerifyPeerCert := VerifyPeer;
+    if VerifyPeer and (gCAFile <> '') then
       TSSLSocketHandler(Result).CertificateData.CertCA.FileName := gCAFile;
   end;
 end;
@@ -159,6 +175,7 @@ var
   r: THostResolver;
   i: Integer;
 begin
+  if Assigned(HttpResolveHook) then Exit(HttpResolveHook(AHost));
   Result := nil;
   r := THostResolver.Create(nil);
   try
@@ -173,9 +190,17 @@ begin
   end;
 end;
 
-function HttpFetch(const AMethod, AUrl, ABody: String;
+{ Applies a client handle's whole configuration to one request. Declared here and
+  written beside the client type it reads, further down. }
+procedure ApplyClient(c: TPinnedClient; ACfg: TObject); forward;
+function ClientProxyActive(ACfg: TObject): Boolean; forward;
+
+{ THE ONE FETCH. HttpFetch (the bare-url verbs and the fallback proof) and the
+  client verbs both come here; ACfg is the client handle's object, or nil for a
+  bare url, which keeps exactly the behaviour the bare verbs always had. }
+function FetchCore(const AMethod, AUrl, ABody: String;
   const AForceAddrs: array of String; out AStatus: Integer;
-  AConnectMs: Integer = 5000): String;
+  AConnectMs: Integer; ACfg: TObject): String;
 var
   addrs: TStringDynArray;
   uri: TURI;
@@ -200,6 +225,8 @@ var
     try
       c.ConnectIP := AConnectIP;
       c.ConnectTimeout := AConnectMs;         // ms; don't hang forever on a dead IP
+      c.VerifyPeer := gVerifyPeer;
+      if ACfg <> nil then ApplyClient(c, ACfg);
       { A NETWORK WAIT IS A LIBRARY CALL TOO, and it is the one shape the budget
         can neither size, charge nor judge: how long a server takes is the
         server's business. The connect side was already bounded at five seconds,
@@ -215,7 +242,10 @@ var
         if remaining > High(Integer) then remaining := High(Integer);
         if c.ConnectTimeout > Integer(remaining) then
           c.ConnectTimeout := Integer(remaining);
-        c.IOTimeout := Integer(remaining);
+        // The run's remaining time can only SHORTEN a client's own response
+        // timeout, never lengthen it.
+        if (c.IOTimeout <= 0) or (c.IOTimeout > Integer(remaining)) then
+          c.IOTimeout := Integer(remaining);
       end;
       if CompareText(AMethod, 'POST') = 0 then
         c.RequestBody := TStringStream.Create(ABody);
@@ -257,7 +287,12 @@ begin
   begin
     uri := ParseURI(AUrl);
     host := uri.Host;
-    if (host = '') or IsIPv4Literal(host) or (LowerCase(uri.Protocol) = 'https') then
+    { THROUGH A PROXY, NEVER PIN. The fallback dials one of the DESTINATION's
+      addresses itself, and a pinned connect goes straight there -- around the
+      proxy the client was told to use (ledger n26). The proxy is the only thing
+      dialled, so there is nothing to fall back across. }
+    if (host = '') or IsIPv4Literal(host) or (LowerCase(uri.Protocol) = 'https') or
+       ClientProxyActive(ACfg) then
     begin
       { Dial the URL's host as written. For https this is deliberate: pinning a
         resolved IP would make the TLS layer see an IP for SNI and certificate
@@ -287,6 +322,13 @@ begin
     end;
   end;
   { nothing connected: Result '' and AStatus 0 (from the last Attempt) }
+end;
+
+function HttpFetch(const AMethod, AUrl, ABody: String;
+  const AForceAddrs: array of String; out AStatus: Integer;
+  AConnectMs: Integer = 5000): String;
+begin
+  Result := FetchCore(AMethod, AUrl, ABody, AForceAddrs, AStatus, AConnectMs, nil);
 end;
 
 function f_http_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -339,6 +381,7 @@ end;
 const
   HTTP_OK      = 0;
   HTTP_EHANDLE = 1;   // an invalid / fabricated client or form handle
+  HTTP_EPROXY  = 2;   // a proxy this client cannot honour; nothing was sent
 
 var
   gHttpErr: Integer = 0;   // ioerror/valcode: last config-op result, read by http_error
@@ -1301,13 +1344,164 @@ begin
   case code of
     HTTP_OK:      Result := ValStr('no error');
     HTTP_EHANDLE: Result := ValStr('invalid handle');
+    HTTP_EPROXY:  Result := ValStr('the request cannot go through this proxy');
   else
     Result := ValStr('unknown error');
   end;
 end;
 
+{ ===========================================================================
+  THE CLIENT VERBS (ledger n26)
+
+  A client handle used to be a bag of settings no verb ever read: http_get$,
+  http_status and http_post$ took a bare url, so the base url, the headers, params,
+  cookies, auth, proxy, timeouts and redirect policy configured on a handle never
+  reached a request. The proxy was the dangerous one -- a program that set a proxy
+  had its traffic go out DIRECTLY, and nothing said so. These overloads take the
+  handle and a path and apply all of it.
+  =========================================================================== }
+
+function ClientProxyActive(ACfg: TObject): Boolean;
+begin
+  Result := (ACfg is TPhosphorHttpClient) and (TPhosphorHttpClient(ACfg).ProxyHost <> '');
+end;
+
+procedure ApplyClient(c: TPinnedClient; ACfg: TObject);
+var
+  cfg: TPhosphorHttpClient;
+  i: Integer;
+begin
+  cfg := TPhosphorHttpClient(ACfg);
+  if cfg.ConnectTimeout > 0 then c.ConnectTimeout := cfg.ConnectTimeout;
+  if cfg.ResponseTimeout > 0 then c.IOTimeout := cfg.ResponseTimeout;
+  c.AllowRedirect := cfg.FollowRedirects;
+  if cfg.MaxRedirects < 0 then c.MaxRedirects := 0
+  else if cfg.MaxRedirects > 255 then c.MaxRedirects := 255
+  else c.MaxRedirects := cfg.MaxRedirects;
+  // Verification is ON only when the global switch AND this client both ask for
+  // it, so either can opt out and neither can quietly turn the other back on.
+  c.VerifyPeer := gVerifyPeer and cfg.ValidateSSL;
+  if cfg.UserAgent <> '' then c.AddHeader('User-Agent', cfg.UserAgent);
+  if cfg.Accept <> '' then c.AddHeader('Accept', cfg.Accept);
+  if cfg.ContentType <> '' then c.AddHeader('Content-Type', cfg.ContentType);
+  if cfg.AuthHeader <> '' then c.AddHeader('Authorization', cfg.AuthHeader);
+  // The client's own header bag last, so a header it names explicitly wins.
+  for i := 0 to cfg.Headers.Count - 1 do
+    c.AddHeader(cfg.Headers.NameAt(i), cfg.Headers.ValueAt(i));
+  for i := 0 to cfg.Cookies.Count - 1 do
+    c.Cookies.Add(cfg.Cookies.NameAt(i) + '=' + cfg.Cookies.ValueAt(i));
+  if cfg.ProxyHost <> '' then
+  begin
+    c.Proxy.Host := cfg.ProxyHost;
+    c.Proxy.Port := cfg.ProxyPort;
+    c.Proxy.UserName := cfg.ProxyUser;
+    c.Proxy.Password := cfg.ProxyPass;
+  end;
+end;
+
+{ The request url: the base url and the path joined by exactly one '/', or the
+  path alone when it is absolute; then the params, url-encoded, as the query.
+
+  THE QUERY IS A QUADRATIC APPEND over a count the SCRIPT chose -- one append per
+  param, copying the query each time -- so it is charged as it goes (RULE 2), the
+  way JoinList in PhosphorConfigLib is. Answers False, with the url unbuilt, when
+  the budget refuses; the caller reports it. (check-budget.py could not see this
+  loop on the day it was written: its comment stripper read the '//' inside the
+  literal below as a comment, and paired every quote after it wrongly.) }
+function ClientUrl(cfg: TPhosphorHttpClient; const APath: String; out AUrl: String): Boolean;
+var
+  base, p, q: String;
+  i, k: Integer;
+begin
+  Result := False;
+  AUrl := '';
+  if Pos('://', APath) > 0 then AUrl := APath
+  else
+  begin
+    base := cfg.BaseUrl;
+    while (base <> '') and (base[Length(base)] = '/') do Delete(base, Length(base), 1);
+    k := 1;
+    while (k <= Length(APath)) and (APath[k] = '/') do Inc(k);
+    p := Copy(APath, k, MaxInt);
+    if base = '' then AUrl := APath
+    else if p = '' then AUrl := base
+    else AUrl := base + '/' + p;
+  end;
+  q := '';
+  for i := 0 to cfg.Params.Count - 1 do
+  begin
+    if not BudgetAppend(Length(q)) then Exit;
+    if q <> '' then q := q + '&';
+    q := q + DoUrlEncode(cfg.Params.NameAt(i)) + '=' + DoUrlEncode(cfg.Params.ValueAt(i));
+  end;
+  if q <> '' then
+    if Pos('?', AUrl) > 0 then AUrl := AUrl + '&' + q
+    else AUrl := AUrl + '?' + q;
+  Result := True;
+end;
+
+{ A PROXY THIS CLIENT CANNOT HONOUR IS A REFUSAL, NOT A DETOUR. Two shapes:
+    * an https request -- TFPHTTPClient has no CONNECT, so through a proxy it would
+      open TLS with the PROXY instead of tunnelling to the destination (read in
+      fphttpclient.pp: ExtractHostPort dials Proxy.Host for every scheme), which is
+      the missing CONNECT the plan records as a deferral (m7). Sending it direct
+      instead would be the leak this entry exists to close;
+    * a port outside 1..65535 -- the RTL's ProxyActive needs a port above zero and
+      otherwise ignores the proxy, so the request would go DIRECT, silently.
+  Either way nothing is sent and http_error() says why. }
+function ProxyRefused(cfg: TPhosphorHttpClient; const AUrl: String): Boolean;
+begin
+  Result := False;
+  if cfg.ProxyHost = '' then Exit;
+  if (cfg.ProxyPort < 1) or (cfg.ProxyPort > 65535) then Exit(True);
+  if LowerCase(ParseURI(AUrl).Protocol) = 'https' then Exit(True);
+end;
+
+function ClientFetch(const AWho: String; const AHandle: TValue;
+                     const AMethod, APath, ABody: String; out AStatus: Integer;
+                     out Err: TPhosphorError): String;
+var
+  cfg: TPhosphorHttpClient;
+  url: String;
+  ms: Integer;
+begin
+  Result := '';
+  AStatus := 0;
+  Err := NoError();
+  if not GetClient(AHandle.Hnd, cfg) then begin gHttpErr := HTTP_EHANDLE; Exit; end;
+  // A query too long for the run's budget is the run's refusal, like any other.
+  if not ClientUrl(cfg, APath, url) then begin Err := BudgetRefusal(AWho); Exit; end;
+  if ProxyRefused(cfg, url) then begin gHttpErr := HTTP_EPROXY; Exit; end;
+  gHttpErr := HTTP_OK;
+  if cfg.ConnectTimeout > 0 then ms := cfg.ConnectTimeout else ms := 5000;
+  Result := FetchCore(AMethod, url, ABody, [], AStatus, ms, cfg);
+end;
+
+function f_http_cget(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var status: Integer;
+begin
+  Result := ValStr(ClientFetch('http_get$', Args[0], 'GET', Args[1].Str, '', status, Err));
+end;
+
+function f_http_cstatus(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var status: Integer;
+begin
+  ClientFetch('http_status', Args[0], 'GET', Args[1].Str, '', status, Err);
+  Result := ValInt(status);
+end;
+
+function f_http_cpost(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var status: Integer;
+begin
+  Result := ValStr(ClientFetch('http_post$', Args[0], 'POST', Args[1].Str, Args[2].Str, status, Err));
+end;
+
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
 begin
+  // The client verbs: the same three names, taking a client handle and a path.
+  Reg.Add('http_get$:@$',      @f_http_cget);
+  Reg.Add('http_status:@$',    @f_http_cstatus);
+  Reg.Add('http_post$:@$$',    @f_http_cpost);
   Reg.Add('http_get$:$',       @f_http_get);
   Reg.Add('http_status:$',     @f_http_status);
   Reg.Add('http_post$:$$',     @f_http_post);

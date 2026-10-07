@@ -12,6 +12,8 @@
     GET  /json    -> 200  a small JSON body
     GET  /teapot  -> 418  "teapot"
     POST /echo    -> 200  (the request body, verbatim)
+    any  /inspect -> 200  what the request carried: its target, query, method,
+                          and the headers a client handle sets (one per line)
     (anything else)  404  "not found"
 
   The BASIC program learns the server's address from server_url$() -- a host
@@ -84,7 +86,25 @@ var path, m: String;
 begin
   path := ARequest.PathInfo;
   m := ARequest.Method;
-  if ((path = '/') or (path = '')) and (m = 'GET') then
+  { /inspect ANSWERS WHAT IT WAS SENT, so a test can see what a client handle put
+    on the wire (ledger n26). Matched anywhere in the request target, because a
+    request that came through a PROXY carries the absolute url on its request line
+    -- "GET http://host:port/inspect" -- and that target is the proof the proxy
+    was used: this same server is what the proxy test points the proxy at. }
+  if Pos('/inspect', ARequest.URI) > 0 then
+    SetBody(AResponse, 200,
+      'target=' + ARequest.URI + #10 +
+      'query=' + ARequest.QueryString + #10 +
+      'method=' + m + #10 +
+      'ua=' + ARequest.UserAgent + #10 +
+      'accept=' + ARequest.Accept + #10 +
+      'ctype=' + ARequest.GetFieldByName('Content-Type') + #10 +
+      'auth=' + ARequest.Authorization + #10 +
+      'pauth=' + ARequest.GetFieldByName('Proxy-Authorization') + #10 +
+      'cookie=' + ARequest.GetFieldByName('Cookie') + #10 +
+      'xdemo=' + ARequest.GetFieldByName('X-Demo') + #10 +
+      'body=' + ARequest.Content)
+  else if ((path = '/') or (path = '')) and (m = 'GET') then
     SetBody(AResponse, 200, 'phosphor http ok')
   else if (path = '/json') and (m = 'GET') then
     SetBody(AResponse, 200, '{"n":42}')
@@ -132,6 +152,35 @@ begin
   { Short connect timeout: a dead loopback alias times out (rather than refusing) on
     Windows, and we don't want the fallback proof to wait seconds for that. }
   Result := ValStr(HttpFetch('GET', Args[0].Str, '', addrs, status, 800));
+end;
+
+{ Test-only: http_resolve_as$(host$, ip$) makes host$ resolve to ip$ for the rest
+  of the run, through PhosphorHttpLib's resolver seam. The proxy test maps a
+  destination name to a DEAD loopback address, so a request that went around the
+  proxy -- dialling the destination itself -- fails, where one that used the
+  proxy succeeds (ledger n26). Answers ip$. }
+var
+  GResolveMap: TStringList = nil;
+
+function TestResolve(const AHost: String): TStringDynArray;
+var ip: String;
+begin
+  Result := nil;
+  ip := GResolveMap.Values[LowerCase(AHost)];
+  if ip <> '' then
+  begin
+    SetLength(Result, 1);
+    Result[0] := ip;
+  end;
+end;
+
+function f_http_resolve_as(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  if GResolveMap = nil then GResolveMap := TStringList.Create();
+  GResolveMap.Values[LowerCase(Args[0].Str)] := Args[1].Str;
+  HttpResolveHook := @TestResolve;
+  Result := ValStr(Args[1].Str);
 end;
 
 { ---- the usual byte-exact package-test scaffolding -------------------------}
@@ -268,6 +317,7 @@ begin
     eng.Registry.Add('server_url$:', @f_server_url);
     eng.Registry.Add('server_url_https$:', @f_server_url_https);
     eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
+    eng.Registry.Add('http_resolve_as$:$$', @f_http_resolve_as);
     ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

@@ -1525,6 +1525,25 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · n26: the entry named the proxy, and the defect was the whole
+  client; and a string literal of mine found a bug in two gates.** No HTTP verb
+  took a client handle, so every setting on one was write-only, and the proxy
+  one was a silent leak -- a program behind a proxy went direct. The verbs now
+  take the handle and apply it all, with three proxy rules read out of
+  fphttpclient.pp first: never pin a connect when a proxy is set, refuse https
+  (no CONNECT), refuse a port the RTL would ignore. The pin mutation SURVIVED the
+  first draft of the test, because its destination was localhost and the proxy
+  was 127.0.0.1 -- the bypass landed on the same server; a resolver seam that
+  maps the destination to a dead address is what made it visible. Then
+  `Pos('://', ...)` made check-sandbox.py lose a routine and check-budget.py
+  miss a loop: both stripped `//` before strings, the ordering defect
+  check-boundary.py had already found in the boundary checks and nobody had
+  asked these two about. A routine-by-routine diff of what each gate saw before
+  and after the new one-pass scanner showed exactly the two places the bug had
+  touched -- one of them a real quadratic append in the code I had just written.
+  Fix the gate, then fix what the fixed gate shows you.
+
+
 - **2026-10-06 · n10 and d62: a sweep of every name, not a sample, and a gate
   rule that keeps the next one from forgetting.** A sandbox refusal recorded 2 in
   one function, 3 in five and nothing in the rest, so ioerror() answered with the

@@ -28,14 +28,24 @@ the ioerror/valcode shape**: every config op on a live handle clears `http_error
 to 0, every op on a bad handle sets it to 1 and answers the empty answer for its
 type — `0` for a number, `""` for a string. No config op ever fails loudly.
 
-The surprise worth stating plainly: **the three verbs take a URL, not a client.**
-Nothing today reads a client's headers, cookies, auth, proxy or timeouts back out
-and puts them on the wire — the accumulator holds them, hands them back, and resets
-them, waiting for the verb that will consume them. `http_get$` uses a fixed 5-second
-connect timeout of its own, not `http_timeout`. In the same spirit, the flag that
-actually governs TLS is the process-global `http_verify_peer`, not the per-client
-`http_validatessl`. What a program can genuinely do today is compose the URL itself
-(`http_baseurl$` + a form's `http_formurlencoded$` rendering) and fetch that.
+**A client is used by handing it to a verb.** The same three verbs take a client
+handle and a path — `http_get$(c@, path$)`, `http_status(c@, path$)`,
+`http_post$(c@, path$, body$)` — and everything configured on the handle goes on
+the wire: the request url is the base url and the path joined by one `/` (or the
+path alone when it is absolute), with the params url-encoded as its query; the
+headers, cookies, auth, user agent, accept and content type are sent; the connect
+and response timeouts, the redirect policy and the proxy are applied. Until
+2026-10-06 no verb took a handle, so all of that stayed in the accumulator —
+and a program that set a proxy had its requests go out direct. TLS is verified
+only when the process-global `http_verify_peer` **and** the client's
+`http_validatessl` both ask for it, so either one can opt out and neither can
+switch the other back on.
+
+**A proxy the client cannot honour is a refusal, never a detour.** The proxy is
+plain HTTP: an `https://` request through one would need `CONNECT`, which FPC's
+client does not have, so it is refused and nothing is sent; so is a proxy whose
+port is not 1–65535, which the RTL would otherwise ignore and go direct. Either
+way the verb answers its empty answer and `http_error()` is `2`.
 
 ## Functions
 
@@ -53,6 +63,9 @@ again.
 | `http_get$(url$) → str` | GET `url$`; the response body, whatever the status — an error page's body included. `""` when the request never completed, which is also what an empty 200 answers: pair it with `http_status` to tell those apart |
 | `http_status(url$) → num` | GET `url$`; the HTTP status code. `0`, and only `0`, when nothing connected — a dead host, a refused connection, a rejected certificate |
 | `http_post$(url$, body$) → str` | POST `body$` to `url$`; the response body, on the same terms as `http_get$` |
+| `http_get$(c@, path$) → str` | GET `path$` on the client's base url, with everything the client carries; the body on the same terms as `http_get$(url$)`. `""` with `http_error()` `1` for a bad handle and `2` for a proxy it cannot use |
+| `http_status(c@, path$) → num` | the same request, answering its status; `0` when nothing connected or nothing was sent. Under a host that sets an execution budget, a query built from more params than the budget allows is a runtime error, the same refusal for all three client verbs |
+| `http_post$(c@, path$, body$) → str` | POST `body$` the same way; the client's content type, if set, goes with it |
 | `http_verify_peer(on) → num` | turn https certificate verification on (the default) or off, for the whole process; answers the value it set (`1`/`0`). `0` is the explicit opt-out for a self-signed dev server, never the default |
 | `http_ca_file$(path$) → str` | verify against this CA bundle (PEM); answers `path$` back, unchanged and unchecked — a path that does not exist is accepted here and shows up later as a failed connection |
 
@@ -106,7 +119,7 @@ so a `1` is the only confirmation there is.
 | `http_bearerauth(c@, token$) → num` | `1`; the client now carries `Bearer <token$>` |
 | `http_customauth(c@, value$) → num` | `1`; the client carries `value$` as the whole Authorization value, unexamined |
 | `http_clearauth(c@) → num` | `1`; whichever of the three was set is gone |
-| `http_proxy(c@, host$, port) → num` | `1`; the proxy is recorded. Neither the host nor the port is validated here |
+| `http_proxy(c@, host$, port) → num` | `1`; the proxy is recorded, and checked when a request is made: a port outside 1–65535, or an `https://` request, is refused there with `http_error()` `2` |
 | `http_proxyauth(c@, user$, pass$) → num` | `1`; the proxy credentials are recorded, also write-only |
 | `http_clearproxy(c@) → num` | `1`; host, port, user and password are all cleared |
 
@@ -158,36 +171,30 @@ No handle, no network, no error code — these four are total functions on a str
 
 | function | what it answers |
 | --- | --- |
-| `http_error() → num` | the last config op's code: `0` clean, `1` a bad client or form handle. A *request* never sets this — a 404, a dead host and a rejected certificate are all read from `http_status`, not from here |
+| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent). A bare-url request never sets it, and a request that was sent does not either: a 404, a dead host and a rejected certificate are all read from `http_status`, not from here |
 | `http_clearerror() → num` | `0`, always; the code is reset to `0` |
-| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"unknown error"` for anything else — including a code this library would never produce |
+| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"unknown error"` for anything else — including a code this library would never produce |
 
 ## A worked example
 
-A search request against a local service. The settings live on a client handle, the
-query string is built by a form rather than by string-pasting, and only the two
-lines near the end touch the network.
+A search request against a local service. The settings live on a client handle and
+travel with it; only the two lines near the end touch the network.
 
 ```basic
-rem Compose a URL from a client's base and a form's rendering, then fetch it.
+rem The client carries the address, a header, a timeout and the query.
 
 c@ = http_client@("http://127.0.0.1:8080")
 http_timeout(c@, 5000)
 http_header(c@, "X-Requested-With", "phosphor")
+http_param(c@, "q", "phosphor basic")
+http_param(c@, "page", "2")
 if http_error() <> 0 then println "config refused: " + http_strerror$(http_error())
 
-f@ = http_form@()
-http_formfield(f@, "q", "phosphor basic")
-http_formfield(f@, "page", "2")
-query$ = http_formurlencoded$(f@)      rem q=phosphor%20basic&page=2
-http_formfree(f@)
-
-url$ = http_baseurl$(c@) + "/search?" + query$
-code = http_status(url$)
+code = http_status(c@, "/search")      rem GET /search?q=phosphor%20basic&page=2
 if code = 0 then
-  println "nothing answered at " + url$
+  println "nothing answered at " + http_baseurl$(c@)
 else
-  body$ = http_get$(url$)
+  body$ = http_get$(c@, "/search")
   println "HTTP " + str$(code) + " -- " + str$(len(body$)) + " bytes"
   println http_htmldecode$(body$)
 endif
@@ -202,10 +209,9 @@ Two things worth noticing:
   together. When one round trip is all you can afford, take the body and treat `""`
   as "empty *or* unreachable", or take the code and accept that you gave up the
   body.
-- **The header and the timeout on `c@` never left the process.** They are set, they
-  read back, `http_reset` would clear them — but the verb takes `url$`. What the
-  client genuinely contributes here is `http_baseurl$`, one place to keep the
-  service's address so the rest of the program composes against it.
+- **The params are the query.** They are url-encoded and appended in the order they
+  were set, after a `?` — or after `&` when the path already carries a query of its
+  own — so a program never pastes a query string together by hand.
 
 ## Notes / Where the rest lives
 
@@ -233,4 +239,6 @@ The tests are `tests/packages/03_http.bas` (a real loopback server the runner
 stands up), `tests/packages/04_https.bas` (a self-signed TLS server, proving both
 that verification refuses it and that TLS works once relaxed) and
 `tests/packages/08_http_offline.bas`, which covers the whole configuration surface
-without a single request.
+without a single request; `tests/packages/14_http_client.bas` sends that
+configuration to the loopback server and reads back what arrived, through a proxy
+as well.

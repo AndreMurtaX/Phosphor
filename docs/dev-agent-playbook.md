@@ -1537,8 +1537,14 @@ the sweep above. Verify before fixing, as with everything on this page.
   phosphortest too), print `FAIL  <name>  timed out after 30 s -- killed, the
   run goes on`, and continue. The bound is MEASURED: the slowest suite file is
   `60_stack_operands`, 0.35 s on Windows over ten runs and 0.36 s on the VM, so
-  30 s is about 85x. The same mutation now ends the Windows run in 174 s with
-  that FAIL line, three ordinary FAILs and every gate run. `-ProveFailure`
+  30 s is about 85x. The same mutation now ends the run with that FAIL line,
+  three ordinary FAILs and every gate run -- 174 s on Windows, 156 s on the VM.
+  The first Linux `--prove` reported its 2 s bound as 7 s, and 7 is exactly 2 + the
+  `-k 5` grace, so that was measured rather than shrugged off: twenty bounded
+  hangs all ended on TERM (exit 124, never KILL's 137) in 2.0 to 6.6 s, while
+  `timeout 2 sleep 30` took 2.0 s every time, with phosphortest's memory flat.
+  The spread is the VM scheduling back-to-back processes, not a process
+  ignoring the signal, and `-k` caps it either way. `-ProveFailure`
   proves the kill path every time with a `while 1 = 1` program under a 2 s
   bound, and `check-crossrefs.py` refuses the two runners holding different
   bounds (seen failing with the bash one set to 31). Two smaller lessons: the

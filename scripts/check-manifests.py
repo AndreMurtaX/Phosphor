@@ -65,7 +65,7 @@ FIXED = {
         ['hello'],
         'test.{ps1,sh} run hello.bas by name and byte-compare it with hello.expected'),
     os.path.join('tests', 'gui', 'hostmode'): (
-        ['fails', 'gui', 'hello'],
+        ['fails', 'gui', 'gui_sandbox', 'hello'],
         'test-gui.{ps1,sh} run each of these by name in a hostmode case of its own'),
 }
 

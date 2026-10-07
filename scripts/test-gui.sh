@@ -147,9 +147,16 @@ if [ -x "$console" ]; then
   # --no-console is a no-op on a shared console, and on Unix altogether: the
   # terminal is the user's. The run still prints and still succeeds.
   host_case "--no-console leaves a terminal console alone" 0 "console ok" --no-console run "$hm/hello.bas"
+  # AND IT HAS TO BE ABLE TO FAIL (ledger d51): gui.bas touched no path, so this
+  # passed with any root or none. gui_sandbox.bas reports the bound root and
+  # whether ".." is visible; the unconfined run shows the probe CAN answer 1.
   cage="$(mktemp -d)"
-  host_case "the sandbox root reaches a GUI program" 0 "gui ok" --sandbox "$cage" run "$hm/gui.bas"
-  rm -rf "$cage"
+  host_case "the sandbox root reaches a GUI program" 0 "root=$cage|" --sandbox "$cage" run "$hm/gui_sandbox.bas"
+  host_case "and confines it: \"..\" is outside the cage" 0 "parent visible: 0" --sandbox "$cage" run "$hm/gui_sandbox.bas"
+  host_case "unconfined, the same program sees \"..\"" 0 "parent visible: 1" run "$hm/gui_sandbox.bas"
+  # rmdir, not rm -rf: the fixture writes nothing, so the cage is empty, and a
+  # cleanup that can only remove an EMPTY directory is the one this tree uses.
+  rmdir "$cage"
 
   # --- WITHOUT a session: the half that only exists here ----------------------
   # The binary links the LCL either way. With nothing to connect to it must not

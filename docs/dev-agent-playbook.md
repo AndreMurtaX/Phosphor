@@ -1226,7 +1226,7 @@ introduces a defect.
     phosphorguitest.lpr:191-192, where nothing released the watchdog or the
     services object. All three fixed in the same commit. No LCL/gtk2 note appeared
     on either platform, so the exclusion filter stayed narrow. Green both OSes.
-51. **tests/gui/hostmode/gui.bas:5** [medium] -- tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
+51. ~~**tests/gui/hostmode/gui.bas:5** [medium]~~ -- CLOSED 2026-10-06: tests/gui/hostmode/gui_sandbox.bas reports the bound root and whether ".." is visible; the case fails with --sandbox removed and with a bogus root. Original text: tests/gui/hostmode/gui.bas touches no path, so the "the sandbox root reaches a GUI program" case passes identically with no --sandbox, with a bogus --sandbox, or with any root at all -- in scripts/test-gui.ps1:188 and equally in scripts/test-gui.sh:143
 52. ~~**tests/gui/manifest.txt:1** [medium]~~ -- 2026-10-06: a duplicate of #44, folded into it and closed with it; its stricter count was the right one and the gate measured 80 (79 + canvas_ellipse@, called only in a compile-only example). Original text: scripts/coverage.py:141 builds its coverage table from engine/libs + host/packages only, so "every registered function is exercised by a test" is printed while 79 of the 426 host/gui/libs names have no call site in any executed .bas (anchor is coverage.py:141, not tests/gui/manifest.txt:1)
 53. ~~**tests/negative/11_unknown_escape.bas:4** [medium]~~ -- CLOSED 2026-10-06: tests/negative/manifest.txt holds each negative's reason; the runners demand exit 2 and that reason; -ProveFailure proves both halves. Original text: scripts/test-suite.ps1:177 and test-suite.sh:111 gate the negative corpus on the exit code alone, so a negative that stops exercising its own rule still reports PASS (11_unknown_escape.bas is the demonstration, not the location)
 54. ~~**tests/skeleton/hello.bas:1** [low]~~ -- CLOSED 2026-10-06: every directory holding a .bas, derived from git, must be classified, and tests/skeleton and tests/gui/hostmode are FIXED lists their runners name. Original text: check-manifests.py enumerates nothing: tests/skeleton and tests/gui/hostmode are in neither CORPORA nor NO_MANIFEST, so a .bas dropped there is invisible to the gate while coverage.py still credits it as exercised (defect is in scripts/check-manifests.py:39-51,68, not in tests/skeleton/hello.bas)
@@ -1523,6 +1523,19 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d51: a test of a guard must ask the guard something.** The
+  hostmode case "the sandbox root reaches a GUI program" ran a fixture that
+  touched no path, so it passed with the right root, a wrong one, or none. The new
+  fixture reports the bound root and whether ".." is visible -- a READ, because a
+  probe that wrote outside the cage would, on an unconfined run, be the escape it
+  exists to rule out -- and an unconfined run of the same file beside it shows the
+  probe can answer 1, so a 0 under the cage is the sandbox and not a broken
+  dir_exists. Both of the plan's mutations were watched: --sandbox removed fails
+  both confined cases, a bogus root fails the root case. The bash twin's cleanup
+  of that cage was an `rm -rf`; it is an `rmdir` now, which can only remove what
+  the fixture left empty.
+
 
 - **2026-10-06 · d55: a golden that counts passes can count the assertion that
   never ran out of existence.** 49_on_error's "error inside a called function"

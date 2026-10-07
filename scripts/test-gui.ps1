@@ -194,9 +194,18 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
     #    succeeds -- an early version released the console and then died on its
     #    next println with EInOutError, exit 217.
     if (-not (Host-Case '--no-console leaves a terminal console alone' @('--no-console', 'run', (Join-Path $hm 'hello.bas')) 0 'console ok')) { $allOk = $false }
+    #    AND IT HAS TO BE ABLE TO FAIL (ledger d51). This case used to run
+    #    gui.bas, which touches no path, so it passed with the right root, a
+    #    bogus one, or no --sandbox at all. gui_sandbox.bas asks the sandbox two
+    #    things -- which root is bound, and whether ".." is visible -- and the
+    #    unconfined run beside it shows that the probe CAN answer 1, so a 0 under
+    #    the cage is the sandbox and not a broken dir_exists.
     $cage = Join-Path $tmp 'phosphor-hostmode-cage'
     New-Item -ItemType Directory -Force $cage | Out-Null
-    if (-not (Host-Case 'the sandbox root reaches a GUI program' @('--sandbox', $cage, 'run', (Join-Path $hm 'gui.bas')) 0 'gui ok')) { $allOk = $false }
+    $gsb = Join-Path $hm 'gui_sandbox.bas'
+    if (-not (Host-Case 'the sandbox root reaches a GUI program' @('--sandbox', $cage, 'run', $gsb) 0 ("root=" + $cage + "|"))) { $allOk = $false }
+    if (-not (Host-Case 'and confines it: ".." is outside the cage' @('--sandbox', $cage, 'run', $gsb) 0 'parent visible: 0')) { $allOk = $false }
+    if (-not (Host-Case 'unconfined, the same program sees ".."' @('run', $gsb) 0 'parent visible: 1')) { $allOk = $false }
 }
 
 Write-Host ''

@@ -46,7 +46,8 @@ eng := TPhosphorEngine.Create;    // registers all built-in libraries
 try
   // ... register host functions, set OnOutput/limits, run or prepare ...
 finally
-  eng.Free;                        // frees any prepared VM and its handles
+  eng.Free;                        // frees any prepared VM -- and every live handle
+                                   // in the process; see "Handles are process-wide"
 end;
 ```
 
@@ -62,8 +63,9 @@ numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
 
 - **Embedding (load once, call many):** `eng.Prepare(source)` compiles and runs
   the script's *top level* once — defining its routines and doing any setup — and
-  keeps the VM **alive**, with its globals and handles intact. You then call the
-  routines it defined as often as you like:
+  keeps the VM **alive**, with its globals and handles intact (handles until
+  another engine in this process runs; see below). You then call the routines it
+  defined as often as you like:
 
   ```pascal
   rc := eng.Prepare(userScript);                 // 0 on success
@@ -73,6 +75,17 @@ numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
 
   Each `CallFunction` runs over the same live globals and handles the script set
   up. A second `Prepare` (or `Finish`) discards the previous one.
+
+  **Handles are process-wide.** The table a `@` value indexes is one per
+  process, like the sandbox root and the library budget, because a library
+  function is a plain callback with no engine to ask. Every `Run`,
+  `RunBytecode`, `Prepare`, `Finish` and `Free` resets it, so a second engine
+  starting work frees the first engine's dictionaries, lists and documents.
+  The first engine's globals survive and its handles do not: what it gets back
+  is the refusal of a handle that no longer exists (`not a valid dictionary
+  handle`), never the other engine's object — an id from before a reset can
+  never name one made after it. One engine at a time is the supported shape;
+  two that must both keep live handles belong in two processes.
 
   **`end` means two different things and the difference is the one an embedder
   has to know.** A script's top level ends with `end` more often than not — the
@@ -550,10 +563,11 @@ outside all four of them.
   the host opens itself is the host's business: `phosphor --out <path>` is opened
   before the root is bound, and writes wherever the operator pointed it.
 
-- **A second thread.** The root and the library budget are both process-wide, so
-  two scripts running at once in two threads share one of each and the last host
-  to set one wins. Scripts at different trust levels belong in different
-  processes.
+- **A second thread.** The root, the library budget and the handle table are all
+  process-wide, so two scripts running at once in two threads share one of each:
+  the last host to set a root or a budget wins, and either engine starting work
+  frees the other's handles. Scripts at different trust levels belong in
+  different processes.
 
 What is *not* on that list is worth saying as plainly: **a script cannot start a
 process.** Nothing in `engine/` or `host/` spawns one — there is no `exec`, no

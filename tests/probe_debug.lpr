@@ -609,6 +609,56 @@ begin
   end;
 end;
 
+{ TWO ENGINES, ONE HANDLE TABLE (ledger d13). The table is the process's, so the
+  second engine's Prepare frees the first engine's dictionary -- that is the
+  documented limit (docs/embedding.md, "Handles are process-wide"). What it must
+  never do is let the first engine READ the second's: ids used to restart at 1,
+  generation 0, after every reset, so A's `d@` named B's new dictionary -- same
+  slot, same generation, same class -- and `who$()` answered "B" with no error.
+  Derived from the epoch rule, not from a run: A's handle is from before B's
+  reset, so it is stale, and dict_get$ refuses a stale handle with "not a valid
+  dictionary handle" (PhosphorDictLib's GetDict). Asserted in both directions:
+  B then reads A's after A prepares again. }
+procedure CheckTwoEnginesDoNotAlias;
+const
+  Script = 'd@ = dict@()' + #10 +
+           'd@ = dict_set@(d@, "who", "%s")' + #10 +
+           'end' + #10 +
+           'function who$()' + #10 +
+           '  return dict_get$(d@, "who")' + #10 +
+           'endfunction' + #10;
+var
+  a, b: TPhosphorEngine;
+  v: TValue;
+begin
+  a := TPhosphorEngine.Create();
+  b := TPhosphorEngine.Create();
+  try
+    Report(a.Prepare(Format(Script, ['A'])) = 0, 'two engines: A prepares');
+    v := a.CallFunction('who$', []);
+    CheckStr(ValToStr(v), 'A', 'two engines: A reads its own dictionary');
+
+    Report(b.Prepare(Format(Script, ['B'])) = 0, 'two engines: B prepares, resetting the table');
+    v := b.CallFunction('who$', []);
+    CheckStr(ValToStr(v), 'B', 'two engines: B reads its own dictionary');
+
+    v := a.CallFunction('who$', []);
+    Report(ValToStr(v) <> 'B', 'two engines: A NEVER reads B''s value through its old handle');
+    Report(Pos('not a valid dictionary handle', a.ErrorMessage) > 0,
+           'two engines: A''s stale handle is refused as invalid (' + a.ErrorMessage + ')');
+
+    { THE OTHER DIRECTION: A prepares again, which resets the table under B. }
+    Report(a.Prepare(Format(Script, ['A'])) = 0, 'two engines: A prepares again');
+    v := b.CallFunction('who$', []);
+    Report(ValToStr(v) <> 'A', 'two engines: B never reads A''s value either');
+    Report(Pos('not a valid dictionary handle', b.ErrorMessage) > 0,
+           'two engines: B''s stale handle is refused as invalid (' + b.ErrorMessage + ')');
+  finally
+    a.Free;
+    b.Free;
+  end;
+end;
+
 { WHAT THE PREPARED PAIR ANSWERS AFTER SOMETHING ELSE RAN. Run, RunBytecode and the
   next Prepare all open by calling Finish, which frees the prepared VM and the
   prepared program. A host that cached the program pointer is holding a freed
@@ -985,6 +1035,7 @@ begin
   CheckPreparedState();
   CheckPreparationDiscarded();
   CheckSpellings();
+  CheckTwoEnginesDoNotAlias();
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

@@ -92,7 +92,10 @@ begin
   Report(HandleObj(1) = nil, 'and HandleObj answers nil for it');
 
   a := RegisterHandle(TMarker.Create(1));
-  Report(a = 1, 'THE FIRST ID OF A RUN IS STILL 1 (generation zero costs no bits)');
+  { Still 1 because this is the first check and the table has never held
+    anything: a reset of an empty table opens no epoch. See CheckReset for a
+    reset that does. }
+  Report(a = 1, 'THE FIRST ID OF A FRESH TABLE IS STILL 1 (generation zero costs no bits)');
   b := RegisterHandle(TMarker.Create(2));
   Report(b = 2, 'and the second is 2');
   Report(IsHandle(a) and IsHandle(b), 'both are handles');
@@ -192,22 +195,28 @@ end;
 procedure CheckSlotsAreRecycled;
 var
   i: Integer;
-  id: Int64;
+  id, e: Int64;
 begin
   ResetHandles();
   { One live handle at a time, a hundred thousand times. The slot part of the id
     is the observable: if the table grew, the slot would climb with it. This is
     the memory half of the defect -- it used to be eight bytes per cycle, kept
-    until the next Run. }
+    until the next Run.
+
+    The generation is counted FROM THE EPOCH this check starts in, which the
+    checks before it decide (ledger d13: a reset of a table that held anything
+    opens a new one), so it is read off the first id rather than assumed 0. }
+  e := -1;
   for i := 1 to 100000 do
   begin
     id := RegisterHandle(TMarker.Create(i));
+    if e < 0 then e := GenPart(id);
     FreeHandle(id);
   end;
   id := RegisterHandle(TMarker.Create(0));
   Report(SlotPart(id) = 1,
          'AFTER 100,000 CREATE/FREE CYCLES THE TABLE STILL HAS ONE SLOT');
-  Report(GenPart(id) = 100000, 'and that slot is on its hundred-thousandth life');
+  Report(GenPart(id) = e + 100000, 'and that slot is on its hundred-thousandth life');
   Report(LiveHandleCount() = 1, 'one live handle');
   FreeHandle(id);
 
@@ -301,12 +310,16 @@ procedure CheckReset;
 var
   i: Integer;
   before: Integer;
-  id: Int64;
+  id, e, old6: Int64;
 begin
   ResetHandles();
   GDestroyed := 0;
-  for i := 1 to 5 do RegisterHandle(TMarker.Create(i));
+  { The epoch this check STARTS in is whatever the checks before it left, so
+    every expectation below is relative to it: E, read off the first id. }
+  e := RegisterHandle(TMarker.Create(1)) shr 32;
+  for i := 2 to 5 do RegisterHandle(TMarker.Create(i));
   id := RegisterHandle(TMarker.Create(6));
+  old6 := id;
   FreeHandle(id);
   before := GDestroyed;
   Report(before = 1, 'one destroyed so far');
@@ -317,8 +330,24 @@ begin
   Report(FirstLiveHandle() = 0, 'and the walk is empty');
   Report(not IsHandle(1), 'ids from before the reset are not handles');
 
+  { THIS USED TO ASSERT `id = 1`, and that was the defect pinned as correct
+    (ledger d13): an id restarting at 1 after a reset is exactly how engine A's
+    stale handle came to name engine B's object. Derived from the epoch rule
+    instead: the old table's slots were issued at E, and slot 6 was freed once,
+    so its Gen is E + 1, the highest; the new epoch is E + 2, and the first
+    slot is slot 1 again. }
   id := RegisterHandle(TMarker.Create(1));
-  Report(id = 1, 'and the first id after a reset is 1 again');
+  Report(SlotPart(id) = 1, 'the first id after a reset takes slot 1 again');
+  Report(id = MakeId(e + 2, 1), '  in a new epoch, one above every generation before it');
+  Report(not IsHandle(MakeId(e, 1)) and not IsHandle(old6),
+         '  so no id from before the reset names it');
+  ResetHandles();
+  Report(RegisterHandle(TMarker.Create(1)) = MakeId(e + 3, 1),
+         'and every reset of a table that held something opens another');
+  ResetHandles();
+  ResetHandles();
+  Report(RegisterHandle(TMarker.Create(1)) = MakeId(e + 4, 1),
+         'while a reset of an EMPTY table opens none: two in a row cost one epoch');
   ResetHandles();
 end;
 

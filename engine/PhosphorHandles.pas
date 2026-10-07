@@ -6,8 +6,29 @@
   A handle (`@`) is an Int64 id into this registry, not a raw pointer, so a
   fabricated or stale handle is detectable (IsHandle) instead of dereferencing
   arbitrary memory -- the property Plan9Basic's HandleRegistry existed to give.
-  Ids are never reused within a run; ResetHandles frees every live object and is
-  called at the start of each Run so handles never leak between programs.
+  ResetHandles frees every live object and is called at the start of each Run so
+  handles never leak between programs.
+
+  THE TABLE IS THE PROCESS'S, NOT THE ENGINE'S (ledger d13), and it says so here
+  the way PhosphorSandbox and PhosphorBudget say it about themselves. A library
+  function is a plain callback with no VM to ask, so there is one table, and
+  every engine's Run, RunBytecode, Prepare, Finish and Free resets it -- which
+  frees every OTHER engine's live handles too. docs/embedding.md promised three
+  times that handles were the engine's; it says this now. Owning a table per
+  engine is the fix the first time a host wants two at once, and no host in the
+  tree does.
+
+  WHAT IS NOT ALLOWED TO FOLLOW FROM IT is reading the other engine's DATA. Ids
+  used to restart at 1, generation 0, after every reset, so engine A's handle
+  to its dictionary named engine B's dictionary once B had prepared: same slot,
+  same generation, same class, and A read B's value with no error at all. A
+  reset of a table that held anything now opens an EPOCH -- every slot it hands
+  out starts above the highest generation the old table ever carried -- so an
+  id from before a reset can never match an object made after it. A's handle
+  is refused as invalid, which is the error-as-value this design exists to
+  give. A reset of an EMPTY table opens no epoch, so the first handles of a
+  process are still 1, 2, 3. Ids are never reused within a process, with one
+  exception named at ResetHandles.
 
   This unit knows nothing about what the objects ARE -- the handle-based
   collections (arrays, dicts, ...) live in the library packages under
@@ -132,6 +153,7 @@ var
   GFreeTop: Integer;
   GLiveHead: Integer;
   GLive: Integer;
+  GEpoch: LongWord;       // the generation a NEW slot starts at; see ResetHandles
 
 function IdOf(ASlot: Integer): Int64; inline;
 begin
@@ -180,7 +202,7 @@ begin
       SetLength(GSlots, (Int64(GUsed) + 1) * 2);
     s := GUsed;
     Inc(GUsed);
-    GSlots[s].Gen := 0;
+    GSlots[s].Gen := GEpoch;
   end;
 
   GSlots[s].Obj := AObj;
@@ -274,13 +296,29 @@ begin
   Result := GLive;
 end;
 
+{ THE EPOCH. Every generation the old table issued is at most its slots' highest
+  Gen -- a freed slot's Gen is already the NEXT one, never issued -- so starting
+  every new slot one above that maximum keeps every old id stale for good: a
+  slot's generation only climbs. The exception is the cap. A slot that reached
+  GEN_MAX makes the next epoch impossible to express without setting bit 63,
+  so the epoch wraps to 0 and ids from before that reset could match again;
+  reaching it takes 2,147,483,647 frees of one slot in one run, which the
+  header measures at 87 seconds of nothing else. It is named rather than
+  hidden. }
 procedure ResetHandles;
 var
   i: Integer;
+  top: LongWord;
 begin
+  top := 0;
   for i := 0 to GUsed - 1 do
+  begin
+    if GSlots[i].Gen > top then top := GSlots[i].Gen;
     if GSlots[i].Obj <> nil then
       GSlots[i].Obj.Free;
+  end;
+  if GUsed > 0 then
+    if top < GEN_MAX then GEpoch := top + 1 else GEpoch := 0;
   GUsed := 0;
   GFreeTop := 0;
   GLiveHead := NO_SLOT;
@@ -294,6 +332,7 @@ initialization
   GFreeTop := 0;
   GLiveHead := NO_SLOT;
   GLive := 0;
+  GEpoch := 0;
 
 finalization
   ResetHandles();

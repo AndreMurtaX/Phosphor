@@ -742,7 +742,7 @@ introduces a defect.
     **CLOSED by A3** -- the 17-digit ladder is in `engine/PhosphorValue.pas`. Struck
     2026-09-15, having been listed as open for months after it was fixed.
 12. ~~**engine/libs/PhosphorConfigLib.pas:83** [medium]~~ -- CLOSED 2026-10-06: a line layer keeps every line the RTL cannot place, and the setters refuse what cannot be read back; tests/suite/75_config_lines.bas. Original text: cfg_save mangles `#` comments inside a section into `=<text>` and drops `#` comments before the first section
-13. **engine/PhosphorEngine.pas:286** [low] -- *(that line has since become SandboxRoot's declaration; the table is engine/PhosphorHandles.pas#ResetHandles, 2026-10-06)* -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
+13. ~~**engine/PhosphorEngine.pas:286** [low]~~ -- CLOSED 2026-10-07: documented process-wide (engine/PhosphorHandles.pas, docs/embedding.md "Handles are process-wide"), and a reset opens an epoch so no engine reads another's object; tests/probe_debug.lpr#CheckTwoEnginesDoNotAlias. Original text: *(that line has since become SandboxRoot's declaration; the table is engine/PhosphorHandles.pas#ResetHandles, 2026-10-06)* -- PhosphorHandles' table is one process-wide global: any engine's Run/Prepare/Finish frees every other live engine's handles, and only the docs' opposite promise (embedding.md 49/65/74) is on record
 14. ~~**host/packages/PhosphorGzipLib.pas:338** [low]~~ -- CLOSED 2026-10-06 with n3: decide-then-write, and the spent flag is an out parameter, not a global; scripts/probe_budget.lpr section (j). Original text: A gzip_decompressfile refused by the budget has already written its truncated 256 MB inflate over the destination -- the refusal is announced after the damage, and embedding.md promises "nothing has been spent"
 
 ### Crashes (4)
@@ -1524,6 +1524,21 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-07 · d13: the decision was to document a limit, and one of its
+  consequences was not part of the limit.** Decision 2 chose to stop promising
+  that handles are the engine's, not to give each engine a table, and that held.
+  But the gate then asked a probe to pin the ALIASING -- engine A reading engine
+  B's value -- as the documented behaviour, and that consequence came from
+  somewhere else: ids restarting at 1, generation 0, on every reset. A shared
+  table explains why A loses its handles; it does not explain why A's stale id
+  should name B's object. Splitting the two let the limit stay documented and
+  the silent wrong answer become a refusal, for the price of one epoch per
+  reset. And probe_handles had asserted "the first id after a reset is 1
+  again" -- the defect as a golden, written by reading a run. Rewriting it
+  turned up a second assertion that silently assumed generation 0 at the start
+  of a check, which the epoch broke on the first baseline run; both now read
+  the epoch they start in instead of assuming one.
 
 - **2026-10-07 · a hang is not a FAIL until something gives it a deadline.**
   A compiler mutation (`FLocalIdx.Clear()` removed from `ParseFunction`) made

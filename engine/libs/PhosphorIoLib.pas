@@ -30,6 +30,21 @@ type
     Data: String;
   end;
 
+{ ASK THE SANDBOX, AND SAY SO WHEN IT REFUSES (ledger n10, d62).
+
+  Every routine in this unit, PhosphorSysLib and PhosphorStrListLib that touches
+  the filesystem asks the gate through THIS, never through SandboxAllows directly
+  -- scripts/check-sandbox.py refuses a bare SandboxAllows in those three units.
+  A refusal records IOERR_REFUSED in ioerror(), so iostrerror$() says "access
+  denied". Until 2026-10-06 a refusal recorded 2 ("file not found") in
+  file_readalltext$, 3 ("path not found") in five more, and NOTHING in the other
+  thirty-odd names that reach the gate -- which left ioerror() holding whatever the
+  previous call put there, a stale answer read as this call's. }
+const
+  IOERR_REFUSED = 5;   // 'access denied' in IoErrorText
+
+function IoGate(const APath: String; AUse: TPathUse): Boolean;
+
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
 
 implementation
@@ -37,6 +52,12 @@ implementation
 var
   GIoError: Integer;   // last IO error code; ioerror()/iostrerror$() read it
   GWalkSpent: Boolean; // a tree walk stopped because the run's budget ran out
+
+function IoGate(const APath: String; AUse: TPathUse): Boolean;
+begin
+  Result := SandboxAllows(APath, AUse);
+  if not Result then GIoError := IOERR_REFUSED;
+end;
 
 { A DIRECTORY WALK IS A LOOP THE VM CANNOT SEE. CollectEntries, DeleteTree and
   CopyTree each recurse over as many entries as the filesystem holds, all inside
@@ -81,7 +102,7 @@ begin
   Result := False;
   // Asked HERE and not at each caller: a t_ function added later inherits the
   // guard by calling this, and cannot forget it.
-  if not SandboxAllows(APath, puWrite) then Exit;
+  if not IoGate(APath, puWrite) then Exit;
   // One byte written is one unit, like one byte read: a file_writealltext$ of a
   // gigabyte is a gigabyte of work inside one opCall whichever way it flows.
   if not BudgetAllows(Length(AContent)) then
@@ -119,7 +140,7 @@ var fs: TFileStream; len: Int64;
 begin
   AContent := '';
   Result := False;
-  if not SandboxAllows(APath, puRead) then Exit;
+  if not IoGate(APath, puRead) then Exit;
   if not FileExists(APath) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
@@ -153,7 +174,11 @@ var s: String;
 begin
   Err := NoError();
   WalkBegin();
-  if ReadAllBytes(Args[0].Str, s) then GIoError := 0 else GIoError := 2;  // 2 ~ not found
+  // 2 is "nothing there to read"; a REFUSAL has already recorded 5 inside
+  // ReadAllBytes, and must not be overwritten into a claim that the file is
+  // missing -- which is what this line used to make of every refusal (n10).
+  GIoError := 0;
+  if (not ReadAllBytes(Args[0].Str, s)) and (GIoError <> IOERR_REFUSED) then GIoError := 2;
   if WalkRefused('file_readalltext$', Err) then Exit(ValStr(''));
   Result := ValStr(s);
 end;
@@ -162,14 +187,14 @@ begin
   Err := NoError();
   // Outside the sandbox a file does not exist as far as the script is concerned:
   // answering truthfully would leak the shape of a filesystem it cannot read.
-  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(FileExists(Args[0].Str)));
 end;
 function t_file_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puDelete) then
-  begin GIoError := 3; Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puDelete) then
+  begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(DeleteFile(Args[0].Str)));
 end;
 
@@ -254,7 +279,7 @@ end;
 function t_dir_exists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(DirectoryExists(Args[0].Str)));
 end;
 
@@ -360,7 +385,7 @@ begin
   // Asked at every level, not only by the caller: a recursive listing walks into
   // subdirectories itself, and a directory symlink is how it would otherwise walk
   // straight out of the root.
-  if not SandboxAllows(ADir, puRead) then Exit;
+  if not IoGate(ADir, puRead) then Exit;
   base := IncludeTrailingPathDelimiter(ADir);
   if FindFirst(base + '*', faAnyFile, sr) = 0 then
   begin
@@ -382,7 +407,7 @@ function ListToStr(const ADir, APattern: String; AFiles, ADirs, ARecursive: Bool
 var l: TStringList; i: Integer;
 begin
   Result := '';
-  if not SandboxAllows(ADir, puRead) then Exit;
+  if not IoGate(ADir, puRead) then Exit;
   l := TStringList.Create();
   try
     CollectEntries(ADir, APattern, AFiles, ADirs, ARecursive, l);
@@ -438,7 +463,7 @@ var sr: TSearchRec; base: String;
 begin
   // Re-asked at every level of the recursion, so a directory symlink planted
   // inside a permitted tree cannot walk the deletion out of it.
-  if not SandboxAllows(ADir, puDelete) then Exit;
+  if not IoGate(ADir, puDelete) then Exit;
   base := IncludeTrailingPathDelimiter(ADir);
   if FindFirst(base + '*', faAnyFile, sr) = 0 then
   begin
@@ -456,7 +481,7 @@ function CopyTree(const ASrc, ADst: String): Boolean;
 var sr: TSearchRec; sbase, dbase: String;
 begin
   Result := False;
-  if not (SandboxAllows(ASrc, puRead) and SandboxAllows(ADst, puWrite)) then Exit;
+  if not (IoGate(ASrc, puRead) and IoGate(ADst, puWrite)) then Exit;
   Result := ForceDirectories(ADst);
   if not Result then Exit;
   sbase := IncludeTrailingPathDelimiter(ASrc);
@@ -487,9 +512,8 @@ begin
   // Same class as dir_delete's: the answer was discarded and 1 returned regardless,
   // so a path that could not be created reported success. An empty path is refused
   // here too -- ForceDirectories('') answers True having made nothing.
-  if not SandboxAllows(Args[0].Str, puWrite) then
+  if not IoGate(Args[0].Str, puWrite) then
   begin
-    GIoError := 3;
     Result := ValInt(0);
     Exit;
   end;
@@ -515,9 +539,8 @@ begin
   // REFUSE BEFORE DOING ANYTHING. dir_delete("", 1) used to walk the root of the
   // current drive and delete it, then answer 1 -- because DirectoryExists("") is
   // False, so the post-check read the disaster as success.
-  if not SandboxAllows(Args[0].Str, puDelete) then
+  if not IoGate(Args[0].Str, puDelete) then
   begin
-    GIoError := 3;
     Result := ValInt(0);
     Exit;
   end;
@@ -532,7 +555,7 @@ begin
   end
   else
     ok := RemoveDir(Args[0].Str);
-  if ok then GIoError := 0 else GIoError := 3;   // 3 ~ the operation was refused
+  if ok then GIoError := 0 else GIoError := 3;   // 3 ~ the operation failed; a refusal is 5
   Result := ValInt(Ord(ok));
 end;
 function t_dir_getfiles(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -581,7 +604,7 @@ begin
   // Moving the working directory outside the root would make every RELATIVE path
   // after it resolve outside too, so the move itself is what has to be refused.
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(SetCurrentDir(Args[0].Str)));
 end;
 function t_dir_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -621,7 +644,7 @@ begin
     probes the filesystem is a probe check-sandbox.py rightly will not trust to
     its callers, and the next caller may not have asked. A refused name is
     answered as taken, which makes the move answer 0 -- the refusal it owed. }
-  if not SandboxAllows(ADst, puWrite) then Exit(True);
+  if not IoGate(ADst, puWrite) then Exit(True);
   if SameFileName(ExpandFileName(ASrc), ExpandFileName(ADst)) then Exit(False);
   Result := FileExists(ADst, False) or DirectoryExists(ADst, False);
 end;
@@ -629,8 +652,8 @@ end;
 function t_dir_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (SandboxAllows(Args[0].Str, puDelete) and SandboxAllows(Args[1].Str, puWrite)) then
-  begin GIoError := 3; Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puDelete) and IoGate(Args[1].Str, puWrite)) then
+  begin Result := ValInt(0); Exit; end;
   if MoveTargetTaken(Args[0].Str, Args[1].Str) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
@@ -639,8 +662,8 @@ end;
 function t_file_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (SandboxAllows(Args[0].Str, puRead) and SandboxAllows(Args[1].Str, puWrite)) then
-  begin GIoError := 3; Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puRead) and IoGate(Args[1].Str, puWrite)) then
+  begin Result := ValInt(0); Exit; end;
   if (Length(Args) >= 3) and (AsDouble(Args[2]) = 0) and FileExists(Args[1].Str) then
   begin Result := ValInt(0); Exit; end;   // no overwrite, target exists
   // EVERY entry point that reaches a charged helper clears the flag first. Not
@@ -653,8 +676,8 @@ end;
 function t_file_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (SandboxAllows(Args[0].Str, puDelete) and SandboxAllows(Args[1].Str, puWrite)) then
-  begin GIoError := 3; Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puDelete) and IoGate(Args[1].Str, puWrite)) then
+  begin Result := ValInt(0); Exit; end;
   if MoveTargetTaken(Args[0].Str, Args[1].Str) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
@@ -669,7 +692,7 @@ function t_file_getsize(const Args: array of TValue; out Err: TPhosphorError): T
 var fs: TFileStream;
 begin
   Err := NoError(); Result := ValInt(0);
-  if not SandboxAllows(Args[0].Str, puRead) then Exit;
+  if not IoGate(Args[0].Str, puRead) then Exit;
   try
     fs := TFileStream.Create(Args[0].Str, fmOpenRead or fmShareDenyNone);
     try Result := ValInt(fs.Size); finally fs.Free; end;
@@ -715,7 +738,7 @@ end;
 function t_file_settime(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
   FileSetDate(Args[0].Str, DateTimeToFileDate(AsDouble(Args[1])));
   Result := ValInt(1);
 end;
@@ -723,7 +746,7 @@ function t_file_gettime(const Args: array of TValue; out Err: TPhosphorError): T
 var age: LongInt;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
   age := FileAge(Args[0].Str);
   if age > 0 then Result := ValDouble(FileDateToDateTime(age)) else Result := ValInt(0);
 end;

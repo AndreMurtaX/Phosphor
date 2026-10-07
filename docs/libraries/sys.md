@@ -111,7 +111,9 @@ Check the result before using it. An empty string joined to a filename produces 
 
 `0` from any of these means **refused**, not failed — see the third paragraph
 above. An empty path, or a bare drive root such as `C:\` or `/`, is refused by
-every destructive one of them even with no sandbox in force.
+every destructive one of them even with no sandbox in force. A refusal also
+records `5` in `ioerror()` (`iostrerror$()` answers `access denied`), so a `0`
+here can be told from whatever the previous file call left in that slot.
 
 | function | what it answers |
 | --- | --- |

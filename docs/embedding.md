@@ -444,10 +444,11 @@ Four details worth knowing before you rely on it:
 
 - **A refusal is a value, not an exception.** `file_writealltext` answers `0`,
   `file_readalltext$` answers `""`, `dir_getfiles$` answers `""`, `dir_delete`
-  answers `0`. Two of those four also record the refusal in `ioerror()` —
-  `file_readalltext$` sets `2`, `dir_delete` sets `3` — while `file_writealltext`
-  and `dir_getfiles$` leave the slot holding whatever the previous call put in
-  it, so read it immediately after the call that refused or not at all. The one
+  answers `0`. Each of them, and every other file function a script has, also
+  records the refusal in `ioerror()` as `5`, which `iostrerror$()` prints as
+  `access denied`. (Until 2026-10-06 `file_readalltext$` recorded `2` -- "file
+  not found" -- `dir_delete` `3`, and `file_writealltext` and `dir_getfiles$`
+  nothing, leaving the previous call's code to be read as this one's.) The one
   exception is `OPEN`, which has no return value to answer with and so fails the
   run with a catchable runtime error. This is the same house rule the rest of the
   library follows: a call that could not do what it was asked says so in its

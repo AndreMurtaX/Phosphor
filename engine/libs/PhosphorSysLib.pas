@@ -20,7 +20,8 @@ interface
 
 uses
   SysUtils,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox,
+  PhosphorIoLib;   // IoGate: a refusal here is recorded in ioerror() too
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 
@@ -110,37 +111,37 @@ begin Err := NoError(); Result := ValStr(GuidHex(AsDouble(Args[0]) <> 0)); end;
 function t_mkdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
   CreateDir(Args[0].Str); Result := ValInt(1);
 end;
 function t_rmdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
   RemoveDir(Args[0].Str); Result := ValInt(1);
 end;
 function t_forcedirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(ForceDirectories(Args[0].Str)));
 end;
 function t_chdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
   SetCurrentDir(Args[0].Str); Result := ValInt(1);
 end;
 function t_fileexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0)));
 end;
 function t_kill(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not SandboxAllows(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
+  if not IoGate(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
   DeleteFile(Args[0].Str); Result := ValInt(1);
 end;
 

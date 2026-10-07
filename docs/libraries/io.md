@@ -21,6 +21,13 @@ never there. When the difference matters, ask `file_exists` or read `ioerror()`
 immediately after the call — not three calls later, because only some functions
 write to that slot and the rest leave whatever the last one left.
 
+**A refusal always says so.** Every function on this page, and the classic
+`mkdir`/`rmdir`/`chdir`/`kill`/`fileexists`/`forcedirectories` and the string
+list's file calls, records `5` in `ioerror()` — `iostrerror$()` answers
+`access denied` — when the [sandbox](../embedding.md#the-filesystem-sandbox)
+refuses its path, whatever else the call answers. Until 2026-10-06 one of them
+recorded `2`, five recorded `3`, and the rest recorded nothing.
+
 A mutator answers **information**, not "I tried". `dir_delete` answers whether the
 directory is gone afterwards, so a non-empty directory without the recursive flag
 answers `0` and stays standing; `dir_create` answers whether the directory exists
@@ -55,17 +62,17 @@ not allowed to read.
 
 | function | what it answers |
 | --- | --- |
-| `file_readalltext$(path$) → str` | the whole file, byte for byte. `""` when the file is missing, locked or outside the sandbox — and `ioerror()` becomes `2`. An empty file answers `""` too |
+| `file_readalltext$(path$) → str` | the whole file, byte for byte. `""` when the file is missing, locked or outside the sandbox — and `ioerror()` becomes `2`, or `5` when the sandbox refused the path. An empty file answers `""` too |
 | `file_writealltext(path$, text$) → num` | `1` when the bytes were written (creating or replacing the file), `0` when the path was refused or could not be opened. Writing `""` makes an empty file |
 | `file_appendalltext(path$, text$) → num` | `1` when the text was added to the end; a file that does not exist is created. It reads the file and rewrites it, so the cost is the size of the **file**, not of the addition — for repeated appending, open a channel instead |
 | `file_exists(path$) → num` | `1` if the file is there. `0` for a directory, and `0` for anything outside the sandbox root whether it exists or not |
-| `file_delete(path$) → num` | `1` when the file is gone by this call. `0` when it was missing, in use, or refused — a refusal also sets `ioerror()` to `3`, a plain failure sets nothing |
+| `file_delete(path$) → num` | `1` when the file is gone by this call. `0` when it was missing, in use, or refused — a refusal also sets `ioerror()` to `5`, a plain failure sets nothing |
 | `file_copy(src$, dst$ [, overwrite]) → num` | `1` when the bytes arrived. `0` when either end was refused, the source could not be read — or the three-argument form was given `0` and the target already exists. **The two-argument form always overwrites** |
 | `file_move(src$, dst$) → num` | `1` when the rename happened. `0` when refused, when the target already exists — a file, a directory or a symlink, on every platform (until 2026-10-05 Linux replaced an existing file instead) — or when the two paths are on different volumes: it is one rename, with no copy-and-delete fallback. A rename that changes only the case of a name still works. The existence check and the rename are two calls, so a second process creating the target between them can still lose it on Linux |
 | `file_createempty(path$) → num` | `1` when a zero-length file exists afterwards — it **truncates** one that was already there. `0` when refused |
 | `file_getsize(path$) → num` | the size in bytes. `0` for a missing, locked or refused file, which is also what an empty file answers |
-| `savetext$(path$, enc$, text$) → str` | `path$` — always, written or not. The encoding argument is accepted and ignored (utf-8 *is* raw bytes here). This is the one function on the page that **cannot report a failure**: it neither answers one nor sets `ioerror()`. Use `file_writealltext` when you need to know |
-| `opentext$(path$, enc$) → str` | the file's text, `""` when it could not be read. Unlike `file_readalltext$` it leaves `ioerror()` untouched, so a failure here is invisible |
+| `savetext$(path$, enc$, text$) → str` | `path$` — always, written or not. The encoding argument is accepted and ignored (utf-8 *is* raw bytes here). It cannot report an ordinary failure — it neither answers one nor sets `ioerror()` for it — though a sandbox refusal does set `ioerror()` to `5`. Use `file_writealltext` when you need to know |
+| `opentext$(path$, enc$) → str` | the file's text, `""` when it could not be read. Unlike `file_readalltext$` it leaves `ioerror()` untouched for an ordinary failure, so that failure is invisible; a sandbox refusal sets `5` |
 
 ### Bytes
 
@@ -93,7 +100,7 @@ Times are **date numbers**, the same values `now` and `strtodate` speak.
 | function | what it answers |
 | --- | --- |
 | `dir_exists(path$) → num` | `1` if the directory is there; `0` outside the sandbox root, existing or not |
-| `dir_create(path$) → num` | `1` when the directory exists afterwards — the whole missing chain is made, and one that already existed also answers `1`. `0` with `ioerror()` `3` when refused, which includes an empty path and a filesystem root |
+| `dir_create(path$) → num` | `1` when the directory exists afterwards — the whole missing chain is made, and one that already existed also answers `1`. `0` with `ioerror()` `5` when refused, which includes an empty path and a filesystem root, and `3` when the system could not make it |
 | `dir_delete(path$ [, recursive]) → num` | `1` when the directory is gone. Without the flag, a **non-empty** directory answers `0` and stays where it is (`ioerror()` `3`); with the flag the tree goes. Two asymmetries worth knowing: a directory that was never there answers `0` non-recursively but `1` recursively, and an empty path, a bare separator or a drive root is refused outright by both |
 | `dir_isempty(path$) → num` | `1` when the listing holds neither files nor subdirectories. A directory that does not exist, or that the sandbox refuses, also lists nothing and so also answers `1` |
 | `dir_getfiles$(path$ [, pattern$ [, recursive]]) → str` | the file names, LF-separated and byte-sorted. `""` when there are none, when the directory is missing, or when it was refused. The glob (`*`, `?`) is matched **case-insensitively on every platform**, and the recursive form still answers bare names — you lose which subdirectory each came from |
@@ -133,7 +140,7 @@ as separators on every platform.
 
 | function | what it answers |
 | --- | --- |
-| `ioerror() → num` | `0` clean, `2` a read that found nothing, `3` an operation refused. Only the functions noted above write to it — everything else leaves it alone, so read it **immediately** after the call you care about, not later |
+| `ioerror() → num` | `0` clean, `2` a read that found nothing, `3` an operation that failed, `5` a path the sandbox refused (from any function that asks it). Only the functions noted above write to it — everything else leaves it alone, so read it **immediately** after the call you care about, not later |
 | `iostrerror$() → str` | the text for that code: `"No error"` for `0`, `"file not found"`, `"path not found"`, and named entries for the other codes a BASIC program meets. Always English, on every machine: the operating system's own message came back in the machine's language and its ANSI code page, which is not valid UTF-8 and could not hold a golden across two computers. A code with no entry reads `I/O error <n>` |
 
 ## A worked example

@@ -74,3 +74,4 @@
 73_strings_save_refused
 74_json_tail
 75_config_lines
+76_ioerror_refused

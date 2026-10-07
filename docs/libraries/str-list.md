@@ -34,8 +34,10 @@ LF on every platform**, not the host's ending — taking `sLineBreak` made
 `strings_text$` and `strings_savetofile` produce different *bytes* on Windows and
 Linux for the same list; a program that wants CRLF asks for it with
 `strings_linebreak`. **The file and stream calls answer the line count**, not a
-success flag, so a `2` is two lines and not "true" — and a write the sandbox
-refuses still answers the count, so check `file_exists` when the write mattered.
+success flag, so a `2` is two lines and not "true" — and a write that did not
+happen answers `0`. A path the sandbox refuses, for a load or a save, also
+records `5` in `ioerror()`. (Until 2026-10-05 a refused save answered the count
+as if it had written it; this sentence said so until 2026-10-06.)
 And `strings_casesensitive` and `strings_duplicates` are **stored and answered but
 not yet acted on**: comparisons here are exact and `strings_add` never rejects a
 duplicate, whatever the policy says.

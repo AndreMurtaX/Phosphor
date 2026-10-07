@@ -1329,7 +1329,7 @@ introduces a defect.
    count were already right, because `coverage.py` gates exactly those two numbers.
    Everything a gate does not read is what drifted, which is the whole argument for
    gates.
-62. **docs/embedding.md:298** [low] -- *(the paragraph is now under docs/embedding.md#the-filesystem-sandbox, 2026-10-06)* -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run. **The sentence was corrected on 2026-09-10** to name which two report the refusal (`file_readalltext$` sets 2, `dir_delete` sets 3) and to say the other two leave the slot alone; the finding stays OPEN because the better fix is probably in `PhosphorIoLib.pas`, where a refused write could set 3 like `file_delete` next door does, and that is a code change this documentation pass may not make.
+62. ~~**docs/embedding.md:298** [low]~~ -- CLOSED 2026-10-06 with n10: every refusal records 5 through IoGate; tests/suite/76_ioerror_refused.bas sweeps all 39 names. Original text: *(the paragraph is now under docs/embedding.md#the-filesystem-sandbox, 2026-10-06)* -- docs/embedding.md:296-298 promises a sandbox refusal is reported by `ioerror()` for four functions; `file_writealltext` and `dir_getfiles$` (and `file_appendalltext`) never touch the slot, so it keeps its previous value -- "No error" in a fresh run. **The sentence was corrected on 2026-09-10** to name which two report the refusal (`file_readalltext$` sets 2, `dir_delete` sets 3) and to say the other two leave the slot alone; the finding stays OPEN because the better fix is probably in `PhosphorIoLib.pas`, where a refused write could set 3 like `file_delete` next door does, and that is a code change this documentation pass may not make.
 63. ~~**docs/function-reference.md:88** [low]~~ -- CLOSED 2026-09-10, and the numbers
    were counted off the source rather than taken from the finding: Str is 64 names /
    69 entries, the page's twenty-three headings now sum to 828, and 715 names is
@@ -1524,6 +1524,23 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · n10 and d62: a sweep of every name, not a sample, and a gate
+  rule that keeps the next one from forgetting.** A sandbox refusal recorded 2 in
+  one function, 3 in five and nothing in the rest, so ioerror() answered with the
+  previous call's code. The fix is one exported helper the three units must ask
+  through -- the code is recorded where the refusal happens, so no caller can
+  forget it -- and a check-sandbox.py rule that refuses a bare SandboxAllows in
+  those units, watched naming t_kill. The test sweeps all 39 names that reach the
+  gate, zeroing the slot with a read that succeeds before each one so a leftover
+  5 cannot pass for the next name's; against the old engine it failed 44 of 46,
+  every failure the measured code. Every refused path is outside the root AND
+  does not exist, so a gate that stopped refusing would find nothing to delete.
+  On the way, str-list.md was found still telling readers that a refused save
+  answers its line count -- true until n7, a day earlier, and invisible to every
+  gate because it was a sentence. And four classic SysLib names answer 1 whatever
+  happened; that is a different defect, recorded here and not folded in.
+
 
 - **2026-10-06 · d12: probe before you fix found nine doors where reading found
   four, and one suspected door that was not there.** The config library let

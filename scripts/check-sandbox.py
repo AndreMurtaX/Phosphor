@@ -55,7 +55,33 @@ PRIMITIVES = [
 # DeleteTree and CopyTree are NOT in that list: they are this project's own
 # helpers and they ask the gate themselves, at every level of their recursion.
 
-GATE = re.compile(r'\bSandbox(Allows|Active|ScratchPath|Root)\b')
+GATE = re.compile(r'\b(?:Sandbox(?:Allows|Active|ScratchPath|Root)|IoGate)\b')
+
+# THE UNITS THAT OWN ioerror() ASK THROUGH IoGate, NEVER AROUND IT (ledger n10,
+# d62). IoGate (engine/libs/PhosphorIoLib.pas) is SandboxAllows plus the one thing
+# a refusal there owes the script: ioerror() = 5, "access denied". Before it, a
+# refusal recorded 2 in one function, 3 in five, and nothing in the rest, so
+# ioerror() kept the previous call's code and a script read that as this call's.
+# A bare SandboxAllows in one of these units is that defect waiting to come back:
+# it would gate the path and still say nothing. The one allowed call is IoGate's
+# own body.
+IOERR_UNITS = ('PhosphorIoLib.pas', 'PhosphorSysLib.pas', 'PhosphorStrListLib.pas')
+BARE_ASK = re.compile(r'\bSandboxAllows\s*\(')
+
+
+def bare_asks():
+    """Routines in the ioerror units that ask the sandbox around IoGate."""
+    bad = []
+    for path in sources():
+        base = os.path.basename(path)
+        if base not in IOERR_UNITS:
+            continue
+        with open(path, encoding='utf-8') as fh:
+            text = strip_comments(fh.read())
+        for name, body in routines_of(text):
+            if BARE_ASK.search(body) and not (base == 'PhosphorIoLib.pas' and name == 'IoGate'):
+                bad.append('%s:%s' % (base, name))
+    return bad
 
 # A routine may skip the gate only for a reason written down here. The key is
 # "<file>:<routine>"; the value is why. Anything not listed and not gated fails.
@@ -288,6 +314,14 @@ def main():
         # A stale exemption is a rule nobody is checking any more.
         print('STALE EXEMPTIONS -- listed in ALLOWED but no longer present:')
         for key in sorted(unused):
+            print('  ' + key)
+        return 1
+
+    bare = bare_asks()
+    if bare:
+        print('A REFUSAL THAT WOULD NOT REACH ioerror() -- these ask the sandbox')
+        print('directly in a unit that owns ioerror(); ask through IoGate instead:')
+        for key in bare:
             print('  ' + key)
         return 1
 

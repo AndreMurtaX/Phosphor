@@ -1010,6 +1010,91 @@ begin
 end;
 
 { The same, but asserting that the exception DOES escape -- the default. }
+{ THE FIFTH CEILING, MaxHandles (ledger m3). Every expectation is derived from
+  the rule, not from a run:
+
+  * the check runs AFTER each library call returns, so with a ceiling of 100
+    the 101st strings@() is refused before the println that follows it -- the
+    output is exactly the lines 1..100;
+  * it is a LEVEL: 100 000 lists created and freed one at a time never hold
+    more than one, so a ceiling of 100 lets the run finish;
+  * 0 is inert: the same 150 lists print all 150 lines;
+  * exactly at the ceiling is allowed -- 100 live under 100 is not over it;
+  * and like the other four it is fatal: ON ERROR cannot catch it.
+
+  The second and third are the ones a wrong version fails: counting handles
+  EVER CREATED fails the second, and testing the ceiling with no `> 0` guard
+  fails the third. Both were built and watched failing. }
+type
+  TTextSink = class
+    Text: String;
+    procedure Take(const S: String);
+  end;
+
+procedure TTextSink.Take(const S: String);
+begin
+  Text := Text + S;
+end;
+
+function Lines(AFrom, ATo: Integer): String;
+var i: Integer;
+begin
+  Result := '';
+  for i := AFrom to ATo do Result := Result + IntToStr(i) + LF;
+end;
+
+procedure CheckMaxHandles;
+const
+  Keep150 = 'for i = 1 to 150' + LF + '  l@ = strings@()' + LF +
+            '  println str$(i)' + LF + 'next' + LF;
+  Keep100 = 'for i = 1 to 100' + LF + '  l@ = strings@()' + LF + 'next' + LF +
+            'println "held 100"' + LF;
+  Churn = 'for i = 1 to 100000' + LF + '  l@ = strings@()' + LF +
+          '  x = strings_free(l@)' + LF + 'next' + LF + 'println "done"' + LF;
+  Caught = 'on error goto oops' + LF + 'for i = 1 to 150' + LF +
+           '  l@ = strings@()' + LF + 'next' + LF + 'goto fin' + LF +
+           'oops:' + LF + 'resume next' + LF + 'fin:' + LF + 'println "escaped"' + LF;
+
+  procedure One(const AName, ASource: String; AMax: Int64; AWantLimit: Boolean;
+                const AWantOut: String);
+  var
+    eng: TPhosphorEngine;
+    sink: TTextSink;
+    rc: Integer;
+  begin
+    eng := TPhosphorEngine.Create();
+    sink := TTextSink.Create();
+    try
+      eng.MaxHandles := AMax;
+      eng.TimeoutMs := 60000;
+      eng.OnOutput := @sink.Take;
+      rc := eng.Run(ASource);
+      if AWantLimit then
+        Report((rc <> 0) and (eng.LastError.Code = peLimit) and
+               (Pos('handle limit exceeded (' + IntToStr(AMax), eng.ErrorMessage) > 0),
+               AName + ' (expected the handle limit, got code ' +
+               IntToStr(Ord(eng.LastError.Code)) + ' ' + eng.ErrorMessage + ')')
+      else
+        Report(rc = 0, AName + ' (expected success, got ' + eng.ErrorMessage + ')');
+      Report(sink.Text = AWantOut, AName + ': the output is exactly what the rule says');
+    finally
+      sink.Free;
+      eng.Free;
+    end;
+  end;
+
+begin
+  One('MaxHandles: 150 kept under 100 is refused after the 101st call', Keep150, 100,
+      True, Lines(1, 100));
+  One('MaxHandles: a LEVEL -- 100 000 created and freed under 100 finish', Churn, 100,
+      False, 'done' + LF);
+  One('MaxHandles: 0 is inert -- the same 150 run to the end', Keep150, 0,
+      False, Lines(1, 150));
+  One('MaxHandles: exactly at the ceiling is not over it', Keep100, 100,
+      False, 'held 100' + LF);
+  One('MaxHandles: ON ERROR cannot escape it', Caught, 100, True, '');
+end;
+
 { THERE IS NO CAP ON A PROGRAM'S NAMES, AND THEY COST WHAT THEY WEIGH (ledger m4).
 
   docs/decisions.md ("No fixed global-variable cap") declined Plan9Basic's 513:
@@ -1908,6 +1993,7 @@ begin
            32 * 1024 * 1024, 'memory limit exceeded');
 
   CheckNameTablesScale();
+  CheckMaxHandles();
   CheckReusedCompilerNames();
 
   Writeln('ok: ', Ok);

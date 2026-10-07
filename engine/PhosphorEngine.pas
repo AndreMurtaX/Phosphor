@@ -61,6 +61,7 @@ type
     FLastError: TPhosphorError;
     FMaxSteps: Int64;
     FMaxMemoryBytes: Int64;
+    FMaxHandles: Int64;
     FMaxOutputBytes: Int64;
     FTimeoutMs: Int64;
     FContainFaults: Boolean;
@@ -238,6 +239,21 @@ type
       A host that must bound the process absolutely still wants a job object on
       Windows or an rlimit or cgroup on Linux. }
     property MaxMemoryBytes: Int64 read FMaxMemoryBytes write FMaxMemoryBytes;
+    { THE FIFTH CEILING: how many handles the script may hold LIVE at once
+      (ledger m3). Every dictionary, list, array, document and buffer is one, and
+      nothing frees them but the script or the next run, so a loop that makes
+      one per pass and keeps them is unbounded under the other four: MaxMemory
+      sees the bytes and not the count, and a handle can be small.
+
+      It refuses a LEVEL: creating and freeing a hundred thousand one at a time
+      is fine under a ceiling of 100, and holding 101 is not. It is asked after
+      every library call, which is the only place a handle is made, so it
+      overshoots by at most what one call creates -- one, for every constructor
+      in the standard library. 0 (the default) is unlimited and costs one
+      integer test per call. FATAL like the other four: ON ERROR cannot catch
+      it. The count is the PROCESS's table (see "Handles are process-wide" in
+      docs/embedding.md), which is this run's when one engine runs at a time. }
+    property MaxHandles: Int64 read FMaxHandles write FMaxHandles;
     { KEEP THE HOST'S PROCESS ALIVE WHEN THE INTERPRETER TAKES A FAULT.
 
       The ceilings above bound what a script may SPEND. This bounds what a defect
@@ -373,6 +389,7 @@ begin
   ClearErrorState();
   FMaxSteps := 0;
   FMaxMemoryBytes := 0;
+  FMaxHandles := 0;
   FMaxOutputBytes := 0;
   FTimeoutMs := 0;
   FVM := nil;
@@ -524,6 +541,7 @@ begin
   AVM.MaxOutputBytes := FMaxOutputBytes;
   AVM.TimeoutMs := FTimeoutMs;
   AVM.MaxMemoryBytes := FMaxMemoryBytes;
+  AVM.MaxHandles := FMaxHandles;
   AVM.ContainFaults := FContainFaults;
 end;
 

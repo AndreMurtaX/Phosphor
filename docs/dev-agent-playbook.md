@@ -1525,6 +1525,21 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · m3: a ceiling whose wrong versions were named before the
+  right one was written.** The gate said which two plausible variants must fail
+  -- latching (a total, not a level) and always-on (no guard for 0) -- and that
+  turned the test into five derivations rather than one: refused after the
+  101st call with output exactly 1..100, a hundred thousand create-and-free
+  under 100, inert at 0, exactly at the ceiling, uncatchable. Each mutation
+  failed the assertion it was aimed at and no other ceiling's check moved,
+  except always-on, which also broke two unrelated refusals -- a ceiling that
+  fires at 0 refuses every run that makes a handle, which is exactly what the
+  guard is for. Two traps from earlier rounds came back and were caught: the
+  docs patch also edited PhosphorVM.pas while the mutation sweep was restoring
+  it, so it waited; and "four ceilings" was a heading other documents cited by
+  its words, so the rename went everywhere the words did.
+
+
 - **2026-10-07 · d13: the decision was to document a limit, and one of its
   consequences was not part of the limit.** Decision 2 chose to stop promising
   that handles are the engine's, not to give each engine a table, and that held.

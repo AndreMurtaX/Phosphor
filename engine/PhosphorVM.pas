@@ -23,7 +23,8 @@ uses
     debug seam may block, and giving the parked time back to FStartTick alone
     leaves the budget's own clock running. See DebugPoll. }
   PhosphorBudget,
-  PhosphorSandbox;
+  PhosphorSandbox,
+  PhosphorHandles;   // LiveHandleCount, for the MaxHandles ceiling (ledger m3)
 
 { IS THIS EXCEPTION EVIDENCE THAT MEMORY IS ALREADY DAMAGED?
 
@@ -600,6 +601,11 @@ type
       Measured from the heap as this run STARTS, so it bounds what the SCRIPT
       adds and does not depend on how much the host was already holding. }
     MaxMemoryBytes: Int64;
+    { THE FIFTH CEILING: how many handles may be LIVE at once (ledger m3); 0 is
+      unlimited. Asked after every library call -- the only place a handle is
+      minted -- so it overshoots by at most what one call creates. See the
+      engine property of the same name. }
+    MaxHandles: Int64;
     constructor Create;
     destructor Destroy; override;   // closes any file channels left open
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)
@@ -2534,6 +2540,27 @@ var
     Result := False;
   end;
 
+  { ARE THE LIVE HANDLES WITHIN MaxHandles? False = they are not, and a fatal
+    peLimit is set, so the caller must Exit(False).
+
+    A LEVEL, NOT A COUNT. LiveHandleCount is what is alive now, so a script that
+    creates and frees a hundred thousand lists one at a time never comes near a
+    ceiling of 100, and a script that keeps 101 is refused. Counting handles
+    ever created would refuse the first; that variant was built and watched
+    failing tests/probe_limits.lpr#CheckMaxHandles before this one went in.
+    The table is the process's (PhosphorHandles, ledger d13), so the count is
+    this run's only for one engine at a time -- which is the supported shape. }
+  function HandlesWithin: Boolean;
+  begin
+    Result := True;
+    if MaxHandles <= 0 then Exit;
+    if LiveHandleCount() <= MaxHandles then Exit;
+    LastError := MakeError(peLimit, 'handle limit exceeded (' +
+      IntToStr(MaxHandles) + ' live handles)');
+    ErrorLine := ins.Line;
+    Result := False;
+  end;
+
   { Emit output, enforcing the output-byte ceiling. False = the ceiling was hit
     (a fatal peLimit is set; the caller must Exit(False)). }
   function EmitOutput(const S: String): Boolean;
@@ -3302,6 +3329,9 @@ begin
               on this build is under a thousandth of it, so unlike the `+` path
               this one needs no threshold. }
             if (MaxMemoryBytes > 0) and (not RoomFor(0)) then Exit(False);
+            { And the fifth, at the same place for the same reason: a library
+              call is the only thing that mints a handle. }
+            if not HandlesWithin() then Exit(False);
           except
             on ex: Exception do
             begin
@@ -4117,8 +4147,8 @@ end;
   raised and LastError describes it.
 
   WHAT PARKING IN HERE COSTS THE SCRIPT, AND WHAT IS GIVEN BACK. A host may sit in
-  this call for a minute while a person reads a stack trace. The engine has four
-  ceilings and a fifth lane, and a minute of parked wall clock is not the script's
+  this call for a minute while a person reads a stack trace. The engine has five
+  ceilings and a sixth lane, and a minute of parked wall clock is not the script's
   in any of them:
 
     MaxSteps        an instruction count. Correct by construction -- parking
@@ -4144,6 +4174,11 @@ end;
                     script printing, and nothing here charges it. A host that
                     writes through OnOutput from in here is printing on the
                     script's behalf and is charged, which is also right.
+    MaxHandles      the LIVE count in the process's handle table, asked after a
+                    library call. Parking mints none, so nothing is given back.
+                    A host that registers handles of its own while parked
+                    shares the table and is counted; that is the process-wide
+                    table (ledger d13) being what it says it is.
 
   A HOST THAT RUNS SCRIPT CODE WHILE PARKED IS NOT CREDITED AT ALL, and that is
   the one asymmetry in here. TPhosphorEngine.CallFunction on a stopped frame is

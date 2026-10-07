@@ -376,7 +376,7 @@ Consequences:
   on-disk format), it would be a large, explicit, documented number — not 513.
 
 A runaway script is bounded by **execution limits, not a variable count**. The
-engine exposes four ceilings — `MaxSteps` (instruction budget), `MaxOutputBytes`
+engine exposes five ceilings — `MaxSteps` (instruction budget), `MaxOutputBytes`
 (bytes the script pushes through a host seam: `PRINT` through `OnOutput`, and
 since 2026-09-11 a `BREAKPOINT`'s payload through `OnBreakpoint`, which used to be
 charged to nothing at all), `TimeoutMs` (wall-clock) and, since 2026-09-10,

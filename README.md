@@ -147,7 +147,7 @@ they named the root. An empty `--out` is refused rather than quietly dropped,
 `phosphor: --out needs a path` and exit 2, because `--out "$LOG"` with `LOG`
 unset used to print to the terminal and exit 0. The three ceilings that bound how
 **long** a script runs are the embedder's to set, and this host sets none of them:
-[docs/embedding.md](docs/embedding.md) has those, and says what all four ceilings
+[docs/embedding.md](docs/embedding.md) has those, and says what all five ceilings
 together still do not bound.
 
 **One binary, and it decides at startup.** `phosphor` links the LCL and asks a

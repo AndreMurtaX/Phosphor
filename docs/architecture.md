@@ -195,7 +195,7 @@ minefield otherwise.
    on Windows it is, so do not glob a directory and run what you find.
    Those limits and `SandboxRoot` are ceilings and not a wall: what they do not
    bound — memory first — is listed in [embedding.md](embedding.md), "What the
-   four ceilings do not bound".
+   five ceilings do not bound".
 
 ## One host, and how it can be both
 

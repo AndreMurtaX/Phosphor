@@ -334,6 +334,7 @@ eng.MaxSteps       := 1000000;        // instruction budget (bounds an infinite 
 eng.MaxOutputBytes := 64 * 1024;      // bytes the SCRIPT pushes through a host seam
 eng.TimeoutMs      := 2000;           // wall-clock ceiling
 eng.MaxMemoryBytes := 256*1024*1024;  // heap this script may ADD while it runs
+eng.MaxHandles     := 10000;          // handles the script may hold LIVE at once
 ```
 
 When one is hit, the run aborts and `eng.LastError.Code` is `peLimit`. The
@@ -355,6 +356,18 @@ overshoot. For an absolute bound on the process you still want a job object on
 Windows or an rlimit or cgroup on Linux — but without it, three instructions
 could take 14.7 GB and report success, and now they cannot.
 
+`MaxHandles` bounds how many handles — dictionaries, lists, arrays, documents,
+buffers — the script holds **live at once**. Nothing frees a handle but the
+script or the next run, so a loop that makes one per pass and keeps it is
+unbounded under the other four: the memory ceiling sees bytes, not count, and a
+handle can be small. It refuses a **level**, not a total: a hundred thousand
+lists created and freed one at a time run fine under a ceiling of 100, and
+holding the 101st is refused — `handle limit exceeded (100 live handles)`. It
+is asked after every library call, the only place a handle is made, so it
+overshoots by at most what one call creates, which is one for every constructor
+in the standard library. The count is the process's table (see "Handles are
+process-wide" above), which is this run's when one engine runs at a time.
+
 **Four more ceilings are fixed rather than yours to set**, and they are why an
 unbounded recursion ends in a message instead of in the process dying. Ordinary
 BASIC recursion stops at 262,144 activation frames, and at 1,048,576 local slots
@@ -362,7 +375,7 @@ held by those frames together — a frame costs a fixed part plus a per-slot par
 and one number cannot bound both. The expression stack stops at 1,048,576 values.
 A callback that re-enters the interpreter — `callfunc`, a GUI event, an `on error
 call` handler — stops at 256, because those levels cost process stack rather than
-heap. The first three are fatal in the same way as the three above; the re-entry
+heap. The first three are fatal in the same way as the five above; the re-entry
 one arrives as an ordinary catchable runtime error. Before they existed,
 `function f(n) return f(n + 1)` reached 1020 MB in 3.3 s, and a `.pbc` that
 pushed in a loop was handed 96 GB by `SetLength` rather than the out-of-memory
@@ -516,7 +529,7 @@ is asked about in turn. Before these rules existed all of it was nothing.
 the acceptance suite if any routine a script can reach touches the filesystem
 without asking the gate first.
 
-## What the four ceilings do not bound
+## What the five ceilings do not bound
 
 A ceiling nobody names reads as a ceiling that is there. Everything below is
 outside all four of them.
@@ -1039,7 +1052,7 @@ value stack and every open channel wherever the unwinding left them.
 Create
   -> Registry.Add / AddHost   (your functions)
   -> OnOutput := ...          (optional)
-  -> MaxSteps / MaxOutputBytes / TimeoutMs / MaxMemoryBytes := ...   (untrusted scripts)
+  -> MaxSteps / MaxOutputBytes / TimeoutMs / MaxMemoryBytes / MaxHandles := ...   (untrusted scripts)
   -> OnDebug := ...; ArmDebug(lines, stopAtEntry)      (optional; a debugger)
   -> SandboxRoot := '<dir>'                   (optional; bounds WHERE it writes)
   -> Run(source)                              one-shot

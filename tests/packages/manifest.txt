@@ -44,3 +44,4 @@
 14_http_client
 15_https_hostname
 16_https_fail_closed
+17_https_client_cert

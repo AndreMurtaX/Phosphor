@@ -34,7 +34,7 @@ no `regex_replace$`, `regex_escape$`, `regex_isvalid`), **HTTP speaks GET and
 POST**, and Plan9Basic's AI library has no counterpart here. See
 [docs/decisions.md](docs/decisions.md) for what changed on purpose.
 
-**717 built-in functions** are registered across those libraries and
+**718 built-in functions** are registered across those libraries and
 packages together -- 536 names from `engine/libs` and 181 from `host/packages` -- and
 the `phosphor` binary registers all of them, which is why the resolution section below
 points back at this number instead of stating a second one. Every one is exercised by
@@ -176,7 +176,7 @@ a standalone GUI application — the stub is this same complete binary.
 
 **A function name is resolved when the program runs, not when it compiles** — and
 that is what makes a `.pbc` portable. Which functions exist is a *host's* decision:
-`phosphor` registers all 717 names counted above — it links every package — the
+`phosphor` registers all 718 names counted above — it links every package — the
 package test runner adds the assertion library, and the GUI runner adds 426 more, as
 does `phosphor` itself wherever a graphical session is reachable. No GUI name
 collides with a library name, so that is 1141 in one process. The compiler has no

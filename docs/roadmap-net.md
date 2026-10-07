@@ -127,6 +127,15 @@ fallback stays an HTTP enhancement — correctness before breadth.
 
 Client certificates and proxy-tunnelled TLS (`CONNECT`) — real features, but past
 "the client can fetch an HTTPS URL". Recorded for later, not built speculatively.
+*(Client certificates were then built, 2026-10-07, ledger m7: `http_clientcert(c@,
+certfile$, keyfile$)`, proven against a local server that requires one. `CONNECT`
+stays deferred, and the reason is measured: `fphttpclient.pp` in FPC 3.2.2 contains
+the word CONNECT zero times -- its proxy support sends the absolute URL to the
+proxy, which is plain-HTTP proxying, so an https request through a proxy is refused
+(`http_error()` 2). A tunnel would mean a TCP connect to the proxy, a CONNECT
+exchange, and the TLS handshake on that same socket, through the `ConnectToServer`
+override the package already has -- with the SNI and the hostname check then
+reading the PROXY's host from the socket, which is the part to design first.)*
 *(A custom CA bundle was on this list and then built: `http_ca_file$(path$)` points
 verification at a specific PEM, as the step above describes.)*
 

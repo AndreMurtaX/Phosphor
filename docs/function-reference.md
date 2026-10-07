@@ -1096,6 +1096,7 @@ only when the request could not complete.
 | `http_followredirects(c@, on) → num` / `http_followredirects(c@) → num` | follow-redirects flag (set / get) |
 | `http_maxredirects(c@, n) → num` / `http_maxredirects(c@) → num` | redirect cap (set / get) |
 | `http_validatessl(c@, on) → num` / `http_validatessl(c@) → num` | per-client SSL-validation flag (set / get) |
+| `http_clientcert(c@, certfile$, keyfile$) → num` | the client certificate this client presents (PEM; `keyfile$` `""` = the key is in `certfile$`; `certfile$` `""` removes it); `1` recorded, `0` for a bad handle or a path the sandbox refuses |
 
 **Multipart form**
 

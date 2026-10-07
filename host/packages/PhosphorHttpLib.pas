@@ -101,6 +101,7 @@ uses
   SysUtils, Classes, Types, StrUtils, base64, fphttpclient, opensslsockets, openssl,
   ssockets, sslsockets, sslbase, resolve, sockets, URIParser,
   dynlibs, ctypes, fpopenssl,   // m5: the TLS names bound by hand, and TSSL
+  PhosphorSandbox, PhosphorIoLib,   // m7: a client certificate's paths ask the gate
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget;
 
 procedure RegisterHttpFuncs(Reg: TPhosphorRegistry);
@@ -168,6 +169,8 @@ type
     ConnectIP: String;
     VerifyPeer: Boolean;   // per request: the global switch, AND a client's own
     HostRefused: Boolean;  // a TLS handler of this request refused the peer's name
+    ClientCert: String;    // m7: PEM certificate to present, '' for none
+    ClientKey: String;     //     and its private key (may be the same file)
   protected
     procedure ConnectToServer(const AHost: String; APort: Integer;
       UseSSL: Boolean = False); override;
@@ -284,6 +287,16 @@ begin
     TSSLSocketHandler(Result).VerifyPeerCert := VerifyPeer;
     if VerifyPeer and (gCAFile <> '') then
       TSSLSocketHandler(Result).CertificateData.CertCA.FileName := gCAFile;
+    { A CLIENT CERTIFICATE (ledger m7). FPC's OpenSSL handler already loads a
+      Certificate and a PrivateKey into the context when they are set -- the code
+      a server uses -- and a client presents them when the server asks. The
+      paths are absolute: http_clientcert expanded them when the sandbox judged
+      them, so OpenSSL opens exactly the path the gate passed. }
+    if ClientCert <> '' then
+    begin
+      TSSLSocketHandler(Result).CertificateData.Certificate.FileName := ClientCert;
+      TSSLSocketHandler(Result).CertificateData.PrivateKey.FileName := ClientKey;
+    end;
     THostCheckedHandler(Result).Client := Self;
   end;
 end;
@@ -565,6 +578,8 @@ type
     ProxyPort: Integer;
     ProxyUser: String;
     ProxyPass: String;
+    ClientCert: String;   // absolute, or '' -- see http_clientcert
+    ClientKey: String;
     constructor Create(const ABaseUrl: String);
     destructor Destroy; override;
     procedure ResetToFactory;
@@ -698,6 +713,8 @@ begin
   ProxyPort := 0;
   ProxyUser := '';
   ProxyPass := '';
+  ClientCert := '';
+  ClientKey := '';
   { BaseUrl is the client's identity: reset returns it to how it left the factory,
     which is with the base url it was constructed with, so BaseUrl is left intact. }
 end;
@@ -1336,6 +1353,40 @@ begin
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
+{ http_clientcert(c@, certfile$, keyfile$) -- the certificate this client presents
+  when an https server asks for one (ledger m7). PEM files; keyfile$ "" means the
+  key is in certfile$ too, and certfile$ "" removes the certificate. Answers 1
+  when it was recorded and 0 when it was not: a bad handle (http_error() 1), or a
+  path the sandbox refuses (ioerror() 5) -- OpenSSL, not this engine, will open
+  the file, so the gate is asked here, on the path made ABSOLUTE, and that same
+  string is what OpenSSL is handed. Nothing is read now: a missing or mismatched
+  file shows up as a failed request, as http_ca_file$'s does. }
+function f_http_clientcert(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var
+  c: TPhosphorHttpClient;
+  cert, key: String;
+begin
+  Err := NoError();
+  if not GetClient(Args[0].Hnd, c) then
+  begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; Exit; end;
+  gHttpErr := HTTP_OK;
+  cert := Args[1].Str;
+  key := Args[2].Str;
+  if cert = '' then
+  begin
+    c.ClientCert := '';
+    c.ClientKey := '';
+    Exit(ValInt(1));
+  end;
+  if key = '' then key := cert;
+  cert := ExpandFileName(cert);
+  key := ExpandFileName(key);
+  if (not IoGate(cert, puRead)) or (not IoGate(key, puRead)) then Exit(ValInt(0));
+  c.ClientCert := cert;
+  c.ClientKey := key;
+  Result := ValInt(1);
+end;
+
 function f_http_validatessl_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorHttpClient;
 begin
@@ -1518,6 +1569,8 @@ begin
   // Verification is ON only when the global switch AND this client both ask for
   // it, so either can opt out and neither can quietly turn the other back on.
   c.VerifyPeer := gVerifyPeer and cfg.ValidateSSL;
+  c.ClientCert := cfg.ClientCert;
+  c.ClientKey := cfg.ClientKey;
   if cfg.UserAgent <> '' then c.AddHeader('User-Agent', cfg.UserAgent);
   if cfg.Accept <> '' then c.AddHeader('Accept', cfg.Accept);
   if cfg.ContentType <> '' then c.AddHeader('Content-Type', cfg.ContentType);
@@ -1698,6 +1751,7 @@ begin
   Reg.Add('http_maxredirects:@',  @f_http_maxredirects_get);
   Reg.Add('http_validatessl:@n',  @f_http_validatessl_set);
   Reg.Add('http_validatessl:@',   @f_http_validatessl_get);
+  Reg.Add('http_clientcert:@$$',  @f_http_clientcert);
   // forms
   Reg.Add('http_form@:',          @f_http_form);
   Reg.Add('http_formfieldcount:@',@f_http_formfieldcount);

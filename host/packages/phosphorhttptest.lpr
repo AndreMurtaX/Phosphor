@@ -29,7 +29,7 @@ program phosphorhttptest;
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
-  dynlibs, ctypes,
+  dynlibs, ctypes, ssockets, sslsockets, opensslsockets, fpopenssl,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib;
 
@@ -37,12 +37,15 @@ const
   SRV_PORT     = 18099;
   SRV_PORT_TLS = 18443;
   SRV_PORT_TLS_IP = 18444;   // the same CA, a certificate for IP:127.0.0.1 only (m5)
+  SRV_PORT_MTLS = 18445;     // requires a client certificate the CA signed (m7)
 
 var
   BaseURL: String;
   BaseURLHttps: String;
   CAFile: String;   // the throwaway CA the TLS fixture chains to (ledger m5)
   BaseURLHttpsIP: String;
+  BaseURLMtls: String;
+  CertDirG: String;   // where the fixtures live, for the client-certificate paths
   Withheld: String = '';   // http_tls_withhold's name, consulted by the library's seam
 
 { ---- the local test server -------------------------------------------------}
@@ -57,6 +60,23 @@ type
     property Address;
     property UseSSL;
     property CertificateData;
+  end;
+
+  { A TLS SERVER THAT REQUIRES A CLIENT CERTIFICATE (ledger m7). FPC's handler can
+    only ASK for one -- VerifyPeerCert sets SSL_VERIFY_PEER, which on a server
+    requests a certificate and accepts a client that sends none. Requiring it
+    takes SSL_VERIFY_FAIL_IF_NO_PEER_CERT, which FPC never sets, so it is set on
+    each connection right after the context is built, through SSL_set_verify
+    bound by name -- the m5 approach, for the same reason. The client's chain is
+    verified against the throwaway CA. }
+  TRequireClientCertHandler = class(TOpenSSLSocketHandler)
+  protected
+    function InitContext(NeedCertificate: Boolean): Boolean; override;
+  end;
+
+  TMutualTlsServer = class(TBoundHttpServer)
+  protected
+    function GetSocketHandler(const AUseSSL: Boolean): TSocketHandler; override;
   end;
 
   { The server runs in its own thread, and that same object carries the request
@@ -154,6 +174,53 @@ function f_server_ca_file(const Args: array of TValue; out Err: TPhosphorError):
 begin
   Err := NoError();
   Result := ValStr(CAFile);
+end;
+
+const
+  { OpenSSL ssl.h. FPC's openssl unit defines SSL_VERIFY_PEER and not this one. }
+  SSL_VERIFY_FAIL_IF_NO_PEER_CERT = $02;
+
+type
+  TSslSetVerify = procedure(ssl: PSSL; mode: cint; cb: Pointer); cdecl;
+
+function TRequireClientCertHandler.InitContext(NeedCertificate: Boolean): Boolean;
+var setverify: TSslSetVerify;
+begin
+  Result := inherited InitContext(NeedCertificate);
+  if not Result then Exit;
+  setverify := TSslSetVerify(GetProcedureAddress(SSLLibHandle, 'SSL_set_verify'));
+  // No way to require it means this server must not pretend to: refuse to start.
+  if not Assigned(setverify) then Exit(False);
+  setverify(SSL.SSL, SSL_VERIFY_PEER or SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nil);
+end;
+
+function TMutualTlsServer.GetSocketHandler(const AUseSSL: Boolean): TSocketHandler;
+var h: TRequireClientCertHandler;
+begin
+  if not AUseSSL then Exit(inherited GetSocketHandler(AUseSSL));
+  h := TRequireClientCertHandler.Create();
+  h.CertificateData := Self.CertificateData;   // what CreateSSLSocketHandler does
+  h.VerifyPeerCert := True;                    // SSL_VERIFY_PEER, and the CA loaded
+  Result := h;
+end;
+
+{ server_url_mtls$() -> https://localhost on the server that REQUIRES a client
+  certificate signed by the throwaway CA. Its own certificate is the localhost
+  one, so with server_ca_file$ trusted the client verifies it end to end. }
+function f_server_url_mtls(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValStr(BaseURLMtls);
+end;
+
+{ server_client_cert$(which$) -> the path of a client-certificate fixture: "cert",
+  "key", or "combined" (certificate and key in one PEM). }
+function f_server_client_cert(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  if Args[0].Str = 'key' then Result := ValStr(CertDirG + 'tls_test_client_key.pem')
+  else if Args[0].Str = 'combined' then Result := ValStr(CertDirG + 'tls_test_client_combined.pem')
+  else Result := ValStr(CertDirG + 'tls_test_client_cert.pem');
 end;
 
 { server_url_https_ip$() -> the base URL of a third server, same routes, whose
@@ -296,7 +363,8 @@ end;
 var
   eng: TPhosphorEngine;
   srv, srvTls, srvTlsIP: TBoundHttpServer;
-  th, thTls, thTlsIP: TServerThread;
+  srvMtls: TMutualTlsServer;
+  th, thTls, thTlsIP, thMtls: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
 begin
@@ -329,6 +397,7 @@ begin
   BaseURL      := 'http://127.0.0.1:' + IntToStr(SRV_PORT);
   BaseURLHttps := 'https://127.0.0.1:' + IntToStr(SRV_PORT_TLS);
   BaseURLHttpsIP := 'https://127.0.0.1:' + IntToStr(SRV_PORT_TLS_IP);
+  BaseURLMtls := 'https://localhost:' + IntToStr(SRV_PORT_MTLS);
 
   { Stand up the local server in a background thread. Bind loopback ONLY, so that a
     127.0.0.x address other than .1 is genuinely dead -- the fallback test relies on
@@ -362,6 +431,7 @@ begin
   srvTls.UseSSL := True;
   certDir := ExtractFilePath(ExpandFileName(path));
   CAFile := certDir + 'tls_test_ca.pem';
+  CertDirG := certDir;
   if FileExists(certDir + 'tls_test_cert.pem') then
   begin
     srvTls.CertificateData.Certificate.FileName := certDir + 'tls_test_cert.pem';
@@ -390,9 +460,28 @@ begin
   thTlsIP.FreeOnTerminate := False;
   thTlsIP.Start;
 
+  { The fourth: the localhost certificate, and a client certificate REQUIRED. }
+  srvMtls := TMutualTlsServer.Create(nil);
+  srvMtls.Address := '127.0.0.1';
+  srvMtls.Port := SRV_PORT_MTLS;
+  srvMtls.Threaded := True;
+  srvMtls.UseSSL := True;
+  if FileExists(certDir + 'tls_test_cert.pem') then
+  begin
+    srvMtls.CertificateData.Certificate.FileName := certDir + 'tls_test_cert.pem';
+    srvMtls.CertificateData.PrivateKey.FileName  := certDir + 'tls_test_key.pem';
+    srvMtls.CertificateData.CertCA.FileName      := certDir + 'tls_test_ca.pem';
+  end;
+  thMtls := TServerThread.Create(True);
+  thMtls.Srv := srvMtls;
+  srvMtls.OnRequest := @thMtls.HandleRequest;
+  thMtls.FreeOnTerminate := False;
+  thMtls.Start;
+
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
-  while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active)) and (waited < 3000) do
+  while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active) or
+         (not srvMtls.Active)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 
@@ -424,6 +513,8 @@ begin
     eng.Registry.Add('server_url_https$:', @f_server_url_https);
     eng.Registry.Add('server_ca_file$:', @f_server_ca_file);
     eng.Registry.Add('server_url_https_ip$:', @f_server_url_https_ip);
+    eng.Registry.Add('server_url_mtls$:', @f_server_url_mtls);
+    eng.Registry.Add('server_client_cert$:$', @f_server_client_cert);
     eng.Registry.Add('http_tls_withhold:$', @f_http_tls_withhold);
     eng.Registry.Add('server_openssl_version$:', @f_server_openssl_version);
     eng.Registry.Add('server_openssl3_pair:', @f_server_openssl3_pair);

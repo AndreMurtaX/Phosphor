@@ -1525,6 +1525,21 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · m7: the feature was six lines and the proof was a server.**
+  FPC's handler already loads a certificate and key on the client side; the
+  package only had to set them. The work was the other end: a TLS server that
+  REQUIRES a client certificate, which FPC cannot express -- VerifyPeerCert on a
+  server only asks -- so the runner's server sets SSL_VERIFY_FAIL_IF_NO_PEER_CERT
+  per connection through SSL_set_verify bound by name, the m5 technique again.
+  The mutation that mattered most was the one aimed at the harness: with the
+  server merely asking, the "refused without one" assertions fail, so the test
+  is not passing because the server never checked. Writing the docs turned up
+  a stale row -- http.md said http_validatessl was "stored only" a full feature
+  after n26 made it decide handshakes -- the drift class the playbook ledger
+  warns about, in a reference page. CONNECT stays deferred, with the reason now
+  measured (zero occurrences in fphttpclient.pp) rather than remembered.
+
+
 - **2026-10-07 · m5: the fixture decided what the test could see.** The
   hostname check is twenty lines; most of the work was making its absence
   visible. A self-signed certificate cannot test a name -- the chain fails

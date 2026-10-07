@@ -1,6 +1,6 @@
 # http — fetch a URL, and build the request that will fetch it
 
-`host/packages/PhosphorHttpLib.pas` · 60 functions · opt-in host package (the
+`host/packages/PhosphorHttpLib.pas` · 61 functions · opt-in host package (the
 `phosphor` console host links it; a host that never calls `RegisterHttpFuncs`
 has none of these names)
 
@@ -135,7 +135,8 @@ a name where the types allow it and are told apart by arity.
 | `http_accept(c@, s$) → num` / `http_accept$(c@) → str` | the Accept header to send; `""` when none was set |
 | `http_followredirects(c@, on) → num` / `http_followredirects(c@) → num` | whether redirects would be followed; `1` on a factory-fresh client |
 | `http_maxredirects(c@, n) → num` / `http_maxredirects(c@) → num` | the redirect cap; `5` on a factory-fresh client |
-| `http_validatessl(c@, on) → num` / `http_validatessl(c@) → num` | this client's SSL-validation flag, `1` by default. Per-client and stored only — the flag that actually decides a handshake is the global `http_verify_peer` |
+| `http_validatessl(c@, on) → num` / `http_validatessl(c@) → num` | this client's SSL-validation flag, `1` by default. It decides this client's handshakes together with the global `http_verify_peer`: verification — chain and name — is on only when both ask for it |
+| `http_clientcert(c@, certfile$, keyfile$) → num` | the certificate this client presents when an https server asks for one (mutual TLS). PEM files; `keyfile$` `""` means the key is in `certfile$` too, and `certfile$` `""` removes the certificate (`http_reset` does too). Answers `1` when recorded, `0` for a bad handle (`http_error()` `1`) or a path the sandbox refuses (`ioerror()` `5`). A relative path means the file it names when it is recorded — it is made absolute then, and that is the path OpenSSL opens. Nothing is read until a request: a missing file, or a key that is not the certificate's, fails that request |
 
 ### Multipart forms
 

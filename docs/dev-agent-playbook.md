@@ -1525,6 +1525,43 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-06 · A one-off probe failure the runner could not name, and seven
+  checks that assumed the machine was quick.** The Linux suite printed
+  `FAIL  probe: probe_step (ok: 224 fail: 1)` once. 27 reruns stayed green, and
+  that run could not say which check failed: test-suite.sh printed only the
+  ok:/fail: counts and threw away the probe's stderr, which is where every
+  `FAIL: <check> -- got ..., wanted ...` line goes. test-suite.ps1 printed that
+  stderr, but as one string with only its first line indented. Both now print
+  a failed probe's stderr, indented and capped at 40 lines. That path only runs
+  when something has already failed, so no green run would ever exercise it.
+  Each runner therefore exercises it deliberately with `probe_value --fail` and
+  fails the suite unless the printed lines contain a `FAIL:` line.
+  Then the flake was CAUGHT rather than reasoned about: twelve parallel loops of
+  probe_step on the VM, with CPU burners, gave 178 failure records that named
+  only seven checks. Every one of them asserts that a run COMPLETES under a
+  wall-clock ceiling. Some were the parked cells (a 700 ms park under a 400 ms
+  ceiling). Others were their UNPARKED controls, and one was `BudgetParked`,
+  where `Sleep(120)` took more than five seconds and both reads answered the
+  clamped `1 -> 1`. So the credit was fine. The engine credits the park it
+  MEASURES. What broke was the tests' assumption that the work done OUTSIDE the
+  park is quick. The fix measures that instead. Each attempt times the run on the
+  same monotonic clock and subtracts what `TDrive.Park` measured. A refusal when
+  the script had more than its ceiling outside the park is a CORRECT refusal
+  that measured nothing, so the attempt is void and runs again (up to 5). A
+  refusal under the ceiling is a FAIL that prints the script time. Five voids in
+  a row are a FAIL that says the machine never gave the check a fair run.
+  `BudgetParked`'s flat margin of 50 became the measured gap between its two
+  reads. Watched: mutations that remove the VM-clock credit, the budget credit,
+  the clamp, or the whole give-back each fail at 0 ms of script time. Under the
+  same moderate load on the VM, old binary against new, alternating: 10 of 150
+  runs failed against 0 of 150. **Lessons:** a runner that drops a failure's
+  detail turns every flake into an argument, so print the detail, and prove the
+  printing by failing on purpose. The grain of the clock is part of the
+  measurement: GetTickCount64 steps by 15.625 ms on Windows, and the first draft
+  of the void rule assumed 1 ms. And it took a full census to see that the
+  unparked CONTROLS failed too, which is what cleared the engine. Read the whole
+  failure set, not the first line.
+
 - **2026-10-06 · d56: a watchdog that does not end the run lets the hang be
   reported as everything else.** The GUI runner's watchdog called
   Application.Terminate, a flag the LCL never clears, so the file ran on past its
@@ -1540,7 +1577,6 @@ the sweep above. Verify before fixing, as with everything on this page.
   Handle is read while it lives -- the first run reported a correct hang as a
   failure with a blank exit -- and the same blank had already been in my own
   measurement of the old behaviour, read past because the stdout was the point.
-
 
 - **2026-10-06 · d57: the harness had a tolerance that grew with the number, and
   a missing overload that pushed tests onto it.** assert_eq forgave 1e-12 of the

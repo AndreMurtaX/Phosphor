@@ -166,6 +166,11 @@ type
     GlobalText: String;       // what it held at the last stop that had it
     GosubTrace: Boolean;      // also record DbgGosubDepth at each stop
     GosubSeen: String;
+    { WHAT THE PARKS REALLY TOOK, on the monotonic clock, not what they asked for.
+      A Sleep(700) on the Linux VM has been measured taking seconds; the engine
+      credits what it MEASURES, so the timed checks below judge against this. }
+    ParkedMs: Int64;
+    procedure Park(AMs: Integer);
     function Debug(AReason: TPhosphorStopReason; ALine: Integer;
                    AFrameDepth: Integer): TPhosphorDebugAction;
     procedure Output(const AText: String);
@@ -174,6 +179,14 @@ type
 procedure TDrive.Output(const AText: String);
 begin
   Text := Text + AText;
+end;
+
+procedure TDrive.Park(AMs: Integer);
+var t0: QWord;
+begin
+  t0 := GetTickCount64();
+  Sleep(AMs);
+  Inc(ParkedMs, Int64(GetTickCount64() - t0));
 end;
 
 function ReasonTag(AReason: TPhosphorStopReason): String;
@@ -235,7 +248,7 @@ begin
     if (PauseAtStop > 0) and (Stops = PauseAtStop) and (Eng.PreparedVM <> nil) then
       Eng.PreparedVM.InterruptDebug();
     if (SleepMsAtStop > 0) and (Stops = 1) then
-      Sleep(SleepMsAtStop);
+      Park(SleepMsAtStop);
     if HogAtStop and (Stops = 1) then
       // 32 MB, RETAINED in a field: a debug adapter buffering a stack frame or a
       // JSON payload is doing exactly this, and before the correction those bytes
@@ -253,14 +266,14 @@ begin
     if (ReentryAtStop > 0) and (Stops = ReentryAtStop) and (Depth = 1) and
        (Eng.PreparedVM <> nil) then
     begin
-      if ParkBeforeEvalMs > 0 then Sleep(ParkBeforeEvalMs);
+      if ParkBeforeEvalMs > 0 then Park(ParkBeforeEvalMs);
       if ReentryName = '' then
         v := Eng.CallFunction('twice', [ValInt(4)])
       else
         v := Eng.CallFunction(ReentryName, [ValInt(ReentryArg)]);
       Reentered := ValToStr(v);
       ReenteredErr := Eng.ErrorMessage;
-      if ParkAfterEvalMs > 0 then Sleep(ParkAfterEvalMs);
+      if ParkAfterEvalMs > 0 then Park(ParkAfterEvalMs);
     end;
 
     if Next <= High(Actions) then
@@ -294,6 +307,69 @@ end;
 function Want(const S: String): String;
 begin
   if ProveFail then Result := S + ' S999@9' else Result := S;
+end;
+
+{ ------------------------------------------------------------------------- }
+{ A TIMED CHECK IS JUDGED ON THE TIME IT ACTUALLY HAD (2026-10-06).
+
+  Every check below that sets a wall-clock ceiling asserts that a run COMPLETES:
+  a park longer than the ceiling is given back, and the work the script does
+  outside the park fits. The second half is an assumption about the machine, and
+  on the Linux VM it is false often enough to matter -- that VM has been measured
+  oversleeping a 0.1 s sleep by half a second and stalling a 1 s recv for 7.2 s
+  (2026-10-05, bf01fb7). A suite run there reported `probe_step (ok: 224 fail: 1)`
+  once and then never again in 27 reruns; under load the same checks failed in
+  4 of 12 parallel runs, every time with the UNPARKED control of the same cell
+  passing a moment earlier.
+
+  So each attempt measures, on the same monotonic clock the engine reads, the
+  wall time of the run MINUS what TDrive.Park measured: the time the script had.
+  The engine's own figure can only be smaller -- its run starts after our first
+  read, and the window it credits contains the Sleep we timed -- except for the
+  GRAIN of the clock: GetTickCount64 advances in 1 ms steps on Linux but in timer
+  ticks of 15.625 ms on Windows, so two of our reads against two of the engine's
+  can disagree by two ticks. TimedGrainMs is that, rounded up. So:
+
+    refused, and the script had  <= ceiling - grain   the credit is broken: FAIL
+    refused, and the script had  >  ceiling - grain   a CORRECT refusal of a slow
+                                                      run, which measured nothing:
+                                                      void, run it again
+
+  A broken credit is still caught on the first attempt -- without it the park is
+  charged, which a script time measured WITHOUT the park cannot explain: the
+  mutations that remove either ledger's credit were each seen failing here at
+  0 ms of script time, against ceilings of 200 to 400. And a
+  machine that never gives a fair attempt in TimedAttempts tries is reported as a
+  failure that says so, never as a pass: not measured is not passing. }
+const
+  TimedAttempts = 5;
+  TimedGrainMs = 32;   // two Windows timer ticks of 15.625 ms
+
+function TimedVoid(const AGot, AWant: String; AScriptMs, ACeilingMs: Int64): Boolean;
+begin
+  Result := (AGot <> AWant) and (AScriptMs > ACeilingMs - TimedGrainMs);
+end;
+
+procedure CheckTimed(const AGot, AWant: String; AScriptMs, ACeilingMs: Int64;
+                     const AName: String);
+begin
+  if AGot = AWant then Report(True, AName)
+  else if TimedVoid(AGot, AWant, AScriptMs, ACeilingMs) then
+  begin
+    Inc(Failed);
+    Writeln(StdErr, 'FAIL: ', AName, ' -- every one of ', TimedAttempts,
+            ' attempts was refused AFTER the script had more than its ceiling ',
+            'outside the park (last: ', AScriptMs, ' ms against ', ACeilingMs,
+            '), so this machine never gave the check a fair run; last answer "',
+            AGot, '"');
+  end
+  else
+  begin
+    Inc(Failed);
+    Writeln(StdErr, 'FAIL: ', AName, ' -- got "', AGot, '", wanted "', AWant,
+            '", with only ', AScriptMs, ' ms of script time against a ',
+            ACeilingMs, ' ms ceiling');
+  end;
 end;
 
 
@@ -1323,11 +1399,15 @@ end;
   every 4096 instructions. The fixture spends 3000 iterations AFTER the park so
   that the check is reached at all -- a program short enough never to reach it
   would pass this test on any build. }
-procedure CheckParkedClock;
+{ One parked run under a ceiling, answered as "<rc>/<output>" with the time the
+  script had outside the park -- see CheckTimed. Shared by ledgers one and two. }
+function ParkedRun(const ASrc: String; out AScriptMs: Int64;
+                   out AErr: String): String;
 var
   eng: TPhosphorEngine;
   d: TDrive;
   rc: Integer;
+  t0: QWord;
 begin
   eng := TPhosphorEngine.Create();
   d := NewDrive(eng, [daRun]);
@@ -1335,19 +1415,40 @@ begin
     d.SleepMsAtStop := 350;
     eng.TimeoutMs := 200;
     eng.ArmDebug([], True);
-    rc := eng.Run('s = 0' + #10 +
-                  'for i = 1 to 3000' + #10 +
-                  '  s = s + 1' + #10 +
-                  'next' + #10 +
-                  'println str$(s)' + #10);
-    CheckInt(rc, 0,
-             'a seam parked for longer than the whole time ceiling does not ' +
-             'time out the script (' + eng.ErrorMessage + ')');
-    CheckStr(d.Text, '3000' + #10, 'and the loop really ran to the end');
+    t0 := GetTickCount64();
+    rc := eng.Run(ASrc);
+    AScriptMs := Int64(GetTickCount64() - t0) - d.ParkedMs;
+    AErr := eng.ErrorMessage;
+    Result := IntToStr(rc) + '/' + StringReplace(d.Text, #10, '', [rfReplaceAll]);
   finally
     eng.Free;
     d.Free;
   end;
+end;
+
+procedure CheckParkedClock;
+const
+  Src = 's = 0' + #10 +
+        'for i = 1 to 3000' + #10 +
+        '  s = s + 1' + #10 +
+        'next' + #10 +
+        'println str$(s)' + #10;
+var
+  got, err: String;
+  ms: Int64;
+  k: Integer;
+begin
+  { "0/3000": the run reports success AND the loop ran to the end -- the two
+    assertions this used to make separately, now one answer so that one attempt
+    decides both. }
+  for k := 1 to TimedAttempts do
+  begin
+    got := ParkedRun(Src, ms, err);
+    if not TimedVoid(got, '0/3000', ms, 200) then Break;
+  end;
+  CheckTimed(got, '0/3000', ms, 200,
+             'a seam parked for longer than the whole time ceiling does not ' +
+             'time out the script, and the loop really ran to the end (' + err + ')');
 end;
 
 { LEDGER TWO: the library budget's own clock, which is a DIFFERENT clock started
@@ -1357,70 +1458,99 @@ end;
   refuse it, and a pass here is about the budget and not about ledger one. }
 procedure CheckParkedBudget;
 var
-  eng: TPhosphorEngine;
-  d: TDrive;
-  rc: Integer;
-  before, after: Int64;
+  before, after, ms, gap: Int64;
+  got, err: String;
+  k: Integer;
+  t1, t2: QWord;
 begin
-  eng := TPhosphorEngine.Create();
-  d := NewDrive(eng, [daRun]);
-  try
-    d.SleepMsAtStop := 350;
-    eng.TimeoutMs := 200;
-    eng.ArmDebug([], True);
-    rc := eng.Run('s$ = string$(50, 65)' + #10 +
-                  'println str$(len(s$))' + #10);
-    CheckInt(rc, 0,
-             'a parked seam does not spend the LIBRARY budget either (' +
-             eng.ErrorMessage + ')');
-    CheckStr(d.Text, '50' + #10, 'and the library call really did its work');
-  finally
-    eng.Free;
-    d.Free;
+  for k := 1 to TimedAttempts do
+  begin
+    got := ParkedRun('s$ = string$(50, 65)' + #10 +
+                     'println str$(len(s$))' + #10, ms, err);
+    if not TimedVoid(got, '0/50', ms, 200) then Break;
   end;
+  CheckTimed(got, '0/50', ms, 200,
+             'a parked seam does not spend the LIBRARY budget either, and the ' +
+             'library call really did its work (' + err + ')');
 
   { AND THE UNIT ITSELF, asked directly, because the engine test above can only
     say that nothing refused -- it cannot say the clock moved by the right amount.
 
-    DERIVED FROM THE DEFINITION. A 5000 ms ceiling, 120 ms of real waiting, then
-    100 of those milliseconds given back: the remaining time must go UP by about
-    100 and must never exceed the ceiling. The margin is 50 rather than 100
-    because the two reads are not simultaneous, and the ceiling test is the half
-    that catches the mistake the first version of BudgetParked actually made --
+    DERIVED FROM THE DEFINITION. A 5000 ms ceiling, at least 120 ms elapsed, then
+    100 of those milliseconds given back: between two reads of the remaining time
+    taken r2 - r1 apart, it must go UP by exactly 100 - (r2 - r1). The reads sit
+    inside [t1, t2] and each tick truncates, so the bound asserted is
+    100 - (t2 - t1) - 2 -- measured, where it used to be a flat 50 and an
+    assumption that Sleep(120) takes about 120 ms. On 2026-10-06 under load on the
+    Linux VM it took over five seconds: the budget was already spent, both reads
+    answered the clamped 1, and the check reported `1 -> 1`. So an attempt whose
+    budget is (nearly) spent before the give-back, or whose two reads straddle a
+    stall long enough to blur 100 ms, measured nothing and is run again -- see
+    CheckTimed for the same rule on the engine's clock. The ceiling half is what
+    catches the mistake the first version of BudgetParked actually made --
     pushing the start into the FUTURE, where the unsigned subtraction every reader
     does wraps and answers 0 for the rest of the run. }
-  BudgetBegin(0, 5000);
-  try
-    Sleep(120);
-    before := BudgetRemainingMs;
-    BudgetParked(100);
-    after := BudgetRemainingMs;
-    Report(after >= before + 50,
-           'BudgetParked gives the parked milliseconds back to the budget clock ' +
-           '(' + IntToStr(before) + ' -> ' + IntToStr(after) + ')');
-    Report((after > 0) and (after <= 5000),
-           'and it never pushes the start past now, which would wrap the clock');
-  finally
-    BudgetEnd();
+  for k := 1 to TimedAttempts do
+  begin
+    BudgetBegin(0, 5000);
+    try
+      { At least 120 ms by the budget's own clock -- GStart was read inside
+        BudgetBegin, before t1 -- so the clamp at "elapsed" cannot trim the 100
+        given back. Waited for, not assumed of a Sleep. }
+      t1 := GetTickCount64();
+      repeat Sleep(20) until GetTickCount64() - t1 >= 120;
+      t1 := GetTickCount64();
+      before := BudgetRemainingMs;
+      BudgetParked(100);
+      after := BudgetRemainingMs;
+      t2 := GetTickCount64();
+    finally
+      BudgetEnd();
+    end;
+    gap := Int64(t2 - t1);
+    if (before > 100) and (gap <= 50) then Break;
   end;
+  if (before > 100) and (gap <= 50) then
+    Report(after >= before + 100 - gap - 2,
+           'BudgetParked gives the parked milliseconds back to the budget clock ' +
+           '(' + IntToStr(before) + ' -> ' + IntToStr(after) + ', reads ' +
+           IntToStr(gap) + ' ms apart)')
+  else
+    Report(False,
+           'BudgetParked gives the parked milliseconds back -- but in ' +
+           IntToStr(TimedAttempts) + ' attempts this machine never gave it a ' +
+           'fair one (last: ' + IntToStr(before) + ' ms left before the ' +
+           'give-back, reads ' + IntToStr(gap) + ' ms apart)');
+  Report((after > 0) and (after <= 5000),
+         'and it never pushes the start past now, which would wrap the clock');
   { TOLD MORE THAN HAS ELAPSED, which is the case the clamp is for and the one a
     caller reaches by rounding: a park of 20 ms reported as 100000. Without the
     clamp the start goes a hundred seconds into the FUTURE, the unsigned
     subtraction every reader does wraps, and a 5000 ms budget answers 1 ms left
     for the rest of the run. Derived from the arithmetic, not from a run: the
-    give-back can never exceed what has elapsed, so the remaining time here is
-    still the whole ceiling, to within the 20 ms actually spent. }
-  BudgetBegin(0, 5000);
-  try
-    Sleep(20);
-    BudgetParked(100000);
-    after := BudgetRemainingMs;
-    Report(after > 4000,
-           'a park longer than the run itself is clamped at now, not wrapped ' +
-           'past it (' + IntToStr(after) + ' ms left of 5000)');
-  finally
-    BudgetEnd();
+    give-back is clamped to what has elapsed, which puts the start AT the moment
+    of the call, so the remaining time is the whole ceiling less the time from
+    that call to the read -- at most t2 - t1, plus 2 for truncation. It used to
+    be a flat "more than 4000", which a one-second stall would have failed. }
+  for k := 1 to TimedAttempts do
+  begin
+    BudgetBegin(0, 5000);
+    try
+      Sleep(20);
+      t1 := GetTickCount64();
+      BudgetParked(100000);
+      after := BudgetRemainingMs;
+      t2 := GetTickCount64();
+    finally
+      BudgetEnd();
+    end;
+    gap := Int64(t2 - t1);
+    if gap <= 1000 then Break;
   end;
+  Report((gap <= 1000) and (after >= 5000 - gap - 2),
+         'a park longer than the run itself is clamped at now, not wrapped ' +
+         'past it (' + IntToStr(after) + ' ms left of 5000, ' + IntToStr(gap) +
+         ' ms after the call)');
   { And it cannot resurrect a budget nobody began: outside a Begin/End pair it is
     a no-op, so a stray call can never hand a later run a clock that never
     started. }
@@ -2823,11 +2953,14 @@ const
     returned nothing" and "it returned nothing AND said why" cannot be confused
     -- which is the mistake a previous round made by comparing an integer it had
     called an exit code and which was a line number. }
-  function Watched(const AName: String; AArg: Int64; AParkMs: Integer): String;
+  function Watched(const AName: String; AArg: Int64; AParkMs: Integer;
+                   out AScriptMs: Int64): String;
   var
     eng: TPhosphorEngine;
     d: TDrive;
+    t0: QWord;
   begin
+    AScriptMs := 0;
     eng := TPhosphorEngine.Create();
     d := NewDrive(eng, [daRun]);
     try
@@ -2838,7 +2971,9 @@ const
       eng.TimeoutMs := 400;
       if eng.Prepare(Fix) <> 0 then Exit('the fixture did not prepare');
       eng.ArmDebug([], True);            // stop once, at the entry of the next call
+      t0 := GetTickCount64();
       eng.CallFunction('host', [ValInt(41)]);
+      AScriptMs := Int64(GetTickCount64() - t0) - d.ParkedMs;
       Result := d.Reentered;
       if d.ReenteredErr <> '' then Result := Result + ' -- ' + d.ReenteredErr;
       if d.Trace <> 'E17@1' then Result := Result + ' [trace ' + d.Trace + ']';
@@ -2848,26 +2983,43 @@ const
     end;
   end;
 
+  { One cell, judged by CheckTimed: retried only while its refusals are correct
+    refusals of a run that really had more than the ceiling outside the park. }
+  procedure Cell(const AName: String; AArg: Int64; AParkMs: Integer;
+                 const AWant, AMsg: String);
+  var
+    got: String;
+    ms: Int64;
+    k: Integer;
+  begin
+    for k := 1 to TimedAttempts do
+    begin
+      got := Watched(AName, AArg, AParkMs, ms);
+      if not TimedVoid(got, AWant, ms, 400) then Break;
+    end;
+    CheckTimed(got, AWant, ms, 400, AMsg);
+  end;
+
 begin
   { LEDGER ONE. The trace is checked inside Watched and appended only when it is
     wrong, so a cell that stopped somewhere else says so instead of quietly
     measuring a different program. Stop-at-entry fires at the first boundary the
     called function carries, which for `host` is line 17, one frame in. }
-  CheckStr(Watched('burn', 50000, 0), '1250025000',
-           'watch-after-pause: a watch expression with nobody waiting in front ' +
-           'of it answers');
-  CheckStr(Watched('burn', 50000, 700), '1250025000',
-           'watch-after-pause: AND THE SAME WATCH AFTER A 700 ms PAUSE UNDER A ' +
-           '400 ms CEILING. A person reading the stack is not the script''s time');
+  Cell('burn', 50000, 0, '1250025000',
+       'watch-after-pause: a watch expression with nobody waiting in front ' +
+       'of it answers');
+  Cell('burn', 50000, 700, '1250025000',
+       'watch-after-pause: AND THE SAME WATCH AFTER A 700 ms PAUSE UNDER A ' +
+       '400 ms CEILING. A person reading the stack is not the script''s time');
   { LEDGER TWO, which is a different clock in a different unit with a different
     sentence, and the first version of the correction missed it for the same
     reason it missed this one. }
-  CheckStr(Watched('slib', 20000, 0), '40',
-           'watch-after-pause: a watch that makes twenty thousand LIBRARY calls ' +
-           'answers');
-  CheckStr(Watched('slib', 20000, 700), '40',
-           'watch-after-pause: and still does after the pause -- RULE 1''s budget ' +
-           'clock is the second ledger and it is corrected too');
+  Cell('slib', 20000, 0, '40',
+       'watch-after-pause: a watch that makes twenty thousand LIBRARY calls ' +
+       'answers');
+  Cell('slib', 20000, 700, '40',
+       'watch-after-pause: and still does after the pause -- RULE 1''s budget ' +
+       'clock is the second ledger and it is corrected too');
 end;
 
 { WHAT THE HOST SPENDS IDLE IS GIVEN BACK; WHAT IT SPENDS RUNNING SCRIPT IS NOT.
@@ -2936,12 +3088,14 @@ const
 
   { Answers what became of the OUTER call, as its own value and its own output. }
   function Outer(ABefore, AAfter: Integer; const AEval: String;
-                 out AEvalErr: String): String;
+                 out AEvalErr: String; out AScriptMs: Int64): String;
   var
     eng: TPhosphorEngine;
     d: TDrive;
     v: TValue;
+    t0: QWord;
   begin
+    AScriptMs := 0;
     eng := TPhosphorEngine.Create();
     d := NewDrive(eng, [daRun]);
     try
@@ -2960,7 +3114,9 @@ const
       eng.TimeoutMs := 300;
       if eng.Prepare(Fix) <> 0 then Exit('the fixture did not prepare');
       eng.ArmDebug([], True);
+      t0 := GetTickCount64();
       v := eng.CallFunction('spin', [ValInt(20000)]);
+      AScriptMs := Int64(GetTickCount64() - t0) - d.ParkedMs;
       AEvalErr := d.ReenteredErr;
       Result := ValToStr(v) + '/' + StringReplace(d.Text, #10, '', [rfReplaceAll]);
     finally
@@ -3078,18 +3234,25 @@ begin
 end;
 
 var
-  evalErr, outerErr: String;
+  evalErr, outerErr, got: String;
+  ms: Int64;
+  k: Integer;
   fits: Int64;
 begin
   { IDLE. Seven hundred milliseconds of a person, against a three-hundred
     millisecond ceiling, and the script does not notice. }
-  CheckStr(Outer(400, 300, '', evalErr), '20000/done',
-           'charged-not-credited: 700 ms of IDLE inside the window costs the ' +
-           'script nothing at all');
+  for k := 1 to TimedAttempts do
+  begin
+    got := Outer(400, 300, '', evalErr, ms);
+    if not TimedVoid(got, '20000/done', ms, 300) then Break;
+  end;
+  CheckTimed(got, '20000/done', ms, 300,
+             'charged-not-credited: 700 ms of IDLE inside the window costs the ' +
+             'script nothing at all');
   { EXECUTION. The watch is refused on its own terms -- which is the answer to
     "does an evaluation need a clock of its own": the script's ceiling is still
     standing over it, so a runaway watch cannot hang the session. }
-  CheckStr(Outer(0, 0, 'spin', evalErr), '0/',
+  CheckStr(Outer(0, 0, 'spin', evalErr, ms), '0/',
            'charged-not-credited: a watch that runs script for longer than the ' +
            'whole ceiling spends the ceiling -- the outer call answers nothing ' +
            'and prints nothing');
@@ -3100,7 +3263,7 @@ begin
     stack, ask for a watch, read the answer. The idle either side is credited and
     the middle is not, which needs a mark on the way OUT as well as on the way
     in. }
-  CheckStr(Outer(400, 300, 'spin', evalErr), '0/',
+  CheckStr(Outer(400, 300, 'spin', evalErr, ms), '0/',
            'charged-not-credited: park, evaluate, park -- the two idle halves are ' +
            'given back and the evaluation between them is still charged');
   CheckStr(DepthOfTheDoor(), 'REFUSED',

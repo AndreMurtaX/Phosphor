@@ -1525,6 +1525,20 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · n11: a guard nobody can see fail cannot be tested until it
+  can fail loudly.** The plan sized n11 as "two Emit lines in the existing
+  fixture", and those two lines would have passed with the guard deleted: in a
+  build without range checks, `FInstrs[-1]` reads the bytes before the array and
+  returns something, and nothing downstream depends on what. The fix had two
+  halves, and the first was not a test -- `{$R+}` on that one routine, so the
+  missing bound turns into an exception at the first program that needs it --
+  and only then the fixture (entry 0 and 1, by hand and through a .pbc). The
+  mutation that proves the design is the one that SURVIVES: bound deleted AND
+  range checks off is green, exactly as n11 recorded, while bound deleted alone
+  is four failures. When a test cannot observe a defect, ask what would make the
+  defect observable before writing the test.
+
+
 - **2026-10-07 · m4: the cap was declined, and the clock kept one.** The item
   was "prose plus a test past 513", and the obvious test was one .bas with more
   globals. Measuring the size first found the real defect: every name table was

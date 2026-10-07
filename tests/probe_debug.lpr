@@ -544,6 +544,71 @@ begin
   end;
 end;
 
+{ A FUNCTION WHOSE ENTRY IS 0 OR 1 -- legal in a .pbc, never made by the compiler
+  (ledger n11). The header exclusion looks two instructions before an entry, so
+  these two put that look at -2 and -1. ValidateProgram checks an Entry only
+  as 0 <= Entry < Count, and both programs below are written and READ BACK
+  through the serializer, so the input is one a host can be handed.
+
+  Derived from the construction, by hand: there is no header to exclude, so
+  the answer is every boundary with a positive line -- 7 and 9 -- for both.
+  StoppableLines is range-checked, so with the `hdr >= 0` bound deleted the
+  first call raises instead of reading the bytes before the array; an
+  exception is reported here as the failure it is. }
+procedure CheckEntryBelowHeader;
+var
+  p, back: TProgram;
+  st: TBytesStream;
+  err, got: String;
+  entry: Integer;
+begin
+  for entry := 0 to 1 do
+  begin
+    back := nil;
+    p := TProgram.Create();
+    try
+      p.Emit(opStmt, 0, 0, 7);      // 0
+      p.Emit(opNop, 0, 0, 7);       // 1
+      p.Emit(opStmt, 0, 0, 9);      // 2
+      p.Emit(opHalt, 0, 0, 9);      // 3
+      p.SetGlobalTableUnnamed([]);
+      p.AddUserFunc('low', entry, 0, [], [], vtNumber);
+      try
+        got := LinesToStr(p.StoppableLines);
+      except
+        on e: Exception do got := 'raised ' + e.ClassName;
+      end;
+      CheckStr(got, '7,9', 'a function entered at ' + IntToStr(entry) +
+               ': no header two before it, every boundary kept, nothing read below');
+      st := TBytesStream.Create();
+      try
+        WriteProgram(st, p);
+        st.Position := 0;
+        if not ReadProgram(st, back, err) then
+        begin
+          Report(False, 'a .pbc with an entry at ' + IntToStr(entry) + ' loads (' + err + ')');
+          back := nil;
+        end;
+      finally
+        st.Free;
+      end;
+      if back <> nil then
+      begin
+        try
+          got := LinesToStr(back.StoppableLines);
+        except
+          on e: Exception do got := 'raised ' + e.ClassName;
+        end;
+        CheckStr(got, '7,9', '  and the same program loaded from a .pbc -- the input is ' +
+                 'one a host can be handed');
+      end;
+    finally
+      back.Free;
+      p.Free;
+    end;
+  end;
+end;
+
 { WHAT THE PREPARED PAIR ANSWERS AFTER SOMETHING ELSE RAN. Run, RunBytecode and the
   next Prepare all open by calling Finish, which frees the prepared VM and the
   prepared program. A host that cached the program pointer is holding a freed
@@ -916,6 +981,7 @@ begin
   end;
   CheckScrambledBoundaries();
   CheckStoppableGuards();
+  CheckEntryBelowHeader();
   CheckPreparedState();
   CheckPreparationDiscarded();
   CheckSpellings();

@@ -1,4 +1,4 @@
-﻿{******************************************************************************
+{******************************************************************************
   Phosphor BASIC -- opcodes, instruction record, constant pool, program
 
   MIT License. Copyright (c) 2026 Andre Murta.
@@ -552,6 +552,17 @@ begin
   end;
 end;
 
+{ RANGE-CHECKED, THIS ROUTINE ONLY (ledger n11). Every index below is computed
+  from a program that may have come out of a .pbc, and the build carries no
+  -Cr: with the `hdr >= 0` bound gone, a loaded program whose function Entry is
+  0 or 1 made hdr -2 or -1, and FInstrs[hdr] read the bytes BEFORE the array --
+  then skip[hdr] := True could write there. Nothing could see it: every suite
+  stayed green with the bound deleted, which is what n11 recorded. Checked, the
+  same deletion raises at the first such program, so
+  tests/probe_debug.lpr#CheckEntryBelowHeader can watch the bound do its work. This is a debugger's
+  routine, asked once per arming and never on the run path, so the checks cost
+  nothing anyone pays; and with every bound in place they never fire. }
+{$push}{$R+}
 function TProgram.StoppableLines: TPhosphorLines;
 var
   i, n, hdr: Integer;
@@ -569,6 +580,11 @@ begin
   for i := 0 to UserFuncCount - 1 do
   begin
     hdr := UserFuncs[i].Entry - 2;
+    { THE `Op = opStmt` CONJUNCT IS UNTESTABLE BY CONSTRUCTION, not by missing
+      coverage: the loop below already passes over every instruction that is
+      not an opStmt before it ever asks skip[], so marking one changes nothing.
+      Deleting the conjunct is behaviour-preserving and a guaranteed mutation
+      survivor. It stays because it says what a header IS; do not report it. }
     if (hdr >= 0) and (hdr + 1 < FCount) and
        (FInstrs[hdr].Op = opStmt) and (FInstrs[hdr + 1].Op = opJump) then
       skip[hdr] := True;
@@ -596,6 +612,7 @@ begin
     end;
   SetLength(Result, hdr);
 end;
+{$pop}
 
 function TProgram.FindUserFunc(const AName: String; AArgCount: Integer): Integer;
 begin

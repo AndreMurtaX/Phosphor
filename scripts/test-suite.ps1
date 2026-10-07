@@ -157,6 +157,21 @@ function Read-Text([string] $path) {
     return $raw.Trim()
 }
 
+# The stderr of a FAILED probe, indented, at most 40 lines -- probe_sweep can name a
+# hundred programs, and one screen of them is the diagnosis. The twin of
+# show_probe_err in test-suite.sh; keep the cap and the wording equal.
+function Get-ProbeErr([string] $path) {
+    $text = Read-Text $path
+    if (-not $text) { return @('         (the probe wrote nothing to stderr)') }
+    $lines = @($text -split "`r?`n")
+    $shown = @($lines | Select-Object -First 40 | ForEach-Object { "         $_" })
+    if ($lines.Count -gt 40) { $shown += ("         ... {0} more stderr lines" -f ($lines.Count - 40)) }
+    return $shown
+}
+function Show-ProbeErr([string] $path) {
+    foreach ($l in (Get-ProbeErr $path)) { Write-Host $l -ForegroundColor DarkGray }
+}
+
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {
     $out = Join-Path $tmp 'phosphortest.out'
     $err = Join-Path $tmp 'phosphortest.err'
@@ -406,9 +421,38 @@ else {
         if ($pcode -eq 0) { Write-Host ("PASS  probe: {0}  ({1})" -f $hp.name, $psum) -ForegroundColor Green }
         else {
             Write-Host ("FAIL  probe: {0}  ({1})" -f $hp.name, $psum) -ForegroundColor Red
-            $why = Read-Text $perr; if ($why) { Write-Host ("         {0}" -f $why) -ForegroundColor DarkGray }
+            # Every probe writes its `FAIL: <check>` lines to STDERR. This printed
+            # them as ONE string with only its first line indented; the bash twin
+            # printed nothing at all, so a one-off probe_step failure on the VM on
+            # 2026-10-06 could not be read from the run that had it.
+            Show-ProbeErr $perr
             $allOk = $false
         }
+    }
+
+    # AND THE DETAIL IS SEEN BEING PRINTED. A path that runs only when a probe
+    # fails is a path no green run exercises, so it is exercised here on purpose:
+    # probe_value --fail corrupts one expectation (never the engine), and the lines
+    # this runner would print for it must name the failed check. The twin of the
+    # same block in test-suite.sh.
+    $pv = Join-Path $binDir 'probe_value.exe'
+    if (Test-Path $pv) {
+        $pout = Join-Path $tmp 'probe.out'
+        $perr = Join-Path $tmp 'probe.err'
+        cmd /c "`"$pv`" --fail > `"$pout`" 2> `"$perr`""
+        $pcode = $LASTEXITCODE
+        $shown = @(Get-ProbeErr $perr)
+        if (($pcode -ne 0) -and (@($shown | Where-Object { $_ -match '^\s+FAIL: ' }).Count -gt 0)) {
+            Write-Host ("PASS  probe detail: probe_value --fail exits {0} and the runner prints:" -f $pcode) -ForegroundColor Green
+            foreach ($l in $shown) { Write-Host $l -ForegroundColor DarkGray }
+        } else {
+            Write-Host ("FAIL  probe detail: probe_value --fail exited {0} and the runner would print no FAIL: line" -f $pcode) -ForegroundColor Red
+            foreach ($l in $shown) { Write-Host $l -ForegroundColor DarkGray }
+            $allOk = $false
+        }
+    } else {
+        Write-Host 'FAIL  probe detail: bin\probe_value.exe was not built, so the failure path went unseen' -ForegroundColor Red
+        $allOk = $false
     }
 }
 

@@ -94,6 +94,18 @@ manifest="$(grep -vE '^[[:space:]]*#' "$suite/manifest.txt" | tr '\n' ' ')"
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
 
+# The stderr of a FAILED probe, indented, at most 40 lines -- probe_sweep can name a
+# hundred programs, and one screen of them is the diagnosis. The twin of
+# Show-ProbeErr in test-suite.ps1; keep the cap and the wording equal.
+show_probe_err() {   # $1 the stderr file
+  local n
+  n=$(grep -c '' "$1")
+  if [ "$n" -eq 0 ]; then echo "         (the probe wrote nothing to stderr)"; return 0; fi
+  head -n 40 "$1" | tr -d '\r' | sed 's/^/         /'
+  [ "$n" -gt 40 ] && echo "         ... $((n - 40)) more stderr lines"
+  return 0
+}
+
 # --prove: corrupt ONE expected value so an assertion must fail, then confirm the
 # byte comparison catches it. The harness is seen failing before it is trusted.
 #
@@ -279,8 +291,36 @@ for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handl
   if [ ! -x "$pexe" ]; then echo "FAIL  probe: $name  did not build"; allok=1; continue; fi
   "$pexe" >"$out" 2>"$err"; pcode=$?
   psum="$(grep -E '^(ok|fail|skip):' "$out" | tr '\n' ' ')"
-  if [ "$pcode" -eq 0 ]; then echo "PASS  probe: $name  ($psum)"; else echo "FAIL  probe: $name  ($psum)"; allok=1; fi
+  if [ "$pcode" -eq 0 ]; then echo "PASS  probe: $name  ($psum)"
+  else
+    echo "FAIL  probe: $name  ($psum)"; allok=1
+    # Every probe writes its `FAIL: <check> -- got ..., wanted ...` lines, and the
+    # RTL its runtime errors, to STDERR. This runner used to print only the ok:/fail:
+    # counts, so on 2026-10-06 a one-off `probe_step (ok: 224 fail: 1)` on the VM
+    # could not be read from the run that had it, and 27 reruns never failed again.
+    # A flake is seen once: print the detail every time. Same cap as test-suite.ps1.
+    show_probe_err "$err"
+  fi
 done
+
+# AND THE DETAIL IS SEEN BEING PRINTED. A path that runs only when a probe fails is
+# a path no green run exercises, so it is exercised here on purpose: probe_value
+# --fail corrupts one expectation (never the engine), and the lines this runner
+# would print for it must name the failed check. The twin of the same block in
+# test-suite.ps1.
+if [ -x "$bin/probe_value" ]; then
+  "$bin/probe_value" --fail >"$out" 2>"$err"; pcode=$?
+  shown="$(show_probe_err "$err")"
+  if [ "$pcode" -ne 0 ] && printf '%s\n' "$shown" | grep -E '^[[:space:]]+FAIL: ' >/dev/null; then
+    echo "PASS  probe detail: probe_value --fail exits $pcode and the runner prints:"
+    printf '%s\n' "$shown"
+  else
+    echo "FAIL  probe detail: probe_value --fail exited $pcode and the runner would print no FAIL: line"
+    printf '%s\n' "$shown"; allok=1
+  fi
+else
+  echo "FAIL  probe detail: bin/probe_value was not built, so the failure path went unseen"; allok=1
+fi
 
 # --- source-level gates -------------------------------------------------------
 # The invariants no compiler can check and no golden happens to cover:

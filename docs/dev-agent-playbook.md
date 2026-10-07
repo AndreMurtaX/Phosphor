@@ -1525,6 +1525,30 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · a hang is not a FAIL until something gives it a deadline.**
+  A compiler mutation (`FLocalIdx.Clear()` removed from `ParseFunction`) made
+  phosphortest spin on `60_stack_operands` for eight minutes and more, and the
+  suite printed nothing -- no runner bounded a test, so a hang read as "still
+  running", the same tell as the REPL and `app_run` traps. Both suite runners
+  now run every program they hand to phosphortest -- suite files, negatives, the
+  staleness probe, the `-ProveFailure` corruptions -- under a bound, kill only
+  the process they started (`timeout(1)` on Linux; the `Process` object from
+  `Start-Process` on Windows, never a kill by name, because other sessions run
+  phosphortest too), print `FAIL  <name>  timed out after 30 s -- killed, the
+  run goes on`, and continue. The bound is MEASURED: the slowest suite file is
+  `60_stack_operands`, 0.35 s on Windows over ten runs and 0.36 s on the VM, so
+  30 s is about 85x. The same mutation now ends the Windows run in 174 s with
+  that FAIL line, three ordinary FAILs and every gate run. `-ProveFailure`
+  proves the kill path every time with a `while 1 = 1` program under a 2 s
+  bound, and `check-crossrefs.py` refuses the two runners holding different
+  bounds (seen failing with the bash one set to 31). Two smaller lessons: the
+  Windows runner had to stop redirecting through `cmd /c`, because killing the
+  `cmd` would have left phosphortest running, and every golden stayed
+  byte-exact through `Start-Process`'s file handles; and the first draft of the
+  bash proof was patched through a heredoc, which ate the `\n` escapes in its
+  `printf`. That is the rule in CLAUDE.md, broken once more, and caught only by
+  reading the diff.
+
 - **2026-10-07 · n11: a guard nobody can see fail cannot be tested until it
   can fail loudly.** The plan sized n11 as "two Emit lines in the existing
   fixture", and those two lines would have passed with the guard deleted: in a

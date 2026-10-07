@@ -36,6 +36,38 @@ strict_build "phosphortest" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux \
 [ -x "$exe" ] || { echo "phosphortest did not build"; exit 1; }
 echo "runner built: $exe"
 
+out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
+
+# EVERY PROGRAM THIS SCRIPT HANDS TO phosphortest RUNS UNDER A BOUND. There was
+# none until 2026-10-07, when a compiler mutation (FLocalIdx.Clear() removed from
+# ParseFunction) made phosphortest spin on 60_stack_operands for eight minutes and
+# more, and the suite said nothing at all -- a hang reads as "still running", never
+# as FAIL, the same tell as the REPL and app_run traps in CLAUDE.md. The bound is
+# MEASURED, not chosen: the slowest suite file that day was 60_stack_operands, at
+# 0.35 s on Windows (ten runs) and 0.36 s on the Linux VM, and 30 s is about
+# eighty-five times that -- room for a machine loaded by other sessions' suites,
+# and a hang now costs half a minute instead of the run. Re-measure before you
+# lower it. test-suite.ps1 holds the same number and check-crossrefs.py demands
+# that the two agree.
+test_timeout_s=30
+
+# Runs phosphortest on $1 with its streams in $out and $err, under a bound of $2
+# seconds; answers the exit code, and 124 when the bound ran out. timeout(1)
+# signals the child it started, never a process found by name -- other sessions
+# run phosphortest too. -k: a child that ignores TERM gets KILL five seconds
+# later, and timeout then exits 137. phosphortest itself exits 0 to 3, so
+# neither number can be a real answer. The twin of Invoke-Bounded in
+# test-suite.ps1.
+run_bounded() {
+  local rc
+  timeout -k 5 "$2" "$exe" "$1" > "$out" 2> "$err"; rc=$?
+  case "$rc" in 124|137) return 124 ;; esac
+  return "$rc"
+}
+timed_out() {   # $1 label, $2 the bound in seconds
+  echo "FAIL  $1  timed out after $2 s -- killed, the run goes on"
+}
+
 # THE RUNNER MUST REFUSE TO ANSWER WHEN IT IS OLDER THAN THE ENGINE, proved here
 # because this is the one moment we know it is fresh. build.sh does not build this
 # file; running it after an engine edit ran old code and answered confidently with
@@ -70,7 +102,7 @@ case "$newest_src" in
 esac
 touch -r "$exe" "$exe.stamp"
 touch -d "@$((newest_src - 60))" "$exe"
-"$exe" "$root/tests/suite/00_harness.bas" >/dev/null 2>&1
+run_bounded "$root/tests/suite/00_harness.bas" "$test_timeout_s"
 stale_rc=$?
 touch -r "$exe.stamp" "$exe"
 rm -f "$exe.stamp"
@@ -80,7 +112,7 @@ if [ "$stale_rc" -ne 3 ]; then
 fi
 # And the other direction, because a guard that refused EVERYTHING would also have
 # passed the check above. With its own timestamp restored the runner must answer.
-"$exe" "$root/tests/suite/00_harness.bas" >/dev/null 2>&1
+run_bounded "$root/tests/suite/00_harness.bas" "$test_timeout_s"
 fresh_rc=$?
 if [ "$fresh_rc" -eq 3 ]; then
   echo "phosphortest refused its own freshly built binary (exit 3) -- the guard refuses everything"
@@ -91,7 +123,6 @@ echo "runner refuses when stale (exit 3), answers when fresh (exit $fresh_rc)"; 
 suite="$root/tests/suite"; neg="$root/tests/negative"
 # Single-source manifest, shared with test-suite.ps1 so Windows/Linux never drift.
 manifest="$(grep -vE '^[[:space:]]*#' "$suite/manifest.txt" | tr '\n' ' ')"
-out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 allok=0
 
 # The stderr of a FAILED probe, indented, at most 40 lines -- probe_sweep can name a
@@ -139,7 +170,8 @@ neg_reason() {   # the reason recorded for basename $1, or nothing
 }
 judge_negative() {   # $1 program, $2 reason, $3 label; 0 when rejected for its reason
   local code why
-  "$exe" "$1" > "$out" 2> "$err"; code=$?
+  run_bounded "$1" "$test_timeout_s"; code=$?
+  if [ "$code" -eq 124 ]; then timed_out "reject: $3" "$test_timeout_s"; return 1; fi
   why="$(cat "$err")"
   if [ "$code" -eq 2 ] && [ -n "$2" ]; then
     case "$why" in *"$2"*) echo "PASS  reject: $3  (exit 2)"; echo "         $why"; return 0 ;; esac
@@ -162,7 +194,7 @@ if [ "$runner_prove" -eq 1 ]; then
   bad="$(mktemp)"
   sed 's/assert_eq(2 + 3, 5)/assert_eq(2 + 3, 6)/' "$suite/00_harness.bas" > "$bad"
   echo "ProveFailure: one expected value corrupted"
-  "$exe" "$bad" > "$out" 2> "$err"; code=$?
+  run_bounded "$bad" "$test_timeout_s"; code=$?
   if [ "$code" -eq 0 ] && cmp -s "$out" "$suite/00_harness.expected"; then
     echo "ProveFailure: NOT detected -- the check is broken"; allok=1
   else
@@ -187,6 +219,20 @@ if [ "$runner_prove" -eq 1 ]; then
     echo "ProveFailure: a failed assert correctly not taken for a rejection"
   fi
   rm -f "$asserts"
+  # AND THE BOUND. A program that never ends, under a two-second bound instead of
+  # the real one so the proof is cheap: it must come back as timed out.
+  echo "ProveFailure: one program never ends"
+  hang="$(mktemp)"
+  printf 'test_case("hang")\nwhile 1 = 1\nwend\n' > "$hang"
+  started=$(date +%s)
+  run_bounded "$hang" 2; hcode=$?
+  if [ "$hcode" -eq 124 ]; then
+    timed_out "never_ends (a bound of 2 s, for this proof only)" 2
+    echo "ProveFailure: a hang correctly ended as a FAIL after $(( $(date +%s) - started )) s"
+  else
+    echo "ProveFailure: a hang was NOT bounded (exit $hcode) -- the timeout is broken"; allok=1
+  fi
+  rm -f "$hang"
   echo
   if [ "$allok" -eq 0 ]; then echo "SUITE OK"; exit 0; else echo "SUITE FAILED"; exit 1; fi
 fi
@@ -211,7 +257,8 @@ for name in $manifest; do
 done
 
 for name in $manifest; do
-  "$exe" "$suite/$name.bas" > "$out" 2> "$err"; code=$?
+  run_bounded "$suite/$name.bas" "$test_timeout_s"; code=$?
+  if [ "$code" -eq 124 ]; then timed_out "$name" "$test_timeout_s"; allok=1; continue; fi
   if [ "$code" -eq 0 ] && cmp -s "$out" "$suite/$name.expected"; then
     echo "PASS  $name  ($(wc -c <"$out") B, exit 0)"
   else

@@ -6,7 +6,9 @@
 .DESCRIPTION
   The engine's real acceptance test. For each .bas file the runner prints a
   byte-exact summary (passed:/failed:) to stdout; this script captures it with
-  cmd redirection (so bytes are not re-encoded) and compares to <file>.expected.
+  Start-Process file redirection (so bytes are not re-encoded) under a per-test
+  bound, and compares to <file>.expected. A test that outlives the bound is
+  killed and reported as a FAIL; the run goes on.
 
   Discipline: -ProveFailure corrupts one expected value in 00_harness and
   confirms the runner reports a failure and exits non-zero -- the check is seen
@@ -83,6 +85,42 @@ Assert-CleanBuild $blog 'phosphortest'
 if (-not (Test-Path $exe)) { throw "phosphortest did not build (fpc exit $LASTEXITCODE)" }
 Write-Host "runner built: $exe" -ForegroundColor DarkGray
 
+# EVERY PROGRAM THIS SCRIPT HANDS TO phosphortest RUNS UNDER A BOUND. There was
+# none until 2026-10-07, when a compiler mutation (FLocalIdx.Clear() removed from
+# ParseFunction) made phosphortest spin on 60_stack_operands for eight minutes and
+# more, and the suite said nothing at all -- a hang reads as "still running", never
+# as FAIL, the same tell as the REPL and app_run traps in CLAUDE.md. The bound is
+# MEASURED, not chosen: the slowest suite file that day was 60_stack_operands, at
+# 0.35 s on Windows (ten runs) and 0.36 s on the Linux VM, and 30 s is about
+# eighty-five times that -- room for a machine loaded by other sessions' suites,
+# and a hang now costs half a minute instead of the run. Re-measure before you
+# lower it. test-suite.sh holds the same number and check-crossrefs.py demands
+# that the two agree.
+$TestTimeoutS = 30
+
+# Runs phosphortest on one program, stdout and stderr to the two files, and
+# answers its exit code -- or $null when it outlived the bound and was killed.
+# Start-Process hands the files to CreateProcess as raw handles, so the bytes
+# are not re-encoded (the job `cmd /c` redirection did before 2026-10-07). Only the process
+# started HERE is killed, by its own object: other sessions run phosphortest
+# too, and a kill by name would end their runs. The twin of run_bounded in
+# test-suite.sh.
+function Invoke-Bounded([string] $basPath, [string] $out, [string] $err, [int] $seconds) {
+    $p = Start-Process -FilePath $exe -ArgumentList "`"$basPath`"" -NoNewWindow -PassThru `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    # Taking the handle now is what makes ExitCode readable after the wait --
+    # without it Windows PowerShell 5.1 answers $null for a process that exited.
+    $null = $p.Handle
+    if ($p.WaitForExit($seconds * 1000)) { $p.WaitForExit(); return $p.ExitCode }
+    $p.Kill()
+    $p.WaitForExit()   # the output files stay locked until it is really gone
+    return $null
+}
+
+function Write-TimedOut([string] $label, [int] $seconds) {
+    Write-Host ("FAIL  {0}  timed out after {1} s -- killed, the run goes on" -f $label, $seconds) -ForegroundColor Red
+}
+
 # THE RUNNER MUST REFUSE TO ANSWER WHEN IT IS OLDER THAN THE ENGINE, and this is
 # where that gets proved, because this is the one moment we know the binary IS
 # fresh. build.ps1 does not build this file; running it after an engine edit ran
@@ -115,12 +153,11 @@ if (-not $srcNewest) {
 $stampWas = (Get-Item $exe).LastWriteTime
 try {
     (Get-Item $exe).LastWriteTime = $srcNewest.LastWriteTime.AddSeconds(-60)
-    # Both streams redirected INSIDE cmd, the same way Run-One does it and for the
-    # same reason: PowerShell 5.1 wraps a native command's stderr in ErrorRecords
-    # and reads $? as false even on exit 0, so `2>&1` here turned a working guard
-    # into a NativeCommandError that killed the run.
-    cmd /c "`"$exe`" `"$(Join-Path $suiteDirForStale '00_harness.bas')`" > `"$(Join-Path $tmp 'ph_stale.out')`" 2> `"$(Join-Path $tmp 'ph_stale.err')`""
-    $staleRc = $LASTEXITCODE
+    # Both streams go to FILES, through Invoke-Bounded like every other run, never
+    # through PowerShell's own pipes: PowerShell 5.1 wraps a native command's stderr
+    # in ErrorRecords and reads $? as false even on exit 0, so `2>&1` here turned a
+    # working guard into a NativeCommandError that killed the run.
+    $staleRc = Invoke-Bounded (Join-Path $suiteDirForStale '00_harness.bas') (Join-Path $tmp 'ph_stale.out') (Join-Path $tmp 'ph_stale.err') $TestTimeoutS
 } finally {
     (Get-Item $exe).LastWriteTime = $stampWas
 }
@@ -129,8 +166,7 @@ if ($staleRc -ne 3) {
 }
 # And the other direction, because a guard that refused EVERYTHING would also have
 # passed the check above. With its own timestamp restored the runner must answer.
-cmd /c "`"$exe`" `"$(Join-Path $suiteDirForStale '00_harness.bas')`" > `"$(Join-Path $tmp 'ph_fresh.out')`" 2> `"$(Join-Path $tmp 'ph_fresh.err')`""
-$freshRc = $LASTEXITCODE
+$freshRc = Invoke-Bounded (Join-Path $suiteDirForStale '00_harness.bas') (Join-Path $tmp 'ph_fresh.out') (Join-Path $tmp 'ph_fresh.err') $TestTimeoutS
 if ($freshRc -eq 3) {
     throw "phosphortest refused its own freshly built binary (exit 3) -- the guard refuses everything, which would pass the stale check above while testing nothing"
 }
@@ -175,10 +211,8 @@ function Show-ProbeErr([string] $path) {
 function Run-One([string] $basPath, [byte[]] $expected, [int] $wantExit, [string] $label) {
     $out = Join-Path $tmp 'phosphortest.out'
     $err = Join-Path $tmp 'phosphortest.err'
-    # Redirect BOTH streams inside cmd: the runner writes failure detail to
-    # stderr, and PowerShell's Stop preference would treat that as terminating.
-    cmd /c "`"$exe`" `"$basPath`" > `"$out`" 2> `"$err`""
-    $code = $LASTEXITCODE
+    $code = Invoke-Bounded $basPath $out $err $TestTimeoutS
+    if ($null -eq $code) { Write-TimedOut $label $TestTimeoutS; return $false }
     $act = [System.IO.File]::ReadAllBytes($out)
     $same = ($act.Length -eq $expected.Length)
     if ($same) { for ($i=0; $i -lt $act.Length; $i++) { if ($act[$i] -ne $expected[$i]) { $same=$false; break } } }
@@ -219,8 +253,8 @@ function Read-NegReasons([string] $path) {
 function Judge-Negative([string] $basPath, [string] $reason, [string] $label) {
     $out = Join-Path $tmp 'phosphortest.out'
     $err = Join-Path $tmp 'phosphortest.err'
-    cmd /c "`"$exe`" `"$basPath`" > `"$out`" 2> `"$err`""
-    $code = $LASTEXITCODE
+    $code = Invoke-Bounded $basPath $out $err $TestTimeoutS
+    if ($null -eq $code) { Write-TimedOut ("reject: {0}" -f $label) $TestTimeoutS; return $false }
     $why = Read-Text $err
     if (($code -eq 2) -and $reason -and $why.Contains($reason)) {
         Write-Host ("PASS  reject: {0}  (exit 2)" -f $label) -ForegroundColor Green
@@ -272,6 +306,23 @@ if ($ProveFailure) {
     if (-not $byAssert) { Write-Host 'ProveFailure: a failed assert correctly not taken for a rejection' -ForegroundColor Green }
     else { Write-Host 'ProveFailure: a failed assert WAS taken for a rejection -- the negative judge is broken' -ForegroundColor Red; $allOk = $false }
     Remove-Item -LiteralPath $asserts
+
+    # AND THE BOUND. A program that never ends, under a two-second bound instead of
+    # the real one so the proof is cheap: it must come back as timed out, and the
+    # process must be gone -- a kill that missed would leave it spinning.
+    Write-Host 'ProveFailure: one program never ends' -ForegroundColor Yellow
+    $hang = Join-Path $tmp 'never_ends.bas'
+    Set-Content -LiteralPath $hang -NoNewline -Encoding ascii -Value "test_case(`"hang`")`nwhile 1 = 1`nwend`n"
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $hcode = Invoke-Bounded $hang (Join-Path $tmp 'phosphortest.out') (Join-Path $tmp 'phosphortest.err') 2
+    $clock.Stop()
+    if ($null -eq $hcode) {
+        Write-TimedOut 'never_ends (a bound of 2 s, for this proof only)' 2
+        Write-Host ("ProveFailure: a hang correctly ended as a FAIL after {0:N1} s" -f $clock.Elapsed.TotalSeconds) -ForegroundColor Green
+    } else {
+        Write-Host ("ProveFailure: a hang was NOT bounded (exit {0}) -- the timeout is broken" -f $hcode) -ForegroundColor Red; $allOk = $false
+    }
+    Remove-Item -LiteralPath $hang
 }
 else {
     # THE MANIFEST MUST COVER THE DIRECTORY, BOTH WAYS. Nothing used to check this. A

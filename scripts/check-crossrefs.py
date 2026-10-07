@@ -301,6 +301,35 @@ def check_probes():
     return len(nix), failed
 
 
+PS_BOUND = re.compile(r'^\$TestTimeoutS\s*=\s*(\d+)\s*$', re.M)
+SH_BOUND = re.compile(r'^test_timeout_s=(\d+)\s*$', re.M)
+
+
+def check_bound():
+    """Both suite runners bound each test by the same number of seconds.
+
+    The bound was added on 2026-10-07, after a compiler mutation hung the suite
+    for eight minutes with nothing on screen. It lives twice, and a bound changed
+    in one runner only would let a hang that Windows reports run forever on
+    Linux, or the reverse, with nothing comparing them."""
+    ps = io.open(os.path.join(ROOT, 'scripts', 'test-suite.ps1'),
+                 encoding='utf-8', errors='replace').read()
+    sh = io.open(os.path.join(ROOT, 'scripts', 'test-suite.sh'),
+                 encoding='utf-8', errors='replace').read()
+    win, nix = PS_BOUND.findall(ps), SH_BOUND.findall(sh)
+    if len(win) != 1 or len(nix) != 1:
+        print('PER-TEST BOUND NOT FOUND EXACTLY ONCE -- this gate cannot see what it guards:')
+        print('  test-suite.ps1 has %d "$TestTimeoutS = N" lines, test-suite.sh has %d '
+              '"test_timeout_s=N" lines; each must have one.' % (len(win), len(nix)))
+        return 0, 1
+    if win[0] != nix[0]:
+        print('THE SUITE RUNNERS BOUND A TEST DIFFERENTLY:')
+        print('  test-suite.ps1: %s s' % win[0])
+        print('  test-suite.sh : %s s' % nix[0])
+        return 0, 1
+    return int(win[0]), 0
+
+
 BOGUS = '--zz-not-a-flag'
 
 # A runner must refuse an argument it does not know, and it must do so BEFORE it
@@ -473,16 +502,18 @@ def main():
     scanned, bad_cites = check_citations(files)
     bad_places = check_places(files)
     probes, bad_probes = check_probes()
+    bound, bad_bound = check_bound()
     runners, bad_runners = check_runners(files)
 
-    if bad_cites or bad_places or bad_probes or bad_runners:
+    if bad_cites or bad_places or bad_probes or bad_bound or bad_runners:
         return 1
 
     print('crossrefs: every cited path in %d text files exists (%d retired or '
           'oracle paths exempt with a reason), every path#Name names something '
           'there and no live text cites a line, both suite runners build the '
-          'same %d probes, and %d runners refused an argument they do not know'
-          % (scanned, len(EXEMPT), probes, runners))
+          'same %d probes and bound each test at %d s, and %d runners refused '
+          'an argument they do not know'
+          % (scanned, len(EXEMPT), probes, bound, runners))
     return 0
 
 

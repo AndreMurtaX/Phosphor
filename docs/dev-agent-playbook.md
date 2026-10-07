@@ -1360,7 +1360,7 @@ introduces a defect.
 
 ### Breakage (1)
 
-65. **engine/PhosphorCompiler.pas:2228** [low] -- *(the print branch of engine/PhosphorCompiler.pas#ParseStatementBody, 2026-10-06)* -- `print`/`println` rejects the `:` statement separator wherever an item is expected -- after the bare keyword, and after a trailing `;` or `,` -- because lines 2228/2240 omit tkColon that all five sibling parsers, including `print using`, include
+65. ~~**engine/PhosphorCompiler.pas:2228** [low]~~ -- CLOSED 2026-10-07: print/println stop at ":" in both checks; tests/classic/17_print_colon.bas pins the bytes. Original text: *(the print branch of engine/PhosphorCompiler.pas#ParseStatementBody, 2026-10-06)* -- `print`/`println` rejects the `:` statement separator wherever an item is expected -- after the bare keyword, and after a trailing `;` or `,` -- because lines 2228/2240 omit tkColon that all five sibling parsers, including `print using`, include
 
 ### Killed by the refuters (13, kept so they are not re-found)
 
@@ -1524,6 +1524,22 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-07 · d65: a two-token fix, tested on the bytes, and the probe found
+  the next defect and a runner bug.** print/println stopped at the end of a line
+  and not at ":", in two places. The plan said a compile-acceptance test could
+  not see the wrong fix, so the test is in the classic corpus, where the output
+  is compared byte for byte with an .expected written from the rules; the
+  half-fix (one of the two checks) still fails it. Measuring before the fix also
+  turned up n27 -- a bare println OR a bare return before a one-line if's `else`
+  does not compile -- which is the one-line if's statement-end rule, not a print
+  rule, and so was recorded rather than folded in. And running the new test
+  against the old compiler killed test-classic.ps1 on its own FAIL line: in
+  PowerShell an empty array assigned from an `if` used as an expression arrives
+  as $null, so the runner crashed printing the case that wrote nothing and would
+  have skipped every test after it. A harness that cannot report a failure is a
+  harness nobody has watched fail.
+
 
 - **2026-10-07 · n26: the entry named the proxy, and the defect was the whole
   client; and a string literal of mine found a bug in two gates.** No HTTP verb

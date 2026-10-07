@@ -2626,7 +2626,15 @@ begin
       begin FLex.Advance(); ParsePrintUsing(t.StrVal = 'println'); Exit; end;
       // Items separated by `;` (adjacent, no separator) or `,` (a tab to the
       // next zone). PRINTLN adds a trailing newline, PRINT does not.
-      if (FLex.Cur().Kind <> tkEOL) and (FLex.Cur().Kind <> tkEOF) then
+      //
+      // A ':' ENDS THE ITEM LIST, as it ends every other statement (ledger
+      // d65). These two checks -- here, and after a trailing separator below --
+      // stopped only at the end of the line, so `println : x = 1` and
+      // `print "a"; : ...` took ':' for the start of an expression and failed
+      // to compile; the other eight statement parsers already stop at it.
+      // tests/classic/17_print_colon.bas pins the BYTES, not just that it
+      // compiles: a bare println still writes exactly one line break.
+      if not (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) then
       begin
         ParseExpr();
         FProg.Emit(opPrint, 0, 0, t.Line);
@@ -2638,7 +2646,7 @@ begin
             FProg.Emit(opPrint, 0, 0, t.Line);
           end;
           FLex.Advance();
-          if (FLex.Cur().Kind = tkEOL) or (FLex.Cur().Kind = tkEOF) then Break;
+          if FLex.Cur().Kind in [tkEOL, tkEOF, tkColon] then Break;
           ParseExpr();
           FProg.Emit(opPrint, 0, 0, t.Line);
         end;

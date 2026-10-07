@@ -86,7 +86,15 @@ function Run-One([System.IO.FileInfo] $t, [byte[]] $expected, [string] $label) {
     # answer 0, which told anything piping a truncated file that it had all run.
     $wantP = Join-Path $dir ($t.BaseName + '.exit')
     $want  = if (Test-Path $wantP) { [int]((Get-Content $wantP -Raw).Trim()) } else { 0 }
-    $act = if (Test-Path $out) { [System.IO.File]::ReadAllBytes($out) } else { @() }
+    # ASSIGNED IN EACH BRANCH, never as `$act = if (...) { ... }`. The value of an
+    # if used as an expression goes through the pipeline, and an EMPTY array comes
+    # out of the pipeline as nothing -- $null -- whether it was @() or the bytes of
+    # an empty file. GetString below then threw, and the runner died printing the
+    # FAIL line of exactly the case it most needs to report: a program that wrote
+    # nothing because it did not compile. Every test after it never ran. Found
+    # 2026-10-07 when 17_print_colon was run against the unfixed compiler.
+    if (Test-Path $out) { $act = [System.IO.File]::ReadAllBytes($out) }
+    else { $act = [byte[]]::new(0) }
     $same = ($act.Length -eq $expected.Length)
     if ($same) { for ($i=0; $i -lt $act.Length; $i++) { if ($act[$i] -ne $expected[$i]) { $same=$false; break } } }
     if ($same -and ($code -eq $want)) {

@@ -138,6 +138,45 @@ foreach ($name in $manifest) {
     if (-not (Run-One $name)) { $allOk = $false }
 }
 
+# --- the watchdog: a hang ends the run, and says so (ledger d56) --------------
+# tests/gui/watchdog/hang.bas enters the message loop and never leaves it. The
+# runner's watchdog, shortened to 2 s here, must end the run AT the hang: the one
+# case before it counted, the hang counted as a failure, exit 4, nothing after it.
+# It used to call Application.Terminate, the file ran on, and `passed: 2` came out
+# of a file that hung. The run is BOUNDED at 60 s and killed past it, because the
+# risk the plan named is that ending a process from inside a timer blocks -- and a
+# watchdog that hangs must be reported, not joined.
+Write-Host ''
+$hang = Join-Path $gui 'watchdog\hang.bas'
+$hOut = Join-Path $tmp 'watchdog.out'
+$hErr = Join-Path $tmp 'watchdog.err'
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$hp = Start-Process -FilePath $exe -ArgumentList "`"$hang`" --watchdog-ms 2000" -PassThru -NoNewWindow `
+        -RedirectStandardOutput $hOut -RedirectStandardError $hErr
+# READ THE HANDLE BEFORE THE PROCESS ENDS, or ExitCode comes back EMPTY: a
+# Process object from Start-Process -PassThru keeps the exit code only if its
+# handle was opened while the process lived. The first run of this case reported
+# a correct 2-second hang as a failure with `exit=` blank, for exactly this.
+$null = $hp.Handle
+$ended = $hp.WaitForExit(60000)
+if (-not $ended) { $hp.Kill() }
+$hp.WaitForExit()
+$secs = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
+$hText = [IO.File]::ReadAllText($hOut)
+$hWhy = [IO.File]::ReadAllText($hErr)
+$okW = $ended -and ($hp.ExitCode -eq 4) -and ($hText -eq "passed: 1`nfailed: 1`n") -and
+       ($hWhy -like '*did not end within 2000 ms*')
+if ($okW) {
+    Write-Host ("PASS  watchdog: a hang ends the run at the hang  (exit 4, {0} s)" -f $secs) -ForegroundColor Green
+} else {
+    Write-Host 'FAIL  watchdog: a hang did not end the run cleanly' -ForegroundColor Red
+    Write-Host ("        ended={0} exit={1} secs={2}" -f $ended, $hp.ExitCode, $secs) -ForegroundColor DarkGray
+    Write-Host ("        stdout: {0}" -f ($hText -replace "`n", '\n')) -ForegroundColor DarkGray
+    Write-Host ("        stderr: {0}" -f ($hWhy -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    $allOk = $false
+}
+[IO.File]::Delete($hOut); [IO.File]::Delete($hErr)
+
 
 # --- host mode: one binary that decides ---------------------------------------
 # phosphor links the LCL and brings the widgetset up only when a graphical

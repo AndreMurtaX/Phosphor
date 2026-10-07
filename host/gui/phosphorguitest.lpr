@@ -12,7 +12,12 @@
   Windows win32, no display; on Linux gtk2, against the session's live display,
   set by the test script) so controls can be built.
 
-  Exit code: 0 all passed, 1 assertions failed, 2 did not compile/run.
+  Exit code: 0 all passed, 1 assertions failed, 2 did not compile/run, 4 the
+  message loop hung and the watchdog ended the run (see TWatchdog).
+
+  It does enter the message loop when a test file calls app_run(), which is why
+  the watchdog exists. `phosphorguitest <file.bas> --watchdog-ms N` shortens it,
+  so scripts/test-gui.* can make a hang happen on purpose without waiting 30 s.
 ******************************************************************************}
 program phosphorguitest;
 
@@ -20,6 +25,7 @@ program phosphorguitest;
 {$codepage UTF8}
 
 uses
+  {$ifdef unix} BaseUnix, {$endif}   // fpExit, for the watchdog's immediate exit
   Interfaces,   // the LCL widgetset (win32 / gtk2), selected at build time
   Forms, Clipbrd, LCLType, ExtCtrls,
   SysUtils, Classes,
@@ -159,24 +165,6 @@ begin
   Result := ClipRetryPaste(AText);
 end;
 
-{ THE WATCHDOG. A test file may now enter the real message loop (app_run), and a
-  loop that is never asked to end does not fail -- it HANGS, which tells nobody
-  anything and blocks every suite queued behind it. This timer can only fire while
-  a message loop is pumping, which is exactly the stuck case; it reports the file
-  as failed and ends the process rather than waiting for a human to notice. }
-type
-  TWatchdog = class
-    procedure Bark(Sender: TObject);
-  end;
-
-procedure TWatchdog.Bark(Sender: TObject);
-begin
-  Writeln(StdErr, 'phosphorguitest: the message loop did not end within 30s -- ' +
-                  'app_run() was entered and nothing called app_quit()');
-  Inc(AssertsFailed);
-  Application.Terminate;
-end;
-
 procedure WriteSummary;
 var
   s: String;
@@ -184,6 +172,63 @@ begin
   s := 'passed: ' + IntToStr(AssertsPassed) + #10 +
        'failed: ' + IntToStr(AssertsFailed) + #10;
   FileWrite(StdOutputHandle, s[1], Length(s));
+end;
+
+{$ifdef windows}
+procedure ExitProcess(uExitCode: Cardinal); stdcall; external 'kernel32.dll';
+{$endif}
+
+{ The process ends HERE, without running finalization. Used only by the watchdog,
+  whose caller is a timer dispatch inside a stuck message loop: Halt would unwind
+  through the LCL's finalization with that loop, the widgetset and live forms on
+  the stack, and on gtk2 nobody has measured whether that returns. A hang is
+  already fatal to the file, so there is nothing left to tidy -- the report has
+  been written by the time this is called. }
+procedure EndNow(ACode: Integer);
+begin
+  {$ifdef windows}
+  ExitProcess(ACode);
+  {$else}
+  fpExit(ACode);
+  {$endif}
+end;
+
+var
+  WatchdogMs: Integer = 30000;
+
+{ THE WATCHDOG. A test file may enter the real message loop (app_run), and a loop
+  that is never asked to end does not fail -- it HANGS, which tells nobody anything
+  and blocks every suite queued behind it. This timer can only fire while a message
+  loop is pumping, which is exactly the stuck case.
+
+  IT ENDS THE RUN, AND IT USED NOT TO (ledger d56). It called
+  Application.Terminate, which sets a flag the LCL never clears: app_run()
+  returned, the file carried on, and every later app_run() in it returned at once
+  without dispatching anything -- so one hang was reported as a screenful of
+  failures about timers and events that never got a loop to run in, and the case
+  that actually hung was one line among them. Measured on
+  tests/gui/watchdog/hang.bas before the change: `passed: 2`, the case after the
+  hang counted as a pass. Now the hang is the LAST thing the file reports: the
+  failures so far, the summary, and exit 4, at once. }
+type
+  TWatchdog = class
+    procedure Bark(Sender: TObject);
+  end;
+
+procedure TWatchdog.Bark(Sender: TObject);
+var
+  i: Integer;
+begin
+  Writeln(StdErr, Format('phosphorguitest: the message loop did not end within %d ms -- ' +
+                         'app_run() was entered and nothing called app_quit(); the run ' +
+                         'ends here', [WatchdogMs]));
+  Inc(AssertsFailed);
+  if Assigned(Failures) then
+    for i := 0 to Failures.Count - 1 do
+      Writeln(StdErr, '  FAIL ', Failures[i]);
+  Flush(StdErr);
+  WriteSummary();
+  EndNow(4);
 end;
 
 var
@@ -229,11 +274,16 @@ begin
 end;
 
 begin
-  if ParamCount < 1 then
+  // One file, optionally followed by --watchdog-ms N. Anything else is refused
+  // rather than ignored: an argument that is silently dropped reads exactly like
+  // one that was obeyed.
+  if (ParamCount <> 1) and not ((ParamCount = 3) and (ParamStr(2) = '--watchdog-ms') and
+                                (StrToIntDef(ParamStr(3), 0) > 0)) then
   begin
-    Writeln(StdErr, 'usage: phosphorguitest <file.bas>');
+    Writeln(StdErr, 'usage: phosphorguitest <file.bas> [--watchdog-ms N]');
     Halt(2);
   end;
+  if ParamCount = 3 then WatchdogMs := StrToInt(ParamStr(3));
   path := ParamStr(1);
   if not FileExists(path) then
   begin
@@ -264,7 +314,7 @@ begin
   // (tests/suite/17_host_services pins those, headless, under phosphortest).
   Dog := TWatchdog.Create();
   DogTimer := TTimer.Create(nil);
-  DogTimer.Interval := 30000;
+  DogTimer.Interval := WatchdogMs;
   DogTimer.OnTimer := @Dog.Bark;
   DogTimer.Enabled := True;
 

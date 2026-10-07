@@ -88,6 +88,24 @@ for name in $manifest; do
   fi
 done
 
+# --- the watchdog: a hang ends the run, and says so (ledger d56) --------------
+# The twin of the block in test-gui.ps1, and the half that matters most: the plan
+# trusted least that ending a process from inside a timer dispatch returns on gtk2.
+# The runner now leaves through fpExit, skipping the LCL's finalization, and this
+# run is bounded at 60 s by timeout(1) so a watchdog that hangs is REPORTED.
+echo
+start=$(date +%s)
+timeout 60 "$exe" "$gui/watchdog/hang.bas" --watchdog-ms 2000 > "$out" 2> "$err"; hcode=$?
+secs=$(( $(date +%s) - start ))
+if [ "$hcode" -eq 4 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 1')" ] &&
+   grep -qF -- "did not end within 2000 ms" "$err"; then
+  echo "PASS  watchdog: a hang ends the run at the hang  (exit 4, ${secs} s)"
+else
+  echo "FAIL  watchdog: a hang did not end the run cleanly (exit $hcode, ${secs} s; 124 is timeout's)"
+  sed 's/^/        stdout: /' "$out"; sed 's/^/        stderr: /' "$err"
+  allok=1
+fi
+
 
 # --- host mode: one binary that decides ---------------------------------------
 # phosphor links the LCL and calls CreateWidgetset itself, only when a graphical

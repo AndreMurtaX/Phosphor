@@ -64,6 +64,10 @@ FIXED = {
     os.path.join('tests', 'skeleton'): (
         ['hello'],
         'test.{ps1,sh} run hello.bas by name and byte-compare it with hello.expected'),
+    os.path.join('tests', 'gui', 'watchdog'): (
+        ['hang'],
+        'test-gui.{ps1,sh} run hang.bas by name with a short watchdog -- a file '
+        'that must fail cannot sit in a corpus of files that must pass'),
     os.path.join('tests', 'gui', 'hostmode'): (
         ['fails', 'gui', 'gui_sandbox', 'hello'],
         'test-gui.{ps1,sh} run each of these by name in a hostmode case of its own'),

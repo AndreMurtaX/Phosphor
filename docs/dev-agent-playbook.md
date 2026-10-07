@@ -1235,7 +1235,7 @@ introduces a defect.
 ### Test gaps (3)
 
 55. ~~**tests/suite/49_on_error.bas:76** [medium]~~ -- CLOSED 2026-10-06: the checks sit after the label both paths reach, and the golden counts every assert in the file. Original text: tests/suite/49_on_error.bas:76: the only assertion in the "error inside a called function" case is dead code -- h5 leaves by `goto done`, jumping past it (and past line 77, which leaves the VM stuck in-handler -- NOT, as the finder says, "h5 still installed")
-56. **host/gui/phosphorguitest.lpr:177** [low] -- The GUI test runner's hang watchdog calls Application.Terminate instead of ending the process, permanently disabling the message loop for every later app_run() in the same file
+56. ~~**host/gui/phosphorguitest.lpr:177** [low]~~ -- CLOSED 2026-10-06: the watchdog reports and ends the process at once (exit 4, no finalization); tests/gui/watchdog/hang.bas pins it on both OSes. Original text: The GUI test runner's hang watchdog calls Application.Terminate instead of ending the process, permanently disabling the message loop for every later app_run() in the same file
 57. ~~**tests/PhosphorTestLib.pas:76** [low]~~ -- CLOSED 2026-10-06: integral values compare exactly under assert_eq, fractions get four ULPs, and assert_int has its message form. Original text: tests/PhosphorTestLib.pas:76 -- assert_eq's relative 1e-12 epsilon loses all resolution above ~1e12, and because assert_int has no `:%%$` message overload, six live assertions that need a message fall back onto it (57_buffer.bas:412/415/416, gui/18_faults.bas:73, gui/19_argord_and_size.bas:122) where their expected literal can be mutated without failing
 
 ### Documentation errors (6)
@@ -1524,6 +1524,23 @@ the sweep above. Verify before fixing, as with everything on this page.
    someone depends on either answer.
 
 ## Retrospective log (appended each round)
+
+- **2026-10-06 · d56: a watchdog that does not end the run lets the hang be
+  reported as everything else.** The GUI runner's watchdog called
+  Application.Terminate, a flag the LCL never clears, so the file ran on past its
+  own hang and every later app_run() returned at once. Measured on a fixture
+  before the change: `passed: 2` from a file whose second case sits after the
+  hang. The plan's least-trusted estimate was whether Halt from inside a timer
+  dispatch returns on gtk2; rather than measure that and hope, the watchdog now
+  leaves through the OS's immediate exit, which runs no finalization at all, after
+  writing the failures and the summary itself. A `--watchdog-ms` argument lets
+  both runners make a hang happen in two seconds, bounded by a kill at sixty so a
+  blocking exit would be reported rather than joined. Two things the case taught
+  on the way: PowerShell's Start-Process loses the exit code unless the process
+  Handle is read while it lives -- the first run reported a correct hang as a
+  failure with a blank exit -- and the same blank had already been in my own
+  measurement of the old behaviour, read past because the stdout was the point.
+
 
 - **2026-10-06 · d57: the harness had a tolerance that grew with the number, and
   a missing overload that pushed tests onto it.** assert_eq forgave 1e-12 of the

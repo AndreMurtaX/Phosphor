@@ -1844,10 +1844,10 @@ begin
 end;
 
 { A frame's name, as the protocol wants it: the user function, or `(main)` for
-  the outermost. NOTE FOR THE EDITOR'S SIDE: TProgram lowercases a function name
-  at registration, so a source that spells it `Greet` is reported as `greet`. The
-  compiler has the as-written spelling and TProgram does not; making the two
-  agree is a change to the name table, not to this. }
+  the outermost. Shown as the header SPELLED it -- `Greet`, not the folded
+  `greet` this reported until ledger r3. Every name this host shows a person
+  goes through a *Spelling reader; every name it COMPARES (watch expressions
+  against the running program) stays on the folded *Name readers. }
 function DbgFrameName(AProg: TProgram; AVM: TPhosphorVM; AFrame: Integer): String;
 var
   fn: Integer;
@@ -1855,7 +1855,7 @@ begin
   if AFrame < 0 then Exit('(main)');
   fn := AVM.DbgFrameFunc(AFrame);
   if (AProg <> nil) and (fn >= 0) and (fn < AProg.UserFuncCount) then
-    Result := AProg.UserFuncs[fn].Name
+    Result := AProg.UserFuncSpelling(fn)
   else
     Result := '(frame)';
 end;
@@ -1969,7 +1969,7 @@ begin
     begin
       val := vm.DbgLocal(vmFrame, i);
       v := TJSONObject.Create();
-      v.Add('name', prog.LocalName(fn, i));
+      v.Add('name', prog.LocalSpelling(fn, i));
       v.Add('value', ValToStr(val));
       v.Add('kind', DbgKindName(val));
       v.Add('scope', 'local');
@@ -1985,7 +1985,7 @@ begin
     if prog.GlobalIsTemporary(i) then Continue;
     val := vm.DbgGlobal(i);
     v := TJSONObject.Create();
-    v.Add('name', prog.GlobalName(i));
+    v.Add('name', prog.GlobalSpelling(i));
     v.Add('value', ValToStr(val));
     v.Add('kind', DbgKindName(val));
     v.Add('scope', 'global');
@@ -3320,7 +3320,7 @@ begin
   if AFrame < 0 then Exit('<top level>');
   fn := AVM.DbgFrameFunc(AFrame);
   if (AProg <> nil) and (fn >= 0) and (fn < AProg.UserFuncCount) then
-    Result := AProg.UserFuncs[fn].Name + '()'
+    Result := AProg.UserFuncSpelling(fn) + '()'
   else
     Result := Format('<frame %d>', [AFrame]);
 end;
@@ -3401,12 +3401,12 @@ begin
     fn := AVM.DbgFrameFunc(ADepth - 1);
     n := AVM.DbgFrameLocalCount(ADepth - 1);
     if (fn >= 0) and (fn < prog.UserFuncCount) then
-      Writeln(StdErr, Format('locals of %s()', [prog.UserFuncs[fn].Name]))
+      Writeln(StdErr, Format('locals of %s()', [prog.UserFuncSpelling(fn)]))
     else
       Writeln(StdErr, 'locals');
     for i := 0 to n - 1 do
       Writeln(StdErr, Format('   %-20s %s',
-                             [prog.LocalName(fn, i), RenderOperand(AVM.DbgLocal(ADepth - 1, i))]));
+                             [prog.LocalSpelling(fn, i), RenderOperand(AVM.DbgLocal(ADepth - 1, i))]));
     if n = 0 then Writeln(StdErr, '   (none)');
   end;
 
@@ -3418,7 +3418,7 @@ begin
       debugger that lists them buries the three names the person wrote. }
     if prog.GlobalIsTemporary(i) then Continue;
     Writeln(StdErr, Format('   %-20s %s',
-                           [prog.GlobalName(i), RenderOperand(AVM.DbgGlobal(i))]));
+                           [prog.GlobalSpelling(i), RenderOperand(AVM.DbgGlobal(i))]));
     Inc(shown);
   end;
   if shown = 0 then Writeln(StdErr, '   (none)');

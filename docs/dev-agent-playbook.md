@@ -1525,6 +1525,28 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · r3: a name has an identity and a spelling, and the first
+  version guessed how far apart they sit.** The lexer folded every identifier,
+  so a debugger showed `greet$` for `Greet$` and every variable in lowercase. The
+  fold stays -- it is the identity, it is what the .pbc serializes and what a
+  watch expression compares -- and the as-written text now travels beside it, for
+  display only, behind readers that refuse a spelling which does not fold back.
+  The thing worth carrying: the compiler finds a new entry's spelling by looking
+  back from the cursor for the token that named it, and the first version looked
+  back 64 tokens because "an entry is created while its token is being consumed".
+  A mutation (look at the current token only) was CAUGHT, which proved the window
+  mattered and said nothing about whether 64 was enough. Instrumenting the lexer
+  and compiling all 183 .bas files answered that: `z = <expr>` creates the global
+  after its right-hand side, so the distance is the expression's length -- 54 at
+  most in the corpus, unbounded in principle. A window sized under the largest
+  value anyone has measured is a guard that passes every test written so far.
+  The scan now has no bound and costs no more than the statement, and a
+  79-token right-hand side in the probe kills the 64-token version. The same
+  sweep's first run reported every console row CAUGHT because the checker itself
+  was wrong (the `(dbg) ` prompt shares the line with `#0`), which the baseline
+  row with no mutation exposed: a sweep needs a row that must pass.
+
+
 - **2026-10-07 · n14 and n27: where a statement begins and where it ends,
   each said once.** An empty statement (`10 : print`, `x = 1 : : y = 2`) failed
   in all three loops that sequence statements, because each expected a

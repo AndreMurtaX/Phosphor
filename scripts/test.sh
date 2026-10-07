@@ -737,6 +737,19 @@ if "$exe" debug "$dbgdir/q.pbc" < /dev/null > /dev/null 2>"$dbgdir/q5.err"; then
 if [[ "$(cat "$dbgdir/q5.err")" != *'no source and no variable names'* ]]; then
   echo '        pbc: refused without saying why'; okQ=1; fi
 
+# 6. NAMES ARE SHOWN AS THE SCRIPT SPELLED THEM (ledger r3). The same program
+#    written in mixed case, the same session. Every check is CASE-SENSITIVE and
+#    anchored at a line start: the source echo repeats `Dobro(I)` and an indented
+#    `  Total =`, so only the frame label can say `Dobro()` and only the variable
+#    list can begin a line with three spaces and a name.
+printf '%s\n' 'Total = 0' 'function Dobro(N) local R' '  R = N * 2' '  return R' 'endfunction' 'for I = 1 to 3' '  Total = Total + Dobro(I)' 'next' 'println "total="; Total' > "$dbgdir/q6.bas"
+"$exe" debug "$dbgdir/q6.bas" < "$dbgdir/cmds" > /dev/null 2>"$dbgdir/q6.err"
+if ! grep -q -F 'locals of Dobro()' "$dbgdir/q6.err"; then echo '        spelling: the frame was not named Dobro()'; okQ=1; fi
+if grep -q -F 'dobro()' "$dbgdir/q6.err"; then echo '        spelling: a frame was named by the fold, dobro()'; okQ=1; fi
+if ! grep -q -E '^   N +[^ ]' "$dbgdir/q6.err"; then echo '        spelling: the parameter was not listed as N'; okQ=1; fi
+if ! grep -q -E '^   Total +[^ ]' "$dbgdir/q6.err"; then echo '        spelling: the global was not listed as Total'; okQ=1; fi
+if grep -q -E '^   (n|total) +[^ ]' "$dbgdir/q6.err"; then echo '        spelling: a variable was listed by the fold'; okQ=1; fi
+
 if [ "$okQ" -eq 0 ]; then echo 'PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)'
 else echo 'FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program'; fail=1; fi
 

@@ -2067,6 +2067,86 @@ check('entry segment: a query behind launch+disconnect is refused once',
       len(a) == 1 and a[0].get('ok') is False and 'after disconnect' in a[0].get('error', ''), str(a))
 w13.close()
 
+# ---------------------------------------------------------------------------
+# A NAME IS SHOWN AS THE SCRIPT SPELLED IT (ledger r3).
+#
+# The lexer folds every identifier, because the language is case-insensitive,
+# and until 2026-10-07 the fold was the only text that survived: a function the
+# header spelled `Greet$` came back in stackTrace as `greet$`, and every variable
+# in the pane was lowercase whatever the author wrote. The spelling is kept now
+# beside the name, for display only. Every expected string below is copied from
+# the fixture's own text, not from a run:
+#   * the frame is named by the HEADER's spelling, `Greet$` -- not the call's
+#     `GREET$` on line 9, which is the spelling a first-occurrence rule would pick;
+#   * a global is shown as its FIRST appearance spells it (`myCounter`, line 2),
+#     and `Hits`, first written inside the function body, is a global too;
+#   * a parameter and a `local` keep theirs (`Who$`, `Shout$`);
+#   * and evaluating a name spelled ANOTHER way still finds it -- identity is the
+#     folded name, and the spelling must not have become something compared.
+# ---------------------------------------------------------------------------
+SPELL = ('rem r3: names are shown as the script spelled them\n'   # 1
+         'myCounter = 1\n'                                       # 2
+         'function Greet$(Who$) local Shout$\n'                  # 3
+         '  Shout$ = Who$ + "!"\n'                               # 4
+         '  Hits = 1\n'                                          # 5
+         '  println Shout$\n'                                    # 6
+         '  return Shout$\n'                                     # 7
+         'endfunction\n'                                         # 8
+         'r$ = GREET$("hi")\n'                                   # 9
+         'println "done"\n'                                      # 10
+         'end\n')                                                # 11
+w14 = Wire(SPELL, 'spelling.bas')
+w14.init()
+
+
+def ask14(seq, **kw):
+    w14.send(seq=seq, **kw)
+    for _ in range(60):
+        m = w14.recv(timeout=15)
+        if m is None or m.get('seq') == seq:
+            return m
+    return None
+
+
+ask14(10, cmd='setBreakpoints', path=w14.path, lines=[6])
+ask14(11, cmd='launch', stopAtEntry=False)
+ev14 = None
+for _ in range(60):
+    m = w14.recv(timeout=15)
+    if m is None or m.get('event') in ('stopped', 'exited'):
+        ev14 = m
+        break
+check('spelling: stopped inside Greet$ on line 6',
+      ev14 is not None and ev14.get('event') == 'stopped' and ev14.get('line') == 6, str(ev14))
+r = ask14(12, cmd='stackTrace')
+fr = [f.get('name') for f in (r or {}).get('frames', [])]
+check('spelling: the frame is named as its header spells it, Greet$',
+      fr == ['Greet$', '(main)'], str(fr))
+r = ask14(13, cmd='variables', frame=0)
+vs = sorted((v['name'], v['scope']) for v in (r or {}).get('variables', []))
+check('spelling: every variable as the script wrote it',
+      vs == sorted([('Who$', 'local'), ('Shout$', 'local'), ('myCounter', 'global'),
+                    ('Hits', 'global'), ('r$', 'global')]), str(vs))
+a = ask14(14, cmd='evaluate', frame=0, expr='MYCOUNTER')
+check('spelling: a global evaluated under another spelling is still found',
+      a is not None and a.get('ok') and '%s:%s' % (a.get('kind'), a.get('result')) == 'int:1', str(a))
+a = ask14(15, cmd='evaluate', frame=0, expr='who$')
+check('spelling: and so is a local',
+      a is not None and a.get('ok') and '%s:%s' % (a.get('kind'), a.get('result')) == 'string:hi', str(a))
+ask14(16, cmd='continue')
+for _ in range(60):
+    m = w14.recv(timeout=15)
+    if m is None or m.get('event') == 'exited':
+        break
+try:
+    out14, _ = w14.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    w14.proc.kill()
+    out14 = b''
+check('spelling: and the program did its own work',
+      b'hi!\ndone\n' in out14.replace(b'\r\n', b'\n'), repr(out14[:60]))
+w14.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

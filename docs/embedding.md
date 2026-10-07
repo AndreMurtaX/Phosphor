@@ -624,10 +624,16 @@ the program this pair points at. A `prog` cached before such a call is a danglin
 pointer; the properties themselves go back to `nil`. Re-read them after anything
 that starts new work.
 
-**Names are lowercase.** The lexer folds every identifier before the compiler sees
-it, so a script that wrote `myCounter` is reported as `mycounter`. The source
-spelling is gone by the time a name reaches a table; recovering it would have to
-happen in the lexer, and nothing here can do it for you.
+**A name has an identity and a spelling.** The language is case-insensitive, so
+the lexer folds every identifier and the tables are keyed by the fold:
+`GlobalName`, `LocalName` and `UserFuncName` answer `mycounter` for a script that
+wrote `myCounter`, and that is what to COMPARE by. `GlobalSpelling`,
+`LocalSpelling` and `UserFuncSpelling` answer `myCounter` -- the spelling to SHOW
+a person. A global is spelled as it is first written, a parameter or `local` as it
+is declared, a function as its header spells it (not as a call before it does). A
+spelling that does not fold to the identity is never answered, and with none
+recorded -- a program read from a `.pbc`, which serializes identities only, or one
+built by hand -- the spelling readers answer the identity.
 
 **Some slots are the compiler's, not the script's.** A `SELECT` subject, a `SWAP`
 scratch, a `FOR` bound are ordinary globals or frame slots with generated names,

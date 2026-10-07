@@ -107,6 +107,12 @@ stops *before* a statement, not after. The globals are listed beside the locals
 because in this language an undeclared name inside a function **is** a global, so a
 pane that hid them would hide most of what a function touches.
 
+Every name is shown **as the program spells it**. Had `demo.bas` declared
+`function Dobro(N)`, the stack would say `Dobro()` and the list `N` — a global as
+it is first written, a parameter or `local` as declared, a function as its header
+spells it. The language is still case-insensitive: the spelling is only what you
+are shown, and `evaluate` finds `TOTAL`, `total` and `Total` alike.
+
 ### 3. Step out and see the result already computed
 
 ```text

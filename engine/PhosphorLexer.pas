@@ -44,6 +44,11 @@ type
     IntVal: Int64;
     DblVal: Double;
     StrVal: String;   // string literal contents, or the (lowercased) identifier
+    { An identifier AS WRITTEN (ledger r3). StrVal is folded because the
+      language is case-insensitive, and every comparison the compiler makes
+      is on StrVal; this is the spelling a person gave the name, kept only so
+      a debugger can show it back. Empty for every other kind of token. }
+    Raw: String;
     Line: Integer;
   end;
 
@@ -70,6 +75,22 @@ type
     function Mark: Integer;             // current token position, for re-parsing
     procedure Reset(APos: Integer);     // rewind to a position from Mark
     function Ok: Boolean;
+    { The as-written spelling of identifier AName (already folded): the nearest
+      token at or BEHIND the cursor that carries it, '' when none does.
+
+      THERE IS NO WINDOW, and the first version had one. It looked back 64
+      tokens on the belief that a table entry is created while its token is
+      being consumed. Measured over all 183 .bas files git knows, that is false
+      for the commonest statement there is: `z = <expr>` creates the global
+      AFTER the right-hand side is parsed, so the distance is the length of the
+      expression -- 54 tokens in tests/suite/50_robustness.bas, and unbounded
+      in principle. A window would have dropped the spelling of a long
+      assignment in silence. The scan still costs no more than the statement:
+      the entry is created once, by a token inside the statement being parsed,
+      so the walk stops at or before that statement's first token. Nothing was
+      ever found AHEAD of the cursor (0 of 2615 hits), so it never looks
+      there. }
+    function SpellingNear(const AName: String): String;
     property ErrorMessage: String read FErr;
     property ErrorLine: Integer read FErrLine;
   end;
@@ -463,6 +484,7 @@ begin
         T := Default(TToken);
         T.Kind := tkIdent;
         T.StrVal := s;
+        T.Raw := Copy(FSrc, n, FPos - n);
         T.Line := startLine;
         Push(T);
       end;
@@ -594,6 +616,17 @@ procedure TLexer.Reset(APos: Integer);
 begin
   if (APos >= 0) and (APos < FCount) then
     FIndex := APos;
+end;
+
+function TLexer.SpellingNear(const AName: String): String;
+var i, hi: Integer;
+begin
+  Result := '';
+  hi := FIndex;
+  if hi > FCount - 1 then hi := FCount - 1;
+  for i := hi downto 0 do
+    if (FTokens[i].Kind = tkIdent) and (FTokens[i].StrVal = AName) then
+      Exit(FTokens[i].Raw);
 end;
 
 function TLexer.Ok: Boolean;

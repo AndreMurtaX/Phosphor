@@ -963,6 +963,30 @@ if ($q5.Code -eq 0) { Write-Host '        pbc: accepted a file that carries no n
 if ((Read-Text $q5.Err) -notlike '*no source and no variable names*') {
     Write-Host '        pbc: refused without saying why' -ForegroundColor DarkGray; $okQ = $false }
 
+# 6. NAMES ARE SHOWN AS THE SCRIPT SPELLED THEM (ledger r3). See test.sh's step
+#    6. Every check is CASE-SENSITIVE -- -like is not, which is why these use
+#    -clike and -cmatch -- and the variable lines are anchored at a line start,
+#    because the source echo repeats an indented `  Total =`.
+$q6Bas = Join-Path $dbgDir 'q6.bas'
+Set-Content -LiteralPath $q6Bas -Encoding ascii -Value @(
+    'Total = 0',
+    'function Dobro(N) local R',
+    '  R = N * 2',
+    '  return R',
+    'endfunction',
+    'for I = 1 to 3',
+    '  Total = Total + Dobro(I)',
+    'next',
+    'println "total="; Total'
+)
+$q6 = Dbg-Run "debug `"$q6Bas`"" $cmds 'q6'
+$q6err = Read-Text $q6.Err
+if (-not ($q6err -clike '*locals of Dobro()*')) { Write-Host '        spelling: the frame was not named Dobro()' -ForegroundColor DarkGray; $okQ = $false }
+if ($q6err -clike '*dobro()*') { Write-Host '        spelling: a frame was named by the fold, dobro()' -ForegroundColor DarkGray; $okQ = $false }
+if (-not ($q6err -cmatch '(?m)^   N +\S')) { Write-Host '        spelling: the parameter was not listed as N' -ForegroundColor DarkGray; $okQ = $false }
+if (-not ($q6err -cmatch '(?m)^   Total +\S')) { Write-Host '        spelling: the global was not listed as Total' -ForegroundColor DarkGray; $okQ = $false }
+if ($q6err -cmatch '(?m)^   (n|total) +\S') { Write-Host '        spelling: a variable was listed by the fold' -ForegroundColor DarkGray; $okQ = $false }
+
 if ($okQ) { Write-Host "PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)" -ForegroundColor Green }
 else { Write-Host "FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program" -ForegroundColor Red }
 

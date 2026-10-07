@@ -732,6 +732,168 @@ begin
   end;
 end;
 
+{ A NAME KEEPS THE SPELLING THE SCRIPT WROTE (ledger r3).
+
+  The lexer folds every identifier, and until 2026-10-07 the fold was all that
+  reached a table: `Greet$` was reported as `greet$`, `myCounter` as `mycounter`.
+  The spelling now travels beside the name, for display. Every expectation here
+  is copied from the listing, not from a run:
+
+     1  myCounter = 1
+     2  println GREET$("x")        -- a CALL, before the header, spelled otherwise
+     3  MYCOUNTER = myCounter + 1  -- a second spelling of an existing global
+     4  Total% = 2
+     5  Wide = 1 + 1 + ... + 1    -- forty terms: 79 tokens of right-hand side
+     6  end
+     7  function Greet$(Who$) local Shout$
+     8    Shout$ = Who$ + "!"
+     9    Hits = 1                 -- undeclared in a body: a GLOBAL, first seen here
+    10    return Shout$
+    11  endfunction
+
+  * a global is shown as it is first written (line 1, not line 3) -- and an
+    assignment's target keeps its spelling however long the right-hand side:
+    the global is created AFTER that side is parsed, which a 64-token window
+    once missed;
+  * a function as its HEADER spells it -- `Greet$`, not the call's `GREET$`,
+    which is what "the first time the name appears" would have picked;
+  * a parameter and a local as their declarations spell them;
+  * the IDENTITY readers still answer the fold, because they are what watch
+    expressions and CallFunction compare;
+  * the .pbc is byte-identical to the one the all-lowercase source writes --
+    derived from the format, which serializes names and never spellings -- and a
+    program read back from it shows the identity, having no spelling to show. }
+const
+  SpellFixture =
+    'myCounter = 1'                       + #10 +
+    'println GREET$("x")'                 + #10 +
+    'MYCOUNTER = myCounter + 1'           + #10 +
+    'Total% = 2'                          + #10 +
+    'Wide = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1' + #10 +
+    'end'                                 + #10 +
+    'function Greet$(Who$) local Shout$'  + #10 +
+    '  Shout$ = Who$ + "!"'               + #10 +
+    '  Hits = 1'                          + #10 +
+    '  return Shout$'                     + #10 +
+    'endfunction'                         + #10;
+
+function PbcBytes(AProg: TProgram): String;
+var st: TBytesStream;
+begin
+  st := TBytesStream.Create();
+  try
+    WriteProgram(st, AProg);
+    SetLength(Result, st.Size);
+    if st.Size > 0 then Move(st.Bytes[0], Result[1], st.Size);
+  finally
+    st.Free;
+  end;
+end;
+
+procedure CheckSpellings;
+var
+  p, lower, back: TProgram;
+  st: TBytesStream;
+  err, shown, ident: String;
+  i, fi: Integer;
+  eng: TPhosphorEngine;
+  v: TValue;
+begin
+  p := Compiled(SpellFixture);
+  lower := Compiled(LowerCase(SpellFixture));
+  if (p = nil) or (lower = nil) then
+  begin
+    Report(False, 'the spelling fixture compiles, both ways');
+    p.Free; lower.Free;
+    Exit;
+  end;
+  try
+    shown := ''; ident := '';
+    for i := 0 to p.VarCount - 1 do
+    begin
+      if p.GlobalIsTemporary(i) then Continue;
+      shown := shown + p.GlobalSpelling(i) + ' ';
+      ident := ident + p.GlobalName(i) + ' ';
+    end;
+    CheckStr(shown, 'myCounter Total% Wide Hits ', 'globals are shown as first written');
+    CheckStr(ident, 'mycounter total% wide hits ', 'and their identity is still the fold');
+
+    fi := FuncIndex(p, 'greet$');
+    CheckInt(fi, 0, 'the function is found by its folded name');
+    CheckStr(p.UserFuncSpelling(fi), 'Greet$', 'a function is shown as its header spells it');
+    CheckStr(p.UserFuncName(fi), 'greet$', 'and its identity is still the fold');
+    shown := '';
+    for i := 0 to p.LocalCount(fi) - 1 do
+      shown := shown + p.LocalSpelling(fi, i) + ' ';
+    CheckStr(shown, 'Who$ Shout$ ', 'a parameter and a local as declared');
+    CheckStr(p.LocalName(fi, 1), 'shout$', 'a local''s identity is still the fold');
+
+    { Out of range answers like the identity readers: nothing, not a fault. }
+    CheckStr(p.GlobalSpelling(-1), '', 'GlobalSpelling(-1) answers an empty name');
+    CheckStr(p.LocalSpelling(999, 0), '', 'LocalSpelling of a function that is not there');
+    CheckStr(p.UserFuncSpelling(-1), '', 'UserFuncSpelling(-1) answers an empty name');
+
+    { THE FORMAT DID NOT MOVE. The two sources differ only in case, and a .pbc
+      carries the folded names, so the bytes must be equal -- if a spelling ever
+      leaked into the serializer, this is where it shows. }
+    Report(PbcBytes(p) = PbcBytes(lower),
+           'the .pbc is byte-identical to the all-lowercase source''s');
+
+    st := TBytesStream.Create();
+    try
+      WriteProgram(st, p);
+      st.Position := 0;
+      if ReadProgram(st, back, err) then
+      try
+        CheckStr(back.UserFuncSpelling(0), 'greet$',
+                 'a program read from a .pbc shows the identity: it has no spelling');
+      finally
+        back.Free;
+      end
+      else Report(False, 'the spelling fixture round-trips (' + err + ')');
+    finally
+      st.Free;
+    end;
+  finally
+    p.Free;
+    lower.Free;
+  end;
+
+  { A SPELLING THAT DOES NOT FOLD TO THE NAME IS NEVER SHOWN. No compiler writes
+    one; an embedder assembling a TProgram by hand can, and the two readers must
+    not then name different things. Hand-built: one global `a` offered the
+    spelling `B`, one function `f` offered `G` -- each answers its identity. }
+  p := TProgram.Create();
+  try
+    p.SetGlobalTable([vtNumber, vtNumber], ['a', 'c'], ['B', 'C']);
+    CheckStr(p.GlobalSpelling(0), 'a', 'a spelling of another name is refused, not shown');
+    CheckStr(p.GlobalSpelling(1), 'C', 'while one that folds to the name is shown');
+    fi := p.AddUserFunc('f', 0, 0, [], [], vtNumber);
+    p.SetUserFuncSpelling(fi, 'G');
+    CheckStr(p.UserFuncSpelling(fi), 'f', 'a function offered another name answers its own');
+  finally
+    p.Free;
+  end;
+
+  { THE NAME A HOST CALLS BY is the identity, whatever case it is asked in. }
+  eng := TPhosphorEngine.Create();
+  try
+    if eng.Prepare(SpellFixture) <> 0 then
+      Report(False, 'the spelling fixture prepares (' + eng.ErrorMessage + ')')
+    else
+    begin
+      v := eng.CallFunction('GREET$', [ValStr('a')]);
+      CheckStr(ValToStr(v), 'a!', 'CallFunction(''GREET$'') resolves');
+      v := eng.CallFunction('greet$', [ValStr('b')]);
+      CheckStr(ValToStr(v), 'b!', 'CallFunction(''greet$'') resolves');
+      v := eng.CallFunction('Greet$', [ValStr('c')]);
+      CheckStr(ValToStr(v), 'c!', 'CallFunction(''Greet$'') resolves');
+    end;
+  finally
+    eng.Free;
+  end;
+end;
+
 var
   prog: TProgram;
 begin
@@ -756,6 +918,7 @@ begin
   CheckStoppableGuards();
   CheckPreparedState();
   CheckPreparationDiscarded();
+  CheckSpellings();
 
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);

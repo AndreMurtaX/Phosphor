@@ -80,6 +80,7 @@ type
     FStmtDepth: Integer;   // block nesting; see THE PARSER'S DEPTH BUDGET
     FBool: Boolean;
     FVarNames: array of String;
+    FVarSpellings: array of String;   // as written, parallel to FVarNames (r3)
     FVarTypes: array of TVarType;
     FVarCount: Integer;
     FHidden: Integer;
@@ -90,6 +91,7 @@ type
     // current-function scope (params + locals live in a frame, not the globals)
     FInFunction: Boolean;
     FLocalNames: array of String;
+    FLocalSpellings: array of String; // as written, parallel to FLocalNames (r3)
     FLocalTypes: array of TVarType;
     FLocalCount: Integer;
     FRetType: TVarType;
@@ -124,6 +126,7 @@ type
     function IsKeyword(const AKw: String): Boolean;
     function AtStatementEnd: Boolean;
     function CurIsTerm(const ATerms: array of String): Boolean;
+    function SpellingFor(const AName: String): String;
     function VarIndex(const AName: String): Integer;
     function NewHiddenVar(AType: TVarType): Integer;
     function NewHidden(AType: TVarType): THiddenSlot;         // see THiddenSlot
@@ -424,6 +427,16 @@ begin
     if FLex.Cur().StrVal = ATerms[i] then Exit(True);
 end;
 
+{ The spelling a new table entry is shown under (ledger r3): the as-written
+  text of the token being consumed when the entry is created -- its first
+  appearance in source order, since an entry is created once. A compiler
+  temporary has no token and no spelling. }
+function TPhosphorCompiler.SpellingFor(const AName: String): String;
+begin
+  if IsTemporaryName(AName) then Exit('');
+  Result := FLex.SpellingNear(AName);
+end;
+
 function TPhosphorCompiler.VarIndex(const AName: String): Integer;
 var i: Integer;
 begin
@@ -432,9 +445,11 @@ begin
   if FVarCount = Length(FVarNames) then
   begin
     SetLength(FVarNames, (FVarCount + 1) * 2);
+    SetLength(FVarSpellings, (FVarCount + 1) * 2);
     SetLength(FVarTypes, (FVarCount + 1) * 2);
   end;
   FVarNames[FVarCount] := AName;
+  FVarSpellings[FVarCount] := SpellingFor(AName);
   FVarTypes[FVarCount] := VarTypeOf(AName);
   Result := FVarCount;
   Inc(FVarCount);
@@ -519,9 +534,11 @@ begin
   if FLocalCount = Length(FLocalNames) then
   begin
     SetLength(FLocalNames, (FLocalCount + 1) * 2);
+    SetLength(FLocalSpellings, (FLocalCount + 1) * 2);
     SetLength(FLocalTypes, (FLocalCount + 1) * 2);
   end;
   FLocalNames[FLocalCount] := AName;
+  FLocalSpellings[FLocalCount] := SpellingFor(AName);
   FLocalTypes[FLocalCount] := VarTypeOf(AName);
   Inc(FLocalCount);
 end;
@@ -606,19 +623,21 @@ end;
 procedure TPhosphorCompiler.ParseFunction;
 var
   ln, entry, jOver, paramCount, i, ufIdx, savedLoopDepth: Integer;
-  funcName: String;
+  funcName, funcSpelling: String;
   retType: TVarType;
   ltypes: array of TVarType;
-  lnames: array of String;
+  lnames, lspell: array of String;
   savedBreaks, savedConts: array of array of Integer;
 begin
   ltypes := nil;
   lnames := nil;
+  lspell := nil;
   if FInFunction then begin Fail('nested functions are not supported', FLex.Cur().Line); Exit; end;
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'function'
   if FLex.Cur().Kind <> tkIdent then begin Fail('expected a function name', FLex.Cur().Line); Exit; end;
   funcName := FLex.Cur().StrVal;
+  funcSpelling := FLex.Cur().Raw;   // the header's spelling, not a call's (r3)
   // eof/lof/loc/input$ are parsed as special forms because they take a #channel.
   // A function with one of those names used to compile cleanly and then never be
   // called: every call site was rewritten into the file opcode instead. Silently
@@ -676,6 +695,7 @@ begin
     lnames[i] := FLocalNames[i];
   end;
   ufIdx := FProg.AddUserFunc(funcName, entry, paramCount, ltypes, lnames, retType);
+  FProg.SetUserFuncSpelling(ufIdx, funcSpelling);
 
   { A LOOP OUTSIDE THE FUNCTION IS NOT THIS FUNCTION'S LOOP.
 
@@ -733,12 +753,14 @@ begin
   // slot the body added, and nothing in the tree asserts the two are parallel.
   SetLength(ltypes, FLocalCount);
   SetLength(lnames, FLocalCount);
+  SetLength(lspell, FLocalCount);
   for i := 0 to FLocalCount - 1 do
   begin
     ltypes[i] := FLocalTypes[i];
     lnames[i] := FLocalNames[i];
+    lspell[i] := FLocalSpellings[i];
   end;
-  FProg.SetUserFuncLocals(ufIdx, ltypes, lnames);
+  FProg.SetUserFuncLocals(ufIdx, ltypes, lnames, lspell);
   // fall-through default return
   FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(retType)), 0, ln);
   FProg.Emit(opRetFunc, 0, 0, ln);
@@ -3147,7 +3169,8 @@ begin
       finished with them at this point. }
     SetLength(FVarTypes, FVarCount);
     SetLength(FVarNames, FVarCount);
-    FProg.SetGlobalTable(FVarTypes, FVarNames);
+    SetLength(FVarSpellings, FVarCount);
+    FProg.SetGlobalTable(FVarTypes, FVarNames, FVarSpellings);
     AProg := FProg; Result := True;
   end;
 end;

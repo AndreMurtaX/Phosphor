@@ -127,6 +127,13 @@ type
     ParamCount: Integer;
     LocalTypes: array of TVarType;
     LocalNames: array of String;
+    { THE SPELLING THE SCRIPT WROTE, for display only (ledger r3). Name and
+      LocalNames are the IDENTITY -- folded, compared, and Name is what a .pbc
+      serializes -- so they stay lowercase. These are never serialized and
+      never compared; '' means none was recorded, and the readers below then
+      answer the identity, which is what every host showed before. }
+    Spelling: String;
+    LocalSpellings: array of String;
     RetType: TVarType;
   end;
 
@@ -148,6 +155,7 @@ type
       doors below are the only way a name gets IN, and GlobalName is the only way
       one comes OUT. }
     FVarNames: array of String;
+    FVarSpellings: array of String;
     FHasNames: Boolean;
     FInstrs: array of TInstr;
     FCount: Integer;
@@ -186,7 +194,11 @@ type
       AddUserFunc time they would be short by every slot the body added, and
       nothing would say so. }
     procedure SetUserFuncLocals(AIndex: Integer; const ALocalTypes: array of TVarType;
-                                const ALocalNames: array of String);
+                                const ALocalNames, ALocalSpellings: array of String);
+    { The function's name as its header spelled it. Separate from AddUserFunc
+      because the .pbc loader and hand-built programs have no spelling to give
+      and must not be made to invent one. }
+    procedure SetUserFuncSpelling(AIndex: Integer; const ASpelling: String);
     { THE TWO DOORS ONTO THE GLOBAL TABLE, and there are two of them so that a
       caller filling the types cannot say NOTHING about the names. Each sizes the
       names to the types and sets VarCount from the same length, so no two of the
@@ -202,7 +214,7 @@ type
       not being changed), so the answer with no names in it has to be asked for by
       name rather than arrived at by leaving an argument out. }
     procedure SetGlobalTable(const ATypes: array of TVarType;
-                             const ANames: array of String);
+                             const ANames, ASpellings: array of String);
     procedure SetGlobalTableUnnamed(const ATypes: array of TVarType);
     procedure AddData(const V: TValue);
     { READ-ONLY NAME LOOKUP -- the read that decides, so nothing else indexes the
@@ -215,6 +227,16 @@ type
       Here for the same reason as the two above: a caller handed an index should
       never have to reach into UserFuncs itself to turn it into a name. }
     function UserFuncName(AFuncIndex: Integer): String;
+    { THE NAME TO SHOW A PERSON (ledger r3): the spelling the source gave it,
+      `myCounter` where the Name readers above answer `mycounter`. Use these to
+      DISPLAY and the three above to COMPARE -- a watch expression compiled from
+      other text must still find `MYCOUNTER`, and only the identity can do that.
+      A spelling that does not fold to the identity is never answered, so the
+      two cannot name different things; with none recorded (a .pbc, a
+      hand-built program) they answer the identity. }
+    function GlobalSpelling(AIndex: Integer): String;
+    function LocalSpelling(AFuncIndex, ASlot: Integer): String;
+    function UserFuncSpelling(AFuncIndex: Integer): String;
     { True when the slot is a temporary the COMPILER made, not a name the script
       wrote -- a SELECT subject, a SWAP scratch, a FOR bound. One predicate for
       both tables: hidden globals interleave with user globals in the index space,
@@ -351,15 +373,28 @@ begin
   UserFuncs[UserFuncCount].ParamCount := AParamCount;
   CopyLocalTable(UserFuncs[UserFuncCount], ALocalTypes, ALocalNames);
   UserFuncs[UserFuncCount].RetType := ARetType;
+  UserFuncs[UserFuncCount].Spelling := '';
+  UserFuncs[UserFuncCount].LocalSpellings := nil;
   Result := UserFuncCount;
   Inc(UserFuncCount);
 end;
 
 procedure TProgram.SetUserFuncLocals(AIndex: Integer; const ALocalTypes: array of TVarType;
-  const ALocalNames: array of String);
+  const ALocalNames, ALocalSpellings: array of String);
+var i: Integer;
 begin
   if (AIndex < 0) or (AIndex >= UserFuncCount) then Exit;
   CopyLocalTable(UserFuncs[AIndex], ALocalTypes, ALocalNames);
+  SetLength(UserFuncs[AIndex].LocalSpellings, Length(ALocalTypes));
+  for i := 0 to High(ALocalTypes) do
+    if i <= High(ALocalSpellings) then UserFuncs[AIndex].LocalSpellings[i] := ALocalSpellings[i]
+    else UserFuncs[AIndex].LocalSpellings[i] := '';
+end;
+
+procedure TProgram.SetUserFuncSpelling(AIndex: Integer; const ASpelling: String);
+begin
+  if (AIndex < 0) or (AIndex >= UserFuncCount) then Exit;
+  UserFuncs[AIndex].Spelling := ASpelling;
 end;
 
 { One loop fills both tables and the count, so a caller cannot leave the three at
@@ -367,17 +402,20 @@ end;
   the read side already answers an absent name honestly, index by index, and a
   partial table is not worth a second failure mode. }
 procedure TProgram.SetGlobalTable(const ATypes: array of TVarType;
-                                  const ANames: array of String);
+                                  const ANames, ASpellings: array of String);
 var i: Integer;
 begin
   VarCount := Length(ATypes);
   SetLength(VarTypes, Length(ATypes));
   SetLength(FVarNames, Length(ATypes));
+  SetLength(FVarSpellings, Length(ATypes));
   for i := 0 to High(ATypes) do
   begin
     VarTypes[i] := ATypes[i];
     if i <= High(ANames) then FVarNames[i] := ANames[i]
     else FVarNames[i] := '';
+    if i <= High(ASpellings) then FVarSpellings[i] := ASpellings[i]
+    else FVarSpellings[i] := '';
   end;
   FHasNames := True;
 end;
@@ -389,6 +427,7 @@ begin
   VarCount := Length(ATypes);
   SetLength(VarTypes, Length(ATypes));
   SetLength(FVarNames, 0);
+  SetLength(FVarSpellings, 0);
   for i := 0 to High(ATypes) do VarTypes[i] := ATypes[i];
   FHasNames := False;
 end;
@@ -416,6 +455,34 @@ function TProgram.UserFuncName(AFuncIndex: Integer): String;
 begin
   if (AFuncIndex < 0) or (AFuncIndex >= UserFuncCount) then Exit('');
   Result := UserFuncs[AFuncIndex].Name;
+end;
+
+{ The one rule all three spelling readers answer by: a recorded spelling that
+  folds to the identity, else the identity. }
+function SpellingOr(const ASpelling, AName: String): String;
+begin
+  if (ASpelling <> '') and (LowerCase(ASpelling) = AName) then Result := ASpelling
+  else Result := AName;
+end;
+
+function TProgram.GlobalSpelling(AIndex: Integer): String;
+begin
+  if (AIndex < 0) or (AIndex > High(FVarSpellings)) then Exit(GlobalName(AIndex));
+  Result := SpellingOr(FVarSpellings[AIndex], GlobalName(AIndex));
+end;
+
+function TProgram.LocalSpelling(AFuncIndex, ASlot: Integer): String;
+begin
+  Result := LocalName(AFuncIndex, ASlot);
+  if (AFuncIndex < 0) or (AFuncIndex >= UserFuncCount) then Exit;
+  if (ASlot < 0) or (ASlot > High(UserFuncs[AFuncIndex].LocalSpellings)) then Exit;
+  Result := SpellingOr(UserFuncs[AFuncIndex].LocalSpellings[ASlot], Result);
+end;
+
+function TProgram.UserFuncSpelling(AFuncIndex: Integer): String;
+begin
+  if (AFuncIndex < 0) or (AFuncIndex >= UserFuncCount) then Exit('');
+  Result := SpellingOr(UserFuncs[AFuncIndex].Spelling, UserFuncs[AFuncIndex].Name);
 end;
 
 function TProgram.GlobalIsTemporary(AIndex: Integer): Boolean;

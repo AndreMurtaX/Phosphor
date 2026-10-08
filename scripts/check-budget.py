@@ -383,6 +383,16 @@ ALLOWED = {
     'phosphorhttptest.lpr:TV6Server.Execute':
         'the TEST server\'s accept loop, on a thread of the runner; no script '
         'reaches it, and the process ends with Halt',
+    'phosphorhttptest.lpr:TRelay.Execute':
+        'the TEST relay\'s accept-and-copy loop, on a thread of the runner, '
+        'trickling a TLS session for 25_http_broken; no script reaches it',
+    'PhosphorHttpLib.pas:ResponseComplete':
+        'one Pos over the Transfer-Encoding header\'s value, a line FPC already '
+        'read whole -- not a count a script supplies',
+    'PhosphorHttpLib.pas:TlsIO':
+        'a TLS read or write under a deadline: the loop leaves the moment the '
+        'deadline passes and each select() waits only what is left of it -- the '
+        'loop IS the bound (25_http_broken measures it at the deadline)',
     'phosphorhttptest.lpr:TV6Server.Serve':
         'the TEST server reading one request the package\'s own test sent, of a '
         'few hundred bytes; no script reaches it',

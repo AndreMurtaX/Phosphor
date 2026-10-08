@@ -42,7 +42,9 @@ fpjson keeps an object's names in a hash whose keys are that long, and until
 2026-10-08 a longer one was truncated in silence: two distinct 261-byte keys sharing
 their first 255 bytes were one member. Now a setter refuses a longer name with an
 error, `json_parse@` refuses a document holding one, and a lookup by one finds
-nothing. A string *value* has no such limit.
+nothing. A string *value* has no such limit. **A NUL or a U+0001 in a name counts
+as two bytes**: that is how a parse stores it, so measured this way a name the
+setter accepts always survives `json_stringify$` and `json_parse@` whole.
 
 The rest is the house style. Array indices are **1-based**, like every other
 positional argument in Phosphor (the reference implementation's JSON arrays were

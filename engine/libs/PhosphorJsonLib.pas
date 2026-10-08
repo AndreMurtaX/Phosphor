@@ -538,6 +538,20 @@ end;
 const
   JSON_MAX_NAME = 255;
 
+{ A NAME'S LENGTH AS A PARSE WOULD STORE IT: a NUL or a U+0001 counts as two,
+  because json_stringify$ writes it as an escape and json_parse@ spells such an
+  escape as a two-byte marker before fpjson stores the name. Measured this way a
+  name the setter accepts always survives json_stringify$ and json_parse@ whole
+  (2026-10-08, fourth pass: a 255-byte name of 130 letters and 125 NULs came
+  back from that round trip as 193 bytes ending in a byte nobody wrote). }
+function StoredNameLength(const AName: String): Integer;
+var i: Integer;
+begin
+  Result := Length(AName);
+  for i := 1 to Length(AName) do
+    if (AName[i] = #0) or (AName[i] = #1) then Inc(Result);
+end;
+
 function MemberIndex(O: TJSONObject; const AName: String): Integer;
 begin
   if Length(AName) > JSON_MAX_NAME then Exit(-1);
@@ -585,10 +599,11 @@ begin
     V.Free;
     Exit(False);
   end;
-  if Length(K) > JSON_MAX_NAME then
+  if StoredNameLength(K) > JSON_MAX_NAME then
   begin
     Err := MakeError(peRuntime, Format(
-      'a json member name is at most %d bytes, and this one is %d', [JSON_MAX_NAME, Length(K)]));
+      'a json member name is at most %d bytes, and this one is %d',
+      [JSON_MAX_NAME, StoredNameLength(K)]));
     V.Free;
     Exit(False);
   end;
@@ -1886,14 +1901,6 @@ begin
       [MaxJsonDepth, pos]));
     Exit;
   end;
-  pos := JsonLongName(Args[0].Str);
-  if pos > 0 then
-  begin
-    Err := MakeError(peRuntime, Format(
-      'invalid json: a member name is longer than %d bytes (at character %d)',
-      [JSON_MAX_NAME, pos]));
-    Exit;
-  end;
   // The escapes fpjson decodes wrongly are decoded HERE first -- see the long
   // note above. Only a document that actually carries a \u escape is rewritten,
   // and only one this can rewrite faithfully; anything else goes to GetJSON as
@@ -1915,6 +1922,27 @@ begin
     end;
   end;
   if not respelled then txt := Args[0].Str;
+  { THE NAME LIMIT IS JUDGED ON THE TEXT FPJSON PARSES (2026-10-08, fourth pass).
+    It was judged on the caller's, before the rewrite above -- which spells a NUL
+    and a U+0001 as two-byte markers, so a 255-byte name holding 55 of them
+    reached fpjson at 310 bytes and was cut to 228, in silence, and two distinct
+    such names were refused as a "Duplicate object member" spelled in marker
+    bytes. The position reported is the caller's where the caller's text alone
+    exceeds the limit; otherwise the name is long only as stored. }
+  pos := JsonLongName(txt);
+  if pos > 0 then
+  begin
+    if respelled then pos := JsonLongName(Args[0].Str);
+    if pos > 0 then
+      Err := MakeError(peRuntime, Format(
+        'invalid json: a member name is longer than %d bytes (at character %d)',
+        [JSON_MAX_NAME, pos]))
+    else
+      Err := MakeError(peRuntime, Format(
+        'invalid json: a member name is longer than %d bytes as stored -- a NUL ' +
+        'or U+0001 in a name is stored as two', [JSON_MAX_NAME]));
+    Exit;
+  end;
   d := nil;
   try
     // UseUTF8 = FALSE, and the name is the opposite of what it does for us. True

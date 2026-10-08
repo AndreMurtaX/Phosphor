@@ -1525,6 +1525,40 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · a fourth pass, over the third (c7c4c49): seven findings, all
+  fixed -- and the bound the day kept chasing finally sits at every wait.**
+  Two reviewers. The HTTP deadline had been fixed, by turns, at the address,
+  the request, the handshake and the read; this pass found it still missing
+  at the SEND and inside a TLS record, where OpenSSL makes reads of its own.
+  **The lesson of the four rounds is that a bound is a property of every wait,
+  and a fix applied where the last defect was found leaves the next wait
+  open.** The TLS reads and writes now run non-blocking under the deadline,
+  like the handshake; plain sends re-arm SO_SNDTIMEO as reads do.
+  - **A library's silence is not success.** FPC's client ends a body at
+    end-of-stream without raising, so a peer that CLOSED early -- short of its
+    Content-Length, before its last chunk -- was a complete 200. And when the
+    stream ended inside the headers it returned a 4096-byte buffer the server
+    never sent: FillBuffer sizes it before the read and never shrinks it on
+    end-of-stream. Completeness is now checked after the client says it
+    finished, and the header cut is caught by overriding the header read.
+  - **Classify by what failed, never by the clock.** "Within 50 ms of the
+    deadline is the deadline's" called a peer's reset the run's time and,
+    under a budget, charged it the whole remainder. The read now records
+    whether it timed out under the deadline's own arming.
+  - **A measurement made on the caller's text is not a measurement of what is
+    stored.** The 255-byte name check ran before the respell that turns NUL
+    and U+0001 into two-byte markers, so the truncation it was written to stop
+    went on for names holding them. It now runs on the text fpjson parses.
+  - **A half-close keeps the read side open, and what is read is acted on.** A
+    `terminate:true` sent after a detach killed the detached program. After
+    the session ends, nothing is acted on.
+  - **A relay is a test fixture with a timing of its own.** The first relay
+    held each byte back before sending it, so the late TLS record began AFTER
+    the client's deadline and the old reader passed the test on time. Send,
+    then wait: the record must begin inside the deadline for the defect to
+    show. And the run-ledger noted a file BEFORE running it, so a case that
+    only compiled it counted -- it now notes after a case that ran it passed.
+
 - **2026-10-08 · a third pass, over the second round's fixes (edb3dd5): the
   fixes were wrong again, in new ways, and two old defects came out.** Three
   reviewers; every finding run before it was accepted.

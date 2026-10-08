@@ -258,7 +258,9 @@ integer is dropped, a JSON number with a fraction or an exponent included:
   silence. The session ends by closing the send side only, so the editor reads
   that last event before the end of the stream: closing both sides with its bytes
   still unread made Windows reset the connection and drop the event, one run in
-  eight.
+  eight. **Nothing the editor sends after that is acted on**: with the read side
+  still open, a `disconnect terminate:true` sent after a detach used to kill the
+  program the detach had let go to run to its end.
 - **Every frame is UTF-8.** A string holding bytes that are not — `bytestr$(255)` —
   went out raw, which a strict editor must refuse; each such byte is written as
   the four characters `\xFF` instead. That is for display and cannot be undone: a

@@ -52,3 +52,4 @@
 22_https_fallback
 23_http_budget_wait
 24_http_cut
+25_http_broken

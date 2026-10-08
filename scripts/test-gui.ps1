@@ -161,7 +161,6 @@ $hang = Join-Path $gui 'watchdog\hang.bas'
 $hOut = Join-Path $tmp 'watchdog.out'
 $hErr = Join-Path $tmp 'watchdog.err'
 $sw = [Diagnostics.Stopwatch]::StartNew()
-Note-Ran $hang
 $hp = Start-Process -FilePath $exe -ArgumentList "`"$hang`" --watchdog-ms 2000" -PassThru -NoNewWindow `
         -RedirectStandardOutput $hOut -RedirectStandardError $hErr
 # READ THE HANDLE BEFORE THE PROCESS ENDS, or ExitCode comes back EMPTY: a
@@ -179,6 +178,7 @@ $okW = $ended -and ($hp.ExitCode -eq 4) -and ($hText -eq "passed: 1`nfailed: 2`n
        ($hWhy -like '*did not end within 2000 ms*') -and
        ($hWhy -like '*modal: 1 queued answer(s) never used*')
 if ($okW) {
+    Note-Ran $hang
     Write-Host ("PASS  watchdog: a hang ends the run at the hang  (exit 4, {0} s)" -f $secs) -ForegroundColor Green
 } else {
     Write-Host 'FAIL  watchdog: a hang did not end the run cleanly' -ForegroundColor Red
@@ -200,7 +200,6 @@ if ($okW) {
 $lb = Join-Path $gui 'ledger\forgot.bas'
 $lOut = Join-Path $tmp 'ledger.out'
 $lErr = Join-Path $tmp 'ledger.err'
-Note-Ran $lb
 $lp = Start-Process -FilePath $exe -ArgumentList "`"$lb`"" -PassThru -NoNewWindow `
         -RedirectStandardOutput $lOut -RedirectStandardError $lErr
 $null = $lp.Handle
@@ -221,6 +220,7 @@ $okL = $lEnded -and ($lp.ExitCode -eq 1) -and ($lText -eq "passed: 1`nfailed: 4`
 # reason ("2 event handler fault(s)") and passed this block (2026-10-08, second
 # adversarial round).
 if ($okL) {
+    Note-Ran $lb
     Write-Host 'PASS  ledger: a forgotten modal answer or an unacknowledged handler fault fails the run  (exit 1)' -ForegroundColor Green
 } else {
     Write-Host 'FAIL  ledger: the modal answer ledger did not fail the run' -ForegroundColor Red
@@ -254,7 +254,6 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
         param([string] $Name, [string[]] $CliArgs, [int] $WantExit, [string] $WantText)
         $o = Join-Path $tmp 'hostmode.out'
         $quoted = ($CliArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-        foreach ($a in $CliArgs) { if ($a -like '*.bas') { Note-Ran $a } }
         cmd /c "`"$console`" $quoted > `"$o`" 2>&1"
         $code = $LASTEXITCODE
         $text = Get-Content -Raw $o -ErrorAction SilentlyContinue
@@ -262,6 +261,13 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
         $okCode = ($code -eq $WantExit)
         $okText = ($WantText -eq '') -or ($text -like "*$WantText*")
         if ($okCode -and $okText) {
+            # NOTED ONLY HERE: a case that PASSED and RAN its file (verb `run`).
+            # Noted before the run, a case whose verb only compiled the file --
+            # `compile fails.bas x.pbc`, exit 0 -- recorded it as executed and
+            # kept the ledger green (2026-10-08, fourth pass).
+            if ($CliArgs -contains 'run') {
+                foreach ($a in $CliArgs) { if ($a -like '*.bas') { Note-Ran $a } }
+            }
             Write-Host ("PASS  hostmode: {0}  (exit {1})" -f $Name, $code) -ForegroundColor Green
             return $true
         }

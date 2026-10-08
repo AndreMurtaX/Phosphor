@@ -210,6 +210,22 @@ threadvar
   { The request's per-read timeout as the client set it (0 = none), so a read
     re-armed against the deadline never waits LONGER than the client asked. }
   gIOMs: Integer;
+  { THE PEER CLOSED: a read answered end-of-stream. A chunked body that met it
+    before its last chunk is incomplete (2026-10-08, fourth pass). }
+  gSawEOF: Boolean;
+  { THE LAST READ TIMED OUT, and the timeout it ran under was the DEADLINE'S --
+    so the cut is the run's time (4) and not a peer that broke off (5). Set by
+    the read itself, never inferred from the clock: a reset 45 ms before the
+    deadline was classed as the deadline's, and under a budget charged it the
+    whole remainder (fourth pass). }
+  gDeadlineTimedOut: Boolean;
+  gArmedByDeadline: Boolean;
+  { THE STREAM ENDED WHILE THE HEADERS WERE STILL BEING READ. FPC's client then
+    hands back as the BODY a 4096-byte buffer the server never sent: FillBuffer
+    sizes it to ReadBufLen before the read and, on end-of-stream, leaves it that
+    size -- so `HTTP/1.1 200 OK`, `Content-Length: 5` and a close answered a 200
+    with 4096 bytes of whatever that memory held (2026-10-08, fourth pass). }
+  gHeadersCut: Boolean;
 
 type
   { Raised from a read once the run's time is gone. Not an ESocketError, so the
@@ -237,13 +253,43 @@ end;
   timeout. Only under a deadline, so an unbudgeted host keeps its timeouts. }
 procedure MarkCut;
 begin
-  { Within a tick's grain of the deadline is the deadline's doing: a read timed
-    out by ArmRecv ends at the deadline, and GetTickCount64 moves in ~15 ms steps
-    on Windows. }
-  if (gDeadline <> 0) and (GetTickCount64() + 50 >= gDeadline) then
+  { BY WHAT FAILED, NOT BY THE CLOCK (2026-10-08, fourth pass). The first rule
+    was "within 50 ms of the deadline is the deadline's", and a peer that RESET
+    the connection 45 ms early was reported as the run's time -- and, under a
+    budget, charged the whole remainder. A read that timed out under the
+    deadline's own arming, or a deadline already past, is the run's time; any
+    other failure is the peer's. }
+  if gDeadlineTimedOut or ((gDeadline <> 0) and (GetTickCount64() >= gDeadline)) then
     gCutShort := True
   else
     gIncomplete := True;
+end;
+
+procedure ArmRecv(AFd: TSocket); forward;
+
+{ Is the body the response promised all here? See the caller in FetchHop. }
+function ResponseComplete(AClient: TFPHTTPClient; const AMethod: String;
+  ASize: Int64): Boolean;
+var
+  cl, te: String;
+  want: Int64;
+  st: Integer;
+begin
+  if gHeadersCut then Exit(False);
+  Result := True;
+  st := AClient.ResponseStatusCode;
+  if SameText(AMethod, 'HEAD') or ((st >= 100) and (st < 200)) or (st = 204) or
+     (st = 304) then Exit;
+  te := LowerCase(TFPHTTPClient.GetHeader(AClient.ResponseHeaders, 'Transfer-Encoding'));
+  if Pos('chunked', te) > 0 then
+    { FPC's chunked read stops at the last chunk and never reads past it, so
+      end-of-stream during it means the last chunk never came. }
+    Exit(not gSawEOF);
+  cl := Trim(TFPHTTPClient.GetHeader(AClient.ResponseHeaders, 'Content-Length'));
+  if cl = '' then Exit;
+  want := StrToInt64Def(cl, -1);
+  { EXACTLY: a body LONGER than it said is no more the body than a shorter one. }
+  if want >= 0 then Result := ASize = want;
 end;
 
 procedure ArmRecv(AFd: TSocket);
@@ -258,7 +304,12 @@ begin
   if left < 1 then left := 1;
   if left > High(Integer) then left := High(Integer);
   ms := Integer(left);
-  if (gIOMs > 0) and (gIOMs < ms) then ms := gIOMs;
+  gArmedByDeadline := True;
+  if (gIOMs > 0) and (gIOMs < ms) then
+  begin
+    ms := gIOMs;
+    gArmedByDeadline := False;
+  end;
   {$IFDEF WINDOWS}
   opt := ms;
   fpsetsockopt(AFd, SOL_SOCKET, SO_RCVTIMEO, @opt, 4);
@@ -268,6 +319,46 @@ begin
   tv.tv_usec := (ms mod 1000) * 1000;
   fpsetsockopt(AFd, SOL_SOCKET, SO_RCVTIMEO, @tv, SizeOf(tv));
   {$ENDIF}
+end;
+
+{ THE SEND HALF OF THE SAME BOUND (2026-10-08, fourth pass). SO_SNDTIMEO was set
+  once, at connect, and restarts with every send -- so a peer draining an upload
+  in bursts held a one-second request 8.4 s while it took a 2 MB body. Every
+  send is now bounded by what is left of the deadline. }
+procedure ArmSend(AFd: TSocket);
+var
+  left: Int64;
+  ms: Integer;
+  {$IFDEF WINDOWS}opt: DWord;{$ENDIF}
+  {$IFDEF UNIX}tv: TTimeVal;{$ENDIF}
+begin
+  if gDeadline = 0 then Exit;
+  if GetTickCount64() >= gDeadline then
+    raise EHttpDeadline.Create('the run''s time ran out while the request was sent');
+  left := Int64(gDeadline) - Int64(GetTickCount64());
+  if left < 1 then left := 1;
+  if left > High(Integer) then left := High(Integer);
+  ms := Integer(left);
+  if (gIOMs > 0) and (gIOMs < ms) then ms := gIOMs;
+  {$IFDEF WINDOWS}
+  opt := ms;
+  fpsetsockopt(AFd, SOL_SOCKET, SO_SNDTIMEO, @opt, 4);
+  {$ENDIF}
+  {$IFDEF UNIX}
+  tv.tv_sec := ms div 1000;
+  tv.tv_usec := (ms mod 1000) * 1000;
+  fpsetsockopt(AFd, SOL_SOCKET, SO_SNDTIMEO, @tv, SizeOf(tv));
+  {$ENDIF}
+end;
+
+{ After a plain read: end-of-stream is recorded, and a timeout under the
+  deadline's own arming is the deadline's. }
+procedure NoteRead(AResult, AError: Integer);
+begin
+  if AResult = 0 then gSawEOF := True;
+  if (AResult < 0) and gArmedByDeadline and
+     {$IFDEF WINDOWS}(AError = 10060){$ELSE}((AError = ESysEAGAIN) or (AError = ESysEWOULDBLOCK)){$ENDIF} then
+    gDeadlineTimedOut := True;
 end;
 
 type
@@ -313,6 +404,7 @@ type
   TPlain4Handler = class(TSocketHandler)
   public
     function Recv(const Buffer; Count: Integer): Integer; override;
+    function Send(const Buffer; Count: Integer): Integer; override;
   end;
 
   THostCheckedHandler = class(TOpenSSLSocketHandler)
@@ -325,6 +417,7 @@ type
     function Connect: Boolean; override;
     function PeerHost: String;
     function Recv(const Buffer; Count: Integer): Integer; override;
+    function Send(const Buffer; Count: Integer): Integer; override;
   protected
     function DoVerifyCert: Boolean; override;
     procedure SetSocket(const AStream: TSocketStream); override;
@@ -348,6 +441,7 @@ type
     procedure ConnectToServer(const AHost: String; APort: Integer;
       UseSSL: Boolean = False); override;
     function GetSocketHandler(const UseSSL: Boolean): TSocketHandler; override;
+    function ReadResponseHeaders: Integer; override;
   end;
 
 { A PIN IS FOR ONE HOST. A redirect to another host comes back through here with
@@ -518,6 +612,13 @@ begin
   CheckDeadline();
   ArmRecv(Socket.Handle);
   Result := inherited Recv(Buffer, Count);
+  NoteRead(Result, LastError);
+end;
+
+function TPlain4Handler.Send(const Buffer; Count: Integer): Integer;
+begin
+  ArmSend(Socket.Handle);
+  Result := inherited Send(Buffer, Count);
 end;
 
 { TSocketHandler.Recv and Send, on the IPv6 descriptor. }
@@ -534,10 +635,12 @@ begin
     Result := fpRecv(Link.Fd, @Buffer, Count, Socket.ReadFlags);
     if Result < 0 then FLastError := SocketError else FLastError := 0;
   end;
+  NoteRead(Result, FLastError);
 end;
 
 function TPlain6Handler.Send(const Buffer; Count: Integer): Integer;
 begin
+  ArmSend(Link.Fd);
   Result := -1;
   {$IFDEF UNIX}
   FLastError := ESysEINTR;
@@ -819,11 +922,75 @@ begin
   if Result then SetSSLActive(True);
 end;
 
-function THostCheckedHandler.Recv(const Buffer; Count: Integer): Integer;
+{ A TLS READ OR WRITE UNDER A DEADLINE RUNS NON-BLOCKING, as the handshake does
+  (2026-10-08, fourth pass). Re-arming SO_RCVTIMEO before SSL_read was not
+  enough: OpenSSL's socket BIO makes its OWN reads inside one SSL_read, each
+  restarting the timeout, so a record trickled a byte every half second held a
+  one-second request 11.4 s -- the plain-read defect, one layer down. The loop
+  waits in select() for what is left of the deadline; past it, the read raises
+  the deadline's exception like any other. Without a deadline: FPC's own. }
+function TlsIO(AHandler: THostCheckedHandler; AFd: TSocket; ARead: Boolean;
+  const Buffer; Count: Integer): Integer;
+var
+  e: cint;
+  left: Int64;
 begin
   CheckDeadline();
-  if Link <> nil then ArmRecv(Link.Fd) else ArmRecv(Socket.Handle);
+  if not SetNonBlocking(AFd, True) then Exit(-1);
+  try
+    repeat
+      if ARead then Result := AHandler.SSL.Read(@Buffer, Count)
+      else Result := AHandler.SSL.Write(@Buffer, Count);
+      if Result > 0 then Exit;
+      e := AHandler.SSL.GetError(Result);
+      if e = SSL_ERROR_ZERO_RETURN then
+      begin
+        if ARead then gSawEOF := True;
+        Exit(0);
+      end;
+      if (e <> SSL_ERROR_WANT_READ) and (e <> SSL_ERROR_WANT_WRITE) then
+      begin
+        if ARead and (Result = 0) then gSawEOF := True;   // the peer just closed
+        Exit;
+      end;
+      left := Int64(gDeadline) - Int64(GetTickCount64());
+      if left <= 0 then
+      begin
+        gDeadlineTimedOut := True;
+        raise EHttpDeadline.Create('the run''s time ran out during the response');
+      end;
+      if left > High(Integer) then left := High(Integer);
+      WaitFd(AFd, e = SSL_ERROR_WANT_READ, Integer(left));
+    until False;
+  finally
+    SetNonBlocking(AFd, False);
+  end;
+end;
+
+function THostCheckedHandler.Recv(const Buffer; Count: Integer): Integer;
+var fd: TSocket;
+begin
+  CheckDeadline();
+  if Link <> nil then fd := Link.Fd else fd := Socket.Handle;
+  if gDeadline <> 0 then Exit(TlsIO(Self, fd, True, Buffer, Count));
   Result := inherited Recv(Buffer, Count);
+  if Result = 0 then gSawEOF := True;
+end;
+
+function THostCheckedHandler.Send(const Buffer; Count: Integer): Integer;
+var fd: TSocket;
+begin
+  if Link <> nil then fd := Link.Fd else fd := Socket.Handle;
+  if gDeadline <> 0 then Exit(TlsIO(Self, fd, False, Buffer, Count));
+  Result := inherited Send(Buffer, Count);
+end;
+
+{ End-of-stream before the blank line means the headers were cut: every read the
+  header parse made went through a handler, which records end-of-stream. }
+function TPinnedClient.ReadResponseHeaders: Integer;
+begin
+  Result := inherited ReadResponseHeaders();
+  if gSawEOF then gHeadersCut := True;
 end;
 
 function TPinnedClient.GetSocketHandler(const UseSSL: Boolean): TSocketHandler;
@@ -1161,6 +1328,10 @@ var
         gDeadline := GetTickCount64() + QWord(remaining);
       end;
       gIOMs := c.IOTimeout;
+      gSawEOF := False;
+      gHeadersCut := False;
+      gDeadlineTimedOut := False;
+      gArmedByDeadline := False;
       { THE CONNECT WAIT IS WHOLE SECONDS. The RTL's connect timeout is a select()
         with tv_sec = ms div 1000 and tv_usec = 0, so 500 ms became a zero-second
         wait that fails every connect slower than an instant -- and a budget with
@@ -1177,6 +1348,14 @@ var
             an error response is read into the stream too. }
           c.HTTPMethod(UpperCase(AMethod), AUrl, resp, []);
           AConnected := True;
+          { A BODY THAT ENDED EARLY WITHOUT AN ERROR IS STILL NOT THE BODY
+            (2026-10-08, fourth pass). FPC's client ends a Content-Length read
+            at end-of-stream without raising, and a chunked read too -- so a
+            peer that sent 10 of a promised 100 bytes and CLOSED handed back a
+            200 holding the 10, error 0. RFC 9112 6.3 and 8: such a message is
+            incomplete. A body with neither length nor chunking ends at the
+            close, and that is complete by definition. }
+          if not ResponseComplete(c, AMethod, resp.Size) then MarkCut();
         except
           { Only a failure to CONNECT means nothing was sent. Until 2026-10-07 any
             ESocketError counted, and FPC's redirect loop raised one from the

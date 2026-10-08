@@ -51,6 +51,16 @@ const
     shutdown() from another thread could not interrupt on Windows (2026-10-08,
     third adversarial pass). }
   SRV_PORT_V6_TLS_LATE = 18450;
+  { [::1], a server that drains an upload in 128 KiB bursts, 600 ms apart, with a
+    small receive buffer -- each burst lets one blocking send through, so only a
+    send bounded by the deadline ends the request on time (fourth pass). }
+  SRV_PORT_V6_DRAIN = 18452;
+  { [::1], a RELAY in front of the IP-certificate TLS server: what the client
+    sends goes straight through, and what the server sends goes straight back
+    for the first 700 ms of the connection -- then one byte every 300 ms. A TLS
+    record arriving late is so trickled INSIDE itself, which is what OpenSSL's
+    own reads restarted the timeout on (fourth pass). }
+  SRV_PORT_V6_RELAY = 18453;
 
 var
   BaseURL: String;
@@ -330,16 +340,51 @@ type
     Ready: Boolean;
     Trickle: Boolean;   // trickle a TLS handshake instead of serving
     LateHeader: Boolean;   // with Trickle: one late record header, then silence
+    Drain: Boolean;        // read a request body in slow bursts
     procedure Execute; override;
   private
     procedure Serve(AFd: TSocket);
   end;
 
-procedure TV6Server.Execute;
+{ THE TRICKLING RELAY (see SRV_PORT_V6_RELAY). One connection at a time, which is
+  what the test makes: the upward copy runs on a thread of its own so the
+  downward one can take its time. }
+type
+  TPipeUp = class(TThread)
+  public
+    FromFd, ToFd: TSocket;
+    procedure Execute; override;
+  end;
+
+  TRelay = class(TThread)
+  public
+    Port, Upstream: Word;
+    Ready: Boolean;
+    procedure Execute; override;
+  end;
+
+procedure TPipeUp.Execute;
 var
-  ls, cs: TSocket;
-  a: TInetSockAddr6;
+  buf: array[0..4095] of Byte;
+  n: LongInt;
+begin
+  repeat
+    n := fpRecv(FromFd, @buf[0], SizeOf(buf), 0);
+    if n > 0 then
+      if fpSend(ToFd, @buf[0], n, 0) <= 0 then Break;
+  until n <= 0;
+  fpShutdown(ToFd, 1);
+end;
+
+procedure TRelay.Execute;
+var
+  ls, cs, us: TSocket;
+  a, u: TInetSockAddr6;
   len: TSockLen;
+  up: TPipeUp;
+  buf: array[0..4095] of Byte;
+  n, i: LongInt;
+  t0: QWord;
   {$IFDEF UNIX}one: LongInt;{$ENDIF}
 begin
   ls := fpSocket(AF_INET6, SOCK_STREAM, 0);
@@ -352,6 +397,83 @@ begin
   a.sin6_port := htons(Port);
   a.sin6_addr := StrToHostAddr6('::1');
   if fpBind(ls, @a, SizeOf(a)) <> 0 then Exit;
+  if fpListen(ls, 8) <> 0 then Exit;
+  Ready := True;
+  while not Terminated do
+  begin
+    len := SizeOf(a);
+    cs := fpAccept(ls, @a, @len);
+    {$IFDEF WINDOWS}if cs = TSocket(-1) then Continue;{$ELSE}if cs < 0 then Continue;{$ENDIF}
+    t0 := GetTickCount64();
+    us := fpSocket(AF_INET6, SOCK_STREAM, 0);
+    FillChar(u, SizeOf(u), 0);
+    u.sin6_family := AF_INET6;
+    u.sin6_port := htons(Upstream);
+    u.sin6_addr := StrToHostAddr6('::1');
+    if fpConnect(us, @u, SizeOf(u)) <> 0 then
+    begin
+      CloseSocket(us);
+      CloseSocket(cs);
+      Continue;
+    end;
+    up := TPipeUp.Create(True);
+    up.FromFd := cs;
+    up.ToFd := us;
+    up.FreeOnTerminate := False;
+    up.Start;
+    try
+      repeat
+        n := fpRecv(us, @buf[0], SizeOf(buf), 0);
+        if n <= 0 then Break;
+        if GetTickCount64() - t0 < 700 then
+        begin
+          if fpSend(cs, @buf[0], n, 0) <= 0 then Break;
+        end
+        else
+          for i := 0 to n - 1 do
+          begin
+            { SEND, THEN WAIT: the record must BEGIN before the client's deadline
+              for the defect to show -- a first byte held back 300 ms arrived
+              after it, and the old reader simply timed out on time. }
+            if fpSend(cs, @buf[i], 1, 0) <= 0 then Break;
+            Sleep(300);
+          end;
+      until False;
+    except
+      // either side gone: the case is over
+    end;
+    fpShutdown(cs, 2);
+    fpShutdown(us, 2);
+    up.WaitFor;
+    up.Free;
+    CloseSocket(us);
+    CloseSocket(cs);
+  end;
+end;
+
+procedure TV6Server.Execute;
+var
+  ls, cs: TSocket;
+  a: TInetSockAddr6;
+  len: TSockLen;
+  rcv: LongInt;
+  {$IFDEF UNIX}one: LongInt;{$ENDIF}
+begin
+  ls := fpSocket(AF_INET6, SOCK_STREAM, 0);
+  {$IFDEF UNIX}
+  one := 1;
+  fpsetsockopt(ls, SOL_SOCKET, SO_REUSEADDR, @one, SizeOf(one));
+  {$ENDIF}
+  FillChar(a, SizeOf(a), 0);
+  a.sin6_family := AF_INET6;
+  a.sin6_port := htons(Port);
+  a.sin6_addr := StrToHostAddr6('::1');
+  if fpBind(ls, @a, SizeOf(a)) <> 0 then Exit;
+  if Drain then
+  begin
+    rcv := 4096;
+    fpsetsockopt(ls, SOL_SOCKET, SO_RCVBUF, @rcv, SizeOf(rcv));
+  end;
   if fpListen(ls, 8) <> 0 then Exit;
   Ready := True;
   while not Terminated do
@@ -375,6 +497,7 @@ var
   n, hdrEnd, want, p, k: Integer;
   req, head, path, body, resp, chunk, status, extra, line: AnsiString;
   ch: AnsiChar;
+  {$IFDEF WINDOWS}lw: array[0..1] of Word;{$ELSE}ll: array[0..1] of LongInt;{$ENDIF}
 begin
   if Trickle then
   begin
@@ -446,6 +569,32 @@ begin
       if Pos(#13, line) > 0 then line := Copy(line, 1, Pos(#13, line) - 1);
       want := StrToIntDef(Trim(line), 0);
     end;
+    if Drain then
+    begin
+      { 128 KiB, then 600 ms, until the body is in or the client has gone. }
+      k := Length(body);
+      try
+        while k < want do
+        begin
+          p := 0;
+          while (p < 131072) and (k < want) do
+          begin
+            n := st.Read(buf[0], SizeOf(buf));
+            if n <= 0 then Break;
+            Inc(p, n);
+            Inc(k, n);
+          end;
+          if n <= 0 then Break;
+          Sleep(600);
+        end;
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 2' + #13#10 +
+                'Connection: close' + #13#10#13#10 + 'OK';
+        st.WriteBuffer(resp[1], Length(resp));
+      except
+        // the client gave up, which is the point
+      end;
+      Exit;
+    end;
     while Length(body) < want do
     begin
       n := st.Read(buf[0], SizeOf(buf));
@@ -462,6 +611,52 @@ begin
       /late: the same ten, one more byte at 900 ms, then nothing. A read timeout
       ends the first; only a read bounded by the deadline itself ends the second
       on time (2026-10-08, third adversarial pass). }
+    { ANSWERS THAT BREAK OFF (fourth pass): each ends by closing -- a FIN, or a
+      reset for /rst -- with no error the client's own reader raises. /chunkok and
+      /closeok are the complete twins: a chunked body with its last chunk, and a
+      body with no length that ends at the close, which is complete by RFC 9112. }
+    if (path = '/shortclose') or (path = '/chunkcut') or (path = '/hdrcut') or
+       (path = '/chunkok') or (path = '/closeok') or (path = '/rst') then
+    begin
+      if path = '/shortclose' then
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 100' + #13#10 +
+                'Connection: close' + #13#10#13#10 + 'AAAAAAAAAA'
+      else if path = '/chunkcut' then
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Transfer-Encoding: chunked' + #13#10 +
+                'Connection: close' + #13#10#13#10 + 'a' + #13#10 + 'AAAAAAAAAA' +
+                #13#10 + '64' + #13#10 + 'BBBBB'
+      else if path = '/hdrcut' then
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 5' + #13#10
+      else if path = '/chunkok' then
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Transfer-Encoding: chunked' + #13#10 +
+                'Connection: close' + #13#10#13#10 + 'a' + #13#10 + 'AAAAAAAAAA' +
+                #13#10 + '0' + #13#10#13#10
+      else if path = '/closeok' then
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Connection: close' + #13#10#13#10 +
+                'AAAAAAAAAA'
+      else
+        resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 100' + #13#10 +
+                'Connection: close' + #13#10#13#10 + 'AAAAAAAAAA';
+      try
+        st.WriteBuffer(resp[1], Length(resp));
+        if path = '/rst' then
+        begin
+          { A RESET 50 ms before a one-second deadline: the peer broke it off,
+            however close the clock was. SO_LINGER on, zero seconds, then close. }
+          Sleep(950);
+          {$IFDEF WINDOWS}
+          lw[0] := 1; lw[1] := 0;
+          fpsetsockopt(AFd, SOL_SOCKET, SO_LINGER, @lw, SizeOf(lw));
+          {$ELSE}
+          ll[0] := 1; ll[1] := 0;
+          fpsetsockopt(AFd, SOL_SOCKET, SO_LINGER, @ll, SizeOf(ll));
+          {$ENDIF}
+        end;
+      except
+        // the client gave up, which is the point
+      end;
+      Exit;
+    end;
     if (path = '/silent') or (path = '/late') then
     begin
       resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 100' + #13#10 +
@@ -608,6 +803,8 @@ begin
   else if Args[0].Str = 'https_ip' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_IP))
   else if Args[0].Str = 'tlstrickle' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_TRICKLE))
   else if Args[0].Str = 'tlslate' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_LATE))
+  else if Args[0].Str = 'drain' then Result := ValStr('http://[::1]:' + IntToStr(SRV_PORT_V6_DRAIN))
+  else if Args[0].Str = 'relay' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_RELAY))
   else Result := ValStr('http://[::1]:' + IntToStr(SRV_PORT_V6));
 end;
 
@@ -813,7 +1010,8 @@ var
   eng: TPhosphorEngine;
   srv, srvTls, srvTlsIP: TBoundHttpServer;
   srvMtls: TMutualTlsServer;
-  v6Plain, v6Tls, v6TlsIP, v6Trickle, v6Late: TV6Server;
+  v6Plain, v6Tls, v6TlsIP, v6Trickle, v6Late, v6Drain: TV6Server;
+  relay: TRelay;
   th, thTls, thTlsIP, thMtls: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
@@ -960,12 +1158,23 @@ begin
   v6Late.LateHeader := True;
   v6Late.FreeOnTerminate := False;
   v6Late.Start;
+  v6Drain := TV6Server.Create(True);
+  v6Drain.Port := SRV_PORT_V6_DRAIN;
+  v6Drain.Drain := True;
+  v6Drain.FreeOnTerminate := False;
+  v6Drain.Start;
+  relay := TRelay.Create(True);
+  relay.Port := SRV_PORT_V6_RELAY;
+  relay.Upstream := SRV_PORT_V6_TLS_IP;
+  relay.FreeOnTerminate := False;
+  relay.Start;
 
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
   while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active) or
          (not srvMtls.Active) or (not v6Plain.Ready) or (not v6Tls.Ready) or
-         (not v6TlsIP.Ready) or (not v6Trickle.Ready) or (not v6Late.Ready)) and (waited < 3000) do
+         (not v6TlsIP.Ready) or (not v6Trickle.Ready) or (not v6Late.Ready) or
+         (not v6Drain.Ready) or (not relay.Ready)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 

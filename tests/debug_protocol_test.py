@@ -2485,6 +2485,33 @@ check('round 3: a frame over 1 MB sent while the program runs is reported too',
 check('  and the socket closes at once, not when the program ends', secs < 1.5, '%.2f s' % secs)
 w24.close()
 
+# A FRAME SENT AFTER THE SESSION ENDED IS NOT ACTED ON (a fourth pass). The
+# session ends with a half-close, so the host still READS -- and it used to act
+# on what it read: a `disconnect terminate:true` sent after the detach killed
+# the program the detach had let go to run to completion. The spec: false
+# "detaches and lets it run to completion".
+w25 = Wire(SLOW, 'late25.bas')
+w25.init()
+w25.send(seq=2, cmd='launch', stopAtEntry=False)
+for _ in range(20):
+    m25 = w25.recv(timeout=15)
+    if m25 is None or m25.get('seq') == 2:
+        break
+w25.send(seq=3, cmd='disconnect', terminate=False)
+until_close(w25)
+try:
+    w25.send(seq=4, cmd='disconnect', terminate=True)
+except OSError:
+    pass
+try:
+    out25, _ = w25.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    w25.proc.kill()
+    out25 = b''
+check('round 4: a terminate sent after the detach does not kill the detached program',
+      b'done' in out25, repr(out25[:40]))
+w25.close()
+
 w22 = Wire(SLOW, 'detach22.bas')
 w22.init()
 w22.send(seq=2, cmd='launch', stopAtEntry=True)

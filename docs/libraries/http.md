@@ -317,6 +317,17 @@ again and two slow ones held a run twice its bound. The request whose wait spend
 the budget answers the budget's own refusal, as `pause()` does, and a request after
 that dials nothing.
 
+**One deadline means every wait in the request**, not only the first: each read and
+each send is bounded by what is left of it, and inside https the reads OpenSSL makes
+on its own are too — a TLS record trickled a byte at a time used to hold a
+one-second request eleven. And **an answer that broke off is no answer, however it
+broke off**: a body short of its `Content-Length`, a chunked body before its last
+chunk, or headers cut by the close answer status `0`, no body and `http_error()`
+`5`, even when the peer simply closed. (A body with neither a length nor chunking
+ends at the close and is complete.) `4` and `5` are told apart by what failed — a
+read that timed out under the deadline is `4`; a reset, even a moment before the
+deadline, is `5`.
+
 The tests are `tests/packages/03_http.bas` (a real loopback server the runner
 stands up), `tests/packages/04_https.bas` (a self-signed TLS server, proving both
 that verification refuses it and that TLS works once relaxed) and

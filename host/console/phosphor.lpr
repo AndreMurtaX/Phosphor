@@ -2881,6 +2881,14 @@ begin
   Result := False;
   stopped := (FState = dbgStopped);
 
+  { A FRAME AFTER THE SESSION ENDED IS NOT ACTED ON (2026-10-08, fourth pass).
+    The session ends with a half-close, so the read side stays open and the
+    reader goes on queueing whatever the editor sends -- and this used to handle
+    it: a `disconnect terminate:true` sent after a `disconnect terminate:false`,
+    or after an error event, KILLED a program that had been let go to run to its
+    end. The decision taken when the session ended stands. }
+  if FDisconnected then Exit(True);
+
   if ARaw = #0 then
   begin
     { The socket closed. Detach and let the program finish, which is the same

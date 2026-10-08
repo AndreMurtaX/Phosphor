@@ -100,12 +100,12 @@ done
 # run is bounded at 60 s by timeout(1) so a watchdog that hangs is REPORTED.
 echo
 start=$(date +%s)
-note_ran "$gui/watchdog/hang.bas"
 timeout 60 "$exe" "$gui/watchdog/hang.bas" --watchdog-ms 2000 > "$out" 2> "$err"; hcode=$?
 secs=$(( $(date +%s) - start ))
 if [ "$hcode" -eq 4 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 2')" ] &&
    grep -qF -- "did not end within 2000 ms" "$err" &&
    grep -qF -- "modal: 1 queued answer(s) never used" "$err"; then
+  note_ran "$gui/watchdog/hang.bas"
   echo "PASS  watchdog: a hang ends the run at the hang  (exit 4, ${secs} s)"
 else
   echo "FAIL  watchdog: a hang did not end the run cleanly (exit $hcode, ${secs} s; 124 is timeout's)"
@@ -115,13 +115,13 @@ fi
 
 # --- the ledger: a forgotten modal answer or a handler fault fails the run -----
 # The twin of the block in test-gui.ps1, which says why.
-note_ran "$gui/ledger/forgot.bas"
 timeout 60 "$exe" "$gui/ledger/forgot.bas" > "$out" 2> "$err"; lcode=$?
 if [ "$lcode" -eq 1 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 4')" ] &&
    grep -qF -- "modal: 1 dialog(s) asked with no answer queued" "$err" &&
    grep -qF -- "modal: 1 queued answer(s) never used" "$err" &&
    grep -qF -- "modal: 1 answer(s) taken by a different kind" "$err" &&
    grep -qE -- "handler: 1 event handler fault\(s\) no test acknowledged.*on_fault" "$err"; then
+  note_ran "$gui/ledger/forgot.bas"
   echo "PASS  ledger: a forgotten modal answer or an unacknowledged handler fault fails the run  (exit 1)"
 else
   echo "FAIL  ledger: the modal answer ledger did not fail the run (exit $lcode)"
@@ -146,12 +146,13 @@ bash "$here/build.sh" > "$out" 2>&1 || { echo "FAIL  hostmode: phosphor did not 
 host_case() {   # name, want_exit, want_text, args...
   local name="$1" wantexit="$2" wanttext="$3"; shift 3
   local o="$out" a
-  for a in "$@"; do case "$a" in *.bas) note_ran "$a" ;; esac; done
   "$console" "$@" > "$o" 2>&1; local code=$?
   local ok=0
   [ "$code" -eq "$wantexit" ] || ok=1
   if [ -n "$wanttext" ] && ! grep -qF -- "$wanttext" "$o"; then ok=1; fi
   if [ "$ok" -eq 0 ]; then
+    # Noted only after a case that passed and RAN its file -- see test-gui.ps1.
+    case " $* " in *" run "*) for a in "$@"; do case "$a" in *.bas) note_ran "$a" ;; esac; done ;; esac
     echo "PASS  hostmode: $name  (exit $code)"
   else
     echo "FAIL  hostmode: $name"
@@ -165,12 +166,13 @@ host_case() {   # name, want_exit, want_text, args...
 host_case_nosession() {   # the same, with the session taken away
   local name="$1" wantexit="$2" wanttext="$3"; shift 3
   local o="$out" a
-  for a in "$@"; do case "$a" in *.bas) note_ran "$a" ;; esac; done
   env -u DISPLAY -u WAYLAND_DISPLAY "$console" "$@" > "$o" 2>&1; local code=$?
   local ok=0
   [ "$code" -eq "$wantexit" ] || ok=1
   if [ -n "$wanttext" ] && ! grep -qF -- "$wanttext" "$o"; then ok=1; fi
   if [ "$ok" -eq 0 ]; then
+    # Noted only after a case that passed and RAN its file -- see test-gui.ps1.
+    case " $* " in *" run "*) for a in "$@"; do case "$a" in *.bas) note_ran "$a" ;; esac; done ;; esac
     echo "PASS  hostmode: $name  (exit $code)"
   else
     echo "FAIL  hostmode: $name"

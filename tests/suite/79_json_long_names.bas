@@ -62,6 +62,37 @@ assert_eq(json_getn(p@, string$(50, 97)), 1, "and found by the name it decodes t
 rem A long STRING VALUE is not a name and has no such limit.
 v@ = json_parse@("{" + q$ + "k" + q$ + ":" + q$ + a256$ + q$ + "}")
 assert_eq(len(json_gets$(v@, "k")), 256, "a long value is kept whole")
+
+test_case("names/a NUL or U+0001 in a name counts as the two bytes it is stored as")
+rem A document holding any \u escape is respelled before fpjson sees it,
+rem and in that spelling a NUL and a U+0001 are two-byte markers -- so a
+rem name is long by what fpjson STORES, not by what the caller wrote. The
+rem first draft judged the caller's text: 200 letters and 55 escaped NULs
+rem (255 bytes written, 310 stored) came back as a 228-byte name, in
+rem silence (a fourth adversarial pass, 2026-10-08). Arithmetic for each
+rem case below: letters + 2 * NULs.
+nul55$ = ""
+for i = 1 to 55
+  nul55$ = nul55$ + "\\u0000"
+next
+raised = 0
+on error goto trapped
+p@ = json_parse@("{" + q$ + string$(200, 97) + nul55$ + q$ + ":1}")
+on error goto 0
+assert_eq(raised, 1, "200 + 2*55 = 310 stored bytes is refused, not cut")
+p@ = json_parse@("{" + q$ + string$(145, 97) + nul55$ + q$ + ":1}")
+assert_eq(json_has(p@, string$(145, 97) + string$(55, 0)), 1, "145 + 2*55 = 255 is kept whole and found")
+raised = 0
+on error goto trapped
+o@ = json_object@()
+o@ = json_setn@(o@, string$(130, 97) + string$(125, 0), 1)
+on error goto 0
+assert_eq(raised, 1, "the setter refuses 130 + 2*125 = 380, which no round trip could keep")
+k$ = string$(101, 97) + string$(77, 0)
+o@ = json_object@()
+o@ = json_setn@(o@, k$, 1)
+r@ = json_parse@(json_stringify$(o@))
+assert_eq(json_has(r@, k$), 1, "101 + 2*77 = 255 is accepted, and comes back from stringify and parse whole")
 end
 
 trapped:

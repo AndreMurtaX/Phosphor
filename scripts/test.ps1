@@ -199,6 +199,48 @@ else {
     Write-Host ("        last output: {0}" -f ($packText -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
 }
 
+# G2. A CALL WITH ITS PARENTHESES LEFT OFF, USED AS A VALUE (ledger r1). It
+#     compiles -- whether a name is a function depends on the host -- so plain
+#     `compile` stays silent and `--check` names it, with the line it is first
+#     read on. The fixture's line numbers are its own text, counted here:
+#       2 `p$ = date$`   a library function read bare      -> reported, line 2
+#       3 `d$ = date$()` the call                          -> not a second report
+#       4-5 `now`        ASSIGNED, so the program's own variable -> not reported
+#       6 `g$ = greet$`  the program's own function bare   -> reported, line 6
+#       7 `nobodyset`    read, never assigned, NOT a function -> not reported
+$r1Bas = Join-Path $tmp 'phosphor_r1.bas'
+Set-Content -LiteralPath $r1Bas -Encoding ascii -Value @(
+    'rem r1: a call with its parentheses left off, used as a value',
+    'p$ = date$',
+    'd$ = date$()',
+    'now = 3',
+    'println now',
+    'g$ = greet$',
+    'q = nobodyset + 1',
+    'function greet$()',
+    '  return "hi"',
+    'endfunction'
+)
+$r1Pbc = Join-Path $tmp 'phosphor_r1.pbc'
+$r1Out = Join-Path $tmp 'phosphor_r1.txt'
+cmd /c "`"$exe`" compile `"$r1Bas`" `"$r1Pbc`" > `"$r1Out`" 2>&1"
+$r1Plain = Read-Text $r1Out
+$okR1a = ($LASTEXITCODE -eq 0) -and ($r1Plain.Trim() -eq '')
+cmd /c "`"$exe`" compile --check `"$r1Bas`" `"$r1Pbc`" > `"$r1Out`" 2>&1"
+$r1Code = $LASTEXITCODE
+$r1Text = Read-Text $r1Out
+$okR1b = ($r1Code -eq 0) -and (Test-Path $r1Pbc) -and
+         ($r1Text -clike '*2 name(s) read as a variable that nothing assigns*') -and
+         ($r1Text -clike '*    date$   (first read at line 2) -- did you mean date$()?*') -and
+         ($r1Text -clike '*    greet$   (first read at line 6) -- did you mean greet$()?*') -and
+         (-not ($r1Text -clike '*    now   (first read*')) -and
+         (-not ($r1Text -clike '*nobodyset*'))
+if ($okR1a -and $okR1b) { Write-Host "PASS  G2:a bare call used as a value (compile is silent, --check names it and its line)" -ForegroundColor Green }
+else {
+    Write-Host ("FAIL  G2:bare call  (compile silent={0}  --check named={1}, exit {2})" -f $okR1a, $okR1b, $r1Code) -ForegroundColor Red
+    Write-Host ("        {0}" -f ($r1Text -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+}
+
 # H/I. A COMMAND THAT CANNOT WRITE ITS OUTPUT MUST SAY SO. `compile` and `pack`
 #      used to exit 0 with zero bytes on both streams and no file produced, so a
 #      build script that checked the exit code was told the artifact existed and
@@ -1354,7 +1396,7 @@ else {
     Write-Host ("        said: " + ($yText -replace "`n", ' / ')) -ForegroundColor DarkGray
 }
 
-if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
+if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
     $okX -and $okY) { exit 0 } else { exit 1 }

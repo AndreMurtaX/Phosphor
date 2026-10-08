@@ -120,6 +120,31 @@ else
 fi
 rm -f "$badbas" "$badpbc" "$neverexe"
 
+# G2: A CALL WITH ITS PARENTHESES LEFT OFF, USED AS A VALUE (ledger r1). The twin
+# of test.ps1's block G2, which counts the fixture's lines. `grep -F >/dev/null`
+# and not `grep -q`: -q exits at the first match and can SIGPIPE the producer,
+# which this file's own history records as a false SKIP.
+r1bas="$(mktemp -u).bas"; r1pbc="$(mktemp -u).pbc"
+printf '%s\n' 'rem r1: a call with its parentheses left off, used as a value' \
+  'p$ = date$' 'd$ = date$()' 'now = 3' 'println now' 'g$ = greet$' 'q = nobodyset + 1' \
+  'function greet$()' '  return "hi"' 'endfunction' > "$r1bas"
+if r1a="$("$exe" compile "$r1bas" "$r1pbc" 2>&1)"; then r1c1=0; else r1c1=$?; fi
+if r1b="$("$exe" compile --check "$r1bas" "$r1pbc" 2>&1)"; then r1c2=0; else r1c2=$?; fi
+okR1=0
+{ [ "$r1c1" -eq 0 ] && [ -z "$r1a" ] && [ "$r1c2" -eq 0 ] && [ -f "$r1pbc" ] \
+  && printf '%s\n' "$r1b" | grep -F '2 name(s) read as a variable that nothing assigns' >/dev/null \
+  && printf '%s\n' "$r1b" | grep -F '    date$   (first read at line 2) -- did you mean date$()?' >/dev/null \
+  && printf '%s\n' "$r1b" | grep -F '    greet$   (first read at line 6) -- did you mean greet$()?' >/dev/null \
+  && ! printf '%s\n' "$r1b" | grep -F '    now   (first read' >/dev/null \
+  && ! printf '%s\n' "$r1b" | grep -F 'nobodyset' >/dev/null; } || okR1=1
+if [ "$okR1" -eq 0 ]; then
+  echo "PASS  G2:a bare call used as a value (compile is silent, --check names it and its line)"
+else
+  echo "FAIL  G2:bare call  (compile exit $r1c1, --check exit $r1c2)"
+  printf '%s\n' "$r1a" "$r1b" | sed 's/^/        /'; fail=1
+fi
+rm -f "$r1bas" "$r1pbc"
+
 # H/I: A COMMAND THAT CANNOT WRITE ITS OUTPUT MUST SAY SO. `compile` and `pack`
 #      used to exit 0 with zero bytes on both streams and no file produced, so a
 #      build script that checked the exit code was told the artifact existed and

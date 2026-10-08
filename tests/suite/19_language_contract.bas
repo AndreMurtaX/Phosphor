@@ -230,6 +230,11 @@ rem assigned, which carries 0; `err()` is the call, which answers the code the
 rem failed division actually set. Swept over the registry rather than argued:
 rem all 109 zero-arity registered names are refused written bare as a statement,
 rem and all 109 compile silently on an assignment's right-hand side.
+rem That compile stays silent by decision (r1, 2026-10-08): whether a name
+rem is a function depends on the host. `phosphor compile --check` names
+rem the slip instead, and scripts/check-examples.py asks it of every
+rem program in the tree -- which is why THIS file sits in its BARE_EXEMPT:
+rem the bare `err` below is the very thing being pinned.
 on error goto valueLimit
 zeroDiv = 1 / 0
 valueLimit:

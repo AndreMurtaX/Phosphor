@@ -1074,7 +1074,13 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
   quietly leaves `p$` empty where `date$()` answers the date. That half cannot be
   decided here — the value really is used, and `p$ = date$` and `p$ = mytext$`
   are the same two tokens to a compiler that never sees the library. Write the
-  parentheses. *(Since 2026-09-11.)*
+  parentheses. *(Since 2026-09-11.)* **`phosphor compile --check` reports it**
+  *(since 2026-10-08)*: a name the program reads and never assigns that is also
+  a function taking no arguments — one of this binary's, or the program's own —
+  is listed with the line it is first read on and the call it probably meant. A
+  name the program assigns is its own variable and is never reported, so `now =
+  3` is fine. It is a warning, never a refusal, for the reason above: which names
+  are functions depends on the host the file will run on.
 - **Undeclared names inside a function are globals.** List scratch variables after
   `local` so they don't leak.
 - **`sqr` is square root.** For x², write `x * x` or `x ^ 2`.

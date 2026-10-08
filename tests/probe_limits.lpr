@@ -1908,7 +1908,14 @@ begin
     silently on the right of an '='; `p$ = date$` leaves p$ empty where
     `date$()` answers the date. The runtime half is asserted in
     tests/suite/19_language_contract.bas. If a later change ever closes this
-    door, these two rows are what must move with it. }
+    door, these two rows are what must move with it.
+    IT STAYS OPEN BY DECISION (ledger r1, 2026-10-08): which names are
+    functions depends on the host, so a refusal here would make whether a file
+    compiles depend on where. What closed instead is the silence --
+    `phosphor compile --check` reports a name read and never assigned that is
+    a function of no arguments (UnassignedFunctionNames, block G2 of
+    test.ps1 and test.sh), and scripts/check-examples.py runs that over every
+    program in the tree. These rows pin that the COMPILER still accepts it. }
   CheckAccepted('the same name on an assignment rhs is still a variable',
                 'v = err_clear' + LF);
   CheckAccepted('...and so is a value-returning one, which is the likelier slip',

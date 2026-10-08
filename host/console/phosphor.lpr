@@ -800,6 +800,22 @@ begin
   end;
 end;
 
+{ Globals this program reads and never writes that are named like a function of
+  no arguments this binary, or the program, provides (r1). Same registry as the
+  question above, for the same reason: the warning is about what a host built
+  from this binary would run. }
+function UnassignedNamesThisBinaryCalls(AProg: TProgram; out AReport: String): Integer;
+var
+  eng: TPhosphorEngine;
+begin
+  eng := EverythingThisBinaryProvides();
+  try
+    Result := UnassignedFunctionNames(AProg, eng.Registry, AReport);
+  finally
+    eng.Free;
+  end;
+end;
+
 { Is a graphical session reachable?
 
   Windows: always. The win32 widgetset draws through USER32 and needs no display
@@ -986,7 +1002,7 @@ var
   comp: TPhosphorCompiler;
   prog: TProgram;
   fs: TFileStream;
-  missing: Integer;
+  missing, bare: Integer;
   report, source: String;
 begin
   if not FileExists(AInPath) then
@@ -1046,6 +1062,20 @@ begin
         Writeln(StdErr, '  Fine if the program is meant for a host that registers them.');
         Writeln(StdErr, '  `phosphor pack` refuses them, because a packed program has');
         Writeln(StdErr, '  only the host packed with it.');
+      end;
+      { r1, 2026-10-08: A CALL WITH ITS PARENTHESES LEFT OFF, USED AS A VALUE.
+        The compiler refuses one written as a statement and cannot refuse this
+        one -- see UnassignedFunctionNames for why -- so it is said here, where
+        the registry it depends on is in hand. A warning, like the one above. }
+      bare := UnassignedNamesThisBinaryCalls(prog, report);
+      if bare > 0 then
+      begin
+        Writeln(StdErr, 'phosphor: warning: ', bare,
+                ' name(s) read as a variable that nothing assigns, and that are');
+        Writeln(StdErr, '  also functions taking no arguments:');
+        Write(StdErr, report);
+        Writeln(StdErr, '  Without its parentheses a call is read as a variable, and a');
+        Writeln(StdErr, '  variable nothing assigned holds its default: "" or 0.');
       end;
     end;
     Result := 0;

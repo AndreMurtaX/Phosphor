@@ -193,7 +193,9 @@ host IS known now check:
   purpose.
 - **`phosphor compile --check` warns** and carries on, exit 0, `.pbc` written. A
   name this host lacks is not necessarily a mistake; the file may be meant for a
-  host that has it.
+  host that has it. It also lists a function written **without its parentheses
+  where a value is wanted** — `p$ = date$` reads a variable nobody assigned and
+  leaves `p$` empty — when the program never assigns that name itself.
 
 **The console is kept by default, and can be let go.** A windowed program still has a
 console, which is where `PRINT` goes — useful while developing, unwanted in something

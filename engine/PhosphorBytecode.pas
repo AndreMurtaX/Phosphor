@@ -49,6 +49,31 @@ const
 function UnresolvedCalls(AProg: TProgram; AReg: TPhosphorRegistry;
                          out AReport: String): Integer;
 
+{ Every GLOBAL this program reads and never assigns whose name is also a function
+  that takes no arguments -- the program's own, or one AReg provides. As a report
+  ready to print, and the count (ledger r1, 2026-10-08).
+
+  `p$ = date$` compiles: with its parentheses left off the call is read as a
+  variable, and a variable nobody assigned holds its kind's default, so the
+  program runs on with "" where a date should be. The compiler cannot refuse it.
+  Which names are functions depends on the HOST -- `home$` is a function under
+  one runner and an ordinary identifier under another -- so a refusal would make
+  whether a program compiles depend on where it is compiled. A report can ask
+  this question of the registry it is handed, and is wrong about nothing.
+
+  READ AND NEVER WRITTEN is what keeps it quiet on correct programs. A name a
+  program assigns is that program's variable, whatever a library calls a
+  function; measured over this tree's corpus, the naive "a variable named like a
+  function" fired on two correct files and this fires on none of them. Only
+  opStoreVar writes a global -- INPUT, READ, FOR and SWAP all compile to it -- so
+  "never written" is exactly "no opStoreVar names this index". Locals are not
+  judged: a name in a `local` list was declared a variable on purpose.
+
+  Needs the global NAMES, which a compiled program carries and a .pbc does not:
+  on a program read back from bytecode this reports nothing. }
+function UnassignedFunctionNames(AProg: TProgram; AReg: TPhosphorRegistry;
+                                 out AReport: String): Integer;
+
 procedure WriteProgram(AStream: TStream; AProg: TProgram);
 { Read a program from AStream. False (with AErr set) on a bad magic, an
   unsupported version, an opcode-set mismatch, or a truncated/corrupt stream. }
@@ -271,6 +296,57 @@ begin
     Inc(Result);
     AReport := AReport + '    ' + name + '   (first called at line ' +
                IntToStr(ins.Line) + ')' + LineEnding;
+  end;
+end;
+
+function UnassignedFunctionNames(AProg: TProgram; AReg: TPhosphorRegistry;
+                                 out AReport: String): Integer;
+var
+  i: Integer;
+  ins: TInstr;
+  written, read: array of Boolean;
+  firstLine: array of Integer;
+  none: array of TValueKind;
+  name: String;
+begin
+  Result := 0;
+  AReport := '';
+  SetLength(written, AProg.VarCount);
+  SetLength(read, AProg.VarCount);
+  SetLength(firstLine, AProg.VarCount);
+  for i := 0 to AProg.VarCount - 1 do
+  begin
+    written[i] := False;
+    read[i] := False;
+    firstLine[i] := 0;
+  end;
+  SetLength(none, 0);
+  for i := 0 to AProg.Count - 1 do
+  begin
+    ins := AProg.Instr(i);
+    if (ins.A < 0) or (ins.A >= AProg.VarCount) then Continue;
+    if ins.Op = opStoreVar then
+      written[ins.A] := True
+    else if (ins.Op = opLoadVar) and not read[ins.A] then
+    begin
+      read[ins.A] := True;
+      firstLine[ins.A] := ins.Line;   // in instruction order: the first read emitted
+    end;
+  end;
+  for i := 0 to AProg.VarCount - 1 do
+  begin
+    if (not read[i]) or written[i] then Continue;
+    name := AProg.GlobalName(i);
+    if (name = '') or IsTemporaryName(name) then Continue;
+    { The order the VM resolves a call in: the program's own functions first,
+      then the registry. Resolve with no argument kinds asks the one question that
+      matters -- would `name()` find something? -- and so also counts a function
+      whose signature accepts zero arguments through a wildcard. }
+    if (AProg.FindUserFunc(name, 0) < 0) and (not AReg.Resolve(name, none).Found) then
+      Continue;
+    Inc(Result);
+    AReport := AReport + '    ' + name + '   (first read at line ' +
+               IntToStr(firstLine[i]) + ') -- did you mean ' + name + '()?' + LineEnding;
   end;
 end;
 

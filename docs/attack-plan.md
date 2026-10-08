@@ -273,7 +273,7 @@ Debug menu enabled from live state).
 - `d62` -- the doc half was corrected by `40ff75c` before the ledger was written
   ("three of four" is two of four); the real defect stands: a refused write or
   listing leaves `ioerror()` holding an earlier call's code.
-- `r1` -- `8425463` refuses the bare statement form; the assignment form
+- ~~`r1`~~ **CLOSED 2026-10-08 as decided in section 3, fork 1 -- option (d).** `phosphor compile --check` reports a global the program reads and never assigns whose name is also a function of no arguments (this binary's, or the program's own), with the line it is first read on; the compiler is unchanged, so no file compiles differently on another host. `scripts/check-examples.py` asks it of every documentation block and every `.bas` git knows: over 153 programs it fired on exactly one, `tests/suite/19_language_contract.bas`, which reads `err` bare to pin this very limit and is exempt with that reason. Block G2 of `scripts/test.{ps1,sh}` pins the report; three mutants of the analysis were each caught there. Original text: `8425463` refuses the bare statement form; the assignment form
   (`p$ = date$`, measured `[]` at exit 0) is still silent, now documented and
   pinned as a known limit in `tests/probe_limits.lpr` and
   `tests/suite/19_language_contract.bas` -- which must change with any fix.

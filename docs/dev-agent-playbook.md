@@ -1525,6 +1525,29 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · r1 closed: `p$ = date$` is reported, and the compiler did not
+  change.** The decision had been made (attack-plan section 3, fork 1, option
+  d) and its measurement held exactly: over 153 programs, the
+  read-and-never-written rule fired on ONE file, the contract test that reads
+  `err` bare on purpose to pin this limit, and on neither of the two correct
+  files the naive rule had flagged. Two things worth keeping:
+  - **The analysis needed one fact about the bytecode, and it was checked, not
+    assumed:** only `opStoreVar` writes a global -- INPUT, READ, FOR and SWAP
+    all compile to it -- so "never written" is a scan for one opcode. Had
+    any of them written through a second door, every program using it would
+    have been a false positive, and the corpus sweep is what would have said so.
+  - **A fixture can make a mutant invisible by having nothing to tell it
+    apart.** The first G2 fixture had no unassigned variable that was NOT a
+    function, so a mutant that dropped the "is it a function?" question
+    reported the same two names and would have passed. One more line
+    (`q = nobodyset + 1`, must not be reported) is what gave that mutant
+    something to get wrong -- and it was then caught with the other two.
+  - The gate is check-examples.py grown, not an eleventh gate: it already
+    handed every doc block to the binary, and "every program in the tree" is
+    the domain the defect class was found in (53_bounds, 2026-09-06). It was
+    watched failing three ways -- a planted program, a planted doc block, and
+    a stale exemption.
+
 - **2026-10-08 · n5 closed: the debug protocol's first edges, `error`'s text,
   and `trace`.** The ledger called the `initialize` clause "narrower than it
   sounds" -- a pre-`initialize` command is answered, only `launch` cannot

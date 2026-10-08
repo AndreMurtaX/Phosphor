@@ -299,7 +299,7 @@ turned out to be false and nothing could tell:
 | `check-codepage.py` | no `Char` is concatenated into a code-page string (bytes ≥ 128) |
 | `check-sandbox.py` | every routine reachable from a script that touches the filesystem asks the gate |
 | `check-seams.py` | every host answers for every engine seam, in writing — a nil seam fails silently. A host is DERIVED: any file git knows that constructs an engine, classified by where it lives; one in an unclassified place fails |
-| `check-examples.py` | every ```basic block in the docs compiles |
+| `check-examples.py` | every ```basic block in the docs compiles; **and** no doc block nor any `.bas` git knows reads a function of no arguments as a variable it never assigns (`p$ = date$`, ledger r1) -- asked of `phosphor compile --check`, exemptions carry a reason and a stale one fails |
 | `check-suffix.py` | a registered name's suffix is the kind its body returns |
 | `check-budget.py` | a loop or an allocation over a script-supplied count consults the budget, or is exempt with a reason |
 | `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test. Every directory holding a `.bas` is classified (manifest, directory-driven, or a FIXED list its runner names), derived from git, not from a table |

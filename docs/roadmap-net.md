@@ -109,7 +109,16 @@ trust-all.
   the server loads a **checked-in self-signed fixture** (`tls_test_cert.pem`) instead of
   generating one.
 
-### Step 3 — reconcile the multi-address fallback with TLS (refinement)
+### Step 3 — reconcile the multi-address fallback with TLS (refinement)  *(DONE 2026-10-08)*
+
+*Built: the TLS handler is TOLD the name a pinned connect is for (`PeerName`,
+read through `PeerHost` by both SNI and the certificate check), because FPC's
+handler takes them from the socket's host, which a pinned connect makes the
+address -- the case this step said to confirm, and it was. https names now walk
+the same address list http does. The gate below is
+`tests/packages/22_https_fallback.bas`, which also proves the check is of the
+NAME: the IP-only certificate is refused for `localhost` though `127.0.0.1` was
+the address dialled. The original plan follows.*
 
 The fallback pins the connect target to a specific IP while keeping the hostname in
 `Host:`. Over TLS the handshake also needs the **hostname** — for SNI and for

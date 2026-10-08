@@ -255,8 +255,10 @@ type
     HostRefused: Boolean;
     Client: TObject;     // the TPinnedClient this request belongs to
     Link: T6Link;        // m6: set for an IPv6 request, nil for IPv4
+    PeerName: String;    // the NAME a pinned connect is for; '' = the socket's host
     destructor Destroy; override;
     function Connect: Boolean; override;
+    function PeerHost: String;
     function Recv(const Buffer; Count: Integer): Integer; override;
   protected
     function DoVerifyCert: Boolean; override;
@@ -602,18 +604,28 @@ begin
   end;
 end;
 
-{ THE NAME THAT IS CHECKED IS THE ONE THAT WAS DIALLED: the socket's own host. It is
-  what SNI sent, and after a redirect it is the new host, not the first URL's. An
-  https request never pins a resolved IP (FetchCore), so this is the URL's name; if
-  that ever changed, an IP here would fail the name check rather than pass it. The
-  opt-out is the chain's opt-out: with VerifyPeerCert off nothing is checked. }
+{ THE HOST THIS CONNECTION IS FOR: the name a pinned connect was made for, or the
+  socket's own host when nothing was pinned. A connect pinned to one of a name's
+  addresses dials the ADDRESS, so the socket's host is that address -- and SNI
+  and the certificate check must still see the NAME (roadmap-net.md, Step 3).
+  An IPv6 connect keeps the name as the socket's host (TPinnedClient.
+  ConnectToServer), so it needs no PeerName. Both SNI and DoVerifyCert ask here,
+  so they can never disagree about which host this is. }
+function THostCheckedHandler.PeerHost: String;
+begin
+  Result := PeerName;
+  if (Result = '') and (Socket is TInetSocket) then Result := TInetSocket(Socket).Host;
+end;
+
+{ THE NAME THAT IS CHECKED IS THE HOST THIS CONNECTION IS FOR (PeerHost): what SNI
+  sent, and after a redirect the new hop's host, not the first URL's. The opt-out
+  is the chain's opt-out: with VerifyPeerCert off nothing is checked. }
 function THostCheckedHandler.DoVerifyCert: Boolean;
 var host: String;
 begin
   Result := inherited DoVerifyCert();
   if (not Result) or (not VerifyPeerCert) then Exit;
-  host := '';
-  if Socket is TInetSocket then host := TInetSocket(Socket).Host;
+  host := PeerHost();
   Result := CertNamesHost(SSL.SSL, host);
   if not Result then
   begin
@@ -651,8 +663,7 @@ begin
   if Link <> nil then fd := Link.Fd else fd := Socket.Handle;
   Result := CheckSSL(SSL.SetFD(fd));
   if not Result then Exit;
-  sni := '';
-  if Socket is TInetSocket then sni := TInetSocket(Socket).Host;
+  sni := PeerHost();
   if IsIPv4Literal(sni) or IsIPv6Literal(sni) then sni := '' else sni := TlsName(sni);
   if SendHostAsSNI and (sni <> '') then
     SSL.Ctrl(SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, PAnsiChar(AnsiString(sni)));
@@ -701,6 +712,10 @@ begin
       TSSLSocketHandler(Result).CertificateData.PrivateKey.FileName := ClientKey;
     end;
     THostCheckedHandler(Result).Client := Self;
+    { A connect pinned to an IPv4 address: the handler is told the name it is for.
+      ConnectToServer has already dropped a pin that is not for this host, so a
+      ConnectIP still set here IS for PinHost. }
+    if ConnectIP <> '' then THostCheckedHandler(Result).PeerName := PinHost;
   end;
 end;
 
@@ -1057,13 +1072,15 @@ begin
         ::ffff:a.b.c.d, IS that IPv4 address (RFC 4291 section 2.5.5.2), dialled as
         one: Windows' IPv6 sockets refuse a mapped address outright. }
       addrs[0] := MappedIPv4(dial)
-    else if (dial <> '') and (not IsIPv4Literal(dial)) and (not viaProxy) and
-            (LowerCase(uri.Protocol) <> 'https') then
+    else if (dial <> '') and (not IsIPv4Literal(dial)) and (not viaProxy) then
     begin
-      { A NAME over plain http: every A record, in turn. Over https the name is
-        dialled as written: a pinned IP would be what SNI and the name check saw
-        (docs/roadmap-net.md). A proxy's name is dialled as written too, and its
-        AAAA below, like any host's. }
+      { A NAME: every A record, in turn, over http and https alike. Until
+        2026-10-08 https dialled the name as written -- the socket layer's first
+        A record only -- because a pinned address would have been what SNI and
+        the name check saw; the TLS handler is now told the name (PeerHost), so
+        one dead address no longer fails an https request a round-robin's other
+        addresses would serve. A proxy's name is dialled as written, and its AAAA
+        below, like any host's. }
       addrs := ResolveAllA(dial);
       if Length(addrs) = 0 then
       begin

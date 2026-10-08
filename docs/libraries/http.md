@@ -259,11 +259,13 @@ as a dead IPv4 one.
 **A host name with several A records is tried in turn.** FPC's socket layer
 resolves a host to its first A record and connects only to that one, so a single
 dead IP fails a request that a round-robin CDN's other addresses would have served.
-This library resolves them all and tries each until one connects. It applies to
-plain `http://` only: over TLS, pinning a resolved IP would show the handshake an
-IP where it needs the name, so https dials the name as written. IPv6 is the
-paragraph above: a name's AAAA addresses come after its A records, over http and
-https alike. The reasoning is in [roadmap-net.md](../roadmap-net.md).
+This library resolves them all and tries each until one connects, over `http://`
+and `https://` alike: an https connect made to one of the addresses still sends
+the NAME as SNI and checks the certificate against the name, never against the
+address it dialled. (Until 2026-10-08 https dialled the name as written and so
+only ever reached its first A record.) IPv6 is the paragraph above: a name's AAAA
+addresses come after its A records. The reasoning is in
+[roadmap-net.md](../roadmap-net.md).
 
 **A redirect is a request of its own.** A client handle follows redirects (up to
 `http_maxredirects`, five by default), and each hop goes through every rule a first

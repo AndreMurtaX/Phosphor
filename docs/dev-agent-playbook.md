@@ -1525,6 +1525,19 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · HTTPS walks every address of a name (roadmap-net Step 3).**
+  The step had waited on one question -- does FPC's TLS handler take SNI and the
+  name check from the URL or from the pinned address? -- and the answer was the
+  address (the socket's host), so the handler is now told the name. Worth
+  keeping: **the first draft of the gate passed on the OLD library.** It put the
+  dead address first for `localhost`, but the old https path never asked the
+  library's resolver -- FPC resolved `localhost` itself and never met the dead
+  one. A test of a fallback must use a name ONLY the fallback can reach; the
+  fixture certificates cannot name one (their CA's key is gone), so that case runs
+  with verification off and the name-check cases run on `localhost`, where three
+  mutants -- the name not passed, the check and SNI reading the socket -- each
+  fail a different assertion.
+
 - **2026-10-08 · the file-wide trap audit: no assertion runs under a live error
   trap, and the harness now says so instead of a reviewer.** The split-out task
   from the entry below. Rather than read the 52 .bas files that arm a trap for the shape, the READ THAT

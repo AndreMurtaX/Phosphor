@@ -1297,7 +1297,18 @@ srv4.close()
 # `stepOut` appear once between them, in the capabilities check. The pending step
 # was guarded out by the same `if (not stop)` as the armed line, and a host cannot
 # repair that half from outside: FDbgMode is private to the VM with no accessor.
+#
+# THE SENTINEL GOES BACK FIRST (2026-10-08). This session reuses BAS2, and the
+# second session created GO2 to release its own run and never removed it -- so
+# here the `while` loop ended at once and `pause` raced a 1000-pass `for` to the
+# end of the program. It lost once in the Linux VM's full runs of 2026-10-08
+# ("the loop fixture pauses" FAIL), the oversleep the sentinel was introduced to
+# survive. With GO2 gone the program cannot finish on its own; this session ends
+# it with `disconnect terminate:true`, and the wait below kills it if a failed
+# check left it running.
 # ---------------------------------------------------------------------------
+if os.path.exists(GO2):
+    os.remove(GO2)
 srv5 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv5.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv5.bind(('127.0.0.1', 0))
@@ -2163,6 +2174,206 @@ except subprocess.TimeoutExpired:
 check('spelling: and the program did its own work',
       b'hi!\ndone\n' in out14.replace(b'\r\n', b'\n'), repr(out14[:60]))
 w14.close()
+
+# ---------------------------------------------------------------------------
+# n5 (2026-10-08): THE LAST THREE CLAUSES OF A LEDGER ITEM ABOUT THIS HOST.
+# Every expected value below is the spec's sentence, quoted beside it, and not a
+# run's output:
+#   * `initialize` "must be the first frame. Nothing else is answered before
+#     it", and "a command sent in the wrong state is answered ok:false ...
+#     never ignored". This host answered whatever came first, and a `launch`
+#     before `initialize` started the program the moment `initialize` came.
+#   * `error` carries `text` -- the spec's own example has one. Ours was blank.
+#   * `trace` is how "a BREAKPOINT STATEMENT in the source" is reported, "rather
+#     than on stdout" -- this host wrote it to stderr instead, and an editor
+#     showed nothing.
+#   * `continued` is for "a resume the editor did not ask for"; this host makes
+#     none after a `stopped`, and pins that it sends none (see TDebugProto.Trace
+#     in host/console/phosphor.lpr for the argument).
+# ---------------------------------------------------------------------------
+GATE = ('rem n5: nothing is answered before initialize\n'   # 1
+        'println "ran"\n'                                    # 2
+        'end\n')                                             # 3
+w15 = Wire(GATE, 'gate.bas')
+
+
+def ask15(seq, **kw):
+    w15.send(seq=seq, **kw)
+    for _ in range(60):
+        m = w15.recv(timeout=15)
+        if m is None or m.get('seq') == seq:
+            return m
+    return None
+
+
+for sq, cmd, kw in ((1, 'setBreakpoints', {'path': w15.path, 'lines': [2]}),
+                    (2, 'launch', {'stopAtEntry': False}),
+                    (3, 'stackTrace', {}),
+                    (4, 'pause', {})):
+    a = ask15(sq, cmd=cmd, **kw)
+    check('n5 gate: %s before initialize is refused, naming initialize' % cmd,
+          a is not None and a.get('ok') is False and 'before initialize' in (a.get('error') or ''),
+          str(a))
+a = ask15(5, cmd='initialize', protocol=1)
+check('n5 gate: and then initialize is answered ok', a is not None and a.get('ok') is True, str(a))
+check('  and the refused launch did NOT start the program',
+      w15.proc.poll() is None, 'exit=%r' % w15.proc.poll())
+a = ask15(6, cmd='initialize', protocol=1)
+check('n5 gate: a second initialize is refused',
+      a is not None and a.get('ok') is False and 'first frame' in (a.get('error') or ''), str(a))
+for sq, cmd in ((7, 'pause'), (8, 'continue'), (9, 'stepOver')):
+    a = ask15(sq, cmd=cmd)
+    check('n5 gate: %s before launch is refused, naming launch' % cmd,
+          a is not None and a.get('ok') is False and 'before launch' in (a.get('error') or ''), str(a))
+# The second launch is sent AT THE ENTRY STOP, so the host is certain to read it
+# while the program exists. Sent straight behind the first, a two-statement
+# program finished on Linux before it was drained -- which is how the exit rule
+# below was found.
+w15.send(seq=10, cmd='launch', stopAtEntry=True)
+seen15 = []
+for _ in range(60):
+    m = w15.recv(timeout=15)
+    if m is None:
+        break
+    seen15.append(m)
+    if m.get('event') == 'stopped':
+        break
+w15.send(seq=11, cmd='launch', stopAtEntry=False)
+w15.send(seq=12, cmd='continue')
+for _ in range(60):
+    m = w15.recv(timeout=15)
+    if m is None:
+        break
+    seen15.append(m)
+    if m.get('event') == 'exited':
+        break
+a10 = [m for m in seen15 if m.get('seq') == 10]
+a11 = [m for m in seen15 if m.get('seq') == 11]
+check('n5 gate: the first launch is answered ok', [m.get('ok') for m in a10] == [True], str(seen15))
+check('  and a second is answered once, refused',
+      len(a11) == 1 and a11[0].get('ok') is False and 'only once' in (a11[0].get('error') or ''),
+      str(a11))
+try:
+    out15, _ = w15.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    w15.proc.kill()
+    out15 = b''
+check('  and the program ran exactly once',
+      out15.replace(b'\r\n', b'\n') == b'ran\n', repr(out15[:60]))
+w15.close()
+
+# A FRAME READ BUT NOT YET ANSWERED WHEN THE PROGRAM ENDS IS ANSWERED. The stop is
+# on the LAST statement, so after `continue` there is no boundary left to drain
+# at: the two frames behind it in the same segment can only be answered by the
+# exit. "Every request gets exactly one response"; `disconnect` is valid in every
+# state, so it is answered ok, and the query is refused.
+LAST = ('rem n5: frames queued behind the last statement\n'   # 1
+        'println "a"\n'                                       # 2
+        'println "b"\n')                                      # 3
+w18 = Wire(LAST, 'last18.bas')
+w18.init()
+w18.send(seq=2, cmd='setBreakpoints', path=w18.path, lines=[3])
+w18.send(seq=3, cmd='launch', stopAtEntry=False)
+seen18 = []
+for _ in range(60):
+    m = w18.recv(timeout=15)
+    if m is None:
+        break
+    seen18.append(m)
+    if m.get('event') in ('stopped', 'exited'):
+        break
+check('n5 exit: the program stops on its last statement, line 3',
+      seen18 and seen18[-1].get('event') == 'stopped' and seen18[-1].get('line') == 3, str(seen18))
+w18.raw(json.dumps({'seq': 4, 'cmd': 'continue'}) + chr(10) +
+        json.dumps({'seq': 5, 'cmd': 'stackTrace'}) + chr(10) +
+        json.dumps({'seq': 6, 'cmd': 'disconnect', 'terminate': False}) + chr(10))
+after18 = []
+for _ in range(60):
+    m = w18.recv(timeout=15)
+    if m is None:
+        break
+    after18.append(m)
+a5 = [m for m in after18 if m.get('seq') == 5]
+a6 = [m for m in after18 if m.get('seq') == 6]
+check('n5 exit: a query queued behind the last statement is answered once, refused',
+      len(a5) == 1 and a5[0].get('ok') is False and 'exited' in (a5[0].get('error') or ''),
+      str(after18))
+check('  and a disconnect queued there is answered once, ok',
+      [m.get('ok') for m in a6] == [True], str(after18))
+check('  and the exited event came first',
+      any(m.get('event') == 'exited' for m in after18) and a5
+      and after18.index(a5[0]) > next(i for i, m in enumerate(after18) if m.get('event') == 'exited'),
+      str(after18))
+w18.close()
+
+# AN `error` EVENT SAYS WHY -- one session per shape, because each ends it.
+for label, frame, want in (('not JSON', 'this is not json', 'did not parse as JSON'),
+                           ('an array', '[1, 2]', 'is an array, not a JSON object')):
+    w16 = Wire('rem n5: an error event has text\nprintln "ran"\nend\n', 'err16.bas')
+    w16.init()
+    w16.raw(frame + chr(10))
+    e16 = None
+    for _ in range(20):
+        m = w16.recv(timeout=15)
+        if m is None or m.get('event') == 'error':
+            e16 = m
+            break
+    check('n5 error: a frame that is %s ends the session with an error event' % label,
+          e16 is not None and e16.get('event') == 'error', str(e16))
+    check('  and its text says why: "%s"' % want,
+          e16 is not None and want in (e16.get('text') or ''), str(e16))
+    w16.close()
+
+# A BREAKPOINT STATEMENT IS A `trace` EVENT -- and the console's again once the
+# editor has detached. Line 3 fires under the editor, line 6 after it has gone.
+TRACE = ('rem n5: a BREAKPOINT statement under a debugger\n'   # 1
+         'trace 1\n'                                            # 2
+         'x = 7\n'                                              # 3
+         'breakpoint "checkpoint", x, "two"\n'                  # 4
+         'println "mid"\n'                                      # 5
+         'breakpoint "after detach"\n'                          # 6
+         'println "done"\n'                                     # 7
+         'end\n')                                               # 8
+w17 = Wire(TRACE, 'trace17.bas')
+w17.init()
+w17.send(seq=2, cmd='setBreakpoints', path=w17.path, lines=[5])
+w17.send(seq=3, cmd='launch', stopAtEntry=False)
+seen17 = []
+for _ in range(60):
+    m = w17.recv(timeout=15)
+    if m is None:
+        break
+    seen17.append(m)
+    if m.get('event') == 'stopped':
+        break
+tr = [m for m in seen17 if m.get('event') == 'trace']
+st = [m for m in seen17 if m.get('event') == 'stopped']
+# The text is the console's report without its "phosphor: file:line: breakpoint: "
+# prefix -- docs/language-reference.md#debugging-trace--breakpoint spells the
+# operand form `[1]=42 [2]="and a string"`.
+check('n5 trace: the BREAKPOINT on line 4 is one trace event',
+      len(tr) == 1 and tr[0].get('line') == 4, str(seen17))
+check('  carrying the message and the operands as the console renders them',
+      tr and tr[0].get('text') == 'checkpoint [1]=7 [2]="two"', str(tr))
+check('  and the path of the file it fired in',
+      tr and tr[0].get('path') == w17.path, str(tr))
+check('  and it comes before the stop on line 5, and nothing resumed unasked',
+      tr and st and st[0].get('line') == 5 and seen17.index(tr[0]) < seen17.index(st[0])
+      and not any(m.get('event') == 'continued' for m in seen17), str(seen17))
+w17.send(seq=4, cmd='disconnect', terminate=False)
+try:
+    out17, err17 = w17.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    w17.proc.kill()
+    out17, err17 = b'', b''
+err17 = err17.replace(b'\r\n', b'\n')
+check('n5 trace: under the editor the BREAKPOINT left stderr alone',
+      b'checkpoint' not in err17, repr(err17[:200]))
+check('  and after a detach the next one is the console\'s again, on stderr',
+      b'breakpoint: after detach\n' in err17, repr(err17[:200]))
+check('  and the program\'s own stdout is untouched',
+      out17.replace(b'\r\n', b'\n') == b'mid\ndone\n', repr(out17[:60]))
+w17.close()
 
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))

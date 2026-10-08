@@ -1525,6 +1525,49 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · n5 closed: the debug protocol's first edges, `error`'s text,
+  and `trace`.** The ledger called the `initialize` clause "narrower than it
+  sounds" -- a pre-`initialize` command is answered, only `launch` cannot
+  happen early. **Measuring it said the opposite: it was wider.** A `launch`
+  before `initialize` was REMEMBERED, so the program started the moment
+  `initialize` arrived; a `continue` before `launch` was acknowledged; and on
+  the old host the new session's script died of a connection the host had
+  aborted, before reaching the `error` and `trace` sessions. Those two then
+  had to be watched failing on their own, with the first session cut out of a
+  scratch copy -- one red run that stops early proves only the part it reached.
+  - **A clause that is correct by design is closed by writing the design down,
+    not by emitting the event.** `continued` is for a resume the editor did not
+    ask for; this host has none after a `stopped`, because each of its silent
+    resumes follows a stop the editor was never told about. Emitting one to
+    satisfy "zero occurrences" would have been a fabricated event. The argument
+    sits on `TDebugProto.Trace` and the test pins the absence.
+  - **One report, two seams.** The `trace` text had to be the console's line
+    under the console's ceilings, so the report became `BreakpointReport` and
+    both seams call it -- and check-budget.py's exemption moved with the loop,
+    which the gate would otherwise have flagged as new and the old name as stale.
+  - **Green on Windows, red on Linux, and the red was a real gap.** A second
+    `launch` sent straight behind the first went unanswered on the VM: the
+    two-statement fixture finished before the frame was drained, and nothing
+    answered a frame still queued at exit. Making the TEST deterministic (send
+    it at the entry stop) would have hidden that; the host now answers what it
+    has read when the program ends, and a session that stops on the LAST
+    statement pins it -- the one place no later boundary can drain the queue.
+  - **And the same Linux run had two more reds that were RACES IN TESTS, one of
+    them this morning's.** `24_wave4`'s focus assertion, added in the
+    adversarial round, asked `control_focused` after ONE pump; on gtk2 the
+    window manager activates the window asynchronously, and 10 direct runs
+    failed 3. A probe measured the arrival -- 1 or 2 pumps in 12 of 12 -- so
+    the test now pumps until it arrives, bounded, and a no-op `setfocus` still
+    fails it. It had passed that round's Linux run by luck: **one green run of
+    a timing-dependent assertion is not a measurement.** The other was older:
+    session 5 of the protocol test reused the loop fixture whose sentinel an
+    earlier session had already created, so its `pause` raced the program's
+    end -- the exact race the sentinel was introduced to close, left open at
+    the second door that used the fixture.
+  - The `and False` mutant failed to BUILD again (an unreachable-code warning),
+    the same morning the last entry recorded it. A mutant is written so it
+    compiles clean, or it measures the build, not the test.
+
 - **2026-10-08 · the adversarial round over the day's five commits: four
   reviewers, every finding but one confirmed by running its repro, all fixed.**
   The day's work had been green on both OSes at every step, and still:

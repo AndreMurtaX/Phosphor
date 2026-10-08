@@ -214,6 +214,42 @@ line the editor had been told had no breakpoint. An element that is not an
 integer is dropped, a JSON number with a fraction or an exponent included:
 `1.5` used to arm line 2, and `1e300` killed the debuggee.
 
+**Three of the specification's sentences this host did not keep until 2026-10-08**
+(ledger n5), each now pinned by a session of the test:
+
+- **`initialize` is the first frame, and nothing else is answered before it.** A
+  command sent before it is refused with an error naming `initialize`, and so are
+  a second `initialize`, a second `launch`, and `pause` or a resume before
+  `launch`. Until then a `setBreakpoints` before `initialize` was installed, a
+  `launch` before it was remembered -- so the program started the moment
+  `initialize` arrived -- and a second `launch` acknowledged a start that never
+  happened. `disconnect` is still valid in every state.
+- **An `error` event says why.** A frame that does not parse, or parses to
+  something that is not an object, ends the session as before, and the event now
+  carries `text` -- "did not parse as JSON", or which JSON type it was. The frame
+  itself is not quoted: it is the peer's bytes, and a cut inside a UTF-8 sequence
+  would make the error unreadable too.
+- **A `BREAKPOINT` statement is a `trace` event** -- `text`, `line`, `path` -- and
+  no longer a line on stderr, which the editor never saw. The text is the console's
+  report without its `phosphor: file:line: breakpoint: ` prefix, under the same
+  three ceilings, and it still fires only under `trace 1`. Once the editor has
+  detached (`disconnect` with `terminate:false`, or a closed socket) the program's
+  later `BREAKPOINT`s are the console's again, on stderr.
+- **A frame already read when the program ends is answered**, which is the
+  disconnect rule of 2026-10-05 at the other way a session ends: `disconnect`
+  `ok`, anything else refused as having arrived after the program exited. The
+  VM drains its inbox only at a statement boundary, and after the last one there
+  is none, so a query sent behind a `continue` from the last statement was freed
+  unanswered. Found on Linux, where a two-statement program finished before the
+  second of two back-to-back frames was drained.
+
+**`continued` is never sent, by design.** The specification sends it for a resume
+the editor did not ask for, and every resume this host makes after a `stopped`
+event is one the editor asked for or ends the session. Its silent resumes -- the
+entry boundary it arms for itself, a breakpoint whose condition is false, a
+boundary taken to read the socket -- each follow a stop the editor was never told
+about, so there is nothing for a `continued` to correct.
+
 The last two are there because PhosphorIDE found both by driving this host on
 2026-09-16, and neither was visible to the 52 assertions that came before them.
 A breakpoint on the first executed statement was answered installed and never

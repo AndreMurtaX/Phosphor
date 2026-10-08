@@ -589,8 +589,8 @@ end;
   above for the numbers and for the 80 MB report that is the reason. Block P of
   scripts/test.ps1 and of its bash twin measures the bound; the exemption in
   scripts/check-budget.py points at that measurement rather than replacing it. }
-procedure TConsoleHost.Breakpoint(const AMessage: String; ALine: Integer;
-  const AOperands: array of TValue);
+function BreakpointReport(const APrefix, AMessage: String;
+  const AOperands: array of TValue): String;
 var
   s, msg: String;
   i: Integer;
@@ -600,10 +600,7 @@ begin
     msg := EscapeForDiag(msg) + Format('...(%d bytes)', [Length(AMessage)])
   else
     msg := EscapeForDiag(msg);
-  if FSourceName <> '' then
-    s := Format('phosphor: %s:%d: breakpoint: %s', [FSourceName, ALine, msg])
-  else
-    s := Format('phosphor: %d: breakpoint: %s', [ALine, msg]);
+  s := APrefix + msg;
   { INDEXED IN PLACE. AOperands is an OPEN ARRAY parameter, not a dynamic array,
     and FPC refuses to assign one to the other -- so the host reads it where it
     lies rather than keeping it. It is also only valid for this call.
@@ -623,7 +620,22 @@ begin
     end;
     s := s + Format(' [%d]=%s', [i + 1, RenderOperand(AOperands[i])]);
   end;
-  WriteStdErr(s + #10);
+  Result := s;
+end;
+
+{ THE CONSOLE'S ANSWER: one line on stderr. The report itself is built above, so
+  the debug protocol's `trace` event carries the same text under the same
+  ceilings -- the line ceiling counts this prefix, exactly as it always did. }
+procedure TConsoleHost.Breakpoint(const AMessage: String; ALine: Integer;
+  const AOperands: array of TValue);
+var
+  pre: String;
+begin
+  if FSourceName <> '' then
+    pre := Format('phosphor: %s:%d: breakpoint: ', [FSourceName, ALine])
+  else
+    pre := Format('phosphor: %d: breakpoint: ', [ALine]);
+  WriteStdErr(BreakpointReport(pre, AMessage, AOperands) + #10);
 end;
 
 { AN EVENT HANDLER THAT FAILED: ONE LINE ON STDERR, AND THE PROGRAM CARRIES ON.
@@ -1300,8 +1312,13 @@ type
       ACompileOnly: Boolean; out AValue, AKind, AError: String): Boolean;
     procedure DoEvaluate(ASeq, AFrameIx, ADepth: Integer; const AExpr: String);
     function Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
-    procedure RefuseQueued;
+    procedure RefuseQueued(const AWhy: String; ADisconnectOk: Boolean);
   public
+    { WHERE A BREAKPOINT STATEMENT GOES ONCE THE EDITOR HAS GONE. A detached
+      program (`disconnect` with `terminate:false`, or a closed socket) runs on,
+      and its BREAKPOINT reports are then the console's again -- stderr, as for
+      `phosphor run` -- rather than written to a socket nobody reads. }
+    FallbackTrace: TPhosphorBreakpointProc;
     constructor Create(AEng: TPhosphorEngine; const APath, ASource: String);
     destructor Destroy; override;
     function Connect(APort: Integer): Boolean;
@@ -1322,6 +1339,8 @@ type
     function Session: Integer;
     function OnStop(AReason: TPhosphorStopReason; ALine: Integer;
                     ADepth: Integer): TPhosphorDebugAction;
+    procedure Trace(const AMessage: String; ALine: Integer;
+                    const AOperands: array of TValue);
   end;
 
 constructor TDbgReader.Create(AOwner: TDebugProto);
@@ -1642,6 +1661,39 @@ begin
   SendJSON(o);
 end;
 
+{ A BREAKPOINT STATEMENT, UNDER A DEBUGGER, IS A `trace` EVENT (n5, 2026-10-08).
+  It used to be written to stderr as for `phosphor run`, so an editor showed
+  nothing and a person reading the program's stderr found a debugging aid in it.
+  The text is BreakpointReport's, under the same three ceilings, with no prefix:
+  the event's own `line` and `path` say where. Called on the VM thread, which is
+  this class's one writer. Tracing still decides whether it fires at all -- the
+  engine calls this seam only under `trace 1`, exactly as it calls the console's.
+
+  `continued` IS NEVER SENT, AND THAT IS THE SPEC, not an omission. It is for "a
+  resume the editor did not ask for", and every resume this host makes after a
+  `stopped` event is one the editor asked for (continue, a step) or ends the
+  session (disconnect, a closed socket). The silent resumes -- the entry boundary
+  this host arms for itself, a breakpoint whose condition is false, a boundary
+  taken to read the socket or to arm a new set -- each follow a stop the editor
+  was never told about, so there is nothing for a `continued` to undo. A host
+  change that makes a told stop resume on its own must send one. }
+procedure TDebugProto.Trace(const AMessage: String; ALine: Integer;
+  const AOperands: array of TValue);
+var
+  ev: TJSONObject;
+begin
+  if FClosed then
+  begin
+    if Assigned(FallbackTrace) then FallbackTrace(AMessage, ALine, AOperands);
+    Exit;
+  end;
+  ev := TJSONObject.Create();
+  ev.Add('text', BreakpointReport('', AMessage, AOperands));
+  ev.Add('line', ALine);
+  ev.Add('path', FPath);
+  SendEvent('trace', ev);
+end;
+
 procedure TDebugProto.SendError(ASeq: Integer; const AText: String);
 var
   o: TJSONObject;
@@ -1669,9 +1721,20 @@ begin
   SendEvent('stopped', AExtra);
 end;
 
+{ A FRAME ALREADY READ WHEN THE PROGRAM ENDS IS ANSWERED (n5, 2026-10-08).
+  The VM drains its inbox only at a statement boundary, and after the last one
+  there is none: a frame the reader had queued by then -- a second `launch`
+  sent behind the first, a query sent behind a `continue` -- was freed with the
+  session and never answered. That is the 2026-10-05 disconnect rule again,
+  at the other way a session ends: "every request gets exactly one response",
+  and a frame this end has READ is not one still in flight. `disconnect` is
+  valid in every state, so it is answered ok; everything else is refused.
+  Measured on Linux first, where a two-statement program finished before the
+  second of two back-to-back frames was drained. }
 procedure TDebugProto.SendExited(AExtra: TJSONObject);
 begin
   SendEvent('exited', AExtra);
+  RefuseQueued('arrived after the program exited', True);
 end;
 
 function TDebugProto.Finished: Boolean;
@@ -2527,10 +2590,11 @@ end;
   socket is a disconnect) covers those. Only frames that parse and carry a seq are
   answered; a line that does not parse arrived after the session ended and there
   is no request to answer. #0 is the reader's closed-socket sentinel. }
-procedure TDebugProto.RefuseQueued;
+procedure TDebugProto.RefuseQueued(const AWhy: String; ADisconnectOk: Boolean);
 var
   raw, cmd: String;
   d: TJSONData;
+  res: TJSONObject;
   seq: Integer;
 begin
   while TakeLine(raw) do
@@ -2548,8 +2612,15 @@ begin
         seq := TJSONObject(d).Get('seq', 0);
         cmd := TJSONObject(d).Get('cmd', '');
         if seq > 0 then
-          SendError(seq, Format('%s arrived after disconnect; the session is closed',
-                                [cmd]));
+          if ADisconnectOk and (cmd = 'disconnect') then
+          begin
+            res := TJSONObject.Create();
+            res.Add('seq', seq);
+            res.Add('ok', True);
+            SendJSON(res);
+          end
+          else
+            SendError(seq, Format('%s %s', [cmd, AWhy]));
       end;
     finally
       d.Free;
@@ -2594,7 +2665,29 @@ begin
       understood from the next. }
     if (d = nil) or (not (d is TJSONObject)) then
     begin
-      SendEvent('error', nil);
+      { AND IT SAYS WHY (n5, 2026-10-08). The event went out with no `text`, which
+        the editor decodes and shows -- so the one diagnostic the session ends on
+        was blank. The frame itself is NOT quoted: it is whatever the peer sent,
+        and a cut inside a UTF-8 sequence would make this frame unreadable too. }
+      res := TJSONObject.Create();
+      if d = nil then
+        res.Add('text', Format('a frame of %d bytes did not parse as JSON; ' +
+                               'the session is closed', [Length(ARaw)]))
+      else
+      begin
+        case d.JSONType of
+          jtArray:   cond := 'an array';
+          jtString:  cond := 'a string';
+          jtNumber:  cond := 'a number';
+          jtBoolean: cond := 'a boolean';
+          jtNull:    cond := 'null';
+        else
+          cond := 'not an object';
+        end;
+        res.Add('text', Format('a frame is %s, not a JSON object; the session ' +
+                               'is closed', [cond]));
+      end;
+      SendEvent('error', res);
       FClosed := True;
       FDisconnected := True;
       FAction := daRun;
@@ -2603,6 +2696,50 @@ begin
     o := TJSONObject(d);
     seq := o.Get('seq', 0);
     cmd := o.Get('cmd', '');
+
+    { THE STATE MACHINE'S FIRST EDGES, enforced (n5, 2026-10-08). The spec says
+      `initialize` "must be the first frame. Nothing else is answered before it",
+      and a command in the wrong state is refused, never ignored. This host
+      answered whatever came first: a `setBreakpoints` before `initialize` was
+      installed, and a `launch` before it was remembered -- so the program ran
+      the moment `initialize` arrived, on a handshake the editor had not yet
+      read. A second `initialize` was answered again, and a second `launch`
+      acknowledged a start that never happened.
+
+      "Refused" and not "dropped": every frame still gets exactly one response,
+      which is the protocol's other rule. `disconnect` is valid in every state.
+      `pause` and the four resumes before `launch` are refused here because the
+      messages below them say "while running", and before `launch` nothing is. }
+    if cmd <> 'disconnect' then
+    begin
+      if FState = dbgConnected then
+      begin
+        if cmd <> 'initialize' then
+        begin
+          SendError(seq, Format('%s is not valid before initialize, which must be ' +
+                                'the first frame', [cmd]));
+          Exit(False);
+        end;
+      end
+      else if cmd = 'initialize' then
+      begin
+        SendError(seq, 'initialize is valid only as the first frame, and it was ' +
+                       'already answered');
+        Exit(False);
+      end
+      else if (cmd = 'launch') and FLaunched then
+      begin
+        SendError(seq, 'launch is valid only once, and the program was already ' +
+                       'launched');
+        Exit(False);
+      end
+      else if (not FLaunched) and ((cmd = 'pause') or (cmd = 'continue') or
+              (cmd = 'stepOver') or (cmd = 'stepInto') or (cmd = 'stepOut')) then
+      begin
+        SendError(seq, Format('%s is not valid before launch', [cmd]));
+        Exit(False);
+      end;
+    end;
 
     if cmd = 'initialize' then
     begin
@@ -2831,7 +2968,7 @@ begin
       { BEFORE FClosed, which is what SendJSON reads to stop writing: a first
         version of this called RefuseQueued after it, and every refusal went
         nowhere -- the probe saw exactly the silence it was written to end. }
-      RefuseQueued();
+      RefuseQueued('arrived after disconnect; the session is closed', False);
       FDisconnected := True;
       if o.Get('terminate', False) then FAction := daStop else FAction := daRun;
       FClosed := True;
@@ -3209,6 +3346,10 @@ begin
     if proto.Finished then Exit(0);
 
     eng.OnDebug := @proto.OnStop;
+    { A BREAKPOINT STATEMENT IS THE EDITOR'S NOW -- a `trace` event -- and the
+      console's again only if the editor leaves. See TDebugProto.Trace. }
+    proto.FallbackTrace := @host.Breakpoint;
+    eng.OnBreakpoint := @proto.Trace;
     proto.Arm();
 
     line := eng.Run(source);

@@ -289,7 +289,19 @@ memo_text@(wm@, "quiet")
 assert_eq(hits, 2, "unbound, it stays quiet")
 assert_eq(control_focused(wb@), 0, "a button nobody focused has no focus")
 wb@ = control_setfocus@(wb@)
+rem FOCUS ARRIVES ASYNCHRONOUSLY ON GTK2: the window manager has to activate
+rem the window first. Measured on the Linux VM (mutter, XWayland), 12 runs:
+rem focused after 1 or 2 pumps, never more -- and this assertion, asked after
+rem ONE, failed 3 runs in 10. Win32 answers on the first pump. So pump until
+rem it arrives, bounded at 2 s; a setfocus that did nothing still exhausts
+rem the bound and fails here.
+k = 0
 x = app_processmessages()
+while control_focused(wb@) = 0 and k < 40
+  x = pause(0.05)
+  x = app_processmessages()
+  k = k + 1
+wend
 assert_eq(control_focused(wb@), 1, "and has it once focused")
 w@ = form_close@(w@)
 x = app_processmessages()

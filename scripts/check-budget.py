@@ -544,7 +544,7 @@ ALLOWED = {
     'phosphor.lpr:DebugFile':
         'copies the armed set ParseBreakList filled, which that function caps at '
         '256 -- a command line, not a script',
-    'phosphor.lpr:TConsoleHost.Breakpoint':
+    'phosphor.lpr:BreakpointReport':
         'the report is bounded by three named constants of this unit -- '
         'BP_MAX_MESSAGE_BYTES, BP_MAX_OPERAND_BYTES and BP_MAX_LINE_BYTES -- so '
         'neither the operand count nor any operand length decides the work; the '

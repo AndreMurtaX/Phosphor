@@ -87,8 +87,20 @@
   and try each until one connects. To dial a specific IP while still sending the
   hostname in Host: (so virtual-hosted servers route correctly), a small TFPHTTPClient
   subclass pins the connect target -- SendRequest still builds Host: from the URL.
-  (The underlying socket layer is IPv4-only, so IPv6/AAAA endpoints remain out of
-  reach here; that would need a hand-rolled AF_INET6 connect and is a separate step.)
+  IPV6 (ledger m6). FPC 3.2.2's socket layer is IPv4 only -- TInetSocket opens an
+  AF_INET socket and resolves A records -- and TFPHTTPClient keeps that socket in a
+  PRIVATE field it creates itself, with no seam to hand it another. What it does
+  give is a socket handler that is told of its socket (SetSocket, virtual) before
+  the client calls the socket's Connect (virtual too), and a stream that does ALL
+  its reading and writing through that handler. So an IPv6 request's handler
+  re-classes the TInetSocket to TInet6Socket -- a subclass with no fields of its
+  own, checked by InstanceSize, so the object is unchanged and only the VMT moves --
+  whose Connect dials AF_INET6, and the handler does the I/O, plain or TLS, on that
+  descriptor. The socket's Host stays the URL's, so SNI and the hostname check read
+  the right name. Candidates: an IPv6 literal URL ([::1]) is dialled as itself; a
+  name is tried over IPv4 first, exactly as before, and its AAAA records only when
+  no IPv4 address connected -- never through a proxy. AAAA comes from netdb on Unix
+  and from getaddrinfo in ws2_32 on Windows, where FPC has no IPv6 resolver.
 ******************************************************************************}
 unit PhosphorHttpLib;
 
@@ -125,6 +137,17 @@ var
     is the only way to see a connect that went around the proxy (ledger n26). }
   HttpResolveHook: THttpResolveHook = nil;
 
+var
+  { THE SAME SEAM FOR AAAA records (ledger m6), nil in every shipped host: when set
+    it answers a host's IPv6 addresses in place of the resolver, so a test can name
+    a host that has ONLY an IPv6 address on any machine. }
+  HttpResolve6Hook: THttpResolveHook = nil;
+
+{ A host's IPv6 addresses (no brackets), from HttpResolve6Hook when set and the
+  platform's resolver otherwise. Exported so the runner can prove the REAL resolver
+  answers on each OS, which the hook would otherwise hide. }
+function HttpResolveAAAA(const AHost: String): TStringDynArray;
+
 type
   THttpTlsWithhold = function(const AName: String): Boolean;
 
@@ -137,6 +160,10 @@ var
   HttpTlsWithhold: THttpTlsWithhold = nil;
 
 implementation
+
+uses
+  {$IFDEF UNIX}BaseUnix, netdb{$ENDIF}
+  {$IFDEF WINDOWS}winsock2{$ENDIF};
 
 var
   { HTTPS security posture (see the unit header). Verification is ON by default;
@@ -151,12 +178,50 @@ type
     check in DoVerifyCert -- which the RTL calls right after SSL_connect, before the
     socket is used, and which FPC leaves empty. HostRefused is how a refusal gets
     back out: the socket layer turns a False here into a plain connect failure. }
+  { WHAT AN IPv6 REQUEST'S HANDLER DIALS, and the descriptor it then talks over.
+    Owned by that handler; TInet6Socket.Connect fills Fd. }
+  T6Link = class
+  public
+    Ip: String;            // the IPv6 address, without brackets
+    Fd: TSocket;
+    FdOpen: Boolean;
+    Owner: TSocketHandler;
+    constructor Create(const AIp: String; AOwner: TSocketHandler);
+    procedure CloseFd;
+    destructor Destroy; override;
+  end;
+
+  { The class an IPv6 request's TInetSocket becomes. NO FIELDS: the instance was
+    allocated as a TInetSocket, and re-classing it is sound only because the two
+    are the same size -- Reclass6 checks InstanceSize and refuses otherwise. }
+  TInet6Socket = class(TInetSocket)
+  public
+    procedure Connect; override;
+  end;
+
+  { http:// over IPv6: FPC's plain handler, reading and writing the IPv6
+    descriptor instead of the stream's own (unused, AF_INET) handle. }
+  TPlain6Handler = class(TSocketHandler)
+  public
+    Link: T6Link;
+    constructor Create6(const AIp: String);
+    destructor Destroy; override;
+    function Recv(const Buffer; Count: Integer): Integer; override;
+    function Send(const Buffer; Count: Integer): Integer; override;
+  protected
+    procedure SetSocket(const AStream: TSocketStream); override;
+  end;
+
   THostCheckedHandler = class(TOpenSSLSocketHandler)
   public
     HostRefused: Boolean;
     Client: TObject;     // the TPinnedClient this request belongs to
+    Link: T6Link;        // m6: set for an IPv6 request, nil for IPv4
+    destructor Destroy; override;
+    function Connect: Boolean; override;
   protected
     function DoVerifyCert: Boolean; override;
+    procedure SetSocket(const AStream: TSocketStream); override;
   end;
 
   { TFPHTTPClient derives BOTH the connect target and the Host: header from the request
@@ -167,6 +232,8 @@ type
   TPinnedClient = class(TFPHTTPClient)
   public
     ConnectIP: String;
+    ConnectIP6: String;    // m6: dial this IPv6 address (no brackets) instead
+    PinHost: String;       // the host the pin is for; a redirect elsewhere is not pinned
     VerifyPeer: Boolean;   // per request: the global switch, AND a client's own
     HostRefused: Boolean;  // a TLS handler of this request refused the peer's name
     ClientCert: String;    // m7: PEM certificate to present, '' for none
@@ -177,13 +244,188 @@ type
     function GetSocketHandler(const UseSSL: Boolean): TSocketHandler; override;
   end;
 
+{ A PIN IS FOR ONE HOST. A redirect to another host comes back through here with
+  that host's name, and dialling the first host's address for it would reach the
+  wrong server -- so the pin applies only while AHost is the host it was made for
+  (PinHost), for an IPv4 pin and an IPv6 one alike. An IPv6 request passes the name
+  through untouched: the handler dials the address, and the socket's Host stays the
+  name for SNI and the hostname check. }
 procedure TPinnedClient.ConnectToServer(const AHost: String; APort: Integer;
   UseSSL: Boolean);
+var pinned: Boolean;
 begin
+  pinned := (PinHost = '') or SameText(AHost, PinHost);
+  if not pinned then
+  begin
+    ConnectIP := '';
+    ConnectIP6 := '';
+  end;
   if ConnectIP <> '' then
     inherited ConnectToServer(ConnectIP, APort, UseSSL)
   else
     inherited ConnectToServer(AHost, APort, UseSSL);
+end;
+
+{ ---- IPv6 (ledger m6) ------------------------------------------------------ }
+
+threadvar
+  { The link a re-classed socket's Connect is to use: set by the handler in
+    SetSocket, taken (and cleared) by TInet6Socket.Connect, which TFPHTTPClient
+    calls next, on the same thread, before anything else can intervene. }
+  gPending6: T6Link;
+
+constructor T6Link.Create(const AIp: String; AOwner: TSocketHandler);
+begin
+  inherited Create();
+  Ip := AIp;
+  Owner := AOwner;
+  FdOpen := False;
+end;
+
+procedure T6Link.CloseFd;
+begin
+  if FdOpen then CloseSocket(Fd);
+  FdOpen := False;
+end;
+
+destructor T6Link.Destroy;
+begin
+  CloseFd();
+  inherited Destroy();
+end;
+
+{ Make AStream a TInet6Socket and leave ALink for its Connect. Refuses -- rather
+  than re-class an object of another shape -- unless AStream is exactly a
+  TInetSocket and the subclass is exactly its size. }
+procedure Reclass6(AStream: TSocketStream; ALink: T6Link);
+begin
+  if (AStream.ClassType <> TInetSocket) or
+     (TInet6Socket.InstanceSize <> TInetSocket.InstanceSize) then
+    raise ESocketError.Create(seConnectFailed, ['[' + ALink.Ip + ']']);
+  PPointer(AStream)^ := Pointer(TInet6Socket);
+  gPending6 := ALink;
+end;
+
+{ TInetSocket.Connect, for AF_INET6: the same connect-timeout dance (the protected
+  helpers are TInetSocket's own), the same IO timeout the stream would have set on
+  its own handle, then the handler's Connect -- a no-op for http, the handshake for
+  https -- and the same ESocketError on failure, so FetchCore's fallback reads an
+  IPv6 failure exactly as it reads an IPv4 one. }
+procedure TInet6Socket.Connect;
+const
+  {$IFDEF UNIX}ErrWouldBlock = ESysEInprogress;{$ENDIF}
+  {$IFDEF WINDOWS}ErrWouldBlock = WSAEWOULDBLOCK;{$ENDIF}
+var
+  link: T6Link;
+  a: TInetSockAddr6;
+  isError: Boolean;
+  err: Integer;
+  tor: TCheckTimeoutResult;
+  fds: TFDSet;
+  timev: TTimeVal;
+  {$IFDEF WINDOWS}opt: DWord;{$ENDIF}
+  {$IFDEF UNIX}tv: TTimeVal;{$ENDIF}
+begin
+  link := gPending6;
+  gPending6 := nil;
+  if link = nil then raise ESocketError.Create(seConnectFailed, [Host]);
+  link.Fd := fpSocket(AF_INET6, SOCK_STREAM, 0);
+  {$IFDEF WINDOWS}if link.Fd = INVALID_SOCKET then{$ELSE}if link.Fd < 0 then{$ENDIF}
+    raise ESocketError.Create(seConnectFailed, ['[' + link.Ip + ']']);
+  link.FdOpen := True;
+  FillChar(a, SizeOf(a), 0);
+  a.sin6_family := AF_INET6;
+  a.sin6_port := htons(Port);
+  a.sin6_addr := StrToHostAddr6(link.Ip);
+  if ConnectTimeout > 0 then SetSocketBlockingMode(link.Fd, bmNonBlocking, @fds);
+  isError := True;
+  tor := ctrError;
+  err := 0;
+  {$IFDEF UNIX}
+  err := ESysEINTR;
+  while isError and ((err = ESysEINTR) or (err = ESysEAGAIN)) do
+  {$ENDIF}
+  begin
+    isError := fpConnect(link.Fd, @a, SizeOf(a)) <> 0;
+    if isError then err := SocketError;
+  end;
+  if ConnectTimeout > 0 then
+  begin
+    if isError and (err = ErrWouldBlock) then
+    begin
+      tor := CheckSocketConnectTimeout(link.Fd, @fds, @timev);
+      isError := tor <> ctrOK;
+    end;
+    SetSocketBlockingMode(link.Fd, bmBlocking, @fds);
+  end;
+  if (not isError) and (IOTimeout > 0) then
+  begin
+    {$IFDEF WINDOWS}
+    opt := IOTimeout;
+    fpsetsockopt(link.Fd, SOL_SOCKET, SO_RCVTIMEO, @opt, 4);
+    fpsetsockopt(link.Fd, SOL_SOCKET, SO_SNDTIMEO, @opt, 4);
+    {$ENDIF}
+    {$IFDEF UNIX}
+    tv.tv_sec := IOTimeout div 1000;
+    tv.tv_usec := (IOTimeout mod 1000) * 1000;
+    fpsetsockopt(link.Fd, SOL_SOCKET, SO_RCVTIMEO, @tv, SizeOf(tv));
+    fpsetsockopt(link.Fd, SOL_SOCKET, SO_SNDTIMEO, @tv, SizeOf(tv));
+    {$ENDIF}
+  end;
+  if not isError then isError := not link.Owner.Connect();
+  if isError then
+  begin
+    link.CloseFd();
+    if tor = ctrTimeout then
+      raise ESocketError.Create(seConnectTimeOut, [Format('[%s]:%d', [link.Ip, Port])])
+    else
+      raise ESocketError.Create(seConnectFailed, [Format('[%s]:%d', [link.Ip, Port])]);
+  end;
+end;
+
+constructor TPlain6Handler.Create6(const AIp: String);
+begin
+  inherited Create();
+  Link := T6Link.Create(AIp, Self);
+end;
+
+destructor TPlain6Handler.Destroy;
+begin
+  Link.Free;
+  inherited Destroy();
+end;
+
+procedure TPlain6Handler.SetSocket(const AStream: TSocketStream);
+begin
+  inherited SetSocket(AStream);
+  Reclass6(AStream, Link);
+end;
+
+{ TSocketHandler.Recv and Send, on the IPv6 descriptor. }
+function TPlain6Handler.Recv(const Buffer; Count: Integer): Integer;
+begin
+  Result := -1;
+  {$IFDEF UNIX}
+  FLastError := ESysEINTR;
+  while FLastError = ESysEINTR do
+  {$ENDIF}
+  begin
+    Result := fpRecv(Link.Fd, @Buffer, Count, Socket.ReadFlags);
+    if Result < 0 then FLastError := SocketError else FLastError := 0;
+  end;
+end;
+
+function TPlain6Handler.Send(const Buffer; Count: Integer): Integer;
+begin
+  Result := -1;
+  {$IFDEF UNIX}
+  FLastError := ESysEINTR;
+  while FLastError = ESysEINTR do
+  {$ENDIF}
+  begin
+    Result := fpSend(Link.Fd, @Buffer, Count, Socket.WriteFlags);
+    if Result < 0 then FLastError := SocketError else FLastError := 0;
+  end;
 end;
 
 type
@@ -226,6 +468,27 @@ end;
   error (a negative answer), and a missing symbol -- every doubt refuses. }
 function IsIPv4Literal(const AHost: String): Boolean; forward;
 
+{ An IPv6 literal, bracketed as a URL writes it or bare. }
+function Unbracket(const AHost: String): String;
+begin
+  Result := AHost;
+  if (Length(Result) >= 2) and (Result[1] = '[') and (Result[Length(Result)] = ']') then
+    Result := Copy(Result, 2, Length(Result) - 2);
+end;
+
+function IsIPv6Literal(const AHost: String): Boolean;
+var a: TIn6_Addr;
+    i: Integer;
+    h: String;
+begin
+  Result := False;
+  h := Unbracket(AHost);
+  if Pos(':', h) = 0 then Exit;
+  a := StrToHostAddr6(h);
+  for i := 0 to 7 do
+    if a.u6_addr16[i] <> 0 then Exit(True);
+end;
+
 function CertNamesHost(ASsl: PSSL; const AHost: String): Boolean;
 var
   c: PX509;
@@ -239,8 +502,8 @@ begin
   c := gGetPeerCert(ASsl);
   if c = nil then Exit;
   try
-    h := AnsiString(AHost);
-    if IsIPv4Literal(AHost) then
+    h := AnsiString(Unbracket(AHost));
+    if IsIPv4Literal(AHost) or IsIPv6Literal(AHost) then
       Result := gCheckIPAsc(c, PAnsiChar(h), 0) = 1
     else
       Result := gCheckHost(c, PAnsiChar(h), Length(h), 0, nil) = 1;
@@ -270,12 +533,51 @@ begin
   end;
 end;
 
+destructor THostCheckedHandler.Destroy;
+begin
+  Link.Free;
+  inherited Destroy();
+end;
+
+procedure THostCheckedHandler.SetSocket(const AStream: TSocketStream);
+begin
+  inherited SetSocket(AStream);
+  if Link <> nil then Reclass6(AStream, Link);
+end;
+
+{ TOpenSSLSocketHandler.Connect, on the IPv6 descriptor: the same context, the SNI
+  from the socket's Host (never an address -- RFC 6066 forbids one, and an IPv6
+  literal is all a bracketed URL has), the handshake, and the same DoVerifyCert. An
+  IPv4 request takes FPC's own path untouched. }
+function THostCheckedHandler.Connect: Boolean;
+var sni: String;
+begin
+  if Link = nil then Exit(inherited Connect());
+  Result := InitContext(False);
+  if not Result then Exit;
+  Result := CheckSSL(SSL.SetFD(Link.Fd));
+  if not Result then Exit;
+  sni := '';
+  if Socket is TInetSocket then sni := TInetSocket(Socket).Host;
+  if SendHostAsSNI and (sni <> '') and (not IsIPv4Literal(sni)) and (not IsIPv6Literal(sni)) then
+    SSL.Ctrl(SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, PAnsiChar(AnsiString(sni)));
+  Result := CheckSSL(SSL.Connect);
+  if Result then Result := DoVerifyCert();
+  if Result then SetSSLActive(True);
+end;
+
 function TPinnedClient.GetSocketHandler(const UseSSL: Boolean): TSocketHandler;
 begin
   { An https request gets THIS handler and not the registered default, which is a
     plain TOpenSSLSocketHandler: the subclass is that plus the name check. }
   if UseSSL then
-    Result := THostCheckedHandler.Create()
+  begin
+    Result := THostCheckedHandler.Create();
+    if ConnectIP6 <> '' then
+      THostCheckedHandler(Result).Link := T6Link.Create(ConnectIP6, Result);
+  end
+  else if ConnectIP6 <> '' then
+    Result := TPlain6Handler.Create6(ConnectIP6)
   else
     Result := inherited GetSocketHandler(UseSSL);
   if UseSSL and (Result is TSSLSocketHandler) then
@@ -330,6 +632,84 @@ begin
   end;
 end;
 
+{$IFDEF WINDOWS}
+type
+  PAddrInfoA = ^TAddrInfoA;
+  TAddrInfoA = record         // ws2def.h ADDRINFOA
+    ai_flags, ai_family, ai_socktype, ai_protocol: LongInt;
+    ai_addrlen: PtrUInt;
+    ai_canonname: PAnsiChar;
+    ai_addr: Pointer;
+    ai_next: PAddrInfoA;
+  end;
+  TGetAddrInfo = function(node, service: PAnsiChar; hints: PAddrInfoA;
+                          out res: PAddrInfoA): LongInt; stdcall;
+  TFreeAddrInfo = procedure(ai: PAddrInfoA); stdcall;
+
+var
+  gWs2: TLibHandle = NilHandle;
+  gGetAddrInfo: TGetAddrInfo = nil;
+  gFreeAddrInfo: TFreeAddrInfo = nil;
+{$ENDIF}
+
+function HttpResolveAAAA(const AHost: String): TStringDynArray;
+var
+  {$IFDEF UNIX}
+  addrs: array[0..15] of THostAddr6;
+  n, i: Integer;
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  hints: TAddrInfoA;
+  res, p: PAddrInfoA;
+  h: AnsiString;
+  {$ENDIF}
+begin
+  if Assigned(HttpResolve6Hook) then Exit(HttpResolve6Hook(AHost));
+  Result := nil;
+  if AHost = '' then Exit;
+  {$IFDEF UNIX}
+  n := ResolveName6(AHost, addrs);
+  for i := 0 to n - 1 do
+    if i <= High(addrs) then
+    begin
+      SetLength(Result, Length(Result) + 1);
+      Result[High(Result)] := HostAddrToStr6(addrs[i]);
+    end;
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  if gWs2 = NilHandle then
+  begin
+    gWs2 := LoadLibrary('ws2_32.dll');
+    if gWs2 <> NilHandle then
+    begin
+      gGetAddrInfo := TGetAddrInfo(GetProcedureAddress(gWs2, 'getaddrinfo'));
+      gFreeAddrInfo := TFreeAddrInfo(GetProcedureAddress(gWs2, 'freeaddrinfo'));
+    end;
+  end;
+  if not (Assigned(gGetAddrInfo) and Assigned(gFreeAddrInfo)) then Exit;
+  FillChar(hints, SizeOf(hints), 0);
+  hints.ai_family := AF_INET6;
+  hints.ai_socktype := SOCK_STREAM;
+  h := AnsiString(AHost);
+  res := nil;
+  if gGetAddrInfo(PAnsiChar(h), nil, @hints, res) <> 0 then Exit;
+  try
+    p := res;
+    while p <> nil do
+    begin
+      if (p^.ai_family = AF_INET6) and (p^.ai_addr <> nil) then
+      begin
+        SetLength(Result, Length(Result) + 1);
+        Result[High(Result)] := HostAddrToStr6(PInetSockAddr6(p^.ai_addr)^.sin6_addr);
+      end;
+      p := p^.ai_next;
+    end;
+  finally
+    gFreeAddrInfo(res);
+  end;
+  {$ENDIF}
+end;
+
 const
   HTTP_OK      = 0;
   HTTP_EHANDLE = 1;   // an invalid / fabricated client or form handle
@@ -354,7 +734,7 @@ function FetchCore(const AMethod, AUrl, ABody: String;
   const AForceAddrs: array of String; out AStatus: Integer;
   AConnectMs: Integer; ACfg: TObject): String;
 var
-  addrs: TStringDynArray;
+  addrs, addrs6: TStringDynArray;
   uri: TURI;
   host, body: String;
   i: Integer;
@@ -375,7 +755,13 @@ var
     resp := TStringStream.Create('');
     c := TPinnedClient.Create(nil);
     try
-      c.ConnectIP := AConnectIP;
+      { A bracketed candidate is an IPv6 address (m6). The pin is for this URL's
+        host only; see TPinnedClient.ConnectToServer. }
+      if (AConnectIP <> '') and (AConnectIP[1] = '[') then
+        c.ConnectIP6 := Unbracket(AConnectIP)
+      else
+        c.ConnectIP := AConnectIP;
+      c.PinHost := ParseURI(AUrl).Host;
       c.ConnectTimeout := AConnectMs;         // ms; don't hang forever on a dead IP
       c.VerifyPeer := gVerifyPeer;
       if ACfg <> nil then ApplyClient(c, ACfg);
@@ -432,6 +818,7 @@ begin
   AStatus := 0;
   hostRefused := False;
   gHttpErr := HTTP_OK;
+  host := '';   // the forced-list path never reads the URL
 
   if Length(AForceAddrs) > 0 then
   begin
@@ -442,6 +829,16 @@ begin
   begin
     uri := ParseURI(AUrl);
     host := uri.Host;
+  end;
+  if (Length(AForceAddrs) = 0) and (host <> '') and (host[1] = '[') then
+  begin
+    { AN IPv6 LITERAL is its own only address (m6). Through a proxy it is dialled
+      no differently from a name: the proxy is what connects, so no pin. }
+    SetLength(addrs, 1);
+    if ClientProxyActive(ACfg) then addrs[0] := '' else addrs[0] := host;
+  end
+  else if Length(AForceAddrs) = 0 then
+  begin
     { THROUGH A PROXY, NEVER PIN. The fallback dials one of the DESTINATION's
       addresses itself, and a pinned connect goes straight there -- around the
       proxy the client was told to use (ledger n26). The proxy is the only thing
@@ -474,6 +871,24 @@ begin
     begin
       Result := body;
       Exit;
+    end;
+  end;
+  { NO IPv4 ADDRESS CONNECTED: a name's AAAA records, in resolver order (m6).
+    IPv4 first keeps every host that already worked exactly as it was; a host with
+    only IPv6, or whose IPv4 is down, is reached here. Not for a forced list (the
+    test names its own), an address literal, or a request through a proxy. }
+  if (Length(AForceAddrs) = 0) and (host <> '') and (host[1] <> '[') and
+     (not IsIPv4Literal(host)) and (not ClientProxyActive(ACfg)) then
+  begin
+    addrs6 := HttpResolveAAAA(host);
+    for i := 0 to High(addrs6) do
+    begin
+      body := Attempt('[' + addrs6[i] + ']', connected);
+      if connected then
+      begin
+        Result := body;
+        Exit;
+      end;
     end;
   end;
   { nothing connected: Result '' and AStatus 0 (from the last Attempt) -- and if

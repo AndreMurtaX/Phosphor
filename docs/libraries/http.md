@@ -242,6 +242,20 @@ beside `libcrypto-3-x64.dll` — when both are on the DLL search path, and falls
 back to the OpenSSL 1.1 names FPC knows; it never pairs halves of different
 versions.
 
+**IPv6 works, and IPv4 is still tried first.** A URL can name an IPv6 address —
+`http://[::1]:8080/` or `https://[2001:db8::7]/` — and it is dialled as itself.
+A host name is tried over IPv4 exactly as before, and its IPv6 (AAAA) addresses
+only when no IPv4 address connected, so a host that already worked behaves the
+same while one with only IPv6, or whose IPv4 is down, is now reached. Over https
+the certificate must name the host: an IPv6 address is matched against the
+certificate's addresses, and a name reached over IPv6 is still checked, and sent
+as SNI, as the name. Through a proxy only the proxy is dialled, IPv6 or not, and
+the name is not looked up locally either -- the proxy resolves it. The
+addresses come from the system resolver on Linux and from Windows' own
+`getaddrinfo` there. One bound: a dead IPv6 address costs the connect timeout
+(five seconds, or the client's `http_timeout`) before the next is tried, the same
+as a dead IPv4 one.
+
 **A host name with several A records is tried in turn.** FPC's socket layer
 resolves a host to its first A record and connects only to that one, so a single
 dead IP fails a request that a round-robin CDN's other addresses would have served.

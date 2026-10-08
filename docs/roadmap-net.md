@@ -139,7 +139,18 @@ reading the PROXY's host from the socket, which is the part to design first.)*
 *(A custom CA bundle was on this list and then built: `http_ca_file$(path$)` points
 verification at a specific PEM, as the step above describes.)*
 
-## IPv6 — deferred (recorded, not dropped)
+## IPv6 — ~~deferred~~ BUILT 2026-10-07 (ledger m6)
+
+*How, since the plan below said it needed a socket-layer rework: it did not.
+TFPHTTPClient's socket is private, but its socket HANDLER is told of the socket
+(`SetSocket`, virtual) before the client calls the socket's `Connect` (virtual),
+and every read and write goes through the handler. An IPv6 request's handler
+re-classes that TInetSocket to `TInet6Socket` -- no fields of its own, checked by
+InstanceSize -- whose Connect dials AF_INET6, and does the I/O, plain or TLS, on
+that descriptor. AAAA comes from `netdb` on Unix and `getaddrinfo` (ws2_32) on
+Windows. Proven by `tests/packages/18_http_ipv6.bas` and `19_https_ipv6.bas`
+against IPv6 servers the runner stands up on [::1]; see `docs/libraries/http.md`.
+The original note follows.*
 
 Kept here so the decision is traceable. FPC 3.2.2's `TInetSocket.Connect` is
 `AF_INET`-only, so IPv6 support means, roughly: resolve AAAA records (`getaddrinfo`),

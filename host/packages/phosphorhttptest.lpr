@@ -29,7 +29,7 @@ program phosphorhttptest;
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
-  dynlibs, ctypes, ssockets, sslsockets, opensslsockets, fpopenssl,
+  dynlibs, ctypes, ssockets, sslsockets, opensslsockets, fpopenssl, sockets,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib;
 
@@ -38,6 +38,9 @@ const
   SRV_PORT_TLS = 18443;
   SRV_PORT_TLS_IP = 18444;   // the same CA, a certificate for IP:127.0.0.1 only (m5)
   SRV_PORT_MTLS = 18445;     // requires a client certificate the CA signed (m7)
+  SRV_PORT_V6 = 18446;       // [::1], plain http (m6)
+  SRV_PORT_V6_TLS = 18447;   // [::1], https, the localhost certificate (m6)
+  SRV_PORT_V6_TLS_IP = 18448;// [::1], https, the certificate naming ::1 (m6)
 
 var
   BaseURL: String;
@@ -45,6 +48,8 @@ var
   CAFile: String;   // the throwaway CA the TLS fixture chains to (ledger m5)
   BaseURLHttpsIP: String;
   BaseURLMtls: String;
+  GResolve6Map: TStringList = nil;   // http_resolve6_as$'s answers
+  GResolve6Calls: Integer = 0;       // how often the package asked it
   CertDirG: String;   // where the fixtures live, for the client-certificate paths
   Withheld: String = '';   // http_tls_withhold's name, consulted by the library's seam
 
@@ -202,6 +207,224 @@ begin
   h.CertificateData := Self.CertificateData;   // what CreateSSLSocketHandler does
   h.VerifyPeerCert := True;                    // SSL_VERIFY_PEER, and the CA loaded
   Result := h;
+end;
+
+{ AN IPv6 SERVER (ledger m6). TFPHTTPServer is IPv4 only -- it is built on
+  TInetServer, which opens AF_INET -- so the IPv6 side is a small accept loop of its
+  own on [::1]. Each accepted descriptor becomes a TSocketStream, which works for any
+  descriptor, wrapped in FPC's OpenSSL handler when it is a TLS server; Accept does
+  the handshake. Routes: / answers "phosphor http ok", /family answers "ipv6" --
+  the IPv4 servers have no such route, so a request that answers it went over IPv6
+  -- /echo answers the request body, and /redir sends a 302 to the IPv4 server, the
+  case that shows a pin is for its own host only. One connection at a time, which
+  is what the tests make. }
+type
+  TV6Server = class(TThread)
+  public
+    Port: Word;
+    Tls: Boolean;
+    CertFile, KeyFile: String;
+    Ready: Boolean;
+    procedure Execute; override;
+  private
+    procedure Serve(AFd: TSocket);
+  end;
+
+procedure TV6Server.Execute;
+var
+  ls, cs: TSocket;
+  a: TInetSockAddr6;
+  len: TSockLen;
+  {$IFDEF UNIX}one: LongInt;{$ENDIF}
+begin
+  ls := fpSocket(AF_INET6, SOCK_STREAM, 0);
+  {$IFDEF UNIX}
+  one := 1;
+  fpsetsockopt(ls, SOL_SOCKET, SO_REUSEADDR, @one, SizeOf(one));
+  {$ENDIF}
+  FillChar(a, SizeOf(a), 0);
+  a.sin6_family := AF_INET6;
+  a.sin6_port := htons(Port);
+  a.sin6_addr := StrToHostAddr6('::1');
+  if fpBind(ls, @a, SizeOf(a)) <> 0 then Exit;
+  if fpListen(ls, 8) <> 0 then Exit;
+  Ready := True;
+  while not Terminated do
+  begin
+    len := SizeOf(a);
+    cs := fpAccept(ls, @a, @len);
+    {$IFDEF WINDOWS}if cs = TSocket(-1) then Continue;{$ELSE}if cs < 0 then Continue;{$ENDIF}
+    try
+      Serve(cs);
+    except
+      // a broken client must not take the server down for the next one
+    end;
+  end;
+end;
+
+procedure TV6Server.Serve(AFd: TSocket);
+var
+  h: TOpenSSLSocketHandler;
+  st: TSocketStream;
+  buf: array[0..8191] of Byte;
+  n, hdrEnd, want, p: Integer;
+  req, head, path, body, resp, chunk, status, extra, line: AnsiString;
+begin
+  if Tls then
+  begin
+    h := TOpenSSLSocketHandler.Create();
+    h.CertificateData.Certificate.FileName := CertFile;
+    h.CertificateData.PrivateKey.FileName := KeyFile;
+    st := TSocketStream.Create(LongInt(AFd), h);
+  end
+  else
+  begin
+    h := nil;
+    st := TSocketStream.Create(LongInt(AFd), nil);
+  end;
+  try
+    if (h <> nil) and (not h.Accept()) then Exit;
+    req := '';
+    hdrEnd := 0;
+    repeat
+      n := st.Read(buf[0], SizeOf(buf));
+      if n > 0 then
+      begin
+        SetString(chunk, PAnsiChar(@buf[0]), n);
+        req := req + chunk;
+      end;
+      hdrEnd := Pos(#13#10#13#10, req);
+    until (n <= 0) or (hdrEnd > 0);
+    if hdrEnd = 0 then Exit;
+    head := Copy(req, 1, hdrEnd - 1);
+    body := Copy(req, hdrEnd + 4, MaxInt);
+    want := 0;
+    p := Pos('content-length:', LowerCase(head));
+    if p > 0 then
+    begin
+      line := Copy(head, p + 15, MaxInt);
+      if Pos(#13, line) > 0 then line := Copy(line, 1, Pos(#13, line) - 1);
+      want := StrToIntDef(Trim(line), 0);
+    end;
+    while Length(body) < want do
+    begin
+      n := st.Read(buf[0], SizeOf(buf));
+      if n <= 0 then Break;
+      SetString(chunk, PAnsiChar(@buf[0]), n);
+      body := body + chunk;
+    end;
+    line := Copy(head, 1, Pos(#13, head + #13) - 1);   // the request line
+    path := ExtractWord(2, line, [' ']);
+    status := '200 OK';
+    extra := '';
+    if path = '/' then resp := 'phosphor http ok'
+    else if path = '/family' then resp := 'ipv6'
+    else if path = '/echo' then resp := body
+    else if path = '/redir' then
+    begin
+      status := '302 Found';
+      extra := 'Location: http://127.0.0.1:' + IntToStr(SRV_PORT) + '/' + #13#10;
+      resp := '';
+    end
+    else
+    begin
+      status := '404 Not Found';
+      resp := 'not found';
+    end;
+    resp := 'HTTP/1.1 ' + status + #13#10 + 'Content-Length: ' + IntToStr(Length(resp)) +
+            #13#10 + extra + 'Connection: close' + #13#10#13#10 + resp;
+    st.WriteBuffer(resp[1], Length(resp));
+  finally
+    st.Free;   // closes the descriptor and frees the handler
+  end;
+end;
+
+function TestResolve6(const AHost: String): TStringDynArray;
+var v: String;
+    parts: TStringArray;
+    i: Integer;
+begin
+  Inc(GResolve6Calls);
+  Result := nil;
+  if GResolve6Map = nil then Exit;
+  v := GResolve6Map.Values[LowerCase(AHost)];
+  if v = '' then Exit;
+  parts := v.Split([',']);
+  SetLength(Result, Length(parts));
+  for i := 0 to High(parts) do Result[i] := Trim(parts[i]);
+end;
+
+{ http_resolve6_as$(host$, addrs$) -> addrs$. From now on host$ has exactly these
+  IPv6 addresses (comma-separated, no brackets): PhosphorHttpLib's HttpResolve6Hook,
+  the AAAA twin of http_resolve_as$. A host given none answers none. }
+function f_http_resolve6_as(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  if GResolve6Map = nil then GResolve6Map := TStringList.Create();
+  GResolve6Map.Values[LowerCase(Args[0].Str)] := Args[1].Str;
+  HttpResolve6Hook := @TestResolve6;
+  Result := ValStr(Args[1].Str);
+end;
+
+{ http_resolve6_calls() -> how many AAAA lookups the package has made through the
+  hook. A request carried by a proxy must make none: the proxy resolves, and a
+  client that looked the name up itself would leak it to the local resolver. }
+function f_http_resolve6_calls(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GResolve6Calls);
+end;
+
+{ server_ipv6_name$() -> a name this OS's REAL resolver answers ::1 for: Linux's
+  /etc/hosts names ::1 ip6-localhost, and Windows answers localhost's AAAA with
+  ::1 itself. }
+function f_server_ipv6_name(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  {$IFDEF WINDOWS}Result := ValStr('localhost');{$ELSE}Result := ValStr('ip6-localhost');{$ENDIF}
+end;
+
+{ http_resolve6_has_loopback(name$) -> 1 when the package's REAL AAAA resolver --
+  the hook set aside for the call -- answers an address equal to ::1 for name$,
+  else 0. Compared as addresses, because the text form the RTL writes ("::0001")
+  is not the canonical one. }
+function f_http_resolve6_has_loopback(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var
+  saved: THttpResolveHook;
+  got: TStringDynArray;
+  i, j: Integer;
+  a, lo: TIn6_Addr;
+  same: Boolean;
+begin
+  Err := NoError();
+  saved := HttpResolve6Hook;
+  HttpResolve6Hook := nil;
+  try
+    got := HttpResolveAAAA(Args[0].Str);
+  finally
+    HttpResolve6Hook := saved;
+  end;
+  lo := StrToHostAddr6('::1');
+  Result := ValInt(0);
+  for i := 0 to High(got) do
+  begin
+    a := StrToHostAddr6(got[i]);
+    same := True;
+    for j := 0 to 7 do
+      if a.u6_addr16[j] <> lo.u6_addr16[j] then same := False;
+    if same then Exit(ValInt(1));
+  end;
+end;
+
+{ server_url_ipv6$(which$) -> the base URL of an IPv6 server: "http" for plain,
+  "https" for TLS with the localhost certificate, "https_ip" for TLS with the
+  certificate that names ::1 -- all three at the literal [::1]. }
+function f_server_url_ipv6(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  if Args[0].Str = 'https' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS))
+  else if Args[0].Str = 'https_ip' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_IP))
+  else Result := ValStr('http://[::1]:' + IntToStr(SRV_PORT_V6));
 end;
 
 { server_url_mtls$() -> https://localhost on the server that REQUIRES a client
@@ -364,6 +587,7 @@ var
   eng: TPhosphorEngine;
   srv, srvTls, srvTlsIP: TBoundHttpServer;
   srvMtls: TMutualTlsServer;
+  v6Plain, v6Tls, v6TlsIP: TV6Server;
   th, thTls, thTlsIP, thMtls: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
@@ -478,10 +702,31 @@ begin
   thMtls.FreeOnTerminate := False;
   thMtls.Start;
 
+  { The three IPv6 servers (m6). }
+  v6Plain := TV6Server.Create(True);
+  v6Plain.Port := SRV_PORT_V6;
+  v6Plain.FreeOnTerminate := False;
+  v6Plain.Start;
+  v6Tls := TV6Server.Create(True);
+  v6Tls.Port := SRV_PORT_V6_TLS;
+  v6Tls.Tls := True;
+  v6Tls.CertFile := certDir + 'tls_test_cert.pem';
+  v6Tls.KeyFile := certDir + 'tls_test_key.pem';
+  v6Tls.FreeOnTerminate := False;
+  v6Tls.Start;
+  v6TlsIP := TV6Server.Create(True);
+  v6TlsIP.Port := SRV_PORT_V6_TLS_IP;
+  v6TlsIP.Tls := True;
+  v6TlsIP.CertFile := certDir + 'tls_test_ip_cert.pem';
+  v6TlsIP.KeyFile := certDir + 'tls_test_ip_key.pem';
+  v6TlsIP.FreeOnTerminate := False;
+  v6TlsIP.Start;
+
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
   while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active) or
-         (not srvMtls.Active)) and (waited < 3000) do
+         (not srvMtls.Active) or (not v6Plain.Ready) or (not v6Tls.Ready) or
+         (not v6TlsIP.Ready)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 
@@ -514,6 +759,11 @@ begin
     eng.Registry.Add('server_ca_file$:', @f_server_ca_file);
     eng.Registry.Add('server_url_https_ip$:', @f_server_url_https_ip);
     eng.Registry.Add('server_url_mtls$:', @f_server_url_mtls);
+    eng.Registry.Add('server_url_ipv6$:$', @f_server_url_ipv6);
+    eng.Registry.Add('http_resolve6_as$:$$', @f_http_resolve6_as);
+    eng.Registry.Add('server_ipv6_name$:', @f_server_ipv6_name);
+    eng.Registry.Add('http_resolve6_calls:', @f_http_resolve6_calls);
+    eng.Registry.Add('http_resolve6_has_loopback:$', @f_http_resolve6_has_loopback);
     eng.Registry.Add('server_client_cert$:$', @f_server_client_cert);
     eng.Registry.Add('http_tls_withhold:$', @f_http_tls_withhold);
     eng.Registry.Add('server_openssl_version$:', @f_server_openssl_version);

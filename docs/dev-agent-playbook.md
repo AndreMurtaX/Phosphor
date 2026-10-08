@@ -1525,6 +1525,27 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · m6: the blocker was read as "no seam", and there were two.**
+  The plan and the roadmap both said IPv6 needed a socket-layer rework because
+  TFPHTTPClient's socket is private. Reading the RTL for a way in -- after a
+  class helper was measured unable to reach the field -- found two virtual calls
+  in a row: the handler is told of its socket, then the client calls the
+  socket's Connect. Re-classing that socket to a field-less subclass moves only
+  the VMT, and the stream already routes every byte through the handler. That
+  is a technique to be careful with, so it was proven before it was built: a
+  forty-line spike on both OSes, then a refusal in the code whenever the
+  instance sizes differ. Three things the tests had to be written to SEE: a
+  /family route only the IPv6 servers answer, so "it worked" means "it went
+  over IPv6"; a name with both A and AAAA records answering from the IPv4
+  server, so IPv4 really is still first; and a dead proxy, so the new fallback
+  cannot quietly go around it -- nor look the name up locally, which a lookup
+  counter caught after the first sweep let the guard survive, as it let a missing
+  connect timeout survive until the test bounded the time. A latent defect fell out of the redirect case:
+  a pinned IPv4 request that was redirected to another host still dialled the
+  first host's address. Testing on Linux happened BEFORE the commit, in a VM
+  worktree removed with `git worktree remove`, not after a push.
+
+
 - **2026-10-07 · m7: the feature was six lines and the proof was a server.**
   FPC's handler already loads a certificate and key on the client side; the
   package only had to set them. The work was the other end: a TLS server that

@@ -345,6 +345,26 @@ ALLOWED = {
         'k is the count already written, and the output is bounded by the input',
     'PhosphorHttpLib.pas:DoHtmlDecode':
         'the same: a decode is never longer than what it decodes',
+    # ---- m6, IPv6: what each loop is bounded by -----------------------------------
+    'PhosphorHttpLib.pas:TPlain6Handler.Recv':
+        'retries ONLY a system call a signal interrupted, as FPC\'s own '
+        'TSocketHandler.Recv does; the wait itself is bounded by the IO timeout '
+        'TInet6Socket.Connect sets on the descriptor, which FetchCore derives '
+        'from the budget\'s remaining time',
+    'PhosphorHttpLib.pas:TPlain6Handler.Send':
+        'the same EINTR retry, bounded the same way',
+    'PhosphorHttpLib.pas:IsIPv6Literal':
+        'one Pos with a one-character needle (":") over a URL host the script '
+        'already handed over -- a scan, linear in it -- and an eight-word loop',
+    'PhosphorHttpLib.pas:HttpResolveAAAA':
+        'walks what the RESOLVER answered, not anything the script sized: '
+        'at most sixteen addresses from netdb, and the getaddrinfo list',
+    'phosphorhttptest.lpr:TV6Server.Execute':
+        'the TEST server\'s accept loop, on a thread of the runner; no script '
+        'reaches it, and the process ends with Halt',
+    'phosphorhttptest.lpr:TV6Server.Serve':
+        'the TEST server reading one request the package\'s own test sent, of a '
+        'few hundred bytes; no script reaches it',
 
     # ---- guarded by the registered function that calls them -------------------
     'PhosphorZipLib.pas:TZipWriter.Create':

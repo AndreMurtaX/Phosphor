@@ -45,3 +45,5 @@
 15_https_hostname
 16_https_fail_closed
 17_https_client_cert
+18_http_ipv6
+19_https_ipv6

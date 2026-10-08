@@ -27,9 +27,9 @@ program phosphorguitest;
 uses
   {$ifdef unix} BaseUnix, {$endif}   // fpExit, for the watchdog's immediate exit
   Interfaces,   // the LCL widgetset (win32 / gtk2), selected at build time
-  Forms, Clipbrd, LCLType, ExtCtrls,
+  Forms, Clipbrd, LCLType, ExtCtrls, StdCtrls, ComCtrls,
   SysUtils, Classes,
-  PhosphorEngine, PhosphorValue, PhosphorTestLib,
+  PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
@@ -239,6 +239,52 @@ var
   gsvc: THostServices;
   path: String;
   rc, i: Integer;
+{ gui_test_fire(c@, event$) -- TEST ONLY, and only in this runner: run the event a
+  person's action would, so a handler bound to it can be seen to run.
+
+  MEASURED on win32 and gtk2 alike (2026-10-08): a change made from code fires
+  the handler of a radio button, a radio group, a toggle box, a spin edit and a
+  track bar, but NOT of a combo box (itemindex), a list box (itemindex, onclick),
+  a tab control (tabindex) or a memo (text, addline) -- and a paint box is never
+  painted without a window on screen. Those bindings could be called and never
+  seen to work. This calls the LCL's OWN method each user action ends in, read in
+  the LCL source rather than assumed: TCustomComboBox.Change and TCustomEdit.Change
+  (a memo is one) call OnChange; TTabControl.Change calls it too; TCustomListBox.
+  Click is TControl.Click; TPaintBox.Paint calls OnPaint. A tray icon's click has
+  no such method -- the LCL raises it from the widgetset -- so its handler is
+  called directly, which proves only which event the binding wired.
+
+  It is not part of the language: it lives in this test host, which no shipped
+  binary links (CLAUDE.md: test-only stand-ins stay out of the libraries).
+  Answers 1 when it ran an event and 0 for a pairing it does not know. }
+type
+  TFireCombo = class(TCustomComboBox);
+  TFireEdit = class(TCustomEdit);
+  TFireList = class(TCustomListBox);
+  TFireTab = class(TTabControl);
+  TFirePaint = class(TPaintBox);
+
+function f_gui_test_fire(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent;
+    ev: String;
+begin
+  Err := NoError();
+  Result := ValInt(0);
+  if not GuiResolve(Args[0].Hnd, TComponent, c) then Exit;
+  ev := LowerCase(Args[1].Str);
+  if (ev = 'change') and (c is TCustomComboBox) then TFireCombo(c).Change
+  else if (ev = 'change') and (c is TCustomEdit) then TFireEdit(c).Change
+  else if (ev = 'change') and (c is TTabControl) then TFireTab(c).Change
+  else if (ev = 'click') and (c is TCustomListBox) then TFireList(c).Click
+  else if (ev = 'paint') and (c is TPaintBox) then TFirePaint(c).Paint
+  else if (ev = 'click') and (c is TTrayIcon) then
+  begin
+    if Assigned(TTrayIcon(c).OnClick) then TTrayIcon(c).OnClick(c);
+  end
+  else Exit;
+  Result := ValInt(1);
+end;
+
 { Turns an escaped exception into a reported failure. A class method rather than a
   free procedure because Application.OnException wants a method pointer. }
 type
@@ -344,6 +390,7 @@ begin
     RegisterCanvasFuncs(eng.Registry);
     RegisterDialogFuncs(eng.Registry);
     RegisterMiscFuncs(eng.Registry);
+    eng.Registry.Add('gui_test_fire:@$', @f_gui_test_fire);   // test only; see above
     ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

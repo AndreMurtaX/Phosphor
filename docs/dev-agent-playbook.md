@@ -1525,6 +1525,28 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · GUI wave 4: the 71 names no test called, called and read
+  back.** Two lessons, both about measuring before writing:
+  - **Which events a change from code raises is a property of the LCL, so it was
+    MEASURED, on both widgetsets, before a single assertion was written.** A
+    radio button, a radio group, a toggle box, a spin edit and a track bar raise
+    theirs; a combo box, a list box, a tab control and a memo do not (an edit
+    does -- the memo's sibling), and a paint box is never painted without a
+    window. win32 and gtk2 agreed on every one. The first four kinds are driven
+    by the change itself; the rest through a test-only gui_test_fire in the GUI
+    runner, which calls the LCL method a person's action ends in, read in the
+    LCL source -- not the handler directly, which would prove only the binding.
+    Each silent case is also PINNED as silent, so a widgetset that started
+    raising one would be seen.
+  - **Handles do not compare, and the better assertion was the one that could
+    not be written.** `assert_eq(setter@(h@), h@)` is refused ("cannot compare
+    handle with handle"), so each setter's answer is kept and the next getter
+    reads THROUGH it -- which proves the answer is that control and that the
+    value landed, in one assertion. 24 mutants, one per library, all caught.
+  - And a heredoc ate a backslash again, in a throwaway script, within the hour
+    of the last entry saying so. The Write tool, every time.
+
+
 - **2026-10-08 · HTTPS walks every address of a name (roadmap-net Step 3).**
   The step had waited on one question -- does FPC's TLS handler take SNI and the
   name check from the URL or from the pinned address? -- and the answer was the

@@ -25,3 +25,5 @@
 21_loop_lifecycle
 22_node_lifetime
 23_image_setbitmap
+24_wave4
+25_wave4_canvas

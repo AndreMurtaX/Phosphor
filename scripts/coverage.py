@@ -65,51 +65,14 @@ SUGAR_BACKED = {
 #     which is the property this gate did not have for the GUI at all.
 # The end state is an empty table, and then no table.
 _MODAL = 'MODAL: waits for a person; needs a host seam that dismisses it before a test can call it'
-_WAVE4 = 'WAVE 4: no test calls it'
+# WAVE 4 -- the 71 names no test called -- was emptied on 2026-10-08 by
+# tests/gui/24_wave4.bas and tests/gui/25_wave4_canvas.bas. The events among
+# them that the LCL does not raise for a change made from code are driven
+# through the GUI runner's test-only gui_test_fire (host/gui/phosphorguitest.lpr).
 GUI_WORKLIST = dict(
     [(n, _MODAL) for n in (
         'dialog_execute', 'inputbox$', 'msgbox', 'msgbox_confirm', 'openfile$',
-        'openpicture$', 'savefile$', 'savepicture$', 'selectdir$')] +
-    [(n, _WAVE4) for n in (
-        # PhosphorButtonLib
-        'bitbtn_caption$', 'speedbutton_caption$', 'speedbutton_caption@',
-        'speedbutton_click@', 'speedbutton_onclick@',
-        # PhosphorCanvasLib
-        'canvas_clear@', 'canvas_ellipse@', 'canvas_fontcolor@', 'canvas_fontsize@',
-        'canvas_penwidth@', 'paintbox_onpaint@', 'shape_pencolor', 'shape_pencolor@',
-        # PhosphorChoiceLib
-        'checkgroup_caption$', 'checkgroup_caption@', 'checkgroup_clear@',
-        'checkgroup_item$', 'combo_onchange@', 'combo_text$', 'list_clear@',
-        'list_onclick@', 'radio_onchange@', 'radiogroup_caption@',
-        'radiogroup_onchange@', 'togglebox_onchange@',
-        # PhosphorContainerLib
-        'tabcontrol_onchange@', 'tabsheet_caption@',
-        # PhosphorControlLib
-        'control_align', 'control_align@', 'control_focused', 'control_fontcolor',
-        'control_fontcolor@', 'control_height@', 'control_italic', 'control_italic@',
-        'control_maxheight', 'control_maxheight@', 'control_minheight',
-        'control_minheight@', 'control_underline', 'control_underline@',
-        'control_visible@',
-        # PhosphorDialogLib -- the two that do not wait for anyone
-        'fontdialog_fontcolor', 'fontdialog_fontcolor@',
-        # PhosphorEditLib
-        'edit_selectall@', 'maskedit_text$', 'maskedit_text@', 'memo_onchange@',
-        'memo_readonly', 'memo_readonly@', 'memo_wordwrap', 'memo_wordwrap@',
-        'spinedit_onchange@',
-        # PhosphorGuiCore
-        'app_processmessages',
-        # PhosphorImageLib
-        'image_proportional', 'image_proportional@',
-        # PhosphorMiscLib
-        'trayicon_hide@', 'trayicon_onclick@', 'trayicon_show@',
-        # PhosphorRangeLib
-        'progressbar_max', 'progressbar_min', 'progressbar_min@', 'scrollbar_max',
-        'scrollbar_min', 'scrollbar_min@', 'trackbar_min', 'trackbar_onchange@',
-        'updown_max', 'updown_min',
-        # PhosphorTimerLib
-        'timer_enabled@',
-        # PhosphorTreeListLib
-        'listitem_caption@')])
+        'openpicture$', 'savefile$', 'savepicture$', 'selectdir$')])
 
 # --- registrations whose NAME is computed ------------------------------------
 # Two libraries register a family by walking a const array of spellings:

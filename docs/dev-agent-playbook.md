@@ -1525,6 +1525,51 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · the adversarial round over the day's five commits: four
+  reviewers, every finding but one confirmed by running its repro, all fixed.**
+  The day's work had been green on both OSes at every step, and still:
+  - **JSON (the frees).** A view handle and the memo that hands the same node
+    the same view were in conflict: freeing a view another caller held killed
+    theirs, and `json_free` of a document scanned every live handle. The rule
+    is now that a view BELONGS to its document -- `json_free` of a view is a
+    no-op answering 0, and a document frees only the views it lists. The same
+    reviewer found a pre-existing access violation (`json_pushval@` with a
+    stale view as the value) that the new rule made reachable more often; it
+    is an error now, pinned in 78_free_handles.
+  - **HTTP (every address).** Each address was handed the run's whole
+    remaining time again -- the deadline was per ATTEMPT, so N stalled
+    addresses held a run N times its bound. One deadline per request now. And
+    `https://[::ffff:127.0.0.1]` was checked against the certificate as an
+    IPv6 address, which no 4-octet certificate entry can match: a literal is
+    never handed to the TLS layer as a peer NAME.
+  - **GUI (wave 4 and the modals).** The wave-4 entry below says a memo raises
+    no change from code. That was measured HEADLESS; with a window it does, on
+    both widgetsets -- the measurement was right and its scope was missing from
+    the sentence. Three canvas assertions could not fail (a font colour that
+    set the brush, a pen two pixels narrow, a processmessages that did
+    nothing), and the modal queue said a forgotten answer "fails on the count"
+    while nothing read the count. The runner now has a LEDGER read when a file
+    ends: a modal with no answer, an answer never used, one taken by a
+    different kind of modal, and -- from the trap reviewer -- **an event
+    handler that faulted**, which GuiCallBack swallows by design, so every
+    assertion after the faulting line in a handler had been skipped in
+    silence. `tests/gui/ledger/forgot.bas` must fail on all four and pass the
+    one fault it acknowledges.
+  - **Rule:** *a claim that something "fails" is a claim about a reader*. A
+    count nobody reads, a fault a seam swallows, a measurement whose
+    conditions are not in the sentence -- each read as a guarantee for a day.
+    Name the code that reads it, and watch it fail.
+  - Six mutants, one per fix, each run against its runner and caught; the
+    cancelled-confirm mutant is equivalent (cancel and dismiss both answer 0)
+    and is said so in 26_modal's header instead of being run. The first draft
+    of the deadline mutant (`if False then`) did not BUILD -- a warning, which
+    the runner refuses -- and the mutation driver read that as SURVIVED; a
+    mutant that never ran says nothing either way. And check-budget.py caught
+    what nobody listed: json_free's exemption, written for the old walk over
+    every live handle, named a loop that no longer exists. And twice more
+    this round a stray interpreter call with no input sat waiting on stdin --
+    the REPL trap at the top of CLAUDE.md, in another language.
+
 - **2026-10-08 · the nine modals, through a seam; the GUI worklist is gone.**
   Each of msgbox, inputbox$, openfile$ and the rest waits for a person, so they
   were the last GUI names no test could call. Dismissing a REAL dialog from

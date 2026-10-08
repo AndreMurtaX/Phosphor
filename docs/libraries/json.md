@@ -53,7 +53,7 @@ difference when it matters.
 | --- | --- |
 | `json_object@() → handle` | a new empty object, owning its own tree |
 | `json_array@() → handle` | a new empty array |
-| `json_free(j@) → num` | gives a JSON handle back: `1` when this call freed it, `0` for one that is stale, already freed, or not JSON. A **document** — anything constructed, parsed or cloned — is freed with every view borrowed into it, which become stale; a **view** frees only itself, and its document still answers for the node. Until 2026-10-08 nothing freed a JSON value |
+| `json_free(j@) → num` | gives a JSON **document** back — anything constructed, parsed or cloned — with every view borrowed into it, which become stale: `1` when this call freed it, `0` for one already freed or not JSON. A **view** (`json_get@`, `json_item@`, `json_path@`) is part of its document and is not freed on its own: `0`, and nothing changes. What it costs is the document's own views. Until 2026-10-08 nothing freed a JSON value |
 | `json_parse@(text$) → handle` | the document `text$` describes. Malformed text is a runtime error (`invalid json: ...`); so is empty or whitespace-only input, rather than a live handle onto nothing. Only the FIRST value is read: anything after it is ignored, unread, and since 2026-10-05 nothing in that tail can affect the result either — before, a stray quote there switched off the escape repair and brackets there counted as nesting |
 | `json_null@() → handle` | a JSON null as a value in its own right |
 | `json_bool@(n) → handle` | a JSON boolean; any non-zero `n` is true |

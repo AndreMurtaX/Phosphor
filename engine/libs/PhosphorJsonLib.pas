@@ -61,12 +61,17 @@ type
       depth never changes: nothing here re-parents a node (every graft clones),
       and deleting an ancestor frees the node and empties the handle. }
     Level: Integer;
-    { THE DOCUMENT THIS NODE BELONGS TO: its own node for a root, and for a view
-      the root of the handle it was borrowed from. json_free of a document frees
-      every view whose Root is that document's node, in one pass over the live
-      handles -- asking each view's tree instead (NodeContains) would cost the
-      tree once per view. }
-    Root: TJSONData;
+    { THE DOCUMENT THIS HANDLE BELONGS TO: itself for a document (anything
+      constructed, parsed or cloned), and for a view the document of the handle it
+      was borrowed from. A document lists its views' ids in Views, so json_free of
+      a document frees exactly its own views -- what it costs is its views. The
+      first version of this found them with one pass over EVERY live handle, so
+      freeing N documents held at once was quadratic (8 s at 40 000, measured by
+      an adversarial review on 2026-10-08). A view never outlives its document's
+      wrapper: views are freed with it, so Doc is never left dangling. }
+    Doc: TPhosphorJson;
+    Views: array of Int64;
+    ViewCount: Integer;
     destructor Destroy; override;
   end;
 
@@ -99,7 +104,7 @@ var
   GBorrowIds: array of Int64;
 
 function RegisterNode(ANode: TJSONData; AOwns: Boolean; ALevel: Integer;
-  ARoot: TJSONData): Int64;
+  ADoc: TPhosphorJson): Int64;
 var w: TPhosphorJson;
     o: TObject;
     key: String;
@@ -129,12 +134,19 @@ begin
   w.Node := ANode;
   w.Owns := AOwns;
   w.Level := ALevel;
-  w.Root := ARoot;
+  if AOwns then w.Doc := w else w.Doc := ADoc;
   if key = '' then
     Result := RegisterHandle(w)
   else
   begin
     Result := RegisterView(w);
+    if ADoc <> nil then
+    begin
+      if ADoc.ViewCount = Length(ADoc.Views) then
+        SetLength(ADoc.Views, (ADoc.ViewCount + 1) * 2);
+      ADoc.Views[ADoc.ViewCount] := Result;
+      Inc(ADoc.ViewCount);
+    end;
     if e >= 0 then
       GBorrowIds[e] := Result
     else
@@ -147,12 +159,16 @@ begin
   end;
 end;
 
-{ The bridge for a sibling package registers a tree of its own, or a node it
-  borrows out of one it owns; either way the node is its own document's root
-  as far as json_free is concerned. }
+{ The bridge for a sibling package registers a tree it OWNS -- a new document.
+  It used to accept a borrowed node too, registered as its own root, and nothing
+  used that; it would have made a view that json_free of the real document never
+  freed, pointing into freed memory (2026-10-08). A borrow belongs to the document
+  it was taken from, which this bridge cannot name, so it is refused: 0, not a
+  handle. }
 function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean; ALevel: Integer): Int64;
 begin
-  Result := RegisterNode(ANode, AOwns, ALevel, ANode);
+  if not AOwns then Exit(0);
+  Result := RegisterNode(ANode, True, ALevel, nil);
 end;
 
 function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
@@ -160,7 +176,9 @@ var o: TObject;
 begin
   ANode := nil;
   o := HandleObj(AHandleId);
-  Result := o is TPhosphorJson;
+  { A stale view -- its node replaced or removed -- has no node to hand over;
+    False, as for any handle that is not JSON, never a nil a caller would use. }
+  Result := (o is TPhosphorJson) and (TPhosphorJson(o).Node <> nil);
   if Result then ANode := TPhosphorJson(o).Node;
 end;
 
@@ -175,30 +193,30 @@ end;
   door and not at the other is worse than one covered nowhere, because it reads as
   covered.
 
-  Required, the omission is a compile error -- and so is ARoot, for json_free:
-  a view registered without its document's root would outlive that document.
+  Required, the omission is a compile error -- and so is ADoc, for json_free: a
+  view registered without its document would outlive that document.
   The exported JsonRegisterNode keeps
   its default: a sibling package registering a tree of its own really does have a
   root, and it is not reaching into anyone's borrowed node. }
-function RegJson(N: TJSONData; AOwns: Boolean; ALevel: Integer; ARoot: TJSONData): TValue;
+function RegJson(N: TJSONData; AOwns: Boolean; ALevel: Integer; ADoc: TPhosphorJson): TValue;
 begin
-  Result := ValHandle(RegisterNode(N, AOwns, ALevel, ARoot));
+  Result := ValHandle(RegisterNode(N, AOwns, ALevel, ADoc));
 end;
 
 { A node this library just made: an owned root of its own document. }
 function RegNewRoot(N: TJSONData): TValue;
 begin
-  Result := RegJson(N, True, 1, N);
+  Result := RegJson(N, True, 1, nil);   // a document is its own Doc
 end;
 
-{ The root of the document a handle's node belongs to; see TPhosphorJson.Root.
-  Only ever called after a Get* has accepted the handle. }
-function JsonRootOf(const V: TValue): TJSONData;
+{ The document a handle belongs to; see TPhosphorJson.Doc. Only ever called after
+  a Get* has accepted the handle. }
+function JsonDocOf(const V: TValue): TPhosphorJson;
 var o: TObject;
 begin
   Result := nil;
   o := HandleObj(V.Hnd);
-  if o is TPhosphorJson then Result := TPhosphorJson(o).Root;
+  if o is TPhosphorJson then Result := TPhosphorJson(o).Doc;
 end;
 
 { How deep the node this handle names sits in its tree. Only ever called after a
@@ -1709,7 +1727,7 @@ begin
   // one: a document parsed as it was written carries none and is not walked.
   if respelled then JsonUnmarkTree(d);
   Err := NoError();
-  Result := RegJson(d, True, 1, d);   // a freshly parsed document is its own root
+  Result := RegJson(d, True, 1, nil);   // a freshly parsed document is its own root
 end;
 
 // --- object mutation --------------------------------------------------------
@@ -1792,7 +1810,7 @@ begin
     Err := MakeError(peRuntime, 'no such json member');
     Exit;
   end;
-  Result := RegJson(m, False, JsonLevelOf(Args[0]) + 1, JsonRootOf(Args[0]));   // borrowed from the parent tree
+  Result := RegJson(m, False, JsonLevelOf(Args[0]) + 1, JsonDocOf(Args[0]));   // borrowed from the parent tree
 end;
 function t_json_has(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var o: TJSONObject;
@@ -2066,7 +2084,7 @@ begin
     Err := MakeError(peRuntime, 'json array index out of bounds');
     Exit;
   end;
-  Result := RegJson(a.Items[z], False, JsonLevelOf(Args[0]) + 1, JsonRootOf(Args[0]));   // borrowed child
+  Result := RegJson(a.Items[z], False, JsonLevelOf(Args[0]) + 1, JsonDocOf(Args[0]));   // borrowed child
 end;
 
 // --- object removal by key, array by position and pop -----------------------
@@ -2110,7 +2128,7 @@ begin
   // agreeing on one platform is not a behaviour worth keeping.
   // a fresh array of plain strings: depth 2, which no ceiling can refuse
   for i := 0 to o.Count - 1 do arr.Add(TJSONString.Create(o.Names[i]));
-  Result := RegJson(arr, True, 1, arr);   // a new owned array, and its own root
+  Result := RegJson(arr, True, 1, nil);   // a new owned array, and its own root
 end;
 
 // --- paths: boolean, a handle -----------------------------------------------
@@ -2133,7 +2151,7 @@ begin
     Exit;
   end;
   Result := RegJson(n, False, JsonLevelOf(Args[0]) + JsonPathSegments(Args[1].Str),
-                    JsonRootOf(Args[0]));   // borrowed
+                    JsonDocOf(Args[0]));   // borrowed
 end;
 
 // --- clone (deep) and merge -------------------------------------------------
@@ -2235,7 +2253,17 @@ begin
     vkString:        Result := TJSONString.Create(V.Str);
     vkBool:          Result := TJSONBoolean.Create(V.Bl);
     vkHandle:
-      if IsHandle(V.Hnd) and (HandleObj(V.Hnd) is TPhosphorJson) then
+      if IsHandle(V.Hnd) and (HandleObj(V.Hnd) is TPhosphorJson) and
+         (TPhosphorJson(HandleObj(V.Hnd)).Node = nil) then
+      begin
+        { A STALE VIEW: its node was replaced or removed. This called .Clone on nil
+          -- an access violation the script's ON ERROR never saw, in json_pushval@,
+          json_setval@ and a JSON literal alike -- where json.md promises a clean
+          error (found 2026-10-08; it predates the frees). }
+        Err := MakeError(peRuntime, 'this json handle is stale: the value it borrowed was replaced or removed');
+        Result := nil;
+      end
+      else if IsHandle(V.Hnd) and (HandleObj(V.Hnd) is TPhosphorJson) then
         Result := TPhosphorJson(HandleObj(V.Hnd)).Node.Clone   // literal takes a copy
       else
       begin
@@ -2267,24 +2295,24 @@ begin
   Result := Args[0];
 end;
 
-{ json_free(j@) -- give a JSON handle back. LENIENT, the shape strings_free and
-  buffer_free settled on: 1 when this call freed it, 0 for a handle that is
-  stale, already freed, or not JSON -- so freeing defensively, or twice, is
-  answered and never raised.
+{ json_free(j@) -- give a JSON DOCUMENT back. LENIENT, the shape strings_free and
+  buffer_free settled on: 1 when this call freed it, 0 otherwise -- freeing
+  defensively, or twice, is answered and never raised.
   A DOCUMENT (anything constructed, parsed or cloned) is freed with every view
-  borrowed into it: those handles become stale, which a later read reports as
-  a clean runtime error, and their slots are given back with the document's.
-  A VIEW (json_get@, json_item@, json_path@) frees only that handle -- the node
-  belongs to its document, which is untouched and still answers for it.
-  The views are collected first and freed after the walk: freeing the current
-  handle of a walk would end it early (PhosphorHandles, NextLiveHandle). }
+  borrowed into it: those handles become stale, which a later read reports as a
+  clean runtime error. A VIEW (json_get@, json_item@, json_path@) is PART of its
+  document and is not freed on its own: 0, and nothing changes. It used to free
+  the view -- and since reaching the same node twice answers the same view, that
+  killed the caller's other reach of the node, or did not, depending on whether
+  the borrow cache had been emptied by unrelated work in between (2026-10-08). A
+  view costs nothing toward a host's handle ceiling and the views of a document
+  can never outnumber its nodes, so there is nothing a view free would buy.
+  What it costs is the document's own views (TPhosphorJson.Doc). }
 function t_json_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   o: TObject;
-  w, v: TPhosphorJson;
-  ids: array of Int64;
-  id: Int64;
-  i, n: Integer;
+  w: TPhosphorJson;
+  i: Integer;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -2292,28 +2320,11 @@ begin
   o := HandleObj(Args[0].Hnd);
   if not (o is TPhosphorJson) then Exit;
   w := TPhosphorJson(o);
-  if w.Owns and (w.Root <> nil) then
+  if not w.Owns then Exit;   // a view: part of its document
+  for i := 0 to w.ViewCount - 1 do
   begin
-    n := 0;
-    ids := nil;
-    id := FirstLiveHandle();
-    for i := 1 to LiveHandleCount() do
-    begin
-      if id = 0 then Break;
-      o := HandleObj(id);
-      if (o is TPhosphorJson) and (o <> w) then
-      begin
-        v := TPhosphorJson(o);
-        if (not v.Owns) and (v.Root = w.Root) then
-        begin
-          if n = Length(ids) then SetLength(ids, (n + 1) * 2);
-          ids[n] := id;
-          Inc(n);
-        end;
-      end;
-      id := NextLiveHandle(id);
-    end;
-    for i := 0 to n - 1 do FreeHandle(ids[i]);
+    o := HandleObj(w.Views[i]);   // a stale id (already freed) answers nil
+    if (o is TPhosphorJson) and (TPhosphorJson(o).Doc = w) then FreeHandle(w.Views[i]);
   end;
   if FreeHandle(Args[0].Hnd) then Result := ValInt(1);
 end;

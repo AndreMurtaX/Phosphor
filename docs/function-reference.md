@@ -350,7 +350,7 @@ default when a member is absent.
 | `json_object@() → handle` | a new empty object |
 | `json_array@() → handle` | a new empty array |
 | `json_parse@(text$) → handle` | parse JSON text (error on malformed input) |
-| `json_free(j@) → num` | free a JSON handle: a document goes with every view borrowed into it, a view frees only itself. `1` when this call freed it, `0` otherwise |
+| `json_free(j@) → num` | free a JSON document with every view borrowed into it: `1` when this call freed it, `0` otherwise -- including for a view, which is part of its document and is not freed on its own |
 | `json_null@() → handle` | a JSON null scalar |
 | `json_bool@(n) → handle` | a JSON boolean scalar |
 | `json_number@(n) → handle` | a JSON number scalar |

@@ -24,7 +24,19 @@ rem   * dialog_execute answers 1 accepted / 0 cancelled, and an accepted
 rem     answer lands in the dialog as a person's choice would: its file
 rem     name, a colour dialog's colour, a font dialog's font name.
 rem A modal with nothing queued is cancelled and COUNTED, never shown --
-rem the last case proves that, so a forgotten answer cannot hang a run.
+rem the last case proves that, so a forgotten answer cannot hang a run --
+rem and the runner FAILS a file that left one unacknowledged, or left an
+rem answer unused, or fed an answer to a different kind of modal than it
+rem named (tests/gui/ledger/forgot.bas is the run that must fail).
+rem
+rem An adversarial review (2026-10-08) found two things here that could
+rem not fail: a confirm DISMISSED (Esc, [X] -- mrCancel, not No) was never
+rem answered, and the ledger was never read. Both are now driven: answer
+rem -1 is a dismissal. It also found that "a cancelled one-shot answers
+rem nothing" holds even for a library that ignored Execute's answer --
+rem true, and not a gap: a real dialog leaves its name untouched on
+rem cancel, and one made inside the call starts empty, so no one could
+rem see that defect either. The harness does what a real dialog does.
 rem ---------------------------------------------------------------
 
 test_case("modal/msgbox")
@@ -48,9 +60,11 @@ assert_eq(gui_test_asked$("buttons"), "yes,no", "with Yes and No")
 assert_eq(gui_test_asked$("prompt"), "delete it?", "asking the question")
 x = gui_test_answer(0, "")
 assert_eq(msgbox_confirm("delete it?"), 0, "No answers 0")
+x = gui_test_answer(-1, "", "message")
+assert_eq(msgbox_confirm("delete it?"), 0, "dismissed (Esc or the [X]) answers 0, not Yes")
 
 test_case("modal/inputbox$")
-x = gui_test_answer(1, "Ann")
+x = gui_test_answer(1, "Ann", "input")
 assert_eq(inputbox$("Your name?"), "Ann", "accepted, it answers what was typed")
 assert_eq(gui_test_asked$("kind"), "input", "it was an input")
 assert_eq(gui_test_asked$("prompt"), "Your name?", "with the prompt")
@@ -70,7 +84,7 @@ test_case("modal/the one-shot file dialogs")
 x = gui_test_answer(1, "chosen.txt")
 assert_eq(openfile$(), "chosen.txt", "an accepted open answers the file")
 assert_eq(gui_test_asked$("kind"), "topendialog", "through an open dialog")
-x = gui_test_answer(0, "")
+x = gui_test_answer(0, "", "topendialog")
 assert_eq(openfile$("Text|*.txt"), "", "a cancelled open answers nothing")
 assert_eq(gui_test_asked$("filter"), "Text|*.txt", "the filter reached the dialog")
 x = gui_test_answer(1, "out.txt")
@@ -127,3 +141,5 @@ assert_eq(gui_test_unanswered(), 0, "every modal so far had its answer")
 assert_eq(openfile$(), "", "a modal with no answer queued is cancelled")
 assert_eq(gui_test_unanswered(), 1, "and counted")
 assert_eq(gui_test_asked() - before, 1, "it was asked, once, and nothing waited for a person")
+assert_eq(gui_test_acknowledge(), 1, "acknowledged here, so the ledger does not fail the run for it")
+assert_eq(gui_test_unanswered(), 0, "and the count is clear")

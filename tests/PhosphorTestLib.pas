@@ -327,9 +327,12 @@ end;
   -- a raise would be swallowed by the very trap it is reporting. Arm the trap
   around the statement expected to fail and disarm it before asserting.
 
-  What this cannot see is an assertion that is never reached: under a live trap
-  whose argument raises on EVERY run. Its siblings in the same armed stretch are
-  reached, though, so a file shaped that way fails on them. }
+  What this cannot see is an assertion that is never CALLED: its argument raises,
+  the trap takes the fault, and the assert_* routine -- where this check lives --
+  never runs. Such a file fails only if some OTHER assertion runs while the same
+  trap is armed; one whose armed stretch holds that single assertion and nothing
+  else passes in silence. The GUI runner closes the same hole for event handlers
+  separately: a handler's fault is counted there whether or not a trap is armed. }
 function TrapGuard(AVM: TObject; AFunc: TPhosphorFunc; const Args: array of TValue;
                    out Err: TPhosphorError): TValue;
 begin

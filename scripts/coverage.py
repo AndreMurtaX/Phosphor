@@ -32,6 +32,12 @@ while seeing less than it claims:
     `arr_set@` -- was excused as "a family shown as a prefix", which is the exact
     shape of every rename this project makes. See is_family().
 
+AND ONE IT STILL CANNOT SEE (an adversarial review, 2026-10-08): "called" here
+means the name stands in CODE of a file that runs, not that the line executes. A
+call inside a branch the test never takes, or inside a handler nothing fires,
+counts. Proving every name actually ran would mean instrumenting the VM's call
+path; until something does, read a newly covered name's call site, not this tally.
+
 Usage:  python scripts/coverage.py [--list]      (--list prints uncovered names)
 """
 import re, glob, os, sys, collections

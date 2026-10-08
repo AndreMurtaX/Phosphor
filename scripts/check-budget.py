@@ -360,9 +360,6 @@ ALLOWED = {
     'PhosphorHttpLib.pas:FetchHop':
         'one Pos with a one-character needle (":") over the host it dials, a scan '
         'linear in a host the script already handed over',
-    'PhosphorJsonLib.pas:t_json_free':
-        'collects at most one id per LIVE handle and frees each once: a count of '
-        'what is already in memory, like InvalidateBorrowed\'s walk, not an amplifier',
     'PhosphorHttpLib.pas:DotlessUrl':
         'three forward scans over one url the script already handed over, each '
         'stopping at the end of the authority -- linear in the url',

@@ -24,6 +24,19 @@ rem   * with every address dead the answer is a dead host -- status 0,
 rem     http_error 0 -- not a refused name.
 rem The client's connect timeout is one second, so each dead address
 rem costs at most that (on Windows a refused connect costs the whole wait).
+rem
+rem An adversarial review (2026-10-08) added three:
+rem   * the run's remaining time is ONE deadline for the whole request:
+rem     each address used to get the whole allowance again, so six that
+rem     stalled the handshake held a run six times its bound. With a
+rem     second left and five dead addresses the request ends inside the
+rem     rounded-up second -- not after five of them;
+rem   * ::ffff:127.0.0.1 IS 127.0.0.1 (RFC 4291 2.5.5.2; http.md) and is
+rem     checked as that address: the IP-only certificate is accepted for
+rem     it, as it was before the fallback handed the handler the IPv6
+rem     spelling, which no 4-octet certificate address can match;
+rem   * dead.test's AAAA is answered by the runner's resolver too, so the
+rem     case never asks the real network.
 rem ---------------------------------------------------------------
 
 lf$ = chr$(10)
@@ -61,7 +74,22 @@ assert_eq(http_error(), 3, "for the name")
 
 test_case("https-fallback/every address dead is a dead host")
 x$ = http_resolve_as$("dead.test", "127.0.0.9,127.0.0.8")
+x$ = http_resolve6_as$("dead.test", "")
 d@ = http_client@("https://dead.test:" + tlsport$)
 x = http_timeout(d@, 1000)
 assert_eq(http_status(d@, "/"), 0, "nothing answers")
 assert_eq(http_error(), 0, "and that is not a refusal")
+
+test_case("https-fallback/one deadline for the whole request")
+x$ = http_resolve_as$("five.test", "127.0.0.9,127.0.0.8,127.0.0.7,127.0.0.6,127.0.0.5")
+x$ = http_resolve6_as$("five.test", "")
+x = http_test_deadline(1000)
+t0 = now()
+assert_eq(http_status("https://five.test:" + tlsport$ + "/"), 0, "five dead addresses answer nothing")
+ms = millisecondsbetween(now(), t0)
+x = http_test_deadline(0)
+assert_true(ms < 2500, "and with a second left the request ends inside it, rounded up -- not a second per address")
+
+test_case("https-fallback/an IPv4-mapped address is checked as that address")
+assert_eq(http_status("https://[::ffff:127.0.0.1]:" + ipport$ + "/"), 200, "the certificate naming 127.0.0.1 is accepted")
+assert_eq(http_error(), 0, "with no refusal")

@@ -286,8 +286,8 @@ never follows redirects.
 
 **What counts as a host.** An address is text that parses as one: four decimal
 numbers of 0..255 for IPv4, and for IPv6 what RFC 4291 writes inside the brackets,
-`::ffff:a.b.c.d` (an IPv4 address written as IPv6, dialled as that IPv4 address)
-included. A bracketed host that does not parse, a zone id, and the unspecified
+`::ffff:a.b.c.d` (an IPv4 address written as IPv6, dialled as that IPv4 address,
+and over https checked against the certificate AS that IPv4 address) included. A bracketed host that does not parse, a zone id, and the unspecified
 address of either family (`0.0.0.0`, `[::]`) are refused before anything is dialled:
 each used to be dialled as `::`, which Linux connects to this machine itself. A
 name with a trailing dot, `localhost.`, is the same name, and is requested,
@@ -300,7 +300,11 @@ BEGINS with a scheme — `/go?to=http://x/` is a path whose query holds a url.
 a server that trickles a byte a second is cut off when the run's time is gone. The
 connect wait is whole seconds, rounded up, because the system's connect timeout is;
 on Windows a REFUSED connect costs that whole wait before the next address is tried,
-which is the RTL's connect and is bounded by the timeout either way.
+which is the RTL's connect and is bounded by the timeout either way. **The run's
+remaining time is ONE deadline for the whole request**, however many addresses a
+name has: an address is not started once it has passed, and each is given only what
+is left of it. (Until 2026-10-08 every address was handed the whole allowance
+again, so six addresses that stalled the handshake held a run six times its bound.)
 
 The tests are `tests/packages/03_http.bas` (a real loopback server the runner
 stands up), `tests/packages/04_https.bas` (a self-signed TLS server, proving both

@@ -177,6 +177,40 @@ if ($okW) {
 }
 [IO.File]::Delete($hOut); [IO.File]::Delete($hErr)
 
+# --- the ledger: a forgotten modal answer or a handler fault fails the run -----
+# tests/gui/ledger/forgot.bas provokes each way the modal answer queue can be
+# wrong -- asked with nothing queued, taken by the wrong kind, never used -- and
+# MUST fail on all three. The runner said a forgotten answer "fails on the
+# count" while nothing read the count (2026-10-08); this is the run that shows
+# it is read. A handler fault no test acknowledged fails it too: GuiCallBack
+# swallows a fault by design, which skipped every assertion after it in silence.
+# Bounded like everything else here.
+$lb = Join-Path $gui 'ledger\forgot.bas'
+$lOut = Join-Path $tmp 'ledger.out'
+$lErr = Join-Path $tmp 'ledger.err'
+$lp = Start-Process -FilePath $exe -ArgumentList "`"$lb`"" -PassThru -NoNewWindow `
+        -RedirectStandardOutput $lOut -RedirectStandardError $lErr
+$null = $lp.Handle
+$lEnded = $lp.WaitForExit(60000)
+if (-not $lEnded) { $lp.Kill() }
+$lp.WaitForExit()
+$lText = [IO.File]::ReadAllText($lOut)
+$lWhy = [IO.File]::ReadAllText($lErr)
+$okL = $lEnded -and ($lp.ExitCode -eq 1) -and ($lText -eq "passed: 1`nfailed: 4`n") -and
+       ($lWhy -like '*asked with no answer queued*') -and ($lWhy -like '*never used*') -and
+       ($lWhy -like '*taken by a different kind*') -and
+       ($lWhy -like '*event handler fault(s) no test acknowledged*on_fault*')
+if ($okL) {
+    Write-Host 'PASS  ledger: a forgotten modal answer or an unacknowledged handler fault fails the run  (exit 1)' -ForegroundColor Green
+} else {
+    Write-Host 'FAIL  ledger: the modal answer ledger did not fail the run' -ForegroundColor Red
+    Write-Host ("        ended={0} exit={1}" -f $lEnded, $lp.ExitCode) -ForegroundColor DarkGray
+    Write-Host ("        stdout: {0}" -f ($lText -replace "`n", '\n')) -ForegroundColor DarkGray
+    Write-Host ("        stderr: {0}" -f ($lWhy -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    $allOk = $false
+}
+[IO.File]::Delete($lOut); [IO.File]::Delete($lErr)
+
 
 # --- host mode: one binary that decides ---------------------------------------
 # phosphor links the LCL and brings the widgetset up only when a graphical

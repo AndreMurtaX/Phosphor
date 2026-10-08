@@ -14,8 +14,11 @@ rem so freeing twice is answered and never raised -- and from what each
 rem frees:
 rem   * a pdict@ holds handles' ids, not the handles: they outlive it;
 rem   * a JSON document goes with every view borrowed into it (json_get@,
-rem     json_item@, json_path@) and with no other document's, and freeing
-rem     a view frees only that view;
+rem     json_item@, json_path@) and with no other document's; a view is
+rem     PART of its document and json_free of one answers 0 and changes
+rem     nothing (2026-10-08: it used to free the view, and since two reaches
+rem     of one node share a view, whether that killed the other depended on
+rem     the borrow cache -- an adversarial round's finding);
 rem   * a config is discarded, never saved: freeing is not cfg_save.
 rem A handle used after it is freed fails with its library's own "not a
 rem valid ... handle", caught here and read back.
@@ -57,11 +60,12 @@ other@ = json_parse@("[{" + q$ + "n" + q$ + ":5}]")
 ov@ = json_item@(other@, 1)
 one@ = json_item@(doc@, 1)
 two@ = json_item@(doc@, 2)
-assert_eq(json_free(one@), 1, "a view is freed")
-assert_eq(json_len(doc@), 2, "and the document it was borrowed from is untouched")
-assert_eq(json_getn(two@, "n"), 2, "and so is another view of that document")
+again@ = json_item@(doc@, 1)
+assert_eq(json_free(one@), 0, "a view is part of its document: it is not freed on its own")
+assert_eq(json_getn(one@, "n"), 1, "so it still reads")
+assert_eq(json_getn(again@, "n"), 1, "and so does another reach of the same node")
+assert_eq(json_len(doc@), 2, "and the document is untouched")
 assert_eq(json_free(doc@), 1, "the document is freed")
-assert_eq(json_free(two@), 0, "and took its view with it: there is nothing left to free")
 raised = 0
 on error goto trapped
 x = json_getn(two@, "n")
@@ -76,6 +80,24 @@ assert_eq(dict_free(k@), 1, "which its own free still takes")
 c@ = json_object@()
 assert_eq(json_free(d@), 0, "json_free leaves a stale handle alone")
 assert_eq(json_free(c@), 1, "and a constructed object is a document too")
+
+test_case("free/a stale view is an error, never a crash")
+rem Removing a member frees its node and empties every view of it. Passing
+rem such a view on used to call Clone on a nil node -- an access violation
+rem ON ERROR never saw -- where json.md promises "this json handle is stale".
+s@ = json_parse@("{" + q$ + "a" + q$ + ":[1]}")
+v@ = json_get@(s@, "a")
+s@ = json_remove@(s@, "a")
+assert_eq(json_free(v@), 0, "an emptied view is not a document to free")
+t@ = json_array@()
+raised = 0
+msg$ = ""
+on error goto trapped
+t@ = json_pushval@(t@, v@)
+on error goto 0
+assert_eq(raised, 1, "pushing it is refused")
+assert_eq(left$(msg$, 25), "this json handle is stale", "as stale, the error json.md names")
+assert_eq(json_free(s@), 1, "and its document still frees")
 
 test_case("free/cfg")
 p$ = "bin/p9b_cfg_free.ini"

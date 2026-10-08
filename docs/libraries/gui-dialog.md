@@ -38,8 +38,13 @@ behaves exactly as before. `DialogExecuteHook(dialog)` answers any dialog's Exec
 `DialogMessageHook(title, text, kind, buttons)` answers a message box with the
 button pressed, and `DialogInputHook(title, prompt, value)` answers an input,
 receiving the default in `value`. `host/gui/phosphorguitest.lpr` is a complete
-example: a queue of answers, a record of what was asked, and a modal with nothing
-queued cancelled and counted rather than shown.
+example: a queue of answers, each optionally naming the kind of modal it is for, a
+record of what was asked, and a ledger read when the file ends -- a modal asked with
+nothing queued, an answer never used, or one taken by a different kind of modal
+fails the run. One modal does NOT go through these hooks: a **colour button**
+(`colorbutton@`, [gui-misc](gui-misc.md)) opens the widget set's colour dialog from
+inside the LCL's own click handling, which no hook reaches, so a test sets its
+colour with `colorbutton_color@` and never presses it.
 
 Two conventions carry over from the rest of the GUI, and one surprise is local to
 this package. The conventions: a setter is the name with `@`, and it answers **the

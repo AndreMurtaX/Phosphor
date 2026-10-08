@@ -74,7 +74,28 @@ type
     function PumpOne: Integer;
     function ClipCopy(const AText: String): Boolean;
     function ClipPaste(out AText: String): Boolean;
+    procedure HandlerFault(const AHandler: String; ALine: Integer; const AMessage: String);
   end;
+
+var
+  { EVENT HANDLERS THAT FAULTED (2026-10-08). GuiCallBack catches a handler's
+    error, sets gui_error() to 2 and carries on -- right for a program, and it
+    meant an assertion inside a handler whose own argument raised was SKIPPED in
+    this runner, neither passed nor failed, with no trap anywhere (an adversarial
+    review of the error-trap audit). The fault now reaches this runner through
+    GuiOnHandlerFault; a test that provokes one ON PURPOSE reads and clears the
+    count with gui_test_handler_faults(), and any other fails the run when the
+    file ends (CheckModalLedger). }
+  GHandlerFaults: Integer = 0;
+  GFirstFault: String = '';
+
+procedure TGuiTestServices.HandlerFault(const AHandler: String; ALine: Integer;
+  const AMessage: String);
+begin
+  Inc(GHandlerFaults);
+  if GFirstFault = '' then
+    GFirstFault := Format('%s, line %d: %s', [AHandler, ALine, AMessage]);
+end;
 
 function TGuiTestServices.Pump: Integer;
 begin
@@ -244,13 +265,15 @@ var
 
   MEASURED on win32 and gtk2 alike (2026-10-08): a change made from code fires
   the handler of a radio button, a radio group, a toggle box, a spin edit and a
-  track bar, but NOT of a combo box (itemindex), a list box (itemindex, onclick),
-  a tab control (tabindex) or a memo (text, addline) -- and a paint box is never
-  painted without a window on screen. Those bindings could be called and never
-  seen to work. This calls the LCL's OWN method each user action ends in, read in
-  the LCL source rather than assumed: TCustomComboBox.Change and TCustomEdit.Change
-  (a memo is one) call OnChange; TTabControl.Change calls it too; TCustomListBox.
-  Click is TControl.Click; TPaintBox.Paint calls OnPaint. A tray icon's click has
+  track bar, but NOT of a combo box (itemindex), a list box (itemindex, onclick)
+  or a tab control (tabindex), with a window or without one -- and a paint box is
+  never painted without a window on screen. (A memo was on that list, measured
+  headless, and wrongly: with a window its text set from code DOES fire, as
+  gui-edit.md says -- an adversarial review caught the pin, the same day.) This
+  calls the LCL's OWN method each user action ends in, read in the LCL source
+  rather than assumed: TCustomComboBox.Change calls OnChange; TTabControl.Change
+  calls it too; TCustomListBox.Click is TControl.Click; TPaintBox.Paint calls
+  OnPaint. A tray icon's click has
   no such method -- the LCL raises it from the widgetset -- so its handler is
   called directly, which proves only which event the binding wired.
 
@@ -259,7 +282,6 @@ var
   Answers 1 when it ran an event and 0 for a pairing it does not know. }
 type
   TFireCombo = class(TCustomComboBox);
-  TFireEdit = class(TCustomEdit);
   TFireList = class(TCustomListBox);
   TFireTab = class(TTabControl);
   TFirePaint = class(TPaintBox);
@@ -273,7 +295,6 @@ begin
   if not GuiResolve(Args[0].Hnd, TComponent, c) then Exit;
   ev := LowerCase(Args[1].Str);
   if (ev = 'change') and (c is TCustomComboBox) then TFireCombo(c).Change
-  else if (ev = 'change') and (c is TCustomEdit) then TFireEdit(c).Change
   else if (ev = 'change') and (c is TTabControl) then TFireTab(c).Change
   else if (ev = 'click') and (c is TCustomListBox) then TFireList(c).Click
   else if (ev = 'paint') and (c is TPaintBox) then TFirePaint(c).Paint
@@ -299,24 +320,63 @@ end;
   dialog's FileName, a colour dialog's Color, a font dialog's font name, an
   input's text. Test only; nothing here is part of the language. }
 var
-  GAnsAccept: array of Boolean;
+  GAnsMode: array of Integer;    // 1 accept, 0 cancel, -1 dismissed (Esc / [X])
   GAnsValue: array of String;
+  GAnsKind: array of String;     // '' = any kind of modal
   GAnsHead: Integer = 0;
   GAsked: TStringList = nil;   // name=value for the last modal
   GAskedCount: Integer = 0;
   GUnanswered: Integer = 0;
+  GMisrouted: Integer = 0;     // an answer queued for one kind, taken by another
 
-function NextAnswer(out AValue: String): Boolean;
+{ The next answer for a modal of kind AKind: its mode (1 accept, 0 cancel, -1
+  dismissed) and value. Nothing queued is a CANCEL, counted -- never shown. An
+  answer that named another kind is still consumed, and counted as misrouted,
+  so a test whose dialogs come in an order it did not expect fails rather than
+  feeding one dialog's answer to another. }
+function NextAnswer(const AKind: String; out AValue: String): Integer;
 begin
   AValue := '';
-  if GAnsHead >= Length(GAnsAccept) then
+  if GAnsHead >= Length(GAnsMode) then
   begin
     Inc(GUnanswered);
-    Exit(False);   // nothing queued: cancelled, never shown
+    Exit(0);
   end;
-  Result := GAnsAccept[GAnsHead];
+  Result := GAnsMode[GAnsHead];
   AValue := GAnsValue[GAnsHead];
+  if (GAnsKind[GAnsHead] <> '') and (GAnsKind[GAnsHead] <> AKind) then Inc(GMisrouted);
   Inc(GAnsHead);
+end;
+
+{ THE LEDGER, read when a file ends: a modal asked with no answer queued, an
+  answer nothing used, or an answer taken by the wrong kind of modal FAILS the
+  run. The runner said a forgotten answer "fails on the count", and nothing read
+  the count -- three unanswered modals ended `passed: 3` (2026-10-08). }
+procedure CheckModalLedger;
+var left: Integer;
+begin
+  if GHandlerFaults > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('handler: %d event handler fault(s) no test acknowledged -- the first: %s',
+                        [GHandlerFaults, GFirstFault]));
+  end;
+  left := Length(GAnsMode) - GAnsHead;
+  if GUnanswered > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('modal: %d dialog(s) asked with no answer queued', [GUnanswered]));
+  end;
+  if left > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('modal: %d queued answer(s) never used', [left]));
+  end;
+  if GMisrouted > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('modal: %d answer(s) taken by a different kind of dialog', [GMisrouted]));
+  end;
 end;
 
 procedure Asked(const AKind, ATitle, APrompt, ADefault: String);
@@ -340,7 +400,14 @@ begin
     GAsked.Values['initialdir'] := TFileDialog(ADialog).InitialDir;
     GAsked.Values['filename'] := TFileDialog(ADialog).FileName;
   end;
-  Result := NextAnswer(v);
+  Result := NextAnswer(LowerCase(ADialog.ClassName), v) = 1;
+  { A CANCEL CHANGES NOTHING, as a real dialog's does: neither the OS dialogs nor
+    the LCL write a name back when Execute answers False. (A first draft set the
+    typed name on cancel, to make "cancelled answers nothing" falsifiable; it
+    made the harness unlike every real dialog, and with a real one a dialog made
+    inside the call is still empty on cancel -- so a library that ignored
+    Execute's answer there would answer the same "" and is not a defect anyone
+    can see. Recorded as an equivalent mutant, 2026-10-08.) }
   if not Result then Exit;
   if ADialog is TFileDialog then TFileDialog(ADialog).FileName := v
   else if ADialog is TColorDialog then TColorDialog(ADialog).Color := StrToIntDef(v, TColorDialog(ADialog).Color)
@@ -360,32 +427,79 @@ begin
   if mbYes in AButtons then b := b + ',yes';
   if mbNo in AButtons then b := b + ',no';
   GAsked.Values['buttons'] := Copy(b, 2, MaxInt);
-  if NextAnswer(v) then
-  begin
-    if mbYes in AButtons then Result := mrYes else Result := mrOK;
-  end
-  else if mbNo in AButtons then Result := mrNo
-  else Result := mrCancel;
+  case NextAnswer('message', v) of
+    1: if mbYes in AButtons then Result := mrYes else Result := mrOK;
+    0: if mbNo in AButtons then Result := mrNo else Result := mrCancel;
+  else
+    Result := mrCancel;   // dismissed: Esc or the [X], which the LCL answers mrCancel
+  end;
 end;
 
 function TestInput(const ATitle, APrompt: String; var AValue: String): Boolean;
 var v: String;
 begin
   Asked('input', ATitle, APrompt, AValue);
-  Result := NextAnswer(v);
+  Result := NextAnswer('input', v) = 1;
   if Result then AValue := v;
 end;
 
-function f_gui_test_answer(const Args: array of TValue; out Err: TPhosphorError): TValue;
+{ gui_test_answer(mode, value$ [, kind$]) -- queue the next modal's answer: mode 1
+  accept, 0 cancel, -1 dismissed; kind$ (a dialog's class in lower case,
+  "message" or "input") makes it an error for another kind to take it. }
+function QueueAnswer(AMode: Integer; const AValue, AKind: String): Integer;
 var n: Integer;
 begin
-  Err := NoError();
-  n := Length(GAnsAccept);
-  SetLength(GAnsAccept, n + 1);
+  n := Length(GAnsMode);
+  SetLength(GAnsMode, n + 1);
   SetLength(GAnsValue, n + 1);
-  GAnsAccept[n] := AsDouble(Args[0]) <> 0;
-  GAnsValue[n] := Args[1].Str;
-  Result := ValInt(n + 1 - GAnsHead);   // answers still waiting
+  SetLength(GAnsKind, n + 1);
+  GAnsMode[n] := AMode;
+  GAnsValue[n] := AValue;
+  GAnsKind[n] := AKind;
+  Result := n + 1 - GAnsHead;   // answers still waiting
+end;
+
+function f_gui_test_answer(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(QueueAnswer(Trunc(AsDouble(Args[0])), Args[1].Str, ''));
+end;
+
+function f_gui_test_answer_kind(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(QueueAnswer(Trunc(AsDouble(Args[0])), Args[1].Str, LowerCase(Args[2].Str)));
+end;
+
+{ gui_test_handler_faults() -- how many event handlers faulted, and the count back to
+  0. A test that makes a handler fault ON PURPOSE says so with this. Test only. }
+function f_gui_test_handler_faults(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GHandlerFaults);
+  GHandlerFaults := 0;
+  GFirstFault := '';
+end;
+
+{ gui_test_acknowledge() -- how many modals went unanswered, and the count back to
+  0. A test that provokes one ON PURPOSE says so with this; any other unanswered
+  modal fails the run when the file ends (CheckModalLedger). Test only. }
+function f_gui_test_acknowledge(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GUnanswered);
+  GUnanswered := 0;
+end;
+
+{ gui_test_selection(e@) -- an edit's selection length. edit_selectall@ selects
+  and the language has no reader for a selection, so this is the only way a test
+  can see it worked. Test only. }
+function f_gui_test_selection(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  Err := NoError();
+  Result := ValInt(-1);
+  if GuiResolve(Args[0].Hnd, TCustomEdit, c) then Result := ValInt(TCustomEdit(c).SelLength);
 end;
 
 function f_gui_test_asked_field(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -437,6 +551,7 @@ procedure ReleaseGuiFixtures;
 begin
   FreeAndNil(DogTimer);
   FreeAndNil(Dog);
+  GuiOnHandlerFault := nil;   // a method pointer into GuiSvc, cleared first for the same reason
   FreeAndNil(GuiSvc);
   FreeAndNil(GAsked);
 end;
@@ -492,6 +607,7 @@ begin
   gsvc.ClipboardCopy := @GuiSvc.ClipCopy;
   gsvc.ClipboardPaste := @GuiSvc.ClipPaste;
   eng.HostServices := gsvc;
+  GuiOnHandlerFault := @GuiSvc.HandlerFault;   // a handler's fault reaches the ledger
 
   try
     RegisterTestFuncs(eng.Registry);
@@ -514,6 +630,10 @@ begin
     RegisterMiscFuncs(eng.Registry);
     eng.Registry.Add('gui_test_fire:@$', @f_gui_test_fire);   // test only; see above
     eng.Registry.Add('gui_test_answer:n$', @f_gui_test_answer);      // test only: the modals
+    eng.Registry.Add('gui_test_answer:n$$', @f_gui_test_answer_kind);
+    eng.Registry.Add('gui_test_selection:@', @f_gui_test_selection);
+    eng.Registry.Add('gui_test_acknowledge:', @f_gui_test_acknowledge);
+    eng.Registry.Add('gui_test_handler_faults:', @f_gui_test_handler_faults);
     eng.Registry.Add('gui_test_asked$:$', @f_gui_test_asked_field);
     eng.Registry.Add('gui_test_asked:', @f_gui_test_asked);
     eng.Registry.Add('gui_test_unanswered:', @f_gui_test_unanswered);
@@ -529,6 +649,7 @@ begin
       ReleaseGuiFixtures();
       Halt(2);
     end;
+    CheckModalLedger();
     for i := 0 to Failures.Count - 1 do
       Writeln(StdErr, '  FAIL ', Failures[i]);
     WriteSummary();

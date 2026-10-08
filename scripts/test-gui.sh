@@ -106,6 +106,20 @@ else
   allok=1
 fi
 
+# --- the ledger: a forgotten modal answer or a handler fault fails the run -----
+# The twin of the block in test-gui.ps1, which says why.
+timeout 60 "$exe" "$gui/ledger/forgot.bas" > "$out" 2> "$err"; lcode=$?
+if [ "$lcode" -eq 1 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 4')" ] &&
+   grep -qF -- "asked with no answer queued" "$err" && grep -qF -- "never used" "$err" &&
+   grep -qF -- "taken by a different kind" "$err" &&
+   grep -qE -- "event handler fault\(s\) no test acknowledged.*on_fault" "$err"; then
+  echo "PASS  ledger: a forgotten modal answer or an unacknowledged handler fault fails the run  (exit 1)"
+else
+  echo "FAIL  ledger: the modal answer ledger did not fail the run (exit $lcode)"
+  sed 's/^/        stdout: /' "$out"; sed 's/^/        stderr: /' "$err"
+  allok=1
+fi
+
 
 # --- host mode: one binary that decides ---------------------------------------
 # phosphor links the LCL and calls CreateWidgetset itself, only when a graphical

@@ -17,13 +17,21 @@ rem
 rem EVENTS. Measured on win32 and gtk2 alike: a change made FROM CODE
 rem runs the handler of a radio button, a radio group, a toggle box, a
 rem spin edit and a track bar, and those are driven that way. A combo
-rem box, a list box, a tab control and a memo do NOT run theirs on a
-rem change from code -- each is pinned as such below -- so this runner's
+rem box, a list box and a tab control do NOT run theirs on a change from
+rem code, with a window or without -- each is pinned as such below -- so
+rem this runner's
 rem test-only gui_test_fire calls the LCL's own method a person's action
 rem ends in (TCustomComboBox.Change and the rest; see
 rem host/gui/phosphorguitest.lpr). Every binding is then unbound with ""
 rem and seen to stay quiet, which is how a handler that is always
 rem called would be told from one that is bound.
+rem
+rem A WINDOW CHANGES SOME ANSWERS, and the last case shows its form for
+rem them. A memo's text set from code runs its handler once the memo has
+rem a window (gui-edit.md says so), and not before: the first draft of
+rem this file pinned the headless silence as the rule, and an adversarial
+rem review caught it the same day. Focus, too, needs a window, and so
+rem does a paint (25_wave4_canvas).
 rem ---------------------------------------------------------------
 
 hits = 0
@@ -90,6 +98,7 @@ e@ = edit@(f@)
 edit_text@(e@, "hello")
 r@ = edit_selectall@(e@)
 assert_eq(edit_text$(r@), "hello", "and selects without changing the text")
+assert_eq(gui_test_selection(e@), 5, "all five characters are selected")
 me@ = maskedit@(f@)
 r@ = maskedit_text@(me@, "abc")
 assert_eq(maskedit_text$(r@), "abc", "with no mask the text reads back as set")
@@ -102,15 +111,6 @@ memo_wordwrap@(m@, 0)
 assert_eq(memo_wordwrap(m@), 0, "word wrap off")
 memo_wordwrap@(m@, 1)
 assert_eq(memo_wordwrap(m@), 1, "and on")
-hits = 0
-memo_onchange@(m@, "on_hit")
-memo_text@(m@, "typed")
-assert_eq(hits, 0, "a memo's text set from code does not run its handler")
-assert_eq(gui_test_fire(m@, "change"), 1, "the LCL's own Change does")
-assert_eq(hits, 1, "and runs it once")
-memo_onchange@(m@, "")
-x = gui_test_fire(m@, "change")
-assert_eq(hits, 1, "unbound, it stays quiet")
 s@ = spinedit@(f@)
 hits = 0
 spinedit_onchange@(s@, "on_hit")
@@ -271,6 +271,28 @@ assert_eq(hits, 1, "and its handler")
 trayicon_onclick@(ti@, "")
 x = gui_test_fire(ti@, "click")
 assert_eq(hits, 1, "unbound, it stays quiet")
+
+test_case("wave4/with a window: memo changes and focus")
+w@ = form@("wave4 shown", 300, 200)
+wm@ = memo@(w@)
+wb@ = button@(w@)
+w@ = form_show@(w@)
+x = app_processmessages()
+hits = 0
+memo_onchange@(wm@, "on_hit")
+memo_text@(wm@, "typed")
+assert_eq(hits, 1, "a memo's text set from code runs its handler, as gui-edit.md says")
+memo_addline@(wm@, "another")
+assert_eq(hits, 2, "and so does a line added")
+memo_onchange@(wm@, "")
+memo_text@(wm@, "quiet")
+assert_eq(hits, 2, "unbound, it stays quiet")
+assert_eq(control_focused(wb@), 0, "a button nobody focused has no focus")
+wb@ = control_setfocus@(wb@)
+x = app_processmessages()
+assert_eq(control_focused(wb@), 1, "and has it once focused")
+w@ = form_close@(w@)
+x = app_processmessages()
 end
 
 function on_hit(sender@)

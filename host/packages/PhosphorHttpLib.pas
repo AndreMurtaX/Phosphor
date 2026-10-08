@@ -188,6 +188,10 @@ threadvar
   { THE RUN'S DEADLINE, as a GetTickCount64 instant; 0 when no budget is installed.
     Set around one attempt by FetchHop and read by every handler's Recv. }
   gDeadline: QWord;
+  { THE REQUEST'S DEADLINE: the run's remaining time, taken ONCE when a request
+    starts (FetchCore) and shared by every address and every redirect hop it
+    tries. 0 when no budget is installed. }
+  gReqDeadline: QWord;
 
 type
   { Raised from a read once the run's time is gone. Not an ESocketError, so the
@@ -715,7 +719,12 @@ begin
     { A connect pinned to an IPv4 address: the handler is told the name it is for.
       ConnectToServer has already dropped a pin that is not for this host, so a
       ConnectIP still set here IS for PinHost. }
-    if ConnectIP <> '' then THostCheckedHandler(Result).PeerName := PinHost;
+    if (ConnectIP <> '') and (not IsIPv4Literal(PinHost)) and (not IsIPv6Literal(PinHost)) then
+      THostCheckedHandler(Result).PeerName := PinHost;
+    { A NAME only. A pinned literal is an address already, checked as the address
+      it dials: ::ffff:a.b.c.d IS a.b.c.d (RFC 4291 2.5.5.2, and http.md says so),
+      and handing the handler the IPv6 spelling made OpenSSL compare 16 octets
+      against the certificate's 4 -- never a match (2026-10-08). }
   end;
 end;
 
@@ -973,9 +982,20 @@ var
         whole response, which is what bounds a peer that trickles (CheckDeadline).
         With no budget installed BudgetRemainingMs answers 0 and nothing below
         runs, so an unbudgeted host keeps exactly the timeouts it had. }
-      remaining := BudgetRemainingMs();
-      if (HttpDeadlineMs > 0) and ((remaining <= 0) or (remaining > HttpDeadlineMs)) then
-        remaining := HttpDeadlineMs;
+      { WHAT IS LEFT OF THE REQUEST'S DEADLINE, not the run's remaining time asked
+        afresh. Asked afresh, a budget measured in STEPS does not shrink while the
+        network waits, so every address got the whole allowance again: six
+        addresses that stalled the TLS handshake held a run 15.4 s on a 2.6 s
+        bound, and once a time budget was spent each remaining dead address still
+        cost a whole rounded-up second (an adversarial review, 2026-10-08). Past
+        the deadline no further address is tried at all. }
+      remaining := 0;
+      if gReqDeadline <> 0 then
+      begin
+        if GetTickCount64() >= gReqDeadline then Exit;   // nothing tried: not connected
+        remaining := Int64(gReqDeadline - GetTickCount64());
+        if remaining < 1 then remaining := 1;
+      end;
       if remaining > 0 then
       begin
         if remaining > High(Integer) then remaining := High(Integer);
@@ -1171,6 +1191,7 @@ function FetchCore(const AMethod, AUrl, ABody: String;
   const AForceAddrs: array of String; out AStatus: Integer;
   AConnectMs: Integer; ACfg: TObject): String;
 var
+  remaining: Int64;
   url, method, body, loc, next, scheme: String;
   hops, maxHops: Integer;
   follow, creds: Boolean;
@@ -1183,6 +1204,11 @@ begin
   method := AMethod;
   body := ABody;
   hops := 0;
+  remaining := BudgetRemainingMs();
+  if (HttpDeadlineMs > 0) and ((remaining <= 0) or (remaining > HttpDeadlineMs)) then
+    remaining := HttpDeadlineMs;
+  if remaining > 0 then gReqDeadline := GetTickCount64() + QWord(remaining)
+  else gReqDeadline := 0;
   jar := TStringList.Create();
   try
     Result := FetchHop(method, url, body, AForceAddrs, AStatus, AConnectMs, ACfg,
@@ -1220,6 +1246,7 @@ begin
     end;
   finally
     jar.Free;
+    gReqDeadline := 0;
   end;
 end;
 

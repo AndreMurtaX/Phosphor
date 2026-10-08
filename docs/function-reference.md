@@ -299,6 +299,7 @@ write. All three answer **the dictionary**, so they chain.
 | `dict@() → handle` | a new dictionary, holding any kind; reports itself as numeric |
 | `sdict@() → handle` | the same container, reporting itself as string |
 | `pdict@() → handle` | the same container, reporting itself as handle |
+| `dict_free(d@) → num` | free a dictionary of any kind: `1` when this call freed it, `0` for a stale, already-freed or non-dictionary handle. A `pdict@`'s values are not freed with it |
 | `dict_set@(d@, key$, v) → handle` | store **any** of the five kinds under `key$` — number, string, int, handle or bool; the int form is the number form. Answers the dictionary |
 | `sdict_set@(d@, key$, value$) → handle` | set a string value; answers the dictionary |
 | `pdict_set@(d@, key$, value@) → handle` | set a handle value; answers the dictionary |
@@ -349,6 +350,7 @@ default when a member is absent.
 | `json_object@() → handle` | a new empty object |
 | `json_array@() → handle` | a new empty array |
 | `json_parse@(text$) → handle` | parse JSON text (error on malformed input) |
+| `json_free(j@) → num` | free a JSON handle: a document goes with every view borrowed into it, a view frees only itself. `1` when this call freed it, `0` otherwise |
 | `json_null@() → handle` | a JSON null scalar |
 | `json_bool@(n) → handle` | a JSON boolean scalar |
 | `json_number@(n) → handle` | a JSON number scalar |
@@ -637,6 +639,7 @@ rejected.
 | function | description |
 | --- | --- |
 | `cfg_open@(path$) → handle` | open (or create) a config bound to a file |
+| `cfg_free(c@) → num` | free a config, discarding what was not saved: `1` when this call freed it, `0` otherwise |
 | `cfg_open_auto@(path$) → handle` | open with autosave on (every set flushes) |
 | `cfg_filename$(c@) → str` | the bound file path |
 | `cfg_path$() → str` | the platform's per-app config directory |

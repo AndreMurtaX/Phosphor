@@ -372,13 +372,12 @@ within the same call, whether or not the host passed the error on. The count is
 the process's table (see "Handles are process-wide" above), which is this run's
 when one engine runs at a time.
 
-Two kinds of handle need saying. A JSON value *reached into* — `json_get@`,
-`json_item@`, `json_path@` — is a view of its document and does not count; the
-document does. And a dictionary, a JSON document or a config can be dropped by
-the script but never freed: nothing in the language frees one, so for those the
-level only rises, and a loop that makes one per pass is refused at the ceiling
-even if it keeps only the last. Size `MaxHandles` for the most a script may
-create of those, not the most it holds.
+A JSON value *reached into* — `json_get@`, `json_item@`, `json_path@` — is a view
+of its document and does not count; the document does, and `json_free` of the
+document gives its views back with it. Every kind a script can make has a free
+— `dict_free`, `json_free` and `cfg_free` since 2026-10-08, when the level for
+those three could only rise — so a script that frees what it is done with is
+judged on what it holds.
 
 **Four more ceilings are fixed rather than yours to set**, and they are why an
 unbounded recursion ends in a message instead of in the process dying. Ordinary

@@ -76,3 +76,4 @@
 75_config_lines
 76_ioerror_refused
 77_sys_answers
+78_free_handles

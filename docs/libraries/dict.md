@@ -1,6 +1,6 @@
 # dict — string-keyed maps as handles
 
-`engine/libs/PhosphorDictLib.pas` · 29 functions · always available (engine core, no package to enable)
+`engine/libs/PhosphorDictLib.pas` · 30 functions · always available (engine core, no package to enable)
 
 ## What it is for
 
@@ -130,9 +130,10 @@ working unchanged.
 
 | function | what it answers |
 | --- | --- |
-| `dict@() → handle` | a new, empty dictionary whose values are numbers. Cannot fail. There is no free function: the handle lives until the program ends |
+| `dict@() → handle` | a new, empty dictionary whose values are numbers. Cannot fail. It lives until `dict_free` or the end of the run |
 | `sdict@() → handle` | the same, with string values |
 | `pdict@() → handle` | the same, with handle values |
+| `dict_free(d@) → num` | gives a dictionary of any of the three kinds back: `1` when this call freed it, `0` for a handle that is stale, already freed, or not a dictionary — so freeing defensively, or twice, is answered and never raised. A `pdict@` stores handles' ids, not the handles, so what it held is NOT freed with it. Using the handle afterwards is the usual `not a valid dictionary handle` |
 
 ### Setting and reading
 
@@ -235,10 +236,12 @@ Two things worth noticing:
 
 ## Notes
 
-- **No free, no ownership.** Nothing here frees a dictionary, and a `pdict@` does
-  not own the handles it stores. Every handle is released together when the run
-  ends, which is why storing the same handle in two dictionaries is safe and why a
-  long-lived program should reuse a dictionary rather than make one per iteration.
+- **A free, and no ownership.** `dict_free` gives a dictionary back; until
+  2026-10-08 nothing did, so under a host's handle ceiling a loop that made one
+  per pass was refused even when it kept only the last. A `pdict@` still does not
+  own the handles it stores: freeing it leaves them, and storing the same handle
+  in two dictionaries is safe. Whatever is not freed is released when the run
+  ends.
 - **Keys are compared exactly**, byte for byte. Case matters, whitespace matters,
   and no Unicode normalization happens; `"Name"` and `"name"` are two keys. The
   index hashes those same raw bytes — a hash that folded case would quietly fail

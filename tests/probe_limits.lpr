@@ -1131,6 +1131,44 @@ begin
   Result := ValInt(0);
 end;
 
+{ AND NOW THEY CAN BE FREED (2026-10-08). The same kinds the level could only
+  rise for -- a dictionary, a JSON document, a config -- each have a free, so a
+  loop that makes one per pass and frees it runs under a ceiling below its pass
+  count. The control is the dictionary loop WITHOUT the free, refused at the
+  101st: it is the free that keeps the level down. A JSON document goes with the
+  views borrowed into it, so the loop that borrows one per pass and frees only
+  the document leaves nothing live at all. }
+procedure CheckFreesKeepTheLevel;
+
+  function RunOne(const ASource: String): Integer;
+  var eng: TPhosphorEngine;
+  begin
+    eng := TPhosphorEngine.Create();
+    try
+      eng.MaxHandles := 100;
+      Result := eng.Run(ASource);
+      if Result <> 0 then
+        Report(eng.LastError.Code = peLimit, 'a refusal here is the handle limit (' + eng.ErrorMessage + ')');
+    finally
+      eng.Free;
+    end;
+  end;
+
+begin
+  Report(RunOne('for i = 1 to 200' + LF + '  d@ = dict@()' + LF + '  x = dict_free(d@)' + LF + 'next' + LF) = 0,
+         'MaxHandles: 200 dictionaries made and freed under 100 finish');
+  Report(RunOne('for i = 1 to 200' + LF + '  d@ = dict@()' + LF + 'next' + LF) <> 0,
+         'the control: the same 200 kept are refused');
+  Report(RunOne('for i = 1 to 200' + LF + '  j@ = json_parse@("[1,2,3]")' + LF +
+                '  r@ = json_item@(j@, 2)' + LF + '  x = json_free(j@)' + LF + 'next' + LF) = 0,
+         'MaxHandles: 200 documents read and freed under 100 finish');
+  Report(LiveHandleCount() = 0, 'and leave nothing live, the views gone with their documents (' +
+         IntToStr(LiveHandleCount()) + ')');
+  Report(RunOne('for i = 1 to 200' + LF + '  c@ = cfg_open@("bin/p9b_probe_free.ini")' + LF +
+                '  x = cfg_free(c@)' + LF + 'next' + LF) = 0,
+         'MaxHandles: 200 configs opened and freed under 100 finish');
+end;
+
 procedure CheckMaxHandlesDoors;
 var
   eng: TPhosphorEngine;
@@ -2098,6 +2136,7 @@ begin
   CheckNameTablesScale();
   CheckMaxHandles();
   CheckMaxHandlesDoors();
+  CheckFreesKeepTheLevel();
   CheckReusedCompilerNames();
 
   Writeln('ok: ', Ok);

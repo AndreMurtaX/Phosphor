@@ -364,6 +364,20 @@ begin
   Result := True;
 end;
 
+{ cfg_free(c@) -- give a config back. LENIENT, like dict_free: 1 when this call
+  freed it, 0 for a handle that is stale, already freed, or not a config. What
+  was not saved is DISCARDED, never written: an explicit cfg_save is the only
+  way a config reaches disk (TPhosphorConfig.Destroy says why), and freeing is
+  not a save. Until 2026-10-08 nothing freed a config at all. }
+function t_cfg_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(0);
+  if (Args[0].Kind <> vkHandle) or (not IsHandle(Args[0].Hnd)) then Exit;
+  if not (HandleObj(Args[0].Hnd) is TPhosphorConfig) then Exit;
+  if FreeHandle(Args[0].Hnd) then Result := ValInt(1);
+end;
+
 function SecName(const S: String): String;
 begin
   if S = '' then Result := 'General' else Result := S;
@@ -708,6 +722,7 @@ end;
 procedure RegisterConfigFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('cfg_open@:$',          @t_cfg_open);
+  Reg.Add('cfg_free:@',           @t_cfg_free);
   Reg.Add('cfg_open_auto@:$',     @t_cfg_open_auto);
   Reg.Add('cfg_filename$:@',      @t_cfg_filename);
   Reg.Add('cfg_path$:',           @t_cfg_path);

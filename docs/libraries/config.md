@@ -1,6 +1,6 @@
 # config — settings a program keeps between runs, as an INI file
 
-`engine/libs/PhosphorConfigLib.pas` · 31 functions · always available (registered by the engine, so every host has it)
+`engine/libs/PhosphorConfigLib.pas` · 32 functions · always available (registered by the engine, so every host has it)
 
 ## What it is for
 
@@ -154,6 +154,7 @@ take the section name **literally**, so `""` there means a section actually name
 | function | what it answers |
 | --- | --- |
 | `cfg_modified(c@) → num` | `1` while the memory copy differs from the last save, `0` right after a save, a reload, or an open |
+| `cfg_free(c@) → num` | gives a config back: `1` when this call freed it, `0` for one that is stale, already freed, or not a config. What was not saved is **discarded**, never written — freeing is not a save, so `cfg_save` first. Until 2026-10-08 nothing freed a config |
 | `cfg_save(c@) → num` | `1` once the whole file has been written, creating any missing directories along the path. It writes whether or not anything changed. A write the OS refuses is a catchable runtime error carrying the OS message. **`0` means no file was ever bound** — the path was outside the sandbox root when the handle was opened, so there is nowhere to write and nothing was written |
 | `cfg_reload@(c@) → handle` | the handle, now holding what is on disk — every unsaved change is discarded, and `cfg_modified` returns to `0`. Reloading a file that no longer exists leaves an empty config |
 

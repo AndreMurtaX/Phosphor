@@ -286,6 +286,23 @@ begin
   Result := True;
 end;
 
+{ dict_free(d@) -- give a dictionary back, of any of the three kinds. LENIENT,
+  the shape strings_free and buffer_free settled on: 1 when this call freed it,
+  0 for a handle that is stale, already freed, or not a dictionary -- freeing
+  defensively, or twice, is answered and never raised. A pdict@'s values are
+  handles of their own and are NOT freed with it: the dictionary held their
+  ids, not them. Until 2026-10-08 nothing freed a dictionary at all, so under a
+  host's MaxHandles a loop making one per pass was refused at the ceiling even
+  when it kept only the last. }
+function t_dict_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(0);
+  if (Args[0].Kind <> vkHandle) or (not IsHandle(Args[0].Hnd)) then Exit;
+  if not (HandleObj(Args[0].Hnd) is TPhosphorDict) then Exit;
+  if FreeHandle(Args[0].Hnd) then Result := ValInt(1);
+end;
+
 function MakeDict(AKind: TArrayKind): TValue;
 begin
   Result := ValHandle(RegisterHandle(TPhosphorDict.Create(AKind)));
@@ -483,6 +500,7 @@ end;
 procedure RegisterDictFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('dict@:',  @t_dict_new);
+  Reg.Add('dict_free:@', @t_dict_free);
   Reg.Add('sdict@:', @t_sdict_new);
   Reg.Add('pdict@:', @t_pdict_new);
 

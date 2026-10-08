@@ -1525,6 +1525,28 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · dict_free, json_free, cfg_free: the follow-up the adversarial
+  round left recorded.** Under MaxHandles the level for these three kinds could
+  only rise. Each free follows the shape strings_free and buffer_free settled on
+  -- lenient, 1 when this call freed it, 0 otherwise -- and the one design
+  question was JSON: a document must take its views with it, and finding them by
+  asking each view's tree (NodeContains) costs the tree once per view. Every
+  wrapper now records its document's ROOT, a required parameter like the level,
+  so a document's views are one pass over the live handles. Two things worth
+  keeping:
+  - **A file-wide error trap swallows assertions.** With `on error goto` armed for
+    the whole test and the handler doing `resume next`, an assert whose own
+    argument raised was SKIPPED -- neither passed nor failed -- and the mutant that
+    freed ANOTHER document's view passed the first draft of
+    tests/suite/78_free_handles.bas so. The trap is now armed only around the
+    statement expected to fail. Other tests in the tree use the file-wide shape;
+    an audit of them was split out as its own task rather than done in passing.
+  - **A mutant can be equivalent, and saying so beats running it.** "dict_free
+    answers 1 whatever happened" cannot differ: after the type check, FreeHandle
+    of a valid handle is always True. Dropped before the sweep; the seven that ran
+    were all caught once the trap was fixed.
+
+
 - **2026-10-07 · adversarial round over the day's commits: 30 findings, every
   one checked before it was accepted -- the severe ones reproduced, the minor HTTP
   ones read -- and two more found while fixing them.** Four reviewers in

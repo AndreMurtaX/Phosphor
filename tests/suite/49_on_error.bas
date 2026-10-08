@@ -5,6 +5,12 @@ rem erl() read what happened, `resume next` continues past the failing
 rem statement, `resume` retries it, `on error goto 0` disables, and
 rem error() raises a catchable error. A handler catches errors raised in
 rem called functions too (recover and continue with goto).
+rem
+rem Each trap is disarmed BEFORE its checks run: an assertion whose own
+rem argument raised under a live trap was skipped by `resume next`, not
+rem failed, and the test library now fails any assertion that runs while
+rem a trap is armed (2026-10-08). `on error goto 0` leaves err(),
+rem errmsg$() and erl() as they were, so the checks still read them.
 rem ---------------------------------------------------------------
 
 test_case("onerror/catch and resume next")
@@ -15,11 +21,11 @@ line1 = 0
 on error goto h1
 x = 5 / 0
 after = 42
+on error goto 0
 assert_eq(caught, 1, "the handler ran on a division by zero")
 assert_eq(after, 42, "resume next continued after the failing statement")
 assert_eq(code1, 2, "err() reported the div-by-zero code")
 assert_true(line1, "erl() reported the failing source line")
-on error goto 0
 goto skip1
 h1:
   caught = 1
@@ -33,9 +39,9 @@ denom = 0
 tries = 0
 on error goto h2
 q = 100 / denom
+on error goto 0
 assert_eq(q, 50, "resume retried the statement with the fixed denominator")
 assert_eq(tries, 1, "the handler ran exactly once")
-on error goto 0
 goto skip2
 h2:
   tries = tries + 1
@@ -47,8 +53,8 @@ test_case("onerror/error() raises a catchable error")
 msg$ = ""
 on error goto h3
 error("boom")
-assert_eq(msg$, "boom", "the custom message reached the handler")
 on error goto 0
+assert_eq(msg$, "boom", "the custom message reached the handler")
 goto skip3
 h3:
   msg$ = errmsg$()
@@ -59,10 +65,10 @@ test_case("onerror/err_clear resets the state")
 on error goto h4
 badcode = 0
 z = 1 / 0
+on error goto 0
 assert_eq(badcode, 2, "the div-by-zero code was read")
 err_clear()
 assert_eq(err(), 0, "err_clear reset the code to none")
-on error goto 0
 goto skip4
 h4:
   badcode = err()
@@ -104,11 +110,11 @@ after_call = 0
 on error call on_fault
 w = 1 / 0
 after_call = 7
+on error goto 0
 assert_eq(callcount, 1, "the handler function was called once")
 assert_eq(callcode, 2, "it received the div-by-zero code")
 assert_eq(callmsg$, "division by zero", "and the message")
 assert_eq(after_call, 7, "execution resumed at the statement after the fault")
-on error goto 0
 
 function risky(n)
   return 10 / n

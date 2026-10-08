@@ -1525,6 +1525,51 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · the file-wide trap audit: no assertion runs under a live error
+  trap, and the harness now says so instead of a reviewer.** The split-out task
+  from the entry below. Rather than read the 52 .bas files that arm a trap for the shape, the READ THAT
+  DECIDES was asked: `TPhosphorVM.ErrTrapLive` answers the two fields `Fault`
+  reads before it takes a fault (a handler installed, and not already running),
+  and every `assert_*` in tests/PhosphorTestLib.pas now goes through `TrapGuard`,
+  which records a FAILURE -- not a raise, which the very trap would swallow --
+  when that is true. Both suite runners pin it both ways with two inline
+  fixtures. The first run named 16 files across tests/suite (12) and tests/gui
+  (4); tests/classic, tests/packages and the examples were already clean. What
+  the round taught:
+  - **The count golden was the only defence, and it is the number written
+    from a run.** Mutating one asserted call per file to raise -- `error("mutant")`
+    spliced into its first argument -- left 7 of the 16 at `failed: 0, exit 0`
+    on the pristine build (48, 58, 75 and all four GUI files): the assertion did
+    not fail, the run did not fail, only `passed:` came out one short. That
+    catches a regression in a file whose golden already exists, and nothing at
+    all in a file being WRITTEN, which is exactly how 78's first draft let its
+    mutant through. After the change all 16 stop at the mutated line, exit 2.
+  - **A retrying handler turns a skipped assertion into a hang.** HEAD's 68 did
+    not skip its mutant, it spun: `ovh` ends in `resume`, which retried the
+    raising assertion for ever. The runners' 30 s bound would have caught it as a
+    timeout, which names nothing.
+  - **Nine of the sixteen were not file-wide traps at all.** 54 and 62-69 arm a
+    trap INSIDE a function, and the install outlives the call -- so the
+    assertion on the function's answer ran under it. No textual gate sees that
+    (and one would flag every assertion in a handler, which is safe), so the
+    rule is enforced by the harness and not by a scripts/*.py. Where the stale
+    install IS the subject (65, 69, and 54's `abarm`) the answer is kept and
+    checked inside the handler, where no trap is live.
+  - **The restructure was re-measured against the checks those files hold.** The
+    abandonment record not being settled by a resume (63, 68, 62 caught; 64 a
+    shape guard that survives, as its header says) and a stale deep install
+    counted as an abandonment (65, 69 caught): identical on HEAD and after.
+  - **What the guard cannot see** is an assertion that is NEVER reached: one
+    whose argument raises under a live trap on every run, with no sibling
+    assertion reached in the same armed stretch. `TrapGuard`'s comment says so.
+  - The GUI files keep their safety net -- a regression in a statement under
+    test still lands in `trapped` and is reported as `raised` -- but every run of
+    assertions is lifted out from under it (`on error goto 0` above,
+    `on error goto trapped` below), and 20's `refused()` arms around its one load.
+  - I wrote a patch through a bash heredoc anyway -- Python inside it, escaping
+    inside that -- and a backslash vanished on the way, within the hour. Scratch
+    script, no harm, and the rule in CLAUDE.md says NEVER for this reason.
+
 - **2026-10-08 · dict_free, json_free, cfg_free: the follow-up the adversarial
   round left recorded.** Under MaxHandles the level for these three kinds could
   only rise. Each free follows the shape strings_free and buffer_free settled on

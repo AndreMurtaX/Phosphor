@@ -79,6 +79,14 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   INTEGRAL values compare exactly there; a fraction gets four ULPs, or 1e-12 near
   zero. Until that date `assert_eq` forgave 1e-12 of the magnitude, ±9007 at 2^53, so
   a big-integer assertion written before it may have been a range check.
+- **No assertion runs under a live error trap** -- arm `on error goto` around the
+  statement expected to fail, `on error goto 0`, THEN assert. Armed over an
+  assertion, an argument that raised was skipped by `resume next`: neither pass nor
+  fail, and only the golden's `passed:` count noticed -- the number a new test
+  writes down from its own run. Since 2026-10-08 the test library fails such an
+  assertion (`TrapGuard`, reading the VM's `ErrTrapLive`), and the suite runners
+  pin that both ways. A trap a FUNCTION installs outlives the call: take its
+  answer, disarm, then assert. Inside a handler no trap is live.
 - **A negative needs a REASON, not just a failure.** `tests/negative/manifest.txt`
   holds `name|reason` for every file there; the runner demands exit 2 (a rejection
   -- a failed assert is 1) and the diagnostic containing that reason. Derive the

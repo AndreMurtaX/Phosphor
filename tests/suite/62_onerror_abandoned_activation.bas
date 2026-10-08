@@ -38,10 +38,19 @@ rem comment says why.
 rem ---------------------------------------------------------------
 
 test_case("onerror/a handler installed inside a function still resumes")
-assert_eq(insideok(), 5, "the handler ran and resume next came back into the call")
+rem The trap a function installs OUTLIVES the call, so a value it answers is
+rem kept and the trap disarmed (or the value checked inside a handler, where
+rem none is live) before it is asserted: the test library fails an assertion
+rem run under a live trap (2026-10-08), because one whose argument raised would
+rem have been skipped by `resume next` and neither passed nor failed.
+v62a = insideok()
+on error goto 0
+assert_eq(v62a, 5, "the handler ran and resume next came back into the call")
 
 test_case("onerror/`on error call` inside a function returns by itself")
-assert_eq(callerok(), 7, "the call form resumed and the function returned its value")
+v62b = callerok()
+on error goto 0
+assert_eq(v62b, 7, "the call form resumed and the function returned its value")
 assert_eq(callmsg$, "division by zero", "and the handler saw the error it took")
 
 test_case("onerror/a top-level handler takes a fault raised inside a call")

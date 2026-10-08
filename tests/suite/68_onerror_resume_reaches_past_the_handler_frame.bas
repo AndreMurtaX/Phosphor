@@ -28,8 +28,14 @@ rem Anything appended after the last block runs as part of it.
 rem ---------------------------------------------------------------
 
 test_case("onerror/a handler in a function resumes a fault raised one call deeper")
+rem The trap a function installs OUTLIVES the call, so a value it answers is
+rem kept and the trap disarmed (or the value checked inside a handler, where
+rem none is live) before it is asserted: the test library fails an assertion
+rem run under a live trap (2026-10-08), because one whose argument raised would
+rem have been skipped by `resume next` and neither passed nor failed.
 ovd = 0
 ovr = ovf(1)
+on error goto 0
 rem Derived, not read off the run: the handler sets ovd to 2, `resume` re-runs
 rem the failing statement so ovg's z becomes 10 / 2, and ovg returns 3 whatever z
 rem is. ovf then answers 1000 + 3.
@@ -39,6 +45,7 @@ assert_eq(ovhits, 1, "the handler ran exactly once")
 test_case("onerror/the same shape through resume next")
 ovd2 = 0
 ovr2 = ovf2(1)
+on error goto 0
 rem `resume next` skips the failing statement instead of re-running it, so ovg2's
 rem z keeps the 0 it started at and ovg2 returns 4 regardless: 1000 + 4.
 assert_eq(ovr2, 1004, "resume next continued inside the deeper call")

@@ -673,6 +673,15 @@ type
     property ErrMessage: String read FErrMsg;
     property ErrLine: Integer read FErrLine;
     procedure ClearError;   // reset err()/errmsg$()/erl() to "no error"
+    { WOULD A FAULT RAISED NOW BE CAUGHT? True while an ON ERROR handler is
+      installed and not already running -- the two fields Fault reads before it
+      takes a fault. Read-only, like the window below. It exists for the test
+      harness (tests/PhosphorTestLib.pas): an assertion whose own argument
+      raised under a live trap was skipped by `resume next` -- neither passed
+      nor failed -- so the harness refuses to run an assertion while this is
+      true. A handler installed by an OUTER activation counts: the nested one
+      returns the fault and the outer handler swallows it all the same. }
+    function ErrTrapLive: Boolean;
     { READ-ONLY STATE, FOR A HOST THAT WANTS TO LOOK. Nothing here writes, and the
       dispatch loop does not know they exist -- no field was added, no branch was
       put on any execution path, and a program that never calls one costs exactly
@@ -3782,6 +3791,11 @@ begin
     session stays closed, and CallUserFunc refuses by name. }
   if FHaltedByDebug then Exit;
   FHalted := False;
+end;
+
+function TPhosphorVM.ErrTrapLive: Boolean;
+begin
+  Result := (FErrHandler >= 0) and (not FInHandler);
 end;
 
 procedure TPhosphorVM.ClearError;

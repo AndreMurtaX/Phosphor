@@ -31,6 +31,13 @@ rem
 rem Written like 18_faults so a returning bug FAILS rather than
 rem aborting the runner: `on error goto` records into `raised` and
 rem `resume next` carries on, so the summary still names the case.
+rem
+rem THE TRAP IS LIFTED AROUND EVERY RUN OF ASSERTIONS (2026-10-08): it
+rem guards the statements under test, never an assertion. Armed over an
+rem assertion, an argument that raised was skipped by `resume next` --
+rem neither passed nor failed -- and the test library now fails any
+rem assertion that runs while a trap is armed. So a raise in a checked
+rem call aborts the run, which is a failure, and not a silent skip.
 rem ---------------------------------------------------------------
 
 raised = 0
@@ -49,28 +56,40 @@ test_case("bool/false through the 32-bit ordinal branch")
 raised = 0
 gui_clearerror()
 control_set@(b@, "Visible", false)
+on error goto 0
 assert_eq(raised, 0, "a bool did not raise")
 assert_eq(gui_error(), 0, "and was not refused")
 assert_eq(control_visible(b@), 0, "false wrote False")
+on error goto trapped
 
 test_case("bool/and true writes True, which is the regression")
 raised = 0
 control_set@(b@, "Visible", true)
+on error goto 0
 assert_eq(raised, 0, "true did not raise")
 assert_eq(control_visible(b@), 1, "true wrote True, not the 0 a lost kind gave")
+on error goto trapped
 
 test_case("bool/read back through the bridge's own getter")
 control_set@(b@, "Enabled", false)
+on error goto 0
 assert_eq(control_get(b@, "Enabled"), 0, "false")
+on error goto trapped
 control_set@(b@, "Enabled", true)
+on error goto 0
 assert_eq(control_get(b@, "Enabled"), 1, "true")
 assert_eq(control_enabled(b@), 1, "and through the named getter too")
+on error goto trapped
 
 test_case("bool/the 64-bit branch lost it as well -- Tag is PtrInt")
 control_set@(b@, "Tag", false)
+on error goto 0
 assert_eq(control_tag(b@), 0, "false is 0")
+on error goto trapped
 control_set@(b@, "Tag", true)
+on error goto 0
 assert_eq(control_tag(b@), 1, "true is 1, not 0")
+on error goto trapped
 
 test_case("bool/a bool still reaches a float property as 0 and 1")
 rem Alignment is an enum, Left an ordinal; a form's AlphaBlendValue is
@@ -78,17 +97,25 @@ rem a byte. The float branch has its own converter (ArgNum), which
 rem never lost the kind -- pinned so a future tidy-up cannot merge the
 rem two and lose it here instead.
 control_set@(b@, "Left", true)
+on error goto 0
 assert_eq(control_left(b@), 1, "true reached an Integer property as 1")
+on error goto trapped
 
 test_case("bool/the other two overloads of the same name still work")
 rem @$n, @$$ and @$? are three registered signatures; the boolean fix
 rem must not have moved either of the others.
 control_set@(b@, "Left", 12)
+on error goto 0
 assert_eq(control_left(b@), 12, "the number overload")
+on error goto trapped
 control_set@(b@, "Hint", "a hint")
+on error goto 0
 assert_eq(control_get$(b@, "Hint"), "a hint", "the string overload")
+on error goto trapped
 control_set@(b@, "Visible", true)
+on error goto 0
 assert_eq(control_visible(b@), 1, "and the bool overload beside them")
+on error goto trapped
 
 rem =================================================================
 rem PART 1b -- and the Int64 edge the boolean fix must not undo
@@ -98,40 +125,56 @@ test_case("int64/the largest Int64 still saturates and still does not trap")
 raised = 0
 n% = 9223372036854775807
 control_left@(b@, n%)
+on error goto 0
 assert_eq(raised, 0, "High(Int64) did not raise")
 assert_eq(control_left(b@), 2147483647, "it saturated at High(Integer)")
+on error goto trapped
 
 test_case("int64/the negative end too")
 raised = 0
 control_top@(b@, -9223372036854775807)
+on error goto 0
 assert_eq(raised, 0, "the negative end did not raise")
 assert_eq(control_top(b@), -2147483648, "it saturated at Low(Integer)")
+on error goto trapped
 
 test_case("int64/a double past Integer does not wrap")
 raised = 0
 control_left@(b@, 3e9)
+on error goto 0
 assert_eq(raised, 0, "3e9 did not raise")
 assert_eq(control_left(b@), 2147483647, "3e9 saturated, never -1294967296")
+on error goto trapped
 
 test_case("int64/through the bridge, on both of its ordinal branches")
 raised = 0
 control_set@(b@, "Left", 1e19)
+on error goto 0
 assert_eq(raised, 0, "1e19 through the bridge did not raise")
 assert_eq(control_left(b@), 2147483647, "and saturated instead of truncating")
+on error goto trapped
 control_set@(b@, "Tag", 9007199254740992)
+on error goto 0
 assert_eq(control_tag(b@), 9007199254740992, "a 53-bit tag kept its width")
+on error goto trapped
 
 test_case("int64/ArgOrdIn saturates into a narrower property, not past it")
 rem control_cursor@ is the ArgOrdIn caller: TCursor is -32768..32767.
 rem It delegates to ArgOrd, so the boolean fix reaches it too.
 raised = 0
 control_cursor@(b@, 9223372036854775807)
+on error goto 0
 assert_eq(raised, 0, "High(Int64) into a 16-bit property did not raise")
 assert_eq(control_cursor(b@), 32767, "it saturated at High(TCursor)")
+on error goto trapped
 control_cursor@(b@, -9223372036854775807)
+on error goto 0
 assert_eq(control_cursor(b@), -32768, "and at Low(TCursor)")
+on error goto trapped
 control_cursor@(b@, 0)
+on error goto 0
 assert_eq(control_cursor(b@), 0, "an ordinary cursor is untouched")
+on error goto trapped
 
 test_case("int64/and taborder, the other ArgOrdIn caller")
 rem TabOrder is the ArgOrdIn caller whose answer the LCL then
@@ -141,10 +184,14 @@ rem number was. What is pinned here is therefore what ArgOrdIn is for:
 rem no trap, and never a wrapped NEGATIVE order.
 raised = 0
 control_taborder@(b@, 9223372036854775807)
+on error goto 0
 assert_eq(raised, 0, "did not raise")
 assert_true(control_taborder(b@) >= 0, "and did not wrap below zero")
+on error goto trapped
 control_taborder@(b@, 0)
+on error goto 0
 assert_eq(control_taborder(b@), 0, "and an ordinary tab order is untouched")
+on error goto trapped
 
 rem =================================================================
 rem PART 1c -- THE DOOR THE ROUND-ONE METHOD COULD NOT HAVE FOUND.
@@ -171,26 +218,34 @@ control_left@(b@, 7)
 raised = 0
 msg$ = ""
 r = callfunc("control_left@", b@, true)
+on error goto 0
 assert_eq(raised, 1, "the wildcard re-resolves by kind and refuses")
 assert_true(instr(msg$, "no function control_left@:@?") > 0, "naming the kinds it could not match")
 assert_eq(control_left(b@), 7, "and nothing was written")
+on error goto trapped
 
 test_case("bool/but the one door that takes a bool works through it")
 raised = 0
 gui_clearerror()
 control_set@(b@, "Visible", false)
+on error goto 0
 assert_eq(control_visible(b@), 0, "false first")
+on error goto trapped
 r@ = callfunc@("control_set@", b@, "Visible", true)
+on error goto 0
 assert_eq(raised, 0, "the wildcard route did not raise")
 assert_eq(control_visible(b@), 1, "and true arrived as True, not as the 0 it used to")
+on error goto trapped
 
 test_case("bool/a number through the same wildcard is unaffected")
 rem callfunc@ and not callfunc: control_left@ answers a handle, and the
 rem suffix on callfunc is the return kind it is asked for.
 raised = 0
 r2@ = callfunc@("control_left@", b@, 21)
+on error goto 0
 assert_eq(raised, 0, "a number resolves through the wildcard")
 assert_eq(control_left(b@), 21, "and lands")
+on error goto trapped
 
 rem =================================================================
 rem PART 2 -- AN ARGUMENT THAT BECOMES AN ALLOCATION, AND THE THREE
@@ -237,12 +292,16 @@ test_case("size/an ordinary bitmap is built and drawn on")
 raised = 0
 gui_clearerror()
 bm@ = bitmap@(64, 48)
+on error goto 0
 assert_eq(raised, 0, "64 x 48 did not raise")
 assert_eq(bitmap_width(bm@), 64, "and has the width asked for")
 assert_eq(bitmap_height(bm@), 48, "and the height")
+on error goto trapped
 canvas_brushcolor@(bm@, 255)
 canvas_fillrect@(bm@, 0, 0, 64, 48)
+on error goto 0
 assert_eq(bitmap_pixel(bm@, 1, 1), 255, "and paints")
+on error goto trapped
 x = control_free(bm@)
 
 test_case("size/a bitmap AT the budget's own edge is accepted")
@@ -252,26 +311,32 @@ rem TBitmap.SetSize is lazy -- which is precisely why the check cannot
 rem wait for the first drawing call.
 raised = 0
 edge@ = bitmap@(13377, 13377)
+on error goto 0
 assert_eq(raised, 0, "the last size that fits is not an error")
 assert_eq(bitmap_width(edge@), 13377, "and the bitmap is the size asked for")
+on error goto trapped
 x = control_free(edge@)
 
 test_case("size/one pixel wider is refused, and the message adds up")
 raised = 0
 msg$ = ""
 over@ = bitmap@(13378, 13378)
+on error goto 0
 assert_eq(raised, 1, "past the budget is a catchable error")
 assert_eq(err(), 6, "a runtime error, which on error goto catches")
 assert_true(instr(msg$, "bitmap 13378 x 13378 is too large") > 0, "the message names what was refused")
 assert_true(instr(msg$, "1024.1 MB") > 0, "and what it would have cost")
 assert_true(instr(msg$, "1024.0 MB") > 0, "and the budget it was measured against")
+on error goto trapped
 
 test_case("size/the case that cost 2.3 GB is refused")
 raised = 0
 msg$ = ""
 bad@ = bitmap@(20000, 20000)
+on error goto 0
 assert_eq(raised, 1, "20000 x 20000 is refused")
 assert_true(instr(msg$, "2288.8 MB") > 0, "and the message prices it")
+on error goto trapped
 
 test_case("size/a size too big to price is DESCRIBED, never mis-printed")
 rem 2^31-1 squared is 4.6e18; multiplying that by 6 leaves an Int64,
@@ -281,9 +346,11 @@ rem a number no reader could check.
 raised = 0
 msg$ = ""
 wide@ = bitmap@(2147483647, 2147483647)
+on error goto 0
 assert_eq(raised, 1, "refused")
 assert_true(instr(msg$, "past anything this host could hold") > 0, "described, not priced")
 assert_true(instr(msg$, "8796093022207") = 0, "and the saturation never reaches the reader")
+on error goto trapped
 
 test_case("size/a negative bitmap is still the empty one it always was")
 rem NOT an error: two negatives multiply to a large positive, and a
@@ -292,22 +359,30 @@ rem into a refusal. TBitmap clamps these itself -- measured.
 raised = 0
 gui_clearerror()
 neg@ = bitmap@(-5, -5)
+on error goto 0
 assert_eq(raised, 0, "a negative size did not become an error")
 assert_eq(bitmap_width(neg@), 0, "and is the empty bitmap it was before")
+on error goto trapped
 raised = 0
 neg2@ = bitmap@(-100000, -100000)
+on error goto 0
 assert_eq(raised, 0, "and the product of two big negatives is not a size")
+on error goto trapped
 
 test_case("size/no pixels means no cost, however many rows are named")
 rem The per-row term is real, but charging it ALONE would have refused
 rem 8 GB for a bitmap the LCL allocates nothing for.
 raised = 0
 flat@ = bitmap@(0, 2000000000)
+on error goto 0
 assert_eq(raised, 0, "a zero-width bitmap of two billion rows is free")
 assert_eq(bitmap_width(flat@), 0, "and empty")
+on error goto trapped
 raised = 0
 flat2@ = bitmap@(2000000000, 0)
+on error goto 0
 assert_eq(raised, 0, "and the other way round")
+on error goto trapped
 
 rem =================================================================
 rem PART 2b -- THE BOUND IS ON THE HOST, NOT ON EACH OBJECT.
@@ -326,12 +401,16 @@ p1@ = bitmap@(6688, 6688)
 p2@ = bitmap@(6688, 6688)
 p3@ = bitmap@(6688, 6688)
 p4@ = bitmap@(6688, 6688)
+on error goto 0
 assert_eq(raised, 0, "four of them are inside the budget")
+on error goto trapped
 msg$ = ""
 p5@ = bitmap@(6688, 6688)
+on error goto 0
 assert_eq(raised, 1, "the fifth is refused -- the host is the bound, not the bitmap")
 assert_true(instr(msg$, "already in use") > 0, "and the message says what is holding it")
 assert_true(instr(msg$, "1023.8 MB") > 0, "and how much")
+on error goto trapped
 
 test_case("size/freeing one makes room again -- the credit half")
 rem A charge that is never credited is a slow false refusal, which is
@@ -340,10 +419,14 @@ rem cannot send FreeNotification, so this is the path that has to be
 rem got right by hand.
 raised = 0
 gui_clearerror()
+on error goto 0
 assert_eq(control_free(p4@), 1, "the fourth is freed")
+on error goto trapped
 p6@ = bitmap@(6688, 6688)
+on error goto 0
 assert_eq(raised, 0, "and its bytes came back")
 assert_eq(bitmap_width(p6@), 6688, "with a real bitmap in their place")
+on error goto trapped
 x = control_free(p1@)
 x = control_free(p2@)
 x = control_free(p3@)
@@ -361,8 +444,10 @@ for i = 1 to 200
   if bitmap_width(c@) = 13377 then n = n + 1
   x = control_free(c@)
 next
+on error goto 0
 assert_eq(raised, 0, "two hundred cycles at the budget's edge, none refused")
 assert_eq(n, 200, "and every one of them was really made")
+on error goto trapped
 
 rem =================================================================
 rem PART 2c -- an image list: 20 bytes a pixel, PER ENTRY
@@ -372,30 +457,40 @@ test_case("size/an ordinary image list takes a bitmap")
 raised = 0
 gui_clearerror()
 il@ = imagelist@(16, 16)
+on error goto 0
 assert_eq(raised, 0, "16 x 16 did not raise")
+on error goto trapped
 icon@ = bitmap@(16, 16)
+on error goto 0
 assert_eq(imagelist_addbitmap(il@, icon@), 1, "and the bitmap went in")
 assert_eq(imagelist_count(il@), 1, "and is counted")
+on error goto trapped
 
 test_case("size/the no-argument overload keeps its own default")
 raised = 0
 il2@ = imagelist@()
+on error goto 0
 assert_eq(raised, 0, "imagelist@() did not raise")
 assert_eq(imagelist_count(il2@), 0, "and is an empty list")
+on error goto trapped
 
 test_case("size/a list AT the edge of one entry is accepted")
 rem 7327^2 * 20 = 1073698580, which is 43244 short of the budget.
 raised = 0
 ile@ = imagelist@(7327, 7327)
+on error goto 0
 assert_eq(raised, 0, "a list whose single entry just fits is allowed")
+on error goto trapped
 x = control_free(ile@)
 
 test_case("size/one pixel wider and no entry could ever fit, so it is refused")
 raised = 0
 msg$ = ""
 ilo@ = imagelist@(7328, 7328)
+on error goto 0
 assert_eq(raised, 1, "refused at the constructor, where the program wrote the numbers")
 assert_true(instr(msg$, "image list 7328 x 7328 is too large") > 0, "and named")
+on error goto trapped
 
 test_case("size/the case the old guard ACCEPTED at 1684 MB is refused")
 rem imagelist@(8192, 8192) was exactly the previous maximum. It is
@@ -403,15 +498,19 @@ rem 67108864 pixels, and an entry is 20 bytes of them, not 4.
 raised = 0
 msg$ = ""
 il8@ = imagelist@(8192, 8192)
+on error goto 0
 assert_eq(raised, 1, "8192 x 8192 is refused now")
 assert_true(instr(msg$, "1280.0 MB") > 0, "priced at what an entry really costs")
+on error goto trapped
 
 test_case("size/the case that cost over 4 GB is refused, and says so")
 raised = 0
 msg$ = ""
 ilbad@ = imagelist@(30000, 30000)
+on error goto 0
 assert_eq(raised, 1, "30000 x 30000 is refused")
 assert_true(instr(msg$, "image list 30000 x 30000") > 0, "and names the list")
+on error goto trapped
 
 test_case("size/a NEGATIVE list is priced by magnitude, not clamped to zero")
 rem The one place the "a negative size is an empty thing" rule of the
@@ -422,14 +521,18 @@ rem that clamped these to zero priced the whole family at nothing.
 raised = 0
 msg$ = ""
 iln@ = imagelist@(-8192, -8192)
+on error goto 0
 assert_eq(raised, 1, "a negative list of the same magnitude is refused too")
 assert_true(instr(msg$, "1280.0 MB") > 0, "at the same price as the positive one")
+on error goto trapped
 raised = 0
 gui_clearerror()
 ils@ = imagelist@(-5, -5)
 tiny@ = bitmap@(8, 8)
+on error goto 0
 assert_eq(raised, 0, "and a SMALL negative list is still no error, as it always was")
 assert_eq(imagelist_addbitmap(ils@, tiny@), 1, "and still takes an entry")
+on error goto trapped
 
 test_case("size/an entry is charged, and it is charged against the SAME budget")
 rem The reviewer's finding was that a per-entry cap says nothing about
@@ -439,32 +542,46 @@ rem entry is then refused for want of the rest.
 raised = 0
 gui_clearerror()
 pad@ = bitmap@(13000, 13000)
+on error goto 0
 assert_eq(raised, 0, "967 MB of budget taken by a bitmap that costs no memory")
+on error goto trapped
 ilc@ = imagelist@(2048, 2048)
 src@ = bitmap@(64, 64)
 msg$ = ""
 k = imagelist_addbitmap(ilc@, src@)
+on error goto 0
 assert_eq(raised, 1, "the entry is refused: it is charged, and the budget is shared")
 assert_true(instr(msg$, "image list entry 2048 x 2048") > 0, "named as an entry")
 assert_eq(imagelist_count(ilc@), 0, "and nothing went into the list")
+on error goto trapped
 
 test_case("size/and freeing the bitmap lets the same entry in")
 raised = 0
 gui_clearerror()
+on error goto 0
 assert_eq(control_free(pad@), 1, "the bitmap is freed")
+on error goto trapped
 k = imagelist_addbitmap(ilc@, src@)
+on error goto 0
 assert_eq(raised, 0, "the entry is taken now")
 assert_eq(k, 1, "as entry 1")
 assert_eq(imagelist_count(ilc@), 1, "and counted")
+on error goto trapped
 
 test_case("size/clearing a list gives its entries' bytes back")
 raised = 0
 k = imagelist_addbitmap(ilc@, src@)
+on error goto 0
 assert_eq(imagelist_count(ilc@), 2, "a second entry")
+on error goto trapped
 imagelist_clear@(ilc@)
+on error goto 0
 assert_eq(imagelist_count(ilc@), 0, "cleared")
+on error goto trapped
 pad2@ = bitmap@(13000, 13000)
+on error goto 0
 assert_eq(raised, 0, "and the 160 MB the two entries held is available again")
+on error goto trapped
 x = control_free(pad2@)
 x = control_free(ilc@)
 
@@ -480,11 +597,15 @@ raised = 0
 gui_clearerror()
 stringgrid_colcount@(g@, 4)
 stringgrid_rowcount@(g@, 6)
+on error goto 0
 assert_eq(raised, 0, "an ordinary grid did not raise")
 assert_eq(stringgrid_colcount(g@), 4, "the columns")
 assert_eq(stringgrid_rowcount(g@), 6, "the rows")
+on error goto trapped
 stringgrid_cell@(g@, 2, 3, "here")
+on error goto 0
 assert_eq(stringgrid_cell$(g@, 2, 3), "here", "and a cell round-trips")
+on error goto trapped
 
 test_case("size/THE WIDE AND SHALLOW SHEET THE CELL PRODUCT REFUSED")
 rem 100 columns x 21000 rows is 2.1 M cells and costs 21 MB measured.
@@ -496,11 +617,15 @@ gui_clearerror()
 wide@ = stringgrid@(f@)
 stringgrid_colcount@(wide@, 100)
 stringgrid_rowcount@(wide@, 21000)
+on error goto 0
 assert_eq(raised, 0, "a 21000-row hundred-column sheet is not an error")
 assert_eq(stringgrid_rowcount(wide@), 21000, "and the rows were made")
 assert_eq(stringgrid_colcount(wide@), 100, "and the columns")
+on error goto trapped
 stringgrid_cell@(wide@, 100, 21000, "corner")
+on error goto 0
 assert_eq(stringgrid_cell$(wide@, 100, 21000), "corner", "and the far corner holds a value")
+on error goto trapped
 stringgrid_rowcount@(wide@, 2)
 
 test_case("size/and the other four shapes the cell product refused")
@@ -511,19 +636,27 @@ gui_clearerror()
 sh@ = stringgrid@(f@)
 stringgrid_colcount@(sh@, 50)
 stringgrid_rowcount@(sh@, 50000)
+on error goto 0
 assert_eq(raised, 0, "50 x 50000")
+on error goto trapped
 stringgrid_rowcount@(sh@, 2)
 stringgrid_colcount@(sh@, 20)
 stringgrid_rowcount@(sh@, 150000)
+on error goto 0
 assert_eq(raised, 0, "20 x 150000")
+on error goto trapped
 stringgrid_rowcount@(sh@, 2)
 stringgrid_colcount@(sh@, 12)
 stringgrid_rowcount@(sh@, 200000)
+on error goto 0
 assert_eq(raised, 0, "12 x 200000")
+on error goto trapped
 stringgrid_rowcount@(sh@, 2)
 stringgrid_colcount@(sh@, 8)
 stringgrid_rowcount@(sh@, 300000)
+on error goto 0
 assert_eq(raised, 0, "8 x 300000")
+on error goto trapped
 stringgrid_rowcount@(sh@, 2)
 stringgrid_colcount@(sh@, 1)
 
@@ -534,8 +667,10 @@ raised = 0
 lim@ = stringgrid@(f@)
 stringgrid_colcount@(lim@, 1)
 stringgrid_rowcount@(lim@, 2000000)
+on error goto 0
 assert_eq(raised, 0, "two million rows in one column is allowed")
 assert_eq(stringgrid_rowcount(lim@), 2000000, "and the rows were made")
+on error goto trapped
 stringgrid_rowcount@(lim@, 2)
 
 test_case("size/but fifty columns of them is 1049 MB and is not")
@@ -543,27 +678,35 @@ raised = 0
 msg$ = ""
 stringgrid_colcount@(lim@, 50)
 stringgrid_rowcount@(lim@, 2000000)
+on error goto 0
 assert_eq(raised, 1, "50 x 2000000 is past the budget")
 assert_true(instr(msg$, "1049.0 MB") > 0, "priced by rows AND cells")
 assert_eq(stringgrid_rowcount(lim@), 2, "and the grid kept the rows it had")
+on error goto trapped
 
 test_case("size/the case that cost 2.5 GB is refused")
 raised = 0
 stringgrid_rowcount@(g@, 20000000)
+on error goto 0
 assert_eq(raised, 1, "20000000 rows is refused")
 assert_eq(stringgrid_rowcount(g@), 6, "and the grid is unchanged")
+on error goto trapped
 raised = 0
 stringgrid_colcount@(g@, 20000000)
+on error goto 0
 assert_eq(raised, 1, "and 20000000 columns too")
 assert_eq(stringgrid_colcount(g@), 4, "with the grid unchanged")
+on error goto trapped
 
 test_case("size/High(Integer) rows is refused and the grid is unchanged")
 raised = 0
 msg$ = ""
 stringgrid_rowcount@(g@, 2147483647)
+on error goto 0
 assert_eq(raised, 1, "High(Integer) rows is refused")
 assert_true(instr(msg$, "2147483647 rows") > 0, "and named")
 assert_eq(stringgrid_rowcount(g@), 6, "and the grid is unchanged")
+on error goto trapped
 
 test_case("size/A COLUMN COSTS 296 BYTES OF ITS OWN, whatever the rows do")
 rem This case was written to pin the opposite. An earlier draft of the
@@ -578,31 +721,41 @@ raised = 0
 gui_clearerror()
 e@ = stringgrid@(f@)
 stringgrid_colcount@(e@, 100000)
+on error goto 0
 assert_eq(raised, 0, "a hundred thousand columns is 34 MB and allowed")
 assert_eq(stringgrid_colcount(e@), 100000, "and they were made")
+on error goto trapped
 raised = 0
 msg$ = ""
 stringgrid_colcount@(e@, 20000000)
+on error goto 0
 assert_eq(raised, 1, "twenty million of them is past the budget and is not")
 assert_true(instr(msg$, "20000000 columns") > 0, "the message names the columns")
 assert_true(instr(msg$, "6408.6 MB") > 0, "and prices them, column term and all")
 assert_eq(stringgrid_colcount(e@), 100000, "and the grid is unchanged")
+on error goto trapped
 stringgrid_colcount@(e@, 1)
 
 test_case("size/the draw grid is the same two counts under another name")
 dg@ = drawgrid@(f@)
 raised = 0
 drawgrid_rowcount@(dg@, 20000000)
+on error goto 0
 assert_eq(raised, 1, "drawgrid rows refused")
+on error goto trapped
 raised = 0
 drawgrid_colcount@(dg@, 20000000)
+on error goto 0
 assert_eq(raised, 1, "drawgrid columns refused")
+on error goto trapped
 raised = 0
 drawgrid_rowcount@(dg@, 8)
 drawgrid_colcount@(dg@, 3)
+on error goto 0
 assert_eq(raised, 0, "an ordinary draw grid is untouched")
 assert_eq(drawgrid_rowcount(dg@), 8, "the rows")
 assert_eq(drawgrid_colcount(dg@), 3, "the columns")
+on error goto trapped
 
 test_case("size/a count that CLEARS a grid is still not a size")
 rem A negative count empties the grid -- documented, and it must not
@@ -610,10 +763,14 @@ rem become an error just because the guard sits in front of it.
 raised = 0
 gui_clearerror()
 stringgrid_rowcount@(g@, -1)
+on error goto 0
 assert_eq(raised, 0, "a negative row count is not a refusal")
 assert_eq(stringgrid_rowcount(g@), 0, "it emptied the grid, as it always has")
+on error goto trapped
 stringgrid_rowcount@(g@, 6)
+on error goto 0
 assert_eq(stringgrid_rowcount(g@), 6, "and the grid takes rows again after")
+on error goto trapped
 
 test_case("size/ten grids do not each get their own gigabyte")
 rem The third failure the per-object cap left: ten grids, each at the
@@ -626,12 +783,16 @@ gm@ = stringgrid@(f@)
 stringgrid_colcount@(gm@, 1)
 msg$ = ""
 stringgrid_rowcount@(gm@, 2000000)
+on error goto 0
 assert_eq(raised, 1, "a 316 MB grid does not fit beside a 967 MB bitmap")
 assert_eq(stringgrid_rowcount(gm@), 5, "and the grid is untouched")
+on error goto trapped
 raised = 0
 x = control_free(gpad@)
 stringgrid_rowcount@(gm@, 2000000)
+on error goto 0
 assert_eq(raised, 0, "and fits once the bitmap is freed")
+on error goto trapped
 stringgrid_rowcount@(gm@, 2)
 
 test_case("size/a grid is credited when its FORM dies -- the other half")
@@ -647,16 +808,24 @@ ff@ = form@("owner", 400, 300)
 gg@ = stringgrid@(ff@)
 stringgrid_colcount@(gg@, 1)
 stringgrid_rowcount@(gg@, 2000000)
+on error goto 0
 assert_eq(stringgrid_rowcount(gg@), 2000000, "a 316 MB grid inside its own form")
+on error goto trapped
 raised = 0
 t1@ = bitmap@(13000, 13000)
+on error goto 0
 assert_eq(raised, 1, "967 MB does not fit beside it")
+on error goto trapped
 raised = 0
 gui_clearerror()
+on error goto 0
 assert_eq(control_free(ff@), 1, "the FORM is freed, not the grid")
+on error goto trapped
 t2@ = bitmap@(13000, 13000)
+on error goto 0
 assert_eq(raised, 0, "and the grid's bytes came back with it")
 assert_eq(bitmap_width(t2@), 13000, "with a real bitmap in their place")
+on error goto trapped
 x = control_free(t2@)
 
 rem =================================================================
@@ -668,37 +837,51 @@ test_case("size/control_set@ reaches RowCount and is stopped there too")
 raised = 0
 msg$ = ""
 control_set@(g@, "RowCount", 20000000)
+on error goto 0
 assert_eq(raised, 1, "the bridge is gated as well")
 assert_true(instr(msg$, "too large") > 0, "with the same message")
 assert_eq(stringgrid_rowcount(g@), 6, "and the grid is unchanged")
+on error goto trapped
 
 test_case("size/and ColCount, and the draw grid through the bridge")
 raised = 0
 control_set@(g@, "ColCount", 20000000)
+on error goto 0
 assert_eq(raised, 1, "ColCount too")
+on error goto trapped
 raised = 0
 control_set@(dg@, "RowCount", 20000000)
+on error goto 0
 assert_eq(raised, 1, "and a draw grid through the same door")
+on error goto trapped
 
 test_case("size/no spelling of the name walks past the gate")
 rem The gate is handed the CANONICAL name out of the RTTI record, not
 rem the string the program typed, so case cannot be used to miss it.
 raised = 0
 control_set@(g@, "rowcount", 20000000)
+on error goto 0
 assert_eq(raised, 1, "lower case is the same property")
+on error goto trapped
 raised = 0
 control_set@(g@, "ROWCOUNT", 20000000)
+on error goto 0
 assert_eq(raised, 1, "and upper case")
+on error goto trapped
 
 test_case("size/an ordinary count through the bridge still works")
 raised = 0
 gui_clearerror()
 control_set@(g@, "RowCount", 9)
+on error goto 0
 assert_eq(raised, 0, "9 rows did not raise")
 assert_eq(gui_error(), 0, "and was not refused")
 assert_eq(stringgrid_rowcount(g@), 9, "and was applied")
+on error goto trapped
 control_set@(g@, "ColCount", 3)
+on error goto 0
 assert_eq(stringgrid_colcount(g@), 3, "and the columns too")
+on error goto trapped
 
 test_case("size/the bridge CHARGES what it wrote, not what it was asked")
 rem The gate runs before the write and the ledger is told after, so a
@@ -710,14 +893,20 @@ gui_clearerror()
 bg@ = stringgrid@(f@)
 control_set@(bg@, "ColCount", 1)
 control_set@(bg@, "RowCount", 500000)
+on error goto 0
 assert_eq(stringgrid_rowcount(bg@), 500000, "the bridge grew it")
+on error goto trapped
 msg$ = ""
 bpad@ = bitmap@(13300, 13300)
+on error goto 0
 assert_eq(raised, 1, "and the 79 MB it took is charged against the budget")
+on error goto trapped
 raised = 0
 control_set@(bg@, "RowCount", 2)
 bpad2@ = bitmap@(13300, 13300)
+on error goto 0
 assert_eq(raised, 0, "shrinking it through the bridge gives the bytes back")
+on error goto trapped
 x = control_free(bpad2@)
 
 test_case("size/the gate does not touch a control that is not a grid")
@@ -727,12 +916,16 @@ rem the package, silently.
 raised = 0
 gui_clearerror()
 control_set@(b@, "Left", 20000000)
+on error goto 0
 assert_eq(raised, 0, "a button's Left is not a cell count")
 assert_eq(control_left(b@), 20000000, "and was written")
+on error goto trapped
 lb@ = listbox@(f@)
 list_add@(lb@, "alpha")
 control_set@(lb@, "ItemIndex", 0)
+on error goto 0
 assert_eq(raised, 0, "and a list box's ItemIndex is not either")
+on error goto trapped
 
 test_case("size/the LCL's own extent ceiling still answers the old way")
 rem GuiExtentOk records gui_error 1 and does not raise; the new size
@@ -742,9 +935,11 @@ raised = 0
 control_size@(b@, 40, 20)
 gui_clearerror()
 control_width@(b@, 1000000)
+on error goto 0
 assert_eq(raised, 0, "a million pixels wide is still not an error value")
 assert_eq(gui_error(), 1, "it is still gui_error 1")
 assert_eq(control_width(b@), 40, "and the control kept its width")
+on error goto trapped
 
 test_case("size/and through the BRIDGE, which is where it was only claimed")
 rem The round-one report cited 18_faults as covering Width and Height
@@ -754,14 +949,18 @@ rem So it is pinned here, where it is actually checked.
 raised = 0
 gui_clearerror()
 control_set@(b@, "Width", 2000000000)
+on error goto 0
 assert_eq(raised, 0, "the LCL's extent trap does not escape")
 assert_eq(gui_error(), 1, "it is recorded as gui_error 1")
 assert_eq(control_width(b@), 40, "and the control kept its width")
+on error goto trapped
 raised = 0
 gui_clearerror()
 control_set@(b@, "Height", 2000000000)
+on error goto 0
 assert_eq(gui_error(), 1, "and Height the same way")
 assert_eq(control_height(b@), 20, "with the height unchanged")
+on error goto trapped
 
 rem =================================================================
 rem PART 2f -- A SIZE THAT ARRIVES IN A FILE. image_load@ and
@@ -813,44 +1012,54 @@ x = buffer_setint(ok@, 35, 4, 16, false)
 wroteok = file_writeallbytes(okbmp$, ok@)
 
 test_case("file/the fixtures were written where the sandbox can see them")
+on error goto 0
 assert_eq(wrote, 1, "the 54-byte bomb was written")
 assert_eq(wroteok, 1, "and the ordinary 2 x 2 bitmap")
+on error goto trapped
 
 test_case("file/an ordinary picture still loads, and reports its size")
 raised = 0
 gui_clearerror()
 im@ = image@(f@)
 image_load@(im@, okbmp$)
+on error goto 0
 assert_eq(raised, 0, "a 2 x 2 bitmap did not raise")
 assert_eq(gui_error(), 0, "and was not refused")
 assert_eq(image_picwidth(im@), 2, "the width it declares")
 assert_eq(image_picheight(im@), 2, "and the height")
 assert_eq(image_empty(im@), 0, "and the image is no longer empty")
+on error goto trapped
 
 test_case("file/the 54-byte bomb is refused before anything is decoded")
 raised = 0
 msg$ = ""
 im2@ = image@(f@)
 image_load@(im2@, bomb$)
+on error goto 0
 assert_eq(raised, 1, "a header that claims 900 million pixels is a catchable error")
 assert_true(instr(msg$, "picture is too large") > 0, "named as a picture")
 assert_true(instr(msg$, "19_bomb.bmp") > 0, "and the file is named")
 assert_true(instr(msg$, "30000 x 30000") > 0, "and the size it CLAIMED")
 assert_eq(image_empty(im2@), 1, "and nothing was loaded")
+on error goto trapped
 
 test_case("file/imagelist_addfile is the same door and the same answer")
 raised = 0
 msg$ = ""
 ilf@ = imagelist@(32, 32)
 k = imagelist_addfile(ilf@, bomb$)
+on error goto 0
 assert_eq(raised, 1, "the image list's file door is bounded too")
 assert_true(instr(msg$, "image list entry is too large") > 0, "named as an entry")
 assert_eq(imagelist_count(ilf@), 0, "and nothing went in")
+on error goto trapped
 raised = 0
 gui_clearerror()
 k = imagelist_addfile(ilf@, okbmp$)
+on error goto 0
 assert_eq(raised, 0, "while an ordinary file still goes in")
 assert_eq(k, 1, "as entry 1")
+on error goto trapped
 
 test_case("file/a missing file is still gui_error, not a size refusal")
 rem The two answers must stay apart: one is "no such file", the other
@@ -858,8 +1067,10 @@ rem is "that file is too big to load".
 raised = 0
 gui_clearerror()
 image_load@(im@, path_combine$(scratch$, "19_does_not_exist.bmp"))
+on error goto 0
 assert_eq(raised, 0, "a missing file does not raise")
 assert_true(gui_error() <> 0, "it is recorded, as it always was")
+on error goto trapped
 
 x = file_delete(bomb$)
 x = file_delete(okbmp$)

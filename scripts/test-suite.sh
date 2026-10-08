@@ -369,6 +369,34 @@ else
   echo "FAIL  probe detail: bin/probe_value was not built, so the failure path went unseen"; allok=1
 fi
 
+# AND NO ASSERTION RUNS UNDER A LIVE ERROR TRAP (2026-10-08). A file that armed
+# `on error goto` for its whole length SKIPPED every assertion whose own argument
+# raised -- `resume next` stepped over it, neither pass nor fail -- so
+# tests/PhosphorTestLib.pas now fails an assertion that runs while the VM would
+# catch a fault. Nothing in a green corpus reaches that refusal, so it is reached
+# here, BOTH ways: one assertion under a live trap must fail and say why, and the
+# same file disarmed -- plus one assertion inside the handler, where no trap is
+# live -- must pass both. A guard that refused everything would pass the first
+# half alone. The twin of the same block in test-suite.ps1.
+tg_armed="$(mktemp)"; tg_clear="$(mktemp)"
+printf 'test_case("guard")\non error goto h\nassert_eq(1, 1, "under a live trap")\non error goto 0\nend\nh:\nresume next\n' > "$tg_armed"
+printf 'test_case("guard")\non error goto h\nx = 1 / 0\non error goto 0\nassert_eq(x, 0, "disarmed first")\nend\nh:\nassert_eq(err(), 2, "inside the handler")\nresume next\n' > "$tg_clear"
+run_bounded "$tg_armed" "$test_timeout_s"; a_code=$?
+a_text="$(tr -d '\r' < "$out")"
+a_why="$(cat "$err")"
+run_bounded "$tg_clear" "$test_timeout_s"; c_code=$?
+c_text="$(tr -d '\r' < "$out")"
+a_named=1
+case "$a_why" in *"while an ON ERROR trap was armed"*) a_named=0 ;; esac
+if [ "$a_code" -eq 1 ] && [ "$a_text" = "$(printf 'passed: 0\nfailed: 1')" ] && [ "$a_named" -eq 0 ] &&
+   [ "$c_code" -eq 0 ] && [ "$c_text" = "$(printf 'passed: 2\nfailed: 0')" ]; then
+  echo "PASS  trap guard: an assertion under a live trap fails, one outside it or in the handler passes"
+else
+  echo "FAIL  trap guard: armed exit $a_code [$(echo $a_text)], clear exit $c_code [$(echo $c_text)] -- wanted 1 [passed: 0 failed: 1] naming the trap, and 0 [passed: 2 failed: 0]"
+  allok=1
+fi
+rm -f "$tg_armed" "$tg_clear"
+
 # --- source-level gates -------------------------------------------------------
 # The invariants no compiler can check and no golden happens to cover:
 #   check-codepage.py  no Char is concatenated into a code-page string (bytes >= 128

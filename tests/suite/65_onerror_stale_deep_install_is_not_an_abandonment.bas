@@ -27,7 +27,14 @@ rem Anything appended after the last block runs as part of it.
 rem ---------------------------------------------------------------
 
 test_case("onerror/a handler installed deeper than the fault, by a call that returned")
-assert_eq(cmid(1), 1, "the installing call returned normally and left its depth remembered")
+rem The trap a function installs OUTLIVES the call, so a value it answers is
+rem kept and the trap disarmed (or the value checked inside a handler, where
+rem none is live) before it is asserted: the test library fails an assertion
+rem run under a live trap (2026-10-08), because one whose argument raised would
+rem have been skipped by `resume next` and neither passed nor failed.
+rem The stale install IS the subject, so it cannot be disarmed here: cmid's
+rem answer is checked first thing in the handler instead.
+v65a = cmid(1)
 rem The fault below is taken at TOP LEVEL, one frame shallower than the depth the
 rem handler is remembered at. Everything after it on this line's own path is
 rem skipped, so the rest of the assertions live in the handler.
@@ -37,7 +44,12 @@ goto fileend
 
 ch:
 chits = chits + 1
-assert_eq(chelp(1), 3, "a helper called from the handler resumed its own fault and returned")
+assert_eq(v65a, 1, "the installing call returned normally and left its depth remembered")
+rem chelp re-arms a trap from inside this handler, and it is live after the
+rem helper returns -- disarmed before its answer is checked.
+v65b = chelp(1)
+on error goto 0
+assert_eq(v65b, 3, "a helper called from the handler resumed its own fault and returned")
 assert_eq(chits, 1, "the outer handler ran exactly once")
 goto fileend
 

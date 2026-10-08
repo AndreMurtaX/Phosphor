@@ -26,11 +26,16 @@ rem Every expected value below is derived from that rule, or from the
 rem file text written out by hand above it -- none was read off a run.
 rem Line breaks in a saved file are the platform's, so the order checks
 rem accept either.
+rem
+rem THE ERROR TRAP IS ARMED ONLY AROUND A STATEMENT EXPECTED TO FAIL
+rem (2026-10-08). This file used to arm it once, at the top, for its whole
+rem length -- so every assertion whose own argument raised was skipped by
+rem `resume next`, neither passed nor failed, and a cfg_get$ that broke
+rem by raising would have passed this file in silence.
 rem ---------------------------------------------------------------
 
 raised = 0
 msg$ = ""
-on error goto trapped
 
 lf$ = chr$(10)
 crlf$ = chr$(13) + chr$(10)
@@ -69,47 +74,73 @@ test_case("config-lines/what cannot be read back is refused, not written")
 d@ = cfg_open@("bin/p9b_cfg_refused.ini")
 raised = 0
 msg$ = ""
+on error goto trapped
 d@ = cfg_set@(d@, "t", "nl", "a" + lf$ + "b")
+on error goto 0
 assert_eq(raised, 1, "a value holding a line break is refused")
 assert_true(instr(msg$, "line break") > 0, "and the message says why")
 assert_eq(cfg_exists(d@, "t", "nl"), 0, "and nothing was written")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, ";sec", "k", "v")
+on error goto 0
 assert_eq(raised, 1, "a section beginning with a semicolon is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", ";semi", "v")
+on error goto 0
 assert_eq(raised, 1, "a key beginning with a semicolon is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", "#hash", "v")
+on error goto 0
 assert_eq(raised, 1, "a key beginning with a hash is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", "a=b", "v")
+on error goto 0
 assert_eq(raised, 1, "a key holding an equals sign is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", "", "v")
+on error goto 0
 assert_eq(raised, 1, "an empty key is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", " sp ", "v")
+on error goto 0
 assert_eq(raised, 1, "a key with blanks at its ends is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", "val", " padded ")
+on error goto 0
 assert_eq(raised, 1, "a value with blanks at its ends is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "a" + lf$ + "b", "k", "v")
+on error goto 0
 assert_eq(raised, 1, "a section holding a line break is refused")
 raised = 0
+on error goto trapped
 d@ = cfg_setn@(d@, "t", "a=b", 1)
+on error goto 0
 assert_eq(raised, 1, "the number setter asks the same question of its key")
 raised = 0
+on error goto trapped
 d@ = cfg_setbs@(d@, ";b", 1)
+on error goto 0
 assert_eq(raised, 1, "and so does the default-section boolean setter")
 raised = 0
+on error goto trapped
 d@ = cfg_sets@(d@, "k", "x" + lf$)
+on error goto 0
 assert_eq(raised, 1, "and the default-section string setter, of its value")
 raised = 0
 rem "[k" = "v]" is written as the line "[k=v]", which is a section header:
 rem the key was gone after a reload, and a section named "k=v" was there.
+on error goto trapped
 d@ = cfg_set@(d@, "t", "[k", "v]")
+on error goto 0
 assert_eq(raised, 1, "a key beginning [ with a value ending ] is refused")
 assert_eq(cfg_keycount(d@, "t"), 0, "not one of them reached the config")
 
@@ -121,12 +152,14 @@ rem and measured not to), and a section name beginning with "#" (a header
 rem line begins with "[", so no comment rule applies to it).
 bs$ = chr$(92)
 raised = 0
+on error goto trapped
 d@ = cfg_set@(d@, "t", "url", "http://x/?a=b#frag;y")
 d@ = cfg_set@(d@, "t", "dir", "C:" + bs$ + "tmp" + bs$)
 d@ = cfg_set@(d@, "#sec", "k", "v")
 d@ = cfg_set@(d@, "t", "next", "kept")
 d@ = cfg_set@(d@, "t", "[open", "v")
 d@ = cfg_set@(d@, "t", "close", "[v]")
+on error goto 0
 assert_eq(raised, 0, "none of these is refused")
 x = cfg_save(d@)
 e@ = cfg_open@("bin/p9b_cfg_refused.ini")
@@ -173,7 +206,6 @@ x = file_delete(h$)
 
 x = file_delete(p$)
 x = file_delete("bin/p9b_cfg_refused.ini")
-on error goto 0
 end
 
 trapped:

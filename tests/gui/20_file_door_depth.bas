@@ -39,6 +39,13 @@ rem
 rem Written like 18_faults and 19: `on error goto` records into
 rem `raised` and `resume next` carries on, so a returning bug FAILS
 rem rather than aborting the runner.
+rem
+rem THE TRAP IS LIFTED AROUND EVERY RUN OF ASSERTIONS (2026-10-08): it
+rem guards the statements under test, never an assertion. Armed over an
+rem assertion, an argument that raised was skipped by `resume next` --
+rem neither passed nor failed -- and the test library now fails any
+rem assertion that runs while a trap is armed. So a raise in a checked
+rem call aborts the run, which is a failure, and not a silent skip.
 rem ---------------------------------------------------------------
 
 raised = 0
@@ -99,11 +106,16 @@ rem The image is freed on the way out so the ledger goes back to
 rem where it was: every case here starts from the same state, and a
 rem case that quietly left 200 MB behind would move the next one's
 rem answer without saying so.
+rem It arms the trap around the load itself and disarms it before it
+rem returns: every caller is an assertion's argument, and the test
+rem library fails an assertion that runs while a trap is armed.
 function refused(path$) local im@, r
   raised = 0
   gui_clearerror()
   im@ = image@(f@)
+  on error goto trapped
   image_load@(im@, path$)
+  on error goto 0
   r = raised
   x = control_free(im@)
   return r
@@ -124,19 +136,25 @@ w8 = writepng(g8$, 30000, 30000, 8, 0)
 w16 = writepng(g16$, 30000, 30000, 16, 0)
 
 test_case("depth/three fixtures that differ in one byte")
+on error goto 0
 assert_eq(w1, 1, "the 1-bit header was written")
 assert_eq(w8, 1, "the 8-bit one")
 assert_eq(w16, 1, "and the 16-bit one")
 assert_eq(file_getsize(g1$), 26, "each is twenty-six bytes")
 assert_eq(file_getsize(g16$), 26, "the same twenty-six bytes")
+on error goto trapped
 
 test_case("depth/1-bit at 30000 square is admitted")
+on error goto 0
 assert_eq(refused(g1$), 0, "107 MB of grey is not a size refusal")
+on error goto trapped
 
 test_case("depth/8-bit at 30000 square is admitted")
 rem This is the case the round-two review measured: a real one of
 rem these loads in 874 MB, and the old door refused it.
+on error goto 0
 assert_eq(refused(g8$), 0, "900 MB is inside the 1024 MB budget")
+on error goto trapped
 
 test_case("depth/16-bit at the same size is refused, and named")
 raised = 0
@@ -144,11 +162,13 @@ msg$ = ""
 gui_clearerror()
 im16@ = image@(f@)
 image_load@(im16@, g16$)
+on error goto 0
 assert_eq(raised, 1, "1800 MB of 16-bit grey is a catchable error")
 assert_true(instr(msg$, "picture is too large") > 0, "named as a picture")
 assert_true(instr(msg$, "30000 x 30000") > 0, "with the size it claimed")
 assert_true(instr(msg$, "20_30000_g16.png") > 0, "and the file")
 assert_eq(image_empty(im16@), 1, "and nothing was loaded")
+on error goto trapped
 x = control_free(im16@)
 
 rem =================================================================
@@ -166,12 +186,16 @@ wg = writepng(pg$, 20000, 20000, 8, 0)
 wp = writepng(pp$, 20000, 20000, 8, 3)
 
 test_case("colour/the pair differs only in the colour type byte")
+on error goto 0
 assert_eq(wg, 1, "the greyscale header was written")
 assert_eq(wp, 1, "and the palette one")
 assert_eq(file_getsize(pg$), file_getsize(pp$), "both are the same length")
+on error goto trapped
 
 test_case("colour/8-bit GREYSCALE at 20000 square is admitted")
+on error goto 0
 assert_eq(refused(pg$), 0, "400 MB of grey is not a size refusal")
+on error goto trapped
 
 test_case("colour/8-bit PALETTE at 20000 square is refused")
 raised = 0
@@ -179,8 +203,10 @@ msg$ = ""
 gui_clearerror()
 imp@ = image@(f@)
 image_load@(imp@, pp$)
+on error goto 0
 assert_eq(raised, 1, "a palette becomes a 32-bit surface, and 1600 MB of one is refused")
 assert_true(instr(msg$, "20000 x 20000") > 0, "with the size it claimed")
+on error goto trapped
 x = control_free(imp@)
 
 rem =================================================================
@@ -197,22 +223,28 @@ wb1 = writebmp(b1$, 4000, 4000, 1)
 wb24 = writebmp(b24$, 4000, 4000, 24)
 
 test_case("bmp/both headers were written, and are the same length")
+on error goto 0
 assert_eq(wb1, 1, "the 1-bit header")
 assert_eq(wb24, 1, "and the 24-bit one")
 assert_eq(file_getsize(b1$), 54, "fifty-four bytes each")
 assert_eq(file_getsize(b24$), 54, "the same fifty-four")
+on error goto trapped
 
 test_case("bmp/with nothing live, both sizes are admitted")
+on error goto 0
 assert_eq(refused(b1$), 0, "4 MB is nothing")
 assert_eq(refused(b24$), 0, "and neither is 46 MB")
+on error goto trapped
 
 test_case("bmp/behind a 1012 MB bitmap the two answers separate")
 raised = 0
 hold@ = bitmap@(13300, 13300)
+on error goto 0
 assert_eq(raised, 0, "a 13300-square bitmap is itself allowed")
 assert_eq(bitmap_width(hold@), 13300, "and really made")
 assert_eq(refused(b1$), 0, "1 bit a pixel still fits in what is left")
 assert_eq(refused(b24$), 1, "24 bits a pixel does not")
+on error goto trapped
 
 test_case("bmp/and the message says what is holding the room")
 raised = 0
@@ -220,9 +252,11 @@ msg$ = ""
 gui_clearerror()
 imb@ = image@(f@)
 image_load@(imb@, b24$)
+on error goto 0
 assert_eq(raised, 1, "still refused")
 assert_true(instr(msg$, "already in use") > 0, "the live total is in the message")
 assert_true(instr(msg$, "20_4000_24bit.bmp") > 0, "and so is the file")
+on error goto trapped
 x = control_free(imb@)
 
 test_case("bmp/freeing the bitmap admits it again")
@@ -230,7 +264,9 @@ rem The credit half. A ledger that refuses on what it has forgotten
 rem to give back is a slow false refusal, which is the failure this
 rem whole door is trying not to become.
 x = control_free(hold@)
+on error goto 0
 assert_eq(refused(b24$), 0, "the room came back with the bitmap")
+on error goto trapped
 
 rem =================================================================
 rem PART 4 -- THE IMAGE LIST'S DOOR IS THE SAME PRICE PLUS ONE MORE
@@ -245,8 +281,10 @@ il1$ = path_combine$(scratch$, "20_14000_g1.png")
 wi = writepng(il1$, 14000, 14000, 1, 0)
 
 test_case("list/image_load@ admits a 14000-square 1-bit header")
+on error goto 0
 assert_eq(wi, 1, "the fixture was written")
 assert_eq(refused(il1$), 0, "24 MB of decode is not a size refusal")
+on error goto trapped
 
 test_case("list/imagelist_addfile refuses the very same file")
 raised = 0
@@ -254,11 +292,13 @@ msg$ = ""
 gui_clearerror()
 il@ = imagelist@(32, 32)
 k = imagelist_addfile(il@, il1$)
+on error goto 0
 assert_eq(raised, 1, "the decode plus its copy is 1200 MB, and that is refused")
 assert_true(instr(msg$, "image list entry is too large") > 0, "named as an entry")
 assert_true(instr(msg$, "14000 x 14000") > 0, "with the size it claimed")
 assert_eq(k, 0, "no index came back")
 assert_eq(imagelist_count(il@), 0, "and nothing went in")
+on error goto trapped
 
 rem =================================================================
 rem PART 5 -- AND EVERY RESERVATION IS GIVEN BACK. The charge is now
@@ -274,7 +314,9 @@ wr = writepng(r$, 16000, 16000, 8, 0)
 test_case("credit/thirty loads that reserve 244 MB and fail to decode")
 rem Five kept reservations would be 1220 MB and the sixth load would
 rem be refused instead of merely failing.
+on error goto 0
 assert_eq(wr, 1, "the fixture was written")
+on error goto trapped
 raised = 0
 gui_clearerror()
 imr@ = image@(f@)
@@ -283,15 +325,19 @@ for i = 1 to 30
   image_load@(imr@, r$)
   if raised = 0 then n = n + 1
 next
+on error goto 0
 assert_eq(n, 30, "not one of the thirty turned into a size refusal")
 assert_true(gui_error() <> 0, "every one of them failed in the decoder, as intended")
+on error goto trapped
 x = control_free(imr@)
 
 test_case("credit/and a 1012 MB bitmap still fits after them")
 raised = 0
 after@ = bitmap@(13300, 13300)
+on error goto 0
 assert_eq(raised, 0, "the budget is where it started")
 assert_eq(bitmap_width(after@), 13300, "and the bitmap is really there")
+on error goto trapped
 x = control_free(after@)
 
 test_case("credit/a hundred REFUSED list adds leave nothing behind")
@@ -304,7 +350,9 @@ for i = 1 to 100
   z = imagelist_addfile(ilr@, il1$)
   refusals = refusals + raised
 next
+on error goto 0
 assert_eq(refusals, 100, "every one of them was refused")
+on error goto trapped
 
 rem An ordinary 2 x 2 bitmap, 70 bytes, so the legitimate side of the
 rem same door is driven a hundred times beside the refused one.
@@ -323,16 +371,20 @@ x = buffer_setint(ok@, 35, 4, 16, false)
 wok = file_writeallbytes(ok$, ok@)
 
 test_case("credit/a hundred adds that really land, after those")
+on error goto 0
 assert_eq(wok, 1, "the 2 x 2 fixture was written")
+on error goto trapped
 raised = 0
 gui_clearerror()
 n = 0
 for i = 1 to 100
   n = imagelist_addfile(ilr@, ok$)
 next
+on error goto 0
 assert_eq(raised, 0, "none of the hundred was refused")
 assert_eq(n, 100, "and the hundredth took index 100")
 assert_eq(imagelist_count(ilr@), 100, "the list holds exactly them")
+on error goto trapped
 
 test_case("credit/a hundred ordinary picture loads, and the size after")
 raised = 0
@@ -341,9 +393,11 @@ imo@ = image@(f@)
 for i = 1 to 100
   image_load@(imo@, ok$)
 next
+on error goto 0
 assert_eq(raised, 0, "loading the same small picture a hundred times is free")
 assert_eq(image_picwidth(imo@), 2, "and it is really loaded")
 assert_eq(image_empty(imo@), 0, "and not empty")
+on error goto trapped
 x = control_free(imo@)
 
 test_case("credit/a missing file is still gui_error, not a size refusal")
@@ -353,8 +407,10 @@ raised = 0
 gui_clearerror()
 imm@ = image@(f@)
 image_load@(imm@, path_combine$(scratch$, "20_does_not_exist.png"))
+on error goto 0
 assert_eq(raised, 0, "a missing file does not raise")
 assert_true(gui_error() <> 0, "it is recorded, as it always was")
+on error goto trapped
 
 x = file_delete(g1$)
 x = file_delete(g8$)

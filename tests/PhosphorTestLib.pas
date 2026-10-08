@@ -52,7 +52,8 @@ procedure ResetTestState;
 implementation
 
 uses
-  PhosphorBudget;   // BudgetActive, for test_budget_active
+  PhosphorBudget,   // BudgetActive, for test_budget_active
+  PhosphorVM;       // ErrTrapLive, for the trap guard on every assert_*
 
 type
   { Two distinct throwaway classes registered in the handle registry, so a probe
@@ -311,6 +312,73 @@ begin
   Result := ValInt(Ord(ok));
 end;
 
+{ NO ASSERTION RUNS UNDER A LIVE ERROR TRAP (2026-10-08).
+
+  A file that armed `on error goto h` for its whole length, with a handler that
+  recorded the message and did `resume next`, SKIPPED every assertion whose own
+  argument raised: the fault happened before the assert_* call, the handler
+  swallowed it, and the statement was neither a pass nor a failure. A defect that
+  made an asserted call fail therefore passed in silence -- a mutation that freed
+  another document's JSON view survived tests/suite/78_free_handles.bas so.
+
+  The read that decides is the VM's own (ErrTrapLive: the two fields Fault reads
+  before it takes a fault), so this cannot disagree with what a fault would do.
+  An assertion that runs while it is true is a FAILURE, recorded and not raised
+  -- a raise would be swallowed by the very trap it is reporting. Arm the trap
+  around the statement expected to fail and disarm it before asserting.
+
+  What this cannot see is an assertion that is never reached: under a live trap
+  whose argument raises on EVERY run. Its siblings in the same armed stretch are
+  reached, though, so a file shaped that way fails on them. }
+function TrapGuard(AVM: TObject; AFunc: TPhosphorFunc; const Args: array of TValue;
+                   out Err: TPhosphorError): TValue;
+begin
+  if TPhosphorVM(AVM).ErrTrapLive() then
+  begin
+    Err := NoError();
+    RecordFail('an assertion ran while an ON ERROR trap was armed -- one whose ' +
+               'argument raised would have been skipped, not failed; arm the ' +
+               'trap only around the statement expected to fail');
+    Exit(ValInt(0));
+  end;
+  Result := AFunc(Args, Err);
+end;
+
+function h_assert_true(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_true, Args, Err); end;
+function h_assert_true_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_true_msg, Args, Err); end;
+function h_assert_true_bool(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_true_bool, Args, Err); end;
+function h_assert_true_bool_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_true_bool_msg, Args, Err); end;
+function h_assert_false(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_false, Args, Err); end;
+function h_assert_false_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_false_msg, Args, Err); end;
+function h_assert_false_bool(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_false_bool, Args, Err); end;
+function h_assert_false_bool_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_false_bool_msg, Args, Err); end;
+function h_assert_eq_num(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_eq_num, Args, Err); end;
+function h_assert_eq_num_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_eq_num_msg, Args, Err); end;
+function h_assert_eq_str(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_eq_str, Args, Err); end;
+function h_assert_eq_str_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_eq_str_msg, Args, Err); end;
+function h_assert_near(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_near, Args, Err); end;
+function h_assert_near_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_near_msg, Args, Err); end;
+function h_assert_int(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_int, Args, Err); end;
+function h_assert_int_msg(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_int_msg, Args, Err); end;
+function h_assert_add_overflows(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := TrapGuard(AVM, @t_assert_add_overflows, Args, Err); end;
+
 // --- handle-registry probes -------------------------------------------------
 // A live probe handle is a real registry id; a fabricated one (pointer@(n)) is
 // not, and IsHandle tells them apart WITHOUT dereferencing the address.
@@ -395,26 +463,26 @@ procedure RegisterTestFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('test_case:$', @t_test_case);
 
-  Reg.Add('assert_true:n',   @t_assert_true);
-  Reg.Add('assert_true:n$',  @t_assert_true_msg);
-  Reg.Add('assert_true:?',   @t_assert_true_bool);
-  Reg.Add('assert_true:?$',  @t_assert_true_bool_msg);
-  Reg.Add('assert_false:n',  @t_assert_false);
-  Reg.Add('assert_false:n$', @t_assert_false_msg);
-  Reg.Add('assert_false:?',  @t_assert_false_bool);
-  Reg.Add('assert_false:?$', @t_assert_false_bool_msg);
+  Reg.AddHost('assert_true:n',   @h_assert_true);
+  Reg.AddHost('assert_true:n$',  @h_assert_true_msg);
+  Reg.AddHost('assert_true:?',   @h_assert_true_bool);
+  Reg.AddHost('assert_true:?$',  @h_assert_true_bool_msg);
+  Reg.AddHost('assert_false:n',  @h_assert_false);
+  Reg.AddHost('assert_false:n$', @h_assert_false_msg);
+  Reg.AddHost('assert_false:?',  @h_assert_false_bool);
+  Reg.AddHost('assert_false:?$', @h_assert_false_bool_msg);
 
-  Reg.Add('assert_eq:nn',    @t_assert_eq_num);
-  Reg.Add('assert_eq:nn$',   @t_assert_eq_num_msg);
-  Reg.Add('assert_eq:$$',    @t_assert_eq_str);
-  Reg.Add('assert_eq:$$$',   @t_assert_eq_str_msg);
+  Reg.AddHost('assert_eq:nn',    @h_assert_eq_num);
+  Reg.AddHost('assert_eq:nn$',   @h_assert_eq_num_msg);
+  Reg.AddHost('assert_eq:$$',    @h_assert_eq_str);
+  Reg.AddHost('assert_eq:$$$',   @h_assert_eq_str_msg);
 
-  Reg.Add('assert_near:nnn',  @t_assert_near);
-  Reg.Add('assert_near:nnn$', @t_assert_near_msg);
+  Reg.AddHost('assert_near:nnn',  @h_assert_near);
+  Reg.AddHost('assert_near:nnn$', @h_assert_near_msg);
 
-  Reg.Add('assert_int:%%',            @t_assert_int);
-  Reg.Add('assert_int:%%$',           @t_assert_int_msg);
-  Reg.Add('assert_add_overflows:%%',  @t_assert_add_overflows);
+  Reg.AddHost('assert_int:%%',            @h_assert_int);
+  Reg.AddHost('assert_int:%%$',           @h_assert_int_msg);
+  Reg.AddHost('assert_add_overflows:%%',  @h_assert_add_overflows);
 
   Reg.Add('probe_new_a@:',   @t_probe_new_a);
   Reg.Add('probe_new_b@:',   @t_probe_new_b);

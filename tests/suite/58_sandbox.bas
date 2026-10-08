@@ -96,9 +96,9 @@ chan$ = path_combine$(out$, "p9b_sandbox_chan.txt")
 caught = 0
 on error goto h_chan
 open chan$ for output as #1
+on error goto 0
 assert_eq(caught, 1, "OPEN outside the root is refused, not obeyed")
 assert_eq(file_exists(chan$), 0, "and no file was made outside")
-on error goto 0
 goto skip_chan
 h_chan:
   caught = 1

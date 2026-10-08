@@ -29,11 +29,20 @@ rem after the final block runs as part of it.
 rem ---------------------------------------------------------------
 
 test_case("onerror/a handler installed in a function resumes and the call returns")
-assert_eq(rnok(), 5, "resume next came back into the call and it returned its own value")
+rem The trap a function installs OUTLIVES the call, so a value it answers is
+rem kept and the trap disarmed (or the value checked inside a handler, where
+rem none is live) before it is asserted: the test library fails an assertion
+rem run under a live trap (2026-10-08), because one whose argument raised would
+rem have been skipped by `resume next` and neither passed nor failed.
+v63a = rnok()
+on error goto 0
+assert_eq(v63a, 5, "resume next came back into the call and it returned its own value")
 assert_eq(rnhits, 1, "the handler ran exactly once")
 
 test_case("onerror/`resume` retries the failing statement and the call returns")
-assert_eq(rtok(), 12, "resume retried the division with the divisor the handler set")
+v63b = rtok()
+on error goto 0
+assert_eq(v63b, 12, "resume retried the division with the divisor the handler set")
 assert_eq(rthits, 1, "that handler ran exactly once too")
 
 test_case("onerror/the resumed program ends by running off the end of the file")

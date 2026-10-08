@@ -115,8 +115,8 @@ rem One question from the caller's side -- "can this be called?" -- so one answe
 caught = 0
 on error goto h_none
 x = callfunc("neither_program_nor_library", 1, 2, 3)
-assert_eq(caught, 1, "an unknown name is refused however many arguments it was given")
 on error goto 0
+assert_eq(caught, 1, "an unknown name is refused however many arguments it was given")
 goto skip_none
 h_none:
   caught = 1

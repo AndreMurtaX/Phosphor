@@ -345,8 +345,17 @@ assert_eq(grec(3), 6, "a gosub from a RECURSIVE function")
 assert_eq(glog$, "3,2,1,0,", "at every level of the recursion")
 assert_eq(gpick(1), 11, "on <expr> gosub, first label")
 assert_eq(gpick(2), 22, "on <expr> gosub, second label")
-assert_eq(ghand(), 5, "a handler installed INSIDE a function body runs")
-assert_eq(gretry(), 5, "and plain resume retries the failing statement")
+rem Each of these functions INSTALLS a handler and returns with it still
+rem armed -- the install outlives the call. So each answer is taken first and
+rem the trap disarmed before it is checked: an assertion run under a live trap
+rem fails in the test library (2026-10-08), because one whose argument raised
+rem would have been skipped by `resume next` instead.
+gv1 = ghand()
+on error goto 0
+assert_eq(gv1, 5, "a handler installed INSIDE a function body runs")
+gv2 = gretry()
+on error goto 0
+assert_eq(gv2, 5, "and plain resume retries the failing statement")
 rem 0, AND IT USED TO BE 10 -- the expectation pinned the defect.
 rem
 rem `s = s - 10 / (i - 2)` is the LAST statement of the loop body, and `resume
@@ -357,8 +366,12 @@ rem
 rem Resuming continues the loop now. i=1 gives 10, i=2 faults and is skipped, i=3
 rem gives 10 - 10/1 = 0. The same three-pass arithmetic the suite already pins one
 rem line at a time elsewhere, arriving here because the loop is no longer cut off.
-assert_eq(ginner(), 0, "an error raised inside a for, handled from in-function")
-assert_eq(gouter(), 0, "and the same body with the handler one frame UP agrees")
+gv3 = ginner()
+on error goto 0
+assert_eq(gv3, 0, "an error raised inside a for, handled from in-function")
+gv4 = gouter()
+on error goto 0
+assert_eq(gv4, 0, "and the same body with the handler one frame UP agrees")
 
 
 function selre(n)
@@ -597,7 +610,9 @@ rem file. That is exactly the exit the VM check sits on, which is the point --
 rem the `end` above is reached only if this fault does not happen.
 rem ---------------------------------------------------------------
 test_case("onerror/a handler installed in a call that RETURNED is not abandoned")
-assert_eq(abarm(1), 2, "the function that installed the handler returned normally")
+rem abarm leaves its handler armed, which is the whole premise, so its answer
+rem is kept here and checked inside the handler, where no trap is live.
+abv = abarm(1)
 abq = 1 / 0
 assert_true(0, "the top-level fault must reach the handler, not this line")
 
@@ -638,5 +653,6 @@ rem VM's abandoned-activation check reads that exit and must let this through,
 rem because the call the handler was installed in returned long ago and the
 rem fault it took was raised at top level, with nothing open.
 abend:
+assert_eq(abv, 2, "the function that installed the handler returned normally")
 assert_eq(abq, 0, "the faulting assignment never completed")
 assert_true(1, "and the handler ran to the end of the program without resuming")

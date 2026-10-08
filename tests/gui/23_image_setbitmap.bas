@@ -30,6 +30,13 @@ rem So one bitmap plus three images holding it fit, and a fourth does not.
 rem
 rem Written like 18_faults: `on error goto` records into `raised`, so a
 rem returning bug FAILS a case rather than aborting the file.
+rem
+rem THE TRAP IS LIFTED AROUND EVERY RUN OF ASSERTIONS (2026-10-08): it
+rem guards the statements under test, never an assertion. Armed over an
+rem assertion, an argument that raised was skipped by `resume next` --
+rem neither passed nor failed -- and the test library now fails any
+rem assertion that runs while a trap is armed. So a raise in a checked
+rem call aborts the run, which is a failure, and not a silent skip.
 rem ---------------------------------------------------------------
 
 raised = 0
@@ -50,24 +57,31 @@ canvas_brushcolor@(small@, 255)
 canvas_fillrect@(small@, 0, 0, 32, 24)
 raised = 0
 image_setbitmap@(i1@, small@)
+on error goto 0
 assert_eq(raised, 0, "a small bitmap did not raise")
 assert_eq(image_picwidth(i1@), 32, "and the image holds a picture of its width")
 assert_eq(image_picheight(i1@), 24, "and its height")
 assert_eq(image_empty(i1@), 0, "and is not empty")
+on error goto trapped
 
 test_case("setbitmap/three images fit, the fourth is refused")
 raised = 0
 image_setbitmap@(i1@, b@)
 image_setbitmap@(i2@, b@)
 image_setbitmap@(i3@, b@)
+on error goto 0
 assert_eq(raised, 0, "the bitmap and three copies are inside the budget")
 assert_eq(image_picwidth(i3@), 6688, "and the third image holds the picture")
+on error goto trapped
 rem i4 holds the small picture first (4704 bytes, which still fits), so
 rem the refusal below can show that the image KEEPS what it had.
 image_setbitmap@(i4@, small@)
+on error goto 0
 assert_eq(raised, 0, "a small picture still fits beside them")
+on error goto trapped
 msg$ = ""
 image_setbitmap@(i4@, b@)
+on error goto 0
 assert_eq(raised, 1, "the fourth copy is refused -- it would pass the budget")
 assert_eq(err(), 6, "a runtime error, which on error goto catches")
 assert_true(instr(msg$, "picture 6688 x 6688 is too large") > 0, "the message names what was refused")
@@ -79,6 +93,7 @@ rem 1 here against the unfixed build too and measured nothing. And this
 rem is the assertion that kills a charge made AFTER the copy: the copy
 rem would already be in the image when the refusal came.
 assert_eq(image_picwidth(i4@), 32, "and the refused image kept the picture it had")
+on error goto trapped
 
 test_case("setbitmap/an image re-given the same picture is not charged twice")
 rem i1 already holds a 6688 surface; replacing it with another of the
@@ -88,15 +103,21 @@ raised = 0
 for k = 1 to 200
   image_setbitmap@(i1@, b@)
 next
+on error goto 0
 assert_eq(raised, 0, "two hundred re-assignments at the edge, none refused")
+on error goto trapped
 
 test_case("setbitmap/a smaller picture gives room back")
 raised = 0
 image_setbitmap@(i2@, small@)
+on error goto 0
 assert_eq(image_picwidth(i2@), 32, "i2 now holds the small picture")
+on error goto trapped
 image_setbitmap@(i4@, b@)
+on error goto 0
 assert_eq(raised, 0, "and the room it gave back admits the fourth")
 assert_eq(image_picwidth(i4@), 6688, "which now holds the picture")
+on error goto trapped
 
 test_case("setbitmap/freeing an image gives its room back")
 rem A TImage is a TComponent, so it is credited by FreeNotification
@@ -108,7 +129,9 @@ rem allocator handed each new TImage the address of the one just freed
 rem and the ledger took it for the same object. A bitmap is a different
 rem class and size, so it can never inherit a dead image's entry.
 raised = 0
+on error goto 0
 assert_eq(control_free(i4@), 1, "the image is freed")
+on error goto trapped
 n = 0
 for k = 1 to 50
   t@ = image@(f@)
@@ -118,19 +141,25 @@ for k = 1 to 50
   if bitmap_width(nb@) = 6688 then n = n + 1
   x = control_free(nb@)
 next
+on error goto 0
 assert_eq(raised, 0, "fifty cycles at the edge, none refused")
 assert_eq(n, 50, "and every freed image's room was there for a bitmap")
+on error goto trapped
 
 test_case("setbitmap/an image freed with its form gives its room back")
 raised = 0
 g@ = form@("setbitmap-2", 200, 100)
 gi@ = image@(g@)
 image_setbitmap@(gi@, b@)
+on error goto 0
 assert_eq(raised, 0, "a fourth surface fits again")
+on error goto trapped
 x = control_free(g@)
 rem A bitmap again, for the reason the case above gives.
 nb@ = bitmap@(6688, 6688)
+on error goto 0
 assert_eq(raised, 0, "and freeing the form credited the image it owned")
+on error goto trapped
 
 end
 

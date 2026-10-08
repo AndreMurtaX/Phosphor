@@ -29,7 +29,13 @@ rem Anything appended after the last block runs as part of it.
 rem ---------------------------------------------------------------
 
 test_case("onerror/a fault taken by a handler standing over a stale deep install")
-assert_eq(stmid(1), 1, "the installing call returned and left its depth remembered")
+rem The trap a function installs OUTLIVES the call, so a value it answers is
+rem kept and the trap disarmed (or the value checked inside a handler, where
+rem none is live) before it is asserted: the test library fails an assertion
+rem run under a live trap (2026-10-08), because one whose argument raised would
+rem have been skipped by `resume next` and neither passed nor failed.
+rem The stale install IS the subject, so stmid's answer is checked in sth2.
+v69a = stmid(1)
 rem The fault below is taken at TOP LEVEL, two frames shallower than the depth
 rem the handler is remembered at, so the dispatcher fabricates the difference.
 stz = 1 / 0
@@ -47,6 +53,7 @@ stz2 = 1 / 0
 assert_true(0, "unreachable: the second fault must have jumped to sth2")
 
 sth2:
+assert_eq(v69a, 1, "the installing call returned and left its depth remembered")
 assert_eq(sthits, 1, "the first handler ran exactly once")
 goto stend
 

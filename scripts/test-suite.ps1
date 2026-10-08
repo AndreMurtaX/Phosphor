@@ -505,6 +505,36 @@ else {
         Write-Host 'FAIL  probe detail: bin\probe_value.exe was not built, so the failure path went unseen' -ForegroundColor Red
         $allOk = $false
     }
+
+    # AND NO ASSERTION RUNS UNDER A LIVE ERROR TRAP (2026-10-08). A file that
+    # armed `on error goto` for its whole length SKIPPED every assertion whose own
+    # argument raised -- `resume next` stepped over it, neither pass nor fail --
+    # so tests/PhosphorTestLib.pas now fails an assertion that runs while the VM
+    # would catch a fault. Nothing in a green corpus reaches that refusal, so it
+    # is reached here, BOTH ways: one assertion under a live trap must fail and
+    # say why, and the same file disarmed -- plus one assertion inside the handler,
+    # where no trap is live -- must pass both. A guard that refused everything
+    # would pass the first half alone. The twin of the same block in
+    # test-suite.sh.
+    $tgArmed = Join-Path $tmp 'trapguard_armed.bas'
+    $tgClear = Join-Path $tmp 'trapguard_clear.bas'
+    Set-Content -LiteralPath $tgArmed -NoNewline -Encoding ascii -Value "test_case(`"guard`")`non error goto h`nassert_eq(1, 1, `"under a live trap`")`non error goto 0`nend`nh:`nresume next`n"
+    Set-Content -LiteralPath $tgClear -NoNewline -Encoding ascii -Value "test_case(`"guard`")`non error goto h`nx = 1 / 0`non error goto 0`nassert_eq(x, 0, `"disarmed first`")`nend`nh:`nassert_eq(err(), 2, `"inside the handler`")`nresume next`n"
+    $tgOut = Join-Path $tmp 'phosphortest.out'
+    $tgErr = Join-Path $tmp 'phosphortest.err'
+    $aCode = Invoke-Bounded $tgArmed $tgOut $tgErr $TestTimeoutS
+    $aText = (Read-Text $tgOut) -replace "`r", ''
+    $aWhy  = Read-Text $tgErr
+    $cCode = Invoke-Bounded $tgClear $tgOut $tgErr $TestTimeoutS
+    $cText = (Read-Text $tgOut) -replace "`r", ''
+    if (($aCode -eq 1) -and ($aText -eq "passed: 0`nfailed: 1") -and ($aWhy -match 'while an ON ERROR trap was armed') -and
+        ($cCode -eq 0) -and ($cText -eq "passed: 2`nfailed: 0")) {
+        Write-Host 'PASS  trap guard: an assertion under a live trap fails, one outside it or in the handler passes' -ForegroundColor Green
+    } else {
+        Write-Host ("FAIL  trap guard: armed exit {0} [{1}], clear exit {2} [{3}] -- wanted 1 [passed: 0 failed: 1] naming the trap, and 0 [passed: 2 failed: 0]" -f $aCode, ($aText -replace "`n",' '), $cCode, ($cText -replace "`n",' ')) -ForegroundColor Red
+        $allOk = $false
+    }
+    Remove-Item -LiteralPath $tgArmed, $tgClear
 }
 
 # --- source-level gates -------------------------------------------------------

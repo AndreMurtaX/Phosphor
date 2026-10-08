@@ -74,19 +74,27 @@ assert_eq(str$(count(p$)), "3", "and emptying one does not remove it")
 rem --- out of range says so ---------------------------------------
 rem A write past the end cannot do what was asked, so it raises rather than
 rem passing in silence. `resume next` continues in control-flow order.
-on error goto oops
+rem The trap is armed around each write expected to raise and nothing else:
+rem an assertion whose own argument raised under it would be skipped, not
+rem failed, and the test library fails any assertion run while one is armed.
 caught = 0
 
 s$ = "abc"
+on error goto oops
 s$[[9]] = "Z"
+on error goto 0
 assert_eq(s$, "abc", "a character write past the end changed nothing")
 
 s$ = "abc"
+on error goto oops
 s$[[0]] = "Z"
+on error goto 0
 assert_eq(s$, "abc", "and neither did one before the start")
 
 p$ = "one\ntwo"
+on error goto oops
 p$[9] = "X"
+on error goto 0
 assert_eq(p$, "one\ntwo", "a line write past the end changed nothing either")
 
 assert_eq(str$(caught), "3", "all three raised")

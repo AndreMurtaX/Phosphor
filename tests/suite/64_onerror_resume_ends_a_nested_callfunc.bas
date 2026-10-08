@@ -27,11 +27,20 @@ rem get wrong, and nothing else in the tree exercises it.
 rem ---------------------------------------------------------------
 
 test_case("onerror/resume next ends a callfunc made from inside a function")
-assert_eq(nouter(1), 0, "the callee's body ended at the resume, so its default came back")
+rem The trap a function installs OUTLIVES the call, so a value it answers is
+rem kept and the trap disarmed (or the value checked inside a handler, where
+rem none is live) before it is asserted: the test library fails an assertion
+rem run under a live trap (2026-10-08), because one whose argument raised would
+rem have been skipped by `resume next` and neither passed nor failed.
+v64a = nouter(1)
+on error goto 0
+assert_eq(v64a, 0, "the callee's body ended at the resume, so its default came back")
 assert_eq(nhits, 1, "the callee's handler ran exactly once")
 
 test_case("onerror/`resume` retries inside the same nesting and the body returns")
-assert_eq(nouter2(1), 12, "the retry saw the divisor the handler set and the body returned it")
+v64b = nouter2(1)
+on error goto 0
+assert_eq(v64b, 12, "the retry saw the divisor the handler set and the body returned it")
 assert_eq(n2hits, 1, "that handler ran exactly once too")
 
 test_case("onerror/both nestings came back and nothing is left open")

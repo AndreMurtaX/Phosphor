@@ -52,6 +52,9 @@ var
   GResolve6Calls: Integer = 0;       // how often the package asked it
   CertDirG: String;   // where the fixtures live, for the client-certificate paths
   Withheld: String = '';   // http_tls_withhold's name, consulted by the library's seam
+  GHits: LongInt = 0;      // how many requests /hit has seen
+  GSniLock: TRTLCriticalSection;
+  GSni: TStringList = nil; // the SNI per TLS connection; Objects[] is its stream
 
 { ---- the local test server -------------------------------------------------}
 
@@ -61,10 +64,21 @@ type
     test needs a genuinely dead 127.0.0.x) and stand a second server up over TLS with
     an auto-generated self-signed certificate (the https test). }
   TBoundHttpServer = class(TFPHTTPServer)
+  protected
+    function GetSocketHandler(const AUseSSL: Boolean): TSocketHandler; override;
   published
     property Address;
     property UseSSL;
     property CertificateData;
+  end;
+
+  { A TLS HANDLER THAT REMEMBERS THE SNI its connection sent (2026-10-07), so
+    /inspect can answer it: a request cannot reach its handler (TSocketStream keeps
+    it private), so the name is filed under the connection's stream, which the
+    request can reach. }
+  TSniHandler = class(TOpenSSLSocketHandler)
+  public
+    function Accept: Boolean; override;
   end;
 
   { A TLS SERVER THAT REQUIRES A CLIENT CERTIFICATE (ledger m7). FPC's handler can
@@ -109,6 +123,41 @@ begin
   AResponse.ContentLength := AResponse.ContentStream.Size;
 end;
 
+{ A query argument read off the raw request target, which for a request through a
+  proxy is the absolute url. Values are taken as written: the tests send none that
+  needs decoding, and none holding '&' or '?'. }
+function QueryArg(const AUri, AName: String): String;
+var p: Integer;
+    part: String;
+begin
+  Result := '';
+  p := Pos('?', AUri);
+  if p = 0 then Exit;
+  for part in Copy(AUri, p + 1, MaxInt).Split(['&']) do
+    if Copy(part, 1, Length(AName) + 1) = AName + '=' then
+      Exit(Copy(part, Length(AName) + 2, MaxInt));
+end;
+
+{ The SNI a TLS request sent, '' for none, and '-' for a connection no TSniHandler
+  accepted (plain http). Taken out of the list as it is read: one request per
+  connection, and a later stream at the same address must not inherit it. }
+function RequestSni(ARequest: TFPHTTPConnectionRequest): String;
+var i: Integer;
+begin
+  Result := '-';
+  EnterCriticalSection(GSniLock);
+  try
+    i := GSni.IndexOfObject(ARequest.Connection.Socket);
+    if i >= 0 then
+    begin
+      Result := GSni[i];
+      GSni.Delete(i);
+    end;
+  finally
+    LeaveCriticalSection(GSniLock);
+  end;
+end;
+
 procedure TServerThread.HandleRequest(Sender: TObject;
   var ARequest: TFPHTTPConnectionRequest;
   var AResponse: TFPHTTPConnectionResponse);
@@ -116,6 +165,24 @@ var path, m: String;
 begin
   path := ARequest.PathInfo;
   m := ARequest.Method;
+  { THE REDIRECT ROUTES (2026-10-07). /redirect?to=URL&code=N answers N -- 302
+    when absent -- with Location URL; /setcookie does the same and sets a cookie
+    that carries attributes; /hit counts the request and then redirects like
+    /redirect, and /hits answers the count. Matched anywhere in the target, as
+    /inspect is, so a request through a proxy reaches them -- and ahead of
+    /inspect, because a `to` that names /inspect is in the target too. }
+  if Pos('/hits', ARequest.URI) > 0 then
+    SetBody(AResponse, 200, IntToStr(GHits))
+  else if (Pos('/redirect', ARequest.URI) > 0) or (Pos('/setcookie', ARequest.URI) > 0) or
+          (Pos('/hit', ARequest.URI) > 0) then
+  begin
+    if Pos('/hit', ARequest.URI) > 0 then InterLockedIncrement(GHits);
+    if Pos('/setcookie', ARequest.URI) > 0 then
+      AResponse.SetCustomHeader('Set-Cookie', 'srv=7; Path=/; HttpOnly');
+    AResponse.SetCustomHeader('Location', QueryArg(ARequest.URI, 'to'));
+    SetBody(AResponse, StrToIntDef(QueryArg(ARequest.URI, 'code'), 302), '');
+  end
+  else
   { /inspect ANSWERS WHAT IT WAS SENT, so a test can see what a client handle put
     on the wire (ledger n26). Matched anywhere in the request target, because a
     request that came through a PROXY carries the absolute url on its request line
@@ -133,6 +200,7 @@ begin
       'pauth=' + ARequest.GetFieldByName('Proxy-Authorization') + #10 +
       'cookie=' + ARequest.GetFieldByName('Cookie') + #10 +
       'xdemo=' + ARequest.GetFieldByName('X-Demo') + #10 +
+      'sni=' + RequestSni(ARequest) + #10 +
       'body=' + ARequest.Content)
   else if ((path = '/') or (path = '')) and (m = 'GET') then
     SetBody(AResponse, 200, 'phosphor http ok')
@@ -197,6 +265,31 @@ begin
   // No way to require it means this server must not pretend to: refuse to start.
   if not Assigned(setverify) then Exit(False);
   setverify(SSL.SSL, SSL_VERIFY_PEER or SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nil);
+end;
+
+function TSniHandler.Accept: Boolean;
+var i: Integer;
+    sni: String;
+begin
+  Result := inherited Accept();
+  if not Result then Exit;
+  sni := SSLGetServername(SSL.SSL);   // '' when the client sent none
+  EnterCriticalSection(GSniLock);
+  try
+    i := GSni.IndexOfObject(Socket);
+    if i >= 0 then GSni[i] := sni else GSni.AddObject(sni, Socket);
+  finally
+    LeaveCriticalSection(GSniLock);
+  end;
+end;
+
+function TBoundHttpServer.GetSocketHandler(const AUseSSL: Boolean): TSocketHandler;
+var h: TSniHandler;
+begin
+  if not AUseSSL then Exit(inherited GetSocketHandler(AUseSSL));
+  h := TSniHandler.Create();
+  h.CertificateData := Self.CertificateData;   // what CreateSSLSocketHandler does
+  Result := h;
 end;
 
 function TMutualTlsServer.GetSocketHandler(const AUseSSL: Boolean): TSocketHandler;
@@ -267,8 +360,9 @@ var
   h: TOpenSSLSocketHandler;
   st: TSocketStream;
   buf: array[0..8191] of Byte;
-  n, hdrEnd, want, p: Integer;
+  n, hdrEnd, want, p, k: Integer;
   req, head, path, body, resp, chunk, status, extra, line: AnsiString;
+  ch: AnsiChar;
 begin
   if Tls then
   begin
@@ -315,6 +409,26 @@ begin
     end;
     line := Copy(head, 1, Pos(#13, head + #13) - 1);   // the request line
     path := ExtractWord(2, line, [' ']);
+    { /trickle: twenty bytes, one every 200 ms -- four seconds in all, and every
+      read answered well inside any per-read timeout. Only a deadline on the
+      WHOLE response bounds it. The client leaving early ends the writes. }
+    if path = '/trickle' then
+    begin
+      resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 20' + #13#10 +
+              'Connection: close' + #13#10#13#10;
+      st.WriteBuffer(resp[1], Length(resp));
+      ch := 'x';
+      try
+        for k := 1 to 20 do
+        begin
+          Sleep(200);
+          st.WriteBuffer(ch, 1);
+        end;
+      except
+        // the client is gone, which is the point
+      end;
+      Exit;
+    end;
     status := '200 OK';
     extra := '';
     if path = '/' then resp := 'phosphor http ok'
@@ -537,14 +651,15 @@ var
 
 function TestResolve(const AHost: String): TStringDynArray;
 var ip: String;
+    parts: TStringArray;
+    i: Integer;
 begin
   Result := nil;
   ip := GResolveMap.Values[LowerCase(AHost)];
-  if ip <> '' then
-  begin
-    SetLength(Result, 1);
-    Result[0] := ip;
-  end;
+  if ip = '' then Exit;
+  parts := ip.Split([',']);     // several A records, in order
+  SetLength(Result, Length(parts));
+  for i := 0 to High(parts) do Result[i] := Trim(parts[i]);
 end;
 
 function f_http_resolve_as(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -554,6 +669,37 @@ begin
   GResolveMap.Values[LowerCase(Args[0].Str)] := Args[1].Str;
   HttpResolveHook := @TestResolve;
   Result := ValStr(Args[1].Str);
+end;
+
+{ http_test_deadline(ms) -- run each request as if the budget had ms left (0:
+  off), through the library's HttpDeadlineMs seam. Answers ms. }
+function f_http_test_deadline(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  HttpDeadlineMs := Trunc(AsDouble(Args[0]));
+  Result := ValInt(HttpDeadlineMs);
+end;
+
+{ http_is_ipv4(host$) / http_is_ipv6(host$) -- 1 when the library takes host$ for
+  an address of that family, which decides the certificate check and SNI. }
+function f_http_is_ipv4(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(HttpIsIPv4Literal(Args[0].Str)));
+end;
+
+function f_http_is_ipv6(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(HttpIsIPv6Literal(Args[0].Str)));
+end;
+
+{ http_same_origin(a$, b$) -- 1 when a redirect from a$ to b$ keeps the caller's
+  credentials, the library's own rule. }
+function f_http_same_origin(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(HttpSameOrigin(Args[0].Str, Args[1].Str)));
 end;
 
 { ---- the usual byte-exact package-test scaffolding -------------------------}
@@ -626,6 +772,8 @@ begin
   { Stand up the local server in a background thread. Bind loopback ONLY, so that a
     127.0.0.x address other than .1 is genuinely dead -- the fallback test relies on
     that to prove it skips a dead address. }
+  InitCriticalSection(GSniLock);
+  GSni := TStringList.Create();
   srv := TBoundHttpServer.Create(nil);
   srv.Address := '127.0.0.1';
   srv.Port := SRV_PORT;
@@ -770,6 +918,10 @@ begin
     eng.Registry.Add('server_openssl3_pair:', @f_server_openssl3_pair);
     eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
     eng.Registry.Add('http_resolve_as$:$$', @f_http_resolve_as);
+    eng.Registry.Add('http_test_deadline:n', @f_http_test_deadline);
+    eng.Registry.Add('http_is_ipv4:$', @f_http_is_ipv4);
+    eng.Registry.Add('http_is_ipv6:$', @f_http_is_ipv6);
+    eng.Registry.Add('http_same_origin:$$', @f_http_same_origin);
     ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

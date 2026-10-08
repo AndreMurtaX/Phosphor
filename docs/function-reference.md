@@ -724,7 +724,7 @@ in-process (creation/write/access variants each behave the same underlying way).
 | `dir_getentries$(path$ [, pattern$]) → str` | files and subdirectories together |
 | `dir_getparent$(path$) → str` | the parent directory |
 | `dir_getcurrent$() → str` | the current working directory |
-| `dir_setcurrent(path$) → num` | change the working directory |
+| `dir_setcurrent(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`, which includes `""`) |
 | `dir_isrelativepath(path$) → num` | 1 if the path is relative |
 | `dir_copy(src$, dst$) → num` | copy a directory tree |
 | `dir_move(src$, dst$) → num` | move/rename a directory |
@@ -851,9 +851,9 @@ on desktop by design.
 | `guidfilename$(withdashes) → str` | a GUID-based name, with or without dashes |
 | `mkdir(path$) → num` | create a directory: `1` if created, `0` if not (`ioerror()` `3`) or refused (`5`) |
 | `rmdir(path$) → num` | remove an empty directory: `1` if removed, `0` if not (`ioerror()` `3`) or refused (`5`) |
-| `forcedirectories(path$) → num` | create a directory tree; reports success |
-| `chdir(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`) |
-| `fileexists(path$, followlinks) → num` | 1 if a file exists |
+| `forcedirectories(path$) → num` | create a directory tree: `1` if it exists afterwards, `0` if not (`ioerror()` `3`) or refused (`5`) |
+| `chdir(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`, which includes `""`) |
+| `fileexists(path$, followlinks) → num` | 1 if a file exists; `ioerror()` is `0` after the answer and `5` for a refusal |
 | `kill(path$) → num` | delete a file: `1` if deleted, `0` if not (`ioerror()` `3`) or refused (`5`) |
 | `environ$(name$) → str` | an environment variable's value |
 | `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal. It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |

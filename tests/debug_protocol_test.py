@@ -174,9 +174,15 @@ check('a frame with no lines key is answered, not fatal', len(r) == 1, 'no reply
 if r:
     check('an absent set is the empty set', r[0].get('lines') == [], str(r[0]))
 
-# put the real breakpoint back for the rest of the session
-s2d = send(cmd='setBreakpoints', path=BAS, lines=[11])
-[f for f in frames(until_seq=s2d) if f.get('seq') == s2d]
+# put the real breakpoint back for the rest of the session -- and with it line 4,
+# the `function dobro` header. 2d. WHAT IS ARMED IS WHAT THE REPLY SAYS: the reply
+#     left the header out (StoppableLines has no header) while the set that was
+#     ARMED kept it, so the program stopped on line 4 -- which runs first, the
+#     definition's own boundary -- under a reply that said it was not installed
+#     (2026-10-07). The first stop below must be 11.
+s2d = send(cmd='setBreakpoints', path=BAS, lines=[4, 11])
+r = [f for f in frames(until_seq=s2d) if f.get('seq') == s2d][0]
+check('a function header is answered as not installed', r.get('lines') == [11], str(r))
 
 # 3. a command in the wrong state is refused, never ignored
 s3 = send(cmd='stackTrace')
@@ -227,6 +233,17 @@ r = [f for f in frames(until_seq=s6b) if f.get('seq') == s6b]
 check('a malformed element is dropped, not fatal', len(r) == 1, 'no reply: the debuggee died')
 if r:
     check('only the usable line survives', r[0].get('lines') == [11], str(r[0]))
+
+# 6b2. A FLOAT IS NOT A LINE NUMBER. JSON has one number type, and fpjson's AsInt64
+#      ROUNDS a float: 1.5 armed line 2, and 1e300 raised EInvalidOp from inside the
+#      parse loop and killed the debuggee (2026-10-07). 11.0 is a float too -- a
+#      line number has no fraction to write -- so all three are dropped, like any
+#      element that is not an integer.
+s6b2 = send(cmd='setBreakpoints', path=BAS, lines=[11, 1.5, 1e300, 11.0])
+r = [f for f in frames(until_seq=s6b2) if f.get('seq') == s6b2]
+check('a float element is dropped, not fatal', len(r) == 1, 'no reply: the debuggee died')
+if r:
+    check('and it arms nothing', r[0].get('lines') == [11], str(r[0]))
 
 # 6c. AND THE SET CAN BE REPLACED WHILE STOPPED, which is the state an editor is
 #     always in when a person moves a breakpoint. TPhosphorEngine.ArmDebug used to

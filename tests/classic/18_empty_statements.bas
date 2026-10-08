@@ -15,6 +15,12 @@ rem println, print with a trailing separator, print using, print #n,
 rem close, return -- took `else` for its operand and failed. Each one is
 rem run with the condition both true and false below, so both arms of
 rem every if execute, and the bytes they print are compared exactly.
+rem It ends one ONLY ON THAT IF'S OWN LINE. A then branch can open a
+rem block -- an if, a for, a function -- whose body runs on to later
+rem lines, where `else` is an ordinary name again; until 2026-10-07
+rem `println else` there printed a blank line and ran the NEXT line as
+rem an else arm, or was refused. The last block below holds `else = 7`
+rem and reads it on those lines.
 rem
 rem 18_empty_statements.expected was written from the rules, not from a
 rem run: println adds one line break, print none, ";" nothing, "," a
@@ -74,3 +80,20 @@ open f$ for input as #1
 line input #1, s$
 if 1 = 2 then println "no" else close
 println s$ + "|"
+
+rem n27, on later lines -- `else` is the global, 7, except where an
+rem inline if on that same line makes it end a bare println
+else = 7
+if 1 = 1 then if 1 = 1 then
+  println else
+  println "then-arm"
+endif
+if 1 = 1 then for q = 1 to 1
+  println else
+  if 1 = 1 then println else println "no"
+  println else
+next
+if 1 = 1 then function g()
+  return else
+endfunction
+println str$(g())

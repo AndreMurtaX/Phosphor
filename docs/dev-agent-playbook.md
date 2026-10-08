@@ -1525,6 +1525,76 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-07 · adversarial round over the day's commits: 30 findings, every
+  one checked before it was accepted -- the severe ones reproduced, the minor HTTP
+  ones read -- and two more found while fixing them.** Four reviewers in
+  worktrees -- compiler, engine resources, HTTP, I/O and debugger -- each against
+  a pristine build, each asked for a grid. What the round taught, beyond the
+  fixes:
+  - **The largest class was one seam nobody had walked: FPC's redirect loop.**
+    n26, m5, m6 and m7 each held for the FIRST url of a request, and every one of
+    them was bypassed by the RTL re-entering the request for a redirect -- the
+    proxy refusal (an https hop through a proxy went to the PROXY, which got the
+    bearer token and passed the name check on its own name), the pin, IPv6, the
+    credentials (FPC re-sent cookies when the host CHANGED and dropped them when
+    it did not). Eleven findings, one cause. Fixed as a class: the library follows
+    redirects itself, and each hop is a request under every rule. **When a
+    guarantee is enforced at the entrance, ask what re-enters without passing it.**
+  - **A test I wrote passed on the leaking build.** `instr(b$, "auth=" + lf$)`
+    also matches the end of the `pauth=` line. Only building the new tests
+    against the OLD library -- with the three test exports grafted on -- showed
+    it, and showed a second masking: a defect in the path parser (a query holding
+    `://` made the path an absolute url) failed most redirect cases for the wrong
+    reason until it was grafted onto the old build too. Every new test was then
+    watched failing, per case, for its own reason.
+  - **The first fix for r3's spelling was quadratic, and m4's probe said so.**
+    "The earliest token of the statement" costs N squared on a line declaring N
+    names. The shipped rule costs one comparison: the statement records its
+    assignment target before the right-hand side.
+  - **A mutation that survives can be telling you which guard DECIDES.** With the
+    bracket check and the dial's own check both removed, the hosts test still
+    passed: strict parsing (ParseIPv6) had already moved `[zzzz]` from the
+    literal path to the name path, which fails at lookup without dialling. The two
+    checks are kept as a second layer and recorded as such. Twenty of twenty-five
+    HTTP mutants failed outright; the scheme half of the origin rule survived until
+    the rule was asked directly, because no server here speaks two schemes on one
+    port; two survivors are recorded with their reasons -- a redundant layer (the
+    connect-failure classification, which the hop split made unreachable) and an
+    effect only a real network shows (the connect wait rounded to whole seconds,
+    from the RTL's `tv_sec := ms div 1000`).
+  - **n27 leaked a depth into lines it never meant**: FInlineDepth stayed raised
+    for a whole block opened in a then-branch. The rule is now the if's own LINE.
+    The sweep that proved it compared against pristine on 130 programs pristine
+    accepts, and the pre-fix binary failed 114 of them.
+  - **A ceiling is only as good as the paths after the call.** MaxHandles skipped
+    a call that raised, and a host that swallowed a callback's peLimit kept
+    dispatching (1000 live under 10). A crossed ceiling now stays crossed for the
+    rest of the library call. And the level now leaves out JSON views, borrowed
+    out of a counted document -- the same node answers the same view, so views
+    cannot outnumber nodes. Dictionaries, documents and configs still cannot be
+    freed by a script; for them the level is a total, which embedding.md now says
+    and a follow-up (a free for each) would change.
+  - **Windows-green shipped a Linux-broken fix again, and the VM caught it.**
+    `localhost.` passed on Windows -- its resolver knows the dotted name -- and
+    never connected on Linux, whose netdb hosts-file lookup does not. Stripping
+    the dot only at the certificate check had fixed the half Windows could
+    see; the request now goes out without it.
+  - **The core mutation sweep (21) found four survivors, each answered:** the
+    `let`/`for` target and a file line that imitates the in-memory header mark
+    were real gaps, now tested; the call-token skip in the spelling scan was
+    unreachable once the target rule existed, and was REMOVED rather than kept
+    untested; restoring the outer inline line is unobservable by construction
+    (an inner one-line if consumes the rest of its line) and stays as a
+    defensive layer, named as one. The tree was fingerprinted before and after
+    the sweep, which edits it in place: identical.
+  - Smaller, each pinned: setBreakpoints armed a function header it reported as
+    not installed, and a JSON float killed the debuggee; a `[k`/`v]` set wrote a
+    section header and `[s] ; note` was no header; `forcedirectories` and
+    `fileexists` left a stale 5 and `chdir("")` answered 1 unsandboxed; an
+    IPv4-literal test read the last octet; a trailing dot and an address as SNI;
+    a trickling peer and a sub-second connect wait; an entry near Low(Integer).
+
+
 - **2026-10-07 · m6: the blocker was read as "no seam", and there were two.**
   The plan and the roadmap both said IPv6 needed a socket-layer rework because
   TFPHTTPClient's socket is private. Reading the RTL for a way in -- after a

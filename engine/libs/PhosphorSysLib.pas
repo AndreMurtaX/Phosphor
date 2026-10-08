@@ -129,19 +129,26 @@ function t_forcedirectories(const Args: array of TValue; out Err: TPhosphorError
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
-  Result := ValInt(Ord(ForceDirectories(Args[0].Str)));
+  // Through IoAnswer like the other mutators: a success left a refusal's 5
+  // standing, and a failure recorded nothing, so it read as "refused" (2026-10-07).
+  Result := IoAnswer(ForceDirectories(Args[0].Str));
 end;
 function t_chdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  { "" names no directory. The sandbox refuses it, but with none in force the
+    RTL's ChDir returns early on '' and reports no error, so SetCurrentDir('') is
+    True and this answered 1 having moved nothing (2026-10-07). Refused, as the
+    reference says, with or without a sandbox. }
+  if Args[0].Str = '' then Exit(IoRefused());
   Result := IoAnswer(SetCurrentDir(Args[0].Str));
 end;
 function t_fileexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
-  Result := ValInt(Ord(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0)));
+  Result := IoQueried(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0));
 end;
 function t_kill(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin

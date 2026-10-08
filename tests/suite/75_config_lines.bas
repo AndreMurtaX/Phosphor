@@ -18,6 +18,9 @@ rem was never written, and blanks at either end of a key or value were
 rem trimmed away. Each of those is now REFUSED, as a catchable error --
 rem the attack plan's decision 6: errors are values, and an escape would
 rem invent a convention nobody editing the file by hand could see.
+rem An adversarial round (2026-10-07) found one shape of setter the rule
+rem missed -- a key beginning "[" with a value ending "]" -- and one hand
+rem edit that still did not survive: a header with a comment after it.
 rem
 rem Every expected value below is derived from that rule, or from the
 rem file text written out by hand above it -- none was read off a run.
@@ -103,6 +106,11 @@ assert_eq(raised, 1, "and so does the default-section boolean setter")
 raised = 0
 d@ = cfg_sets@(d@, "k", "x" + lf$)
 assert_eq(raised, 1, "and the default-section string setter, of its value")
+raised = 0
+rem "[k" = "v]" is written as the line "[k=v]", which is a section header:
+rem the key was gone after a reload, and a section named "k=v" was there.
+d@ = cfg_set@(d@, "t", "[k", "v]")
+assert_eq(raised, 1, "a key beginning [ with a value ending ] is refused")
 assert_eq(cfg_keycount(d@, "t"), 0, "not one of them reached the config")
 
 test_case("config-lines/what CAN be read back still is")
@@ -117,6 +125,8 @@ d@ = cfg_set@(d@, "t", "url", "http://x/?a=b#frag;y")
 d@ = cfg_set@(d@, "t", "dir", "C:" + bs$ + "tmp" + bs$)
 d@ = cfg_set@(d@, "#sec", "k", "v")
 d@ = cfg_set@(d@, "t", "next", "kept")
+d@ = cfg_set@(d@, "t", "[open", "v")
+d@ = cfg_set@(d@, "t", "close", "[v]")
 assert_eq(raised, 0, "none of these is refused")
 x = cfg_save(d@)
 e@ = cfg_open@("bin/p9b_cfg_refused.ini")
@@ -124,6 +134,42 @@ assert_eq(cfg_get$(e@, "t", "url", "?"), "http://x/?a=b#frag;y", "a value holdin
 assert_eq(cfg_get$(e@, "t", "dir", "?"), "C:" + bs$ + "tmp" + bs$, "a trailing backslash reads back")
 assert_eq(cfg_get$(e@, "t", "next", "?"), "kept", "and does not swallow the next key")
 assert_eq(cfg_get$(e@, "#sec", "k", "?"), "v", "a section named with a leading hash reads back")
+assert_eq(cfg_get$(e@, "t", "[open", "?"), "v", "a key beginning [ reads back when its value does not end ]")
+assert_eq(cfg_get$(e@, "t", "close", "?"), "[v]", "and a value in brackets under a plain key")
+
+test_case("config-lines/a header with a comment after it is a header")
+rem "[s] ; note" ends in a comment, not in "]", and the RTL takes only a line
+rem ending in "]" for a header: the section did not exist, its key was
+rem unreadable, and a set appended a second, bare [s].
+h$ = "bin/p9b_cfg_head.ini"
+file_writealltext(h$, "[s] ; note" + lf$ + "k=1" + lf$ + "[t] # other" + lf$ + "m=3" + lf$)
+h@ = cfg_open@(h$)
+assert_eq(cfg_get$(h@, "s", "k", "?"), "1", "its key reads")
+assert_eq(cfg_get$(h@, "t", "m", "?"), "3", "and so does one under a header with a # comment")
+h@ = cfg_set@(h@, "s", "j", "2")
+x = cfg_save(h@)
+t$ = file_readalltext$(h$)
+assert_true(instr(t$, "[s] ; note") > 0, "the header is written back as it was")
+assert_eq(instr(t$, "[s]" + lf$) + instr(t$, "[s]" + crlf$), 0, "and no second, bare [s] is added")
+assert_true(instr(t$, "k=1") < instr(t$, "j=2") and instr(t$, "j=2") < instr(t$, "[t] # other"), "the new key joins its own section")
+f@ = cfg_open@(h$)
+assert_eq(cfg_keycount(f@, "s"), 2, "and both of its keys read back")
+x = file_delete(h$)
+
+test_case("config-lines/a line that looks like the library's own marker is kept")
+rem The library marks a commented header in memory with a line beginning
+rem ";" and chr$(2), and puts the header's text back where it finds one. A
+rem person's file can hold such a line too; it must come back as written,
+rem and the header above it must stay the header.
+m$ = ";" + chr$(2) + "mine"
+file_writealltext(h$, "[s]" + lf$ + m$ + lf$ + "k=1" + lf$)
+h@ = cfg_open@(h$)
+h@ = cfg_set@(h@, "s", "j", "2")
+x = cfg_save(h@)
+t$ = file_readalltext$(h$)
+assert_true(instr(t$, "[s]") > 0 and instr(t$, m$) > instr(t$, "[s]"), "the line is kept, under its header")
+assert_eq(cfg_keycount(h@, "s"), 2, "and is not a key")
+x = file_delete(h$)
 
 x = file_delete(p$)
 x = file_delete("bin/p9b_cfg_refused.ini")

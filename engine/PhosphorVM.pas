@@ -24,7 +24,7 @@ uses
     leaves the budget's own clock running. See DebugPoll. }
   PhosphorBudget,
   PhosphorSandbox,
-  PhosphorHandles;   // LiveHandleCount, for the MaxHandles ceiling (ledger m3)
+  PhosphorHandles;   // OwnedHandleCount, for the MaxHandles ceiling (ledger m3)
 
 { IS THIS EXCEPTION EVIDENCE THAT MEMORY IS ALREADY DAMAGED?
 
@@ -341,6 +341,7 @@ type
       isolation and only their integration could show it: probe_budget went to
       205/2, on the two cases that catch a refusal and continue. }
     FLimitFromInner: Boolean;
+    FInnerLimitErr: TPhosphorError;   // the ceiling FLimitFromInner reports
     { CONTAINMENT: does a fault end the RUN, or the PROCESS? See ContainFaults. }
     FContainFaults: Boolean;
     { Set once a state fault has been contained. This VM is not reusable after
@@ -2543,7 +2544,9 @@ var
   { ARE THE LIVE HANDLES WITHIN MaxHandles? False = they are not, and a fatal
     peLimit is set, so the caller must Exit(False).
 
-    A LEVEL, NOT A COUNT. LiveHandleCount is what is alive now, so a script that
+    A LEVEL, NOT A COUNT. OwnedHandleCount is what is alive now -- less the
+    VIEWS, a JSON child borrowed out of a document that is itself counted (see
+    PhosphorHandles.RegisterView) -- so a script that
     creates and frees a hundred thousand lists one at a time never comes near a
     ceiling of 100, and a script that keeps 101 is refused. Counting handles
     ever created would refuse the first; that variant was built and watched
@@ -2554,7 +2557,7 @@ var
   begin
     Result := True;
     if MaxHandles <= 0 then Exit;
-    if LiveHandleCount() <= MaxHandles then Exit;
+    if OwnedHandleCount() <= MaxHandles then Exit;
     LastError := MakeError(peLimit, 'handle limit exceeded (' +
       IntToStr(MaxHandles) + ' live handles)');
     ErrorLine := ins.Line;
@@ -3328,10 +3331,6 @@ begin
               One query per call against a call that costs 21 to 115 microseconds
               on this build is under a thousandth of it, so unlike the `+` path
               this one needs no threshold. }
-            if (MaxMemoryBytes > 0) and (not RoomFor(0)) then Exit(False);
-            { And the fifth, at the same place for the same reason: a library
-              call is the only thing that mints a handle. }
-            if not HandlesWithin() then Exit(False);
           except
             on ex: Exception do
             begin
@@ -3362,6 +3361,14 @@ begin
               e := MakeError(peRuntime, ex.Message);
             end;
           end;
+          { The memory ceiling, asked after every library call (see the comment
+            above the call) -- and the fifth, the handle level, for the same
+            reason: a library call is the only thing that mints a handle. Both
+            are asked HERE, after the net, and not inside it: a call that minted
+            and then RAISED skipped them, and two hundred such calls under a
+            ceiling of 100 finished with 200 live (2026-10-07). }
+          if (MaxMemoryBytes > 0) and (not RoomFor(0)) then Exit(False);
+          if not HandlesWithin() then Exit(False);
           if IsError(e) then
           begin
             { A BUDGET THAT CAME BACK FROM A NESTED ACTIVATION IS STILL A BUDGET.
@@ -4666,6 +4673,20 @@ begin
   // segfault while the ON ERROR handler tried to resume into abandoned frames. An
   // ordinary recursive BASIC function is unaffected -- opCall is a jump inside one
   // interpreter loop and costs only heap.
+  { A CEILING CROSSED IN HERE STAYS CROSSED for the rest of the library call
+    that made it. A host that dispatches many callbacks from one call -- the
+    GUI's event loop is one -- may swallow the peLimit an activation returns,
+    and it used to: every later handler then ran, and minted, so a ceiling of
+    10 handles stood at 1000 when the call came back (2026-10-07). The
+    documented overshoot is what ONE call creates. So while an execution is in
+    progress (FExecDepth > 0) no further activation starts once one crossed a
+    ceiling; opCall clears the mark at its next dispatch, and a host calling in
+    from outside any execution starts clean. }
+  if FLimitFromInner and (FExecDepth > 0) then
+  begin
+    Err := FInnerLimitErr;
+    Exit;
+  end;
   if FCallDepth >= MaxCallDepth then
   begin
     Err := MakeError(peRuntime, 'call nesting too deep: ' + AName +
@@ -4690,6 +4711,7 @@ begin
     Err := MakeError(peLimit, 'call depth limit exceeded (' +
       IntToStr(MaxFrameDepth) + ' activation frames)');
     FLimitFromInner := True;   // a ceiling, crossed in here; see FLimitFromInner
+    FInnerLimitErr := Err;
     Exit;
   end;
   slots := Length(FProg.UserFuncs[ufi].LocalTypes);
@@ -4701,6 +4723,7 @@ begin
       IntToStr(MaxFrameSlots) + ' slots in ' + IntToStr(FFrameSP) +
       ' activation frames)');
     FLimitFromInner := True;   // a ceiling, crossed in here; see FLimitFromInner
+    FInnerLimitErr := Err;
     Exit;
   end;
   Inc(FFrameSlots, slots);
@@ -4841,7 +4864,11 @@ begin
       // A ceiling the INNER activation crossed. It travels back to opCall as an
       // ordinary library error, and this is the only place that still knows it was
       // not a library saying no. See FLimitFromInner.
-      if Err.Code = peLimit then FLimitFromInner := True;
+      if Err.Code = peLimit then
+      begin
+        FLimitFromInner := True;
+        FInnerLimitErr := Err;
+      end;
     end;
    except
      { THE HOST-CALLBACK DOOR IS AN ENTRY INTO EXECUTION TOO, and it is the one a

@@ -47,3 +47,5 @@
 17_https_client_cert
 18_http_ipv6
 19_https_ipv6
+20_http_redirects
+21_http_hosts

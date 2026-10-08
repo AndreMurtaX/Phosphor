@@ -555,6 +555,43 @@ end;
   StoppableLines is range-checked, so with the `hdr >= 0` bound deleted the
   first call raises instead of reading the bytes before the array; an
   exception is reported here as the failure it is. }
+{ AN ENTRY ANYWHERE IN Integer IS ANSWERED, NOT RAISED (2026-10-07). Only a
+  program built in memory can carry one outside the program -- ValidateProgram
+  refuses it from a .pbc -- and StoppableLines computed Entry - 2 in Integer,
+  so Low(Integer) + 1 left the type's range and raised ERangeError under the
+  range checking the routine is compiled with. Every value here names no
+  header, so the answer is the two boundaries the program has: 7 and 9. }
+procedure CheckEntryAnywhere;
+const
+  Entries: array[0..5] of Integer = (Low(Integer), Low(Integer) + 1, Low(Integer) + 2,
+                                     -1, 4, High(Integer));
+var
+  p: TProgram;
+  got: String;
+  k: Integer;
+begin
+  for k := Low(Entries) to High(Entries) do
+  begin
+    p := TProgram.Create();
+    try
+      p.Emit(opStmt, 0, 0, 7);
+      p.Emit(opNop, 0, 0, 7);
+      p.Emit(opStmt, 0, 0, 9);
+      p.Emit(opHalt, 0, 0, 9);
+      p.SetGlobalTableUnnamed([]);
+      p.AddUserFunc('far', Entries[k], 0, [], [], vtNumber);
+      try
+        got := LinesToStr(p.StoppableLines);
+      except
+        on e: Exception do got := 'raised ' + e.ClassName;
+      end;
+      CheckStr(got, '7,9', 'an in-memory entry of ' + IntToStr(Entries[k]) + ' is answered');
+    finally
+      p.Free;
+    end;
+  end;
+end;
+
 procedure CheckEntryBelowHeader;
 var
   p, back: TProgram;
@@ -885,11 +922,21 @@ const
     'MYCOUNTER = myCounter + 1'           + #10 +
     'Total% = 2'                          + #10 +
     'Wide = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1' + #10 +
+    'Acc = ACC + 5'                       + #10 +   // read on the right first: still Acc
+    'TALLY += tally'                      + #10 +   // the compound form: TALLY
+    'twice = Twice(2)'                    + #10 +   // a call that folds the same: twice
+    'lEN = Len("abc")'                    + #10 +   // a builtin that does: lEN
+    'let Cnt = CNT + 1'                   + #10 +   // the target after LET: Cnt
+    'for Idx = IDX + 1 to 1'              + #10 +   // and after FOR: Idx
+    'next'                                + #10 +
     'end'                                 + #10 +
     'function Greet$(Who$) local Shout$'  + #10 +
     '  Shout$ = Who$ + "!"'               + #10 +
     '  Hits = 1'                          + #10 +
     '  return Shout$'                     + #10 +
+    'endfunction'                         + #10 +
+    'function Twice(N)'                   + #10 +
+    '  return N * 2'                      + #10 +
     'endfunction'                         + #10;
 
 function PbcBytes(AProg: TProgram): String;
@@ -930,8 +977,12 @@ begin
       shown := shown + p.GlobalSpelling(i) + ' ';
       ident := ident + p.GlobalName(i) + ' ';
     end;
-    CheckStr(shown, 'myCounter Total% Wide Hits ', 'globals are shown as first written');
-    CheckStr(ident, 'mycounter total% wide hits ', 'and their identity is still the fold');
+    { AS FIRST WRITTEN, in source order -- the target of `Acc = ACC + 5`, not the
+      read on its right that the parser meets first and that creates the entry;
+      and never a CALL's spelling (Twice, Len), which names a function. Until
+      2026-10-07 these four showed ACC, tally, Twice and Len. }
+    CheckStr(shown, 'myCounter Total% Wide Acc TALLY twice lEN Cnt Idx Hits ', 'globals are shown as first written');
+    CheckStr(ident, 'mycounter total% wide acc tally twice len cnt idx hits ', 'and their identity is still the fold');
 
     fi := FuncIndex(p, 'greet$');
     CheckInt(fi, 0, 'the function is found by its folded name');
@@ -1032,6 +1083,7 @@ begin
   CheckScrambledBoundaries();
   CheckStoppableGuards();
   CheckEntryBelowHeader();
+  CheckEntryAnywhere();
   CheckPreparedState();
   CheckPreparationDiscarded();
   CheckSpellings();

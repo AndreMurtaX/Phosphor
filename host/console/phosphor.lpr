@@ -2565,9 +2565,9 @@ var
   rejected: TJSONArray;
   rej: TJSONObject;
   cmd, cond, evVal, evKind, evErr: String;
-  seq, i, n: Integer;
+  seq, i, n, k: Integer;
   v: Int64;
-  stopped: Boolean;
+  stopped, keepLine: Boolean;
 begin
   Result := False;
   stopped := (FState = dbgStopped);
@@ -2731,8 +2731,24 @@ begin
         begin
           el := TJSONArray(arr).Items[i];
           if (el = nil) or (el.JSONType <> jtNumber) then Continue;
+          { AN INTEGER, not any number. A JSON float is a jtNumber too, and its
+            AsInt64 ROUNDS: 1.5 armed line 2, and 1e300 raised EInvalidOp out of
+            this loop and killed the debuggee (2026-10-07). A line number has no
+            fraction; a float element is dropped like any other non-integer. }
+          if TJSONNumber(el).NumberType = ntFloat then Continue;
           v := el.AsInt64;
           if (v < 1) or (v > High(Integer)) then Continue;   // a line number, not an index
+          { WHAT IS ARMED IS WHAT THE REPLY SAYS WAS INSTALLED. The reply is
+            filtered by StoppableLines and this set used not to be, so a
+            breakpoint on a `function` header line was answered as not installed
+            -- and then stopped there, on the boundary the definition itself
+            emits (2026-10-07). One filter, both answers, and before the
+            condition: a line that cannot bind has no condition to refuse. }
+          EnsureStoppable();
+          keepLine := False;
+          for k := 0 to High(FStoppable) do
+            if FStoppable[k] = Integer(v) then begin keepLine := True; Break; end;
+          if not keepLine then Continue;
           cond := '';
           if (conds <> nil) and (i < TJSONArray(conds).Count) then
           begin

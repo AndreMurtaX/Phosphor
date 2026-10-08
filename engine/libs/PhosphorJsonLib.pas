@@ -20,7 +20,8 @@ interface
 
 uses
   SysUtils, fpjson, jsonparser,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorBudget,
+  PhosphorNameIndex;
 
 procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
 
@@ -69,14 +70,73 @@ begin
   inherited Destroy();
 end;
 
+{ A BORROW IS A VIEW, AND THE SAME NODE IS THE SAME VIEW (2026-10-07).
+  docs/libraries/json.md promises a borrow costs nothing, and under MaxHandles
+  it cost a live handle each: a loop READING 200 rows of a document was refused
+  at a ceiling of 100. Two changes make the promise true. A borrow is
+  registered as a VIEW, which the level leaves out -- its node belongs to a
+  document that is counted. And borrowing a node already lent out answers the
+  handle it was lent under, so the views can never outnumber the nodes of the
+  documents, which were sized when they were built or parsed: re-reading the
+  same row a million times mints one handle, where it minted a million.
+  GBorrowed maps a node to that handle; an entry is believed only while the id
+  is live and its wrapper still lends exactly that node, so a node freed (and
+  its view emptied by InvalidateBorrowed) or an address reused is a miss.
+  The map is the engine's own TNameIndex (Generics.Collections warns when it is
+  instantiated, see PhosphorRegistry), keyed by the node's address in hex and
+  holding an index into GBorrowIds, which is what lets an entry be replaced.
+  Entries outlive the run that made them, and only miss after it; the map is
+  emptied when it holds more than twice the live handles, which no run's own
+  views can reach, so it is bounded by the run in progress. }
+var
+  GBorrowed: TNameIndex = nil;
+  GBorrowIds: array of Int64;
+
 function JsonRegisterNode(ANode: TJSONData; AOwns: Boolean; ALevel: Integer): Int64;
 var w: TPhosphorJson;
+    o: TObject;
+    key: String;
+    e: Integer;
 begin
+  e := -1;
+  key := '';
+  if (not AOwns) and (ANode <> nil) then
+  begin
+    if GBorrowed = nil then GBorrowed := TNameIndex.Create();
+    if GBorrowed.Count > 2 * LiveHandleCount() + 1024 then
+    begin
+      GBorrowed.Clear();
+      SetLength(GBorrowIds, 0);
+    end;
+    key := HexStr(PtrUInt(ANode), SizeOf(PtrUInt) * 2);
+    e := GBorrowed.Find(key);
+    if e >= 0 then
+    begin
+      o := HandleObj(GBorrowIds[e]);
+      if (o is TPhosphorJson) and (not TPhosphorJson(o).Owns) and
+         (TPhosphorJson(o).Node = ANode) and (TPhosphorJson(o).Level = ALevel) then
+        Exit(GBorrowIds[e]);
+    end;
+  end;
   w := TPhosphorJson.Create();
   w.Node := ANode;
   w.Owns := AOwns;
   w.Level := ALevel;
-  Result := RegisterHandle(w);
+  if key = '' then
+    Result := RegisterHandle(w)
+  else
+  begin
+    Result := RegisterView(w);
+    if e >= 0 then
+      GBorrowIds[e] := Result
+    else
+    begin
+      e := GBorrowed.Count;
+      if e >= Length(GBorrowIds) then SetLength(GBorrowIds, (e + 1) * 2);
+      GBorrowIds[e] := Result;
+      GBorrowed.Put(key, e);
+    end;
+  end;
 end;
 
 function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
@@ -2245,5 +2305,8 @@ begin
   Reg.Add('json_setval@:@$?',  @t_json_setval);
   Reg.Add('json_setval@:@$@',  @t_json_setval);
 end;
+
+finalization
+  GBorrowed.Free;
 
 end.

@@ -1330,7 +1330,31 @@ else {
     $xText -split "`r?`n" | Where-Object { $_ -match 'FAIL|SETUP' } | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
 }
 
+# --- Y: chdir("") WITH NO SANDBOX IN FORCE --------------------------------------
+# Every suite runner is sandboxed, and the sandbox refuses "" itself, so this
+# defect lived only where no root is installed -- the console host run plainly. The
+# RTL's ChDir returns early on '' and reports no error, so chdir("") and
+# dir_setcurrent("") answered 1, having moved nothing, until 2026-10-07. Expected
+# from docs/libraries/sys.md and io.md: refused -- 0, ioerror() 5 -- and the working
+# directory where it was.
+$yBas = Join-Path $tmp 'phosphor_chdir_empty.bas'
+$yOut = Join-Path $tmp 'phosphor_chdir_empty.out'
+Set-Content -LiteralPath $yBas -Encoding ascii -Value @(
+    'here$ = dir_getcurrent$()',
+    'println str$(chdir("")) + " " + str$(ioerror())',
+    'println str$(dir_setcurrent("")) + " " + str$(ioerror())',
+    'if dir_getcurrent$() = here$ then println "same" else println "moved"'
+)
+cmd /c "`"$exe`" `"$yBas`" < NUL > `"$yOut`" 2>&1"
+$yText = (Read-Text $yOut) -replace "`r", ''
+$okY = ($LASTEXITCODE -eq 0) -and ($yText.TrimEnd() -ceq "0 5`n0 5`nsame")
+if ($okY) { Write-Host 'PASS  Y:chdir("") with no sandbox is refused (0, ioerror 5) and moves nothing' -ForegroundColor Green }
+else {
+    Write-Host 'FAIL  Y:chdir("") with no sandbox answered something other than a refusal' -ForegroundColor Red
+    Write-Host ("        said: " + ($yText -replace "`n", ' / ')) -ForegroundColor DarkGray
+}
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX) { exit 0 } else { exit 1 }
+    $okX -and $okY) { exit 0 } else { exit 1 }

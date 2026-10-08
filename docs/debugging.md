@@ -206,6 +206,14 @@ program that never stops on its own, a one-line loop body stopping once per pass
 **a breakpoint on the first executed statement**, and **a line on every frame of a
 recursion** — and that the program's own stdout is untouched by all of it.
 
+**The `lines` in a `setBreakpoints` reply are exactly what is armed.** A line no
+breakpoint can bind to — a comment, a blank line, `endif`, and a `function`
+header — is left out of the reply and is not armed either; until 2026-10-07 a
+header was left out of the reply and armed anyway, so the program stopped on a
+line the editor had been told had no breakpoint. An element that is not an
+integer is dropped, a JSON number with a fraction or an exponent included:
+`1.5` used to arm line 2, and `1e300` killed the debuggee.
+
 The last two are there because PhosphorIDE found both by driving this host on
 2026-09-16, and neither was visible to the 52 assertions that came before them.
 A breakpoint on the first executed statement was answered installed and never

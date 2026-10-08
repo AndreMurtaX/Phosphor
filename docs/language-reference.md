@@ -226,6 +226,12 @@ for i = 1 to 2
 next
 ```
 
+Only on that line. A `then` branch that opens a block — `if c then for i = 1 to 3`
+— runs on to later lines, and there `else` is an ordinary name again, as it is
+everywhere outside an `if`. Until 2026-10-07 it ended a statement on every line of
+such a block, so `println else` there printed a blank line and ran the next
+statement as an else arm.
+
 ```
 
 second pass

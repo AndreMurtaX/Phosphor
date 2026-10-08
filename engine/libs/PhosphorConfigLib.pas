@@ -68,12 +68,25 @@ type
     * before the first section: anything that is not a ';' comment;
     * inside a section: a '#' line, and any line with no '=';
     * anywhere: a line that begins with the marker. }
+{ A HEADER WITH A COMMENT AFTER IT -- `[s] ; note` -- is a header to a person and
+  was not one to anyone else: the RTL wants a line that ENDS in ']', so the
+  header was wrapped as a foreign line, the section never existed, its keys were
+  unreadable, and a set appended a second `[s]` (2026-10-07). It is handed to the
+  RTL as the bare `[s]`, followed by a line carrying HeadMark and the header as
+  it was written, which Save puts back in the header's place. A line that
+  already begins with HeadMark is wrapped, like one beginning with WrapMark. }
 const
   WrapMark = ';' + #1;
+  HeadMark = ';' + #2;
 
 function IsWrapped(const S: String): Boolean;
 begin
   Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #1);
+end;
+
+function IsHeadMarked(const S: String): Boolean;
+begin
+  Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #2);
 end;
 
 function IsHeader(const T: String): Boolean;
@@ -81,22 +94,59 @@ begin
   Result := (Length(T) >= 2) and (T[1] = '[') and (T[Length(T)] = ']');
 end;
 
+{ `[name]` followed by a comment: AHeader is the `[name]` part. The first ']'
+  whose remainder is a ';' or '#' comment ends the header. }
+function IsCommentedHeader(const T: String; out AHeader: String): Boolean;
+var p: Integer;
+    rest: String;
+begin
+  Result := False;
+  AHeader := '';
+  if (T = '') or (T[1] <> '[') then Exit;
+  for p := 2 to Length(T) - 1 do
+    if T[p] = ']' then
+    begin
+      rest := TrimLeft(Copy(T, p + 1, MaxInt));
+      if (rest <> '') and (rest[1] in [';', '#']) then
+      begin
+        AHeader := Copy(T, 1, p);
+        Exit(True);
+      end;
+    end;
+end;
+
 procedure WrapForeign(L: TStrings);
 var
   i: Integer;
-  t: String;
+  t, hdr: String;
   inSection: Boolean;
+  outL: TStringList;
 begin
   inSection := False;
-  for i := 0 to L.Count - 1 do
-  begin
-    t := Trim(L[i]);
-    if t = '' then Continue;
-    if IsWrapped(t) then begin L[i] := WrapMark + L[i]; Continue; end;
-    if IsHeader(t) then begin inSection := True; Continue; end;
-    if t[1] = ';' then Continue;                          // the RTL keeps these
-    if (not inSection) or (t[1] = '#') or (Pos('=', t) = 0) then
-      L[i] := WrapMark + L[i];
+  outL := TStringList.Create();
+  try
+    for i := 0 to L.Count - 1 do
+    begin
+      t := Trim(L[i]);
+      if t = '' then begin outL.Add(L[i]); Continue; end;
+      if IsWrapped(t) or IsHeadMarked(t) then begin outL.Add(WrapMark + L[i]); Continue; end;
+      if IsHeader(t) then begin inSection := True; outL.Add(L[i]); Continue; end;
+      if IsCommentedHeader(t, hdr) then
+      begin
+        inSection := True;
+        outL.Add(hdr);
+        outL.Add(HeadMark + L[i]);
+        Continue;
+      end;
+      if (t[1] <> ';') and                                 // the RTL keeps those
+         ((not inSection) or (t[1] = '#') or (Pos('=', t) = 0)) then
+        outL.Add(WrapMark + L[i])
+      else
+        outL.Add(L[i]);
+    end;
+    L.Assign(outL);
+  finally
+    outL.Free;
   end;
 end;
 
@@ -208,7 +258,18 @@ begin
       end;
       if prevBlank then headerIsComment := raw[i][1] = ';';
       prevBlank := False;
-      if IsWrapped(raw[i]) then sl.Add(Copy(raw[i], 3, MaxInt))
+      { A commented header's own text replaces the bare header the RTL kept --
+        which is the line just written, since a section's first line is its
+        HeadMark. Were it ever not, the text is written where it stands rather
+        than lost. }
+      if IsHeadMarked(raw[i]) then
+      begin
+        if (sl.Count > 0) and IsHeader(Trim(sl[sl.Count - 1])) then
+          sl[sl.Count - 1] := Copy(raw[i], 3, MaxInt)
+        else
+          sl.Add(Copy(raw[i], 3, MaxInt));
+      end
+      else if IsWrapped(raw[i]) then sl.Add(Copy(raw[i], 3, MaxInt))
       else sl.Add(raw[i]);
     end;
     sl.WriteBOM := Bom;
@@ -271,6 +332,11 @@ begin
   if Trim(Key) <> Key then Exit('a key may not begin or end with blanks, which the reader trims');
   if not CheckVal then Exit;
   if HasNewline(Val) then Exit('the value contains a line break');
+  { `[k` = `v]` is written `[k=v]`, which IS a header line: the key was gone after a
+    reload and a section named `k=v` had appeared (2026-10-07). Measured as the
+    only shape of the 4050 triples a sweep wrote that did not read back. }
+  if (Key[1] = '[') and (Val <> '') and (Val[Length(Val)] = ']') then
+    Exit('a key beginning "[" with a value ending "]" is written as a section header');
   if Trim(Val) <> Val then Exit('a value may not begin or end with blanks, which the reader trims');
 end;
 

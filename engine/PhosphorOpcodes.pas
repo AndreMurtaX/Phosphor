@@ -579,6 +579,13 @@ begin
   SetLength(skip, FCount);
   for i := 0 to UserFuncCount - 1 do
   begin
+    { In Int64, then bounded: an Entry near Low(Integer) -- which only a program
+      built in memory can carry, ValidateProgram refuses one from a .pbc -- made
+      Entry - 2 leave Integer's range, and under the range checking this routine
+      is compiled with, that raised ERangeError out of a function that answers
+      lists (2026-10-07). }
+    if (Int64(UserFuncs[i].Entry) - 2 < 0) or (Int64(UserFuncs[i].Entry) - 2 >= FCount) then
+      Continue;
     hdr := UserFuncs[i].Entry - 2;
     { THE `Op = opStmt` CONJUNCT IS UNTESTABLE BY CONSTRUCTION, not by missing
       coverage: the loop below already passes over every instruction that is

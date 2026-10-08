@@ -363,10 +363,22 @@ unbounded under the other four: the memory ceiling sees bytes, not count, and a
 handle can be small. It refuses a **level**, not a total: a hundred thousand
 lists created and freed one at a time run fine under a ceiling of 100, and
 holding the 101st is refused — `handle limit exceeded (100 live handles)`. It
-is asked after every library call, the only place a handle is made, so it
-overshoots by at most what one call creates, which is one for every constructor
-in the standard library. The count is the process's table (see "Handles are
-process-wide" above), which is this run's when one engine runs at a time.
+is asked after every library call, the only place a handle is made — a call that
+raised included — so it overshoots by at most what one call creates, which is
+one for every constructor in the standard library. A host function that calls
+back into the script many times in one call, as a GUI event loop does, is held
+to that too: once a callback crosses a ceiling no further callback starts
+within the same call, whether or not the host passed the error on. The count is
+the process's table (see "Handles are process-wide" above), which is this run's
+when one engine runs at a time.
+
+Two kinds of handle need saying. A JSON value *reached into* — `json_get@`,
+`json_item@`, `json_path@` — is a view of its document and does not count; the
+document does. And a dictionary, a JSON document or a config can be dropped by
+the script but never freed: nothing in the language frees one, so for those the
+level only rises, and a loop that makes one per pass is refused at the ceiling
+even if it keeps only the last. Size `MaxHandles` for the most a script may
+create of those, not the most it holds.
 
 **Four more ceilings are fixed rather than yours to set**, and they are why an
 unbounded recursion ends in a message instead of in the process dying. Ordinary

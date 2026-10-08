@@ -353,9 +353,26 @@ ALLOWED = {
         'from the budget\'s remaining time',
     'PhosphorHttpLib.pas:TPlain6Handler.Send':
         'the same EINTR retry, bounded the same way',
-    'PhosphorHttpLib.pas:IsIPv6Literal':
+    'PhosphorHttpLib.pas:ParseIPv6':
         'one Pos with a one-character needle (":") over a URL host the script '
-        'already handed over -- a scan, linear in it -- and an eight-word loop',
+        'already handed over -- a scan, linear in it -- then the RTL\'s parse of it',
+    # ---- 2026-10-07, redirects followed hop by hop -------------------------------
+    'PhosphorHttpLib.pas:FetchHop':
+        'one Pos with a one-character needle (":") over the host it dials, a scan '
+        'linear in a host the script already handed over',
+    'PhosphorHttpLib.pas:DotlessUrl':
+        'three forward scans over one url the script already handed over, each '
+        'stopping at the end of the authority -- linear in the url',
+    'PhosphorHttpLib.pas:FetchCore':
+        'the redirect loop: at most MaxRedirects hops, which ClientFollow clamps '
+        'to 255, and each hop a request bounded by its own connect and IO '
+        'timeouts and the run\'s deadline',
+    'PhosphorHttpLib.pas:ResponseCookies':
+        'walks the headers the SERVER answered with, one Pos per line, after '
+        'reading them was bounded by the IO timeout and the run\'s deadline; '
+        'nothing the script sized',
+    'phosphorhttptest.lpr:QueryArg':
+        'the TEST server reading a query its own test sent; no script reaches it',
     'PhosphorHttpLib.pas:HttpResolveAAAA':
         'walks what the RESOLVER answered, not anything the script sized: '
         'at most sixteen addresses from netdb, and the getaddrinfo list',

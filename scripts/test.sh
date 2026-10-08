@@ -998,4 +998,20 @@ else
   echo 'SKIP  X:a packed GUI application (no xvfb-run on this machine)'
 fi
 
+# --- Y: chdir("") WITH NO SANDBOX IN FORCE --------------------------------------
+# The twin of block Y in scripts/test.ps1, whose comment carries the reason.
+printf '%s\n' 'here$ = dir_getcurrent$()' \
+  'println str$(chdir("")) + " " + str$(ioerror())' \
+  'println str$(dir_setcurrent("")) + " " + str$(ioerror())' \
+  'if dir_getcurrent$() = here$ then println "same" else println "moved"' > "$tmpdir/y.bas"
+if "$exe" "$tmpdir/y.bas" < /dev/null > "$tmpdir/y.out" 2>&1; then ycode=0; else ycode=$?; fi
+ytext=$(tr -d '\r' < "$tmpdir/y.out")
+if [ "$ycode" -eq 0 ] && [ "$ytext" = "$(printf '0 5\n0 5\nsame')" ]; then
+  echo 'PASS  Y:chdir("") with no sandbox is refused (0, ioerror 5) and moves nothing'
+else
+  echo 'FAIL  Y:chdir("") with no sandbox answered something other than a refusal'
+  sed 's/^/        said: /' "$tmpdir/y.out"
+  fail=1
+fi
+
 exit "$fail"

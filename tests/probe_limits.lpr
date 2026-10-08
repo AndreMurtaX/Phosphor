@@ -27,7 +27,7 @@ program probe_limits;
 
 uses
   Classes, SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler,
-  PhosphorOpcodes, PhosphorValue, PhosphorRegistry, PhosphorVM;
+  PhosphorOpcodes, PhosphorValue, PhosphorRegistry, PhosphorVM, PhosphorHandles;
 
 var
   Ok: Integer = 0;
@@ -1095,6 +1095,109 @@ begin
   One('MaxHandles: ON ERROR cannot escape it', Caught, 100, True, '');
 end;
 
+{ THE LEVEL, AT THE DOORS AN ADVERSARIAL ROUND FOUND (2026-10-07). Three ways the
+  level was not what docs/embedding.md says it is:
+    * A JSON BORROW COST A HANDLE. json.md says a borrow costs nothing, and a
+      loop READING 200 rows was refused at a ceiling of 100. A borrow is now a
+      view, which the level leaves out, and the same node is the same view --
+      so the sum is 200*201/2 = 20100 and reading one row a thousand times
+      leaves exactly two live handles: the document and the one view.
+    * A HOST THAT SWALLOWS A CALLBACK'S ERROR kept dispatching: under a ceiling
+      of 10, one library call running 1000 handlers that each keep a list ended
+      with 1000 live. The documented overshoot is what ONE call creates, so at
+      most 11 -- and the run is refused.
+    * A CALL THAT MINTS AND THEN RAISES skipped the check: 200 of them under
+      100 finished with 200 live. At most 101, and refused. }
+function PumpHandlers(AVM: TObject; const Args: array of TValue;
+                      out Err: TPhosphorError): TValue;
+var
+  i: Integer;
+  e: TPhosphorError;
+begin
+  Err := NoError();
+  for i := 1 to Trunc(AsDouble(Args[0])) do
+    TPhosphorVM(AVM).CallUserFunc('handler', [], e);   // GuiCallBack's shape: record, go on
+  Result := ValInt(0);
+end;
+
+type
+  TMintMarker = class end;
+
+function MintThenRaise(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  RegisterHandle(TMintMarker.Create());
+  raise Exception.Create('validation failed after minting');
+  Result := ValInt(0);
+end;
+
+procedure CheckMaxHandlesDoors;
+var
+  eng: TPhosphorEngine;
+  sink: TTextSink;
+  rc, i: Integer;
+  rows: String;
+begin
+  rows := '';
+  for i := 1 to 200 do
+  begin
+    if i > 1 then rows := rows + ',';
+    rows := rows + '{' + #92 + '"n' + #92 + '":' + IntToStr(i) + '}';
+  end;
+  eng := TPhosphorEngine.Create();
+  sink := TTextSink.Create();
+  try
+    eng.MaxHandles := 100;
+    eng.OnOutput := @sink.Take;
+    rc := eng.Run('p@ = json_parse@("[' + rows + ']")' + LF + 'total = 0' + LF +
+                  'for i = 1 to json_len(p@)' + LF + '  row@ = json_item@(p@, i)' + LF +
+                  '  total = total + json_getn(row@, "n")' + LF + 'next' + LF +
+                  'println str$(total)' + LF);
+    Report(rc = 0, 'MaxHandles: reading 200 JSON rows under 100 finishes (' + eng.ErrorMessage + ')');
+    Report(sink.Text = '20100' + LF, 'and sums them: 200*201/2');
+    sink.Text := '';
+    rc := eng.Run('p@ = json_parse@("[{' + #92 + '"n' + #92 + '":7}]")' + LF + 'total = 0' + LF +
+                  'for i = 1 to 1000' + LF + '  row@ = json_item@(p@, 1)' + LF +
+                  '  total = total + json_getn(row@, "n")' + LF + 'next' + LF +
+                  'println str$(total)' + LF);
+    Report((rc = 0) and (sink.Text = '7000' + LF), 'reading one row a thousand times answers 7000');
+    Report(LiveHandleCount() = 2, 'and leaves two live handles, the document and one view (' +
+           IntToStr(LiveHandleCount()) + ')');
+  finally
+    sink.Free;
+    eng.Free;
+  end;
+
+  eng := TPhosphorEngine.Create();
+  try
+    eng.MaxHandles := 10;
+    eng.Registry.AddHost('pump:n', @PumpHandlers);
+    rc := eng.Run('pump(1000)' + LF + 'end' + LF + 'function handler()' + LF +
+                  '  h@ = strings@()' + LF + '  return 0' + LF + 'endfunction' + LF);
+    Report((rc <> 0) and (eng.LastError.Code = peLimit),
+           'MaxHandles: a host that swallows a callback''s refusal still ends the run (' +
+           eng.ErrorMessage + ')');
+    Report(LiveHandleCount() <= 11, 'with at most one call''s overshoot: ' +
+           IntToStr(LiveHandleCount()) + ' live under 10');
+  finally
+    eng.Free;
+  end;
+
+  eng := TPhosphorEngine.Create();
+  try
+    eng.MaxHandles := 100;
+    eng.Registry.Add('mkraise:', @MintThenRaise);
+    rc := eng.Run('on error goto h' + LF + 'for i = 1 to 200' + LF + '  x = mkraise()' + LF +
+                  'next' + LF + 'end' + LF + 'h:' + LF + 'resume next' + LF);
+    Report((rc <> 0) and (eng.LastError.Code = peLimit),
+           'MaxHandles: a call that mints and then raises is asked too (' + eng.ErrorMessage + ')');
+    Report(LiveHandleCount() <= 101, 'and stops at most one past the ceiling: ' +
+           IntToStr(LiveHandleCount()) + ' live under 100');
+  finally
+    eng.Free;
+  end;
+end;
+
 { THERE IS NO CAP ON A PROGRAM'S NAMES, AND THEY COST WHAT THEY WEIGH (ledger m4).
 
   docs/decisions.md ("No fixed global-variable cap") declined Plan9Basic's 513:
@@ -1994,6 +2097,7 @@ begin
 
   CheckNameTablesScale();
   CheckMaxHandles();
+  CheckMaxHandlesDoors();
   CheckReusedCompilerNames();
 
   Writeln('ok: ', Ok);

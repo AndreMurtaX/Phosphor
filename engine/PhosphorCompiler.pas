@@ -76,7 +76,9 @@ type
       only the second one means "read another line". }
     FParseDone: Boolean;
     FExprDepth: Integer;
-    FInlineDepth: Integer; // > 0 inside a one-line IF; see AtStatementEnd
+    FInlineLine: Integer;  // the innermost one-line IF's line, 0 outside one; see AtStatementEnd
+    FStmtTarget: String;   // the name the current statement assigns, '' for none; see SpellingFor
+    FStmtTargetRaw: String;//   and that name as the statement writes it
     FStmtDepth: Integer;   // block nesting; see THE PARSER'S DEPTH BUDGET
     FBool: Boolean;
     FVarNames: array of String;
@@ -416,11 +418,17 @@ end;
   carry its own copy of the first three, so `if c then println else ...`
   took `else` for an expression and failed. An expression already stops at
   `else` (it is an identifier no operator follows), which is why only the
-  optional-operand statements needed it. }
+  optional-operand statements needed it.
+  ON THE IF'S OWN LINE, not while one is being parsed. A then-branch can open
+  a block -- `if c then for ...`, `if c then if d then`, even a function -- whose
+  body runs on to later lines, and there `else` is an ordinary name again. A
+  depth counter held for the whole parse made `println else` end at the `else`
+  on every one of those lines: a refused program, or one that silently ran its
+  next statement as an else arm (2026-10-07). }
 function TPhosphorCompiler.AtStatementEnd: Boolean;
 begin
   Result := (FLex.Cur().Kind in [tkEOL, tkEOF, tkColon]) or
-            ((FInlineDepth > 0) and IsKeyword('else'));
+            ((FInlineLine > 0) and (FLex.Cur().Line = FInlineLine) and IsKeyword('else'));
 end;
 
 function TPhosphorCompiler.CurIsTerm(const ATerms: array of String): Boolean;
@@ -432,13 +440,24 @@ begin
     if FLex.Cur().StrVal = ATerms[i] then Exit(True);
 end;
 
-{ The spelling a new table entry is shown under (ledger r3): the as-written
-  text of the token being consumed when the entry is created -- its first
-  appearance in source order, since an entry is created once. A compiler
-  temporary has no token and no spelling. }
+{ The spelling a new table entry is shown under (ledger r3): as it is FIRST
+  WRITTEN. The name the statement assigns, when that is the name being created,
+  is spelled as the statement's target writes it; any other name as the nearest
+  token behind the parser, which is the token being read when it is created. A
+  compiler temporary has none.
+  The nearest token alone, which is what this was, is wrong for the most common
+  statement there is: an assignment creates its global only after the right-hand
+  side, so `Total = TOTAL + 1` showed TOTAL, `total = Total(3)` the FUNCTION's
+  spelling and `lEN = Len(s$)` the builtin's (2026-10-07). A first draft took the
+  earliest token of the whole statement instead and made a line declaring N names
+  cost N squared: m4's probe caught it. This costs one comparison. (A second draft
+  also skipped call tokens in the nearest-token scan; a mutation sweep found that
+  no program can tell -- a name is only ever created later than its own token by
+  an assignment, which the target already answers -- so it was taken out.) }
 function TPhosphorCompiler.SpellingFor(const AName: String): String;
 begin
   if IsTemporaryName(AName) then Exit('');
+  if (FStmtTarget <> '') and (AName = FStmtTarget) then Exit(FStmtTargetRaw);
   Result := FLex.SpellingNear(AName);
 end;
 
@@ -1608,11 +1627,15 @@ end;
   accepted is NOTHING AT ALL -- `then else` and `else` at the end of a line
   still need a statement, or a ':' standing for an empty one, because a
   branch with no text is far more often a line cut short than a choice.
-  FInlineDepth tells AtStatementEnd that `else` ends a statement here (n27). }
+  FInlineLine tells AtStatementEnd that `else` ends a statement on THIS line
+  (n27); it is saved and restored, so a nested block's own inline IF on a
+  later line answers for that line only. }
 procedure TPhosphorCompiler.ParseInlineStatements;
 var any: Boolean;
+    outerLine: Integer;
 begin
-  Inc(FInlineDepth);
+  outerLine := FInlineLine;
+  FInlineLine := FLex.Cur().Line;
   try
     any := False;
     while not FFailed do
@@ -1624,7 +1647,7 @@ begin
       if FLex.Cur().Kind <> tkColon then Break;
     end;
   finally
-    Dec(FInlineDepth);
+    FInlineLine := outerLine;
   end;
 end;
 
@@ -2356,9 +2379,32 @@ end;
 procedure TPhosphorCompiler.ParseStatement;
 var
   stmtIdx: Integer;
+  outerTarget, outerRaw: String;
+  t, nx: TToken;
 begin
   if FFailed then Exit;
   Inc(FStmtDepth);
+  outerTarget := FStmtTarget;
+  outerRaw := FStmtTargetRaw;
+  { THE NAME THIS STATEMENT ASSIGNS, read before anything is parsed: `x = ...`,
+    `x += ...`, `let x = ...`, `for x = ...`. See SpellingFor. }
+  FStmtTarget := '';
+  FStmtTargetRaw := '';
+  t := FLex.Cur();
+  nx := FLex.Peek();
+  if t.Kind = tkIdent then
+  begin
+    if ((t.StrVal = 'let') or (t.StrVal = 'for')) and (nx.Kind = tkIdent) then
+    begin
+      FStmtTarget := nx.StrVal;
+      FStmtTargetRaw := nx.Raw;
+    end
+    else if nx.Kind in [tkEQ, tkPlusEq, tkMinusEq, tkStarEq, tkSlashEq] then
+    begin
+      FStmtTarget := t.StrVal;
+      FStmtTargetRaw := t.Raw;
+    end;
+  end;
   try
     if FStmtDepth > MaxBlockDepth then
     begin
@@ -2369,6 +2415,8 @@ begin
     ParseStatementBody();
     if not FFailed then FProg.Patch(stmtIdx, FProg.Count);
   finally
+    FStmtTarget := outerTarget;
+    FStmtTargetRaw := outerRaw;
     Dec(FStmtDepth);
   end;
 end;
@@ -3047,7 +3095,7 @@ begin
   // The two nesting counters are balanced by try/finally on every path, failures
   // included, so they are already 0 here -- set outright anyway, because a reused
   // compiler must not inherit a depth from the program before it.
-  FExprDepth := 0; FStmtDepth := 0;
+  FExprDepth := 0; FStmtDepth := 0; FStmtTarget := ''; FStmtTargetRaw := ''; FInlineLine := 0;
   FLabelCount := 0; FGotoCount := 0; FBool := False;
   FInFunction := False; FLocalCount := 0; FRetType := vtNumber;
   FConstCount := 0;

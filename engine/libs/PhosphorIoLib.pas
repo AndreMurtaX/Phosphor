@@ -52,6 +52,15 @@ function IoGate(const APath: String; AUse: TPathUse): Boolean;
   script can tell "refused" (5) from "tried and failed" (3). mkdir, rmdir,
   chdir, kill, file_delete and dir_setcurrent all answer through it. }
 function IoAnswer(AOk: Boolean): TValue;
+{ The answer of a filesystem QUERY that was asked and answered: 1 or 0 as AYes
+  says, and ioerror() back to 0 -- a "no" is an answer, not a failure. Without it
+  a refusal's 5 from an earlier call stood beside the next answer, and a refused
+  query could not be told from a "no". fileexists answers through it. }
+function IoQueried(AYes: Boolean): TValue;
+{ A refusal decided by the caller rather than by the sandbox: 0, and ioerror()
+  5. For a request the gate passes but that names nothing to act on -- chdir("")
+  with no sandbox in force, which the RTL answers True without moving. }
+function IoRefused: TValue;
 
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
 
@@ -519,6 +528,18 @@ begin
   Result := ValInt(Ord(AOk));
 end;
 
+function IoQueried(AYes: Boolean): TValue;
+begin
+  GIoError := 0;
+  Result := ValInt(Ord(AYes));
+end;
+
+function IoRefused: TValue;
+begin
+  GIoError := IOERR_REFUSED;
+  Result := ValInt(0);
+end;
+
 // --- directory functions ----------------------------------------------------
 function t_dir_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -619,6 +640,7 @@ begin
   // after it resolve outside too, so the move itself is what has to be refused.
   Err := NoError();
   if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if Args[0].Str = '' then Exit(IoRefused());   // see chdir: '' moved nothing and answered 1
   Result := IoAnswer(SetCurrentDir(Args[0].Str));
 end;
 function t_dir_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;

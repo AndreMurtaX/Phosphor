@@ -109,7 +109,7 @@ Times are **date numbers**, the same values `now` and `strtodate` speak.
 | `dir_getparent$(path$) → str` | everything before the last separator, a trailing separator on the input ignored first. `""` when there is no separator — a bare name has no parent to name, and neither does a root |
 | `dir_isrelativepath(path$) → num` | `1` when the path has no leading separator and no drive letter. `""` answers `1` |
 | `dir_getcurrent$() → str` | the process working directory. Not filtered by the sandbox — it is where relative paths resolve from, whether or not the script may read it |
-| `dir_setcurrent(path$) → num` | `1` when the working directory moved. `0` when the directory does not exist (`ioerror()` `3`), or when it is outside the root (`5`) — the move is refused rather than the writes that would follow it |
+| `dir_setcurrent(path$) → num` | `1` when the working directory moved. `0` when the directory does not exist (`ioerror()` `3`), or when it is outside the root or is `""` (`5`) — the move is refused rather than the writes that would follow it, and `""` names nothing to move to, with or without a sandbox |
 | `dir_copy(src$, dst$) → num` | `1` when the destination root was created and both ends were permitted, having then copied the tree file by file. A single file inside that could not be copied is **not** reported: the answer covers the destination, not every leaf |
 | `dir_move(src$, dst$) → num` | `1` when the rename happened. `0` when refused, when the target exists — even an empty directory, which Linux used to replace — or across volumes; like `file_move`, there is no copy fallback |
 

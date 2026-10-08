@@ -20,7 +20,12 @@ anything else. A value you **construct** (`json_object@`, `json_array@`,
 `json_parse@`, `json_clone@`, `json_keys@`, the scalar constructors) owns its
 tree. A value you **reach into** — `json_get@`, `json_item@`, `json_path@` —
 *borrows*: the handle is a view onto a node the parent still owns, so it costs
-nothing and stays in step with the parent. When the parent frees that node,
+nothing and stays in step with the parent. Reaching the same node again answers
+the same handle, and a view does not count toward a host's handle ceiling
+(`MaxHandles`) — its document does — so reading every row of a large document
+is never refused for the handles the reading took. Until 2026-10-07 each reach
+minted a handle that counted: reading 200 rows under a ceiling of 100 was
+refused. When the parent frees that node,
 because the member was replaced or removed, every borrowed handle pointing at it
 *or at anything inside it* is emptied first, and the next read through it is a
 clean `this json handle is stale` runtime error rather than a crash. The other

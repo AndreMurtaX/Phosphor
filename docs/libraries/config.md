@@ -31,19 +31,27 @@ key is not a failure**: every read takes the answer you want for that case as it
 last argument and hands it straight back, so there is no error to check and no
 sentinel to recognise.
 
-**A hand edit survives a save.** Comments are kept where they were written —
-`;` lines and `#` lines alike, before the first section or inside one — and so is
-any line the reader cannot place as `key=value`. None of them counts as a key:
-`cfg_keycount` and `cfg_keys$` see only the real ones. A file this library wrote
-itself comes out of a save byte for byte as it always did.
+**A hand edit's text survives a save.** Comments are kept where they were
+written — `;` lines and `#` lines alike, before the first section or inside one —
+and so is any line the reader cannot place as `key=value`, and a section header
+with a comment after it, `[s] ; note`, which is the section `s` and is written
+back as it was (until 2026-10-07 it was not read as a header at all, and a set
+added a second `[s]`). None of them counts as a key: `cfg_keycount` and
+`cfg_keys$` see only the real ones. A file this library wrote itself comes out of
+a save byte for byte as it always did. What a save does NOT keep is layout: it
+writes the platform's line endings and a final one, one blank line between
+sections and none inside them, and `key=value` without the spaces a person may
+have put around the `=`.
 
 **And a set that could not be read back is refused, not written.** The setters
 raise a catchable runtime error (`cannot be stored in an .ini and read back --`
 and the reason) for a section, key or value holding a line break; a section or
 key beginning with `;`, or a key beginning with `#` — each of those is a comment
 line; a key holding `=`, which would end it early; an empty key; and blanks at
-either end of a key or a value, which the reader trims. Inside a value, `=`, `#`
-and `;` are ordinary characters and come back whole.
+either end of a key or a value, which the reader trims; and a key beginning with
+`[` whose value ends with `]`, which is written as the line `[key=value]` — a
+section header. Inside a value, `=`, `#` and `;` are ordinary characters and come
+back whole.
 
 What *is* an error is a bad handle. `cfg_open@` answers a handle, and every other
 call rejects a value that is not one with a catchable runtime error, `not a valid

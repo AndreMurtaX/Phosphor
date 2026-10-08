@@ -95,6 +95,11 @@ unit PhosphorHandles;
 interface
 
 function RegisterHandle(AObj: TObject): Int64;
+{ A VIEW: a handle that lends access to an object some other handle OWNS -- a
+  JSON child borrowed out of its document. It is a handle like any other in
+  every respect but one: OwnedHandleCount leaves it out, because what it
+  points at was already counted, and paid for, by its owner. }
+function RegisterView(AObj: TObject): Int64;
 function HandleObj(AId: Int64): TObject;
 function IsHandle(AId: Int64): Boolean;
 function FreeHandle(AId: Int64): Boolean;   // free one object, invalidate its id
@@ -126,6 +131,8 @@ procedure ResetHandles;
 function FirstLiveHandle: Int64;
 function NextLiveHandle(AId: Int64): Int64;
 function LiveHandleCount: Integer;
+{ The live handles that are not views: the level MaxHandles judges. }
+function OwnedHandleCount: Integer;
 
 implementation
 
@@ -134,6 +141,7 @@ type
     Obj: TObject;          // nil exactly when the slot is free
     Gen: LongWord;         // generation of the id that owns it now
     Prev, Next: Integer;   // live list, -1 for none
+    View: Boolean;         // registered by RegisterView; fits the record's padding
   end;
 
 const
@@ -153,6 +161,7 @@ var
   GFreeTop: Integer;
   GLiveHead: Integer;
   GLive: Integer;
+  GViews: Integer;         // live handles that are views
   GEpoch: LongWord;       // the generation a NEW slot starts at; see ResetHandles
 
 function IdOf(ASlot: Integer): Int64; inline;
@@ -182,7 +191,7 @@ begin
             (GSlots[s].Gen = LongWord(AId shr 32));
 end;
 
-function RegisterHandle(AObj: TObject): Int64;
+function RegisterSlot(AObj: TObject; AView: Boolean): Int64;
 var
   s: Integer;
 begin
@@ -206,12 +215,24 @@ begin
   end;
 
   GSlots[s].Obj := AObj;
+  GSlots[s].View := AView;
+  if AView then Inc(GViews);
   GSlots[s].Prev := NO_SLOT;
   GSlots[s].Next := GLiveHead;
   if GLiveHead <> NO_SLOT then GSlots[GLiveHead].Prev := s;
   GLiveHead := s;
   Inc(GLive);
   Result := IdOf(s);
+end;
+
+function RegisterHandle(AObj: TObject): Int64;
+begin
+  Result := RegisterSlot(AObj, False);
+end;
+
+function RegisterView(AObj: TObject): Int64;
+begin
+  Result := RegisterSlot(AObj, True);
 end;
 
 { The same test as IsHandle, but resolving the slot ONCE. This is the hottest
@@ -239,6 +260,8 @@ begin
 
   GSlots[s].Obj.Free;
   GSlots[s].Obj := nil;
+  if GSlots[s].View then Dec(GViews);
+  GSlots[s].View := False;
 
   if GSlots[s].Prev <> NO_SLOT then
     GSlots[GSlots[s].Prev].Next := GSlots[s].Next
@@ -296,15 +319,24 @@ begin
   Result := GLive;
 end;
 
+function OwnedHandleCount: Integer;
+begin
+  Result := GLive - GViews;
+end;
+
 { THE EPOCH. Every generation the old table issued is at most its slots' highest
   Gen -- a freed slot's Gen is already the NEXT one, never issued -- so starting
   every new slot one above that maximum keeps every old id stale for good: a
   slot's generation only climbs. The exception is the cap. A slot that reached
   GEN_MAX makes the next epoch impossible to express without setting bit 63,
-  so the epoch wraps to 0 and ids from before that reset could match again;
-  reaching it takes 2,147,483,647 frees of one slot in one run, which the
-  header measures at 87 seconds of nothing else. It is named rather than
-  hidden. }
+  so the epoch wraps to 0 and ids from before that reset could match again.
+  Reaching it takes 2,147,483,647 frees of ONE SLOT -- counted across every run
+  in the process, not within one: each reset starts the next table above the
+  highest generation so far, so a slot's generation keeps climbing from run to
+  run. This said "in one run" until an adversarial review measured otherwise
+  (2026-10-07). At the header's measured rate that is still 87 seconds of
+  nothing but freeing one slot, spread over however many runs. It is named
+  rather than hidden. }
 procedure ResetHandles;
 var
   i: Integer;
@@ -323,6 +355,7 @@ begin
   GFreeTop := 0;
   GLiveHead := NO_SLOT;
   GLive := 0;
+  GViews := 0;
   SetLength(GSlots, 0);
   SetLength(GFree, 0);
 end;
@@ -332,6 +365,7 @@ initialization
   GFreeTop := 0;
   GLiveHead := NO_SLOT;
   GLive := 0;
+  GViews := 0;
   GEpoch := 0;
 
 finalization

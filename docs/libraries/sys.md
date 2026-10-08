@@ -20,16 +20,16 @@ separator there, and the eighteen platform paths below are `""` on every desktop
 build because the desktop has no such place.
 
 The second thing to know is **what a number coming back from the filesystem calls
-means**. `mkdir`, `rmdir`, `chdir` and `kill` answer `1` whatever the filesystem
-did — creating a directory that already exists, removing one that was never there,
-and changing to a directory that does not exist all answer `1`. That `1` is
-inherited from the oracle and carries no information. A `0` from any of them means
-something quite specific: the call was **refused before it was attempted**, either
-by the sandbox root the host installed or by the rule that a destructive call is
-never handed a bare drive root or an empty path. Reporting success for something
-that was never attempted is the fabricated answer this project forbids, so refusal
-is the one thing these functions do report. Only `forcedirectories` and
-`fileexists` genuinely answer the question they were asked.
+means**. `1` from `mkdir`, `rmdir`, `chdir`, `kill` or `forcedirectories` means the
+operation **happened**, and `0` that it did not — and `ioerror()` says which kind of
+`0`: `3` when it was tried and failed, `5` when it was refused before it was
+attempted, by the sandbox root the host installed or by the rule that a
+destructive call is never handed a bare drive root or an empty path. Every one of
+them writes that slot whatever it answers, so the code is always this call's.
+`fileexists` is a question, not an operation: `1` or `0` is the answer, `ioerror()`
+is `0` after it, and only a refusal makes it `5`. Until 2026-10-07 the first four
+answered `1` whatever the filesystem did, as Plan9Basic does, and
+`forcedirectories` and `fileexists` left the slot as the previous call had it.
 
 The third is the **sandbox**. When a host installs a root (`phosphor --sandbox
 <dir>`), the platform's scratch places answer *inside* it: `temppath$()`,
@@ -112,7 +112,8 @@ Check the result before using it. An empty string joined to a filename produces 
 `1` means the operation **happened** and `0` that it did not, and `ioerror()` says
 which kind of `0`: `3` when it was tried and failed, `5` when it was refused —
 see the third paragraph above. A success sets it back to `0`, so it is always
-this call's. Until 2026-10-07 `mkdir`, `rmdir`, `chdir` and `kill` answered `1`
+this call's -- `forcedirectories` included, which until 2026-10-07 left a
+refusal's `5` standing after a success and recorded nothing for a failure. Until 2026-10-07 `mkdir`, `rmdir`, `chdir` and `kill` answered `1`
 whatever the filesystem said, which is what Plan9Basic does; that told a program
 nothing. An empty path, or a bare drive root such as `C:\` or `/`, is refused by
 every destructive one of them even with no sandbox in force. A refusal also
@@ -123,9 +124,9 @@ here can be told from whatever the previous file call left in that slot.
 | --- | --- |
 | `mkdir(path$) → num` | `1` when it created the directory. `0` when the directory already existed, when its parent does not exist, or when refused. One level: `forcedirectories` makes a chain |
 | `rmdir(path$) → num` | `1` when it removed the directory. `0` for a directory that is not there, for one that is not empty (it stays), or when refused. Removes one level: it is not recursive |
-| `forcedirectories(path$) → num` | the odd one out, and the one to prefer: `1` when the whole chain of directories exists afterwards — creating however many levels were missing — and `0` when it could not be made, or was refused |
-| `chdir(path$) → num` | `1` when the process working directory moved. `0` for a directory that does not exist, which moves nothing, and when refused — for this one that means outside the sandbox root, or `""`; it is a read, so the drive-root rule does not apply |
-| `fileexists(path$, followlink) → num` | `1` when the file is there, `0` when it is not. A non-zero `followlink` resolves a symbolic link and asks about its target; `0` asks about the link itself. A refused path also answers `0`, which is indistinguishable from absent |
+| `forcedirectories(path$) → num` | the one to prefer: `1` when the whole chain of directories exists afterwards — creating however many levels were missing — and `0` when it could not be made (`ioerror()` `3`) or was refused (`5`) |
+| `chdir(path$) → num` | `1` when the process working directory moved. `0` for a directory that does not exist, which moves nothing, and when refused — for this one that means outside the sandbox root, or `""` with or without a sandbox in force (until 2026-10-07 an unsandboxed `chdir("")` answered `1` and moved nothing: the RTL's `ChDir` ignores an empty name); it is a read, so the drive-root rule does not apply |
+| `fileexists(path$, followlink) → num` | `1` when the file is there, `0` when it is not. A non-zero `followlink` resolves a symbolic link and asks about its target; `0` asks about the link itself. A refused path also answers `0`, and it can be told from absent by `ioerror()`: `5` for the refusal, `0` after any answer |
 | `kill(path$) → num` | `1` when it deleted the file. `0` for a file that is not there, for a directory (`rmdir` removes those), for one the OS would not delete, or when refused |
 
 ### Environment
@@ -156,7 +157,8 @@ lands in the root instead.
 ```basic
 rem A scratch working directory under the platform's own temp path: made,
 rem used, and taken away again. Every call below that touches the disk
-rem answers 0 only when it was REFUSED, so that is what is worth testing.
+rem answers 1 when it happened and 0 when it did not, and ioerror() says
+rem why: 3 for a failure, 5 for a refusal.
 
 println "arguments: " + str$(paramcount()) + ", program " + extractfilename$(paramstr$(0))
 println "separators: dir '" + dirseparator$() + "'  path '" + pathseparator$() + "'  alt '" + altseparator$() + "'"
@@ -232,9 +234,9 @@ back together — `extractfilename$`, `extractfilepath$`, `extractfileext$`,
 and lives in the io library along with `dir_exists`, `dir_create`, `dir_delete`,
 `file_delete` and the rest of the file API. Note that the io names and the six
 here overlap in purpose but not in behaviour: `dir_create` and `file_delete`
-report what actually happened, while `mkdir` and `kill` answer `1` regardless.
-When the answer matters, prefer the io ones; these exist so an oracle-era program
-keeps working.
+report what actually happened, and since 2026-10-07 so do `mkdir` and `kill`; the
+difference left is that `dir_create` makes a whole chain and answers `1` for a
+directory that already existed, where `mkdir` makes one level and answers `0`.
 
 **The sandbox seen from Pascal.** Everything a script can observe about the cage
 is `sandboxroot$()` plus the redirection of the scratch paths. The ceiling itself

@@ -158,6 +158,17 @@ var
     machine whose OpenSSL has all four, which is every machine anyone runs (ledger
     m5). Consulted once, at the first binding, like the binding itself. }
   HttpTlsWithhold: THttpTlsWithhold = nil;
+  { TEST SEAM: when above 0, a request runs as if the run's budget had this many
+    milliseconds left, so a test host with no TimeoutMs can watch the deadline
+    bound a peer that trickles (tests/packages/21_http_hosts.bas). }
+  HttpDeadlineMs: Integer = 0;
+
+{ Whether a host is written as an address, and which family -- what decides the
+  certificate check and SNI. Exported for a sweep in the package tests. }
+function HttpIsIPv4Literal(const AHost: String): Boolean;
+function HttpIsIPv6Literal(const AHost: String): Boolean;
+{ Whether a redirect from A to B may carry what identifies the caller. }
+function HttpSameOrigin(const A, B: String): Boolean;
 
 implementation
 
@@ -172,6 +183,27 @@ var
     a different bundle with http_ca_file$(). }
   gVerifyPeer: Boolean = True;
   gCAFile: String = '';
+
+threadvar
+  { THE RUN'S DEADLINE, as a GetTickCount64 instant; 0 when no budget is installed.
+    Set around one attempt by FetchHop and read by every handler's Recv. }
+  gDeadline: QWord;
+
+type
+  { Raised from a read once the run's time is gone. Not an ESocketError, so the
+    request counts as ANSWERED -- the fallback never re-sends it -- and the VM's
+    own TimeoutMs check, which runs when this library call returns, ends the run. }
+  EHttpDeadline = class(Exception);
+
+{ A per-read socket timeout bounds a peer that goes SILENT, and nothing else: one
+  that trickles a byte a second answers every read in time and held a run with
+  TimeoutMs 3000 for thirty seconds (2026-10-07). The whole response is bounded
+  here, on every read, by the run's own deadline. }
+procedure CheckDeadline;
+begin
+  if (gDeadline <> 0) and (GetTickCount64() >= gDeadline) then
+    raise EHttpDeadline.Create('the run''s time ran out during the response');
+end;
 
 type
   { THE TLS HANDLER EVERY https REQUEST GETS: FPC's OpenSSL handler, plus the name
@@ -212,6 +244,12 @@ type
     procedure SetSocket(const AStream: TSocketStream); override;
   end;
 
+  { http:// over IPv4: exactly FPC's plain handler, plus the run's deadline. }
+  TPlain4Handler = class(TSocketHandler)
+  public
+    function Recv(const Buffer; Count: Integer): Integer; override;
+  end;
+
   THostCheckedHandler = class(TOpenSSLSocketHandler)
   public
     HostRefused: Boolean;
@@ -219,6 +257,7 @@ type
     Link: T6Link;        // m6: set for an IPv6 request, nil for IPv4
     destructor Destroy; override;
     function Connect: Boolean; override;
+    function Recv(const Buffer; Count: Integer): Integer; override;
   protected
     function DoVerifyCert: Boolean; override;
     procedure SetSocket(const AStream: TSocketStream); override;
@@ -267,6 +306,9 @@ begin
 end;
 
 { ---- IPv6 (ledger m6) ------------------------------------------------------ }
+
+function ParseIPv6(const AHost: String; out A: TIn6_Addr): Boolean; forward;
+function IsUnspecifiedAddr(const AHost: String): Boolean; forward;
 
 threadvar
   { The link a re-classed socket's Connect is to use: set by the handler in
@@ -329,14 +371,17 @@ begin
   link := gPending6;
   gPending6 := nil;
   if link = nil then raise ESocketError.Create(seConnectFailed, [Host]);
+  FillChar(a, SizeOf(a), 0);
+  { The last place an unreadable address could become `::` -- see ParseIPv6.
+    FetchHop already refuses one; this is the dial itself refusing too. }
+  if (not ParseIPv6(link.Ip, a.sin6_addr)) or IsUnspecifiedAddr(link.Ip) then
+    raise ESocketError.Create(seConnectFailed, ['[' + link.Ip + ']']);
   link.Fd := fpSocket(AF_INET6, SOCK_STREAM, 0);
   {$IFDEF WINDOWS}if link.Fd = INVALID_SOCKET then{$ELSE}if link.Fd < 0 then{$ENDIF}
     raise ESocketError.Create(seConnectFailed, ['[' + link.Ip + ']']);
   link.FdOpen := True;
-  FillChar(a, SizeOf(a), 0);
   a.sin6_family := AF_INET6;
   a.sin6_port := htons(Port);
-  a.sin6_addr := StrToHostAddr6(link.Ip);
   if ConnectTimeout > 0 then SetSocketBlockingMode(link.Fd, bmNonBlocking, @fds);
   isError := True;
   tor := ctrError;
@@ -401,9 +446,16 @@ begin
   Reclass6(AStream, Link);
 end;
 
+function TPlain4Handler.Recv(const Buffer; Count: Integer): Integer;
+begin
+  CheckDeadline();
+  Result := inherited Recv(Buffer, Count);
+end;
+
 { TSocketHandler.Recv and Send, on the IPv6 descriptor. }
 function TPlain6Handler.Recv(const Buffer; Count: Integer): Integer;
 begin
+  CheckDeadline();
   Result := -1;
   {$IFDEF UNIX}
   FLastError := ESysEINTR;
@@ -476,17 +528,50 @@ begin
     Result := Copy(Result, 2, Length(Result) - 2);
 end;
 
+{ IS THIS TEXT AN ADDRESS? Asked of the RTL's Try* parsers, which say whether they
+  could READ it. The plain StrToHostAddr6 answers all zeros for text it cannot
+  read, and all zeros is `::` -- so `[zzzz]`, `[1::2::3]` and `[evil.example]`
+  were each dialled as `::`, five seconds apiece on Windows and, on Linux, which
+  connects `::` to `::1`, a URL naming no host at all reached this machine's own
+  services (2026-10-07). An address must PARSE; then it is an address. }
+function ParseIPv6(const AHost: String; out A: TIn6_Addr): Boolean;
+var h: String;
+begin
+  h := Unbracket(AHost);
+  Result := (Pos(':', h) > 0) and TryStrToHostAddr6(h, A);
+end;
+
 function IsIPv6Literal(const AHost: String): Boolean;
 var a: TIn6_Addr;
-    i: Integer;
-    h: String;
 begin
-  Result := False;
-  h := Unbracket(AHost);
-  if Pos(':', h) = 0 then Exit;
-  a := StrToHostAddr6(h);
-  for i := 0 to 7 do
-    if a.u6_addr16[i] <> 0 then Exit(True);
+  Result := ParseIPv6(AHost, a);
+end;
+
+{ What an IPv6 literal is dialled as: the dotted IPv4 address it maps, for
+  ::ffff:a.b.c.d, and otherwise itself, bracketed -- FetchHop's candidate form. }
+function MappedIPv4(const AHost: String): String;
+var a: TIn6_Addr;
+    i: Integer;
+    mapped: Boolean;
+begin
+  Result := '[' + Unbracket(AHost) + ']';
+  if not ParseIPv6(AHost, a) then Exit;
+  mapped := (a.u6_addr8[10] = $FF) and (a.u6_addr8[11] = $FF);
+  for i := 0 to 9 do
+    if a.u6_addr8[i] <> 0 then mapped := False;
+  if mapped then
+    Result := Format('%d.%d.%d.%d', [a.u6_addr8[12], a.u6_addr8[13], a.u6_addr8[14], a.u6_addr8[15]]);
+end;
+
+{ The certificate check and SNI are about the NAME, which has no trailing dot:
+  `localhost.` is the fully-qualified spelling of `localhost`, RFC 6066 section 3
+  sends the HostName "without a trailing dot", and OpenSSL's X509_check_host does
+  not strip one, so `https://localhost.` was refused as another host. }
+function TlsName(const AHost: String): String;
+begin
+  Result := AHost;
+  if (Result <> '') and (Result[Length(Result)] = '.') then
+    SetLength(Result, Length(Result) - 1);
 end;
 
 function CertNamesHost(ASsl: PSSL; const AHost: String): Boolean;
@@ -502,11 +587,16 @@ begin
   c := gGetPeerCert(ASsl);
   if c = nil then Exit;
   try
-    h := AnsiString(Unbracket(AHost));
     if IsIPv4Literal(AHost) or IsIPv6Literal(AHost) then
-      Result := gCheckIPAsc(c, PAnsiChar(h), 0) = 1
+    begin
+      h := AnsiString(Unbracket(AHost));
+      Result := gCheckIPAsc(c, PAnsiChar(h), 0) = 1;
+    end
     else
-      Result := gCheckHost(c, PAnsiChar(h), Length(h), 0, nil) = 1;
+    begin
+      h := AnsiString(TlsName(AHost));
+      Result := (h <> '') and (gCheckHost(c, PAnsiChar(h), Length(h), 0, nil) = 1);
+    end;
   finally
     gX509Free(c);   // both getters hand back a reference the caller owns
   end;
@@ -545,25 +635,36 @@ begin
   if Link <> nil then Reclass6(AStream, Link);
 end;
 
-{ TOpenSSLSocketHandler.Connect, on the IPv6 descriptor: the same context, the SNI
-  from the socket's Host (never an address -- RFC 6066 forbids one, and an IPv6
-  literal is all a bracketed URL has), the handshake, and the same DoVerifyCert. An
-  IPv4 request takes FPC's own path untouched. }
+{ TOpenSSLSocketHandler.Connect, for both families: the same context, the
+  descriptor (the IPv6 link's, or the stream's own), the SNI, the handshake and
+  the same DoVerifyCert. FPC's own version is not called because of the SNI: it
+  sends the socket's Host as it stands, so `https://127.0.0.1` sent an ADDRESS,
+  which RFC 6066 section 3 forbids ("Literal IPv4 and IPv6 addresses are not
+  permitted"), and `localhost.` sent its trailing dot. Its parent's Connect
+  (TSocketHandler's) only answers True, so nothing else is skipped. }
 function THostCheckedHandler.Connect: Boolean;
 var sni: String;
+    fd: TSocket;
 begin
-  if Link = nil then Exit(inherited Connect());
   Result := InitContext(False);
   if not Result then Exit;
-  Result := CheckSSL(SSL.SetFD(Link.Fd));
+  if Link <> nil then fd := Link.Fd else fd := Socket.Handle;
+  Result := CheckSSL(SSL.SetFD(fd));
   if not Result then Exit;
   sni := '';
   if Socket is TInetSocket then sni := TInetSocket(Socket).Host;
-  if SendHostAsSNI and (sni <> '') and (not IsIPv4Literal(sni)) and (not IsIPv6Literal(sni)) then
+  if IsIPv4Literal(sni) or IsIPv6Literal(sni) then sni := '' else sni := TlsName(sni);
+  if SendHostAsSNI and (sni <> '') then
     SSL.Ctrl(SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, PAnsiChar(AnsiString(sni)));
   Result := CheckSSL(SSL.Connect);
   if Result then Result := DoVerifyCert();
   if Result then SetSSLActive(True);
+end;
+
+function THostCheckedHandler.Recv(const Buffer; Count: Integer): Integer;
+begin
+  CheckDeadline();
+  Result := inherited Recv(Buffer, Count);
 end;
 
 function TPinnedClient.GetSocketHandler(const UseSSL: Boolean): TSocketHandler;
@@ -579,7 +680,7 @@ begin
   else if ConnectIP6 <> '' then
     Result := TPlain6Handler.Create6(ConnectIP6)
   else
-    Result := inherited GetSocketHandler(UseSSL);
+    Result := TPlain4Handler.Create();   // what FPC would make, plus the deadline
   if UseSSL and (Result is TSSLSocketHandler) then
   begin
     { VerifyPeerCert => SSL_VERIFY_PEER, and CertCA.FileName is LoadVerifyLocations'd
@@ -603,11 +704,28 @@ begin
   end;
 end;
 
-{ A dotted-quad literal is used as-is; a name is resolved. Same "first byte zero =>
-  needs lookup" test the socket layer itself applies. }
+{ A dotted quad is an address; anything else is a name. NOT the socket layer's own
+  test, "first byte zero => needs lookup": StrToHostAddr answers in HOST order, so
+  on a little-endian machine s_bytes[1] is the LAST octet, and every address
+  ending in .0 -- 10.1.2.0 -- was taken for a name, its certificate checked
+  against DNS names, and refused (2026-10-07). The socket layer survives the same
+  mistake only because looking up "10.1.2.0" answers 10.1.2.0. }
 function IsIPv4Literal(const AHost: String): Boolean;
+var a: sockets.in_addr;
 begin
-  Result := StrToHostAddr(AHost).s_bytes[1] <> 0;
+  Result := TryStrToHostAddr(AHost, a);
+end;
+
+{ The UNSPECIFIED address, 0.0.0.0 or `::`, names no host. Linux connects either one
+  to this machine itself, so dialling it would reach a local service under a URL
+  that named none; it is refused before anything is dialled. }
+function IsUnspecifiedAddr(const AHost: String): Boolean;
+var a4: sockets.in_addr;
+    a6: TIn6_Addr;
+begin
+  if TryStrToHostAddr(AHost, a4) then Exit(a4.s_addr = 0);
+  Result := ParseIPv6(AHost, a6) and (a6.u6_addr32[0] = 0) and (a6.u6_addr32[1] = 0) and
+            (a6.u6_addr32[2] = 0) and (a6.u6_addr32[3] = 0);
 end;
 
 { All of a host's A records, dotted, in resolver order. THostResolver resolves the
@@ -722,32 +840,91 @@ var
     certificate named another host. Declared above FetchCore because it writes it. }
   gHttpErr: Integer = 0;
 
-{ Applies a client handle's whole configuration to one request. Declared here and
+{ Applies a client handle's configuration to one request. With ACreds False it
+  leaves out everything that identifies the caller -- the Authorization header,
+  the cookies and the client certificate; see SameOrigin. Declared here and
   written beside the client type it reads, further down. }
-procedure ApplyClient(c: TPinnedClient; ACfg: TObject); forward;
+procedure ApplyClient(c: TPinnedClient; ACfg: TObject; ACreds: Boolean); forward;
 function ClientProxyActive(ACfg: TObject): Boolean; forward;
+function ClientProxyHost(ACfg: TObject): String; forward;
+function ClientFollow(ACfg: TObject; out AMax: Integer): Boolean; forward;
+function ProxyRefusedFor(ACfg: TObject; const AUrl: String): Boolean; forward;
 
-{ THE ONE FETCH. HttpFetch (the bare-url verbs and the fallback proof) and the
-  client verbs both come here; ACfg is the client handle's object, or nil for a
-  bare url, which keeps exactly the behaviour the bare verbs always had. }
-function FetchCore(const AMethod, AUrl, ABody: String;
+{ The cookie each Set-Cookie header of a response sets, as `name=value`: the text
+  before its first ';'. FPC's own list splits the header at EVERY ';', so its
+  attributes -- `Path=/`, `HttpOnly` -- came back as cookies of their own. }
+procedure ResponseCookies(c: TPinnedClient; AJar: TStrings);
+var
+  i, k, p: Integer;
+  h, nv: String;
+begin
+  for i := 0 to c.ResponseHeaders.Count - 1 do
+  begin
+    h := c.ResponseHeaders[i];
+    if CompareText(Copy(h, 1, 11), 'set-cookie:') <> 0 then Continue;
+    nv := Copy(h, 12, MaxInt);
+    p := Pos(';', nv);
+    if p > 0 then nv := Copy(nv, 1, p - 1);
+    nv := Trim(nv);
+    p := Pos('=', nv);
+    if p <= 1 then Continue;
+    k := AJar.IndexOfName(Copy(nv, 1, p - 1));
+    if k >= 0 then AJar[k] := nv else AJar.Add(nv);
+  end;
+end;
+
+{ ONE REQUEST TO ONE URL: which addresses to try, in what order, and the first
+  answer. A redirect is NOT followed here -- FetchCore follows it, a hop at a time,
+  so every rule below applies to every URL a request reaches and not only to the
+  first. ACreds says whether this URL may be sent what identifies the caller; AJar
+  (nil when it may not) holds the cookies earlier hops of the same origin set, and
+  receives this response's. ALocation is the response's Location header. }
+{ AUrl with one trailing dot taken off its host: `https://localhost.:8443/x` asks for
+  `localhost`. The dot only spells the name in full, and only some resolvers know
+  it -- Windows' does; the netdb hosts-file lookup FPC uses on Linux does not, so
+  there `localhost.` never connected (2026-10-07). Taking it off before dialling
+  makes resolution, SNI and the name check see the same name on every OS. An
+  IPv6 literal is left alone. }
+function DotlessUrl(const AUrl: String): String;
+var p, i, j, hostStart, hostEnd: Integer;
+begin
+  Result := AUrl;
+  p := Pos('://', Result);
+  if p = 0 then Exit;
+  i := p + 3;
+  j := i;
+  while (j <= Length(Result)) and not (Result[j] in ['/', '?', '#']) do Inc(j);
+  hostStart := i;
+  for p := i to j - 1 do
+    if Result[p] = '@' then hostStart := p + 1;
+  if (hostStart >= j) or (Result[hostStart] = '[') then Exit;
+  hostEnd := hostStart;
+  while (hostEnd < j) and (Result[hostEnd] <> ':') do Inc(hostEnd);
+  if (hostEnd - 1 > hostStart) and (Result[hostEnd - 1] = '.') then
+    Delete(Result, hostEnd - 1, 1);
+end;
+
+function FetchHop(const AMethod, ARawUrl, ABody: String;
   const AForceAddrs: array of String; out AStatus: Integer;
-  AConnectMs: Integer; ACfg: TObject): String;
+  AConnectMs: Integer; ACfg: TObject; ACreds: Boolean;
+  AJar: TStrings; out ALocation: String): String;
 var
   addrs, addrs6: TStringDynArray;
   uri: TURI;
-  host, body: String;
+  AUrl: String;        // ARawUrl as it is requested: see DotlessUrl
+  dial, body: String;
   i: Integer;
-  connected, hostRefused: Boolean;
+  connected, hostRefused, viaProxy: Boolean;
 
-  { One attempt against a single connect target ('' = dial the URL's host as written).
-    AConnected separates a connection-level failure (try the next address) from a
-    completed exchange, whatever its status code (stop and report it). }
+  { One attempt against a single connect target ('' = dial the host as written).
+    AConnected separates a failure to CONNECT (try the next address -- nothing was
+    sent) from an exchange that began, whatever came of it (stop and report it). }
   function Attempt(const AConnectIP: String; out AConnected: Boolean): String;
   var
     c: TPinnedClient;
     resp: TStringStream;
     remaining: Int64;
+    k, p: Integer;
   begin
     Result := '';
     AConnected := False;
@@ -755,26 +932,35 @@ var
     resp := TStringStream.Create('');
     c := TPinnedClient.Create(nil);
     try
-      { A bracketed candidate is an IPv6 address (m6). The pin is for this URL's
-        host only; see TPinnedClient.ConnectToServer. }
+      { A bracketed candidate is an IPv6 address (m6). The pin is for the host
+        DIALLED -- the URL's, or the proxy's -- and only for it; see
+        TPinnedClient.ConnectToServer. }
       if (AConnectIP <> '') and (AConnectIP[1] = '[') then
         c.ConnectIP6 := Unbracket(AConnectIP)
       else
         c.ConnectIP := AConnectIP;
-      c.PinHost := ParseURI(AUrl).Host;
+      c.PinHost := dial;
       c.ConnectTimeout := AConnectMs;         // ms; don't hang forever on a dead IP
       c.VerifyPeer := gVerifyPeer;
-      if ACfg <> nil then ApplyClient(c, ACfg);
+      if ACfg <> nil then ApplyClient(c, ACfg, ACreds);
+      if AJar <> nil then
+        for k := 0 to AJar.Count - 1 do
+        begin
+          p := c.Cookies.IndexOfName(AJar.Names[k]);
+          if p >= 0 then c.Cookies[p] := AJar[k] else c.Cookies.Add(AJar[k]);
+        end;
+      c.AllowRedirect := False;               // FetchCore follows, hop by hop
       { A NETWORK WAIT IS A LIBRARY CALL TOO, and it is the one shape the budget
         can neither size, charge nor judge: how long a server takes is the
-        server's business. The connect side was already bounded at five seconds,
-        but nothing bounded the READ -- a peer that completes the handshake and
-        then trickles one byte a minute held the whole interpreter, inside one
-        opCall, with TimeoutMs set. What CAN be done is to hand the run's
-        remaining time down to the socket, which is what the RTL's IOTimeout
-        takes. With no budget installed BudgetRemainingMs answers 0 and nothing
-        below runs, so an unbudgeted host keeps exactly the timeouts it had. }
+        server's business. What CAN be done is to hand the run's remaining time
+        down: to the connect, to the socket's per-read timeout -- which bounds a
+        peer that goes silent -- and, as a DEADLINE every read checks, to the
+        whole response, which is what bounds a peer that trickles (CheckDeadline).
+        With no budget installed BudgetRemainingMs answers 0 and nothing below
+        runs, so an unbudgeted host keeps exactly the timeouts it had. }
       remaining := BudgetRemainingMs();
+      if (HttpDeadlineMs > 0) and ((remaining <= 0) or (remaining > HttpDeadlineMs)) then
+        remaining := HttpDeadlineMs;
       if remaining > 0 then
       begin
         if remaining > High(Integer) then remaining := High(Integer);
@@ -784,7 +970,16 @@ var
         // timeout, never lengthen it.
         if (c.IOTimeout <= 0) or (c.IOTimeout > Integer(remaining)) then
           c.IOTimeout := Integer(remaining);
+        gDeadline := GetTickCount64() + QWord(remaining);
       end;
+      { THE CONNECT WAIT IS WHOLE SECONDS. The RTL's connect timeout is a select()
+        with tv_sec = ms div 1000 and tv_usec = 0, so 500 ms became a zero-second
+        wait that fails every connect slower than an instant -- and a budget with
+        under a second left did the same. Rounded UP, so it is never shorter than
+        asked; a budget can be overrun by under a second, and is still bounded. }
+      if (c.ConnectTimeout > 0) and (c.ConnectTimeout mod 1000 <> 0) and
+         (c.ConnectTimeout < High(Integer) - 1000) then
+        c.ConnectTimeout := (c.ConnectTimeout div 1000 + 1) * 1000;
       if CompareText(AMethod, 'POST') = 0 then
         c.RequestBody := TStringStream.Create(ABody);
       try
@@ -794,13 +989,25 @@ var
           c.HTTPMethod(UpperCase(AMethod), AUrl, resp, []);
           AConnected := True;
         except
-          on E: ESocketError do AConnected := False;   // dead address -> try the next
+          { Only a failure to CONNECT means nothing was sent. Until 2026-10-07 any
+            ESocketError counted, and FPC's redirect loop raised one from the
+            redirect TARGET's connect -- so a POST that had been answered, by a
+            307 to a dead host, was sent again to the first host's next address. }
+          on E: ESocketError do
+            AConnected := not (E.Code in [seHostNotFound, seCreationFailed,
+                                          seConnectFailed, seConnectTimeOut]);
           on E: Exception do AConnected := True;        // reached; keep its answer
         end;
         AStatus := c.ResponseStatusCode;
-        if AConnected then Result := resp.DataString;
+        if AConnected then
+        begin
+          Result := resp.DataString;
+          ALocation := TFPHTTPClient.GetHeader(c.ResponseHeaders, 'Location');
+          if AJar <> nil then ResponseCookies(c, AJar);
+        end;
         if c.HostRefused then hostRefused := True;
       finally
+        gDeadline := 0;
         if Assigned(c.RequestBody) then
         begin
           c.RequestBody.Free;
@@ -816,46 +1023,48 @@ var
 begin
   Result := '';
   AStatus := 0;
+  ALocation := '';
+  AUrl := DotlessUrl(ARawUrl);
   hostRefused := False;
-  gHttpErr := HTTP_OK;
-  host := '';   // the forced-list path never reads the URL
+  viaProxy := ClientProxyActive(ACfg);
+  dial := '';
 
   if Length(AForceAddrs) > 0 then
   begin
     SetLength(addrs, Length(AForceAddrs));
     for i := 0 to High(AForceAddrs) do addrs[i] := AForceAddrs[i];
+    dial := ParseURI(AUrl).Host;
   end
   else
   begin
     uri := ParseURI(AUrl);
-    host := uri.Host;
-  end;
-  if (Length(AForceAddrs) = 0) and (host <> '') and (host[1] = '[') then
-  begin
-    { AN IPv6 LITERAL is its own only address (m6). Through a proxy it is dialled
-      no differently from a name: the proxy is what connects, so no pin. }
+    { THE HOST DIALLED IS THE PROXY'S when there is one -- only the proxy is
+      dialled, and it resolves the destination, which is never looked up here --
+      and the URL's otherwise. The same rules choose its addresses either way. }
+    if viaProxy then dial := ClientProxyHost(ACfg) else dial := uri.Host;
+    { AN ADDRESS MUST PARSE, AND NAME A HOST. A bracketed host that is not an IPv6
+      address, or the unspecified address of either family, is refused before
+      anything is dialled; see ParseIPv6 and IsUnspecifiedAddr. }
+    if (dial <> '') and
+       ((((dial[1] = '[') or (Pos(':', dial) > 0)) and
+         (((dial[1] = '[') <> (dial[Length(dial)] = ']')) or not IsIPv6Literal(dial))) or
+        IsUnspecifiedAddr(dial)) then
+      Exit;
     SetLength(addrs, 1);
-    if ClientProxyActive(ACfg) then addrs[0] := '' else addrs[0] := host;
-  end
-  else if Length(AForceAddrs) = 0 then
-  begin
-    { THROUGH A PROXY, NEVER PIN. The fallback dials one of the DESTINATION's
-      addresses itself, and a pinned connect goes straight there -- around the
-      proxy the client was told to use (ledger n26). The proxy is the only thing
-      dialled, so there is nothing to fall back across. }
-    if (host = '') or IsIPv4Literal(host) or (LowerCase(uri.Protocol) = 'https') or
-       ClientProxyActive(ACfg) then
+    addrs[0] := '';
+    if IsIPv6Literal(dial) then
+      { AN IPv6 LITERAL is its own only address (m6) -- and an IPv4-MAPPED one,
+        ::ffff:a.b.c.d, IS that IPv4 address (RFC 4291 section 2.5.5.2), dialled as
+        one: Windows' IPv6 sockets refuse a mapped address outright. }
+      addrs[0] := MappedIPv4(dial)
+    else if (dial <> '') and (not IsIPv4Literal(dial)) and (not viaProxy) and
+            (LowerCase(uri.Protocol) <> 'https') then
     begin
-      { Dial the URL's host as written. For https this is deliberate: pinning a
-        resolved IP would make the TLS layer see an IP for SNI and certificate
-        hostname verification instead of the real name, breaking the handshake --
-        the fallback is reconciled with TLS in a later step (docs/roadmap-net.md). }
-      SetLength(addrs, 1);
-      addrs[0] := '';
-    end
-    else
-    begin
-      addrs := ResolveAllA(host);
+      { A NAME over plain http: every A record, in turn. Over https the name is
+        dialled as written: a pinned IP would be what SNI and the name check saw
+        (docs/roadmap-net.md). A proxy's name is dialled as written too, and its
+        AAAA below, like any host's. }
+      addrs := ResolveAllA(dial);
       if Length(addrs) = 0 then
       begin
         SetLength(addrs, 1);
@@ -873,14 +1082,15 @@ begin
       Exit;
     end;
   end;
-  { NO IPv4 ADDRESS CONNECTED: a name's AAAA records, in resolver order (m6).
+  { NOTHING CONNECTED OVER IPv4: a name's AAAA records, in resolver order (m6).
     IPv4 first keeps every host that already worked exactly as it was; a host with
     only IPv6, or whose IPv4 is down, is reached here. Not for a forced list (the
-    test names its own), an address literal, or a request through a proxy. }
-  if (Length(AForceAddrs) = 0) and (host <> '') and (host[1] <> '[') and
-     (not IsIPv4Literal(host)) and (not ClientProxyActive(ACfg)) then
+    test names its own) or an address literal. Through a proxy it is the PROXY's
+    name that is looked up, never the destination's. }
+  if (Length(AForceAddrs) = 0) and (dial <> '') and (not IsIPv6Literal(dial)) and
+     (not IsIPv4Literal(dial)) then
   begin
-    addrs6 := HttpResolveAAAA(host);
+    addrs6 := HttpResolveAAAA(dial);
     for i := 0 to High(addrs6) do
     begin
       body := Attempt('[' + addrs6[i] + ']', connected);
@@ -894,6 +1104,106 @@ begin
   { nothing connected: Result '' and AStatus 0 (from the last Attempt) -- and if
     a peer was refused for its NAME, say so; it is not a dead address. }
   if hostRefused then gHttpErr := HTTP_EHOST;
+end;
+
+{ WHERE A REDIRECT MAY TAKE WHAT IDENTIFIES THE CALLER. The Authorization header,
+  the cookies and the client certificate go only to the ORIGIN they were set up
+  for -- the first URL's scheme, host and port, all three: curl's rule since
+  CVE-2022-27776, which RFC 9110 section 15.4 leaves to the client. FPC's loop did
+  the reverse of safe: it re-sent the cookies when the host CHANGED, dropped them
+  when it did not, and never touched Authorization, so a redirect from https to
+  another host's plain http carried a bearer token in cleartext (2026-10-07). }
+function SameOrigin(const A, B: String): Boolean;
+var ua, ub: TURI;
+
+  function PortOf(const U: TURI): Integer;
+  begin
+    Result := U.Port;
+    if Result = 0 then
+      if LowerCase(U.Protocol) = 'https' then Result := 443 else Result := 80;
+  end;
+
+begin
+  ua := ParseURI(A);
+  ub := ParseURI(B);
+  Result := SameText(ua.Protocol, ub.Protocol) and
+            SameText(TlsName(ua.Host), TlsName(ub.Host)) and (PortOf(ua) = PortOf(ub));
+end;
+
+function IsRedirectStatus(ACode: Integer): Boolean;
+begin
+  Result := (ACode = 301) or (ACode = 302) or (ACode = 303) or (ACode = 307) or (ACode = 308);
+end;
+
+{ THE ONE FETCH. HttpFetch (the bare-url verbs and the fallback proof) and the
+  client verbs both come here; ACfg is the client handle's object, or nil for a
+  bare url, which keeps exactly the behaviour the bare verbs always had -- no
+  redirect is followed.
+
+  REDIRECTS ARE FOLLOWED HERE, not by TFPHTTPClient (2026-10-07). Its loop
+  re-entered the request with none of this library's rules: no proxy refusal, no
+  pin for the new host, no IPv6, no rule about credentials -- an https URL reached
+  by a redirect through a proxy was opened WITH THE PROXY, and passed the name
+  check on the proxy's name. Here each hop is a request of its own, through
+  FetchHop, under every rule a first request is under. What a hop that is not
+  followed answers is what FPC answered: the redirect's status and no body -- for
+  a missing Location, a scheme other than http and https, or the cap. A 303 turns
+  the request into a GET without a body; every other code keeps the method, as
+  FPC did. }
+function FetchCore(const AMethod, AUrl, ABody: String;
+  const AForceAddrs: array of String; out AStatus: Integer;
+  AConnectMs: Integer; ACfg: TObject): String;
+var
+  url, method, body, loc, next, scheme: String;
+  hops, maxHops: Integer;
+  follow, creds: Boolean;
+  jar: TStringList;
+begin
+  AStatus := 0;
+  gHttpErr := HTTP_OK;
+  follow := ClientFollow(ACfg, maxHops);
+  url := AUrl;
+  method := AMethod;
+  body := ABody;
+  hops := 0;
+  jar := TStringList.Create();
+  try
+    Result := FetchHop(method, url, body, AForceAddrs, AStatus, AConnectMs, ACfg,
+                       True, jar, loc);
+    while follow and IsRedirectStatus(AStatus) and (gHttpErr = HTTP_OK) do
+    begin
+      Result := '';
+      if loc = '' then Exit;
+      if not IsAbsoluteURI(loc) then
+      begin
+        if not ResolveRelativeURI(url, loc, next) then Exit;
+        loc := next;
+      end;
+      scheme := LowerCase(ParseURI(loc).Protocol);
+      if (scheme <> 'http') and (scheme <> 'https') then Exit;
+      Inc(hops);
+      if hops > maxHops then Exit;
+      if ProxyRefusedFor(ACfg, loc) then
+      begin
+        AStatus := 0;
+        gHttpErr := HTTP_EPROXY;      // nothing was sent to it
+        Exit;
+      end;
+      if AStatus = 303 then
+      begin
+        method := 'GET';
+        body := '';
+      end;
+      url := loc;
+      creds := SameOrigin(url, AUrl);
+      if creds then
+        Result := FetchHop(method, url, body, [], AStatus, AConnectMs, ACfg, True, jar, loc)
+      else
+        Result := FetchHop(method, url, body, [], AStatus, AConnectMs, ACfg, False, nil, loc);
+    end;
+  finally
+    jar.Free;
+  end;
 end;
 
 function HttpFetch(const AMethod, AUrl, ABody: String;
@@ -1787,11 +2097,13 @@ begin
   gHttpErr := HTTP_OK;
   cert := Args[1].Str;
   key := Args[2].Str;
+  { The answer is IoAnswer's, so ioerror() is THIS call's: 0 when it was recorded.
+    A plain 1 left a refusal's 5 from an earlier call standing beside a success. }
   if cert = '' then
   begin
     c.ClientCert := '';
     c.ClientKey := '';
-    Exit(ValInt(1));
+    Exit(IoAnswer(True));
   end;
   if key = '' then key := cert;
   cert := ExpandFileName(cert);
@@ -1799,7 +2111,7 @@ begin
   if (not IoGate(cert, puRead)) or (not IoGate(key, puRead)) then Exit(ValInt(0));
   c.ClientCert := cert;
   c.ClientKey := key;
-  Result := ValInt(1);
+  Result := IoAnswer(True);
 end;
 
 function f_http_validatessl_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1969,7 +2281,35 @@ begin
   Result := (ACfg is TPhosphorHttpClient) and (TPhosphorHttpClient(ACfg).ProxyHost <> '');
 end;
 
-procedure ApplyClient(c: TPinnedClient; ACfg: TObject);
+function ClientProxyHost(ACfg: TObject): String;
+begin
+  Result := '';
+  if ACfg is TPhosphorHttpClient then Result := TPhosphorHttpClient(ACfg).ProxyHost;
+end;
+
+{ Whether this request follows redirects, and how many: a client's own setting; a
+  bare url follows none, as it never did. }
+function ClientFollow(ACfg: TObject; out AMax: Integer): Boolean;
+var cfg: TPhosphorHttpClient;
+begin
+  AMax := 0;
+  Result := ACfg is TPhosphorHttpClient;
+  if not Result then Exit;
+  cfg := TPhosphorHttpClient(ACfg);
+  Result := cfg.FollowRedirects;
+  if cfg.MaxRedirects < 0 then AMax := 0
+  else if cfg.MaxRedirects > 255 then AMax := 255
+  else AMax := cfg.MaxRedirects;
+end;
+
+{ A header that identifies the caller to the SERVER. Proxy-Authorization is not
+  one: it is for the proxy, which is the same at every hop. }
+function IsCredentialHeader(const AName: String): Boolean;
+begin
+  Result := SameText(AName, 'Authorization') or SameText(AName, 'Cookie');
+end;
+
+procedure ApplyClient(c: TPinnedClient; ACfg: TObject; ACreds: Boolean);
 var
   cfg: TPhosphorHttpClient;
   i: Integer;
@@ -1977,24 +2317,25 @@ begin
   cfg := TPhosphorHttpClient(ACfg);
   if cfg.ConnectTimeout > 0 then c.ConnectTimeout := cfg.ConnectTimeout;
   if cfg.ResponseTimeout > 0 then c.IOTimeout := cfg.ResponseTimeout;
-  c.AllowRedirect := cfg.FollowRedirects;
-  if cfg.MaxRedirects < 0 then c.MaxRedirects := 0
-  else if cfg.MaxRedirects > 255 then c.MaxRedirects := 255
-  else c.MaxRedirects := cfg.MaxRedirects;
   // Verification is ON only when the global switch AND this client both ask for
   // it, so either can opt out and neither can quietly turn the other back on.
   c.VerifyPeer := gVerifyPeer and cfg.ValidateSSL;
-  c.ClientCert := cfg.ClientCert;
-  c.ClientKey := cfg.ClientKey;
+  if ACreds then
+  begin
+    c.ClientCert := cfg.ClientCert;
+    c.ClientKey := cfg.ClientKey;
+  end;
   if cfg.UserAgent <> '' then c.AddHeader('User-Agent', cfg.UserAgent);
   if cfg.Accept <> '' then c.AddHeader('Accept', cfg.Accept);
   if cfg.ContentType <> '' then c.AddHeader('Content-Type', cfg.ContentType);
-  if cfg.AuthHeader <> '' then c.AddHeader('Authorization', cfg.AuthHeader);
+  if ACreds and (cfg.AuthHeader <> '') then c.AddHeader('Authorization', cfg.AuthHeader);
   // The client's own header bag last, so a header it names explicitly wins.
   for i := 0 to cfg.Headers.Count - 1 do
-    c.AddHeader(cfg.Headers.NameAt(i), cfg.Headers.ValueAt(i));
-  for i := 0 to cfg.Cookies.Count - 1 do
-    c.Cookies.Add(cfg.Cookies.NameAt(i) + '=' + cfg.Cookies.ValueAt(i));
+    if ACreds or not IsCredentialHeader(cfg.Headers.NameAt(i)) then
+      c.AddHeader(cfg.Headers.NameAt(i), cfg.Headers.ValueAt(i));
+  if ACreds then
+    for i := 0 to cfg.Cookies.Count - 1 do
+      c.Cookies.Add(cfg.Cookies.NameAt(i) + '=' + cfg.Cookies.ValueAt(i));
   if cfg.ProxyHost <> '' then
   begin
     c.Proxy.Host := cfg.ProxyHost;
@@ -2013,6 +2354,21 @@ end;
   the budget refuses; the caller reports it. (check-budget.py could not see this
   loop on the day it was written: its comment stripper read the '//' inside the
   literal below as a comment, and paired every quote after it wrongly.) }
+{ IS THIS AN ABSOLUTE URL? Only when it BEGINS with a scheme and '://' -- RFC 3986
+  section 3.1: a letter, then letters, digits, '+', '-' or '.'. The test used to
+  be '://' ANYWHERE, so a path whose query carried a url -- /go?to=http://x/ --
+  was sent as an absolute url with no host and failed (2026-10-07). }
+function HasScheme(const AUrl: String): Boolean;
+var i: Integer;
+begin
+  Result := False;
+  if (AUrl = '') or not (AUrl[1] in ['A'..'Z', 'a'..'z']) then Exit;
+  i := 2;
+  while (i <= Length(AUrl)) and (AUrl[i] in ['A'..'Z', 'a'..'z', '0'..'9', '+', '-', '.']) do
+    Inc(i);
+  Result := Copy(AUrl, i, 3) = '://';
+end;
+
 function ClientUrl(cfg: TPhosphorHttpClient; const APath: String; out AUrl: String): Boolean;
 var
   base, p, q: String;
@@ -2020,7 +2376,7 @@ var
 begin
   Result := False;
   AUrl := '';
-  if Pos('://', APath) > 0 then AUrl := APath
+  if HasScheme(APath) then AUrl := APath
   else
   begin
     base := cfg.BaseUrl;
@@ -2060,6 +2416,26 @@ begin
   if cfg.ProxyHost = '' then Exit;
   if (cfg.ProxyPort < 1) or (cfg.ProxyPort > 65535) then Exit(True);
   if LowerCase(ParseURI(AUrl).Protocol) = 'https' then Exit(True);
+end;
+
+function HttpIsIPv4Literal(const AHost: String): Boolean;
+begin
+  Result := IsIPv4Literal(AHost);
+end;
+
+function HttpIsIPv6Literal(const AHost: String): Boolean;
+begin
+  Result := IsIPv6Literal(AHost);
+end;
+
+function HttpSameOrigin(const A, B: String): Boolean;
+begin
+  Result := SameOrigin(A, B);
+end;
+
+function ProxyRefusedFor(ACfg: TObject; const AUrl: String): Boolean;
+begin
+  Result := (ACfg is TPhosphorHttpClient) and ProxyRefused(TPhosphorHttpClient(ACfg), AUrl);
 end;
 
 function ClientFetch(const AWho: String; const AHandle: TValue;

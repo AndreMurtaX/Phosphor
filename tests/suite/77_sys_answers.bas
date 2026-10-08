@@ -80,3 +80,31 @@ assert_eq(dir_setcurrent("bin"), 1, "dir_setcurrent moves into one that exists")
 assert_eq(ioerror(), 0, "and clears the error")
 x = dir_setcurrent("..")
 assert_eq(dir_getcurrent$(), here$, "and back")
+
+test_case("answers/forcedirectories and fileexists write the slot too")
+rem Each answer below follows a REFUSAL, which records 5, so a 5 still
+rem standing after it is the defect an adversarial round found on
+rem 2026-10-07: neither call wrote ioerror() when it answered. A failed
+rem forcedirectories read as "refused", and a refused fileexists could not
+rem be told from "not there". A "no" from fileexists is an answer, so its
+rem slot is 0 either way; forcedirectories is a mutator, 0 or 3.
+o$ = "../p9b_outside_never_made/x"
+x = fileexists(o$, 0)
+assert_eq(ioerror(), 5, "the control: a path outside the root records 5")
+assert_eq(forcedirectories(d$ + "/a/b"), 1, "forcedirectories makes the chain")
+assert_eq(ioerror(), 0, "and clears the refusal before it")
+file_writealltext(g$, "x")
+x = fileexists(o$, 0)
+assert_eq(forcedirectories(g$ + "/sub"), 0, "a file in the way fails the chain")
+assert_eq(ioerror(), 3, "and is recorded as a failure, not left reading as a refusal")
+x = fileexists(o$, 0)
+assert_eq(fileexists(g$, 0), 1, "fileexists answers for a file that is there")
+assert_eq(ioerror(), 0, "and clears the slot")
+x = fileexists(o$, 0)
+assert_eq(fileexists(d$ + "/none.txt", 0), 0, "and for one that is not")
+assert_eq(ioerror(), 0, "where no is an answer, not a failure")
+x = kill(g$)
+x = rmdir(d$ + "/a/b")
+x = rmdir(d$ + "/a")
+x = rmdir(d$)
+assert_eq(dir_exists(d$), 0, "and everything it made is gone")

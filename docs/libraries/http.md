@@ -261,9 +261,44 @@ resolves a host to its first A record and connects only to that one, so a single
 dead IP fails a request that a round-robin CDN's other addresses would have served.
 This library resolves them all and tries each until one connects. It applies to
 plain `http://` only: over TLS, pinning a resolved IP would show the handshake an
-IP where it needs the name, so https takes the plain resolve-and-dial path. The
-underlying layer is IPv4-only, so an IPv6-only endpoint is out of reach here. The
-reasoning and what comes next are in [roadmap-net.md](../roadmap-net.md).
+IP where it needs the name, so https dials the name as written. IPv6 is the
+paragraph above: a name's AAAA addresses come after its A records, over http and
+https alike. The reasoning is in [roadmap-net.md](../roadmap-net.md).
+
+**A redirect is a request of its own.** A client handle follows redirects (up to
+`http_maxredirects`, five by default), and each hop goes through every rule a first
+request does: the proxy, the certificate's name, IPv6, the choice of address. What
+identifies the caller — the `Authorization` header, the cookies, and the client
+certificate — goes only to the **origin** it was set up for, the first url's
+scheme, host and port, all three: a redirect to another host, another port, or from
+`https` to `http` arrives without them. A cookie a response sets goes on to the next
+hop of the same origin, as `name=value`. A `303` turns the request into a `GET`
+without a body; every other code keeps the method and the body. A redirect that is
+not followed — a `Location` missing, a scheme other than http and https, one hop
+past the cap — answers its own status with no body. And through a proxy, a hop to
+`https` is refused like a first request: nothing is sent, `http_error()` `2`. Until
+2026-10-07 the RTL followed redirects with none of this — a redirect to https
+through a proxy was opened with the PROXY, which was handed the bearer token, and
+credentials went to whatever host a redirect named. A bare url (`http_get$(url$)`)
+never follows redirects.
+
+**What counts as a host.** An address is text that parses as one: four decimal
+numbers of 0..255 for IPv4, and for IPv6 what RFC 4291 writes inside the brackets,
+`::ffff:a.b.c.d` (an IPv4 address written as IPv6, dialled as that IPv4 address)
+included. A bracketed host that does not parse, a zone id, and the unspecified
+address of either family (`0.0.0.0`, `[::]`) are refused before anything is dialled:
+each used to be dialled as `::`, which Linux connects to this machine itself. A
+name with a trailing dot, `localhost.`, is the same name, and is requested,
+resolved and checked against the certificate without the dot -- Windows'
+resolver knew the dotted form and Linux's hosts-file lookup does not; an address is never sent as SNI, a name always
+is (RFC 6066). A path given to a client verb is a url of its own only when it
+BEGINS with a scheme — `/go?to=http://x/` is a path whose query holds a url.
+
+**Time.** A run with a time budget bounds a response as a whole, not only each read:
+a server that trickles a byte a second is cut off when the run's time is gone. The
+connect wait is whole seconds, rounded up, because the system's connect timeout is;
+on Windows a REFUSED connect costs that whole wait before the next address is tried,
+which is the RTL's connect and is bounded by the timeout either way.
 
 The tests are `tests/packages/03_http.bas` (a real loopback server the runner
 stands up), `tests/packages/04_https.bas` (a self-signed TLS server, proving both

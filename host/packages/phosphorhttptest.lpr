@@ -31,7 +31,7 @@ uses
   SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
   dynlibs, ctypes, ssockets, sslsockets, opensslsockets, fpopenssl, sockets,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
-  PhosphorHttpLib;
+  PhosphorHttpLib, PhosphorBudget;
 
 const
   SRV_PORT     = 18099;
@@ -41,6 +41,11 @@ const
   SRV_PORT_V6 = 18446;       // [::1], plain http (m6)
   SRV_PORT_V6_TLS = 18447;   // [::1], https, the localhost certificate (m6)
   SRV_PORT_V6_TLS_IP = 18448;// [::1], https, the certificate naming ::1 (m6)
+  { [::1], a peer that TRICKLES THE TLS HANDSHAKE: it reads the ClientHello, sends
+    a record header announcing 16384 bytes, then one byte every 200 ms for four
+    seconds. Every read is answered in time, so only a deadline on the whole
+    handshake bounds it (2026-10-08, second adversarial round). }
+  SRV_PORT_V6_TLS_TRICKLE = 18449;
 
 var
   BaseURL: String;
@@ -318,6 +323,7 @@ type
     Tls: Boolean;
     CertFile, KeyFile: String;
     Ready: Boolean;
+    Trickle: Boolean;   // trickle a TLS handshake instead of serving
     procedure Execute; override;
   private
     procedure Serve(AFd: TSocket);
@@ -364,6 +370,29 @@ var
   req, head, path, body, resp, chunk, status, extra, line: AnsiString;
   ch: AnsiChar;
 begin
+  if Trickle then
+  begin
+    st := TSocketStream.Create(LongInt(AFd), nil);
+    try
+      n := st.Read(buf[0], SizeOf(buf));          // the ClientHello
+      if n <= 0 then Exit;
+      resp := Chr($16) + Chr($03) + Chr($03) + Chr($40) + Chr($00);
+      st.WriteBuffer(resp[1], Length(resp));
+      ch := Chr($02);
+      try
+        for k := 1 to 20 do
+        begin
+          Sleep(200);
+          st.WriteBuffer(ch, 1);
+        end;
+      except
+        // the client gave up, which is the point
+      end;
+    finally
+      st.Free;
+    end;
+    Exit;
+  end;
   if Tls then
   begin
     h := TOpenSSLSocketHandler.Create();
@@ -538,6 +567,7 @@ begin
   Err := NoError();
   if Args[0].Str = 'https' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS))
   else if Args[0].Str = 'https_ip' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_IP))
+  else if Args[0].Str = 'tlstrickle' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_TRICKLE))
   else Result := ValStr('http://[::1]:' + IntToStr(SRV_PORT_V6));
 end;
 
@@ -680,6 +710,16 @@ begin
   Result := ValInt(HttpDeadlineMs);
 end;
 
+{ http_test_spend(ms) -- charge the run's budget for ms of waiting, at the price
+  pause() and a network wait pay, WITHOUT waiting: so a test can stand a request
+  at the edge of the budget in no time. Answers 1 while the budget holds, 0 once
+  this charge spent it. Test only (2026-10-08, second adversarial round). }
+function f_http_test_spend(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Ord(BudgetCharge(Trunc(AsDouble(Args[0])) * BudgetUnitsPerMs)));
+end;
+
 { http_is_ipv4(host$) / http_is_ipv6(host$) -- 1 when the library takes host$ for
   an address of that family, which decides the certificate check and SNI. }
 function f_http_is_ipv4(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -733,7 +773,7 @@ var
   eng: TPhosphorEngine;
   srv, srvTls, srvTlsIP: TBoundHttpServer;
   srvMtls: TMutualTlsServer;
-  v6Plain, v6Tls, v6TlsIP: TV6Server;
+  v6Plain, v6Tls, v6TlsIP, v6Trickle: TV6Server;
   th, thTls, thTlsIP, thMtls: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
@@ -869,12 +909,17 @@ begin
   v6TlsIP.KeyFile := certDir + 'tls_test_ip_key.pem';
   v6TlsIP.FreeOnTerminate := False;
   v6TlsIP.Start;
+  v6Trickle := TV6Server.Create(True);
+  v6Trickle.Port := SRV_PORT_V6_TLS_TRICKLE;
+  v6Trickle.Trickle := True;
+  v6Trickle.FreeOnTerminate := False;
+  v6Trickle.Start;
 
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
   while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active) or
          (not srvMtls.Active) or (not v6Plain.Ready) or (not v6Tls.Ready) or
-         (not v6TlsIP.Ready)) and (waited < 3000) do
+         (not v6TlsIP.Ready) or (not v6Trickle.Ready)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 
@@ -919,6 +964,7 @@ begin
     eng.Registry.Add('http_get_via$:$$', @f_http_get_via);
     eng.Registry.Add('http_resolve_as$:$$', @f_http_resolve_as);
     eng.Registry.Add('http_test_deadline:n', @f_http_test_deadline);
+    eng.Registry.Add('http_test_spend:n', @f_http_test_spend);
     eng.Registry.Add('http_is_ipv4:$', @f_http_is_ipv4);
     eng.Registry.Add('http_is_ipv6:$', @f_http_is_ipv6);
     eng.Registry.Add('http_same_origin:$$', @f_http_same_origin);

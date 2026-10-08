@@ -14,7 +14,7 @@
     phosphor run <file> [--out F]    same, explicit verb; --out writes bytes to F
     phosphor --sandbox <dir> <file>  confine every path the script names to <dir>
     phosphor debug [--stop-at-entry] [--break N,N] <file.bas>   step through it
-    phosphor compile [--check] <in.bas> <out.pbc>   compile to portable bytecode
+    phosphor compile [--check [--names <file>]] <in.bas> <out.pbc>   compile to portable bytecode
     phosphor pack <in.pbc> <out>     make a standalone executable (stub + payload).
                                      Takes COMPILED bytecode, not source: compile
                                      once, pack as often as you like
@@ -60,7 +60,7 @@ uses
   // actually there. This is the whole reason one binary can do both jobs.
   Forms, Clipbrd, LCLType, InterfaceBase,
   {$IFDEF WINDOWS}Win32Int,{$ELSE}Gtk2Int,{$ENDIF}
-  SysUtils, Classes, PhosphorEngine, PhosphorValue, PhosphorCompiler, PhosphorOpcodes,
+  SysUtils, Classes, PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorCompiler, PhosphorOpcodes,
   { PhosphorHandles for ONE NUMBER: LiveHandleCount, read either side of an
     `evaluate` so the answer is refused if the evaluation created or freed a
     handle. The handle registry is process-wide (its own header says so), so it
@@ -777,13 +777,74 @@ begin
   RegisterMiscFuncs(Reg);
 end;
 
-{ Every function name this BINARY can ever provide -- both halves, no widgetset.
-  The caller frees the engine. }
+{ SIGNATURES ANOTHER HOST PROVIDES, given to `compile --check --names <file>`
+  (2026-10-08, second adversarial round). Both checks below judge a program
+  against the registry they are handed, and this binary's is not the only host a
+  file is written for: a test that runs under phosphortest or an embedder's own
+  host can call names this binary never registers -- and a bare zero-argument one
+  of those was invisible to the r1 check, because here it is just a variable.
+  One signature per line, as a host registers it ('name:codes'); a blank line or
+  one starting with '#' is skipped. Registered with a stub that is never called:
+  compile --check only asks whether a name exists and with which arity. }
+var
+  GCheckSigs: TStringList = nil;
+
+function NamedOnlyForTheCheck(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := MakeError(peRuntime, 'a name given to compile --names is never called');
+  Result := ValInt(0);
+end;
+
+{ Reads the --names file into GCheckSigs. '' when it is fine, otherwise what is
+  wrong with it, which the caller prints and exits 2 on -- a check run against a
+  file it could not read would report a clean bill for the wrong host. }
+function LoadCheckNames(const APath: String): String;
+var
+  lines: TStringList;
+  i, j, colon: Integer;
+  t, codes: String;
+begin
+  Result := '';
+  lines := TStringList.Create();
+  try
+    try
+      lines.LoadFromFile(APath);
+    except
+      on Ex: Exception do Exit('cannot read ' + APath + ': ' + Ex.Message);
+    end;
+    if GCheckSigs = nil then GCheckSigs := TStringList.Create();
+    for i := 0 to lines.Count - 1 do
+    begin
+      t := Trim(lines[i]);
+      if (t = '') or (t[1] = '#') then Continue;
+      colon := Pos(':', t);
+      codes := Copy(t, colon + 1, Length(t));
+      if colon < 2 then
+        Exit(Format('%s:%d is not a signature (name:codes): %s', [APath, i + 1, t]));
+      for j := 1 to Length(codes) do
+        if Pos(codes[j], 'n%$@?*') = 0 then
+          Exit(Format('%s:%d: %s is not an argument code (n %% $ @ ? *)',
+                      [APath, i + 1, codes[j]]));
+      GCheckSigs.Add(t);
+    end;
+  finally
+    lines.Free;
+  end;
+end;
+
+{ Every function name this BINARY can ever provide -- both halves, no widgetset --
+  and, under `compile --check --names`, the other host's too. The caller frees
+  the engine. }
 function EverythingThisBinaryProvides: TPhosphorEngine;
+var
+  i: Integer;
 begin
   Result := TPhosphorEngine.Create();     // the engine's own libraries register here
   RegisterOptInPackages(Result.Registry);
   RegisterGuiPackages(Result.Registry);
+  if GCheckSigs <> nil then
+    for i := 0 to GCheckSigs.Count - 1 do
+      Result.Registry.Add(GCheckSigs[i], @NamedOnlyForTheCheck);
 end;
 
 { Names this program calls that no host built from this binary could satisfy.
@@ -1453,7 +1514,11 @@ begin
     TakeRun(runFrom, got);
     if Length(acc) > DBG_MAX_FRAME then
     begin
-      FOwner.Push(#0);
+      { #1, NOT #0 (2026-10-08, second adversarial round): #0 means the peer
+        closed, and Handle answers that by detaching in silence -- so a frame
+        past the limit ended the session with no word to the editor. #1 is a
+        frame this end refuses, which Handle reports as an `error` event. }
+      FOwner.Push(#1);
       Break;
     end;
   end;
@@ -1657,6 +1722,109 @@ begin
   end;
 end;
 
+{ AN INTEGER FIELD, OR NOT (2026-10-08, second adversarial round). fpjson's
+  typed Get finds a field only if it is a NUMBER, and then CONVERTS: a float is
+  Round()ed -- 1e300 raised EInvalidOp out of the frame handler, at every door,
+  and the host exited 3 -- 1.5 became 2, and an Int64 past the Integer range was
+  truncated, so a seq was answered under a number the editor never sent. True
+  with ADefault when the field is absent; False when it is present and is not an
+  integer that fits. }
+function IntField(O: TJSONObject; const AName: String; ADefault: Integer;
+                  out AValue: Integer): Boolean;
+var
+  d: TJSONData;
+  v: Int64;
+begin
+  AValue := ADefault;
+  Result := True;
+  d := O.Find(AName);
+  if d = nil then Exit;
+  Result := False;
+  if d.JSONType <> jtNumber then Exit;
+  if not (TJSONNumber(d).NumberType in [ntInteger, ntInt64]) then Exit;
+  v := d.AsInt64;
+  if (v < Low(Integer)) or (v > High(Integer)) then Exit;
+  AValue := Integer(v);
+  Result := True;
+end;
+
+{ EVERY FRAME IS UTF-8, which the spec requires and a strict editor enforces by
+  ending the session. A script's strings are bytes -- bytestr$(255) is one -- and
+  fpjson writes a string's bytes as they are, so a variable, a trace or an
+  exception text holding one made a frame no UTF-8 decoder would read. Each byte
+  that does not begin a well-formed sequence is written as the four characters
+  \xFF instead -- inside a JSON string, so as an escaped backslash -- which reads
+  as the byte it was. Well-formed means RFC 3629: no overlong form, no surrogate,
+  nothing past U+10FFFF. Whole runs are copied, never a Char at a time. }
+{ How many bytes from S[I] form one well-formed UTF-8 sequence (RFC 3629: no
+  overlong form, no surrogate, nothing past U+10FFFF); 0 when they do not. }
+function Utf8SeqLen(const S: String; I, N: Integer): Integer;
+var
+  b, b2: Byte;
+  need, k: Integer;
+begin
+  b := Ord(S[I]);
+  if b < $80 then Exit(1);
+  Result := 0;
+  if (b >= $C2) and (b <= $DF) then need := 1
+  else if (b >= $E0) and (b <= $EF) then need := 2
+  else if (b >= $F0) and (b <= $F4) then need := 3
+  else Exit;
+  if I + need > N then Exit;
+  b2 := Ord(S[I + 1]);
+  if (b2 < $80) or (b2 > $BF) then Exit;
+  if (b = $E0) and (b2 < $A0) then Exit;
+  if (b = $ED) and (b2 > $9F) then Exit;
+  if (b = $F0) and (b2 < $90) then Exit;
+  if (b = $F4) and (b2 > $8F) then Exit;
+  for k := 2 to need do
+    if (Ord(S[I + k]) < $80) or (Ord(S[I + k]) > $BF) then Exit;
+  Result := need + 1;
+end;
+
+{ TWO PASSES, BOTH LINEAR: count the bytes to escape, size the answer once, copy.
+  The first version appended to its answer in the loop, which check-budget.py
+  refused -- rightly: a variable holding ten million bytes of 0xFF would have
+  been a quadratic copy, in the one routine every frame goes through. }
+function Utf8Frame(const S: String): String;
+const
+  ESC = '\\x';   // inside a JSON string: an escaped backslash, then x
+var
+  i, n, k, bad, at, run: Integer;
+  hex: String;
+begin
+  n := Length(S);
+  bad := 0;
+  i := 1;
+  while i <= n do
+  begin
+    k := Utf8SeqLen(S, i, n);
+    if k = 0 then begin Inc(bad); Inc(i); end else Inc(i, k);
+  end;
+  if bad = 0 then Exit(S);
+  SetLength(Result, n + bad * 4);   // one byte becomes five characters
+  at := 1;
+  i := 1;
+  while i <= n do
+  begin
+    k := Utf8SeqLen(S, i, n);
+    if k > 0 then
+    begin
+      run := k;
+      Move(S[i], Result[at], run);
+      Inc(at, run);
+      Inc(i, run);
+    end
+    else
+    begin
+      hex := ESC + IntToHex(Ord(S[i]), 2);
+      Move(hex[1], Result[at], Length(hex));
+      Inc(at, Length(hex));
+      Inc(i);
+    end;
+  end;
+end;
+
 { ONE WRITER, AND IT IS THE VM THREAD. AsJSON is fpjson's own encoder, the same
   one the editor's udebugproto.pas uses, so a value holding chr(10) or a quote
   cannot split a frame -- and the terminator is ours to add, because AsJSON does
@@ -1666,7 +1834,7 @@ var
   line: String;
 begin
   try
-    line := AObj.AsJSON + #10;
+    line := Utf8Frame(AObj.AsJSON) + #10;
     if (FSock <> nil) and (not FClosed) then
       FSock.Write(line[1], Length(line));
   except
@@ -2629,7 +2797,7 @@ var
 begin
   while TakeLine(raw) do
   begin
-    if raw = #0 then Continue;
+    if (raw = #0) or (raw = #1) then Continue;
     d := nil;
     try
       try
@@ -2639,7 +2807,7 @@ begin
       end;
       if (d <> nil) and (d is TJSONObject) then
       begin
-        seq := TJSONObject(d).Get('seq', 0);
+        if not IntField(TJSONObject(d), 'seq', 0, seq) then seq := 0;
         cmd := TJSONObject(d).Get('cmd', '');
         if seq > 0 then
           if ADisconnectOk and (cmd = 'disconnect') then
@@ -2666,7 +2834,7 @@ var
   rejected: TJSONArray;
   rej: TJSONObject;
   cmd, cond, evVal, evKind, evErr: String;
-  seq, i, n, k: Integer;
+  seq, i, n, k, fr: Integer;
   v: Int64;
   stopped, keepLine: Boolean;
 begin
@@ -2677,7 +2845,19 @@ begin
   begin
     { The socket closed. Detach and let the program finish, which is the same
       thing `disconnect terminate:false` asks for. }
-    FClosed := True;
+    CloseTransport();
+    FDisconnected := True;
+    FAction := daRun;
+    Exit(True);
+  end;
+  if ARaw = #1 then
+  begin
+    { A frame past DBG_MAX_FRAME: reported, then the session ends like any
+      frame this end cannot read. }
+    res := TJSONObject.Create();
+    res.Add('text', 'a frame longer than 1048576 bytes was refused; the session is closed');
+    SendEvent('error', res);
+    CloseTransport();
     FDisconnected := True;
     FAction := daRun;
     Exit(True);
@@ -2718,14 +2898,32 @@ begin
                                'is closed', [cond]));
       end;
       SendEvent('error', res);
-      FClosed := True;
+      { AND THE SOCKET CLOSES NOW (2026-10-08, second adversarial round). The
+        session ended here and the socket stayed open until the program did:
+        the editor waited behind it, and a program it had been told was stopped
+        ran to its end with nothing said. The spec: "the receiver reports it and
+        disconnects". }
+      CloseTransport();
       FDisconnected := True;
       FAction := daRun;
       Exit(True);
     end;
     o := TJSONObject(d);
-    seq := o.Get('seq', 0);
     cmd := o.Get('cmd', '');
+    { A REQUEST CARRIES AN INTEGER SEQ, and one that does not is not a request:
+      it is reported and the session ends, as for any frame that is neither an
+      event nor a response. It used to be answered under 0, or under a seq
+      fpjson had rounded or truncated -- or it killed the host (see IntField). }
+    if (not IntField(o, 'seq', 0, seq)) or (seq < 1) then
+    begin
+      res := TJSONObject.Create();
+      res.Add('text', 'a request needs a positive integer seq; the session is closed');
+      SendEvent('error', res);
+      CloseTransport();
+      FDisconnected := True;
+      FAction := daRun;
+      Exit(True);
+    end;
 
     { THE STATE MACHINE'S FIRST EDGES, enforced (n5, 2026-10-08). The spec says
       `initialize` "must be the first frame. Nothing else is answered before it",
@@ -3001,7 +3199,10 @@ begin
       RefuseQueued('arrived after disconnect; the session is closed', False);
       FDisconnected := True;
       if o.Get('terminate', False) then FAction := daStop else FAction := daRun;
-      FClosed := True;
+      { "Both are answered ok:true, after which the host closes the socket" --
+        the spec. It used to stay open until the program ended, so a detached
+        program held the editor's connection for as long as it ran. }
+      CloseTransport();
       Exit(True);
     end;
 
@@ -3053,14 +3254,16 @@ begin
     if cmd = 'variables' then
     begin
       if not stopped then SendError(seq, 'variables is valid only while stopped')
-      else DoVariables(seq, o.Get('frame', 0), ADepth);
+      else if not IntField(o, 'frame', 0, fr) then SendError(seq, 'frame must be an integer')
+      else DoVariables(seq, fr, ADepth);
       Exit(False);
     end;
 
     if cmd = 'evaluate' then
     begin
       if not stopped then SendError(seq, 'evaluate is valid only while stopped')
-      else DoEvaluate(seq, o.Get('frame', 0), ADepth, o.Get('expr', ''));
+      else if not IntField(o, 'frame', 0, fr) then SendError(seq, 'frame must be an integer')
+      else DoEvaluate(seq, fr, ADepth, o.Get('expr', ''));
       Exit(False);
     end;
 
@@ -4698,7 +4901,8 @@ end;
 procedure RunCommandLine;
 var
   i, code: Integer;
-  arg, filePath, outPath, packIn, packOut: String;
+  arg, filePath, outPath, packIn, packOut, namesPath: String;
+  wantNames: Boolean;
   packFlags: LongWord;
   packArgs: Integer;
   payload: TBytesStream;
@@ -4840,17 +5044,27 @@ begin
       Halt(DebugFile(dbgPath, dbgLines, dbgCount, dbgEntry));
   end;
 
-  // `phosphor compile [--check] <in.bas> <out.pbc>` -- compile to bytecode and stop.
+  // `phosphor compile [--check [--names <file>]] <in.bas> <out.pbc>` -- compile
+  // to bytecode and stop.
   if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
   begin
     packFlags := 0;   // reused as "--check was given"
     packArgs := 0;
     packIn := '';
     packOut := '';
+    namesPath := '';
+    wantNames := False;
     for i := 2 to ParamCount do
     begin
       arg := ParamStr(i);
-      if arg = '--check' then
+      if wantNames then
+      begin
+        namesPath := arg;
+        wantNames := False;
+      end
+      else if arg = '--names' then
+        wantNames := True
+      else if arg = '--check' then
         packFlags := 1
       else
       begin
@@ -4864,10 +5078,21 @@ begin
         end;
       end;
     end;
-    if packArgs < 2 then
+    if (packArgs < 2) or wantNames or ((namesPath <> '') and (packFlags = 0)) then
     begin
-      Writeln(StdErr, 'usage: phosphor compile [--check] <in.bas> <out.pbc>');
+      Writeln(StdErr, 'usage: phosphor compile [--check [--names <file>]] <in.bas> <out.pbc>');
+      if (namesPath <> '') and (packFlags = 0) then
+        Writeln(StdErr, '  --names says which host --check judges against; without --check it does nothing');
       Halt(2);
+    end;
+    if namesPath <> '' then
+    begin
+      arg := LoadCheckNames(namesPath);
+      if arg <> '' then
+      begin
+        Writeln(StdErr, 'phosphor: compile --names: ', arg);
+        Halt(2);
+      end;
     end;
     Halt(CompileFile(packIn, packOut, packFlags <> 0));
   end;
@@ -4933,10 +5158,13 @@ begin
       Writeln('              per line, and the program keeps its own stdin, stdout');
       Writeln('              and stderr. docs/debugging.md and PhosphorIDE''s');
       Writeln('              docs/debug-protocol.md are the contract');
-      Writeln('       phosphor compile [--check] <in.bas> <out.pbc>');
+      Writeln('       phosphor compile [--check [--names <file>]] <in.bas> <out.pbc>');
       Writeln('              --check warns about function names this host does not');
-      Writeln('              have; it never fails, because the file may be meant');
-      Writeln('              for a host that has them');
+      Writeln('              have, and about one of no arguments written without');
+      Writeln('              its parentheses where a value is wanted; it never');
+      Writeln('              fails, because the file may be meant for a host that');
+      Writeln('              has them. --names <file> adds that host''s signatures,');
+      Writeln('              one name:codes per line');
       Writeln('       phosphor pack [--no-console] <in.pbc> <out>   (standalone executable)');
       Writeln('              pack takes COMPILED bytecode: compile first, then pack');
       Writeln('              --no-console is baked into the file: a packed program');

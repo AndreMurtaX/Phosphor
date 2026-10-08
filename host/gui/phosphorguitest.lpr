@@ -236,17 +236,15 @@ type
     procedure Bark(Sender: TObject);
   end;
 
+procedure ReportFailures; forward;
+
 procedure TWatchdog.Bark(Sender: TObject);
-var
-  i: Integer;
 begin
   Writeln(StdErr, Format('phosphorguitest: the message loop did not end within %d ms -- ' +
                          'app_run() was entered and nothing called app_quit(); the run ' +
                          'ends here', [WatchdogMs]));
   Inc(AssertsFailed);
-  if Assigned(Failures) then
-    for i := 0 to Failures.Count - 1 do
-      Writeln(StdErr, '  FAIL ', Failures[i]);
+  ReportFailures();
   Flush(StdErr);
   WriteSummary();
   EndNow(4);
@@ -259,7 +257,7 @@ var
   DogTimer: TTimer;
   gsvc: THostServices;
   path: String;
-  rc, i: Integer;
+  rc: Integer;
 { gui_test_fire(c@, event$) -- TEST ONLY, and only in this runner: run the event a
   person's action would, so a handler bound to it can be seen to run.
 
@@ -547,6 +545,21 @@ end;
   Both notes had been live in the tree for as long as this file has existed and
   were invisible until 2026-09-15, when this runner started reading its own build
   log instead of checking whether the binary appeared. }
+{ THE LEDGER AND THE FAILURES, AT EVERY EXIT THAT REPORTS (2026-10-08, second
+  adversarial round). Only the file's normal end read the ledger: a run ended by
+  the watchdog or by a fault at top level printed the hang or the fault and
+  nothing else, though an unacknowledged handler fault may be exactly what caused
+  either. Each still exits non-zero; what was missing was the report. }
+procedure ReportFailures;
+var
+  i: Integer;
+begin
+  CheckModalLedger();
+  if Assigned(Failures) then
+    for i := 0 to Failures.Count - 1 do
+      Writeln(StdErr, '  FAIL ', Failures[i]);
+end;
+
 procedure ReleaseGuiFixtures;
 begin
   FreeAndNil(DogTimer);
@@ -645,13 +658,12 @@ begin
     if rc <> 0 then
     begin
       Writeln(StdErr, Format('phosphorguitest: %s:%d: %s', [path, eng.ErrorLine, eng.ErrorMessage]));
+      ReportFailures();
       WriteSummary();
       ReleaseGuiFixtures();
       Halt(2);
     end;
-    CheckModalLedger();
-    for i := 0 to Failures.Count - 1 do
-      Writeln(StdErr, '  FAIL ', Failures[i]);
+    ReportFailures();
     WriteSummary();
     ReleaseGuiFixtures();
     if AssertsFailed = 0 then Halt(0) else Halt(1);

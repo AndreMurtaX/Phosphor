@@ -407,7 +407,28 @@ gui_clearerror()
 on error goto 0
 assert_eq(form_caption$(c@), "closes", "and the form is still there to answer")
 assert_eq(gui_error(), 0, "through a handle that still resolves")
-on error goto trapped
+on error goto 0
+
+test_case("faults/a handler fault provoked on purpose is acknowledged, and the file passes")
+rem THE PASS SIDE OF THE LEDGER (2026-10-08, second adversarial round).
+rem tests/gui/ledger/forgot.bas shows an unacknowledged handler fault
+rem FAILS a run; nothing showed an acknowledged one does not. A
+rem gui_test_handler_faults() that answered the count and never cleared
+rem it passed every runner -- and would fail THIS file at its end, which
+rem is the point of putting the case in a file that must pass. The
+rem expected values are the rule's: two clicks on a handler that divides
+rem by zero are two faults, each sets gui_error() to 2, and reading the
+rem count clears it.
+fz = 0
+fb@ = button@(f@)
+button_onclick@(fb@, "on_divide")
+gui_clearerror()
+button_click@(fb@)
+assert_eq(gui_error(), 2, "a handler that faulted is recorded as 2, not raised")
+button_click@(fb@)
+assert_eq(gui_test_handler_faults(), 2, "both faults are counted")
+assert_eq(gui_test_handler_faults(), 0, "and reading the count cleared it")
+button_onclick@(fb@, "")
 
 end
 
@@ -421,5 +442,10 @@ resume next
 function cleanup(sender@)
   freed = 1
   control_free(sender@)
+  return 0
+endfunction
+
+function on_divide(sender@)
+  y = 1 / fz
   return 0
 endfunction

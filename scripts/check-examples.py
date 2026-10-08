@@ -32,6 +32,14 @@ file that reads such a name ON PURPOSE is exempt in BARE_EXEMPT, with the reason
 an exemption that no longer fires is a failure, so the list cannot outlive what
 it excuses.
 
+AND AGAINST THE HOSTS THE CORPUS RUNS UNDER (2026-10-08, second adversarial
+round). `compile --check` judges against phosphor.exe's registry, and 128 of the
+153 programs run under a TEST host that registers more names of no arguments --
+probe_count, server_url$, gui_test_asked and the rest -- so a bare one of those
+was a variable here and never reported. The signatures those hosts register are
+read from their sources (TEST_HOST_SOURCES) and handed to `--names`, the union of
+all of them: a name one test host provides is a function wherever a test runs.
+
 Exit 0 = every example compiles and nothing reads a function as a variable.
 Exit 1 = otherwise, each named with the compiler's own message.
 """
@@ -46,6 +54,21 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NOTATION = '```basic notation'
 BARE_WARNING = 'read as a variable that nothing assigns'
+
+# The sources whose registrations make the test hosts' extra names.
+TEST_HOST_SOURCES = ['tests/*.pas', 'tests/*.lpr', 'host/packages/*test*.lpr',
+                     'host/gui/phosphorguitest.lpr']
+REGISTRATION = re.compile(r"\.(?:Add|AddHost)\('([A-Za-z_][A-Za-z0-9_]*[$%@?]?:[n%$@?*]*)'")
+
+
+def test_host_signatures():
+    """Every 'name:codes' a test host registers, sorted, de-duplicated."""
+    sigs = set()
+    for pat in TEST_HOST_SOURCES:
+        for f in glob.glob(os.path.join(ROOT, *pat.split('/'))):
+            sigs.update(REGISTRATION.findall(io.open(f, encoding='utf-8',
+                                                     errors='ignore').read()))
+    return sorted(sigs)
 
 # path -> why it reads a function's name as a variable on purpose.
 BARE_EXEMPT = {
@@ -156,6 +179,13 @@ def main():
     tmp = tempfile.mkdtemp(prefix='phosphor-examples-')
     src = os.path.join(tmp, 'block.bas')
     out = os.path.join(tmp, 'block.pbc')
+    names_file = os.path.join(tmp, 'test-hosts.names')
+    sigs = test_host_signatures()
+    if not sigs:
+        print('FAIL  check-examples: no test-host registration was found in %s'
+              % ', '.join(TEST_HOST_SOURCES))
+        return 1
+    io.open(names_file, 'w', encoding='utf-8', newline='\n').write('\n'.join(sigs) + '\n')
     total = compiled = skipped = 0
     bad = []
     doc_bare = []
@@ -192,7 +222,8 @@ def main():
         return 1
     bare_bad, fired = list(doc_bare), set()
     for rel in files:
-        r = subprocess.run([exe, 'compile', '--check', os.path.join(ROOT, rel), out],
+        r = subprocess.run([exe, 'compile', '--check', '--names', names_file,
+                            os.path.join(ROOT, rel), out],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         # A file that does not compile is its own runner's failure, not this one's.
         names = bare_names(r.stderr) if r.returncode == 0 else []

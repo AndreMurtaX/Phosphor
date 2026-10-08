@@ -192,6 +192,16 @@ threadvar
     starts (FetchCore) and shared by every address and every redirect hop it
     tries. 0 when no budget is installed. }
   gReqDeadline: QWord;
+  { THE RESPONSE WAS CUT OFF BY THE DEADLINE, or the handshake was (2026-10-08,
+    second adversarial round). A cut response used to come back as the status
+    the peer sent and the bytes it had trickled so far, with http_error() 0: a
+    complete-looking success holding a truncated body. FetchCore turns this into
+    status 0, no body, and HTTP_ETIME. }
+  gCutShort: Boolean;
+  { THE WAIT SPENT THE RUN'S BUDGET. Set by FetchCore after it charges the time
+    the request took; each verb then answers the budget's own refusal, as pause()
+    does. }
+  gBudgetOut: Boolean;
 
 type
   { Raised from a read once the run's time is gone. Not an ESocketError, so the
@@ -658,9 +668,79 @@ end;
   which RFC 6066 section 3 forbids ("Literal IPv4 and IPv6 addresses are not
   permitted"), and `localhost.` sent its trailing dot. Its parent's Connect
   (TSocketHandler's) only answers True, so nothing else is skipped. }
+{ THE HANDSHAKE IS UNDER THE DEADLINE TOO (2026-10-08, second adversarial
+  round). OpenSSL reads the socket itself during SSL_connect -- not through Recv,
+  so CheckDeadline never ran -- and the only bound was the per-read timeout,
+  which bounds SILENCE: a peer trickling a byte every 0.4 s held a run with a
+  2000 ms deadline for exactly as long as it chose (20 s, and once 217 s before
+  it was killed). A guard thread waits for the deadline; if the handshake has not
+  finished by then it shuts the socket down, OpenSSL's next read fails, and the
+  connect fails as a dead address does -- after which Attempt tries no other,
+  because the deadline has passed. Only under a deadline: with no budget the
+  handshake is exactly what it was. Claimed once, by whichever side gets there
+  first, so a guard never shuts down a connection that has already finished. }
+type
+  THandshakeGuard = class(TThread)
+  private
+    FFd: TSocket;
+    FDeadline: QWord;
+    FWake: PRTLEvent;
+    FClaimed: LongInt;
+  protected
+    procedure Execute; override;
+  public
+    Fired: Boolean;
+    constructor Create(AFd: TSocket; ADeadline: QWord);
+    destructor Destroy; override;
+    procedure Finish;
+  end;
+
+constructor THandshakeGuard.Create(AFd: TSocket; ADeadline: QWord);
+begin
+  FFd := AFd;
+  FDeadline := ADeadline;
+  FWake := RTLEventCreate();
+  FClaimed := 0;
+  Fired := False;
+  FreeOnTerminate := False;
+  inherited Create(False);
+end;
+
+destructor THandshakeGuard.Destroy;
+begin
+  RTLEventDestroy(FWake);
+  inherited Destroy();
+end;
+
+procedure THandshakeGuard.Execute;
+var
+  now, wait: QWord;
+begin
+  now := GetTickCount64();
+  if FDeadline > now then
+  begin
+    wait := FDeadline - now;
+    if wait > QWord(High(LongInt)) then wait := QWord(High(LongInt));
+    RTLEventWaitFor(FWake, LongInt(wait));
+  end;
+  if InterlockedCompareExchange(FClaimed, 1, 0) = 0 then
+  begin
+    Fired := True;
+    fpShutdown(FFd, 2);   // 2 = SHUT_RDWR on both systems
+  end;
+end;
+
+procedure THandshakeGuard.Finish;
+begin
+  if InterlockedCompareExchange(FClaimed, 1, 0) = 0 then
+    RTLEventSetEvent(FWake);
+  WaitFor();
+end;
+
 function THostCheckedHandler.Connect: Boolean;
 var sni: String;
     fd: TSocket;
+    guard: THandshakeGuard;
 begin
   Result := InitContext(False);
   if not Result then Exit;
@@ -671,7 +751,22 @@ begin
   if IsIPv4Literal(sni) or IsIPv6Literal(sni) then sni := '' else sni := TlsName(sni);
   if SendHostAsSNI and (sni <> '') then
     SSL.Ctrl(SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, PAnsiChar(AnsiString(sni)));
-  Result := CheckSSL(SSL.Connect);
+  guard := nil;
+  if gDeadline <> 0 then guard := THandshakeGuard.Create(fd, gDeadline);
+  try
+    Result := CheckSSL(SSL.Connect);
+  finally
+    if guard <> nil then
+    begin
+      guard.Finish();
+      if guard.Fired then
+      begin
+        Result := False;
+        gCutShort := True;
+      end;
+      guard.Free;
+    end;
+  end;
   if Result then Result := DoVerifyCert();
   if Result then SetSSLActive(True);
 end;
@@ -857,6 +952,7 @@ const
   HTTP_EHANDLE = 1;   // an invalid / fabricated client or form handle
   HTTP_EPROXY  = 2;   // a proxy this client cannot honour; nothing was sent
   HTTP_EHOST   = 3;   // https: the server's certificate is not for this host
+  HTTP_ETIME   = 4;   // the run's time ran out mid-handshake or mid-response
 
 var
   { What http_error() answers: the last configuration op's result, and since m5
@@ -1031,10 +1127,18 @@ var
           on E: ESocketError do
             AConnected := not (E.Code in [seHostNotFound, seCreationFailed,
                                           seConnectFailed, seConnectTimeOut]);
+          { Reached, and cut off by the deadline: answered, so never re-sent --
+            and not a response either (see gCutShort). }
+          on E: EHttpDeadline do
+          begin
+            AConnected := True;
+            gCutShort := True;
+          end;
           on E: Exception do AConnected := True;        // reached; keep its answer
         end;
         AStatus := c.ResponseStatusCode;
-        if AConnected then
+        if gCutShort then AStatus := 0;
+        if AConnected and not gCutShort then
         begin
           Result := resp.DataString;
           ALocation := TFPHTTPClient.GetHeader(c.ResponseHeaders, 'Location');
@@ -1130,7 +1234,12 @@ begin
     addrs6 := HttpResolveAAAA(dial);
     for i := 0 to High(addrs6) do
     begin
-      body := Attempt('[' + addrs6[i] + ']', connected);
+      { An IPv4-mapped answer IS that IPv4 address (RFC 4291 2.5.5.2), dialled
+        and checked as one -- as the same address written as a literal is.
+        Bracketed as IPv6 it failed on Windows, whose IPv6 sockets refuse a
+        mapped address, while Linux's dual stack connected: one address, two
+        paths, two answers (2026-10-08, second adversarial round). }
+      body := Attempt(MappedIPv4(addrs6[i]), connected);
       if connected then
       begin
         Result := body;
@@ -1196,9 +1305,20 @@ var
   hops, maxHops: Integer;
   follow, creds: Boolean;
   jar: TStringList;
+  started, took: QWord;
 begin
   AStatus := 0;
+  Result := '';
   gHttpErr := HTTP_OK;
+  gCutShort := False;
+  gBudgetOut := False;
+  { A RUN THAT HAS SPENT ITS BUDGET DIALS NOTHING. See the charge below. }
+  if BudgetActive() and BudgetSpent() then
+  begin
+    gBudgetOut := True;
+    Exit;
+  end;
+  started := GetTickCount64();
   follow := ClientFollow(ACfg, maxHops);
   url := AUrl;
   method := AMethod;
@@ -1247,6 +1367,24 @@ begin
   finally
     jar.Free;
     gReqDeadline := 0;
+    { THE WAIT IS CHARGED (2026-10-08, second adversarial round). A budget
+      measured in STEPS does not move while the network waits, so every
+      request was handed the whole remaining allowance again: two requests to a
+      peer that trickled held a run 51 s on a 25.6 s budget, three held it 77 s.
+      pause() prices a millisecond of waiting at BudgetUnitsPerMs; a request is
+      priced the same, and the charge that spends the budget latches it, so the
+      verb answers the budget's refusal and the next request dials nothing. }
+    if BudgetActive() then
+    begin
+      took := GetTickCount64() - started;
+      if not BudgetCharge(Int64(took) * BudgetUnitsPerMs) then gBudgetOut := True;
+    end;
+  end;
+  if gCutShort then
+  begin
+    Result := '';
+    AStatus := 0;
+    gHttpErr := HTTP_ETIME;
   end;
 end;
 
@@ -1262,6 +1400,7 @@ var status: Integer;
 begin
   Err := NoError();
   Result := ValStr(HttpFetch('GET', Args[0].Str, '', [], status));
+  if gBudgetOut then Err := BudgetRefusal('http_get$');
 end;
 
 function f_http_status(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1270,6 +1409,7 @@ begin
   Err := NoError();
   HttpFetch('GET', Args[0].Str, '', [], status);
   Result := ValInt(status);
+  if gBudgetOut then Err := BudgetRefusal('http_status');
 end;
 
 function f_http_post(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1277,6 +1417,7 @@ var status: Integer;
 begin
   Err := NoError();
   Result := ValStr(HttpFetch('POST', Args[0].Str, Args[1].Str, [], status));
+  if gBudgetOut then Err := BudgetRefusal('http_post$');
 end;
 
 { http_verify_peer(on%) -- turn https certificate verification on (default) or off.
@@ -2304,6 +2445,7 @@ begin
     HTTP_EHANDLE: Result := ValStr('invalid handle');
     HTTP_EPROXY:  Result := ValStr('the request cannot go through this proxy');
     HTTP_EHOST:   Result := ValStr('the server''s certificate is not for this host');
+    HTTP_ETIME:   Result := ValStr('the run''s time ran out before the answer was complete');
   else
     Result := ValStr('unknown error');
   end;
@@ -2500,6 +2642,7 @@ begin
   gHttpErr := HTTP_OK;
   if cfg.ConnectTimeout > 0 then ms := cfg.ConnectTimeout else ms := 5000;
   Result := FetchCore(AMethod, url, ABody, [], AStatus, ms, cfg);
+  if gBudgetOut then Err := BudgetRefusal(AWho);
 end;
 
 function f_http_cget(const Args: array of TValue; out Err: TPhosphorError): TValue;

@@ -1080,7 +1080,9 @@ on error goto h … h:  err()  errmsg$()  erl()  resume | resume next
   is listed with the line it is first read on and the call it probably meant. A
   name the program assigns is its own variable and is never reported, so `now =
   3` is fine. It is a warning, never a refusal, for the reason above: which names
-  are functions depends on the host the file will run on.
+  are functions depends on the host the file will run on — and `--names <file>`
+  says which host: one `name:codes` signature per line, added to this binary's
+  own names for both checks.
 - **Undeclared names inside a function are globals.** List scratch variables after
   `local` so they don't leak.
 - **`sqr` is square root.** For x², write `x * x` or `x ^ 2`.

@@ -86,7 +86,12 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   writes down from its own run. Since 2026-10-08 the test library fails such an
   assertion (`TrapGuard`, reading the VM's `ErrTrapLive`), and the suite runners
   pin that both ways. A trap a FUNCTION installs outlives the call: take its
-  answer, disarm, then assert. Inside a handler no trap is live.
+  answer, disarm, then assert. Inside a handler no trap is live. **One false
+  refusal, kept on purpose:** in the GUI runner an assertion inside an EVENT
+  handler fails if the click that fired it ran under a top-level trap -- yet that
+  trap cannot reach the handler (a GUI callback swallows the fault, and the
+  runner's ledger counts it). Through `callfunc` the same trap DOES catch the
+  fault, so the guard cannot tell the doors apart; don't arm a trap around a click.
 - **A negative needs a REASON, not just a failure.** `tests/negative/manifest.txt`
   holds `name|reason` for every file there; the runner demands exit 2 (a rejection
   -- a failed assert is 1) and the diagnostic containing that reason. Derive the
@@ -299,10 +304,10 @@ turned out to be false and nothing could tell:
 | `check-codepage.py` | no `Char` is concatenated into a code-page string (bytes ≥ 128) |
 | `check-sandbox.py` | every routine reachable from a script that touches the filesystem asks the gate |
 | `check-seams.py` | every host answers for every engine seam, in writing — a nil seam fails silently. A host is DERIVED: any file git knows that constructs an engine, classified by where it lives; one in an unclassified place fails |
-| `check-examples.py` | every ```basic block in the docs compiles; **and** no doc block nor any `.bas` git knows reads a function of no arguments as a variable it never assigns (`p$ = date$`, ledger r1) -- asked of `phosphor compile --check`, exemptions carry a reason and a stale one fails |
+| `check-examples.py` | every ```basic block in the docs compiles; **and** no doc block nor any `.bas` git knows reads a function of no arguments as a variable it never assigns (`p$ = date$`, ledger r1) -- asked of `phosphor compile --check --names`, with the TEST hosts' signatures read from their sources, since 128 of the programs run under one; exemptions carry a reason and a stale one fails |
 | `check-suffix.py` | a registered name's suffix is the kind its body returns |
 | `check-budget.py` | a loop or an allocation over a script-supplied count consults the budget, or is exempt with a reason |
-| `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test. Every directory holding a `.bas` is classified (manifest, directory-driven, or a FIXED list its runner names), derived from git, not from a table |
+| `check-manifests.py` | every `.bas` in a manifest-driven corpus is listed, and every listing has a file — a test nothing runs is not a test. Every directory holding a `.bas` is classified (manifest, directory-driven, or a FIXED list its runner names), derived from git, not from a table -- and each FIXED file must be NAMED, outside a comment, by every runner said to run it: deleting the case that runs `tests/gui/ledger/forgot.bas` used to leave this green |
 | `check-crossrefs.py` | a repo path named in prose exists (renumbering a test file breaks every comment citing it, and no other gate reads a sentence); a place in it is cited as `path#Name` -- a heading slug or a routine, which the gate looks up -- never as `path:LINE`, which drifts in silence (only the two dated records keep line numbers, bounded by the file); both suite runners build the same probes from the same sources — a probe registered in one runs on one OS; both bound each test by the same timeout (30 s, measured against a slowest test of 0.36 s), so a hang is a FAIL line and not a silent run on either OS; and **every runner refuses an argument it does not know**, asked by running it, because `-ProveFailure` was a silent full run on five of six bash runners |
 | `check-boundary.py` | the two halves of the engine boundary check are right, **and agree** — asked by RUNNING each over `tests/boundary`, whose eleven expected answers are derived from Pascal and not from any implementation. The first time anyone asked, the bash halves scored 8/11 and the PowerShell halves 10/11: the bash ones never stripped `(* *)` at all, and all four stripped `//` before the block forms, which lets a brace comment lose its terminator to a `//` on the same line and then swallow a real `uses` clause |
 

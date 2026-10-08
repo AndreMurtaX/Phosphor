@@ -96,12 +96,83 @@ end;
   The map is the engine's own TNameIndex (Generics.Collections warns when it is
   instantiated, see PhosphorRegistry), keyed by the node's address in hex and
   holding an index into GBorrowIds, which is what lets an entry be replaced.
-  Entries outlive the run that made them, and only miss after it; the map is
-  emptied when it holds more than twice the live handles, which no run's own
-  views can reach, so it is bounded by the run in progress. }
+  Entries outlive the run that made them, and only miss after it.
+
+  THE MAP IS REBUILT, NEVER EMPTIED (2026-10-08, second adversarial round). It
+  used to be cleared once it held more than twice the live handles -- and a
+  document freed with a thousand views left a thousand dead entries, so freeing
+  ANY such document flushed the memo for every live one: the next reach of an
+  untouched member minted a second view, contradicting "the same node answers
+  the same handle", and the first one stayed live for good. A rebuild keeps
+  every entry whose view is still live and drops the rest, which is linear in
+  what it drops and amortised over at least 1024 additions.
+
+  ONE LIVE VIEW PER NODE, AND IT IS ALWAYS IN THE MAP. InvalidateBorrowed finds
+  the views of a dying subtree by looking its nodes up here, so a view the map
+  did not know would keep a pointer into freed memory. Level is therefore not
+  part of the match: a live node's depth never changes, so it is equal by
+  construction, and requiring it could only ever mint an untracked second view. }
 var
   GBorrowed: TNameIndex = nil;
   GBorrowIds: array of Int64;
+  GBorrowKeys: array of String;   // entry -> key, which TNameIndex does not expose
+
+procedure RebuildBorrowed;
+var
+  oldKeys: array of String;
+  oldIds: array of Int64;
+  n, i, e: Integer;
+  o: TObject;
+begin
+  n := GBorrowed.Count;
+  oldKeys := Copy(GBorrowKeys, 0, n);
+  oldIds := Copy(GBorrowIds, 0, n);
+  GBorrowed.Clear();
+  SetLength(GBorrowKeys, 0);
+  SetLength(GBorrowIds, 0);
+  for i := 0 to n - 1 do
+  begin
+    o := HandleObj(oldIds[i]);
+    if not ((o is TPhosphorJson) and (TPhosphorJson(o).Node <> nil)) then Continue;
+    e := GBorrowed.Count;
+    if e >= Length(GBorrowIds) then
+    begin
+      SetLength(GBorrowIds, (e + 1) * 2);
+      SetLength(GBorrowKeys, (e + 1) * 2);
+    end;
+    GBorrowIds[e] := oldIds[i];
+    GBorrowKeys[e] := oldKeys[i];
+    GBorrowed.Put(oldKeys[i], e);
+  end;
+end;
+
+{ A document's list of its views, compacted before it grows: an id whose view has
+  died -- with the value it borrowed -- is dropped, so the list is bounded by the
+  document's LIVE views and not by every view it ever lent. }
+procedure AddDocView(ADoc: TPhosphorJson; AId: Int64);
+var
+  i, k: Integer;
+  o: TObject;
+begin
+  if ADoc.ViewCount = Length(ADoc.Views) then
+  begin
+    k := 0;
+    for i := 0 to ADoc.ViewCount - 1 do
+    begin
+      o := HandleObj(ADoc.Views[i]);
+      if (o is TPhosphorJson) and (TPhosphorJson(o).Doc = ADoc) then
+      begin
+        ADoc.Views[k] := ADoc.Views[i];
+        Inc(k);
+      end;
+    end;
+    ADoc.ViewCount := k;
+    if ADoc.ViewCount * 2 >= Length(ADoc.Views) then
+      SetLength(ADoc.Views, (ADoc.ViewCount + 1) * 2);
+  end;
+  ADoc.Views[ADoc.ViewCount] := AId;
+  Inc(ADoc.ViewCount);
+end;
 
 function RegisterNode(ANode: TJSONData; AOwns: Boolean; ALevel: Integer;
   ADoc: TPhosphorJson): Int64;
@@ -115,18 +186,14 @@ begin
   if (not AOwns) and (ANode <> nil) then
   begin
     if GBorrowed = nil then GBorrowed := TNameIndex.Create();
-    if GBorrowed.Count > 2 * LiveHandleCount() + 1024 then
-    begin
-      GBorrowed.Clear();
-      SetLength(GBorrowIds, 0);
-    end;
+    if GBorrowed.Count > 2 * LiveHandleCount() + 1024 then RebuildBorrowed();
     key := HexStr(PtrUInt(ANode), SizeOf(PtrUInt) * 2);
     e := GBorrowed.Find(key);
     if e >= 0 then
     begin
       o := HandleObj(GBorrowIds[e]);
       if (o is TPhosphorJson) and (not TPhosphorJson(o).Owns) and
-         (TPhosphorJson(o).Node = ANode) and (TPhosphorJson(o).Level = ALevel) then
+         (TPhosphorJson(o).Node = ANode) then
         Exit(GBorrowIds[e]);
     end;
   end;
@@ -140,20 +207,19 @@ begin
   else
   begin
     Result := RegisterView(w);
-    if ADoc <> nil then
-    begin
-      if ADoc.ViewCount = Length(ADoc.Views) then
-        SetLength(ADoc.Views, (ADoc.ViewCount + 1) * 2);
-      ADoc.Views[ADoc.ViewCount] := Result;
-      Inc(ADoc.ViewCount);
-    end;
+    if ADoc <> nil then AddDocView(ADoc, Result);
     if e >= 0 then
       GBorrowIds[e] := Result
     else
     begin
       e := GBorrowed.Count;
-      if e >= Length(GBorrowIds) then SetLength(GBorrowIds, (e + 1) * 2);
+      if e >= Length(GBorrowIds) then
+      begin
+        SetLength(GBorrowIds, (e + 1) * 2);
+        SetLength(GBorrowKeys, (e + 1) * 2);
+      end;
       GBorrowIds[e] := Result;
+      GBorrowKeys[e] := key;
       GBorrowed.Put(key, e);
     end;
   end;
@@ -261,10 +327,24 @@ begin
     if APath[i] = '.' then Inc(Result);
 end;
 
+const
+  STALE_MSG = 'this json handle is stale: it was freed, the value it borrowed was ' +
+              'replaced or removed, or it was never a handle';
+
 function GetNode(const V: TValue; out N: TJSONData; out Err: TPhosphorError): Boolean;
 begin
   N := nil;
-  if (V.Kind <> vkHandle) or (not IsHandle(V.Hnd)) or (not (HandleObj(V.Hnd) is TPhosphorJson)) then
+  { A HANDLE THAT IS NO LONGER LIVE says what can have happened to it. Since the
+    second adversarial round of 2026-10-08 a view dies with the value it
+    borrowed, so this is now the common case of the "stale" json.md promises --
+    and a view of a freed document, which json.md always called stale, said
+    "not a valid json handle" instead. A live handle of another kind still does. }
+  if (V.Kind = vkHandle) and (not IsHandle(V.Hnd)) then
+  begin
+    Err := MakeError(peRuntime, STALE_MSG);
+    Exit(False);
+  end;
+  if (V.Kind <> vkHandle) or (not (HandleObj(V.Hnd) is TPhosphorJson)) then
   begin
     Err := MakeError(peRuntime, 'not a valid json handle');
     Exit(False);
@@ -382,45 +462,55 @@ begin
       if NodeContains(ARoot.Items[i], ATarget) then Exit(True);
 end;
 
-{ Walks the LIVE handles, not the table.
+{ THE VIEWS OF A DYING SUBTREE DIE WITH IT (2026-10-08, second adversarial round).
 
-  This loop was `for i := 1 to HandleCount`, and HandleCount was the number of
-  handles ever created -- so replacing one member cost a step for every handle the
-  program had ever made, including all the ones it had correctly freed. Measured:
-  20,000 json_setn@ took 0.24 s in a fresh process and 48 s after a million
-  create/free cycles that left nothing live. Nothing here was wrong; the registry
-  could not tell it which handles still existed. Now it can.
+  This walked every LIVE handle and emptied each view whose node lay inside the
+  subtree, leaving the emptied view registered. Two costs followed from that,
+  both measured by the review that found them. A view emptied this way could
+  never be given back -- json_free of a view is a no-op -- so re-reading a member
+  that is rewritten each pass left one live handle per pass: 40 000 passes over
+  a ONE-member object held 40 000 handles. And every replacing write paid for
+  every live handle, so the read-every-row, update-every-row pattern json.md
+  promotes took 15 s at 40 000 rows where it had taken 0.5.
 
-  Nothing in this loop frees a handle, which is what makes the walk safe -- see
-  the warning on NextLiveHandle.
+  Now the subtree is walked -- the node is about to be freed, which already
+  costs that much -- and each node is looked up in the borrow map, which holds
+  every live view (see GBorrowed). A view found there is FREED. A script still
+  holding its id gets a clean error naming what happened (GetNode), and the
+  table is bounded by what is reachable rather than by what was ever read.
 
-  COUNTED, not merely terminated by the list. LiveHandleCount is both the honest
-  bound -- there is nothing else to visit -- and a guarantee that this walk ends
-  even if the live list were ever left inconsistent, which matters because it runs
-  while a subtree is being destroyed. scripts/check-budget.py reads it as bounded
-  for the same reason it read `1 to HandleCount` as bounded: a count of what is
-  already in memory is not an amplifier. }
-procedure InvalidateBorrowed(ANode: TJSONData);
+  The walk's depth is the subtree's, which MaxJsonDepth bounds -- the same
+  recursion NodeContains has always made. }
+procedure ReleaseViewsUnder(ANode: TJSONData);
 var
-  id: Int64;
-  i: Integer;
+  i, e: Integer;
   o: TObject;
-  w: TPhosphorJson;
 begin
-  if ANode = nil then Exit;
-  id := FirstLiveHandle();
-  for i := 1 to LiveHandleCount() do
+  if (ANode = nil) or (GBorrowed = nil) then Exit;
+  e := GBorrowed.Find(HexStr(PtrUInt(ANode), SizeOf(PtrUInt) * 2));
+  if e >= 0 then
   begin
-    if id = 0 then Break;
-    o := HandleObj(id);
-    if o is TPhosphorJson then
+    o := HandleObj(GBorrowIds[e]);
+    if (o is TPhosphorJson) and (not TPhosphorJson(o).Owns) and
+       (TPhosphorJson(o).Node = ANode) then
     begin
-      w := TPhosphorJson(o);
-      if (not w.Owns) and NodeContains(ANode, w.Node) then
-        w.Node := nil;
+      TPhosphorJson(o).Node := nil;   // nothing may reach the node through it now
+      FreeHandle(GBorrowIds[e]);
     end;
-    id := NextLiveHandle(id);
+    GBorrowIds[e] := 0;
   end;
+  if ANode.JSONType in [jtObject, jtArray] then
+    for i := 0 to ANode.Count - 1 do
+      ReleaseViewsUnder(ANode.Items[i]);
+end;
+
+{ The name every door that frees a member calls. It walked the handle table, then
+  the live handles (a million create/free cycles had made the table walk cost 48 s
+  for 20,000 writes); since the second adversarial round of 2026-10-08 it walks
+  only the dying subtree -- see ReleaseViewsUnder, which says why. }
+procedure InvalidateBorrowed(ANode: TJSONData);
+begin
+  ReleaseViewsUnder(ANode);
 end;
 
 { Look a member up by name WITHOUT fpjson's Find.
@@ -2253,7 +2343,12 @@ begin
     vkString:        Result := TJSONString.Create(V.Str);
     vkBool:          Result := TJSONBoolean.Create(V.Bl);
     vkHandle:
-      if IsHandle(V.Hnd) and (HandleObj(V.Hnd) is TPhosphorJson) and
+      if not IsHandle(V.Hnd) then
+      begin
+        Err := MakeError(peRuntime, STALE_MSG + ' (in a literal)');
+        Result := nil;
+      end
+      else if (HandleObj(V.Hnd) is TPhosphorJson) and
          (TPhosphorJson(HandleObj(V.Hnd)).Node = nil) then
       begin
         { A STALE VIEW: its node was replaced or removed. This called .Clone on nil

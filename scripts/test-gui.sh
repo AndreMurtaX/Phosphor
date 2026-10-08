@@ -97,8 +97,9 @@ echo
 start=$(date +%s)
 timeout 60 "$exe" "$gui/watchdog/hang.bas" --watchdog-ms 2000 > "$out" 2> "$err"; hcode=$?
 secs=$(( $(date +%s) - start ))
-if [ "$hcode" -eq 4 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 1')" ] &&
-   grep -qF -- "did not end within 2000 ms" "$err"; then
+if [ "$hcode" -eq 4 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 2')" ] &&
+   grep -qF -- "did not end within 2000 ms" "$err" &&
+   grep -qF -- "modal: 1 queued answer(s) never used" "$err"; then
   echo "PASS  watchdog: a hang ends the run at the hang  (exit 4, ${secs} s)"
 else
   echo "FAIL  watchdog: a hang did not end the run cleanly (exit $hcode, ${secs} s; 124 is timeout's)"
@@ -110,9 +111,10 @@ fi
 # The twin of the block in test-gui.ps1, which says why.
 timeout 60 "$exe" "$gui/ledger/forgot.bas" > "$out" 2> "$err"; lcode=$?
 if [ "$lcode" -eq 1 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 4')" ] &&
-   grep -qF -- "asked with no answer queued" "$err" && grep -qF -- "never used" "$err" &&
-   grep -qF -- "taken by a different kind" "$err" &&
-   grep -qE -- "event handler fault\(s\) no test acknowledged.*on_fault" "$err"; then
+   grep -qF -- "modal: 1 dialog(s) asked with no answer queued" "$err" &&
+   grep -qF -- "modal: 1 queued answer(s) never used" "$err" &&
+   grep -qF -- "modal: 1 answer(s) taken by a different kind" "$err" &&
+   grep -qE -- "handler: 1 event handler fault\(s\) no test acknowledged.*on_fault" "$err"; then
   echo "PASS  ledger: a forgotten modal answer or an unacknowledged handler fault fails the run  (exit 1)"
 else
   echo "FAIL  ledger: the modal answer ledger did not fail the run (exit $lcode)"

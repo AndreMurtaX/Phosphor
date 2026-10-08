@@ -172,7 +172,7 @@ No handle, no network, no error code — these four are total functions on a str
 
 | function | what it answers |
 | --- | --- |
-| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to. Every request — bare-url or client — sets it: `0` when it was not refused, `3` when it was. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
+| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to, `4` a request the run's time cut off mid-handshake or mid-response — it then answers status `0` and no body, never the part that had arrived. Every request — bare-url or client — sets it: `0` when it was not refused or cut off. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
 | `http_clearerror() → num` | `0`, always; the code is reset to `0` |
 | `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"the server's certificate is not for this host"` for `3`, `"unknown error"` for anything else — including a code this library would never produce |
 
@@ -254,7 +254,9 @@ the name is not looked up locally either -- the proxy resolves it. The
 addresses come from the system resolver on Linux and from Windows' own
 `getaddrinfo` there. One bound: a dead IPv6 address costs the connect timeout
 (five seconds, or the client's `http_timeout`) before the next is tried, the same
-as a dead IPv4 one.
+as a dead IPv4 one. An AAAA answer that is an IPv4-mapped address (`::ffff:a.b.c.d`)
+is that IPv4 address and is dialled as one, exactly as the same address written
+in a URL is; until 2026-10-08 it was dialled as IPv6, which Windows refuses.
 
 **A host name with several A records is tried in turn.** FPC's socket layer
 resolves a host to its first A record and connects only to that one, so a single
@@ -305,6 +307,15 @@ remaining time is ONE deadline for the whole request**, however many addresses a
 name has: an address is not started once it has passed, and each is given only what
 is left of it. (Until 2026-10-08 every address was handed the whole allowance
 again, so six addresses that stalled the handshake held a run six times its bound.)
+The deadline covers the **TLS handshake** too, which OpenSSL reads on its own: a
+peer that trickles one held a run for as long as it liked. A request cut off by it
+answers status `0`, no body and `http_error()` `4` — a truncated body used to come
+back as a complete-looking `200`. And **the wait is charged to the run's budget**,
+at the price `pause()` pays for a millisecond: a budget measured in steps did not
+move while the network waited, so each request was handed the whole allowance
+again and two slow ones held a run twice its bound. The request whose wait spends
+the budget answers the budget's own refusal, as `pause()` does, and a request after
+that dials nothing.
 
 The tests are `tests/packages/03_http.bas` (a real loopback server the runner
 stands up), `tests/packages/04_https.bas` (a self-signed TLS server, proving both

@@ -41,7 +41,10 @@ receiving the default in `value`. `host/gui/phosphorguitest.lpr` is a complete
 example: a queue of answers, each optionally naming the kind of modal it is for, a
 record of what was asked, and a ledger read when the file ends -- a modal asked with
 nothing queued, an answer never used, or one taken by a different kind of modal
-fails the run. One modal does NOT go through these hooks: a **colour button**
+fails the run, and the ledger is reported however the file ends: normally, at a
+hang the watchdog ends, or at a fault in top-level code. The kind a script names
+is the dialog class's name in lower case (`topendialog`, `topenpicturedialog`),
+or `message` and `input` for the two hooks of their own. One modal does NOT go through these hooks: a **colour button**
 (`colorbutton@`, [gui-misc](gui-misc.md)) opens the widget set's colour dialog from
 inside the LCL's own click handling, which no hook reaches, so a test sets its
 colour with `colorbutton_color@` and never presses it.

@@ -1124,7 +1124,7 @@ only when the request could not complete.
 | `http_urldecode$(s$) → str` | percent-decode (`+` → space) |
 | `http_htmlencode$(s$) → str` | escape HTML entities |
 | `http_htmldecode$(s$) → str` | unescape HTML entities |
-| `http_error() → num` | the last **handle** error (0 = clean, 1 = a bad client or form handle). A request never sets it — read `http_status` for the server's answer (0 when the request never reached one) and `http_strerror$` for why |
+| `http_error() → num` | the last code: 0 clean, 1 a bad client or form handle, 2 a request the client's proxy could not carry, 3 an https server whose certificate is not for the host, 4 the run's time ran out mid-handshake or mid-response (the answer is then status 0 and no body). Every request sets it; read `http_status` for the server's answer and `http_strerror$` for the words |
 | `http_clearerror() → num` | reset the error code |
 | `http_strerror$(code) → str` | the text for an error code |
 

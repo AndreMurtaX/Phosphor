@@ -37,6 +37,16 @@ rem     it, as it was before the fallback handed the handler the IPv6
 rem     spelling, which no 4-octet certificate address can match;
 rem   * dead.test's AAAA is answered by the runner's resolver too, so the
 rem     case never asks the real network.
+rem A second round the same day added two more:
+rem   * the TLS HANDSHAKE is under the deadline: OpenSSL reads the socket
+rem     itself there, so a peer that trickled the handshake held a run with
+rem     a second left for as long as it chose. The runner's tlstrickle
+rem     peer takes four seconds to finish one; with a second left the
+rem     request ends inside the rounded-up second, answers 0, and
+rem     http_error() says time cut it off (4);
+rem   * an AAAA answer that is ::ffff:127.0.0.1 IS 127.0.0.1 (RFC 4291
+rem     2.5.5.2) and is dialled as it, as the literal already was -- on
+rem     Windows the IPv6 dial of a mapped address fails.
 rem ---------------------------------------------------------------
 
 lf$ = chr$(10)
@@ -93,3 +103,23 @@ assert_true(ms < 2500, "and with a second left the request ends inside it, round
 test_case("https-fallback/an IPv4-mapped address is checked as that address")
 assert_eq(http_status("https://[::ffff:127.0.0.1]:" + ipport$ + "/"), 200, "the certificate naming 127.0.0.1 is accepted")
 assert_eq(http_error(), 0, "with no refusal")
+
+test_case("https-fallback/the TLS handshake is under the same deadline")
+x = http_test_deadline(1000)
+t0 = now()
+s = http_status(server_url_ipv6$("tlstrickle") + "/")
+ms = millisecondsbetween(now(), t0)
+e = http_error()
+x = http_test_deadline(0)
+assert_eq(s, 0, "a handshake that never finishes answers nothing")
+assert_true(ms < 2500, "and with a second left it ends inside it, rounded up -- not after the four seconds the peer takes")
+assert_eq(e, 4, "and http_error() says the run's time cut it off")
+
+test_case("https-fallback/an IPv4-mapped AAAA answer is dialled as that address")
+srv$ = server_url$()
+port$ = mid$(srv$, instr(mid$(srv$, 8), ":") + 8)
+x$ = http_resolve_as$("mapped.test", "127.0.0.9")
+x$ = http_resolve6_as$("mapped.test", "::ffff:127.0.0.1")
+m@ = http_client@("http://mapped.test:" + port$)
+x = http_timeout(m@, 1000)
+assert_eq(http_status(m@, "/"), 200, "the dead A record fails, and its AAAA reaches 127.0.0.1")

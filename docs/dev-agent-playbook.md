@@ -1525,6 +1525,66 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · a second adversarial round, over what the first one and the
+  afternoon had written: 22 findings, 20 confirmed by running them, 1 refused
+  with its reason, 1 documented instead of fixed.** Four reviewers -- JSON
+  views, the HTTP deadline, the GUI ledger, the debug protocol and the r1 lint.
+  The pattern that matters: **most of what they found was the morning's FIXES.**
+  - **A fix that removes a hazard can remove the only way back.** The morning
+    made `json_free` of a view a no-op, so no caller could kill a view another
+    held -- and with it, a view emptied because its value was replaced became a
+    live handle nobody could give back: 40 000 rewrites of a ONE-member object
+    held 40 000 handles, and every write walked them all (15 s where it had
+    been 0.5). The comment justifying the no-op said "views can never
+    outnumber nodes"; the repro had one node. A view now dies with the value
+    it borrowed, and the walk is the dying subtree, looked up in the memo. The
+    memo is rebuilt, never emptied -- emptying it was why an untouched member
+    answered a second handle after an unrelated document was freed.
+  - **A deadline that covers every read does not cover the reads it does not
+    make.** OpenSSL reads the socket itself during the handshake, so the
+    morning's one-deadline rule held a trickled handshake for as long as the
+    peer liked (20 s on a 2 s deadline; 217 s once). A guard thread shuts the
+    socket at the deadline. And the deadline itself was the run's remaining
+    BUDGET, which a step budget does not reduce while the network waits -- the
+    per-address overrun the morning fixed, one level up, per request. The wait
+    is now charged as pause() charges it. A response the deadline cut off came
+    back as a complete-looking 200 with a truncated body; it is status 0 and
+    `http_error()` 4 now.
+  - **Two gates had a domain one step too small.** check-manifests compared a
+    FIXED list with the directory and never with the runner that is supposed
+    to run it -- so the case proving the ledger can fail could be deleted
+    green. check-examples judged the corpus against phosphor.exe's names
+    while 128 of its 153 programs run under a test host with names of its
+    own; `compile --check --names` now takes the host, and the gate hands it
+    the test hosts' signatures read from their sources. Both were watched
+    failing on a plant.
+  - **A count in a check that does not pin the count measures the reason, not
+    the rule.** The ledger's runner checks matched "event handler fault(s)"
+    without the number, so a `gui_test_handler_faults()` that never cleared
+    the count printed "2" and passed. Counts are pinned, and a file that must
+    PASS now acknowledges a fault on purpose -- the mutant fails both.
+  - **The protocol host died of a number.** `{"seq":1e300}` is valid JSON;
+    fpjson's typed Get ROUNDS a float into an Integer and raised EInvalidOp
+    out of the frame handler at every door -- the class debugging.md already
+    recorded as fixed for `lines`, one field over. Every integer field goes
+    through one reader now. The socket now closes when the session ends (it
+    stayed open until the program did), an oversize frame is reported, and
+    every frame is UTF-8 -- `bytestr$(255)` in a variable made a frame no
+    decoder reads. The first UTF-8 pass appended in a loop and check-budget
+    refused it; two linear passes replaced it.
+  - **Refused: "frames behind an entry-stop launch are judged as stopped."**
+    Session 13b already pins that by decision: `stopped` reaches the wire
+    before the answers, so every answer is about a state the editor has been
+    told. **Documented, not fixed: the trap guard refuses an assertion inside a
+    GUI handler fired under an outer trap** -- through `callfunc` the same trap
+    does catch the fault, so the guard cannot tell the doors apart; CLAUDE.md
+    says so.
+  - Each new test was run against the code before the fix and failed for its
+    own reason: 3 of 3 in JSON, 11 of 13 in the protocol (the two that pass
+    pin what was already right), 8 in HTTP, and the G2 mutant twice. And the
+    stray-interpreter habit recurred four more times this round: `python -`
+    with nothing on stdin sits at a prompt, the REPL trap in another language.
+
 - **2026-10-08 · r1 closed: `p$ = date$` is reported, and the compiler did not
   change.** The decision had been made (attack-plan section 3, fork 1, option
   d) and its measurement held exactly: over 153 programs, the

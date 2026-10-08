@@ -50,3 +50,4 @@
 20_http_redirects
 21_http_hosts
 22_https_fallback
+23_http_budget_wait

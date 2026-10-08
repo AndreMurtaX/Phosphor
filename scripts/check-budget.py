@@ -538,6 +538,12 @@ ALLOWED = {
         'command a PERSON types and leaves on the first one that answers the '
         'seam. A script cannot make it turn, and stdin at EOF leaves it on the '
         'first pass -- which is asserted in block Q of scripts/test.{ps1,sh}',
+    'phosphor.lpr:Utf8SeqLen':
+        '`need` is 1, 2 or 3 -- the continuation bytes of ONE UTF-8 sequence, set '
+        'by the lead byte two lines above -- never a count a script supplies',
+    'phosphor.lpr:LoadCheckNames':
+        'reads the file `compile --check --names` was GIVEN ON THE COMMAND LINE, '
+        'one Pos per line -- a command line, not a script, like ParseBreakList',
     'phosphor.lpr:ParseBreakList':
         'splits the --break argument, which is a command line and not a script; '
         'and it refuses past 256 lines rather than growing',

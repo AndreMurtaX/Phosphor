@@ -27,8 +27,12 @@ is never refused for the handles the reading took. Until 2026-10-07 each reach
 minted a handle that counted: reading 200 rows under a ceiling of 100 was
 refused. When the parent frees that node,
 because the member was replaced or removed, every borrowed handle pointing at it
-*or at anything inside it* is emptied first, and the next read through it is a
-clean `this json handle is stale` runtime error rather than a crash. The other
+*or at anything inside it* goes with it, and the next use of one is a clean
+`this json handle is stale` runtime error rather than a crash — the same error a
+view of a freed document gives. So the views a program holds are bounded by what
+is still reachable: until 2026-10-08 an emptied view stayed registered and could
+not be given back, and re-reading a member rewritten on every pass left one live
+handle per pass. The other
 side of the same rule: `json_set@`, `json_push@`, `json_setval@`, `json_pushval@`
 and `json_merge@` store a **clone**, so the container owns its own copy and the
 handle you passed in stays yours to change.

@@ -243,6 +243,22 @@ integer is dropped, a JSON number with a fraction or an exponent included:
   unanswered. Found on Linux, where a two-statement program finished before the
   second of two back-to-back frames was drained.
 
+**And four more the same day, from a second adversarial round:**
+
+- **A request carries a positive integer `seq`, and a frame that does not is not
+  a request**: an `error` event says so and the session ends. `1e300` used to kill
+  the host (exit 3, fpjson rounding a float), `1.5` was answered as `2` and a
+  missing seq as `0`. A `frame` that is not an integer is refused the same way.
+- **The socket closes when the session does** — after an `error` event, after a
+  `disconnect` of either kind, after a closed connection. It used to stay open
+  until the program ended, so the editor waited behind it while a program it had
+  been told was stopped ran on.
+- **A frame over 1 MB is reported** as an `error` event before the close; it used
+  to end the session in silence.
+- **Every frame is UTF-8.** A string holding bytes that are not — `bytestr$(255)` —
+  went out raw, which a strict editor must refuse; each such byte is written as
+  the four characters `\xFF` instead.
+
 **`continued` is never sent, by design.** The specification sends it for a resume
 the editor did not ask for, and every resume this host makes after a `stopped`
 event is one the editor asked for or ends the session. Its silent resumes -- the

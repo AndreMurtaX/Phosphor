@@ -21,7 +21,18 @@ rem     of one node share a view, whether that killed the other depended on
 rem     the borrow cache -- an adversarial round's finding);
 rem   * a config is discarded, never saved: freeing is not cfg_save.
 rem A handle used after it is freed fails with its library's own "not a
-rem valid ... handle", caught here and read back.
+rem valid ... handle", caught here and read back -- except JSON's, which
+rem says the handle is STALE, as json.md always said of a freed document's
+rem views (it used to say "not a valid json handle" for those).
+rem
+rem A second adversarial round (2026-10-08) found the views could not be
+rem bounded: a view emptied because its value was replaced stayed a live
+rem handle nobody could give back, so re-reading a member rewritten each
+rem pass left one live handle per pass; and freeing a document with more
+rem than 1024 views emptied the borrow memo for every OTHER document, so
+rem an untouched member answered a second handle. A view now dies with
+rem the value it borrowed, and the memo is rebuilt, never emptied. The
+rem last case pins both, from the rules json.md states.
 rem
 rem THE ERROR TRAP IS ARMED ONLY AROUND A STATEMENT EXPECTED TO FAIL. Armed
 rem for the whole file, an assertion whose own argument raised was skipped
@@ -71,7 +82,7 @@ on error goto trapped
 x = json_getn(two@, "n")
 on error goto 0
 assert_eq(raised, 1, "a view of a freed document cannot be used")
-assert_eq(msg$, "not a valid json handle", "and says so")
+assert_eq(left$(msg$, 25), "this json handle is stale", "and says it is stale, as json.md says")
 assert_eq(json_free(doc@), 0, "a second free of the document answers 0")
 assert_eq(json_getn(ov@, "n"), 5, "and a view into ANOTHER document is still that document's")
 k@ = dict@()
@@ -116,6 +127,38 @@ assert_eq(msg$, "not a valid config handle", "and says so")
 h@ = dict@()
 assert_eq(cfg_free(h@), 0, "cfg_free leaves a handle of another kind alone")
 assert_eq(dict_free(h@), 1, "which its own free still takes")
+
+test_case("free/json views are bounded by what is reachable")
+rem FIRST, with few live handles: "Reaching the same node again answers the
+rem same handle" (json.md) -- across the free of an unrelated document that lent out 1100 views,
+rem more than the 1024 that used to empty the memo for everyone.
+o@ = json_object@()
+json_setn@(o@, "a", 0)
+h1@ = json_get@(o@, "a")
+t@ = json_array@()
+for i = 1 to 1100
+  json_pushn@(t@, i)
+next
+for i = 1 to 1100
+  v@ = json_item@(t@, i)
+next
+assert_eq(json_free(t@), 1, "the unrelated document is freed")
+h2@ = json_get@(o@, "a")
+assert_eq(pnttonum(h2@), pnttonum(h1@), "and the untouched member still answers the same handle")
+rem Re-reading a member that is rewritten each pass: each rewrite frees the
+rem node the last pass's view borrowed, and that view goes with it. What
+rem is live afterwards is the document and the one view of its member, so
+rem a fresh handle's slot is small -- it was 2002 here, one per pass.
+for i = 1 to 2000
+  json_setn@(o@, "a", i)
+  c@ = json_get@(o@, "a")
+next
+probe@ = json_object@()
+assert_true((pnttonum(probe@) mod 4294967296) < 16, "two thousand rewrites leave no trail of live views")
+assert_eq(json_getn(o@, "a"), 2000, "and the member holds the last write")
+assert_eq(json_value(c@), 2000, "and the last view reads it")
+x = json_free(probe@)
+assert_eq(json_free(o@), 1, "and the document frees")
 end
 
 trapped:

@@ -196,6 +196,8 @@ host IS known now check:
   host that has it. It also lists a function written **without its parentheses
   where a value is wanted** — `p$ = date$` reads a variable nobody assigned and
   leaves `p$` empty — when the program never assigns that name itself.
+  `--names <file>` judges against the host the file is meant for: one signature
+  per line, as that host registers it (`name:codes`), added to this binary's.
 
 **The console is kept by default, and can be let go.** A windowed program still has a
 console, which is where `PRINT` goes — useful while developing, unwanted in something

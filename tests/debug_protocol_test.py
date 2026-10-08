@@ -2375,6 +2375,139 @@ check('  and the program\'s own stdout is untouched',
       out17.replace(b'\r\n', b'\n') == b'mid\ndone\n', repr(out17[:60]))
 w17.close()
 
+# ---------------------------------------------------------------------------
+# THE SECOND ADVERSARIAL ROUND OF 2026-10-08, against the spec's sentences:
+#   * "Every request gets exactly one response, carrying the same seq" -- and a
+#     line that is "neither an event nor a response" is reported and the
+#     receiver disconnects. A seq of 1e300 killed the host (exit 3, fpjson
+#     rounding a float), 1.5 was answered as 2, and a missing seq as 0.
+#   * "the receiver reports it and disconnects", and a disconnect is "answered
+#     ok:true, after which the host closes the socket". Both left the socket
+#     open until the program ended -- seconds, or for ever.
+#   * A frame over the 1 MB limit ended the session with no event at all.
+#   * "One JSON object per line. UTF-8." A string holding bytestr$(255) went
+#     out as a raw 0xFF, which no UTF-8 decoder reads.
+# The fixture runs about three seconds, so "closed at once" is measured
+# against a program that is still running, never against one that ended.
+# ---------------------------------------------------------------------------
+SLOW = ('rem a program that is still running when the session ends\n'   # 1
+        'for i = 1 to 6\n'                                              # 2
+        '  x = pause(0.5)\n'                                            # 3
+        'next\n'                                                        # 4
+        'println "done"\n'                                              # 5
+        'end\n')                                                        # 6
+
+
+def until_close(w, timeout=10):
+    """Frames until EOF, and the seconds it took."""
+    got, t0 = [], time.time()
+    while time.time() - t0 < timeout:
+        try:
+            m = w.recv(timeout=timeout)
+        except OSError:   # a reset IS the close, on Windows, when bytes were unread
+            break
+        if m is None:
+            break
+        got.append(m)
+    return got, time.time() - t0
+
+
+for label, frame in (('1e300', '{"seq":1e300,"cmd":"stackTrace"}'),
+                     ('1.5', '{"seq":1.5,"cmd":"stackTrace"}'),
+                     ('absent', '{"cmd":"stackTrace"}')):
+    w19 = Wire(SLOW, 'seq19.bas')
+    w19.init()
+    w19.raw(frame + chr(10))
+    got, secs = until_close(w19)
+    errs = [m for m in got if m.get('event') == 'error']
+    check('round 2: a seq that is %s is not a request -- an error event says so' % label,
+          len(errs) == 1 and 'integer seq' in (errs[0].get('text') or '')
+          and not any('seq' in m for m in got), str(got))
+    try:
+        rc = w19.proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        w19.proc.kill()
+        rc = None
+    check('  and the host does not die of it (exit 0, not 3)', rc == 0, 'rc=%r' % rc)
+    w19.close()
+
+w20 = Wire(SLOW, 'err20.bas')
+w20.init()
+w20.send(seq=2, cmd='launch', stopAtEntry=True)
+for _ in range(20):
+    m = w20.recv(timeout=15)
+    if m is None or m.get('event') == 'stopped':
+        break
+w20.raw('[1]' + chr(10))
+got, secs = until_close(w20)
+check('round 2: after an error event the socket closes at once, not when the program ends',
+      any(m.get('event') == 'error' for m in got) and secs < 1.5, '%.2f s %s' % (secs, got))
+w20.close()
+
+w21 = Wire(SLOW, 'big21.bas')
+w21.init()
+t21 = time.time()
+try:
+    w21.raw('x' * (1100 * 1024))
+except OSError:
+    pass   # the host may close while the tail is still being sent
+got, secs = until_close(w21)
+secs = time.time() - t21
+errs = [m for m in got if m.get('event') == 'error']
+check('round 2: a frame over 1 MB is reported as an error event, with text',
+      len(errs) == 1 and '1048576' in (errs[0].get('text') or ''), str(got)[:200])
+check('  and the socket closes at once', secs < 1.5, '%.2f s' % secs)
+w21.close()
+
+w22 = Wire(SLOW, 'detach22.bas')
+w22.init()
+w22.send(seq=2, cmd='launch', stopAtEntry=True)
+for _ in range(20):
+    m = w22.recv(timeout=15)
+    if m is None or m.get('event') == 'stopped':
+        break
+w22.send(seq=3, cmd='disconnect', terminate=False)
+got, secs = until_close(w22)
+check('round 2: a detach is answered ok and the socket closes at once',
+      [m.get('ok') for m in got if m.get('seq') == 3] == [True] and secs < 1.5,
+      '%.2f s %s' % (secs, got))
+try:
+    out22, _ = w22.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    w22.proc.kill()
+    out22 = b''
+check('  and the detached program still runs to its end', b'done' in out22, repr(out22[:40]))
+w22.close()
+
+RAW = ('rem a string that is not UTF-8\n'   # 1
+       'b$ = bytestr$(255)\n'                 # 2
+       'println "x"\n'                        # 3
+       'end\n')                               # 4
+w23 = Wire(RAW, 'raw23.bas')
+w23.init()
+w23.send(seq=2, cmd='setBreakpoints', path=w23.path, lines=[3])
+w23.send(seq=3, cmd='launch', stopAtEntry=False)
+for _ in range(20):
+    m = w23.recv(timeout=15)
+    if m is None or m.get('event') == 'stopped':
+        break
+w23.send(seq=4, cmd='variables', frame=0)
+v23 = None
+try:
+    for _ in range(20):
+        m = w23.recv(timeout=15)
+        if m is None or m.get('seq') == 4:
+            v23 = m
+            break
+    decoded = True
+except UnicodeDecodeError:
+    decoded = False
+check('round 2: a variable holding byte 255 arrives in a frame that is valid UTF-8', decoded)
+vals = [x.get('value') for x in (v23 or {}).get('variables', []) if x.get('name') == 'b$']
+check('  and the byte reads as the four characters \\xFF', vals == ['\\xFF'], str(vals))
+w23.send(seq=5, cmd='continue')
+w23.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

@@ -164,8 +164,9 @@ $hp.WaitForExit()
 $secs = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
 $hText = [IO.File]::ReadAllText($hOut)
 $hWhy = [IO.File]::ReadAllText($hErr)
-$okW = $ended -and ($hp.ExitCode -eq 4) -and ($hText -eq "passed: 1`nfailed: 1`n") -and
-       ($hWhy -like '*did not end within 2000 ms*')
+$okW = $ended -and ($hp.ExitCode -eq 4) -and ($hText -eq "passed: 1`nfailed: 2`n") -and
+       ($hWhy -like '*did not end within 2000 ms*') -and
+       ($hWhy -like '*modal: 1 queued answer(s) never used*')
 if ($okW) {
     Write-Host ("PASS  watchdog: a hang ends the run at the hang  (exit 4, {0} s)" -f $secs) -ForegroundColor Green
 } else {
@@ -197,9 +198,16 @@ $lp.WaitForExit()
 $lText = [IO.File]::ReadAllText($lOut)
 $lWhy = [IO.File]::ReadAllText($lErr)
 $okL = $lEnded -and ($lp.ExitCode -eq 1) -and ($lText -eq "passed: 1`nfailed: 4`n") -and
-       ($lWhy -like '*asked with no answer queued*') -and ($lWhy -like '*never used*') -and
-       ($lWhy -like '*taken by a different kind*') -and
-       ($lWhy -like '*event handler fault(s) no test acknowledged*on_fault*')
+       ($lWhy -like '*modal: 1 dialog(s) asked with no answer queued*') -and
+       ($lWhy -like '*modal: 1 queued answer(s) never used*') -and
+       ($lWhy -like '*modal: 1 answer(s) taken by a different kind*') -and
+       ($lWhy -like '*handler: 1 event handler fault(s) no test acknowledged*on_fault*')
+# THE COUNTS ARE PINNED, each derived from forgot.bas's own lines: one msgbox
+# with nothing queued, one answer an input named and a msgbox took, one answer
+# never asked for, and two faults of which the file acknowledges one. Unpinned,
+# a gui_test_handler_faults() that never cleared the count still printed the
+# reason ("2 event handler fault(s)") and passed this block (2026-10-08, second
+# adversarial round).
 if ($okL) {
     Write-Host 'PASS  ledger: a forgotten modal answer or an unacknowledged handler fault fails the run  (exit 1)' -ForegroundColor Green
 } else {

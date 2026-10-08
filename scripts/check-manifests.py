@@ -32,6 +32,7 @@ Exit 0 when every corpus agrees, non-zero with the offending names otherwise.
 import glob
 import io
 import os
+import re
 import subprocess
 import sys
 
@@ -60,6 +61,21 @@ NO_MANIFEST = {
 # coverage.py all the same, because that gate reads every .bas under tests/. These
 # two were in neither table above, so this gate could not see them at all (ledger
 # d54). The list here is the runner's own list; a file that is not on it fails.
+# AND EACH FIXED LIST IS CHECKED AGAINST THE RUNNERS THAT ARE SAID TO RUN IT
+# (2026-10-08, second adversarial round). The table was compared with the
+# directory only: deleting the case that runs tests/gui/ledger/forgot.bas from
+# both GUI runners left this gate green -- and with it went the only run that
+# shows the ledger CAN fail. FIXED_RUNNERS names, per directory, the scripts
+# that must each name every listed file on a line that is not a comment.
+TEST_RUNNERS = [os.path.join('scripts', 'test.ps1'), os.path.join('scripts', 'test.sh')]
+GUI_RUNNERS = [os.path.join('scripts', 'test-gui.ps1'), os.path.join('scripts', 'test-gui.sh')]
+FIXED_RUNNERS = {
+    os.path.join('tests', 'skeleton'): TEST_RUNNERS,
+    os.path.join('tests', 'gui', 'watchdog'): GUI_RUNNERS,
+    os.path.join('tests', 'gui', 'ledger'): GUI_RUNNERS,
+    os.path.join('tests', 'gui', 'hostmode'): GUI_RUNNERS,
+}
+
 FIXED = {
     os.path.join('tests', 'skeleton'): (
         ['hello'],
@@ -139,6 +155,26 @@ def main():
         for n in names:
             if n not in on_disk:
                 bad.append('%s/%s.bas is named by its runner but is not there' % (rel, n))
+        runners = FIXED_RUNNERS.get(rel)
+        if not runners:
+            bad.append('%s is FIXED but FIXED_RUNNERS names no runner for it' % rel)
+            continue
+        named = re.compile(r'[\\/\'"](%s)\.bas\b' % '|'.join(re.escape(n) for n in names))
+        for runner in runners:
+            try:
+                lines = io.open(os.path.join(ROOT, runner), encoding='utf-8').read().split('\n')
+            except OSError:
+                bad.append('%s: its runner %s cannot be read' % (rel, runner))
+                continue
+            seen = set()
+            for line in lines:
+                if line.lstrip().startswith('#'):
+                    continue
+                seen.update(m.group(1) for m in named.finditer(line))
+            for n in names:
+                if n not in seen:
+                    bad.append('%s/%s.bas is FIXED, but %s never names it outside a '
+                               'comment -- nothing runs it there' % (rel, n, runner))
     for rel, mf in sorted(CORPORA.items()):
         d = os.path.join(ROOT, rel)
         mpath = os.path.join(d, mf)

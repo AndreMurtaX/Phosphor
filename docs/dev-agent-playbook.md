@@ -1525,6 +1525,26 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · the nine modals, through a seam; the GUI worklist is gone.**
+  Each of msgbox, inputbox$, openfile$ and the rest waits for a person, so they
+  were the last GUI names no test could call. Dismissing a REAL dialog from
+  outside was the obvious route and the wrong one: on Windows MessageDlg and the
+  file dialogs are native, on gtk2 the chooser is GTK's, and a test that clicks
+  them is a test of window automation on two platforms. The library already had
+  the right shape elsewhere (HttpResolveHook): three hooks, nil = the real
+  dialog, so every host that sets none is unchanged, and every modal call --
+  checked by grep afterwards, ShowMessage/MessageDlg/InputBox/Execute each in the
+  else of a hook test -- goes through them. The GUI runner installs them, so a
+  test can never show a dialog, and a modal with nothing queued is CANCELLED and
+  counted, never shown: a forgotten answer fails on a count, not by waiting. One
+  thing the seam made ours that was the LCL's: inputbox$'s "the default on
+  cancel" is now written out in DoInput for the hooked path, so the test pins it.
+  Mutants that could not differ were said to be equivalent and not run (a file
+  name returned on cancel from a dialog that starts with none). With this the
+  worklist d44 created reached the end state its own comment named -- an empty
+  table, and then no table -- and coverage.py fails on any untested GUI name.
+
+
 - **2026-10-08 · GUI wave 4: the 71 names no test called, called and read
   back.** Two lessons, both about measuring before writing:
   - **Which events a change from code raises is a property of the LCL, so it was

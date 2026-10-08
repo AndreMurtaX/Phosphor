@@ -27,7 +27,7 @@ program phosphorguitest;
 uses
   {$ifdef unix} BaseUnix, {$endif}   // fpExit, for the watchdog's immediate exit
   Interfaces,   // the LCL widgetset (win32 / gtk2), selected at build time
-  Forms, Clipbrd, LCLType, ExtCtrls, StdCtrls, ComCtrls,
+  Forms, Clipbrd, LCLType, ExtCtrls, StdCtrls, ComCtrls, Controls, Dialogs, System.UITypes,
   SysUtils, Classes,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
@@ -285,6 +285,127 @@ begin
   Result := ValInt(1);
 end;
 
+{ THE MODALS, ANSWERED (2026-10-08). This runner installs PhosphorDialogLib's
+  three hooks, so NO DIALOG IS EVER SHOWN IN A TEST: a test queues the answers it
+  wants with gui_test_answer(accept, value$), and each modal takes the next one.
+  A modal with nothing queued is CANCELLED and counted (gui_test_unanswered()),
+  never shown -- a test that forgot an answer fails on the count instead of
+  waiting for a person, the same principle as the watchdog. What each modal was
+  asked to show is kept for gui_test_asked$(field$): kind (the dialog's class in
+  lower case, or "message" / "input"), title, prompt (a message's text), default,
+  filter, initialdir, filename (as the dialog was handed it), type ("information"
+  / "confirmation"), buttons ("ok" or "yes,no").
+  An accepted answer is applied as a person's choice would be: a file or folder
+  dialog's FileName, a colour dialog's Color, a font dialog's font name, an
+  input's text. Test only; nothing here is part of the language. }
+var
+  GAnsAccept: array of Boolean;
+  GAnsValue: array of String;
+  GAnsHead: Integer = 0;
+  GAsked: TStringList = nil;   // name=value for the last modal
+  GAskedCount: Integer = 0;
+  GUnanswered: Integer = 0;
+
+function NextAnswer(out AValue: String): Boolean;
+begin
+  AValue := '';
+  if GAnsHead >= Length(GAnsAccept) then
+  begin
+    Inc(GUnanswered);
+    Exit(False);   // nothing queued: cancelled, never shown
+  end;
+  Result := GAnsAccept[GAnsHead];
+  AValue := GAnsValue[GAnsHead];
+  Inc(GAnsHead);
+end;
+
+procedure Asked(const AKind, ATitle, APrompt, ADefault: String);
+begin
+  if GAsked = nil then GAsked := TStringList.Create();
+  GAsked.Clear();
+  GAsked.Values['kind'] := AKind;
+  GAsked.Values['title'] := ATitle;
+  GAsked.Values['prompt'] := APrompt;
+  GAsked.Values['default'] := ADefault;
+  Inc(GAskedCount);
+end;
+
+function TestExecute(ADialog: TCommonDialog): Boolean;
+var v: String;
+begin
+  Asked(LowerCase(ADialog.ClassName), ADialog.Title, '', '');
+  if ADialog is TFileDialog then
+  begin
+    GAsked.Values['filter'] := TFileDialog(ADialog).Filter;
+    GAsked.Values['initialdir'] := TFileDialog(ADialog).InitialDir;
+    GAsked.Values['filename'] := TFileDialog(ADialog).FileName;
+  end;
+  Result := NextAnswer(v);
+  if not Result then Exit;
+  if ADialog is TFileDialog then TFileDialog(ADialog).FileName := v
+  else if ADialog is TColorDialog then TColorDialog(ADialog).Color := StrToIntDef(v, TColorDialog(ADialog).Color)
+  else if ADialog is TFontDialog then TFontDialog(ADialog).Font.Name := v;
+end;
+
+function TestMessage(const ATitle, AMessage: String; AType: TMsgDlgType;
+  AButtons: TMsgDlgButtons): TModalResult;
+var v, b: String;
+begin
+  Asked('message', ATitle, AMessage, '');
+  if AType = mtConfirmation then GAsked.Values['type'] := 'confirmation'
+  else if AType = mtInformation then GAsked.Values['type'] := 'information'
+  else GAsked.Values['type'] := 'other';
+  b := '';
+  if mbOK in AButtons then b := b + ',ok';
+  if mbYes in AButtons then b := b + ',yes';
+  if mbNo in AButtons then b := b + ',no';
+  GAsked.Values['buttons'] := Copy(b, 2, MaxInt);
+  if NextAnswer(v) then
+  begin
+    if mbYes in AButtons then Result := mrYes else Result := mrOK;
+  end
+  else if mbNo in AButtons then Result := mrNo
+  else Result := mrCancel;
+end;
+
+function TestInput(const ATitle, APrompt: String; var AValue: String): Boolean;
+var v: String;
+begin
+  Asked('input', ATitle, APrompt, AValue);
+  Result := NextAnswer(v);
+  if Result then AValue := v;
+end;
+
+function f_gui_test_answer(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: Integer;
+begin
+  Err := NoError();
+  n := Length(GAnsAccept);
+  SetLength(GAnsAccept, n + 1);
+  SetLength(GAnsValue, n + 1);
+  GAnsAccept[n] := AsDouble(Args[0]) <> 0;
+  GAnsValue[n] := Args[1].Str;
+  Result := ValInt(n + 1 - GAnsHead);   // answers still waiting
+end;
+
+function f_gui_test_asked_field(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  if GAsked = nil then Result := ValStr('') else Result := ValStr(GAsked.Values[Args[0].Str]);
+end;
+
+function f_gui_test_asked(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GAskedCount);
+end;
+
+function f_gui_test_unanswered(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GUnanswered);
+end;
+
 { Turns an escaped exception into a reported failure. A class method rather than a
   free procedure because Application.OnException wants a method pointer. }
 type
@@ -317,6 +438,7 @@ begin
   FreeAndNil(DogTimer);
   FreeAndNil(Dog);
   FreeAndNil(GuiSvc);
+  FreeAndNil(GAsked);
 end;
 
 begin
@@ -391,6 +513,13 @@ begin
     RegisterDialogFuncs(eng.Registry);
     RegisterMiscFuncs(eng.Registry);
     eng.Registry.Add('gui_test_fire:@$', @f_gui_test_fire);   // test only; see above
+    eng.Registry.Add('gui_test_answer:n$', @f_gui_test_answer);      // test only: the modals
+    eng.Registry.Add('gui_test_asked$:$', @f_gui_test_asked_field);
+    eng.Registry.Add('gui_test_asked:', @f_gui_test_asked);
+    eng.Registry.Add('gui_test_unanswered:', @f_gui_test_unanswered);
+    DialogExecuteHook := @TestExecute;   // no dialog is ever shown in a test
+    DialogMessageHook := @TestMessage;
+    DialogInputHook := @TestInput;
     ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

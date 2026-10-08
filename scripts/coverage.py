@@ -6,8 +6,8 @@ host/gui/libs (the authoritative source is each `Reg.Add('name:sig', ...)` /
 `Reg.AddHost(...)` line), then checks whether each function's name is CALLED by a
 program that runs -- a test (tests/**/*.bas, negatives excluded) or an example the
 manifest runs -- with comments and string literals stripped first. Prints a
-per-library tally and exits non-zero if any function is uncovered and not on the
-dated GUI_WORKLIST, or if a worklist entry has gone stale.
+per-library tally and exits non-zero if any function is uncovered -- the GUI's
+included, since its dated worklist was emptied and removed on 2026-10-08.
 
 A handful of built-ins are reached only through SYNTAX SUGAR, never by name -- an
 `a@[i]` compiles to `arr_get`/`arr_set@`, `s$[n]`/`s$[[n]]` to `strline$`/`strchar$`
@@ -48,31 +48,19 @@ SUGAR_BACKED = {
     'json_setval@', 'json_setnull@',
 }
 
-# --- the GUI names no test runs, DATED 2026-10-06 (ledger d44) ---------------
-# Until this date the table below was built from engine/libs and host/packages
+# --- the GUI worklist, DATED 2026-10-06 and EMPTIED 2026-10-08 (ledger d44) --
+# Until 2026-10-06 the table below was built from engine/libs and host/packages
 # only, and printed "every registered function is exercised by a test" while the
-# 426 names under host/gui/libs were outside it. Seventy-six of them had no call
-# site; eighty, once a mention in a comment, a string or a compile-only example
-# stopped counting as one (see load_corpus). d10 and d42 were both defects in that
-# unseen part, found by a person reading it.
-#
-# The GUI is now IN the table, and these are what it found. This is a WORKLIST,
-# not an excuse list, built like PENDING_NAMES below so it can only shrink:
-#   * the count is printed on every run, and --list prints every name;
-#   * an entry that a test now calls FAILS, naming the line to delete;
-#   * an entry that is no longer registered FAILS the same way;
-#   * a NEW untested name -- GUI or not -- matches nothing and fails on the spot,
-#     which is the property this gate did not have for the GUI at all.
-# The end state is an empty table, and then no table.
-_MODAL = 'MODAL: waits for a person; needs a host seam that dismisses it before a test can call it'
-# WAVE 4 -- the 71 names no test called -- was emptied on 2026-10-08 by
-# tests/gui/24_wave4.bas and tests/gui/25_wave4_canvas.bas. The events among
-# them that the LCL does not raise for a change made from code are driven
-# through the GUI runner's test-only gui_test_fire (host/gui/phosphorguitest.lpr).
-GUI_WORKLIST = dict(
-    [(n, _MODAL) for n in (
-        'dialog_execute', 'inputbox$', 'msgbox', 'msgbox_confirm', 'openfile$',
-        'openpicture$', 'savefile$', 'savepicture$', 'selectdir$')])
+# 426 names under host/gui/libs were outside it; d10 and d42 were defects in that
+# unseen part, found by a person reading it. Bringing the GUI in found EIGHTY
+# names no test called, carried here as GUI_WORKLIST -- a ratchet that could only
+# shrink: 71 that no test called, and 9 modal dialogs that waited for a person.
+# The 71 were called and read back on 2026-10-08 (tests/gui/24_wave4.bas and
+# 25_wave4_canvas.bas); the 9 the same day (tests/gui/26_modal.bas), once
+# PhosphorDialogLib routed every modal through a seam the GUI runner answers. The
+# comment that opened the table said its end state was "an empty table, and then
+# no table" -- so it is gone, and a GUI name no test calls now fails here like
+# any other.
 
 # --- registrations whose NAME is computed ------------------------------------
 # Two libraries register a family by walking a const array of spellings:
@@ -232,17 +220,12 @@ def main():
     gui_libs = sorted(glob.glob(os.path.join(ROOT, 'host', 'gui', 'libs', '*.pas')))
     total = covered = 0
     uncovered_all = []
-    worklisted = []
-    gui_seen = set()
     print(f"{'library':<26}{'fns':>5}{'covered':>9}{'gap':>5}")
     print('-' * 45)
     for lib in libs + gui_libs:
         names = registered_names(lib)
         if not names:
             continue
-        is_gui = lib in gui_libs
-        if is_gui:
-            gui_seen |= names
         cov = 0
         uncovered = []
         for n in sorted(names):
@@ -253,10 +236,7 @@ def main():
         total += len(names)
         covered += cov
         for n in uncovered:
-            if is_gui and n in GUI_WORKLIST:
-                worklisted.append((os.path.basename(lib), n))
-            else:
-                uncovered_all.append((os.path.basename(lib), n))
+            uncovered_all.append((os.path.basename(lib), n))
         flag = '' if not uncovered else '  <-- ' + ', '.join(uncovered)
         print(f"{os.path.basename(lib):<26}{len(names):>5}{cov:>9}{len(uncovered):>5}"
               + (flag if show else ''))
@@ -269,38 +249,12 @@ def main():
     rc = 0
     if uncovered_all:
         print()
-        print("UNTESTED, AND ON NO WORKLIST:")
+        print("UNTESTED -- no executed test calls these:")
         for lib, n in uncovered_all:
             print(f"  {lib}: {n}")
         rc = 1
-    # THE RATCHET. An entry whose name a test now calls, or that is no longer
-    # registered at all, is a line to delete -- and a list nobody shortens when the
-    # work lands stops describing the work.
-    uncov_names = {n for _, n in worklisted}
-    stale = sorted(n for n in GUI_WORKLIST if n not in gui_seen)
-    done = sorted(n for n in GUI_WORKLIST if n in gui_seen and n not in uncov_names)
-    if stale or done:
-        print()
-        print("GUI_WORKLIST ENTRIES TO DELETE (scripts/coverage.py):")
-        for n in done:
-            print(f"  {n}: a test calls it now")
-        for n in stale:
-            print(f"  {n}: no GUI library registers it")
-        rc = 1
-    if worklisted:
-        by_reason = collections.Counter(GUI_WORKLIST[n] for _, n in worklisted)
-        print()
-        print(f"NOT EXERCISED BY ANY TEST: {len(worklisted)} GUI names, on the dated "
-              f"worklist in this file (ledger d44){'' if show else '; --list names them'}")
-        for reason, k in sorted(by_reason.items()):
-            print(f"  {k:>3}  {reason}")
-        if show:
-            for lib, n in worklisted:
-                print(f"       {lib}: {n}")
-    if not uncovered_all and not worklisted:
+    if not uncovered_all:
         print("every registered function is exercised by a test.")
-    elif not uncovered_all:
-        print(f"every other registered function is exercised by a test.")
 
     # --- documentation gate ----------------------------------------------------
     # The reference calls itself the complete catalog; hold it to that.

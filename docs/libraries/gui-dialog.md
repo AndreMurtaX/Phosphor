@@ -22,11 +22,24 @@ path, folder or text directly. Use the one-shot when you want a file; use the
 retained one when you also want a title, a filter, and a starting folder.
 
 The design line that shaped this page is that **a dialog's Execute is modal — it
-blocks until the user answers**. That makes it the interactive host's business, not
-the headless byte-exact suite's, which would simply hang on it. So what the tests
-check is a dialog's **configuration** (`tests/gui/10_dialog.bas` round-trips every
-property this library sets), and the showing half is documented interactive-only.
-Nothing here fails a headless run — it waits, forever, which is worse.
+blocks until the user answers**. A headless run that showed one would wait, forever.
+So every modal on this page goes through **a seam the host can answer**, and the GUI
+test runner answers it: no dialog is ever shown in a test. `tests/gui/10_dialog.bas`
+round-trips every property this library sets, and since 2026-10-08
+`tests/gui/26_modal.bas` calls all nine modals — checking that what a script passes
+reaches the dialog (title, text, default, filter, starting folder, file name) and
+that every answer comes back as the right value: the file chosen or `""`, `1` or
+`0`, the text typed or the default. What the operating system then draws is its own.
+
+**For an embedder writing tests of its own.** `PhosphorDialogLib` exports three hook
+variables, all `nil` — and `nil` shows the real dialog, so a host that sets none
+behaves exactly as before. `DialogExecuteHook(dialog)` answers any dialog's Execute
+(the hook may set its `FileName`, `Color` or font, as a person's choice would),
+`DialogMessageHook(title, text, kind, buttons)` answers a message box with the
+button pressed, and `DialogInputHook(title, prompt, value)` answers an input,
+receiving the default in `value`. `host/gui/phosphorguitest.lpr` is a complete
+example: a queue of answers, a record of what was asked, and a modal with nothing
+queued cancelled and counted rather than shown.
 
 Two conventions carry over from the rest of the GUI, and one surprise is local to
 this package. The conventions: a setter is the name with `@`, and it answers **the
@@ -87,13 +100,13 @@ it matches none of the sixteen named ones.
 | `fontdialog_fontcolor@(d@, color) → handle` | the handle. Preselects the text colour |
 | `fontdialog_fontcolor(d@) → num` | the chosen text colour as a `TColor`; `0` for a wrong handle |
 
-### Showing one — modal, interactive host only
+### Showing one — modal (answered through the seam in a test)
 
 | function | what it answers |
 | --- | --- |
 | `dialog_execute(d@) → num` | `1` when the user accepted, `0` when they cancelled. Also `0` — with `gui_error()` set — when the handle is not a dialog at all, which is the one case the return value alone cannot tell you. **Blocks** until the user answers |
 
-### One-shot dialogs — modal, interactive host only
+### One-shot dialogs — modal (answered through the seam in a test)
 
 These build their own dialog, show it, and free it before answering. There is no
 handle to keep and nothing to free.

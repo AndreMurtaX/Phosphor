@@ -4,18 +4,18 @@
   MIT License. Copyright (c) 2026 Andre Murta.
 
   The common dialogs. A dialog's Execute is MODAL -- it blocks until the user
-  answers -- so it belongs to the interactive host, not the headless byte-exact
-  suite (which would hang on it, the way setfocus did). What the suite checks is
-  a dialog's CONFIGURATION; the one-shot convenience calls (msgbox, openfile$,
-  ...) are provided for real programs and are documented interactive-only.
+  answers -- so a headless suite that showed one would hang on it, the way
+  setfocus did. Every modal here therefore goes through THE SEAM described
+  below, which the GUI test runner answers: tests/gui/10_dialog.bas checks a
+  dialog's configuration and tests/gui/26_modal.bas calls every modal.
 
-  Configured, then Execute'd in the interactive host:
+  Configured, then Execute'd:
     opendialog@()  savedialog@()  selectdirdialog@()  colordialog@()
     dialog_title@/$  dialog_filter@/$  dialog_filename@/$  dialog_initialdir@/$
     colordialog_color@/()
     dialog_execute(d@)                 -> 1 if accepted, 0 if cancelled  (modal)
 
-  One-shot, modal (interactive host only):
+  One-shot, modal:
     msgbox(msg$)  msgbox(msg$, title$)          show a message
     msgbox_confirm(msg$)                         -> 1 yes, 0 no
     openfile$([filter$])   savefile$([filter$])  -> the chosen path, or ""
@@ -29,6 +29,18 @@
   LCL's InputBox answers the default on cancel, so a program that must know uses
   a default it would never accept, or InputQuery's own shape. Said here because
   the alternative -- inventing a sentinel string -- would be worse.
+
+  THE SEAM (2026-10-08). Every modal above goes through one of three hooks: the
+  Execute of any dialog, a message box, a line of input. All three are nil, and
+  then the real dialog is shown -- every host that sets none behaves as it always
+  did. A host that sets them answers instead, and is handed what the dialog would
+  have shown: the dialog object itself (its class, title, filter, initial
+  directory, file name), or the title, text, kind and buttons of a message, or
+  the title, prompt and default of an input. That is what lets a test call a
+  modal at all -- before this the nine were the only GUI names no test could
+  call, because each waited for a person -- and it tests THIS library's half:
+  that what a script passes reaches the dialog, and that each answer comes back
+  as the right value. What the LCL then draws is the LCL's.
 ******************************************************************************}
 unit PhosphorDialogLib;
 
@@ -38,10 +50,28 @@ unit PhosphorDialogLib;
 interface
 
 uses
-  SysUtils, Classes, Controls, Dialogs, ExtDlgs, Graphics,
+  SysUtils, Classes, Controls, Dialogs, ExtDlgs, Graphics, System.UITypes,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore;
 
 procedure RegisterDialogFuncs(Reg: TPhosphorRegistry);
+
+type
+  { Answer a dialog's Execute: True for accepted. The hook may change the dialog --
+    a file dialog's FileName, a colour dialog's Color -- exactly as a person's
+    choice would before Execute returned. }
+  TDialogExecuteHook = function(ADialog: TCommonDialog): Boolean;
+  { Answer a message box: the button pressed, as MessageDlg answers it. }
+  TDialogMessageHook = function(const ATitle, AMessage: String; AType: TMsgDlgType;
+    AButtons: TMsgDlgButtons): TModalResult;
+  { Answer a line of input: True for accepted, with AValue -- which arrives holding
+    the default -- set to what was typed. }
+  TDialogInputHook = function(const ATitle, APrompt: String; var AValue: String): Boolean;
+
+var
+  { THE SEAM: nil shows the real dialog. See the unit header. }
+  DialogExecuteHook: TDialogExecuteHook = nil;
+  DialogMessageHook: TDialogMessageHook = nil;
+  DialogInputHook: TDialogInputHook = nil;
 
 implementation
 
@@ -101,23 +131,47 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorDialog, c) 
 function f_colordialog_color_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TColorDialog, c) then Result := ValInt(TColorDialog(c).Color) else Result := ValInt(0); end;
 
-// --- modal actions (interactive host only) ----------------------------------
+// --- modal actions, each through the seam ----------------------------------
+{ The one place a dialog is executed: the hook's answer when a host set one, the
+  real modal otherwise. }
+function ExecDialog(ADialog: TCommonDialog): Boolean;
+begin
+  if Assigned(DialogExecuteHook) then Result := DialogExecuteHook(ADialog)
+  else Result := ADialog.Execute;
+end;
+
 function f_dialog_execute(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCommonDialog, c) then Result := ValInt(Ord(TCommonDialog(c).Execute)) else Result := ValInt(0); end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCommonDialog, c) then Result := ValInt(Ord(ExecDialog(TCommonDialog(c)))) else Result := ValInt(0); end;
 
 function f_msgbox(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; ShowMessage(A[0].Str); Result := ValInt(0); end;
+begin
+  E := NoError;
+  if Assigned(DialogMessageHook) then DialogMessageHook('', A[0].Str, mtInformation, [mbOK])
+  else ShowMessage(A[0].Str);
+  Result := ValInt(0);
+end;
 function f_msgbox_titled(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; MessageDlg(A[1].Str, A[0].Str, mtInformation, [mbOK], 0); Result := ValInt(0); end;
+begin
+  E := NoError;
+  if Assigned(DialogMessageHook) then DialogMessageHook(A[1].Str, A[0].Str, mtInformation, [mbOK])
+  else MessageDlg(A[1].Str, A[0].Str, mtInformation, [mbOK], 0);
+  Result := ValInt(0);
+end;
 function f_msgbox_confirm(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError; Result := ValInt(Ord(MessageDlg(A[0].Str, mtConfirmation, [mbYes, mbNo], 0) = mrYes)); end;
+var r: TModalResult;
+begin
+  E := NoError;
+  if Assigned(DialogMessageHook) then r := DialogMessageHook('', A[0].Str, mtConfirmation, [mbYes, mbNo])
+  else r := MessageDlg(A[0].Str, mtConfirmation, [mbYes, mbNo], 0);
+  Result := ValInt(Ord(r = mrYes));
+end;
 
 function OneShotFile(ADlg: TOpenDialog; const AFilter: String): String;
 begin
   Result := '';
   try
     if AFilter <> '' then ADlg.Filter := AFilter;
-    if ADlg.Execute then Result := ADlg.FileName;
+    if ExecDialog(ADlg) then Result := ADlg.FileName;
   finally
     ADlg.Free;
   end;
@@ -135,13 +189,22 @@ var d: TSelectDirectoryDialog;
 begin
   E := NoError; Result := ValStr('');
   d := TSelectDirectoryDialog.Create(nil);
-  try if d.Execute then Result := ValStr(d.FileName); finally d.Free; end;
+  try if ExecDialog(d) then Result := ValStr(d.FileName); finally d.Free; end;
 end;
 
 // --- one-shot: ask the user for a line of text ------------------------------
+{ Through the seam, the answer is InputBox's own rule written out: what was typed
+  when accepted, the DEFAULT when cancelled (see the unit header). }
 function DoInput(const ATitle, APrompt, ADefault: String): TValue;
+var v: String;
 begin
-  Result := ValStr(InputBox(ATitle, APrompt, ADefault));
+  if Assigned(DialogInputHook) then
+  begin
+    v := ADefault;
+    if DialogInputHook(ATitle, APrompt, v) then Result := ValStr(v) else Result := ValStr(ADefault);
+  end
+  else
+    Result := ValStr(InputBox(ATitle, APrompt, ADefault));
 end;
 function f_inputbox1(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError; Result := DoInput('', A[0].Str, ''); end;
@@ -158,7 +221,7 @@ begin
   d := TOpenPictureDialog.Create(nil);
   try
     if AFilter <> '' then d.Filter := AFilter;
-    if d.Execute then Result := ValStr(d.FileName);
+    if ExecDialog(d) then Result := ValStr(d.FileName);
   finally d.Free; end;
 end;
 function PictureSave(const AFilter: String): TValue;
@@ -168,7 +231,7 @@ begin
   d := TSavePictureDialog.Create(nil);
   try
     if AFilter <> '' then d.Filter := AFilter;
-    if d.Execute then Result := ValStr(d.FileName);
+    if ExecDialog(d) then Result := ValStr(d.FileName);
   finally d.Free; end;
 end;
 function f_openpicture(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -191,7 +254,7 @@ begin
   Reg.Add('dialog_filename@:@$', @f_filename_set); Reg.Add('dialog_filename$:@', @f_filename_get);
   Reg.Add('dialog_initialdir@:@$', @f_initialdir_set); Reg.Add('dialog_initialdir$:@', @f_initialdir_get);
   Reg.Add('colordialog_color@:@n', @f_colordialog_color_set); Reg.Add('colordialog_color:@', @f_colordialog_color_get);
-  // modal (interactive host only)
+  // modal: each answered through the seam when a host set one
   Reg.Add('dialog_execute:@', @f_dialog_execute);
   Reg.Add('msgbox:$', @f_msgbox);
   Reg.Add('msgbox:$$', @f_msgbox_titled);

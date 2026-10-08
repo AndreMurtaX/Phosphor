@@ -27,3 +27,4 @@
 23_image_setbitmap
 24_wave4
 25_wave4_canvas
+26_modal

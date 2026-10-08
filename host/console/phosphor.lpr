@@ -821,6 +821,15 @@ begin
       codes := Copy(t, colon + 1, Length(t));
       if colon < 2 then
         Exit(Format('%s:%d is not a signature (name:codes): %s', [APath, i + 1, t]));
+      { AND THE NAME IS AN IDENTIFIER: a letter or _, then letters, digits and _,
+        then at most one type suffix. `probe_count :` -- one space -- was taken,
+        registered with the space, and left the real name unreported behind a
+        clean exit (2026-10-08, third pass). }
+      for j := 1 to colon - 1 do
+        if not ((t[j] in ['A'..'Z', 'a'..'z', '_']) or
+                ((j > 1) and (t[j] in ['0'..'9'])) or
+                ((j = colon - 1) and (j > 1) and (t[j] in ['$', '%', '@', '?']))) then
+          Exit(Format('%s:%d: %s is not a function name', [APath, i + 1, Copy(t, 1, colon - 1)]));
       for j := 1 to Length(codes) do
         if Pos(codes[j], 'n%$@?*') = 0 then
           Exit(Format('%s:%d: %s is not an argument code (n %% $ @ ? *)',
@@ -1393,6 +1402,7 @@ type
     procedure EnsureStoppable;
     function InstalledLines: TJSONArray;
     procedure CloseTransport;
+    procedure EndSession;
     procedure SendJSON(AObj: TJSONObject);
     procedure SendEvent(const AName: String; AExtra: TJSONObject);
     procedure SendError(ASeq: Integer; const AText: String);
@@ -1485,8 +1495,10 @@ begin
     begin
       { A closed socket IS a disconnect; the spec says the editor treats it that
         way and so does this end. Queue the sentinel so the VM thread leaves its
-        stop instead of waiting for a frame that will never come. }
+        stop instead of waiting for a frame that will never come -- and wake a
+        RUNNING program for it too, or the close is read only when it ends. }
       FOwner.Push(#0);
+      FOwner.InterruptRun();
       Break;
     end;
     runFrom := 0;
@@ -1517,8 +1529,13 @@ begin
       { #1, NOT #0 (2026-10-08, second adversarial round): #0 means the peer
         closed, and Handle answers that by detaching in silence -- so a frame
         past the limit ended the session with no word to the editor. #1 is a
-        frame this end refuses, which Handle reports as an `error` event. }
+        frame this end refuses, which Handle reports as an `error` event.
+        AND THE PROGRAM IS WOKEN FOR IT, as for any frame: pushed without the
+        nudge, a sentinel that arrived while the program RAN sat in the inbox
+        until the program ended -- no event, the socket open behind it (a third
+        adversarial pass, 2026-10-08). }
       FOwner.Push(#1);
+      FOwner.InterruptRun();
       Break;
     end;
   end;
@@ -1604,6 +1621,25 @@ end;
   else is blocked on that no more traffic is coming: the read returns 0, the
   thread pushes its disconnect sentinel and leaves, and only then is it safe to
   free the socket it was reading. }
+{ THE SESSION ENDS WITH A HALF-CLOSE: the send side only (a third adversarial
+  pass, 2026-10-08). The full shutdown CloseTransport makes is what Destroy needs
+  -- it wakes the reader's blocked read -- but at a session's end it could
+  DISCARD what had just been sent: with the editor's bytes still unread in the
+  receive buffer (an oversize frame always leaves some), Windows answered the
+  close with a reset, and the reset threw away the `error` event that explained
+  it -- 1 run in 8, measured. Shutting the send side alone puts the FIN after the
+  last frame; the editor reads everything, then end-of-stream, at once. }
+procedure TDebugProto.EndSession;
+begin
+  if FSock = nil then Exit;
+  FClosed := True;
+  try
+    fpShutdown(FSock.Handle, 1);   // 1 = SHUT_WR / SD_SEND on both systems
+  except
+    on Exception do ;
+  end;
+end;
+
 procedure TDebugProto.CloseTransport;
 begin
   if FSock = nil then Exit;
@@ -1753,9 +1789,13 @@ end;
   fpjson writes a string's bytes as they are, so a variable, a trace or an
   exception text holding one made a frame no UTF-8 decoder would read. Each byte
   that does not begin a well-formed sequence is written as the four characters
-  \xFF instead -- inside a JSON string, so as an escaped backslash -- which reads
-  as the byte it was. Well-formed means RFC 3629: no overlong form, no surrogate,
-  nothing past U+10FFFF. Whole runs are copied, never a Char at a time. }
+  \xFF instead -- inside a JSON string, so as an escaped backslash. It is FOR
+  DISPLAY and it is not reversible: a string that already holds those four
+  characters arrives the same, because a real backslash is not escaped in this
+  layer (measured by a third adversarial pass, 2026-10-08, which also swept 5.4
+  million generated inputs against Python's strict decoder with no mismatch).
+  Well-formed means RFC 3629: no overlong form, no surrogate, nothing past
+  U+10FFFF. }
 { How many bytes from S[I] form one well-formed UTF-8 sequence (RFC 3629: no
   overlong form, no surrogate, nothing past U+10FFFF); 0 when they do not. }
 function Utf8SeqLen(const S: String; I, N: Integer): Integer;
@@ -2845,7 +2885,7 @@ begin
   begin
     { The socket closed. Detach and let the program finish, which is the same
       thing `disconnect terminate:false` asks for. }
-    CloseTransport();
+    EndSession();
     FDisconnected := True;
     FAction := daRun;
     Exit(True);
@@ -2857,7 +2897,7 @@ begin
     res := TJSONObject.Create();
     res.Add('text', 'a frame longer than 1048576 bytes was refused; the session is closed');
     SendEvent('error', res);
-    CloseTransport();
+    EndSession();
     FDisconnected := True;
     FAction := daRun;
     Exit(True);
@@ -2903,7 +2943,7 @@ begin
         the editor waited behind it, and a program it had been told was stopped
         ran to its end with nothing said. The spec: "the receiver reports it and
         disconnects". }
-      CloseTransport();
+      EndSession();
       FDisconnected := True;
       FAction := daRun;
       Exit(True);
@@ -2919,7 +2959,7 @@ begin
       res := TJSONObject.Create();
       res.Add('text', 'a request needs a positive integer seq; the session is closed');
       SendEvent('error', res);
-      CloseTransport();
+      EndSession();
       FDisconnected := True;
       FAction := daRun;
       Exit(True);
@@ -3202,7 +3242,7 @@ begin
       { "Both are answered ok:true, after which the host closes the socket" --
         the spec. It used to stay open until the program ended, so a detached
         program held the editor's connection for as long as it ran. }
-      CloseTransport();
+      EndSession();
       Exit(True);
     end;
 
@@ -4902,7 +4942,7 @@ procedure RunCommandLine;
 var
   i, code: Integer;
   arg, filePath, outPath, packIn, packOut, namesPath: String;
-  wantNames: Boolean;
+  wantNames, namesGiven: Boolean;
   packFlags: LongWord;
   packArgs: Integer;
   payload: TBytesStream;
@@ -5054,12 +5094,27 @@ begin
     packOut := '';
     namesPath := '';
     wantNames := False;
+    namesGiven := False;
     for i := 2 to ParamCount do
     begin
       arg := ParamStr(i);
       if wantNames then
       begin
+        { REFUSED, NOT IGNORED (2026-10-08, third pass): `--names ""` used to be
+          taken for "no --names" and a second `--names` silently replaced the
+          first -- both exit 0, and a check against the wrong host reads clean. }
+        if namesGiven then
+        begin
+          Writeln(StdErr, 'phosphor: compile: --names is given twice; put every signature in one file');
+          Halt(2);
+        end;
+        if arg = '' then
+        begin
+          Writeln(StdErr, 'phosphor: compile: --names needs a file, and was given an empty name');
+          Halt(2);
+        end;
         namesPath := arg;
+        namesGiven := True;
         wantNames := False;
       end
       else if arg = '--names' then
@@ -5078,14 +5133,14 @@ begin
         end;
       end;
     end;
-    if (packArgs < 2) or wantNames or ((namesPath <> '') and (packFlags = 0)) then
+    if (packArgs < 2) or wantNames or (namesGiven and (packFlags = 0)) then
     begin
       Writeln(StdErr, 'usage: phosphor compile [--check [--names <file>]] <in.bas> <out.pbc>');
-      if (namesPath <> '') and (packFlags = 0) then
+      if namesGiven and (packFlags = 0) then
         Writeln(StdErr, '  --names says which host --check judges against; without --check it does nothing');
       Halt(2);
     end;
-    if namesPath <> '' then
+    if namesGiven then
     begin
       arg := LoadCheckNames(namesPath);
       if arg <> '' then

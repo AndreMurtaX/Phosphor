@@ -162,7 +162,7 @@ which reads exactly like an empty table, and is meant to.
 
 | function | what it answers |
 | --- | --- |
-| `sqlite_row@(s@) → handle` | the current row as a JSON object, column names as keys. An **empty object** when the cursor is not on a row; handle `0` for a non-statement handle |
+| `sqlite_row@(s@) → handle` | the current row as a JSON object, column names as keys. An **empty object** when the cursor is not on a row; handle `0` for a non-statement handle. One member per **name**: when two columns share one — `select *` over a join of two tables that both have an `id` — the **later** column is kept, as in a row read into a dictionary; alias them (`a.id as a_id`) to keep both. A column name past 255 bytes cannot be a JSON member name and is a runtime error (the same rule holds for `sqlite_fetchone@` and `sqlite_fetchall@`) |
 | `sqlite_fetchone@(s@) → handle` | steps first, then hands back the new current row. At the end of the result that is an empty object — check with `json_count` rather than expecting a failure |
 | `sqlite_fetchall@(s@) → handle` | a JSON array of every **remaining** row, stepping a fresh cursor onto the first one for you. Empty array when the cursor is already exhausted. Count it with `json_len` |
 | `sqlite_insertjson(db@, t$, o@) → num` | inserts an object as a row, keys as columns, values bound rather than pasted into SQL; answers the number of rows written. `0` for an empty object, a handle that is not an object, or an insert SQLite refused |

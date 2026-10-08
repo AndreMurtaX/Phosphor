@@ -202,6 +202,14 @@ threadvar
     the request took; each verb then answers the budget's own refusal, as pause()
     does. }
   gBudgetOut: Boolean;
+  { THE RESPONSE STOPPED BEFORE IT WAS COMPLETE for any other reason -- the peer
+    went silent past the client's own read timeout, or the connection broke
+    (2026-10-08, third pass). Answered as status 0 and HTTP_EINCOMPLETE: a body
+    that ended early is not the body, whoever ended it. }
+  gIncomplete: Boolean;
+  { The request's per-read timeout as the client set it (0 = none), so a read
+    re-armed against the deadline never waits LONGER than the client asked. }
+  gIOMs: Integer;
 
 type
   { Raised from a read once the run's time is gone. Not an ESocketError, so the
@@ -217,6 +225,49 @@ procedure CheckDeadline;
 begin
   if (gDeadline <> 0) and (GetTickCount64() >= gDeadline) then
     raise EHttpDeadline.Create('the run''s time ran out during the response');
+end;
+
+{ THE READ ABOUT TO START WAITS NO LONGER THAN THE DEADLINE (2026-10-08, third
+  pass). SO_RCVTIMEO was set once, to the whole remaining time, when the socket
+  was made -- and it restarts with every read. A read begun just before the
+  deadline could block for that whole time again: a peer that sent one byte at
+  1.8 s and then nothing held a 2 s request 3.8 s, and on the run's real budget
+  50.6 s of a 25.6 s bound. CheckDeadline asks only BEFORE a read; this bounds
+  the read itself, to what is left -- never more than the client's own per-read
+  timeout. Only under a deadline, so an unbudgeted host keeps its timeouts. }
+procedure MarkCut;
+begin
+  { Within a tick's grain of the deadline is the deadline's doing: a read timed
+    out by ArmRecv ends at the deadline, and GetTickCount64 moves in ~15 ms steps
+    on Windows. }
+  if (gDeadline <> 0) and (GetTickCount64() + 50 >= gDeadline) then
+    gCutShort := True
+  else
+    gIncomplete := True;
+end;
+
+procedure ArmRecv(AFd: TSocket);
+var
+  left: Int64;
+  ms: Integer;
+  {$IFDEF WINDOWS}opt: DWord;{$ENDIF}
+  {$IFDEF UNIX}tv: TTimeVal;{$ENDIF}
+begin
+  if gDeadline = 0 then Exit;
+  left := Int64(gDeadline) - Int64(GetTickCount64());
+  if left < 1 then left := 1;
+  if left > High(Integer) then left := High(Integer);
+  ms := Integer(left);
+  if (gIOMs > 0) and (gIOMs < ms) then ms := gIOMs;
+  {$IFDEF WINDOWS}
+  opt := ms;
+  fpsetsockopt(AFd, SOL_SOCKET, SO_RCVTIMEO, @opt, 4);
+  {$ENDIF}
+  {$IFDEF UNIX}
+  tv.tv_sec := ms div 1000;
+  tv.tv_usec := (ms mod 1000) * 1000;
+  fpsetsockopt(AFd, SOL_SOCKET, SO_RCVTIMEO, @tv, SizeOf(tv));
+  {$ENDIF}
 end;
 
 type
@@ -465,6 +516,7 @@ end;
 function TPlain4Handler.Recv(const Buffer; Count: Integer): Integer;
 begin
   CheckDeadline();
+  ArmRecv(Socket.Handle);
   Result := inherited Recv(Buffer, Count);
 end;
 
@@ -472,6 +524,7 @@ end;
 function TPlain6Handler.Recv(const Buffer; Count: Integer): Integer;
 begin
   CheckDeadline();
+  ArmRecv(Link.Fd);
   Result := -1;
   {$IFDEF UNIX}
   FLastError := ESysEINTR;
@@ -668,79 +721,62 @@ end;
   which RFC 6066 section 3 forbids ("Literal IPv4 and IPv6 addresses are not
   permitted"), and `localhost.` sent its trailing dot. Its parent's Connect
   (TSocketHandler's) only answers True, so nothing else is skipped. }
-{ THE HANDSHAKE IS UNDER THE DEADLINE TOO (2026-10-08, second adversarial
-  round). OpenSSL reads the socket itself during SSL_connect -- not through Recv,
-  so CheckDeadline never ran -- and the only bound was the per-read timeout,
-  which bounds SILENCE: a peer trickling a byte every 0.4 s held a run with a
-  2000 ms deadline for exactly as long as it chose (20 s, and once 217 s before
-  it was killed). A guard thread waits for the deadline; if the handshake has not
-  finished by then it shuts the socket down, OpenSSL's next read fails, and the
-  connect fails as a dead address does -- after which Attempt tries no other,
-  because the deadline has passed. Only under a deadline: with no budget the
-  handshake is exactly what it was. Claimed once, by whichever side gets there
-  first, so a guard never shuts down a connection that has already finished. }
-type
-  THandshakeGuard = class(TThread)
-  private
-    FFd: TSocket;
-    FDeadline: QWord;
-    FWake: PRTLEvent;
-    FClaimed: LongInt;
-  protected
-    procedure Execute; override;
-  public
-    Fired: Boolean;
-    constructor Create(AFd: TSocket; ADeadline: QWord);
-    destructor Destroy; override;
-    procedure Finish;
-  end;
-
-constructor THandshakeGuard.Create(AFd: TSocket; ADeadline: QWord);
+{ THE HANDSHAKE IS UNDER THE DEADLINE TOO (2026-10-08). OpenSSL reads the socket
+  itself during SSL_connect -- not through Recv, so neither CheckDeadline nor
+  ArmRecv runs -- and a peer trickling the handshake held a run with a 2000 ms
+  deadline for as long as it chose. The first repair was a guard thread that
+  shut the socket down at the deadline; a third adversarial pass measured that
+  on Windows shutdown() does NOT wake a recv already blocked in another thread,
+  so a peer that sent a record header at 1.8 s held the call 3.8 s. Now the
+  handshake runs NON-BLOCKING and waits in select(), each wait bounded by what is
+  left of the deadline: when it is gone, the handshake is abandoned, on both
+  systems, from the thread doing it. Only under a deadline; otherwise blocking,
+  exactly as before. }
+function SetNonBlocking(AFd: TSocket; AOn: Boolean): Boolean;
+{$IFDEF WINDOWS}
+var nb: u_long;
 begin
-  FFd := AFd;
-  FDeadline := ADeadline;
-  FWake := RTLEventCreate();
-  FClaimed := 0;
-  Fired := False;
-  FreeOnTerminate := False;
-  inherited Create(False);
+  if AOn then nb := 1 else nb := 0;
+  Result := ioctlsocket(AFd, LongInt(FIONBIO), nb) = 0;
 end;
-
-destructor THandshakeGuard.Destroy;
+{$ELSE}
+var fl: cint;
 begin
-  RTLEventDestroy(FWake);
-  inherited Destroy();
+  fl := fpfcntl(AFd, F_GETFL);
+  if fl < 0 then Exit(False);
+  if AOn then fl := fl or O_NONBLOCK else fl := fl and not O_NONBLOCK;
+  Result := fpfcntl(AFd, F_SETFL, fl) >= 0;
 end;
+{$ENDIF}
 
-procedure THandshakeGuard.Execute;
-var
-  now, wait: QWord;
+{ Wait until AFd is readable (AForRead) or writable, at most AMs. True when it is. }
+function WaitFd(AFd: TSocket; AForRead: Boolean; AMs: Integer): Boolean;
+{$IFDEF WINDOWS}
+var fs: TFDSet;
+    tv: TTimeVal;
 begin
-  now := GetTickCount64();
-  if FDeadline > now then
-  begin
-    wait := FDeadline - now;
-    if wait > QWord(High(LongInt)) then wait := QWord(High(LongInt));
-    RTLEventWaitFor(FWake, LongInt(wait));
-  end;
-  if InterlockedCompareExchange(FClaimed, 1, 0) = 0 then
-  begin
-    Fired := True;
-    fpShutdown(FFd, 2);   // 2 = SHUT_RDWR on both systems
-  end;
+  FD_ZERO(fs);
+  FD_SET(AFd, fs);
+  tv.tv_sec := AMs div 1000;
+  tv.tv_usec := (AMs mod 1000) * 1000;
+  if AForRead then Result := winsock2.select(0, @fs, nil, nil, @tv) > 0
+  else Result := winsock2.select(0, nil, @fs, nil, @tv) > 0;
 end;
-
-procedure THandshakeGuard.Finish;
+{$ELSE}
+var fs: TFDSet;
 begin
-  if InterlockedCompareExchange(FClaimed, 1, 0) = 0 then
-    RTLEventSetEvent(FWake);
-  WaitFor();
+  fpFD_ZERO(fs);
+  fpFD_SET(AFd, fs);
+  if AForRead then Result := fpSelect(AFd + 1, @fs, nil, nil, AMs) > 0
+  else Result := fpSelect(AFd + 1, nil, @fs, nil, AMs) > 0;
 end;
+{$ENDIF}
 
 function THostCheckedHandler.Connect: Boolean;
 var sni: String;
     fd: TSocket;
-    guard: THandshakeGuard;
+    r, e: cint;
+    left: Int64;
 begin
   Result := InitContext(False);
   if not Result then Exit;
@@ -751,20 +787,32 @@ begin
   if IsIPv4Literal(sni) or IsIPv6Literal(sni) then sni := '' else sni := TlsName(sni);
   if SendHostAsSNI and (sni <> '') then
     SSL.Ctrl(SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, PAnsiChar(AnsiString(sni)));
-  guard := nil;
-  if gDeadline <> 0 then guard := THandshakeGuard.Create(fd, gDeadline);
-  try
-    Result := CheckSSL(SSL.Connect);
-  finally
-    if guard <> nil then
-    begin
-      guard.Finish();
-      if guard.Fired then
-      begin
-        Result := False;
-        gCutShort := True;
-      end;
-      guard.Free;
+  if (gDeadline = 0) or not SetNonBlocking(fd, True) then
+    Result := CheckSSL(SSL.Connect)
+  else
+  begin
+    Result := False;
+    try
+      repeat
+        r := SSL.Connect;
+        if r = 1 then begin Result := True; Break; end;
+        e := SSL.GetError(r);
+        if (e <> SSL_ERROR_WANT_READ) and (e <> SSL_ERROR_WANT_WRITE) then
+        begin
+          Result := CheckSSL(r);   // a real failure: reported as the RTL reports it
+          Break;
+        end;
+        left := Int64(gDeadline) - Int64(GetTickCount64());
+        if left <= 0 then
+        begin
+          gCutShort := True;       // the deadline passed mid-handshake
+          Break;
+        end;
+        if left > High(Integer) then left := High(Integer);
+        WaitFd(fd, e = SSL_ERROR_WANT_READ, Integer(left));
+      until False;
+    finally
+      SetNonBlocking(fd, False);
     end;
   end;
   if Result then Result := DoVerifyCert();
@@ -774,6 +822,7 @@ end;
 function THostCheckedHandler.Recv(const Buffer; Count: Integer): Integer;
 begin
   CheckDeadline();
+  if Link <> nil then ArmRecv(Link.Fd) else ArmRecv(Socket.Handle);
   Result := inherited Recv(Buffer, Count);
 end;
 
@@ -843,6 +892,7 @@ var a4: sockets.in_addr;
     a6: TIn6_Addr;
 begin
   if TryStrToHostAddr(AHost, a4) then Exit(a4.s_addr = 0);
+  if MappedIPv4(AHost) = '0.0.0.0' then Exit(True);   // ::ffff:0.0.0.0 is 0.0.0.0
   Result := ParseIPv6(AHost, a6) and (a6.u6_addr32[0] = 0) and (a6.u6_addr32[1] = 0) and
             (a6.u6_addr32[2] = 0) and (a6.u6_addr32[3] = 0);
 end;
@@ -953,6 +1003,7 @@ const
   HTTP_EPROXY  = 2;   // a proxy this client cannot honour; nothing was sent
   HTTP_EHOST   = 3;   // https: the server's certificate is not for this host
   HTTP_ETIME   = 4;   // the run's time ran out mid-handshake or mid-response
+  HTTP_EBROKEN = 5;   // reached, and the answer broke off before it was complete
 
 var
   { What http_error() answers: the last configuration op's result, and since m5
@@ -1048,6 +1099,12 @@ var
   begin
     Result := '';
     AConnected := False;
+    { NO DIAL TO AN UNSPECIFIED ADDRESS, from any path (2026-10-08, third pass).
+      The literal check refused 0.0.0.0 and [::] but not ::ffff:0.0.0.0, which
+      the dial maps to 0.0.0.0 -- and Linux connects 0.0.0.0 to THIS machine. A
+      resolver's answer can be 0.0.0.0 too (a blocking DNS sinkhole's usual
+      reply), so the refusal sits here, where every address is dialled. }
+    if (AConnectIP <> '') and IsUnspecifiedAddr(Unbracket(AConnectIP)) then Exit;
     AStatus := 0;
     resp := TStringStream.Create('');
     c := TPinnedClient.Create(nil);
@@ -1103,6 +1160,7 @@ var
           c.IOTimeout := Integer(remaining);
         gDeadline := GetTickCount64() + QWord(remaining);
       end;
+      gIOMs := c.IOTimeout;
       { THE CONNECT WAIT IS WHOLE SECONDS. The RTL's connect timeout is a select()
         with tv_sec = ms div 1000 and tv_usec = 0, so 500 ms became a zero-second
         wait that fails every connect slower than an instant -- and a budget with
@@ -1125,8 +1183,11 @@ var
             redirect TARGET's connect -- so a POST that had been answered, by a
             307 to a dead host, was sent again to the first host's next address. }
           on E: ESocketError do
+          begin
             AConnected := not (E.Code in [seHostNotFound, seCreationFailed,
                                           seConnectFailed, seConnectTimeOut]);
+            if AConnected then MarkCut();
+          end;
           { Reached, and cut off by the deadline: answered, so never re-sent --
             and not a response either (see gCutShort). }
           on E: EHttpDeadline do
@@ -1134,11 +1195,20 @@ var
             AConnected := True;
             gCutShort := True;
           end;
-          on E: Exception do AConnected := True;        // reached; keep its answer
+          { REACHED, AND THE ANSWER BROKE OFF. Kept, until 2026-10-08's third
+            pass, as "reached; keep its answer": a read that timed out on a
+            SILENT peer raised here and handed back the status and the bytes so
+            far -- a 200 with 10 bytes of a promised 100 and http_error() 0.
+            Reached, so never re-sent; incomplete, so not an answer. }
+          on E: Exception do
+          begin
+            AConnected := True;
+            MarkCut();
+          end;
         end;
         AStatus := c.ResponseStatusCode;
-        if gCutShort then AStatus := 0;
-        if AConnected and not gCutShort then
+        if gCutShort or gIncomplete then AStatus := 0;
+        if AConnected and not (gCutShort or gIncomplete) then
         begin
           Result := resp.DataString;
           ALocation := TFPHTTPClient.GetHeader(c.ResponseHeaders, 'Location');
@@ -1306,11 +1376,13 @@ var
   follow, creds: Boolean;
   jar: TStringList;
   started, took: QWord;
+  byBudget: Boolean;
 begin
   AStatus := 0;
   Result := '';
   gHttpErr := HTTP_OK;
   gCutShort := False;
+  gIncomplete := False;
   gBudgetOut := False;
   { A RUN THAT HAS SPENT ITS BUDGET DIALS NOTHING. See the charge below. }
   if BudgetActive() and BudgetSpent() then
@@ -1325,8 +1397,12 @@ begin
   body := ABody;
   hops := 0;
   remaining := BudgetRemainingMs();
+  byBudget := remaining > 0;
   if (HttpDeadlineMs > 0) and ((remaining <= 0) or (remaining > HttpDeadlineMs)) then
+  begin
     remaining := HttpDeadlineMs;
+    byBudget := False;          // the test's seam set this deadline, not the run
+  end;
   if remaining > 0 then gReqDeadline := GetTickCount64() + QWord(remaining)
   else gReqDeadline := 0;
   jar := TStringList.Create();
@@ -1377,6 +1453,13 @@ begin
     if BudgetActive() then
     begin
       took := GetTickCount64() - started;
+      { A REQUEST CUT BY THE RUN'S OWN DEADLINE SPENT THE RUN'S TIME -- all of it,
+        not the milliseconds the clock happened to show. Since reads are bounded
+        by the deadline itself (ArmRecv) one can end a tick EARLY, and a charge of
+        `took` then left the budget a hair short of spent: test 23 failed one run
+        in two (2026-10-08, third pass). }
+      if gCutShort and byBudget and (Int64(took) <= remaining) then
+        took := QWord(remaining + 1);
       if not BudgetCharge(Int64(took) * BudgetUnitsPerMs) then gBudgetOut := True;
     end;
   end;
@@ -1385,6 +1468,12 @@ begin
     Result := '';
     AStatus := 0;
     gHttpErr := HTTP_ETIME;
+  end
+  else if gIncomplete then
+  begin
+    Result := '';
+    AStatus := 0;
+    gHttpErr := HTTP_EBROKEN;
   end;
 end;
 
@@ -2446,6 +2535,7 @@ begin
     HTTP_EPROXY:  Result := ValStr('the request cannot go through this proxy');
     HTTP_EHOST:   Result := ValStr('the server''s certificate is not for this host');
     HTTP_ETIME:   Result := ValStr('the run''s time ran out before the answer was complete');
+    HTTP_EBROKEN: Result := ValStr('the answer broke off before it was complete');
   else
     Result := ValStr('unknown error');
   end;

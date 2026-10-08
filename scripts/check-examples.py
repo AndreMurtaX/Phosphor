@@ -56,7 +56,12 @@ NOTATION = '```basic notation'
 BARE_WARNING = 'read as a variable that nothing assigns'
 
 # The sources whose registrations make the test hosts' extra names.
-TEST_HOST_SOURCES = ['tests/*.pas', 'tests/*.lpr', 'host/packages/*test*.lpr',
+# THE HOSTS THE CORPUS RUNS UNDER, by name -- not every test source (2026-10-08,
+# third pass). The globs this replaced also read the probes, whose engines run no
+# corpus file, and brought in `done:` from a program text a probe builds, so a
+# corpus file's own variable called `done` was reported as a bare call.
+TEST_HOST_SOURCES = ['tests/PhosphorTestLib.pas', 'host/console/phosphortest.lpr',
+                     'host/packages/phosphorpkgtest.lpr', 'host/packages/phosphorhttptest.lpr',
                      'host/gui/phosphorguitest.lpr']
 REGISTRATION = re.compile(r"\.(?:Add|AddHost)\('([A-Za-z_][A-Za-z0-9_]*[$%@?]?:[n%$@?*]*)'")
 
@@ -186,6 +191,17 @@ def main():
               % ', '.join(TEST_HOST_SOURCES))
         return 1
     io.open(names_file, 'w', encoding='utf-8', newline='\n').write('\n'.join(sigs) + '\n')
+    # THE NAMES FILE IS ASKED FIRST, on a program with nothing in it to report:
+    # a file the binary refuses (exit 2) used to make every corpus compile "fail",
+    # which the loop below skips as some other runner's problem -- so a refused
+    # file silently reported nothing at all (2026-10-08, third pass).
+    io.open(src, 'w', encoding='utf-8', newline='\n').write('x = 1\n')
+    r = subprocess.run([exe, 'compile', '--check', '--names', names_file, src, out],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        print('FAIL  check-examples: compile --check refused the test hosts\' names '
+              '(exit %d): %s' % (r.returncode, (r.stderr or r.stdout).strip()))
+        return 1
     total = compiled = skipped = 0
     bad = []
     doc_bare = []
@@ -225,7 +241,13 @@ def main():
         r = subprocess.run([exe, 'compile', '--check', '--names', names_file,
                             os.path.join(ROOT, rel), out],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        # A file that does not compile is its own runner's failure, not this one's.
+        # A file that does not compile (exit 1) is its own runner's failure, not
+        # this one's. Exit 2 is the binary REFUSING to run the check at all, which
+        # is this gate's failure and is never a skip.
+        if r.returncode == 2:
+            print('FAIL  check-examples: compile --check refused %s: %s'
+                  % (rel, (r.stderr or r.stdout).strip()))
+            return 1
         names = bare_names(r.stderr) if r.returncode == 0 else []
         if not names:
             continue

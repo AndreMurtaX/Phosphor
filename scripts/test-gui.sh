@@ -67,6 +67,11 @@ strict_build "the Lazarus demo" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -
 echo "lazarus demo built: $demoexe"; echo
 
 gui="$root/tests/gui"
+
+# THE FILES THIS RUNNER RAN BY NAME -- the twin of test-gui.ps1's run-ledger,
+# which says why a text gate is not enough. Absolute paths, '|'-delimited.
+ran_fixed="|"
+note_ran() { ran_fixed="$ran_fixed$(cd "$(dirname "$1")" && pwd)/$(basename "$1")|"; }
 out="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$out" "$err"' EXIT
 
 # probe the display once: if the widgetset cannot connect, skip cleanly.
@@ -95,6 +100,7 @@ done
 # run is bounded at 60 s by timeout(1) so a watchdog that hangs is REPORTED.
 echo
 start=$(date +%s)
+note_ran "$gui/watchdog/hang.bas"
 timeout 60 "$exe" "$gui/watchdog/hang.bas" --watchdog-ms 2000 > "$out" 2> "$err"; hcode=$?
 secs=$(( $(date +%s) - start ))
 if [ "$hcode" -eq 4 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 2')" ] &&
@@ -109,6 +115,7 @@ fi
 
 # --- the ledger: a forgotten modal answer or a handler fault fails the run -----
 # The twin of the block in test-gui.ps1, which says why.
+note_ran "$gui/ledger/forgot.bas"
 timeout 60 "$exe" "$gui/ledger/forgot.bas" > "$out" 2> "$err"; lcode=$?
 if [ "$lcode" -eq 1 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 4')" ] &&
    grep -qF -- "modal: 1 dialog(s) asked with no answer queued" "$err" &&
@@ -138,7 +145,8 @@ bash "$here/build.sh" > "$out" 2>&1 || { echo "FAIL  hostmode: phosphor did not 
 
 host_case() {   # name, want_exit, want_text, args...
   local name="$1" wantexit="$2" wanttext="$3"; shift 3
-  local o="$out"
+  local o="$out" a
+  for a in "$@"; do case "$a" in *.bas) note_ran "$a" ;; esac; done
   "$console" "$@" > "$o" 2>&1; local code=$?
   local ok=0
   [ "$code" -eq "$wantexit" ] || ok=1
@@ -156,7 +164,8 @@ host_case() {   # name, want_exit, want_text, args...
 
 host_case_nosession() {   # the same, with the session taken away
   local name="$1" wantexit="$2" wanttext="$3"; shift 3
-  local o="$out"
+  local o="$out" a
+  for a in "$@"; do case "$a" in *.bas) note_ran "$a" ;; esac; done
   env -u DISPLAY -u WAYLAND_DISPLAY "$console" "$@" > "$o" 2>&1; local code=$?
   local ok=0
   [ "$code" -eq "$wantexit" ] || ok=1
@@ -203,6 +212,18 @@ else
   echo "FAIL  hostmode: no phosphor binary, so host mode was not tested"
   allok=1
 fi
+
+# --- the run-ledger: every FIXED file ran ------------------------------------
+for d in watchdog ledger hostmode; do
+  for f in "$gui/$d"/*.bas; do
+    [ -e "$f" ] || continue
+    abs="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+    case "$ran_fixed" in
+      *"|$abs|"*) ;;
+      *) echo "FAIL  run-ledger: tests/gui/$d/$(basename "$f") is named by no case that ran it"; allok=1 ;;
+    esac
+  done
+done
 
 echo
 if [ "$allok" -eq 0 ]; then echo "GUI SUITE OK"; else echo "GUI SUITE FAILED"; fi

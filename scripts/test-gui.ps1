@@ -87,6 +87,16 @@ Write-Host ''
 
 # --- run the manifest --------------------------------------------------------
 $gui = Join-Path $root 'tests\gui'
+
+# THE FILES THIS RUNNER RAN BY NAME, recorded where each one is executed and
+# checked at the end against what tests/gui/watchdog, ledger and hostmode hold
+# (2026-10-08, third adversarial pass). check-manifests.py reads this script's
+# TEXT, and a text cannot tell a run from a string: with the case that runs
+# ledger/forgot.bas deleted, a mention of the name in a help block, a
+# Write-Host, a trailing comment or an unused variable kept that gate green.
+# A run-ledger is evidence the file ran, which is the claim.
+$script:ranFixed = @{}
+function Note-Ran([string] $p) { $script:ranFixed[[IO.Path]::GetFullPath($p).ToLowerInvariant()] = $true }
 $manifest = Get-Content (Join-Path $gui 'manifest.txt') |
     ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
 $tmp = [System.IO.Path]::GetTempPath()
@@ -151,6 +161,7 @@ $hang = Join-Path $gui 'watchdog\hang.bas'
 $hOut = Join-Path $tmp 'watchdog.out'
 $hErr = Join-Path $tmp 'watchdog.err'
 $sw = [Diagnostics.Stopwatch]::StartNew()
+Note-Ran $hang
 $hp = Start-Process -FilePath $exe -ArgumentList "`"$hang`" --watchdog-ms 2000" -PassThru -NoNewWindow `
         -RedirectStandardOutput $hOut -RedirectStandardError $hErr
 # READ THE HANDLE BEFORE THE PROCESS ENDS, or ExitCode comes back EMPTY: a
@@ -189,6 +200,7 @@ if ($okW) {
 $lb = Join-Path $gui 'ledger\forgot.bas'
 $lOut = Join-Path $tmp 'ledger.out'
 $lErr = Join-Path $tmp 'ledger.err'
+Note-Ran $lb
 $lp = Start-Process -FilePath $exe -ArgumentList "`"$lb`"" -PassThru -NoNewWindow `
         -RedirectStandardOutput $lOut -RedirectStandardError $lErr
 $null = $lp.Handle
@@ -242,6 +254,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
         param([string] $Name, [string[]] $CliArgs, [int] $WantExit, [string] $WantText)
         $o = Join-Path $tmp 'hostmode.out'
         $quoted = ($CliArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
+        foreach ($a in $CliArgs) { if ($a -like '*.bas') { Note-Ran $a } }
         cmd /c "`"$console`" $quoted > `"$o`" 2>&1"
         $code = $LASTEXITCODE
         $text = Get-Content -Raw $o -ErrorAction SilentlyContinue
@@ -287,6 +300,16 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $console)) {
     if (-not (Host-Case 'the sandbox root reaches a GUI program' @('--sandbox', $cage, 'run', $gsb) 0 ("root=" + $cage + "|"))) { $allOk = $false }
     if (-not (Host-Case 'and confines it: ".." is outside the cage' @('--sandbox', $cage, 'run', $gsb) 0 'parent visible: 0')) { $allOk = $false }
     if (-not (Host-Case 'unconfined, the same program sees ".."' @('run', $gsb) 0 'parent visible: 1')) { $allOk = $false }
+}
+
+# --- the run-ledger: every FIXED file ran ------------------------------------
+foreach ($d in @('watchdog', 'ledger', 'hostmode')) {
+    foreach ($f in (Get-ChildItem -Path (Join-Path $gui $d) -Filter '*.bas')) {
+        if (-not $script:ranFixed.ContainsKey($f.FullName.ToLowerInvariant())) {
+            Write-Host ("FAIL  run-ledger: tests/gui/{0}/{1} is named by no case that ran it" -f $d, $f.Name) -ForegroundColor Red
+            $allOk = $false
+        }
+    }
 }
 
 Write-Host ''

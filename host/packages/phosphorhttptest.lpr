@@ -46,6 +46,11 @@ const
     seconds. Every read is answered in time, so only a deadline on the whole
     handshake bounds it (2026-10-08, second adversarial round). }
   SRV_PORT_V6_TLS_TRICKLE = 18449;
+  { [::1], a peer that reads the ClientHello and sends the TLS record header only
+    after 900 ms, then nothing for two seconds. Its single late write is what a
+    shutdown() from another thread could not interrupt on Windows (2026-10-08,
+    third adversarial pass). }
+  SRV_PORT_V6_TLS_LATE = 18450;
 
 var
   BaseURL: String;
@@ -324,6 +329,7 @@ type
     CertFile, KeyFile: String;
     Ready: Boolean;
     Trickle: Boolean;   // trickle a TLS handshake instead of serving
+    LateHeader: Boolean;   // with Trickle: one late record header, then silence
     procedure Execute; override;
   private
     procedure Serve(AFd: TSocket);
@@ -377,6 +383,17 @@ begin
       n := st.Read(buf[0], SizeOf(buf));          // the ClientHello
       if n <= 0 then Exit;
       resp := Chr($16) + Chr($03) + Chr($03) + Chr($40) + Chr($00);
+      if LateHeader then
+      begin
+        try
+          Sleep(900);
+          st.WriteBuffer(resp[1], Length(resp));
+          Sleep(2000);
+        except
+          // the client gave up, which is the point
+        end;
+        Exit;
+      end;
       st.WriteBuffer(resp[1], Length(resp));
       ch := Chr($02);
       try
@@ -441,6 +458,28 @@ begin
     { /trickle: twenty bytes, one every 200 ms -- four seconds in all, and every
       read answered well inside any per-read timeout. Only a deadline on the
       WHOLE response bounds it. The client leaving early ends the writes. }
+    { /silent: ten of a promised hundred bytes, then nothing for two seconds.
+      /late: the same ten, one more byte at 900 ms, then nothing. A read timeout
+      ends the first; only a read bounded by the deadline itself ends the second
+      on time (2026-10-08, third adversarial pass). }
+    if (path = '/silent') or (path = '/late') then
+    begin
+      resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 100' + #13#10 +
+              'Connection: close' + #13#10#13#10 + 'AAAAAAAAAA';
+      try
+        st.WriteBuffer(resp[1], Length(resp));
+        if path = '/late' then
+        begin
+          Sleep(900);
+          ch := 'B';
+          st.WriteBuffer(ch, 1);
+        end;
+        Sleep(2000);
+      except
+        // the client gave up, which is the point
+      end;
+      Exit;
+    end;
     if path = '/trickle' then
     begin
       resp := 'HTTP/1.1 200 OK' + #13#10 + 'Content-Length: 20' + #13#10 +
@@ -568,6 +607,7 @@ begin
   if Args[0].Str = 'https' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS))
   else if Args[0].Str = 'https_ip' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_IP))
   else if Args[0].Str = 'tlstrickle' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_TRICKLE))
+  else if Args[0].Str = 'tlslate' then Result := ValStr('https://[::1]:' + IntToStr(SRV_PORT_V6_TLS_LATE))
   else Result := ValStr('http://[::1]:' + IntToStr(SRV_PORT_V6));
 end;
 
@@ -773,7 +813,7 @@ var
   eng: TPhosphorEngine;
   srv, srvTls, srvTlsIP: TBoundHttpServer;
   srvMtls: TMutualTlsServer;
-  v6Plain, v6Tls, v6TlsIP, v6Trickle: TV6Server;
+  v6Plain, v6Tls, v6TlsIP, v6Trickle, v6Late: TV6Server;
   th, thTls, thTlsIP, thMtls: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
@@ -914,12 +954,18 @@ begin
   v6Trickle.Trickle := True;
   v6Trickle.FreeOnTerminate := False;
   v6Trickle.Start;
+  v6Late := TV6Server.Create(True);
+  v6Late.Port := SRV_PORT_V6_TLS_LATE;
+  v6Late.Trickle := True;
+  v6Late.LateHeader := True;
+  v6Late.FreeOnTerminate := False;
+  v6Late.Start;
 
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
   while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active) or
          (not srvMtls.Active) or (not v6Plain.Ready) or (not v6Tls.Ready) or
-         (not v6TlsIP.Ready) or (not v6Trickle.Ready)) and (waited < 3000) do
+         (not v6TlsIP.Ready) or (not v6Trickle.Ready) or (not v6Late.Ready)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 

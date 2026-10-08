@@ -2459,6 +2459,32 @@ check('round 2: a frame over 1 MB is reported as an error event, with text',
 check('  and the socket closes at once', secs < 1.5, '%.2f s' % secs)
 w21.close()
 
+# AND WHILE THE PROGRAM RUNS (a third pass, 2026-10-08). The case above sends
+# the frame before `launch`, where the session loop reads it. Sent while the
+# program was running, the refusal was queued without waking the VM, so it was
+# read only when the program ended: no event, the socket open for its whole
+# run. The fixture runs about three seconds; "at once" is measured against that.
+w24 = Wire(SLOW, 'big24.bas')
+w24.init()
+w24.send(seq=2, cmd='launch', stopAtEntry=False)
+for _ in range(20):
+    m24 = w24.recv(timeout=15)
+    if m24 is None or m24.get('seq') == 2:
+        break
+time.sleep(0.3)
+t24 = time.time()
+try:
+    w24.raw('x' * (1100 * 1024))
+except OSError:
+    pass
+got, secs = until_close(w24)
+secs = time.time() - t24
+errs = [m for m in got if m.get('event') == 'error']
+check('round 3: a frame over 1 MB sent while the program runs is reported too',
+      len(errs) == 1 and '1048576' in (errs[0].get('text') or ''), str(got)[:200])
+check('  and the socket closes at once, not when the program ends', secs < 1.5, '%.2f s' % secs)
+w24.close()
+
 w22 = Wire(SLOW, 'detach22.bas')
 w22.init()
 w22.send(seq=2, cmd='launch', stopAtEntry=True)

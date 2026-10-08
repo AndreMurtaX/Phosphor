@@ -309,3 +309,39 @@ assert_eq(sqlite_step(i@), 0, "however many times it is asked")
 assert_eq(sqlite_scalar(x@, "select count(*) from s"), 4, "having inserted exactly ONE row, not three")
 sqlite_finalize(i@)
 sqlite_close(x@)
+
+test_case("sqlite-full/a row whose columns share a name keeps the last")
+rem `select *` over a join of two tables that both have an id is the
+rem commonest query there is, and its row could not be fetched at all:
+rem the JSON row builder raised "Duplicate object member" on the second id
+rem (2026-10-08). One member per NAME, the later column replacing the
+rem earlier -- as a row read into a dictionary does; aliasing keeps both.
+j@ = sqlite_open@(":memory:")
+x = sqlite_exec(j@, "create table a(id, n); create table b(id, a_id, m)")
+x = sqlite_exec(j@, "insert into a values(1, 'one'); insert into b values(7, 1, 'seven')")
+c@ = sqlite_query@(j@, "select * from a join b on b.a_id = a.id")
+r@ = sqlite_fetchone@(c@)
+assert_eq(json_count(r@), 4, "four distinct names: id, n, a_id, m")
+assert_eq(json_getn(r@, "id"), 7, "and id is the LATER column's, b.id")
+assert_eq(json_gets$(r@, "n"), "one", "with a's other columns intact")
+sqlite_finalize(c@)
+c@ = sqlite_query@(j@, "select a.id as a_id, b.id as b_id from a join b on b.a_id = a.id")
+r@ = sqlite_fetchone@(c@)
+assert_eq(json_getn(r@, "a_id") * 10 + json_getn(r@, "b_id"), 17, "aliased, both are kept: 1 and 7")
+sqlite_finalize(c@)
+rem A column NAME past 255 bytes cannot be a JSON member name (fpjson keeps
+rem 255; see tests/suite/79_json_long_names.bas): refused, never truncated
+rem into a collision with its neighbour.
+raised = 0
+c@ = sqlite_query@(j@, "select 1 as " + string$(256, 97))
+on error goto toolong
+r@ = sqlite_fetchone@(c@)
+on error goto 0
+assert_eq(raised, 1, "a 256-byte column name is refused")
+sqlite_finalize(c@)
+sqlite_close(j@)
+end
+
+toolong:
+raised = 1
+resume next

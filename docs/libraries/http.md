@@ -172,9 +172,9 @@ No handle, no network, no error code — these four are total functions on a str
 
 | function | what it answers |
 | --- | --- |
-| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to, `4` a request the run's time cut off mid-handshake or mid-response — it then answers status `0` and no body, never the part that had arrived. Every request — bare-url or client — sets it: `0` when it was not refused or cut off. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
+| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to, `4` a request the run's time cut off mid-handshake or mid-response, `5` a response that broke off for any other reason — the peer went silent past the client's own read timeout, or the connection dropped. Either way it answers status `0` and no body, never the part that had arrived. Every request — bare-url or client — sets it: `0` when it was not refused or cut off. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
 | `http_clearerror() → num` | `0`, always; the code is reset to `0` |
-| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"the server's certificate is not for this host"` for `3`, `"unknown error"` for anything else — including a code this library would never produce |
+| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"the server's certificate is not for this host"` for `3`, `"the run's time ran out before the answer was complete"` for `4`, `"the answer broke off before it was complete"` for `5`, `"unknown error"` for anything else — including a code this library would never produce |
 
 ## A worked example
 

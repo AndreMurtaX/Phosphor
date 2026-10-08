@@ -77,3 +77,4 @@
 76_ioerror_refused
 77_sys_answers
 78_free_handles
+79_json_long_names

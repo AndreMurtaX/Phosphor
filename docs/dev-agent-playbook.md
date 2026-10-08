@@ -1525,6 +1525,46 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · a third pass, over the second round's fixes (edb3dd5): the
+  fixes were wrong again, in new ways, and two old defects came out.** Three
+  reviewers; every finding run before it was accepted.
+  - **A deadline guard is only as good as the call it can interrupt.** The
+    handshake guard shut the socket from another thread -- which on Windows
+    does not wake a recv already blocked. And the read timeout, set once,
+    restarts with every read, so one byte just before the deadline bought a
+    whole second wait: a 2 s request held 3.8 s, the run's budget 50.6 s of
+    25.6. Now the handshake runs non-blocking under select(), each wait
+    bounded by what is left, and every read re-arms its timeout to the
+    deadline. The second-round test of the guard passed only because its peer
+    wrote every 200 ms -- each write woke the read. **A peer that writes often
+    cannot test a bound on a peer that writes once.**
+  - **"Reached; keep its answer" was a decision nobody re-asked.** A response
+    whose read failed returned its status and its partial body: a 200 with 10
+    of 100 bytes, error 0. Incomplete is now status 0, and 4 or 5 says why.
+  - **Bounding a read early broke a test that measured the budget exactly.**
+    With reads ending at the deadline -- a tick early, on Windows -- test 23's
+    charge fell a hair short of spending the budget, one run in two. A request
+    cut by the run's own deadline now spends what was left, which is the
+    truth about it.
+  - **A test can pass because a SERIAL server is still busy.** Test 24's
+    late-byte case passed on the old library: the one-connection server was
+    still holding the previous case's connection, so the request measured the
+    queue. A wait between the cases made it fail for its own reason.
+  - **The textual FIXED gate could not tell a string from a run** -- six of
+    six mutations that stopped a file from running stayed green. The proof
+    now comes from the runners: each records the FIXED files it executes and
+    fails on any it did not. A gate that reads a script can only say a name is
+    mentioned.
+  - **Closing a socket with unread input loses what you just sent.** Ending a
+    session with shutdown(both) after an oversize frame let Windows answer
+    with a reset that discarded the error event, one run in eight; the
+    session now ends with a half-close.
+  - **Two old defects, both data:** JSON member names past 255 bytes were
+    truncated by fpjson's ShortString hash (two keys became one member), and a
+    SQLite row could not be fetched when two columns shared a name -- every
+    `select *` over a join of tables with an `id`. The first is refused at
+    every door; the second keeps the later column, as a dictionary would.
+
 - **2026-10-08 · a second adversarial round, over what the first one and the
   afternoon had written: 22 findings, 20 confirmed by running them, 1 refused
   with its reason, 1 documented instead of fixed.** Four reviewers -- JSON

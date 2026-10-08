@@ -510,6 +510,12 @@ end;
   only the dying subtree -- see ReleaseViewsUnder, which says why. }
 procedure InvalidateBorrowed(ANode: TJSONData);
 begin
+  { NO VIEW LIVE ANYWHERE, NOTHING TO FIND -- and the walk is skipped. It costs a
+    hex key and a hash lookup per freed node, which a third adversarial pass
+    measured at about +40 ns a node: replacing a 200 000-element member 60 times
+    took 1.89 s against 1.21 s before it, with not one view in the program. Two
+    O(1) counters answer the question first. }
+  if LiveHandleCount() = OwnedHandleCount() then Exit;
   ReleaseViewsUnder(ANode);
 end;
 
@@ -519,12 +525,31 @@ end;
   stored byte-exactly (Names[i] reads it back unchanged) Find returns nil while
   IndexOfName finds it at 0. A member that can be written and never read is not a
   member, so every lookup here goes through IndexOfName. }
+{ A MEMBER NAME IS AT MOST 255 BYTES, because fpjson keeps an object's names in
+  a TFPHashObjectList, whose keys are ShortStrings ("Careful : Names limited to
+  255 chars", fpjson.pp). Past that length a name was TRUNCATED in silence: two
+  distinct 261-byte keys sharing their first 255 became one member, the second
+  write replacing the first, and a parsed document with two such keys was
+  refused as a "Duplicate object member" it did not contain (a third adversarial
+  pass, 2026-10-08; it predates every change that day). Nothing here can store a
+  longer name faithfully, so every door refuses one instead -- SetMember and the
+  parser -- and every lookup treats one as absent, because a truncated lookup
+  would FIND the member whose name is its first 255 bytes. }
+const
+  JSON_MAX_NAME = 255;
+
+function MemberIndex(O: TJSONObject; const AName: String): Integer;
+begin
+  if Length(AName) > JSON_MAX_NAME then Exit(-1);
+  Result := O.IndexOfName(AName);
+end;
+
 function FindMember(O: TJSONObject; const AName: String): TJSONData;
 var idx: Integer;
 begin
   Result := nil;
   if O = nil then Exit;
-  idx := O.IndexOfName(AName);
+  idx := MemberIndex(O, AName);
   if idx >= 0 then Result := O.Items[idx];
 end;
 
@@ -557,6 +582,13 @@ var idx: Integer;
 begin
   if GraftTooDeep(ALevel, V, Err) then
   begin
+    V.Free;
+    Exit(False);
+  end;
+  if Length(K) > JSON_MAX_NAME then
+  begin
+    Err := MakeError(peRuntime, Format(
+      'a json member name is at most %d bytes, and this one is %d', [JSON_MAX_NAME, Length(K)]));
     V.Free;
     Exit(False);
   end;
@@ -1050,6 +1082,107 @@ begin
           end;
       end;
     Inc(i);
+  end;
+end;
+
+{ THE FIRST MEMBER NAME LONGER THAN JSON_MAX_NAME BYTES ONCE DECODED, as the
+  character position of its opening quote; 0 when there is none. Decoded,
+  because that is what fpjson stores: \n is one byte, \u00e9 two, a surrogate
+  pair four -- so a long-looking raw name can be short, and only the decoded
+  length decides. A string is a NAME when the next non-space character after it
+  is ':'. Only as far as the parser reads (JsonValueEnd). }
+function JsonLongName(const AText: String): Int64;
+var
+  i, n, stop, start, j: Int64;
+  bytes, cp, lo, k: Integer;
+  delim: Char;
+  skip: Integer;
+
+  function Hex4(AAt: Int64): Integer;   // the \uXXXX digits at AAt, or -1
+  var t: Integer; c: Char;
+  begin
+    Result := 0;
+    if AAt + 3 > n then Exit(-1);
+    for t := 0 to 3 do
+    begin
+      c := AText[AAt + t];
+      case c of
+        '0'..'9': Result := Result * 16 + Ord(c) - Ord('0');
+        'a'..'f': Result := Result * 16 + Ord(c) - Ord('a') + 10;
+        'A'..'F': Result := Result * 16 + Ord(c) - Ord('A') + 10;
+      else
+        Exit(-1);
+      end;
+    end;
+  end;
+
+begin
+  Result := 0;
+  n := Length(AText);
+  stop := JsonValueEnd(AText);
+  delim := #0;
+  start := 0;
+  bytes := 0;
+  skip := 0;
+  for i := 1 to n do
+  begin
+    if i > stop then Break;
+    if skip > 0 then begin Dec(skip); Continue; end;
+    if delim = #0 then
+    begin
+      if (AText[i] = '"') or (AText[i] = '''') then
+      begin
+        delim := AText[i];
+        start := i;
+        bytes := 0;
+      end;
+      Continue;
+    end;
+    if AText[i] = '\' then
+    begin
+      if (i < n) and (AText[i + 1] = 'u') then
+      begin
+        cp := Hex4(i + 2);
+        k := 1;
+        if (cp >= $D800) and (cp <= $DBFF) and (i + 11 <= n) and
+           (AText[i + 6] = '\') and (AText[i + 7] = 'u') then
+        begin
+          lo := Hex4(i + 8);
+          if (lo >= $DC00) and (lo <= $DFFF) then
+          begin
+            Inc(bytes, 4);
+            skip := 11;
+            k := 0;
+          end;
+        end;
+        if k = 1 then
+        begin
+          if cp < 0 then Inc(bytes)
+          else if cp < $80 then Inc(bytes)
+          else if cp < $800 then Inc(bytes, 2)
+          else Inc(bytes, 3);
+          skip := 5;
+        end;
+      end
+      else
+      begin
+        Inc(bytes);
+        skip := 1;
+      end;
+      Continue;
+    end;
+    if AText[i] = delim then
+    begin
+      delim := #0;
+      if bytes > JSON_MAX_NAME then
+      begin
+        j := i + 1;
+        while (j <= n) and (AText[j] in [' ', #9, #10, #13]) do Inc(j);
+        if (j <= n) and (AText[j] = ':') then Exit(start);
+      end;
+      Continue;
+    end;
+    Inc(bytes);
   end;
 end;
 
@@ -1753,6 +1886,14 @@ begin
       [MaxJsonDepth, pos]));
     Exit;
   end;
+  pos := JsonLongName(Args[0].Str);
+  if pos > 0 then
+  begin
+    Err := MakeError(peRuntime, Format(
+      'invalid json: a member name is longer than %d bytes (at character %d)',
+      [JSON_MAX_NAME, pos]));
+    Exit;
+  end;
   // The escapes fpjson decodes wrongly are decoded HERE first -- see the long
   // note above. Only a document that actually carries a \u escape is rewritten,
   // and only one this can rewrite faithfully; anything else goes to GetJSON as
@@ -1853,7 +1994,7 @@ var o: TJSONObject; idx: Integer;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  idx := o.IndexOfName(Args[1].Str);
+  idx := MemberIndex(o, Args[1].Str);
   if idx >= 0 then
   begin
     InvalidateBorrowed(o.Items[idx]);
@@ -1907,7 +2048,7 @@ var o: TJSONObject;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
-  Result := ValInt(Ord(o.IndexOfName(Args[1].Str) >= 0));
+  Result := ValInt(Ord(MemberIndex(o, Args[1].Str) >= 0));
 end;
 function t_json_count(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var n: TJSONData;
@@ -2016,7 +2157,10 @@ begin
     begin
       part := Copy(Path, start, i - start);
       if not (cur is TJSONObject) then Exit(False);
-      cur := TJSONObject(cur).Find(part);
+      { FindMember, not fpjson's Find: the same lookup every other reader makes,
+        so a path agrees with json_get@ about a non-ASCII name and about one past
+        JSON_MAX_NAME. }
+      cur := FindMember(TJSONObject(cur), part);
       if cur = nil then Exit(False);
       start := i + 1;
     end;

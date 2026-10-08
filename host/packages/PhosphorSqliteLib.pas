@@ -739,16 +739,36 @@ begin
   end;
 end;
 
-{ The current row as a fresh JSON object (empty when the cursor is not on a row). }
-function BuildRowObject(AStmt: TSqliteStmt): TJSONObject;
-var i, cnt: Integer; nm: String;
+{ The current row as a fresh JSON object (empty when the cursor is not on a row),
+  or nil with AWhy set when a column's name cannot be a JSON member name.
+
+  ONE MEMBER PER COLUMN NAME, AND THE LAST COLUMN OF A NAME WINS (2026-10-08). A
+  row object cannot hold two members of one name, and SQL makes such rows all
+  the time: `select * from a join b` where both tables have an `id`. fpjson's Add
+  RAISED on the second -- "Duplicate object member" -- so a join of two tables
+  with an id could not be fetched at all. The later column now replaces the
+  earlier, as a row read into a dictionary does; aliasing (`a.id as a_id`) keeps
+  both. A name past 255 bytes cannot be kept apart from its neighbours (see
+  JSON_MAX_NAME in PhosphorJsonLib) and is refused. }
+function BuildRowObject(AStmt: TSqliteStmt; out AWhy: String): TJSONObject;
+var i, cnt, at: Integer; nm: String;
 begin
+  AWhy := '';
   Result := TJSONObject.Create();
   if not AStmt.OnRow then Exit;
   cnt := sqlite3_column_count(AStmt.StmtPtr);
   for i := 0 to cnt - 1 do
   begin
     nm := PtrStr(sqlite3_column_name(AStmt.StmtPtr, i));
+    if Length(nm) > 255 then
+    begin
+      AWhy := Format('column %d''s name is %d bytes, and a json member name is at ' +
+                     'most 255 -- alias it shorter', [i + 1, Length(nm)]);
+      FreeAndNil(Result);
+      Exit;
+    end;
+    at := Result.IndexOfName(nm);
+    if at >= 0 then Result.Delete(at);
     case sqlite3_column_type(AStmt.StmtPtr, i) of
       SQLITE_INTEGER: Result.Add(nm, sqlite3_column_int64(AStmt.StmtPtr, i));
       SQLITE_FLOAT:   Result.Add(nm, sqlite3_column_double(AStmt.StmtPtr, i));
@@ -1301,13 +1321,26 @@ begin
 end;
 
 // --- rows as JSON -----------------------------------------------------------
+{ The row as a registered JSON document, or the reason it cannot be one. }
+function RowValue(AStmt: TSqliteStmt; out Err: TPhosphorError): TValue;
+var o: TJSONObject; why: String;
+begin
+  o := BuildRowObject(AStmt, why);
+  if o = nil then
+  begin
+    Err := MakeError(peRuntime, why);
+    Exit(ValHandle(0));
+  end;
+  Result := ValHandle(JsonRegisterNode(o, True));
+end;
+
 function f_row(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: TSqliteStmt;
 begin
   Err := NoError();
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  Result := ValHandle(JsonRegisterNode(BuildRowObject(s), True));
+  Result := RowValue(s, Err);
 end;
 
 function f_fetchone(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1317,11 +1350,11 @@ begin
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   DoStep(s);   // advance, then hand back the new current row (empty object at end)
-  Result := ValHandle(JsonRegisterNode(BuildRowObject(s), True));
+  Result := RowValue(s, Err);
 end;
 
 function f_fetchall(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var s: TSqliteStmt; arr: TJSONArray;
+var s: TSqliteStmt; arr: TJSONArray; row: TJSONObject; why: String;
 begin
   Err := NoError();
   Result := ValHandle(0);
@@ -1341,7 +1374,14 @@ begin
       Err := BudgetRefusal('sqlite_fetchall@');
       Exit(ValHandle(0));
     end;
-    arr.Add(BuildRowObject(s));
+    row := BuildRowObject(s, why);
+    if row = nil then
+    begin
+      arr.Free;
+      Err := MakeError(peRuntime, why);
+      Exit(ValHandle(0));
+    end;
+    arr.Add(row);
     DoStep(s);
   end;
   Result := ValHandle(JsonRegisterNode(arr, True));

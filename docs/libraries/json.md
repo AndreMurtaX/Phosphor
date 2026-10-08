@@ -37,6 +37,13 @@ side of the same rule: `json_set@`, `json_push@`, `json_setval@`, `json_pushval@
 and `json_merge@` store a **clone**, so the container owns its own copy and the
 handle you passed in stays yours to change.
 
+**A member name is at most 255 bytes** (of the decoded name — `é` is two).
+fpjson keeps an object's names in a hash whose keys are that long, and until
+2026-10-08 a longer one was truncated in silence: two distinct 261-byte keys sharing
+their first 255 bytes were one member. Now a setter refuses a longer name with an
+error, `json_parse@` refuses a document holding one, and a lookup by one finds
+nothing. A string *value* has no such limit.
+
 The rest is the house style. Array indices are **1-based**, like every other
 positional argument in Phosphor (the reference implementation's JSON arrays were
 0-based; this one is not). **Errors are returned, not thrown** — a bad handle, a

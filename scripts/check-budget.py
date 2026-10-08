@@ -313,6 +313,10 @@ ALLOWED = {
         'exactly half the input length, trimmed to the pairs actually decoded',
     'PhosphorHttpLib.pas:DoUrlDecode':
         'a decode is never longer than what it decodes',
+    'PhosphorHttpLib.pas:THostCheckedHandler.Connect':
+        'the non-blocking handshake loop runs only under a deadline and leaves it '
+        'the moment the deadline passes -- each wait in select() is bounded by what '
+        'is left of it; the loop IS the bound (test 24 measures it at the deadline)',
     'PhosphorSqliteLib.pas:ColStr':
         'copies one column value, whose length sqlite reports',
     'PhosphorDateTimeLib.pas:t_dayoftheyear':

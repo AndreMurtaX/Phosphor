@@ -51,3 +51,4 @@
 21_http_hosts
 22_https_fallback
 23_http_budget_wait
+24_http_cut

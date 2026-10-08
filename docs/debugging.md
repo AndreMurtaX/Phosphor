@@ -253,11 +253,16 @@ integer is dropped, a JSON number with a fraction or an exponent included:
   `disconnect` of either kind, after a closed connection. It used to stay open
   until the program ended, so the editor waited behind it while a program it had
   been told was stopped ran on.
-- **A frame over 1 MB is reported** as an `error` event before the close; it used
-  to end the session in silence.
+- **A frame over 1 MB is reported** as an `error` event before the close, while the
+  program runs as well as while it is stopped; it used to end the session in
+  silence. The session ends by closing the send side only, so the editor reads
+  that last event before the end of the stream: closing both sides with its bytes
+  still unread made Windows reset the connection and drop the event, one run in
+  eight.
 - **Every frame is UTF-8.** A string holding bytes that are not — `bytestr$(255)` —
   went out raw, which a strict editor must refuse; each such byte is written as
-  the four characters `\xFF` instead.
+  the four characters `\xFF` instead. That is for display and cannot be undone: a
+  string that already holds those four characters looks the same.
 
 **`continued` is never sent, by design.** The specification sends it for a resume
 the editor did not ask for, and every resume this host makes after a `stopped`

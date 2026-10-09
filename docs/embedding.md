@@ -417,20 +417,56 @@ x$ = string$(1000000000000000000, 65)   ' refused immediately, not attempted
 println regex_find$("(a+)+$", "aaaa...!")   ' refused: the pattern can backtrack
 ```
 
-The judge refuses a pattern only when it cannot **prove** the repeated part
-unambiguous, and it gives up in two directions, deliberately. A pattern too big
-for its tables — nesting deeper than it tracks, more alternatives than it
-tracks — is allowed to run: it was not judged, and refusing working patterns for
-a reason that is not true of them is the failure a host most needs to be spared.
-But inside a repeat it *is* judging, an atom whose bytes it cannot name — a
-backreference, or an escape it does not model, such as `\p{L}` or `a` — is
-treated as able to match anything, and that leans toward refusal: "unambiguous"
-is a claim of proof. It reads the pattern the way the matcher does: `\x61` is
-the byte `a` (so `^(\x61+)+$` is refused exactly as `^(a+)+$` is), an inline
-`(?i)` makes `a` and `A` the same character to the end of its group, `(?x)`
-makes blanks and `#` comments nothing, and an empty group or a `(?#comment)` is
-never mistaken for a separator. Until 2026-10-09 each of those was misread, and
-each misreading let a 2ⁿ pattern run under a budget.
+The judge refuses a repeated group unless it can **prove** that no text can be
+matched by the repeat in two different ways. That is the exact condition for a
+backtracking matcher to take exponentially many attempts on a subject it fails:
+the judge builds the group's automaton the way `TRegExpr` walks it — one path per
+alternative, per count of a counted repeat, per way of matching nothing — and
+searches its product with itself for a state with two different paths back to
+itself on the same text. So `^(a*a*b)+$` is refused (a run of `a`s can be split
+between the two `a*` in many ways), and so are `^((a|a)b)+$` and `^(ab?|b)+$`
+(`"ab"` is one iteration of the first branch or one of each); `^(\d+\.)+\d+$`
+and `^(a|ab)+$` are allowed, because each subject has one reading. Until
+2026-10-09 the judge asked three rules of thumb instead — is there a separator,
+does the body end on one, does it begin on one — and all three of those shapes
+answered it wrongly: the first two ran 2ⁿ under a budget, and `(a|ab)+`, which
+runs in linear time, was refused.
+
+A repeat counted three or more times is judged the same way, with one extra
+allowance: a body with no loop of its own has a fixed number of paths `P`, so
+`k` iterations of it have at most `Pᵏ`, and up to 4096 of those are allowed.
+That keeps the usual dotted-quad IPv4 pattern
+(`(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}`, 6³ paths) while `(a?){20}` and
+`(a+){10}` stay refused.
+
+Inside a repeat it is judging, an atom whose bytes it cannot name — a
+backreference, or an escape it does not model, such as `\p{L}` or `\z` — makes
+the proof impossible, so that repeat is refused. It reads the pattern the way
+the matcher does: `\x61` is the byte `a` (so `^(\x61+)+$` is refused exactly as
+`^(a+)+$` is), an inline `(?i)` makes `a` and `A` the same character to the end
+of its group, `(?x)` makes blanks and `#` comments nothing, and an empty group
+or a `(?#comment)` consumes nothing.
+
+**A pattern the judge cannot finish reading is refused.** This is a decision,
+and it reversed one. Until 2026-10-09 a pattern past the judge's tables — more
+than 96 atoms in a repeated body, more than 16 alternatives, nesting deeper than
+48 — was *allowed*, on the reasoning that refusing a pattern for a reason not
+true of it is the worse failure. But a budget exists to make an *untrusted*
+script safe, and padding any 2ⁿ shape past one of those limits —
+`^(a+` followed by a hundred `c?` and `a+)+$`, or an eighteenth alternative —
+walked it straight through, so the limit was a documented bypass that anyone
+could type. The limits are now far past anything a program writes: 100 levels of
+nesting, 262144 atoms, 4096 automaton states for one repeated body, and a fixed
+amount of search for the whole pattern (a 300-word alternation under a repeat is
+judged in milliseconds). Past them the pattern is refused with a message that
+says the judge could not read it, so the cost of the decision falls only on
+patterns nobody writes, and what it closes is a bypass.
+
+What the judge does **not** claim: **polynomial** blow-up, such as `a*a*a*b` at
+the top level, is outside it. Its cost grows with the subject's length rather
+than doubling per character, so a subject of a few kilobytes is harmless — but
+nothing interrupts the matcher once it starts, so a host that hands untrusted
+patterns megabyte subjects should bound the subject's length too.
 
 Two things follow for you. First, **a refusal of this kind is an ordinary
 catchable error, not a fatal ceiling** — `err()` is `7`, the message names the

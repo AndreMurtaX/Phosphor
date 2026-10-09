@@ -130,12 +130,17 @@ matcher cannot be interrupted, so when the host has set `MaxSteps` or `TimeoutMs
 a pattern whose repeated part can match the same text in more than one way — the
 `(a+)+` shape — is refused with a catchable `peLimit` error instead of being run
 (see [docs/embedding.md](../embedding.md#the-ceilings-reach-inside-a-library-call-too)).
+"More than one way" is decided exactly, not guessed from the pattern's look:
+`^(a*a*b)+$`, `^((a|a)b)+$` and `^(ab?|b)+$` are refused, while `^(a|ab)+$`,
+`^(\d+\.)+\d+$` and a dotted-quad IPv4 pattern counted `{3}` are allowed.
 The judge reads the pattern as the matcher does, so spelling the shape differently
 does not get it past: `^(\x61+)+$` is `^(a+)+$`, and under `(?i)` the alternation
 `(a|A)+` has two branches matching the same character. An escape the judge does
-not model (`\p{L}`, `a`, `\z`) or a backreference, inside a repeated group,
-counts as able to match anything, which leans toward refusal. Without a budget
-nothing is judged and every pattern runs.
+not model (`\p{L}`, `\z`) or a backreference, inside a repeated group, makes the
+repeat unprovable, and it is refused. So is a pattern too large for the judge to
+finish reading — nesting past 100 groups, or a repeated body bigger than its
+automaton limit — which no real pattern reaches. Without a budget nothing is
+judged and every pattern runs.
 
 **`.` matches a newline here.** `TRegExpr` runs in single-line mode by default, so
 `regex_findpos("a.b", "a" + chr$(10) + "b")` answers `1` — a pattern meant for one

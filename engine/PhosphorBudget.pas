@@ -319,8 +319,9 @@ function BudgetSearchCost(const AHay, ANeedle: String;
                           ACaseless: Boolean = False): Int64;
 
 { RULE 3. Is APattern's worst case bounded work? False = it contains a
-  construct that can backtrack super-linearly; AWhy names it. Answers True for
-  anything it cannot judge, so an exotic pattern is allowed, not refused. }
+  construct that can backtrack exponentially, or one too large for the judge to
+  finish reading; AWhy names which. True is a claim of proof: every repeated
+  part was shown unambiguous (see the comment above the implementation). }
 function BudgetPatternBounded(const APattern: String; out AWhy: String): Boolean;
 
 implementation
@@ -642,148 +643,156 @@ end;
   would close the door behind the horse. The only thing that can be done BEFORE
   the call is to read the pattern.
 
-  WHAT THE CRITERION IS, AND WHAT IT IS NOT. The first version of this judge
-  implemented "star height >= 2": a repeat of a group that itself repeats without
-  bound was refused. That is not the ReDoS criterion, and it refused nearly half
-  of a set of sixty real-world patterns -- a unix path, a slug, a dotted version,
-  a comma-separated row, a domain name -- every one of which runs in single-digit
-  milliseconds against a hostile failing subject. A guard that answers an error
-  where the right answer exists is exactly as serious as the hang it replaced.
+  WHAT A BACKTRACKER COSTS. On a subject it fails to match, TRegExpr tries every
+  way the pattern can consume every prefix of the subject, one after another,
+  and remembers nothing between them. Its work is therefore the number of PATHS
+  through the pattern's automaton that spell a prefix of the subject. A repeated
+  part makes that number exponential exactly when the repeat is AMBIGUOUS in the
+  sense automata theory names: some state of it has two different paths back to
+  itself that spell the same text (Weber and Seidl, "On the degree of ambiguity
+  of finite automata", 1991 -- EDA). Pump that text k times and there are 2^k
+  paths. Without such a state the count is polynomial.
 
-  The real criterion is the AMBIGUITY of the repeated body. (a+)+ is catastrophic
-  because "aa" can be one iteration or two, so a failing tail makes the matcher
-  try every way of cutting the subject up: 2^n. (\d+\.)+ is NOT, because every
-  iteration must end on a '.' and \d cannot match a '.', so there is exactly ONE
-  way to cut the subject up however long it is. A mandatory SEPARATOR that no
-  flexible atom in the body can consume removes the ambiguity, and with it the
-  blow-up.
+  THE CRITERION IS THAT DEFINITION, DECIDED, NOT APPROXIMATED BY RULES OF THUMB.
+  The judge this replaces asked three structural questions -- does a mandatory
+  separator exist, does the body end on one, does it begin on one -- and called
+  the body unambiguous if any said yes. Each was a question about the wrong
+  thing, and the round-2 attacker of 2026-10-09 walked through all three:
 
-  So a repeat of a group is refused when the body is AMBIGUOUS, which is judged
-  three ways, any one of which is enough to call it safe:
+    ^(a*a*b)+$    a separator pins where an iteration ENDS, not how the bytes
+                  INSIDE one are divided between two flexible atoms: a block of
+                  m a's splits m+1 ways, (m+1)^k for k blocks, 15 s under a
+                  2000 ms budget;
+    ^((a|a)b)+$   an unquantified inner alternation was never asked whether its
+                  branches overlap -- it folded into its parent as one atom;
+    ^(ab?|b)+$    the boundary windows looked at atoms of the SAME branch, and
+                  the next iteration may take another.
 
-    (i)   some mandatory fixed-width atom in the body has a character set
-          disjoint from every flexible (optional or unbounded) atom's set;
-    (ii)  the body ENDS on a mandatory fixed-width atom disjoint from the
-          flexible atoms that follow the previous mandatory one;
-    (iii) the body STARTS on a mandatory fixed-width atom disjoint from the
-          flexible atoms that precede the next mandatory one.
+  And it refused (a|ab)+, which is a uniquely decodable code and runs in 0 ms,
+  because its branches share a first byte. So now: the repeated body is compiled
+  to a Thompson automaton exactly as TRegExpr walks it (one path per
+  alternative, per count of a counted repeat, per way of matching the empty
+  string), the empty moves are folded into weighted edges between the states
+  that consume a byte, and the PRODUCT of that automaton with itself is searched
+  from every diagonal pair (p,p) for an off-diagonal pair (q,r) that leads back
+  to the diagonal. Every state of a repeated body lies on the repeat's cycle, so
+  that is two different paths from a state back to itself on the same text --
+  the definition, no more and no less. An edge with two empty routes between
+  the same two bytes is the same thing with q = r (the (c()?)+ shape), and an
+  empty move that loops back on itself is a body that can repeat while
+  consuming nothing (the (a*)* shape); both refuse.
 
-  A body with no mandatory atom at all can match the empty string, which is the
-  (a?)+ / (a*)* shape, and is refused. So is an alternation whose branches can
-  begin on the same byte, which is the (a|ab)+ shape: there the ambiguity is
-  between the branches rather than inside one.
+  COUNTED REPEATS. A repeat counted three or more times is judged by the same
+  test as the unbounded one, and then given one chance the unbounded one does
+  not get: a body with no loop of its own has finitely many paths P, so k
+  iterations of it have at most P^k whatever the subject. The dotted-quad
+  pattern of an IPv4 address is ambiguous inside an iteration ([01]?\d?\d reads
+  "11" two ways) and was rightly allowed for three iterations -- 6^3 paths --
+  where its unbounded twin is 2^n. Past BudgetMaxCountedPaths the count itself
+  is the explosion: (a?) taken twenty times before twenty a's. A counted repeat
+  over a body WITH a loop of its own and an ambiguous iteration -- (a+) ten
+  times -- is polynomial of degree ten and refuses, as before. Nests of counts
+  are still capped by BudgetMaxRepeatProduct.
 
-  BOUNDED REPEATS COUNT TOO. A counted repeat -- (a+) taken ten times, or (a?)
-  taken twenty times before a run of twenty a's -- carries no unbounded outer
-  quantifier and the first version allowed both; both blow up (2703 ms and worse
-  on a 26-character subject). A counted repeat of at least BudgetAmbiguousRepeat
-  iterations over an ambiguous body is refused for the same reason -- the number
-  of ways to cut the subject up is ambiguity^count either way.
+  WHAT IT READS IS WHAT THE MATCHER READS. Every set an atom stands for is a
+  SUPERSET of what TRegExpr 0.987 matches -- the version RegExpr is in FPC
+  3.2.2, read from its source -- and a superset can only find more ambiguity,
+  never hide some. \x61 is the byte a, (?i) folds case to the end of its group,
+  (?x) makes blanks and #-comments nothing, an empty group or a comment
+  consumes nothing. An ATOM whose bytes it cannot name -- a backreference, an
+  escape it does not model -- inside a repeated body makes "unambiguous"
+  unprovable, so that body refuses.
 
-  TWO KINDS OF UNCERTAINTY, RESOLVED IN OPPOSITE DIRECTIONS, and the difference
-  is the whole of the 2026-10-09 repair. A pattern the TABLES cannot hold -- one
-  nested past MaxReDepth, a body past MaxReAtoms or MaxReBranch -- is ALLOWED:
-  this judge did not look at it, and refusing what it did not look at is the
-  failure the paragraphs above are about. But an ATOM whose bytes it cannot name
-  -- a backreference, an escape it does not model -- inside a body it IS
-  judging resolves toward REFUSAL: a set it cannot name is a set it cannot
-  prove disjoint, and "unambiguous" is a claim of proof. The judge used to make
-  that claim off its own misreadings: an escape's operand read as literal atoms
-  (^(\x61+)+$), (?i) ignored (^(a|A)+$ under it), an empty group or a comment
-  taken for a separator. Each produced a confident "unambiguous" over a body
-  that ran 2^n. The sets it intersects are now always SUPERSETS of what
-  TRegExpr 0.987 matches -- the version RegExpr is in FPC 3.2.2, read from its
-  source -- and a superset can only make it refuse more.
+  WHAT IT CANNOT LOOK AT, IT REFUSES. A pattern nested past MaxReDepth, bigger
+  than MaxReNodes, or whose repeated body needs more than MaxReStates states or
+  MaxReWork steps of product search, is refused. Until 2026-10-09 the old
+  judge's table limits (96 atoms, 16 branches, 48 levels) meant ALLOW, and
+  padding any 2^n shape past one of them was a documented way through. The
+  limits are now far past any pattern a program writes -- a 300-word
+  alternation under a repeat is judged in milliseconds -- so the only thing a
+  refusal past them costs is a pattern nobody writes, and the thing it closes
+  is a bypass anybody can type. docs/embedding.md records the decision.
+
+  WHAT IT DOES NOT CLAIM. Polynomial blow-up -- a*a*a*b at the top level,
+  degree two -- is outside this judge: the budget's time ceiling bounds what the
+  matcher may cost a CALL, not the cost of every call it is willing to start.
+  The judge closes the exponential door, which is the one a forty-character
+  subject can hold open for a week.
 
   All of it applies ONLY when the host installed a budget. }
 
 const
-  { A counted repeat of at least this many iterations over an ambiguous body is
-    treated as unbounded work. Three is low enough to catch a twenty-fold repeat
-    of .*a and high enough to leave the three-fold repeat inside an IPv4 pattern
-    -- whose body is unambiguous anyway -- and every two-iteration date shape. }
+  { A counted repeat of at least this many iterations is judged like an
+    unbounded one. Three is low enough to catch a twenty-fold repeat of .*a and
+    high enough to leave every two-iteration date shape unjudged. }
   BudgetAmbiguousRepeat = 3;
+
+  { An ambiguous counted repeat over a loop-free body is allowed while its
+    paths, P to the count, stay at or under this. 6^3 = 216 (the IPv4 quad)
+    is allowed; 2^20 ((a?) twenty times) is not. }
+  BudgetMaxCountedPaths = 4096;
+
+  { THE JUDGE'S OWN LIMITS. Past any of them the pattern is refused, not
+    allowed -- see the comment above. }
+  MaxReDepth = 100;          // nested groups
+  MaxReNodes = 262144;       // parse-tree nodes for the whole pattern
+  MaxReStates = 4096;        // automaton states for one repeated body
+  MaxReWork = 20000000;      // closure and product steps, for the whole pattern
+
+  { A counted repeat whose upper count is at most this is unrolled exactly
+    (one path per count, as TRegExpr walks it). A larger one is read as its
+    first MaxReLoopCopies copies followed by an unbounded loop -- a SUPERSET
+    of its paths, which can only make the judge refuse more. }
+  MaxReUnroll = 64;
+  MaxReLoopCopies = 3;
 
 type
   TByteSet = set of Byte;
 
   TQuantKind = (qkNone, qkOptional, qkBounded, qkUnbounded);
 
-  { One atom of a branch, in order. KIND is what the ambiguity test needs:
+  { The parse tree. rnByte consumes one byte of CSet; rnEmpty consumes nothing
+    (an anchor, a zero-width escape, a lookaround, a comment, a directive);
+    rnUnknown is an atom the judge cannot name; rnRep repeats its one child
+    MinR..MaxR times (MaxR < 0 = unbounded). Children are a First/Next list. }
+  TReNodeKind = (rnByte, rnEmpty, rnUnknown, rnCat, rnAlt, rnRep);
 
-      akSep   mandatory and FIXED width -- a barrier that pins an iteration
-              boundary, if its set is disjoint from the flexible atoms
-      akFlex  optional or unbounded -- it can slide across a boundary
-      akWide  mandatory but of VARIABLE width (a group whose body is not fixed):
-              it must be consumed, but it cannot pin a boundary, and whatever it
-              can consume counts as flexible }
-  TReAtomKind = (akSep, akFlex, akWide);
-
-  TReAtom = record
+  TReNode = record
+    Kind: TReNodeKind;
     CSet: TByteSet;
-    Known: Boolean;
-    Kind: TReAtomKind;
-    Branch: Integer;
+    MinR, MaxR: Int64;
+    First, Last, Next: Integer;
+    Group: Boolean;          // rnRep over a parenthesised group: the judged kind
+    { rnRep over a group that TRegExpr compiles to OP_LOOP -- a counted repeat,
+      or a lazy one -- rather than to a branch that jumps back. }
+    LoopOp: Boolean;
+    { A LoopOp nested in another, or holding one: its counts are not to be
+      trusted, and it is read as unbounded (see MarkLoops). }
+    Unsure: Boolean;
+    HasParent: Boolean;
   end;
 
-const
-  MaxReDepth = 48;
-  MaxReBranch = 15;
-  MaxReAtoms = 96;
-
-type
-  TReLevel = record
-    Unbounded: Boolean;      // an unbounded quantifier occurs in this body
-    Reps: Int64;             // the largest bounded-repetition product in it
-    Opaque: Boolean;         // a lookaround: it consumes nothing, so no first-set
-    Branches: Integer;       // how many alternatives so far (1 + the '|' count)
-    First: array[0..MaxReBranch] of TByteSet;
-    Known: array[0..MaxReBranch] of Boolean;
-    NeedFirst: Boolean;      // still collecting the current branch's first set
-    AnyFirst: Boolean;       // this branch has contributed at least one atom
-    NAtoms: Integer;         // atoms recorded for the ambiguity test
-    Atoms: array[0..MaxReAtoms - 1] of TReAtom;
-    Overflowed: Boolean;     // more atoms than the table holds: do not judge
-    { MORE BRANCHES THAN THE TABLE HOLDS -- the twin of Overflowed, and it was
-      missing, so the two table limits gave up in OPPOSITE directions.
-
-      With more than MaxReBranch+1 alternatives the First/Known arrays stop
-      recording, so BodyUnambiguous cannot judge the body -- and it returned its
-      initial False, which the caller reads as "ambiguous", which refuses. That
-      made `^(a|b|...|p)+$` (16 branches) allowed and `^(a|b|...|q)+$` (17)
-      refused, with a reason naming the (a+)+ shape that neither pattern has;
-      `^[a-q]+$`, the same language, is allowed. A 17-verb HTTP-method
-      alternation is the realistic form.
-
-      This flag is what lets the caller tell "I judged it and it is ambiguous"
-      from "I could not judge it", so the second resolves toward ALLOW like
-      every other uncertainty in this unit. }
-    BranchOverflow: Boolean;
-    FixedWidth: Boolean;     // every branch consumes a fixed number of bytes
-    { THE MODIFIERS IN FORCE, which change what an atom MATCHES and therefore
-      every set this judge intersects. TRegExpr reads (?i) and (?x) as a
-      directive that holds to the end of the ENCLOSING group (ParseReg saves
-      fCompModifiers on entry and restores it on exit), across a '|' too, and a
-      nested group inherits whatever is in force where it opens. Ignoring them
-      was a confident wrong answer: (?i)^(a|A)+$ has two disjoint first sets as
-      written and two IDENTICAL ones as matched, and ran 2^n. }
+  { The modifiers in force. TRegExpr reads (?i) and (?x) as a directive that
+    holds to the end of the ENCLOSING group (ParseReg saves fCompModifiers on
+    entry and restores it on exit), across a '|' too, and a nested group
+    inherits whatever is in force where it opens. }
+  TReMods = record
     CaseFold: Boolean;       // (?i): every literal and class matches both cases
     Extended: Boolean;       // (?x): unescaped whitespace and #-comments are nothing
-    { THE EMPTY STRING, MATCHED IN MORE THAN ONE WAY. A body need not consume
-      anything to be ambiguous: ^(c()?)+$ and ^(c(a?|b?))+$ have a mandatory
-      'c' that pins every iteration, and still ran 2^n (4188 and 5907 ms at
-      n=24), because after each 'c' there are TWO ways to match nothing -- take
-      the empty group or skip it; take the first empty branch or the second --
-      and a failing tail tries every combination. TRegExpr does not memoise.
-      The three ways to get two empty matches: a quantifier on something that
-      can match empty (a zero-width piece, or a nullable group) unless it is an
-      exact count; two nullable branches in one alternation; or a nested level
-      that already has either. BranchNullable/NullableBranches track the second,
-      and EmptyAmb records any of them. }
-    BranchNullable: Boolean; // the current branch can still match the empty string
-    NullableBranches: Integer; // closed branches that can match the empty string
-    EmptyAmb: Boolean;       // the empty string matches here in more than one way
   end;
+
+  { One state of a judged body's automaton: a byte state consumes one byte of
+    CSet and moves to Out1; an empty state moves to Out1 and/or Out2. }
+  TReState = record
+    IsByte: Boolean;
+    CSet: TByteSet;
+    Out1, Out2: Integer;
+  end;
+
+  TReVerdict = (rvUnambiguous, rvUnknown, rvEmptyLoop, rvEmptyTwice,
+                rvAmbiguous, rvTooBig);
+
+  TReIntArray = array of Integer;
 
 function SetOfRange(A, B: Byte): TByteSet;
 var i: Integer;
@@ -865,46 +874,39 @@ begin
   else begin AVal := 0; Result := False; end;
 end;
 
+function SatAdd(A, B: Int64): Int64;
+begin
+  if A > High(Int64) - B then Result := High(Int64) else Result := A + B;
+end;
+
+function SatMul(A, B: Int64): Int64;
+begin
+  if (A = 0) or (B = 0) then Exit(0);
+  if A > High(Int64) div B then Result := High(Int64) else Result := A * B;
+end;
+
 function BudgetPatternBounded(const APattern: String; out AWhy: String): Boolean;
 var
-  lv: array[0..MaxReDepth] of TReLevel;
-  top: Integer;
+  nodes: array of TReNode;
+  nn: Integer;
   i, n: Integer;
   gaveUp: Boolean;
-
-  procedure ResetLevel(var L: TReLevel; ACaseFold, AExtended: Boolean);
-  var b: Integer;
-  begin
-    L.CaseFold := ACaseFold;
-    L.Extended := AExtended;
-    L.BranchNullable := True;
-    L.NullableBranches := 0;
-    L.EmptyAmb := False;
-    L.Unbounded := False;
-    L.Reps := 1;
-    L.Opaque := False;
-    L.Branches := 1;
-    for b := 0 to MaxReBranch do
-    begin
-      L.First[b] := [];
-      L.Known[b] := True;
-    end;
-    L.NeedFirst := True;
-    L.AnyFirst := False;
-    L.NAtoms := 0;
-    L.Overflowed := False;
-    L.BranchOverflow := False;
-    L.FixedWidth := True;
-  end;
+  st: array of TReState;
+  ns: Integer;
+  work: Int64;
+  tooBig: Boolean;
 
   { Read the quantifier standing at i (if any) and step past it. AMax is the
-    largest number of repetitions, AMin the smallest -- the ambiguity test needs
-    both, because an exact count is a fixed-width barrier and a range is not. }
-  function ReadQuant(out AMin, AMax: Int64): TQuantKind;
+    largest number of repetitions, AMin the smallest. ALoopOp answers whether,
+    on a group, TRegExpr 0.987 compiles it to OP_LOOP: a counted form, or a
+    lazy one (ParsePiece: EmitComplexBraces); a greedy * + ? on a group is a
+    branch that jumps back instead. }
+  function ReadQuant(out AMin, AMax: Int64; out ALoopOp: Boolean): TQuantKind;
   var j, lo, hi: Int64; sawComma, sawHi: Boolean; c: Char;
   begin
     AMax := 1;
     AMin := 1;
+    ALoopOp := False;
     Result := qkNone;
     if i > n then Exit;
     c := APattern[i];
@@ -948,60 +950,24 @@ var
       if (j > n) or (APattern[j] <> '}') then Exit;   // not a quantifier at all
       i := Integer(j) + 1;
       AMin := lo;
-      if sawComma and not sawHi then Exit(qkUnbounded);   // {n,}
-      if not sawComma then hi := lo;                      // {n}
-      AMax := hi;
-      if (hi <= 1) and (lo <= 0) then Exit(qkOptional);
-      Result := qkBounded;
+      ALoopOp := True;
+      if sawComma and not sawHi then
+        Result := qkUnbounded                             // {n,}
+      else
+      begin
+        if not sawComma then hi := lo;                    // {n}
+        AMax := hi;
+        if (hi <= 1) and (lo <= 0) then Result := qkOptional
+        else Result := qkBounded;
+      end;
     end;
-    // A lazy or possessive suffix does not change how much work the worst case is.
+    { A lazy suffix does not change how much work the worst case is -- but on a
+      group it makes the repeat an OP_LOOP. A possessive '+' is a compile error
+      in 0.987 (reeNestedSQP) and is stepped past the same way. }
     if (Result <> qkNone) and (i <= n) and ((APattern[i] = '?') or (APattern[i] = '+')) then
-      Inc(i);
-  end;
-
-  { Fold one consumed atom into the current branch's first-set. }
-  procedure NoteAtom(const ASet: TByteSet; AKnown, AOptional: Boolean);
-  var b: Integer;
-  begin
-    if lv[top].Opaque then Exit;
-    b := lv[top].Branches - 1;
-    if b > MaxReBranch then Exit;
-    if not lv[top].NeedFirst then Exit;
-    if AKnown then lv[top].First[b] := lv[top].First[b] + ASet
-    else lv[top].Known[b] := False;
-    lv[top].AnyFirst := True;
-    if not AOptional then lv[top].NeedFirst := False;
-  end;
-
-  { Record one atom of the current branch, in order, for the ambiguity test. }
-  procedure PushAtom(const ASet: TByteSet; AKnown: Boolean; AKind: TReAtomKind);
-  var k: Integer;
-  begin
-    if lv[top].Opaque then Exit;               // a lookaround consumes nothing
-    if AKind <> akSep then lv[top].FixedWidth := False;
-    if lv[top].NAtoms >= MaxReAtoms then
     begin
-      lv[top].Overflowed := True;
-      Exit;
-    end;
-    k := lv[top].NAtoms;
-    lv[top].Atoms[k].CSet := ASet;
-    lv[top].Atoms[k].Known := AKnown;
-    lv[top].Atoms[k].Kind := AKind;
-    lv[top].Atoms[k].Branch := lv[top].Branches - 1;
-    Inc(lv[top].NAtoms);
-  end;
-
-  { A quantifier's atom kind: what it does to an iteration boundary. }
-  function KindOf(AQ: TQuantKind; AMin, AMax: Int64): TReAtomKind;
-  begin
-    case AQ of
-      qkNone: Result := akSep;                              // exactly once
-      qkBounded:
-        if AMin = AMax then Result := akSep                 // {n}: fixed width
-        else Result := akFlex;                              // {n,m}: it can slide
-    else
-      Result := akFlex;                                     // ?, *, +, {n,}
+      if APattern[i] = '?' then ALoopOp := True;
+      Inc(i);
     end;
   end;
 
@@ -1024,13 +990,6 @@ var
   (* THE WHOLE ESCAPE, OPERAND INCLUDED. i is on the backslash; this steps past
     every byte the escape owns and answers what it matches.
 
-    THE DEFECT THIS REPLACED. The old reader looked at ONE character after the
-    backslash and the caller always stepped two, so an escape that carries an
-    operand left its operand behind to be read as literal atoms: in ^(\x61+)+$
-    the '6' became a mandatory separator no flexible atom could consume, and the
-    judge called the body unambiguous. It is ^(a+)+$, which it refuses -- and it
-    ran 2^n under a budget (n=24 1.9 s, n=40 past 20 s).
-
     THE MEANINGS ARE TRegExpr 0.987's, read from its ParseAtom and UnQuoteChar
     (non-Unicode build): \xNN and \x{N..} are one byte, \cX is a control byte,
     \t \n \r \f \a \e are bytes, \d \D \w \W \s \S \v \V \h \H are classes,
@@ -1039,9 +998,9 @@ var
     \z, \G, \k, \Q and the rest, and \0 -- mean a literal letter to 0.987 but
     something else to a newer TRegExpr or to PCRE, so they are UNKNOWN (and \u
     and \p take their operand with them, so a hex digit is never left behind to
-    pass for a separator). An unknown atom inside a repeat resolves toward
-    REFUSAL -- see BodyUnambiguous -- because a set this judge cannot name is a
-    set it cannot prove disjoint.
+    pass for something it is not). An unknown atom inside a repeated body
+    refuses -- see JudgeRepeat -- because a set this judge cannot name is a set
+    it cannot prove anything about.
 
     ACode is the single byte the escape stands for when it is a literal (a
     class uses it as a range end, and (?i) folds it), and -1 otherwise.
@@ -1154,16 +1113,15 @@ var
     locale, so it is counted as possibly matching any non-empty class. A NEGATED
     class matches what the positive one does not, so its superset is everything
     an ASCII subject provably avoids, plus every byte above 127. }
-  procedure ClassSet(out ASet: TByteSet; out AKnown: Boolean);
+  procedure ClassSet(AFold: Boolean; out ASet: TByteSet; out AKnown: Boolean);
   var
-    neg, fold, hiItem, hiRange: Boolean;
+    neg, hiItem, hiRange: Boolean;
     lo, hi, code, b: Integer;
     raw, up, esc: TByteSet;
     ek, ez: Boolean;
   begin
     ASet := [];
     AKnown := True;
-    fold := lv[top].CaseFold;
     raw := [];
     up := [];
     hiItem := False;
@@ -1230,7 +1188,7 @@ var
     end;
     if (i <= n) and (APattern[i] = ']') then Inc(i)
     else AKnown := False;                    // unterminated: the engine rejects it
-    if not fold then
+    if not AFold then
     begin
       if neg then ASet := AllBytes() - raw else ASet := raw;
       Exit;
@@ -1251,248 +1209,110 @@ var
 
   { A modifier string such as i, -i, ix-s: what TRegExpr's ParseModifiers
     reads. Only the two that change what an atom matches are tracked. }
-  procedure ApplyModifiers(var L: TReLevel; AFrom, ATo: Integer);
+  procedure ApplyModifiers(var M: TReMods; AFrom, ATo: Integer);
   var k: Integer; isOn: Boolean;
   begin
     isOn := True;
     for k := AFrom to ATo do
       case APattern[k] of
         '-': isOn := False;
-        'i', 'I': L.CaseFold := isOn;
-        'x', 'X': L.Extended := isOn;
+        'i', 'I': M.CaseFold := isOn;
+        'x', 'X': M.Extended := isOn;
       end;
   end;
 
-  { Do two of this level's branches share a possible first byte? That is the
-    (a|ab)+ shape: two ways to begin an iteration is two ways to cut the subject
-    up, exactly like a sliding quantifier. }
-  function BranchesOverlap(const L: TReLevel): Boolean;
-  var a, b, cnt: Integer;
-  begin
-    Result := False;
-    cnt := L.Branches;
-    if cnt > MaxReBranch + 1 then Exit;      // too many to have tracked: do not judge
-    if cnt < 2 then Exit;
-    for a := 0 to cnt - 2 do
-      for b := a + 1 to cnt - 1 do
-        if L.Known[a] and L.Known[b] and ((L.First[a] * L.First[b]) <> []) then
-          Exit(True);
-  end;
+  // --- the parse tree -------------------------------------------------------
 
-  function UnionFirst(const L: TReLevel; out ASet: TByteSet): Boolean;
-  var b, cnt: Integer;
+  { Node 0 is a spare empty node that nothing links: past MaxReNodes every
+    new node is it, and the verdict is already "too large to judge". }
+  function NewNode(AKind: TReNodeKind): Integer;
   begin
-    ASet := [];
-    cnt := L.Branches;
-    if cnt > MaxReBranch + 1 then Exit(False);
-    for b := 0 to cnt - 1 do
+    if nn >= MaxReNodes then
     begin
-      if not L.Known[b] then Exit(False);
-      ASet := ASet + L.First[b];
+      gaveUp := True;
+      Exit(0);
     end;
-    Result := True;
+    if nn >= Length(nodes) then SetLength(nodes, nn * 2 + 16);
+    nodes[nn].Kind := AKind;
+    nodes[nn].CSet := [];
+    nodes[nn].MinR := 1;
+    nodes[nn].MaxR := 1;
+    nodes[nn].First := -1;
+    nodes[nn].Last := -1;
+    nodes[nn].Next := -1;
+    nodes[nn].Group := False;
+    nodes[nn].LoopOp := False;
+    nodes[nn].Unsure := False;
+    nodes[nn].HasParent := False;
+    Result := nn;
+    Inc(nn);
   end;
 
-  { Everything the body can consume, whatever the branch -- what a group folds
-    into its parent when the group is itself quantified. }
-  function ConsumedUnion(const L: TReLevel; out ASet: TByteSet): Boolean;
-  var k: Integer;
+  function ByteNode(const ASet: TByteSet): Integer;
   begin
-    ASet := [];
-    Result := True;
-    for k := 0 to L.NAtoms - 1 do
-    begin
-      if not L.Atoms[k].Known then Exit(False);
-      ASet := ASet + L.Atoms[k].CSet;
-    end;
-    if L.Overflowed then Result := False;
+    Result := NewNode(rnByte);
+    nodes[Result].CSet := ASet;
   end;
 
-  { THE AMBIGUITY TEST. True = the body decomposes uniquely, so repeating it
-    cannot take super-linearly many attempts. }
-  function BodyUnambiguous(const L: TReLevel): Boolean;
+  procedure AddKid(AParent, AKid: Integer);
+  begin
+    if gaveUp then Exit;
+    if nodes[AParent].First < 0 then nodes[AParent].First := AKid
+    else nodes[nodes[AParent].Last].Next := AKid;
+    nodes[AParent].Last := AKid;
+    nodes[AKid].HasParent := True;
+  end;
+
+  function ParseAlt(var M: TReMods; ADepth: Integer): Integer; forward;
+
+  { One atom at i. AGroup answers whether it was a parenthesised group, which
+    is what makes a quantifier on it a judged repeat. }
+  function ParseAtom(var M: TReMods; ADepth: Integer; out AGroup: Boolean): Integer;
   var
-    flexAll: TByteSet;
-    k, b, cnt, firstK, lastK, w: Integer;
-    anyMandatory, branchOk, windowKnown: Boolean;
-    window: TByteSet;
+    c: Char;
+    aset: TByteSet;
+    aknown, azero, look: Boolean;
+    code, j: Integer;
+    m2: TReMods;
   begin
-    Result := False;
-    if L.Overflowed then Exit;                 // more than the table holds
-    if L.NAtoms = 0 then Exit;                 // an empty body matches everywhere
-    cnt := L.Branches;
-    if cnt > MaxReBranch + 1 then Exit;
-
-    { The union of every atom that can slide -- optional, unbounded, or a
-      variable-width group. Taken across ALL branches, because iteration k may
-      use one branch and iteration k+1 another.
-
-      AN UNKNOWN ATOM ANYWHERE POISONS THE BODY, not only a sliding one. It used
-      to be skipped when it was mandatory, on the reasoning that it could not be
-      used as a barrier anyway -- but a backreference is mandatory AND of
-      variable width, and an escape this judge cannot name may be anything at
-      all, so leaving it out of flexAll let a neighbour pass for a separator
-      that the unknown atom could in fact swallow. A set this judge cannot name
-      is a set it cannot prove disjoint, and an unproven body is ambiguous. }
-    flexAll := [];
-    for k := 0 to L.NAtoms - 1 do
-    begin
-      if not L.Atoms[k].Known then Exit;
-      if L.Atoms[k].Kind <> akSep then flexAll := flexAll + L.Atoms[k].CSet;
-    end;
-
-    for b := 0 to cnt - 1 do
-    begin
-      branchOk := False;
-      anyMandatory := False;
-      firstK := -1;
-      lastK := -1;
-      for k := 0 to L.NAtoms - 1 do
-        if L.Atoms[k].Branch = b then
-        begin
-          if L.Atoms[k].Kind <> akFlex then anyMandatory := True;
-          if firstK < 0 then firstK := k;
-          lastK := k;
-        end;
-      // A branch that can match nothing at all is the (a?)+ shape: every
-      // position can be split any number of ways.
-      if not anyMandatory then Exit;
-
-      { (i) some fixed-width mandatory atom no flexible atom can consume.
-
-        A BARRIER MUST CONSUME SOMETHING. An empty set is disjoint from
-        everything, so an atom with no bytes in it passed every test below as
-        the perfect separator -- and the atoms that have no bytes are the ones
-        that consume nothing: an empty group, (?:), and once the reader of (?
-        was wrong, a (?#comment) too. ^(a+()a+)+$ was judged unambiguous and is
-        (a+a+)+. Every barrier test now asks for a non-empty set. }
-      for k := 0 to L.NAtoms - 1 do
-        if (L.Atoms[k].Branch = b) and (L.Atoms[k].Kind = akSep) and
-           L.Atoms[k].Known and (L.Atoms[k].CSet <> []) and
-           ((L.Atoms[k].CSet * flexAll) = []) then
-        begin
-          branchOk := True;
-          Break;
-        end;
-
-      // (ii) the branch ENDS on a barrier: only the flexible atoms since the
-      // previous barrier can reach across the boundary behind it.
-      if (not branchOk) and (lastK >= 0) and (L.Atoms[lastK].Kind = akSep) and
-         L.Atoms[lastK].Known and (L.Atoms[lastK].CSet <> []) then
-      begin
-        window := [];
-        windowKnown := True;
-        w := lastK - 1;
-        while w >= 0 do
-        begin
-          if L.Atoms[w].Branch = b then
-          begin
-            if L.Atoms[w].Kind = akSep then Break;
-            if not L.Atoms[w].Known then begin windowKnown := False; Break; end;
-            window := window + L.Atoms[w].CSet;
-          end;
-          Dec(w);
-        end;
-        if windowKnown and ((L.Atoms[lastK].CSet * window) = []) then branchOk := True;
-      end;
-
-      // (iii) the branch BEGINS on a barrier: only the flexible atoms up to the
-      // next barrier can reach across the boundary in front of it.
-      if (not branchOk) and (firstK >= 0) and (L.Atoms[firstK].Kind = akSep) and
-         L.Atoms[firstK].Known and (L.Atoms[firstK].CSet <> []) then
-      begin
-        window := [];
-        windowKnown := True;
-        w := firstK + 1;
-        while w < L.NAtoms do
-        begin
-          if L.Atoms[w].Branch = b then
-          begin
-            if L.Atoms[w].Kind = akSep then Break;
-            if not L.Atoms[w].Known then begin windowKnown := False; Break; end;
-            window := window + L.Atoms[w].CSet;
-          end;
-          Inc(w);
-        end;
-        if windowKnown and ((L.Atoms[firstK].CSet * window) = []) then branchOk := True;
-      end;
-
-      if not branchOk then Exit;
-    end;
-    Result := True;
-  end;
-
-var
-  c: Char;
-  q: TQuantKind;
-  qmin, qmax, total: Int64;
-  aset: TByteSet;
-  aknown, azero: Boolean;
-  popped: TReLevel;
-  kind: TReAtomKind;
-  ambiguous, groupNullable: Boolean;
-  j, code: Integer;
-begin
-  AWhy := '';
-  Result := True;
-  n := Length(APattern);
-  if n = 0 then Exit;
-  top := 0;
-  gaveUp := False;
-  // RegexGuard's TRegExpr starts with the library defaults, ModifierI and
-  // ModifierX both off (RegExprModifierI/X in regexpr.pas).
-  ResetLevel(lv[0], False, False);
-  i := 1;
-  while i <= n do
-  begin
+    AGroup := False;
     c := APattern[i];
-    { (?x): an unescaped blank and a #-comment to the end of the line are not
-      atoms (ParseAtom emits OP_COMMENT for them). Read as literals, the blank
-      in (?x)^(a+ a?)+$ was a separator no flexible atom could consume, and the
-      body is (a+a?)+. }
-    if lv[top].Extended and (c in [' ', #9, #10, #13]) then
-    begin
-      Inc(i);
-      Continue;
-    end;
-    if lv[top].Extended and (c = '#') then
-    begin
-      while (i <= n) and (APattern[i] <> #10) and (APattern[i] <> #13) do Inc(i);
-      Continue;
-    end;
     case c of
       '\':
         begin
           ReadEscape(False, aset, aknown, azero, code);
-          q := ReadQuant(qmin, qmax);
-          if azero then
-          begin
-            // A zero-width assertion consumes nothing, so it neither starts a
-            // branch nor repeats anything -- but quantified (\B?) it is two
-            // ways to match nothing.
-            if q <> qkNone then lv[top].EmptyAmb := True;
-            Continue;
-          end;
-          // An unknown escape (a backreference) may match nothing at all, so
-          // only a known one ends the branch's ability to match empty.
-          if aknown and (qmin >= 1) then lv[top].BranchNullable := False;
-          if (code >= 0) and lv[top].CaseFold then aset := FoldLiteral(Byte(code));
-          if q = qkUnbounded then lv[top].Unbounded := True
-          else if q = qkBounded then
-            if qmax > lv[top].Reps then lv[top].Reps := qmax;
-          NoteAtom(aset, aknown, q in [qkOptional, qkUnbounded]);
-          PushAtom(aset, aknown, KindOf(q, qmin, qmax));
+          if azero then Exit(NewNode(rnEmpty));
+          if not aknown then Exit(NewNode(rnUnknown));
+          if (code >= 0) and M.CaseFold then aset := FoldLiteral(Byte(code));
+          Result := ByteNode(aset);
         end;
+      '[':
+        begin
+          ClassSet(M.CaseFold, aset, aknown);
+          if aknown then Result := ByteNode(aset) else Result := NewNode(rnUnknown);
+        end;
+      '^', '$':
+        begin
+          Inc(i);                            // zero-width anchors
+          Result := NewNode(rnEmpty);
+        end;
+      '.':
+        begin
+          Inc(i);
+          Result := ByteNode(AllBytes());
+        end;
+      '*', '+', '?':
+        { A quantifier with nothing before it is, to TRegExpr, a quantifier on
+          the zero-width piece before it -- under (?x) the blank in `(a) ?` --
+          or a compile error. Either way it repeats something that consumes
+          nothing: an empty node, and the caller reads the quantifier. }
+        Result := NewNode(rnEmpty);
       '(':
         begin
           { A MODIFIER DIRECTIVE OR A COMMENT IS NOT A GROUP. TRegExpr emits a
-            comment node for (?i) and (?#...), consuming nothing; this judge
-            used to open a level for them, close it empty, and fold that empty
-            level into its parent as a fixed-width atom with no bytes -- a
-            "separator" disjoint from everything. A directive now changes the
-            enclosing level's modifiers and opens nothing. (?i:...) -- a scoped
-            group, which 0.987 rejects and a newer TRegExpr accepts -- opens a
-            level with the modifiers applied to it alone. }
+            comment node for (?i) and (?#...), consuming nothing. (?i:...) -- a
+            scoped group, which 0.987 rejects and a newer TRegExpr accepts --
+            is a group with the modifiers applied to it alone. }
           if (i + 1 <= n) and (APattern[i + 1] = '?') then
           begin
             if (i + 2 <= n) and (APattern[i + 2] = '#') then
@@ -1500,42 +1320,39 @@ begin
               i := i + 3;
               while (i <= n) and (APattern[i] <> ')') do Inc(i);
               if i <= n then Inc(i);
-              // a quantified comment is two ways to match nothing
-              if ReadQuant(qmin, qmax) <> qkNone then lv[top].EmptyAmb := True;
-              Continue;
+              Exit(NewNode(rnEmpty));
             end;
             j := i + 2;
             while (j <= n) and (APattern[j] in ['i', 'I', 'r', 'R', 's', 'S', 'g', 'G',
                                                  'm', 'M', 'x', 'X', '-']) do Inc(j);
             if (j > i + 2) and (j <= n) and (APattern[j] = ')') then
             begin
-              ApplyModifiers(lv[top], i + 2, j - 1);
+              ApplyModifiers(M, i + 2, j - 1);
               i := j + 1;
-              if ReadQuant(qmin, qmax) <> qkNone then lv[top].EmptyAmb := True;
-              Continue;
+              Exit(NewNode(rnEmpty));
             end;
             if (j > i + 2) and (j <= n) and (APattern[j] = ':') then
             begin
-              if top >= MaxReDepth then begin gaveUp := True; Break; end;
-              Inc(top);
-              ResetLevel(lv[top], lv[top - 1].CaseFold, lv[top - 1].Extended);
-              ApplyModifiers(lv[top], i + 2, j - 1);
+              m2 := M;
+              ApplyModifiers(m2, i + 2, j - 1);
               i := j + 1;
-              Continue;
+              Result := ParseAlt(m2, ADepth + 1);
+              if (i <= n) and (APattern[i] = ')') then Inc(i);
+              AGroup := True;
+              Exit;
             end;
           end;
-          if top >= MaxReDepth then begin gaveUp := True; Break; end;
-          Inc(top);
-          // A group inherits the modifiers in force where it opens.
-          ResetLevel(lv[top], lv[top - 1].CaseFold, lv[top - 1].Extended);
           Inc(i);
+          // A group inherits the modifiers in force where it opens.
+          m2 := M;
+          look := False;
           if (i <= n) and (APattern[i] = '?') then
           begin
             Inc(i);
             if (i <= n) and ((APattern[i] = ':') or (APattern[i] = '>')) then Inc(i)
             else if (i <= n) and ((APattern[i] = '=') or (APattern[i] = '!')) then
             begin
-              lv[top].Opaque := True;                 // lookahead
+              look := True;                           // lookahead
               Inc(i);
             end
             else if (i <= n) and (APattern[i] = '<') then
@@ -1543,7 +1360,7 @@ begin
               Inc(i);
               if (i <= n) and ((APattern[i] = '=') or (APattern[i] = '!')) then
               begin
-                lv[top].Opaque := True;               // lookbehind
+                look := True;                         // lookbehind
                 Inc(i);
               end
               else
@@ -1558,198 +1375,647 @@ begin
             end
             else
               // Any other (? form, which 0.987 rejects at compile time: step to
-              // its ')' -- the level it opened closes empty, and an empty level
-              // folds into nothing (below).
+              // its ')', and the group is empty.
               while (i <= n) and (APattern[i] <> ')') do Inc(i);
           end;
-        end;
-      ')':
-        begin
-          if top = 0 then begin Inc(i); Continue; end;   // unbalanced: not ours to judge
-          popped := lv[top];
-          Dec(top);
-          Inc(i);
-          q := ReadQuant(qmin, qmax);
-          // Close the last branch: two that can match nothing are two ways to.
-          if popped.BranchNullable then Inc(popped.NullableBranches);
-          if popped.NullableBranches >= 2 then popped.EmptyAmb := True;
-          groupNullable := popped.Opaque or (popped.NullableBranches > 0);
-          ambiguous := False;
-          if (q = qkUnbounded) or ((q = qkBounded) and (qmax >= BudgetAmbiguousRepeat)) then
-          begin
-            // THE JUDGEMENT, and the only place a pattern is ever refused.
-            if popped.EmptyAmb then
-            begin
-              AWhy := 'a repeat of a group that can match the empty string in more ' +
-                      'than one way (the (c()?)+ shape) can take exponentially ' +
-                      'many attempts';
-              Exit(False);
-            end;
-            if BranchesOverlap(popped) then
-            begin
-              AWhy := 'a repeat of an alternation whose branches can start on the ' +
-                      'same character (the (a|ab)+ shape) can take exponentially ' +
-                      'many attempts';
-              Exit(False);
-            end;
-            ambiguous := not BodyUnambiguous(popped);
-            { BOTH TABLE OVERFLOWS SUPPRESS THE REFUSAL, and for one reason:
-              BodyUnambiguous cannot have judged what it could not record, and
-              this unit's contract is that every uncertainty resolves toward
-              letting the pattern run. Overflowed (atoms) always did; the branch
-              table did not, and refused a 17-way alternation of single
-              characters while allowing the 16-way one beside it. }
-            if ambiguous and (not popped.Overflowed) and
-               (not popped.BranchOverflow) and (popped.NAtoms > 0) then
-            begin
-              if q = qkUnbounded then
-                AWhy := 'a repeat of a group whose body can match the same text in ' +
-                        'more than one way (the (a+)+ shape) can take exponentially ' +
-                        'many attempts -- a mandatory separator between iterations ' +
-                        'would make it linear'
-              else
-                AWhy := 'a counted repeat of ' + IntToStr(qmax) +
-                        ' iterations over a body that can match the same text in ' +
-                        'more than one way (the (a+){10} shape) can take ' +
-                        'exponentially many attempts';
-              Exit(False);
-            end;
-          end;
-          if q = qkUnbounded then lv[top].Unbounded := True
-          else if q = qkBounded then
-          begin
-            total := popped.Reps * qmax;
-            if (popped.Reps > 0) and (total div popped.Reps <> qmax) then
-              total := High(Int64);                       // the product wrapped
-            if total > BudgetMaxRepeatProduct then
-            begin
-              AWhy := 'nested counted repeats expand to more than ' +
-                      IntToStr(BudgetMaxRepeatProduct) + ' repetitions';
-              Exit(False);
-            end;
-            if total > lv[top].Reps then lv[top].Reps := total;
-            if popped.Unbounded then lv[top].Unbounded := True;
-          end
-          else
-          begin
-            if popped.Unbounded then lv[top].Unbounded := True;
-            if popped.Reps > lv[top].Reps then lv[top].Reps := popped.Reps;
-          end;
-
-          { The empty string, carried up. A level that matches nothing in two
-            ways makes its parent do so too, once per time the parent runs it;
-            a group that can match nothing, quantified by anything but an exact
-            count, is two more (take it empty, or skip it); and a group that
-            must consume something ends the parent branch's chance of matching
-            nothing. }
-          if popped.EmptyAmb then lv[top].EmptyAmb := True;
-          if groupNullable and (q <> qkNone) and
-             not ((q = qkBounded) and (qmin = qmax)) then
-            lv[top].EmptyAmb := True;
-          if (not groupNullable) and (qmin >= 1) then lv[top].BranchNullable := False;
-
-          if popped.Opaque then
-          begin
-            // A lookaround consumes nothing: it cannot begin a branch, and it
-            // cannot pin or cross an iteration boundary either.
-          end
-          else
-          begin
-            if UnionFirst(popped, aset) then
-              NoteAtom(aset, True, (q in [qkOptional, qkUnbounded]) or (not popped.AnyFirst))
-            else
-              NoteAtom([], False, q in [qkOptional, qkUnbounded]);
-            { A GROUP FOLDS INTO ITS PARENT AS ONE ATOM. Which kind it is decides
-              whether the parent can use it as a barrier:
-                quantified flexibly -> akFlex, and everything inside it can slide
-                mandatory, one branch, every atom fixed -> akSep, a real barrier
-                mandatory otherwise -> akWide: it must be consumed, but its width
-                                       varies, so it pins nothing }
-            if not ConsumedUnion(popped, aset) then
-            begin
-              aset := [];
-              aknown := False;
-            end
-            else
-              aknown := True;
-            if q in [qkOptional, qkUnbounded] then kind := akFlex
-            else if (q = qkBounded) and (qmin <> qmax) then kind := akFlex
-            else if popped.FixedWidth and (popped.Branches = 1) and
-                    (not popped.Overflowed) then kind := akSep
-            else kind := akWide;
-            // A group that recorded no atom -- (), (?:), (\b) -- consumes
-            // nothing, and an atom that consumes nothing is not one.
-            if popped.NAtoms > 0 then PushAtom(aset, aknown, kind);
-          end;
-        end;
-      '|':
-        begin
-          Inc(i);
-          { Past MaxReBranch+1 alternatives the First/Known arrays stop
-            recording, so nothing downstream may READ a verdict off this level.
-            The count keeps rising (BranchesOverlap and UnionFirst test it), and
-            the flag is what tells the judgement it is looking at an untracked
-            level rather than an ambiguous one. }
-          if lv[top].Branches > MaxReBranch then lv[top].BranchOverflow := True;
-          if lv[top].BranchNullable then Inc(lv[top].NullableBranches);
-          lv[top].BranchNullable := True;
-          Inc(lv[top].Branches);
-          lv[top].NeedFirst := True;
-          lv[top].AnyFirst := False;
-        end;
-      '[':
-        begin
-          ClassSet(aset, aknown);
-          q := ReadQuant(qmin, qmax);
-          if qmin >= 1 then lv[top].BranchNullable := False;
-          if q = qkUnbounded then lv[top].Unbounded := True
-          else if q = qkBounded then
-            if qmax > lv[top].Reps then lv[top].Reps := qmax;
-          NoteAtom(aset, aknown, q in [qkOptional, qkUnbounded]);
-          PushAtom(aset, aknown, KindOf(q, qmin, qmax));
-        end;
-      '^', '$':
-        begin
-          Inc(i);                               // zero-width anchors
-          if ReadQuant(qmin, qmax) <> qkNone then lv[top].EmptyAmb := True;
-        end;
-      '.':
-        begin
-          Inc(i);
-          q := ReadQuant(qmin, qmax);
-          if qmin >= 1 then lv[top].BranchNullable := False;
-          if q = qkUnbounded then lv[top].Unbounded := True
-          else if q = qkBounded then
-            if qmax > lv[top].Reps then lv[top].Reps := qmax;
-          NoteAtom(AllBytes(), True, q in [qkOptional, qkUnbounded]);
-          PushAtom(AllBytes(), True, KindOf(q, qmin, qmax));
-        end;
-      '*', '+', '?':
-        begin
-          { A quantifier with nothing before it is, to TRegExpr, a quantifier on
-            the zero-width piece before it -- under (?x) the blank in `(a) ?`
-            -- or a compile error. Either way it is two ways to match nothing. }
-          Inc(i);
-          lv[top].EmptyAmb := True;
+          Result := ParseAlt(m2, ADepth + 1);
+          if (i <= n) and (APattern[i] = ')') then Inc(i);
+          { A LOOKAROUND CONSUMES NOTHING. Its own repeats are in the tree and
+            are judged like any other -- the matcher backtracks inside it -- but
+            where it stands it is an empty node: it neither starts, ends nor
+            divides an iteration of anything around it. }
+          if look then Exit(NewNode(rnEmpty));
+          AGroup := True;
         end;
     else
       begin
-        if lv[top].CaseFold then aset := FoldLiteral(Byte(Ord(c)))
+        if M.CaseFold then aset := FoldLiteral(Byte(Ord(c)))
         else aset := [Byte(Ord(c))];
         Inc(i);
-        q := ReadQuant(qmin, qmax);
-        if qmin >= 1 then lv[top].BranchNullable := False;
-        if q = qkUnbounded then lv[top].Unbounded := True
-        else if q = qkBounded then
-          if qmax > lv[top].Reps then lv[top].Reps := qmax;
-        NoteAtom(aset, True, q in [qkOptional, qkUnbounded]);
-        PushAtom(aset, True, KindOf(q, qmin, qmax));
+        Result := ByteNode(aset);
       end;
     end;
   end;
-  if gaveUp then Exit(True);                    // nested past what we track: allow
-  // The outermost level is not inside any repeat, so its own Reps/Unbounded are
-  // linear work and nothing here refuses them.
+
+  { One branch: atoms and their quantifiers, up to a '|', a ')' or the end. }
+  function ParseSeq(var M: TReMods; ADepth: Integer): Integer;
+  var
+    seq, atom, r: Integer;
+    c: Char;
+    grp, loopOp: Boolean;
+    q: TQuantKind;
+    qmin, qmax: Int64;
+  begin
+    seq := NewNode(rnCat);
+    while (i <= n) and not gaveUp do
+    begin
+      c := APattern[i];
+      { (?x): an unescaped blank and a #-comment to the end of the line are not
+        atoms (ParseAtom emits OP_COMMENT for them). Read as literals, the blank
+        in (?x)^(a+ a?)+$ was a byte the a's could not consume, and the body is
+        (a+a?)+. }
+      if M.Extended and (c in [' ', #9, #10, #13]) then
+      begin
+        Inc(i);
+        Continue;
+      end;
+      if M.Extended and (c = '#') then
+      begin
+        while (i <= n) and (APattern[i] <> #10) and (APattern[i] <> #13) do Inc(i);
+        Continue;
+      end;
+      if (c = '|') or (c = ')') then Break;
+      atom := ParseAtom(M, ADepth, grp);
+      q := ReadQuant(qmin, qmax, loopOp);
+      if q <> qkNone then
+      begin
+        r := NewNode(rnRep);
+        nodes[r].MinR := qmin;
+        if q = qkUnbounded then nodes[r].MaxR := -1
+        else if qmax < qmin then nodes[r].MaxR := qmin   // {5,2}: rejected anyway
+        else nodes[r].MaxR := qmax;
+        nodes[r].Group := grp;
+        nodes[r].LoopOp := grp and loopOp;
+        AddKid(r, atom);
+        atom := r;
+      end;
+      AddKid(seq, atom);
+    end;
+    Result := seq;
+  end;
+
+  function ParseAlt(var M: TReMods; ADepth: Integer): Integer;
+  var alt: Integer;
+  begin
+    if ADepth > MaxReDepth then
+    begin
+      gaveUp := True;
+      i := n + 1;
+      Exit(0);
+    end;
+    alt := NewNode(rnAlt);
+    repeat
+      AddKid(alt, ParseSeq(M, ADepth));
+      if gaveUp or (i > n) or (APattern[i] <> '|') then Break;
+      Inc(i);
+    until False;
+    Result := alt;
+  end;
+
+  (* NESTED OP_LOOPs DO NOT COUNT. TRegExpr 0.987 keeps a counted (or lazy)
+     group repeat's iteration count in LoopStack[LoopStackIdx], one slot per
+     nesting depth, and OP_LOOPENTRY zeroes the slot on entry -- while an
+     earlier instance of a loop at that depth may still be on the backtracking
+     stack, to be resumed with somebody else's count. Measured: the group
+     "a, one to two times" taken one to two times and that taken twice should
+     match two to eight a's, and matches nine and twelve but not two; with
+     "aa" appended and taken four times it ran 219 ms on 28 a's, doubling every
+     byte and a half, where its 6^4 paths would be instant. The judge's model
+     of a count is therefore only true of an OP_LOOP that neither holds
+     another nor sits inside one; for those, the only safe reading is a loop
+     with no bound at either end -- a superset of whatever the counters do.
+     Answers whether the subtree holds an OP_LOOP. *)
+  function MarkLoops(K: Integer; AInside: Boolean): Boolean;
+  var c: Integer; isLoop, below: Boolean;
+  begin
+    isLoop := (nodes[K].Kind = rnRep) and nodes[K].LoopOp;
+    below := False;
+    c := nodes[K].First;
+    while c >= 0 do
+    begin
+      if MarkLoops(c, AInside or isLoop) then below := True;
+      c := nodes[c].Next;
+    end;
+    if isLoop and (AInside or below) then nodes[K].Unsure := True;
+    Result := isLoop or below;
+  end;
+
+  { Does the subtree hold an atom the judge cannot name? }
+  function HasUnknown(K: Integer): Boolean;
+  var c: Integer;
+  begin
+    if nodes[K].Kind = rnUnknown then Exit(True);
+    c := nodes[K].First;
+    while c >= 0 do
+    begin
+      if HasUnknown(c) then Exit(True);
+      c := nodes[c].Next;
+    end;
+    Result := False;
+  end;
+
+  { Does the subtree hold a loop -- an unbounded repeat, or a count too large
+    to unroll, which Build reads as one? }
+  function HasLoop(K: Integer): Boolean;
+  var c: Integer;
+  begin
+    if (nodes[K].Kind = rnRep) and
+       ((nodes[K].MaxR < 0) or (nodes[K].MaxR > MaxReUnroll) or
+        nodes[K].Unsure) then Exit(True);
+    c := nodes[K].First;
+    while c >= 0 do
+    begin
+      if HasLoop(c) then Exit(True);
+      c := nodes[c].Next;
+    end;
+    Result := False;
+  end;
+
+  { The largest product of nested counted repeats in the subtree: a group
+    repeated 0..1000 times over a body repeated 0..1000 times is a million. }
+  function Reps(K: Integer): Int64;
+  var c: Integer; r: Int64;
+  begin
+    Result := 1;
+    c := nodes[K].First;
+    while c >= 0 do
+    begin
+      r := Reps(c);
+      if r > Result then Result := r;
+      c := nodes[c].Next;
+    end;
+    if (nodes[K].Kind = rnRep) and (nodes[K].MaxR > 1) then
+      Result := SatMul(Result, nodes[K].MaxR);
+  end;
+
+  // --- the automaton of one repeated body -----------------------------------
+
+  function NewState(AIsByte: Boolean; const ASet: TByteSet; AOut1, AOut2: Integer): Integer;
+  begin
+    if ns >= MaxReStates then
+    begin
+      tooBig := True;
+      Exit(0);
+    end;
+    st[ns].IsByte := AIsByte;
+    st[ns].CSet := ASet;
+    st[ns].Out1 := AOut1;
+    st[ns].Out2 := AOut2;
+    Result := ns;
+    Inc(ns);
+    Inc(work);
+  end;
+
+  { Thompson's construction, in continuation form: the states that match node
+    K and then go on to ANext; answers the entry state. One path per
+    alternative, per count of a counted repeat, per way of matching nothing --
+    exactly the choices TRegExpr's backtracker makes, so the paths here are its
+    attempts. }
+  function Build(K, ANext: Integer): Integer;
+  var
+    kids: array of Integer;
+    c, m, j, s, t, loopAt, copies, optional: Integer;
+    mn, mx: Int64;
+  begin
+    Result := ANext;
+    if tooBig then Exit;
+    case nodes[K].Kind of
+      rnByte:
+        Result := NewState(True, nodes[K].CSet, ANext, -1);
+      rnEmpty, rnUnknown:
+        Result := ANext;               // an unknown never reaches here: JudgeRepeat
+      rnCat, rnAlt:
+        begin
+          m := 0;
+          kids := nil;
+          c := nodes[K].First;
+          while c >= 0 do
+          begin
+            SetLength(kids, m + 1);
+            kids[m] := c;
+            Inc(m);
+            c := nodes[c].Next;
+          end;
+          if m = 0 then Exit(ANext);
+          if nodes[K].Kind = rnCat then
+          begin
+            s := ANext;
+            for j := m - 1 downto 0 do s := Build(kids[j], s);
+          end
+          else
+          begin
+            // a chain of two-way splits: exactly one empty route per branch
+            s := Build(kids[m - 1], ANext);
+            for j := m - 2 downto 0 do
+            begin
+              t := Build(kids[j], ANext);
+              s := NewState(False, [], t, s);
+            end;
+          end;
+          Result := s;
+        end;
+      rnRep:
+        begin
+          c := nodes[K].First;
+          mn := nodes[K].MinR;
+          mx := nodes[K].MaxR;
+          if nodes[K].Unsure then
+          begin
+            mn := 0;                   // its counter is not to be trusted
+            mx := -1;
+          end;
+          if (mx < 0) or (mx > MaxReUnroll) then
+          begin
+            // X{m,} -- and a count too large to unroll -- as its first copies
+            // and then a loop: a superset of its paths.
+            loopAt := NewState(False, [], -1, ANext);
+            t := Build(c, loopAt);
+            st[loopAt].Out1 := t;
+            s := loopAt;
+            if mn > MaxReLoopCopies then copies := MaxReLoopCopies
+            else copies := Integer(mn);
+            for j := 1 to copies do s := Build(c, s);
+          end
+          else
+          begin
+            // X{m,n} as m copies and then n-m nested optional ones: one path
+            // per count, as the matcher counts. Both are at most MaxReUnroll.
+            s := ANext;
+            optional := Integer(mx - mn);
+            copies := Integer(mn);
+            for j := 1 to optional do
+            begin
+              t := Build(c, s);
+              s := NewState(False, [], t, ANext);
+            end;
+            for j := 1 to copies do s := Build(c, s);
+          end;
+          Result := s;
+        end;
+    end;
+  end;
+
+  { An order of the EMPTY states in which every empty move goes forward, or
+    False when an empty move can come back to where it started -- a body that
+    can go round while consuming nothing. }
+  function EmptyOrder(out AOrder: TReIntArray; out ACount: Integer): Boolean;
+  var
+    color: array of Byte;
+    stackS, stackE: array of Integer;
+    sp, s0, v, e, w: Integer;
+  begin
+    Result := True;
+    SetLength(color, ns);
+    SetLength(stackS, ns + 1);
+    SetLength(stackE, ns + 1);
+    SetLength(AOrder, ns);
+    ACount := 0;
+    for s0 := 0 to ns - 1 do
+    begin
+      if st[s0].IsByte or (color[s0] <> 0) then Continue;
+      sp := 0;
+      stackS[0] := s0;
+      stackE[0] := 0;
+      color[s0] := 1;
+      while sp >= 0 do
+      begin
+        v := stackS[sp];
+        e := stackE[sp];
+        Inc(stackE[sp]);
+        Inc(work);
+        if e = 0 then w := st[v].Out1
+        else if e = 1 then w := st[v].Out2
+        else
+        begin
+          color[v] := 2;                     // finished: post-order
+          AOrder[ACount] := v;
+          Inc(ACount);
+          Dec(sp);
+          Continue;
+        end;
+        if (w < 0) or st[w].IsByte then Continue;
+        if color[w] = 1 then Exit(False);    // back to a state still open
+        if color[w] = 0 then
+        begin
+          color[w] := 1;
+          Inc(sp);
+          stackS[sp] := w;
+          stackE[sp] := 0;
+        end;
+      end;
+    end;
+  end;
+
+  { THE TEST. Is the repeat of node X, taken round and round, ambiguous? }
+  function JudgeRepeat(X: Integer): TReVerdict;
+  var
+    exitAt, loopAt, t, k, u, v, j, p, q, a, b, a2, b2, ia, ib, head, tail: Integer;
+    order: TReIntArray;
+    nOrder: Integer;
+    cnt: array of Byte;
+    adjStart, adjTo: array of Integer;
+    nAdj: Integer;
+    seen: array of Byte;
+    queue: array of Integer;
+    idx: Int64;
+  begin
+    if HasUnknown(X) then Exit(rvUnknown);
+    ns := 0;
+    tooBig := False;
+    exitAt := NewState(False, [], -1, -1);
+    loopAt := NewState(False, [], -1, exitAt);
+    t := Build(X, loopAt);
+    st[loopAt].Out1 := t;
+    if tooBig then Exit(rvTooBig);
+
+    if not EmptyOrder(order, nOrder) then Exit(rvEmptyLoop);
+
+    { FOLD THE EMPTY MOVES INTO EDGES between byte states, counting the empty
+      routes (saturating at 2). Every byte state lies on the loop's cycle, so
+      every edge found here is inside the one strongly connected component the
+      test is about. }
+    SetLength(cnt, ns);
+    SetLength(adjStart, ns + 1);
+    adjTo := nil;
+    nAdj := 0;
+    for u := 0 to ns - 1 do
+    begin
+      adjStart[u] := nAdj;
+      if not st[u].IsByte then Continue;
+      if work > MaxReWork then Exit(rvTooBig);
+      FillChar(cnt[0], ns, 0);
+      cnt[st[u].Out1] := 1;
+      // reverse post-order of the empty states is a topological order
+      for j := nOrder - 1 downto 0 do
+      begin
+        v := order[j];
+        if cnt[v] = 0 then Continue;
+        if st[v].Out1 >= 0 then
+          if cnt[st[v].Out1] + cnt[v] >= 2 then cnt[st[v].Out1] := 2
+          else cnt[st[v].Out1] := cnt[st[v].Out1] + cnt[v];
+        if st[v].Out2 >= 0 then
+          if cnt[st[v].Out2] + cnt[v] >= 2 then cnt[st[v].Out2] := 2
+          else cnt[st[v].Out2] := cnt[st[v].Out2] + cnt[v];
+      end;
+      Inc(work, ns);
+      for v := 0 to ns - 1 do
+        if st[v].IsByte and (cnt[v] > 0) then
+        begin
+          // two empty routes from one byte to the next: nothing matched twice
+          if cnt[v] >= 2 then Exit(rvEmptyTwice);
+          if st[v].CSet = [] then Continue;  // a state no byte can enter
+          if nAdj >= Length(adjTo) then SetLength(adjTo, nAdj * 2 + 64);
+          adjTo[nAdj] := v;
+          Inc(nAdj);
+        end;
+    end;
+    adjStart[ns] := nAdj;
+
+    { THE PRODUCT, searched from every diagonal pair. A pair (a,b), a < b, is
+      the two copies of the automaton in two different states after the same
+      text; reaching one from (p,p) and then the diagonal again from it is two
+      different paths from p round to the same state on the same text. }
+    SetLength(seen, (Int64(ns) * ns) div 8 + 1);
+    queue := nil;
+    head := 0;
+    tail := 0;
+    for p := 0 to ns - 1 do
+    begin
+      if (not st[p].IsByte) or (st[p].CSet = []) then Continue;
+      for ia := adjStart[p] to adjStart[p + 1] - 1 do
+        for ib := ia + 1 to adjStart[p + 1] - 1 do
+        begin
+          Inc(work);
+          a := adjTo[ia];
+          b := adjTo[ib];
+          if (st[a].CSet * st[b].CSet) = [] then Continue;
+          if a > b then begin k := a; a := b; b := k; end;
+          idx := Int64(a) * ns + b;
+          if (seen[idx shr 3] and (1 shl (idx and 7))) <> 0 then Continue;
+          seen[idx shr 3] := seen[idx shr 3] or (1 shl (idx and 7));
+          if tail + 2 > Length(queue) then SetLength(queue, tail * 2 + 64);
+          queue[tail] := a;
+          queue[tail + 1] := b;
+          Inc(tail, 2);
+        end;
+      if work > MaxReWork then Exit(rvTooBig);
+    end;
+    while head < tail do
+    begin
+      a := queue[head];
+      b := queue[head + 1];
+      Inc(head, 2);
+      for ia := adjStart[a] to adjStart[a + 1] - 1 do
+        for ib := adjStart[b] to adjStart[b + 1] - 1 do
+        begin
+          Inc(work);
+          a2 := adjTo[ia];
+          b2 := adjTo[ib];
+          if a2 = b2 then Exit(rvAmbiguous);   // back on the diagonal
+          if (st[a2].CSet * st[b2].CSet) = [] then Continue;
+          if a2 > b2 then begin q := a2; a2 := b2; b2 := q; end;
+          idx := Int64(a2) * ns + b2;
+          if (seen[idx shr 3] and (1 shl (idx and 7))) <> 0 then Continue;
+          seen[idx shr 3] := seen[idx shr 3] or (1 shl (idx and 7));
+          if tail + 2 > Length(queue) then SetLength(queue, tail * 2 + 64);
+          queue[tail] := a2;
+          queue[tail + 1] := b2;
+          Inc(tail, 2);
+        end;
+      if work > MaxReWork then Exit(rvTooBig);
+    end;
+    Result := rvUnambiguous;
+  end;
+
+  { How many paths a LOOP-FREE body has from its entry to its exit, saturating;
+    -1 when it is too big to build. }
+  function PathCount(X: Integer): Int64;
+  var
+    exitAt, entry, s0, v, e, w, sp, j: Integer;
+    paths: array of Int64;
+    color: array of Byte;
+    stackS, stackE, order: array of Integer;
+    nOrder: Integer;
+  begin
+    ns := 0;
+    tooBig := False;
+    exitAt := NewState(False, [], -1, -1);
+    entry := Build(X, exitAt);
+    if tooBig then Exit(-1);
+    SetLength(color, ns);
+    SetLength(stackS, ns + 1);
+    SetLength(stackE, ns + 1);
+    SetLength(order, ns);
+    nOrder := 0;
+    s0 := entry;
+    sp := 0;
+    stackS[0] := s0;
+    stackE[0] := 0;
+    color[s0] := 1;
+    while sp >= 0 do
+    begin
+      v := stackS[sp];
+      e := stackE[sp];
+      Inc(stackE[sp]);
+      if e = 0 then w := st[v].Out1
+      else if (e = 1) and not st[v].IsByte then w := st[v].Out2
+      else
+      begin
+        order[nOrder] := v;
+        Inc(nOrder);
+        Dec(sp);
+        Continue;
+      end;
+      if (w < 0) or (color[w] <> 0) then Continue;
+      color[w] := 1;
+      Inc(sp);
+      stackS[sp] := w;
+      stackE[sp] := 0;
+    end;
+    // post-order: every state after the states it leads to
+    SetLength(paths, ns);
+    for j := 0 to nOrder - 1 do
+    begin
+      v := order[j];
+      if v = exitAt then paths[v] := 1
+      else
+      begin
+        paths[v] := 0;
+        if st[v].Out1 >= 0 then paths[v] := SatAdd(paths[v], paths[st[v].Out1]);
+        if (not st[v].IsByte) and (st[v].Out2 >= 0) then
+          paths[v] := SatAdd(paths[v], paths[st[v].Out2]);
+      end;
+    end;
+    Result := paths[entry];
+  end;
+
+  { A counted repeat's second chance: a loop-free body whose paths, to the
+    power of the count, stay small. }
+  function CountedSmall(X: Integer; ACount: Int64): Boolean;
+  var p, total: Int64; j: Int64;
+  begin
+    if HasLoop(X) then Exit(False);
+    p := PathCount(X);
+    if p < 0 then Exit(False);
+    total := 1;
+    j := 0;
+    while (j < ACount) and (total <= BudgetMaxCountedPaths) do
+    begin
+      total := SatMul(total, p);
+      Inc(j);
+    end;
+    Result := total <= BudgetMaxCountedPaths;
+  end;
+
+var
+  m0: TReMods;
+  k: Integer;
+  mx, total: Int64;
+  v: TReVerdict;
+begin
+  AWhy := '';
+  Result := True;
+  n := Length(APattern);
+  if n = 0 then Exit;
+  nn := 0;
+  nodes := nil;
+  NewNode(rnEmpty);                    // node 0: the spare
+  gaveUp := False;
+  work := 0;
+  // RegexGuard's TRegExpr starts with the library defaults, ModifierI and
+  // ModifierX both off (RegExprModifierI/X in regexpr.pas).
+  m0.CaseFold := False;
+  m0.Extended := False;
+  i := 1;
+  ParseAlt(m0, 1);
+  // A ')' with nothing open is the engine's to reject; read on past it, so a
+  // repeat after it is still judged.
+  while (i <= n) and not gaveUp do
+  begin
+    Inc(i);
+    ParseAlt(m0, 1);
+  end;
+  if gaveUp then
+  begin
+    AWhy := 'a pattern nested deeper than ' + IntToStr(MaxReDepth) + ' groups or ' +
+            'longer than ' + IntToStr(MaxReNodes) + ' atoms is too large for the ' +
+            'judge to read, and what it has not read it cannot call safe';
+    Exit(False);
+  end;
+
+  { THE JUDGEMENT. A repeat is created after everything inside it, so walking
+    the nodes in order judges the innermost repeat first. }
+  for k := 1 to nn - 1 do
+    if not nodes[k].HasParent then MarkLoops(k, False);
+  st := nil;
+  for k := 1 to nn - 1 do
+  begin
+    if (nodes[k].Kind <> rnRep) or not nodes[k].Group then Continue;
+    mx := nodes[k].MaxR;
+    if nodes[k].Unsure then mx := -1;  // judged as the loop it may become
+    if (mx < 0) or (mx >= BudgetAmbiguousRepeat) then
+    begin
+      if st = nil then SetLength(st, MaxReStates);
+      v := JudgeRepeat(nodes[k].First);
+      { A NULLABLE body gets no second chance. Its paths are few -- (a?) four
+        times is sixteen -- but TRegExpr 0.987 either rejects it at compile
+        ("operand could be empty") or, when a counted repeat from zero hides the
+        nullability from that check, recurses without end computing its
+        first-character set; the old judge refused it too. }
+      if (mx >= 0) and (v in [rvEmptyTwice, rvAmbiguous]) and
+         CountedSmall(nodes[k].First, mx) then
+        v := rvUnambiguous;
+      if (v = rvTooBig) or (work > MaxReWork) then
+      begin
+        AWhy := 'a repeat of a group too large for the judge to finish (past ' +
+                IntToStr(MaxReStates) + ' states or ' + IntToStr(MaxReWork) +
+                ' steps of search), and what it has not read it cannot call safe';
+        Exit(False);
+      end;
+      case v of
+        rvUnknown:
+          AWhy := 'a repeat of a group holding an atom the judge cannot name -- a ' +
+                  'backreference, or an escape it does not model -- cannot be ' +
+                  'proved unambiguous';
+        rvEmptyLoop:
+          AWhy := 'a repeat of a group that can match the empty string (the (a*)* ' +
+                  'shape) can go round without consuming anything';
+        rvEmptyTwice:
+          AWhy := 'a repeat of a group that can match the empty string in more ' +
+                  'than one way (the (c()?)+ shape) can take exponentially many ' +
+                  'attempts';
+        rvAmbiguous:
+          if mx < 0 then
+            AWhy := 'a repeat of a group whose body can match the same text in ' +
+                    'more than one way (the (a+)+, (a|a)+ and (a*a*b)+ shapes) can ' +
+                    'take exponentially many attempts -- a separator no part of ' +
+                    'the body can consume, and branches that cannot match the same ' +
+                    'text, would make it linear'
+          else
+            AWhy := 'a counted repeat of ' + IntToStr(mx) +
+                    ' iterations over a body that can match the same text in ' +
+                    'more than one way (the (a+){10} shape) can take ' +
+                    'exponentially many attempts';
+      else
+        ;                                    // unambiguous: nothing to say
+      end;
+      if v <> rvUnambiguous then
+      begin
+        if (v = rvEmptyLoop) and (mx >= 0) then
+          AWhy := 'a counted repeat of ' + IntToStr(mx) + ' iterations over a ' +
+                  'body that can match the empty string (the (a?){20} shape) ' +
+                  'divides the same text among its iterations in too many ways'
+        else if (v = rvEmptyTwice) and (mx >= 0) then
+          AWhy := 'a counted repeat of ' + IntToStr(mx) + ' iterations over a ' +
+                  'body that matches the empty string in more than one way has ' +
+                  'more paths than the judge allows (' +
+                  IntToStr(BudgetMaxCountedPaths) + ')';
+        Exit(False);
+      end;
+    end;
+    if mx > 1 then
+    begin
+      total := SatMul(Reps(nodes[k].First), mx);
+      if total > BudgetMaxRepeatProduct then
+      begin
+        AWhy := 'nested counted repeats expand to more than ' +
+                IntToStr(BudgetMaxRepeatProduct) + ' repetitions';
+        Exit(False);
+      end;
+    end;
+  end;
+  // The outermost level is not inside any repeat, so what it does once is
+  // linear work and nothing here refuses it.
 end;
 
 end.

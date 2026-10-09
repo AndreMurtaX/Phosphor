@@ -38,6 +38,12 @@ program probe_budget;
 {$codepage UTF8}
 
 uses
+  // The generated judge sweep (section h3) runs the real matcher under a
+  // WATCHDOG THREAD, because TRegExpr cannot be interrupted: a pattern the judge
+  // wrongly allows would otherwise hang the suite instead of failing it. A
+  // thread on Linux needs the cthreads manager linked first.
+  {$ifdef unix}cthreads,{$endif}
+  RegExpr,
   SysUtils, PhosphorErrors, PhosphorEngine, PhosphorBudget,
   // Three OPT-IN packages, registered below: base64_valid is a quadratic-append
   // door of exactly the family this probe pins; gzip_decompressfile is the
@@ -258,6 +264,414 @@ var i: Integer;
 begin
   Result := '';
   for i := 1 to N do Result := Result + S;
+end;
+
+{ ---- THE GENERATED JUDGE SWEEP (2026-10-09, round 2) ----------------------
+  Every pin above is a pattern somebody thought of. The round-2 attacker found
+  two shapes nobody had -- ^(a*a*b)+$ and ^(ab?|b)+$ -- that the judge ALLOWED
+  and TRegExpr ran 2^n, and a list of pins cannot say what it did not think of.
+  So this half GENERATES: a grammar over the atoms a, b, c, [ab], [bc], [a-c],
+  '.', a hex escape and a capital, the quantifiers ? * + and their lazy
+  forms, and five counted forms (SweepQuants spells them), capturing and
+  non-capturing groups of one to three branches (an empty one now and then),
+  nested three deep, each body placed in one of six repeated forms, one of
+  them case-folded. Every
+  pattern the judge ALLOWS is then run against the real matcher on hostile
+  subjects -- fourteen pump words repeated to 12..48 bytes, then a byte that
+  fails -- and must stay under SweepSlowMs on every one of them. The judge's
+  answer is never consulted for what is slow: the matcher's clock is the oracle.
+
+  WHY A CLOCK AND A THREAD. TRegExpr has no step hook and no interrupt, so the
+  only measure of its work is time, and a wrongly allowed pattern does not
+  return at all. The length climbs in steps of four and stops at the first slow
+  subject, so a 2^n pattern is caught within a factor of sixteen of the
+  threshold; anything that still runs away is caught by the watchdog thread,
+  which reports the pattern and ends the run rather than hang the suite.
+
+  AND THE SWEEP IS SEEN FAILING. SweepControl runs four patterns the judge
+  must refuse -- the two findings and their siblings -- through the same
+  subjects and the same threshold, and demands that they be SLOW. A sweep
+  whose subjects could not make a 2^n pattern slow would pass every allowed
+  pattern and prove nothing.
+
+  The seed is fixed, so a failure names a pattern that can be re-run. }
+var
+  WatchStart: QWord = 0;     // GetTickCount64 when the Exec in flight began; 0 = idle
+  { What is in flight. The pattern is written by the main thread before the
+    worker starts and only read after; the subject is two integers the worker
+    writes, never a string, so the watchdog never reads a string mid-write. }
+  WatchWhat: String = '';
+  WatchWord: Integer = 0;
+  WatchLen: Integer = 0;
+  SweepSeed: QWord = 20261009;
+
+const
+  WatchLimitMs = 4000;       // one Exec past this has run away: report it and stop
+  SweepSlowMs = 100;         // an allowed pattern slower than this has failed
+  // \x61 is 'a' spelled as the matcher reads it; under (?i) 'A' is 'a' too
+  SweepAtoms: array[0..10] of String = ('a', 'b', 'c', 'a', 'b', '[ab]', '[bc]',
+                                        '[a-c]', '.', '\x61', 'A');
+  // the lazy forms and every counted form on a GROUP compile to OP_LOOP
+  SweepQuants: array[0..12] of String = ('', '', '', '?', '*', '+', '{2}',
+                                         '{1,2}', '{0,2}', '{2,}', '*?', '+?',
+                                         '{1,3}');
+  SweepWords: array[0..13] of String = ('a', 'b', 'c', 'ab', 'ba', 'ac', 'bc',
+                                        'aab', 'abb', 'abc', 'cab', 'aabb',
+                                        'abab', 'abcc');
+
+function Watchdog(P: Pointer): PtrInt;
+var started, now: QWord;
+begin
+  Result := PtrInt(P);
+  while True do
+  begin
+    Sleep(50);
+    { The start is read BEFORE the clock. Read after it, a start the worker
+      set in between is later than "now", and the unsigned difference wrapped
+      to a run of eighteen quintillion milliseconds: two 30000-pattern runs
+      reported a hang in patterns that take microseconds. }
+    started := WatchStart;
+    now := GetTickCount64();
+    if (started <> 0) and (now > started) and (now - started > WatchLimitMs) then
+    begin
+      Writeln(StdErr, 'FAIL: ', WatchWhat, ' on pump word #', WatchWord,
+              ' to ', WatchLen, ' bytes -- still inside the matcher after ',
+              WatchLimitMs, ' ms: the judge allowed a pattern that does not end');
+      Writeln('ok: ', Ok);
+      Writeln('fail: ', Failed + 1);
+      Halt(1);
+    end;
+  end;
+end;
+
+{ EVERY PATTERN IS MEASURED ON A FRESH THREAD. TRegExpr 0.987 can exhaust the
+  stack two ways the sweep reaches: FillFirstCharSet recurses without end at
+  COMPILE on a leading group repeated over a body that a count starting at zero
+  makes nullable (a group of "a, zero to two times" taken twice), and the
+  matcher recurses without end at EXEC on some nested repeats of nullable
+  bodies. The first overflow in a thread arrives as EStackOverflow; the SECOND
+  in the same thread is an access violation that ends the process, because
+  Windows does not re-arm a thread's stack guard page. Both shapes are ones the
+  judge refuses when a budget is installed; they are reported separately, as a
+  defect of the library call itself, and a sweep that died of one would have
+  tested nothing. A fresh thread is a fresh guard page. }
+var
+  MeasPattern, MeasTail, MeasWorst: String;
+  MeasWords: array of String;
+  MeasResult: Int64;
+
+var
+  MeasDone: Boolean = False;  // the worker reached its end, however it got there
+
+function TimeExec(R: TRegExpr; const ASubject: String; AWord, ALen: Integer;
+                  out AFaulted: Boolean): Int64;
+var t0: QWord;
+begin
+  AFaulted := False;
+  WatchWord := AWord;
+  WatchLen := ALen;
+  t0 := GetTickCount64();
+  WatchStart := t0;
+  try
+    try
+      R.Exec(ASubject);
+    except
+      // A stack overflow or an access violation is a fault. Anything else is
+      // the engine declining -- 0.987 raises "loop without loop entry" on some
+      // counted repeats -- which a script sees as a catchable regex error, and
+      // which costs nothing.
+      on EStackOverflow do AFaulted := True;
+      on EAccessViolation do AFaulted := True;
+      on Exception do ;
+    end;
+  finally
+    WatchStart := 0;
+  end;
+  Result := Int64(GetTickCount64() - t0);
+end;
+
+function MeasureOnThread(P: Pointer): PtrInt;
+var
+  r: TRegExpr;
+  w, len: Integer;
+  s: String;
+  ms: Int64;
+  faulted: Boolean;
+begin
+  Result := PtrInt(P);
+  MeasResult := -1;
+  MeasWorst := '';
+  r := TRegExpr.Create();
+  try
+    try
+      r.Expression := MeasPattern;
+      r.Compile;
+    except
+      Exit;                           // rejected, or overflowed, at compile
+    end;
+    MeasResult := 0;
+    for w := 0 to High(MeasWords) do
+    begin
+      len := 12;
+      while len <= 48 do
+      begin
+        s := '';
+        while Length(s) < len do s := s + MeasWords[w];
+        s := s + MeasTail;
+        ms := TimeExec(r, s, w, len, faulted);
+        if faulted then
+        begin
+          MeasResult := -2;
+          MeasWorst := s;
+          Exit;
+        end;
+        if ms > MeasResult then
+        begin
+          MeasResult := ms;
+          MeasWorst := s;
+        end;
+        if ms > SweepSlowMs then Exit;
+        len := len + 4;
+      end;
+    end;
+  finally
+    r.Free;
+    MeasDone := True;
+  end;
+end;
+
+{ The slowest match of APattern over hostile subjects built from AWords: each
+  word repeated to 12, 16, ... 48 bytes, then ATail. Answers -1 when TRegExpr
+  will not compile the pattern and -2 when the matcher faulted on AWorst.
+  Stops at the first slow subject. }
+function WorstMs(const APattern: String; const AWords: array of String;
+                 const ATail: String; out AWorst: String): Int64;
+var
+  w: Integer;
+  th: TThreadID;
+begin
+  MeasPattern := APattern;
+  WatchWhat := 'pattern "' + APattern + '"';
+  MeasDone := False;
+  MeasTail := ATail;
+  SetLength(MeasWords, Length(AWords));
+  for w := 0 to High(AWords) do MeasWords[w] := AWords[w];
+  th := BeginThread(@MeasureOnThread);
+  WaitForThreadTerminate(th, 0);
+  CloseThread(th);
+  AWorst := MeasWorst;
+  Result := MeasResult;
+  // A worker that never reached its end died inside the matcher.
+  if not MeasDone then Result := -2;
+end;
+
+function SweepRnd(N: Integer): Integer;
+begin
+  {$push}{$Q-}{$R-}
+  SweepSeed := SweepSeed * QWord(6364136223846793005) + QWord(1442695040888963407);
+  Result := Integer((SweepSeed shr 33) mod QWord(N));
+  {$pop}
+end;
+
+function SweepSeq(ADepth: Integer): String; forward;
+
+function SweepItem(ADepth: Integer): String;
+var k, alts: Integer;
+begin
+  if (ADepth < 3) and (SweepRnd(4) = 0) then
+  begin
+    if SweepRnd(2) = 0 then Result := '(' else Result := '(?:';
+    alts := 1 + SweepRnd(3);
+    Result := Result + SweepSeq(ADepth + 1);
+    for k := 2 to alts do Result := Result + '|' + SweepSeq(ADepth + 1);
+    Result := Result + ')';
+  end
+  else
+    Result := SweepAtoms[SweepRnd(Length(SweepAtoms))];
+  Result := Result + SweepQuants[SweepRnd(Length(SweepQuants))];
+end;
+
+function SweepSeq(ADepth: Integer): String;
+var k, cnt: Integer;
+begin
+  Result := '';
+  if (ADepth > 0) and (SweepRnd(12) = 0) then Exit;   // an empty branch
+  cnt := 1 + SweepRnd(3);
+  for k := 1 to cnt do Result := Result + SweepItem(ADepth);
+end;
+
+function SweepPattern: String;
+var b: String;
+begin
+  b := SweepSeq(0);
+  case SweepRnd(7) of
+    0, 1: Result := '^(' + b + ')+$';
+    2:    Result := '^(' + b + ')*$';
+    3:    Result := '(' + b + ')+$';          // unanchored: every start position
+    4:    Result := '^(?:' + b + '){4}$';     // a counted repeat past the threshold
+    5:    Result := '(?i)^(' + b + ')+$';     // case folded: A is a
+  else
+          Result := '^(' + b + '){2,}c$';
+  end;
+end;
+
+{ The control: a pattern that MUST be slow on these subjects. }
+procedure SweepControl(const APattern: String);
+var worst: String; ms: Int64;
+begin
+  ms := WorstMs(APattern, SweepWords, '!', worst);
+  Report(ms > SweepSlowMs, 'sweep control: "' + APattern + '" must be slow on ' +
+         'the sweep''s own subjects (worst ' + IntToStr(ms) + ' ms on "' +
+         worst + '") -- otherwise the sweep cannot see what it hunts');
+end;
+
+procedure JudgeSweep(ACount: Integer);
+var
+  k, allowed, refused, uncompiled, slow: Integer;
+  p, why, worst: String;
+  ms, top: Int64;
+  topPat: String;
+begin
+  allowed := 0; refused := 0; uncompiled := 0; slow := 0; top := 0; topPat := '';
+  for k := 1 to ACount do
+  begin
+    p := SweepPattern();
+    if not BudgetPatternBounded(p, why) then
+    begin
+      Inc(refused);
+      Continue;
+    end;
+    ms := WorstMs(p, SweepWords, '!', worst);
+    if ms = -1 then
+    begin
+      Inc(uncompiled);
+      Continue;
+    end;
+    Inc(allowed);
+    if ms = -2 then
+    begin
+      Inc(slow);
+      Report(False, 'sweep #' + IntToStr(k) + ': the judge ALLOWED "' + p +
+             '" and the matcher overflowed its stack on "' + worst + '"');
+      if slow >= 5 then Break;
+      Continue;
+    end;
+    if ms > top then begin top := ms; topPat := p; end;
+    if ms > SweepSlowMs then
+    begin
+      Inc(slow);
+      Report(False, 'sweep #' + IntToStr(k) + ': the judge ALLOWED "' + p +
+             '" and the matcher took ' + IntToStr(ms) + ' ms on "' + worst + '"');
+      if slow >= 5 then Break;               // enough to read; stop the bleeding
+    end;
+  end;
+  Writeln('sweep: ', ACount, ' generated, ', allowed, ' allowed and run, ',
+          refused, ' refused, ', uncompiled, ' not compiled by TRegExpr; ',
+          'slowest allowed ', top, ' ms ("', topPat, '")');
+  Report(slow = 0, 'sweep: every allowed pattern stays under ' +
+         IntToStr(SweepSlowMs) + ' ms (' + IntToStr(slow) + ' did not)');
+  { BOTH DIRECTIONS. A judge that refused everything would pass the line above
+    with nothing run. This grammar is mostly ambiguous by construction -- '.',
+    [a-c] and the optional atoms overlap almost everything -- and the judge of
+    2026-10-09 allows 564 of the 3000 (19%); the floor is a tenth, far below
+    that and far above the zero a refuse-everything judge would score. The
+    SAFE CORPUS below is the sharper half of this direction. }
+  Report(allowed * 10 >= k, 'sweep: the judge still allows at least a ' +
+         'tenth of the generated patterns (' + IntToStr(allowed) + ' of ' +
+         IntToStr(k) + ')');
+end;
+
+{ THE SAFE CORPUS. Real patterns, the kind a program writes -- paths, CSV,
+  IPv4/IPv6/MAC, email, hex colours, base64, escapes, dates, versions, (?i),
+  (?x). Each must be ALLOWED, which is the half of the judge's contract that
+  refusing too much breaks, and each is also run on hostile subjects, so the
+  corpus itself is shown to be safe rather than assumed to be. }
+const
+  SafeWords: array[0..19] of String = ('a', '1', '.', ':', '-', '/', ',', '"',
+                                       '\', 'a.', '1.', 'a:', '1,', 'a ', '%2',
+                                       '#', '=', 'aa', '11', 'a1');
+  SafeCorpus: array[0..63] of String = (
+    '^(/[^/]+)+/?$',
+    '^[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*$',
+    '^(\.{1,2}/)*([\w.-]+/)*[\w.-]+$',
+    '^~?(/[\w.-]+)*/?$',
+    '^([^,]*,)*[^,]*$',
+    '^("([^"]|"")*"|[^,"]*)(,("([^"]|"")*"|[^,"]*))*$',
+    '^(\s*"[^"]*"\s*,)*\s*"[^"]*"\s*$',
+    '^(\d+;)*\d+$',
+    '^[^\t]*(\t[^\t]*)*$',
+    '^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$',
+    '^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$',
+    '^(\d{1,3}\.){3}\d{1,3}$',
+    '^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$',
+    '^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|' +
+      '([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|' +
+      '([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|' +
+      '([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(:[0-9a-fA-F]{1,4}){1,6}|' +
+      ':((:[0-9a-fA-F]{1,4}){1,7}|:))$',
+    '^[0-9a-fA-F:]+$',
+    '^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$',
+    '^([0-9a-f]{2}:)+[0-9a-f]{2}$',
+    '^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$',
+    '^[\w.+-]+@[\w-]+(\.[\w-]+)+$',
+    '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
+    '^(\w+\.)*\w+@(\w+\.)+\w+$',
+    '^[^@\s]+@[^@\s]+\.[^@\s]+$',
+    '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$',
+    '^#?([a-f0-9]{6}|[a-f0-9]{3})$',
+    '(?i)^#[0-9a-f]{3,8}$',
+    '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$',
+    '^[A-Za-z0-9+/]*={0,2}$',
+    '^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$',
+    '"(?:[^"\\]|\\.)*"',
+    '''(?:[^''\\]|\\.)*''',
+    '^(?:[^\\]|\\[nrt\\"])*$',
+    '\\u[0-9a-fA-F]{4}',
+    '^(%[0-9A-Fa-f]{2}|[\w.~-])*$',
+    '(?i)^(get|post|put|delete|head|options|patch)$',
+    '(?i)^[a-z][a-z0-9_]*$',
+    '(?i)^(?:[a-z]+-)*[a-z]+$',
+    '(?i)\b(true|false|yes|no)\b',
+    '(?x) ^ (\d{4}) - (\d{2}) - (\d{2}) $',
+    '(?x) ^ ( [a-z]+ , )* [a-z]+ $',
+    '(?x)^\s* (\w+) \s* = \s* (.*?) \s*$',
+    '^\d{4}-\d{2}-\d{2}$',
+    '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$',
+    '^\d{2}:\d{2}(:\d{2})?$',
+    '^[a-z0-9]+(?:-[a-z0-9]+)*$',
+    '^(\d+\.)+\d+$',
+    '^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$',
+    '^https?://[^\s/$.?#].[^\s]*$',
+    '^(https?|ftp)://([\w-]+\.)+[\w-]+(/[\w./?%&=-]*)?$',
+    '^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$',
+    '^-?\d+(,\d{3})*(\.\d+)?$',
+    '^\+?\d{1,3}[- ]?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}$',
+    '^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$',
+    '^\d{5}(-\d{4})?$',
+    '<[^>]+>',
+    '^(<[^>]+>)+$',
+    '^\s*#\s*include\s*[<"]([^>"]+)[>"]',
+    '^\[([^\]]+)\]$',
+    '^([^=]+)=(.*)$',
+    '^(\w+)(\.\w+)*$',
+    '^[_a-zA-Z][_a-zA-Z0-9]*(::[_a-zA-Z][_a-zA-Z0-9]*)*$',
+    '^(\w+\s)*\w+$',
+    '^([01]?\d|2[0-3]):[0-5]\d$',
+    '^(\$\{[^}]+\}|[^$])*$',
+    '^[\w\s,.!?''-]{1,280}$');
+
+procedure SafeCorpusCheck;
+var k: Integer; why, worst: String; ms: Int64;
+begin
+  for k := 0 to High(SafeCorpus) do
+  begin
+    Report(BudgetPatternBounded(SafeCorpus[k], why),
+           'safe corpus: "' + SafeCorpus[k] + '" is allowed (' + why + ')');
+    ms := WorstMs(SafeCorpus[k], SafeWords, '!', worst);
+    Report((ms >= 0) and (ms <= SweepSlowMs),
+           'safe corpus: "' + SafeCorpus[k] + '" compiles and is fast on hostile ' +
+           'subjects (' + IntToStr(ms) + ' ms on "' + worst + '")');
+  end;
 end;
 
 var
@@ -543,11 +957,12 @@ begin
              'println strings_capacity(l@, 1000000)' + LF, '1000000' + LF);
 
   { ---- 4. THE PATTERN JUDGEMENT ITSELF ------------------------------------- }
-  { The rule refuses two shapes and nothing else: an unbounded repeat of a group
-    that itself repeats without bound, and an unbounded repeat of an alternation
-    whose branches can start on the same byte. Everything it cannot parse
-    confidently is ALLOWED, because refusing a legitimate pattern is the failure
-    this half must not have. }
+  { The rule refuses a repeat of a group whose body can match the same text in
+    more than one way -- decided exactly since 2026-10-09, see (h3) -- and a
+    nest of counted repeats past a million. A malformed pattern is the engine's
+    to reject, and is allowed through to it. (a|ab)+ used to be refused here
+    for sharing a first byte between its branches; it is a code with one
+    reading per subject and moved to (h3), allowed. }
   Pattern('^\d{4}-\d{2}-\d{2}$', True);
   Pattern('(\w+)@(\w+)\.(\w+)', True);
   Pattern('[a-z]+\s*=\s*(.*)', True);
@@ -575,7 +990,6 @@ begin
   Pattern('(a+)*b', False);
   Pattern('([a-zA-Z]+)*', False);
   Pattern('(\s*\w+)+$', False);
-  Pattern('(a|ab)+', False);
   Pattern('(\d+|\w+)*', False);
   Pattern('(x+x+)+y', False);
   Pattern('(a{0,2000}){0,2000}', False);
@@ -1071,6 +1485,104 @@ begin
           'println regex_find$("(?i)^([a-z]+,)+$", "Ab,cD,")' + LF, 'Ab,cD,' + LF);
   Allowed('a hex-spelled separator still answers under a budget',
           'println regex_find$("^(\\d+\\x2E)+\\d+$", "1.2.3")' + LF, '1.2.3' + LF);
+
+  { (h3) AMBIGUITY THE JUDGE NEVER LOOKED FOR (2026-10-09, round 2). The judge
+    asked three structural questions -- is there a separator, does the body end
+    on one, does it begin on one -- and answered "unambiguous" if any said yes.
+    Each question was about the wrong thing:
+
+    INSIDE ONE ITERATION. A separator pins where an iteration ENDS. It says
+    nothing about how the bytes INSIDE one are divided between two flexible
+    atoms with overlapping sets: in ^(a*a*b)+$ a block of m a's splits m+1
+    ways, (m+1)^k for k blocks, x4 per block and 15 s under a 2000 ms budget.
+    And an unquantified inner alternation was never asked whether its branches
+    overlap at all -- ^((a|a)b)+$ is 2^k.
+
+    ACROSS THE BOUNDARY. The window rules (ii) and (iii) looked at atoms of the
+    SAME branch, but the next iteration may take another: in ^(ab?|b)+$ "ab"
+    is one iteration of the first branch or two of the first and the second.
+
+    The criterion is now the one the theory names: a repeated body is refused
+    when some state of its automaton has two different paths back to itself on
+    the same text (exponential ambiguity, decided on the product automaton).
+    Measured here, unfixed, against TRegExpr: x2 per block for the four 2^n
+    shapes, ^(a|ab)+$ flat at 0 ms. }
+  Pattern('^(a*a*b)+$', False);
+  Pattern('^((a|a)b)+$', False);
+  Pattern('^(a?a?b)+$', False);              // two optional atoms, one set
+  Pattern('^(\d*\d+,)+$', False);
+  Pattern('^(a+(b|b)c)+$', False);           // identical inner branches
+  Pattern('^((ab|ab)c)+$', False);
+  Pattern('^((a|[ab])b)+$', False);
+  Pattern('^(x(a|a)?y)+$', False);
+  Pattern('^((?:a|a)b){3,}$', False);
+  Pattern('^(ab?|b)+$', False);
+  Pattern('^(a|ba?)+$', False);
+  Pattern('^(ab*|b)+$', False);
+  Pattern('^(a[ab]?|b)+$', False);
+  Pattern('^(ab|b|a)+$', False);
+  { AND WHERE THE OLD QUESTIONS REFUSED WHAT IS NOT AMBIGUOUS. (a|ab) is a
+    uniquely decodable code -- 'a' is a prefix of 'ab', and the dangling 'b'
+    begins no word (Sardinas-Patterson) -- so each subject has one parse, and
+    TRegExpr answers it in 0 ms at every length measured. Its branches share a
+    first byte, which is all the old rule asked. }
+  Pattern('(a|ab)+', True);
+  Pattern('^(a|ab)+$', True);
+  Pattern('^(ab|ac)+$', True);
+  Pattern('^((ab|ac)d)+$', True);
+  Pattern('^(a*b)+$', True);
+  Pattern('^(a+b?c)+$', True);
+  { A COUNT THE MATCHER DOES NOT KEEP. Found by the sweep at 30000 patterns:
+    TRegExpr 0.987 keeps a counted group repeat's count in one slot per
+    nesting depth and zeroes it on entry, so nested counted group repeats
+    resume with each other's counts. The first pattern below has 6^4 paths
+    as written and ran 219 ms on 28 a's, doubling every byte and a half.
+    A counted group repeat that holds another, or sits inside one, is now read
+    as a loop with no bound; a lone one keeps its exact count (the IPv4 quad,
+    pinned above, is one). }
+  Pattern('^(?:((a){1,2}){1,2}aa){4}$', False);
+  Pattern('^(?:(a){1,2}a){3}$', False);
+  Pattern('^(?:(ab){2}c)+$', True);          // a lone counted group, inside +
+
+  { THE TABLE LIMITS WERE A DOCUMENTED BYPASS. Past 96 atoms, 16 branches or
+    48 levels of nesting the old judge did not look, and "did not look" meant
+    ALLOW -- so padding made any shape pass. Each of these is the (a+)+ or
+    (a|a)+ shape past one of the old limits. The limits are now far past any
+    real pattern (100 levels, 4096 automaton states a body, a bounded amount of
+    product work), and a pattern past them is REFUSED under a budget:
+    docs/embedding.md#the-ceilings-reach-inside-a-library-call-too says why. }
+  Pattern('^(a+' + Repeated('c?', 100) + 'a+)+$', False);
+  Pattern('^(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|a)+$', False);
+  Pattern('^' + Repeated('(', 50) + 'a|a' + Repeated(')', 50) + '+$', False);
+  Pattern(Repeated('(', 150) + 'a' + Repeated(')', 150), False);
+  // ...and a big alternation that is a real code is still judged and allowed:
+  // three hundred distinct four-letter words, every one the same length.
+  aaa := '';
+  for i := 0 to 299 do
+  begin
+    if i > 0 then aaa := aaa + '|';
+    aaa := aaa + Chr(97 + i mod 26) + Chr(97 + (i div 26) mod 26) + 'x' +
+           Chr(97 + (i * 7) mod 26);
+  end;
+  Pattern('^(?:' + aaa + ')+$', True);
+  // The subjects are short enough that an unfixed judge lets the match FINISH
+  // (3^12 and 2^16 attempts) and the check fails on its answer, not on a hang;
+  // the refusal comes before the matcher whatever the subject's length.
+  Refused('regex_find$ refuses ^(a*a*b)+$',
+          'println regex_find$("^(a*a*b)+$", "' + Repeated('aab', 12) + '!")' + LF);
+  Refused('regex_find$ refuses ^(ab?|b)+$',
+          'println regex_find$("^(ab?|b)+$", "' + Repeated('ab', 16) + '!")' + LF);
+  Allowed('and ^(a|ab)+$ answers under a budget',
+          'println regex_find$("^(a|ab)+$", "aababa")' + LF, 'aababa' + LF);
+
+  { The controls first: the sweep must be able to see a 2^n pattern. }
+  BeginThread(@Watchdog);
+  SweepControl('^(a*a*b)+$');
+  SweepControl('^((a|a)b)+$');
+  SweepControl('^(ab?|b)+$');
+  SweepControl('^(a|ba?)+$');
+  JudgeSweep(3000);
+  SafeCorpusCheck;
 
   { (i) AND THE UNBUDGETED HOST IS STILL UNTOUCHED by every one of these. }
   Unbudgeted('an unbudgeted host still globs',

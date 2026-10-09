@@ -73,3 +73,4 @@
 28_http_authority
 29_http_ca_sandbox
 30_http_path_colon
+31_sqlite_json_integers

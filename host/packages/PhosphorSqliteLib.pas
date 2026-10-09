@@ -716,16 +716,28 @@ begin
   Result := StringReplace(S, '''', '''''', [rfReplaceAll]);
 end;
 
-{ Bind one fpjson node to a 1-based sqlite parameter. }
+{ Bind one fpjson node to a 1-based sqlite parameter.
+
+  AN INTEGER IS BOUND AS AN INTEGER, whatever width fpjson gave it (2026-10-09,
+  round 3, found by the JSON fixer). Only ntInteger -- 32 bits -- was bound with
+  bind_int64; an ntInt64 went through AsFloat, so 2^53+1 was stored as the REAL
+  9007199254740992 and every integer past 2^31 changed its SQL type. An ntQWord
+  (past 2^63-1) cannot be an SQLite INTEGER, so it is a REAL -- read from its
+  exact digits by the one correctly rounded reader, not by FPC's QWord-to-Double
+  conversion, which is one ulp off for some of them. }
 procedure BindNode(AStmt: psqlite3_stmt; AParam: Integer; ANode: TJSONData);
 var s: String;
 begin
   case ANode.JSONType of
     jtNumber:
-      if TJSONNumber(ANode).NumberType = ntInteger then
-        sqlite3_bind_int64(AStmt, AParam, ANode.AsInt64)
+      case TJSONNumber(ANode).NumberType of
+        ntInteger, ntInt64:
+          sqlite3_bind_int64(AStmt, AParam, ANode.AsInt64);
+        ntQWord:
+          sqlite3_bind_double(AStmt, AParam, ReadNumberText(ANode.AsString).Value);
       else
         sqlite3_bind_double(AStmt, AParam, ANode.AsFloat);
+      end;
     jtNull:
       sqlite3_bind_null(AStmt, AParam);
     jtBoolean:

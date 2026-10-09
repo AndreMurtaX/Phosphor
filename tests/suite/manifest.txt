@@ -85,3 +85,4 @@
 85_datetime_round2
 86_config_roundtrip
 87_sys_round2
+88_regex_nullable_repeat

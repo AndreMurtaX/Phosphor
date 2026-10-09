@@ -139,8 +139,9 @@ does not get it past: `^(\x61+)+$` is `^(a+)+$`, and under `(?i)` the alternatio
 not model (`\p{L}`, `\z`) or a backreference, inside a repeated group, makes the
 repeat unprovable, and it is refused. So is a pattern too large for the judge to
 finish reading — nesting past 100 groups, or a repeated body bigger than its
-automaton limit — which no real pattern reaches. Without a budget nothing is
-judged and every pattern runs.
+automaton limit — which no real pattern reaches. Without a budget this judge is
+not asked, and every pattern runs except the few, below, that would end the
+process.
 
 **`.` matches a newline here.** `TRegExpr` runs in single-line mode by default, so
 `regex_findpos("a.b", "a" + chr$(10) + "b")` answers `1` — a pattern meant for one
@@ -157,3 +158,52 @@ like `"ç.o"` fails to match `"ação"` because `.` consumes only the first byte
 constructs (`.`, character classes, `{n}` counts) that count bytes. Keep patterns
 byte-safe, or match on the ASCII structure around the accented text rather than
 through it.
+
+## Patterns that would end the process
+
+Some patterns are refused on every host, with or without a budget, because running
+them would not fail — it would end the program. `TRegExpr` compiles and matches by
+recursion on the machine stack and has no limit of its own; an overflow on Windows
+is caught once, and the second one in the same thread is an access violation that
+closes the host, while on Linux the first one does. So every pattern is read before
+it runs, the way `TRegExpr` itself reads it, and four shapes are answered with the
+library's ordinary error — code `6`, a message beginning `regex error:` and naming
+the function and the reason — instead of being run:
+
+| refused | example | why |
+| --- | --- | --- |
+| a repeated group that can match nothing, at the start of the pattern | `(a{0,2}){2}`, `(b\|a{0,1}){2}`, `^(a{0,2})+`, `(a?)??` | the compiler walks the group, arrives back at the repeat, and walks it again for ever. It believes `a{0,2}` has width, so it does not refuse the repeat itself |
+| a repeat with no upper count over a group that can match nothing | `-(a{0,2})+`, `-(a{0,2})*?c` | the matcher takes the empty match again and again |
+| a counted backreference to a group that can capture nothing, or to its own group | `()\1*x`, `(a?)\1+`, `(a\1*)` | the matcher counts empty copies to 2³¹ and then steps back "that many bytes" — past the end of the text. Unguarded, `()\1*?x` against `"a"` answered a 5994-byte match of whatever followed the text in memory |
+| a text too long for the stack the pattern's groups would take | `(a\|b)*` over 40000 bytes | every pass through a group, an alternation or a repeated group costs a stack frame that stays until the match ends. `(a\|b)*` costs four per byte, and a 16 MB stack (8 MB on Linux) runs out at about 16000 bytes (8000) |
+
+The last one is arithmetic, not a shape: the stack a call could need is worked out
+from the pattern and the text's length and compared with what the calling thread
+has left, and the message says both. A repeat of ONE byte-sized thing — `a*`,
+`[0-9]+`, `\w{2,}`, `.*` — costs one frame however long the text is, so the usual
+patterns over large texts are untouched; it is a repeated *group* that costs per
+pass, and the bound is the worst case, a group that consumes one byte per pass.
+When a long text is refused, split it first, or repeat a class instead of a group
+(`[ab]*` instead of `(a|b)*`).
+
+What still runs: the same group after something that consumes a byte
+(`-(a{0,2}){2}` against `"-aaa"` answers `"-aaa"`), a counted repeat over a group
+that can match nothing anywhere but at the start (it is bounded by its count), and
+a counted backreference to a group that cannot be empty (`(a)\1{2}`) or to a group
+the pattern does not have. A pattern that `TRegExpr` itself rejects as malformed
+still gets `TRegExpr`'s own message. `tests/suite/88_regex_nullable_repeat.bas`
+asks each refusal twice — the second call is the one that used to end the process.
+
+A few refusals are wider than the crash, kept so for one simple rule: a lazy
+unbounded repeat over a group that can match nothing crashes only when what
+follows it fails, so a trailing `-(a{0,2})*?` — which never repeats at all — is
+refused too; and every count on an empty-capable backreference is refused,
+although a small one reads only a few bytes past the text.
+
+Two things this does not change. A pattern can still be **slow**: `(a?|b?)` written
+out thirty times takes minutes to compile, in a part of `TRegExpr` that no budget
+judges, and without a budget an ambiguous repeat over a long text takes exponential
+time to fail. And `TRegExpr` raises `loop without loop
+entry` for some counted groups over an alternation (`-(b|a{0,1}){2}c` against
+`"-abab"`): that is a catchable `regex error:` for a pattern that should simply not
+match, a defect of the matcher and not of the process.

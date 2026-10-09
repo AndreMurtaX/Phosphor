@@ -619,7 +619,10 @@ when absent. The stream pair moves a list through the same byte-buffer handle
 Thin wrappers over the RTL's `TRegExpr`. Throughout, the **pattern comes first**,
 the text second. Positions are 1-based, absence is 0; group 0 is the whole match.
 The find-list functions return a **string-list handle** (read it with StrList). A
-malformed pattern is returned as an error.
+malformed pattern is returned as an error, and so is one the matcher could not run
+without ending the process — a repeated group that can match nothing, a counted
+backreference to an empty group, or a text too long for the stack the pattern's
+groups would take ([regex.md](libraries/regex.md#patterns-that-would-end-the-process)).
 
 | function | description |
 | --- | --- |

@@ -147,8 +147,26 @@ const
     died with "Division by zero", a message with nothing in it about size, about
     bounds, or about the line that asked. Every path into DoSetBounds is affected:
     Width, Height, SetBounds, and a form's own w/h. Checked here first, so the
-    answer is gui_error 1 and no resize. }
-  GuiMaxExtent = 100000;
+    answer is gui_error 1 and no resize.
+
+    AND 100000 WAS THE WRONG NUMBER, because it is only the ceiling of a control
+    that has no WINDOW yet (2026-10-09, round 4). Once its form is shown, a
+    control's bounds travel through TWinControl.SendMoveSizeMessages
+    (lcl/include/wincontrol.inc), which raises ELayoutException for a width or
+    height outside Word and for a left or top outside SmallInt -- so on a shown
+    form control_left@(b@, 100000) raised "Position range overflow" and
+    control_height@(b@, 70000) "Size range overflow", from setters documented
+    never to raise, and the LCL kept the out-of-range value, so later realigns
+    of that form raised again. Worse, a spin edit cannot be realized wider than
+    about 32780 pixels on win32: control_width@(spin@, 32768..65535) made
+    TWinControl.WMSize see bounds that never converge and raise from INSIDE the
+    window procedure, where Application.HandleException ended the process -- no
+    error trap could see it. So the one ceiling is now 32767: a legal SmallInt
+    coordinate, a legal Word size, and a size every control kind realizes.
+    GuiMinPos / GuiMaxPos are the coordinate range beside it. }
+  GuiMaxExtent = 32767;
+  GuiMinPos = -32768;
+  GuiMaxPos = 32767;
 
   { AND THE CEILING THE LCL DOES NOT HAVE: A SIZE THAT BECOMES AN ALLOCATION.
 
@@ -292,6 +310,22 @@ const
   changing as the control's current one -- that is what the LCL sees, since every
   setter routes through the four-argument SetBounds. }
 function GuiExtentOk(AWidth, AHeight: Integer): Boolean;
+{ The same answer for a position: True when both lie in GuiMinPos..GuiMaxPos,
+  else gui_error 1 and False. }
+function GuiPosOk(ALeft, ATop: Integer): Boolean;
+
+{ EVERY SIZE THE LCL WORKS OUT FOR ITSELF IS HELD TO THE SAME CEILING.
+  A setter can be checked; an AUTOSIZE cannot -- a check box captioned with
+  100000 spaces asked TControl.DoSetBounds for a width past 100000 once its form
+  was shown, which raised EDivByZero ("Division by zero") from checkbox_caption@
+  and left the form raising it again on every later constructor and move. Nor
+  can an alignment, an anchor or a parent's constraint. All of those reach the
+  size through TControl.ChangeBounds, which asks the control's ConstrainedResize
+  hook before DoSetBounds; this installs one on AObj (when it is a control) that
+  caps the maximum at GuiMaxExtent. It does not touch Constraints, so
+  control_maxwidth still reads what the program wrote. GuiRegister calls it for
+  every control a handle is made for. }
+procedure GuiCapSizes(AObj: TObject);
 
 { --- what a thing costs -----------------------------------------------------
   Each answers the modelled cost in bytes, and each is total: a dimension at or
@@ -1105,6 +1139,43 @@ begin
   if not Result then GGuiError := 1;
 end;
 
+function GuiPosOk(ALeft, ATop: Integer): Boolean;
+begin
+  Result := (ALeft >= GuiMinPos) and (ALeft <= GuiMaxPos) and
+            (ATop >= GuiMinPos) and (ATop <= GuiMaxPos);
+  if not Result then GGuiError := 1;
+end;
+
+type
+  { The protected hook, reached the standard way: a type that is never
+    instantiated, so a cast can name a member of an instance we already hold. }
+  TCapAccess = class(TControl);
+
+  { One object for the whole process; its method is the ConstrainedResize hook. }
+  TGuiSizeCap = class
+    procedure Cap(Sender: TObject; var MinWidth, MinHeight,
+                  MaxWidth, MaxHeight: TConstraintSize);
+  end;
+
+var
+  GSizeCap: TGuiSizeCap;
+
+procedure TGuiSizeCap.Cap(Sender: TObject; var MinWidth, MinHeight,
+                          MaxWidth, MaxHeight: TConstraintSize);
+begin
+  // 0 is the LCL's "no maximum", so it is the case that matters most.
+  if (MaxWidth = 0) or (MaxWidth > GuiMaxExtent) then MaxWidth := GuiMaxExtent;
+  if (MaxHeight = 0) or (MaxHeight > GuiMaxExtent) then MaxHeight := GuiMaxExtent;
+  if MinWidth > GuiMaxExtent then MinWidth := GuiMaxExtent;
+  if MinHeight > GuiMaxExtent then MinHeight := GuiMaxExtent;
+end;
+
+procedure GuiCapSizes(AObj: TObject);
+begin
+  if not (AObj is TControl) or (GSizeCap = nil) then Exit;
+  TCapAccess(AObj).OnConstrainedResize := @GSizeCap.Cap;
+end;
+
 { Clamped at zero because that is what the framework makes of a negative size, and
   because it is what keeps the product below from being a large POSITIVE number
   built out of two negatives: (-100000) * (-100000) is 10^10, and refusing on that
@@ -1654,6 +1725,7 @@ begin
   h.Control := AObj;
   h.Owns := AOwns;
   h.Watch;                       // tell me when you die
+  GuiCapSizes(AObj);             // and never grow past what a window can hold
   Result := RegisterHandle(h);
 end;
 
@@ -1918,8 +1990,10 @@ initialization
   // a grid when its form dies -- a leak that only shows up as a false refusal
   // twenty minutes into a long-running host.
   GLedgerWatch := TGuiLedgerWatch.Create(nil);
+  GSizeCap := TGuiSizeCap.Create;
 
 finalization
+  FreeAndNil(GSizeCap);   // every control holding its method died with the handles
   // Charged objects that outlive this unit (they do not: the engine's handle
   // registry is torn down first) would notify a freed watcher. Drop the list and
   // the watcher together.

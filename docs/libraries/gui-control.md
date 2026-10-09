@@ -46,6 +46,17 @@ given one changes nothing and answers that same handle back.
 
 ### Geometry
 
+**A position is a 16-bit signed number and a size is at most 32767**, on a hidden
+form and a shown one alike. Past either, the setter records `gui_error() = 1` and
+the control keeps the bounds it had — nothing is raised. The reason is the window:
+once a form is shown the LCL raises for a left or top outside `-32768..32767` and
+a width or height outside `0..65535` (after storing the value, so the window went
+on raising), and a spin edit cannot be realized wider than about 32780 pixels on
+win32 at all — `control_width@(spin@, 40000)` used to end the process from inside
+the window procedure, past any error trap. A size the control works out for itself
+(an autosized caption, an alignment) is held to the same 32767, and a resize the
+layout still refuses is undone and recorded as `gui_error() = 1`.
+
 | function | what it answers |
 | --- | --- |
 | `control_left(c@) → num`<br>`control_left@(c@, x) → handle` | the left edge in pixels, in the **parent's** client coordinates — not the screen's |
@@ -53,9 +64,9 @@ given one changes nothing and answers that same handle back.
 | `control_width(c@) → num`<br>`control_width@(c@, w) → handle` | the width. A value the `Constraints` refuse is clamped by the LCL, so reading it back is the only way to know what you got |
 | `control_height(c@) → num`<br>`control_height@(c@, h) → handle` | the height, likewise |
 | `control_align(c@) → num`<br>`control_align@(c@, a) → handle` | the `TAlign` ordinal: `0` none, `1` top, `2` bottom, `3` left, `4` right, `5` client, `6` custom. A number outside `0..6` leaves the alignment alone — and, unlike the bridge, records nothing, so pass a constant you trust |
-| `control_move@(c@, x, y) → handle` | left and top in one call |
-| `control_size@(c@, w, h) → handle` | width and height in one call |
-| `control_bounds@(c@, x, y, w, h) → handle` | all four at once through `SetBounds`, so the control never passes through an intermediate rectangle on its way |
+| `control_move@(c@, x, y) → handle` | left and top in one call; both are refused if either is out of range |
+| `control_size@(c@, w, h) → handle` | width and height in one call; both are refused if either is past 32767 |
+| `control_bounds@(c@, x, y, w, h) → handle` | all four at once through `SetBounds`, so the control never passes through an intermediate rectangle on its way. All four are refused if any is out of range |
 
 ### State and appearance
 
@@ -100,8 +111,8 @@ Each of these writes into the control's own `Font`; the pair round-trips.
 | `control_anchors$(c@) → str`<br>`control_anchors@(c@, ids$) → handle` | the anchor set as an identifier list without brackets — `"akLeft,akRight"` — which is exactly the text the setter takes, so the pair round-trips. On a control with no published `Anchors`: `""` / no write, and `gui_error() = 3` |
 | `control_tabstop(c@) → num`<br>`control_tabstop@(c@, on) → handle` | whether Tab reaches this control, `1`/`0`. Windowed controls only: on a label the getter answers `0` and **both** halves record `gui_error() = 1` |
 | `control_taborder(c@) → num`<br>`control_taborder@(c@, n) → handle` | its 0-based position in the parent's tab chain. Windowed controls only, as above |
-| `control_spacing(c@) → num`<br>`control_spacing@(c@, px) → handle` | `BorderSpacing.Around` — one gap for all four edges. `BorderSpacing` is a class-typed sub-object, which is precisely why the bridge refuses it and this named helper exists |
-| `control_minwidth(c@) → num`<br>`control_minwidth@(c@, px) → handle` | `Constraints.MinWidth`; `0` is the LCL's "no constraint" |
+| `control_spacing(c@) → num`<br>`control_spacing@(c@, px) → handle` | `BorderSpacing.Around` — one gap for all four edges. `BorderSpacing` is a class-typed sub-object, which is precisely why the bridge refuses it and this named helper exists. A gap outside `-32767..32767` is refused with `gui_error() = 1` |
+| `control_minwidth(c@) → num`<br>`control_minwidth@(c@, px) → handle` | `Constraints.MinWidth`; `0` is the LCL's "no constraint". A negative value is `0`; a value past 32767 is refused with `gui_error() = 1`, as for the other three. `0` still reads back as `0` — the host's own 32767 ceiling is applied beside the constraint, not written into it |
 | `control_maxwidth(c@) → num`<br>`control_maxwidth@(c@, px) → handle` | `Constraints.MaxWidth`, likewise |
 | `control_minheight(c@) → num`<br>`control_minheight@(c@, px) → handle` | `Constraints.MinHeight`, likewise |
 | `control_maxheight(c@) → num`<br>`control_maxheight@(c@, px) → handle` | `Constraints.MaxHeight`, likewise |
@@ -134,7 +145,7 @@ That is what makes the whole event surface testable headless.
 | `control_keydown@(c@, key, mods$) → handle` | the control, after its key-down handler has run. `mods$` is any subset of `S`, `C`, `A` in any order — the same text a handler receives, read back the other way. Windowed controls only (`gui_error() = 1` otherwise) |
 | `control_keyup@(c@, key, mods$) → handle` | the same for the release |
 | `control_keypress@(c@, ch$) → handle` | the control, after its key-press handler has run on the **first byte** of `ch$`. An empty string presses nothing and is not an error |
-| `control_mousedown@(c@, button, x, y, mods$) → handle` | the control, after its mouse-down handler has run at `x`,`y` |
+| `control_mousedown@(c@, button, x, y, mods$) → handle` | the control, after its mouse-down handler has run at `x`,`y`. A grid and a tree view try to take the focus on a mouse-down; on a form that is not shown that focus is the same deliberate no-op as `control_setfocus@`, not an error, and the handler still runs exactly once. Anything else the control raises is recorded as `gui_error() = 1`, here and in the other synthesisers |
 | `control_mouseup@(c@, button, x, y, mods$) → handle` | the same for the release |
 | `control_mousemove@(c@, x, y, mods$) → handle` | the control, after a move to `x`,`y` |
 | `control_mousewheel(c@, delta, x, y, mods$) → num` | **not a handle** — `1` if the wheel was consumed, `0` if it was not, which is the handler's own decision read straight back out of one call. A positive `delta` is one way, a negative one the other; `0` when there is no handler, or the handle is bad |
@@ -143,7 +154,7 @@ That is what makes the whole event surface testable headless.
 
 | function | what it answers |
 | --- | --- |
-| `control_set@(c@, name$, value) → handle`<br>`control_set@(c@, name$, value$) → handle`<br>`control_set@(c@, name$, value?) → handle` | the control, with the published property `name$` written. The BASIC type decides the write: a string sets a string property, an **enum by its identifier** (`"alClient"`) or a **set by its identifier list** (`"akLeft,akRight"`); a number sets a float or any ordinal. A string aimed at a plain ordinal is a mistake, not a value to coerce: it is refused with `gui_error() = 3` and the old value stays. An unknown property, or a class-typed one like `Constraints`, is refused the same way |
+| `control_set@(c@, name$, value) → handle`<br>`control_set@(c@, name$, value$) → handle`<br>`control_set@(c@, name$, value?) → handle` | the control, with the published property `name$` written. The BASIC type decides the write: a string sets a string property, an **enum by its identifier** (`"alClient"`) or a **set by its identifier list** (`"akLeft,akRight"`); a number sets a float or any ordinal. A string aimed at a plain ordinal is a mistake, not a value to coerce: it is refused with `gui_error() = 3` and the old value stays. An unknown property, or a class-typed one like `Constraints`, is refused the same way. `Left`, `Top`, `Width`, `Height`, `ClientWidth` and `ClientHeight` are held to the geometry range above (`gui_error() = 1`), and a value the control itself refuses is put back to what it was, with `gui_error() = 1` |
 | `control_get(c@, name$) → num` | the property's numeric or ordinal value — an enum or set reads as its number. A property that has no numeric reading (a string, a class) answers `0` **and** records `gui_error() = 3`, so a real zero and an unreadable property are distinguishable |
 | `control_get$(c@, name$) → str` | the string value; an enum as its identifier (`"alClient"`); a set as its bracket-less identifier list, in exactly the form `control_set@` accepts. Anything else answers `""` with `gui_error() = 3` |
 

@@ -44,39 +44,43 @@ on error goto trapped
 f@ = form@("faults", 400, 300)
 
 rem --- the arithmetic trap and the silent wrap ------------------------
+rem (Probed through control_color@ since 2026-10-09: Left and Top are
+rem positions now, refused past a SmallInt, so they can no longer show
+rem whether the narrowing saturated or wrapped. Color is an Integer the
+rem host leaves unranged, through the same ArgOrd32.)
 test_case("faults/a number too large for Integer saturates, never traps")
 b@ = button@(f@)
 raised = 0
 gui_clearerror()
 n% = 9223372036854775807
-control_left@(b@, n%)
+control_color@(b@, n%)
 on error goto 0
 assert_eq(raised, 0, "the largest Int64 the language has did not raise")
-assert_eq(control_left(b@), 2147483647, "it saturated at High(Integer)")
+assert_eq(control_color(b@), 2147483647, "it saturated at High(Integer)")
 on error goto trapped
 
 test_case("faults/and a value merely past Integer does not wrap")
 raised = 0
-control_left@(b@, 3e9)
+control_color@(b@, 3e9)
 on error goto 0
 assert_eq(raised, 0, "3e9 did not raise")
-assert_eq(control_left(b@), 2147483647, "3e9 saturated instead of answering -1294967296")
+assert_eq(control_color(b@), 2147483647, "3e9 saturated instead of answering -1294967296")
 on error goto trapped
 
 test_case("faults/the negative end saturates too")
 raised = 0
-control_top@(b@, -1e19)
+control_color@(b@, -1e19)
 on error goto 0
 assert_eq(raised, 0, "-1e19 did not raise")
-assert_eq(control_top(b@), -2147483648, "it saturated at Low(Integer)")
+assert_eq(control_color(b@), -2147483648, "it saturated at Low(Integer)")
 on error goto trapped
 
 test_case("faults/the property bridge narrows the same way")
 raised = 0
-control_set@(b@, "Left", 1e19)
+control_set@(b@, "Color", 1e19)
 on error goto 0
 assert_eq(raised, 0, "control_set@ with 1e19 did not raise")
-assert_eq(control_left(b@), 2147483647, "and saturated instead of truncating to -1")
+assert_eq(control_color(b@), 2147483647, "and saturated instead of truncating to -1")
 on error goto trapped
 
 test_case("faults/but a 64-bit property through the bridge keeps its width")
@@ -91,7 +95,11 @@ on error goto trapped
 
 rem --- the LCL's hard ceiling on a control's size ---------------------
 rem TControl.DoSetBounds traps (RaiseGDBException -> EDivByZero) above
-rem 100000, so a size past it is refused here instead.
+rem 100000, so a size past it is refused here instead. Since 2026-10-09
+rem (round 4) the host's ceiling is 32767, lower than the LCL's: a
+rem SHOWN form raises past a Word and a spin edit dies past ~32780, so
+rem the case below pins the new edge (tests/gui/29_shown_form.bas pins
+rem why).
 test_case("faults/a size past the LCL's ceiling is refused, not trapped")
 control_size@(b@, 40, 20)
 raised = 0
@@ -105,10 +113,10 @@ on error goto trapped
 
 test_case("faults/a size at the ceiling is still accepted")
 gui_clearerror()
-control_width@(b@, 100000)
+control_width@(b@, 32767)
 on error goto 0
-assert_eq(gui_error(), 0, "100000 is inside the limit")
-assert_eq(control_width(b@), 100000, "and was applied")
+assert_eq(gui_error(), 0, "32767 is inside the limit")
+assert_eq(control_width(b@), 32767, "and was applied")
 on error goto trapped
 control_width@(b@, 40)
 

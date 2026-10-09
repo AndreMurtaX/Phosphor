@@ -39,6 +39,7 @@ begin
   end;
   lbl := TLabel.Create(pc);
   lbl.Parent := TWinControl(pc);
+  GuiCapSizes(lbl);   // before the caption: its autosize is the size the cap holds
   if Length(Args) >= 2 then lbl.Caption := Args[1].Str;
   Result := ValHandle(GuiRegister(lbl, False));
 end;
@@ -67,6 +68,7 @@ begin
   if not GuiResolve(Args[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
   st := TStaticText.Create(pc);
   st.Parent := TWinControl(pc);
+  GuiCapSizes(st);    // before the caption, as label@ does
   if Length(Args) >= 2 then st.Caption := Args[1].Str;
   Result := ValHandle(GuiRegister(st, False));
 end;

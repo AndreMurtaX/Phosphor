@@ -26,7 +26,7 @@ unit PhosphorControlLib;
 interface
 
 uses
-  SysUtils, Classes, Types, TypInfo, Controls, Graphics,
+  SysUtils, Classes, Types, TypInfo, Controls, Graphics, Forms,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorGuiCore;
 
 type
@@ -121,29 +121,67 @@ begin
   else if Result > AHi then Result := AHi;
 end;
 
+{ EVERY GEOMETRY WRITE GOES THROUGH HERE, and a write the LCL refuses is UNDONE.
+  The range checks in the setters below keep the program's own numbers inside
+  what a window can hold (GuiPosOk, GuiExtentOk). What they cannot see is the
+  layout the write sets off: an anchored or aligned sibling, a parent's
+  constraint, an autosize. When any of that raises -- SendMoveSizeMessages'
+  "Position range overflow" is the one a shown form produces -- the LCL has
+  ALREADY stored the new bounds, so every later realign of that form raised
+  again: one refused move poisoned the window for the rest of the run
+  (2026-10-09, round 4). So the old bounds are put back, the refusal is
+  gui_error 1, and nothing crosses into BASIC. }
+function SafeSetBounds(c: TControl; L, T, W, H: Integer): Boolean;
+var oL, oT, oW, oH: Integer;
+begin
+  oL := c.Left; oT := c.Top; oW := c.Width; oH := c.Height;
+  try
+    c.SetBounds(L, T, W, H);
+    Result := True;
+  except
+    on Exception do
+    begin
+      GGuiError := 1;
+      Result := False;
+      try
+        c.SetBounds(oL, oT, oW, oH);
+      except
+        on Exception do ;   // the old bounds were legal once; nothing more to try
+      end;
+    end;
+  end;
+end;
+
 // --- named geometry helpers -------------------------------------------------
+{ A POSITION IS A SmallInt AND A SIZE AT MOST GuiMaxExtent, refused past either
+  with gui_error 1 and the control left where it was -- on a hidden form and a
+  shown one alike, so a program does not pass its tests headless and raise when a
+  person runs it (see GuiMaxExtent in PhosphorGuiCore for the measurements). }
 function f_left_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Left) else Result := ValInt(0); end;
 function f_left_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Left := ArgOrd32(A[1]); Result := A[0]; end;
+var c: TControl; n: Integer; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiPosOk(n, 0) then SafeSetBounds(c, n, c.Top, c.Width, c.Height); end;
+  Result := A[0]; end;
 function f_top_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Top) else Result := ValInt(0); end;
 function f_top_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Top := ArgOrd32(A[1]); Result := A[0]; end;
+var c: TControl; n: Integer; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiPosOk(0, n) then SafeSetBounds(c, c.Left, n, c.Width, c.Height); end;
+  Result := A[0]; end;
 function f_width_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Width) else Result := ValInt(0); end;
 function f_width_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; n: Integer; begin E := NoError;
-  // GuiExtentOk, not a bare assignment: past 100000 the LCL traps rather than
-  // refusing -- see the constant's note in PhosphorGuiCore. The height it will see
-  // is the one the control already has, so that is what is offered for checking.
-  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiExtentOk(n, c.Height) then c.Width := n; end;
+  // GuiExtentOk, not a bare assignment: past the ceiling the LCL traps or raises
+  // rather than refusing -- see the constant's note in PhosphorGuiCore.
+  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiExtentOk(n, 0) then SafeSetBounds(c, c.Left, c.Top, n, c.Height); end;
   Result := A[0]; end;
 function f_height_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then Result := ValInt(c.Height) else Result := ValInt(0); end;
 function f_height_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; n: Integer; begin E := NoError;
-  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiExtentOk(c.Width, n) then c.Height := n; end;
+  if Ctl(A[0].Hnd, c) then begin n := ArgOrd32(A[1]); if GuiExtentOk(0, n) then SafeSetBounds(c, c.Left, c.Top, c.Width, n); end;
   Result := A[0]; end;
 
 function f_align_get(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -218,7 +256,15 @@ begin E := NoError; StyleSet(A, fsUnderline); Result := A[0]; end;
 
 // --- geometry verbs ---------------------------------------------------------
 function f_move(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then begin c.Left := ArgOrd32(A[1]); c.Top := ArgOrd32(A[2]); end; Result := A[0]; end;
+var c: TControl; x, y: Integer; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then
+  begin
+    x := ArgOrd32(A[1]); y := ArgOrd32(A[2]);
+    // Both or neither, the rule control_size@ already had: half a move is not a
+    // place anybody asked for.
+    if GuiPosOk(x, y) then SafeSetBounds(c, x, y, c.Width, c.Height);
+  end;
+  Result := A[0]; end;
 function f_size(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; w, h: Integer; begin E := NoError;
   if Ctl(A[0].Hnd, c) then
@@ -226,15 +272,16 @@ var c: TControl; w, h: Integer; begin E := NoError;
     w := ArgOrd32(A[1]); h := ArgOrd32(A[2]);
     // Both together, and BOTH refused if either is too big: half a resize is not a
     // size anybody asked for.
-    if GuiExtentOk(w, h) then begin c.Width := w; c.Height := h; end;
+    if GuiExtentOk(w, h) then SafeSetBounds(c, c.Left, c.Top, w, h);
   end;
   Result := A[0]; end;
 function f_bounds(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; w, h: Integer; begin E := NoError;
+var c: TControl; x, y, w, h: Integer; begin E := NoError;
   if Ctl(A[0].Hnd, c) then
   begin
+    x := ArgOrd32(A[1]); y := ArgOrd32(A[2]);
     w := ArgOrd32(A[3]); h := ArgOrd32(A[4]);
-    if GuiExtentOk(w, h) then c.SetBounds(ArgOrd32(A[1]), ArgOrd32(A[2]), w, h);
+    if GuiPosOk(x, y) and GuiExtentOk(w, h) then SafeSetBounds(c, x, y, w, h);
   end;
   Result := A[0]; end;
 function f_bringtofront(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -400,13 +447,110 @@ begin
   end;
 end;
 
+{ A SYNTHESISED EVENT IS THE CONTROL'S OWN METHOD, AND SOME OF THOSE FOCUS.
+  TCustomGrid.MouseDown calls SetFocus after the handler and TCustomTreeView's
+  BEFORE it; on a form that was never shown that reaches TCustomForm.SetFocus,
+  which raises EInvalidOperation "Can not focus" -- so control_mousedown@ on a
+  grid or a tree view of a hidden form ended the program (2026-10-09, round 4),
+  and for the tree its handler never ran. Focus before form_show@ is documented
+  as a deliberate no-op (control_setfocus@), so that refusal is ANSWERED here,
+  not reported: the call goes on as the LCL itself goes on when a grid finds it
+  cannot focus. Anything else the LCL raises is recorded as gui_error 1.
+
+  FocusRefused tells the one refusal from the rest: an EInvalidOperation while
+  the control's form is not showing. }
+function FocusRefused(c: TComponent; Ex: Exception): Boolean;
+var f: TCustomForm;
+begin
+  Result := False;
+  if not (Ex is EInvalidOperation) or not (c is TControl) then Exit;
+  f := GetParentForm(TControl(c));
+  Result := (f = nil) or not (f.Visible and f.Enabled);
+end;
+
+procedure SynthFault(c: TComponent; Ex: Exception);
+begin
+  if not FocusRefused(c, Ex) then GGuiError := 1;
+end;
+
+type
+  { And the handler must still run when the refusal came BEFORE it. The probe
+    stands in for the bound handler for the length of one synthesised call,
+    passes the event through, and remembers whether it did -- so a mouse-down
+    the LCL abandoned at SetFocus can be delivered to the handler afterwards, the
+    way a grid delivers it before it tries to focus. }
+  TMouseProbe = class
+    Saved: TMouseEvent;
+    Ran: Boolean;
+    procedure Fire(Sender: TObject; Button: TMouseButton; Shift: TShiftState;
+                   X, Y: Integer);
+  end;
+
+procedure TMouseProbe.Fire(Sender: TObject; Button: TMouseButton;
+                           Shift: TShiftState; X, Y: Integer);
+begin
+  Ran := True;
+  if Assigned(Saved) then Saved(Sender, Button, Shift, X, Y);
+end;
+
+function SameEvent(const A, B: TMouseEvent): Boolean;
+begin
+  Result := (TMethod(A).Code = TMethod(B).Code) and (TMethod(A).Data = TMethod(B).Data);
+end;
+
+procedure SynthMouse(c: TComponent; AUp: Boolean; Btn: TMouseButton;
+                     Shift: TShiftState; X, Y: Integer);
+var
+  probe: TMouseProbe;
+  mine: TMouseEvent;
+begin
+  probe := TMouseProbe.Create;
+  try
+    mine := @probe.Fire;
+    if AUp then probe.Saved := TControlAccess(c).OnMouseUp
+    else probe.Saved := TControlAccess(c).OnMouseDown;
+    if AUp then TControlAccess(c).OnMouseUp := mine
+    else TControlAccess(c).OnMouseDown := mine;
+    try
+      try
+        if AUp then TControlAccess(c).MouseUp(Btn, Shift, X, Y)
+        else TControlAccess(c).MouseDown(Btn, Shift, X, Y);
+      except
+        on Ex: Exception do
+        begin
+          SynthFault(c, Ex);
+          if FocusRefused(c, Ex) and not probe.Ran and Assigned(probe.Saved) then
+            probe.Saved(c, Btn, Shift, X, Y);
+        end;
+      end;
+    finally
+      // Put the binding back -- unless the handler bound a new one, which is the
+      // program's to keep. (A free requested inside the handler is deferred, so
+      // the control is still alive here.)
+      if AUp then
+      begin
+        if SameEvent(TControlAccess(c).OnMouseUp, mine) then
+          TControlAccess(c).OnMouseUp := probe.Saved;
+      end
+      else if SameEvent(TControlAccess(c).OnMouseDown, mine) then
+        TControlAccess(c).OnMouseDown := probe.Saved;
+    end;
+  finally
+    probe.Free;
+  end;
+end;
+
 function f_do_keydown(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; k: Word;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
   k := Word(ArgOrdIn(A[1], Low(Word), High(Word)));
-  TWinControlAccess(c).KeyDown(k, ModsOf(A[2].Str));
+  try
+    TWinControlAccess(c).KeyDown(k, ModsOf(A[2].Str));
+  except
+    on Ex: Exception do SynthFault(c, Ex);
+  end;
 end;
 function f_do_keyup(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; k: Word;
@@ -414,7 +558,11 @@ begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
   k := Word(ArgOrdIn(A[1], Low(Word), High(Word)));
-  TWinControlAccess(c).KeyUp(k, ModsOf(A[2].Str));
+  try
+    TWinControlAccess(c).KeyUp(k, ModsOf(A[2].Str));
+  except
+    on Ex: Exception do SynthFault(c, Ex);
+  end;
 end;
 function f_do_keypress(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; ch: Char;
@@ -423,30 +571,38 @@ begin
   if not GuiResolve(A[0].Hnd, TWinControl, c) then Exit;
   if A[1].Str = '' then Exit;      // nothing to press
   ch := A[1].Str[1];               // the first BYTE, so this stays byte-exact
-  TWinControlAccess(c).KeyPress(ch);
+  try
+    TWinControlAccess(c).KeyPress(ch);
+  except
+    on Ex: Exception do SynthFault(c, Ex);
+  end;
 end;
 function f_do_mousedown(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
-  TControlAccess(c).MouseDown(MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
-                              ArgOrd32(A[2]), ArgOrd32(A[3]));
+  SynthMouse(c, False, MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
+             ArgOrd32(A[2]), ArgOrd32(A[3]));
 end;
 function f_do_mouseup(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
-  TControlAccess(c).MouseUp(MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
-                            ArgOrd32(A[2]), ArgOrd32(A[3]));
+  SynthMouse(c, True, MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
+             ArgOrd32(A[2]), ArgOrd32(A[3]));
 end;
 function f_do_mousemove(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
-  TControlAccess(c).MouseMove(ModsOf(A[3].Str), ArgOrd32(A[1]), ArgOrd32(A[2]));
+  try
+    TControlAccess(c).MouseMove(ModsOf(A[3].Str), ArgOrd32(A[1]), ArgOrd32(A[2]));
+  except
+    on Ex: Exception do SynthFault(c, Ex);
+  end;
 end;
 function f_do_mousewheel(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; pt: TPoint;
@@ -457,7 +613,11 @@ begin
   // ONE call. DoMouseWheel already answers whether the event was consumed, which is
   // what the handler's Handled var parameter decided -- so the program reads back
   // its own answer, and the wheel is not spun twice to find out.
-  Result := ValInt(Ord(TControlAccess(c).DoMouseWheel(ModsOf(A[4].Str), ArgOrd32(A[1]), pt)));
+  try
+    Result := ValInt(Ord(TControlAccess(c).DoMouseWheel(ModsOf(A[4].Str), ArgOrd32(A[1]), pt)));
+  except
+    on Ex: Exception do SynthFault(c, Ex);
+  end;
 end;
 
 // --- the backbone helpers the plan named and never had ----------------------
@@ -538,33 +698,102 @@ var c: TComponent; begin E := NoError; Result := A[0];
 function f_spacing_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).BorderSpacing.Around); end;
+{ A GAP AND A CONSTRAINT ARE SIZES TOO. Each moves or resizes the control (and its
+  aligned siblings) the moment it is written, so each is held to the same ceiling
+  as control_width@ -- refused past it with gui_error 1 -- and each write is undone
+  if the layout it sets off raises, the way SafeSetBounds undoes a move. Measured
+  on a shown form before this: control_spacing@ on an aligned control raised
+  "Position range overflow", and control_minwidth@ of 65536..2^31 raised "Size
+  range overflow" or "Division by zero" from nearly every control kind. }
+function SpacingOk(N: Integer): Boolean;
+begin
+  Result := (N >= -GuiMaxExtent) and (N <= GuiMaxExtent);
+  if not Result then GGuiError := 1;
+end;
+
+procedure SafeSpacing(c: TControl; N: Integer);
+var old: Integer;
+begin
+  old := c.BorderSpacing.Around;
+  try
+    c.BorderSpacing.Around := N;
+  except
+    on Exception do
+    begin
+      GGuiError := 1;
+      try c.BorderSpacing.Around := old; except on Exception do ; end;
+    end;
+  end;
+end;
+
+type TConstraintKind = (ckMinW, ckMaxW, ckMinH, ckMaxH);
+
+function ConstraintOf(c: TControl; K: TConstraintKind): Integer;
+begin
+  case K of
+    ckMinW: Result := c.Constraints.MinWidth;
+    ckMaxW: Result := c.Constraints.MaxWidth;
+    ckMinH: Result := c.Constraints.MinHeight;
+  else      Result := c.Constraints.MaxHeight;
+  end;
+end;
+
+procedure PutConstraint(c: TControl; K: TConstraintKind; N: Integer);
+begin
+  case K of
+    ckMinW: c.Constraints.MinWidth := N;
+    ckMaxW: c.Constraints.MaxWidth := N;
+    ckMinH: c.Constraints.MinHeight := N;
+  else      c.Constraints.MaxHeight := N;
+  end;
+end;
+
+procedure SetConstraint(const A: array of TValue; K: TConstraintKind);
+var c: TComponent; n: Int64; old: Integer;
+begin
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  // A negative still saturates to 0, the LCL's "no constraint", as it always did.
+  n := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize));
+  if n > GuiMaxExtent then begin GGuiError := 1; Exit; end;
+  old := ConstraintOf(TControl(c), K);
+  try
+    PutConstraint(TControl(c), K, n);
+  except
+    on Exception do
+    begin
+      GGuiError := 1;
+      try PutConstraint(TControl(c), K, old); except on Exception do ; end;
+    end;
+  end;
+end;
+
 function f_spacing_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).BorderSpacing.Around := ArgOrd32(A[1]); end;
+var c: TComponent; n: Integer; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then
+  begin
+    n := ArgOrd32(A[1]);
+    if SpacingOk(n) then SafeSpacing(TControl(c), n);
+  end; end;
 function f_minwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MinWidth); end;
 function f_minwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinWidth := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
+begin E := NoError; Result := A[0]; SetConstraint(A, ckMinW); end;
 function f_maxwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MaxWidth); end;
 function f_maxwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxWidth := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
+begin E := NoError; Result := A[0]; SetConstraint(A, ckMaxW); end;
 function f_minheight_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MinHeight); end;
 function f_minheight_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MinHeight := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
+begin E := NoError; Result := A[0]; SetConstraint(A, ckMinH); end;
 function f_maxheight_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TControl, c) then Result := ValInt(TControl(c).Constraints.MaxHeight); end;
 function f_maxheight_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TControl, c) then TControl(c).Constraints.MaxHeight := ArgOrdIn(A[1], Low(TConstraintSize), High(TConstraintSize)); end;
+begin E := NoError; Result := A[0]; SetConstraint(A, ckMaxH); end;
 
 // --- the generic TypInfo property bridge ------------------------------------
 function IsStrKind(K: TTypeKind): Boolean;
@@ -578,6 +807,7 @@ end;
 
 function f_prop_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; pi: PPropInfo; k: TTypeKind; n: Int64;
+    oldStr: String; oldNum: Extended; oldOrd: Int64; haveOld: Boolean;
 begin
   E := NoError;
   Result := A[0];   // A[0]=handle, A[1]=name$, A[2]=value
@@ -600,6 +830,34 @@ begin
   // control_parent@ above catches the LCL's own refusals, and recorded as
   // gui_error 1: the property exists, the VALUE was refused. (ERR_NO_PROPERTY stays
   // what it has always meant: no such published property.)
+  //
+  // THE GEOMETRY PROPERTIES ARE HELD TO THE NAMED SETTERS' RANGE, before the write:
+  // a position outside GuiMinPos..GuiMaxPos, a size past GuiMaxExtent. Caught
+  // afterwards was not enough -- on a shown form the LCL raises only AFTER storing
+  // the value, and "Width" past 32767 on a spin edit never reached this except at
+  // all: it raised inside the window procedure and ended the process.
+  if (A[2].Kind <> vkString) and IsOrdKind(k) and (k <> tkInt64) and (k <> tkQWord) then
+  begin
+    n := ArgOrd32(A[2]);
+    if (SameText(pi^.Name, 'Left') or SameText(pi^.Name, 'Top')) and
+       not GuiPosOk(n, 0) then Exit;
+    if (SameText(pi^.Name, 'Width') or SameText(pi^.Name, 'Height') or
+        SameText(pi^.Name, 'ClientWidth') or SameText(pi^.Name, 'ClientHeight')) and
+       not GuiExtentOk(n, 0) then Exit;
+  end;
+  // AND A WRITE THE LCL REFUSES IS UNDONE. It used to be caught and recorded with
+  // the refused value left standing -- control_set@(b@, "Left", 100000) on a shown
+  // form read back 100000 and poisoned every later realign of the window. So the
+  // old value is read first and put back when the write raises.
+  oldStr := ''; oldNum := 0; oldOrd := 0;
+  try
+    if IsStrKind(k) then oldStr := GetStrProp(c, pi)
+    else if k = tkFloat then oldNum := GetFloatProp(c, pi)
+    else if IsOrdKind(k) then oldOrd := GetOrdProp(c, pi);
+    haveOld := True;
+  except
+    on Exception do haveOld := False;   // unreadable: then there is nothing to restore
+  end;
   try
     if IsStrKind(k) then
       SetStrProp(c, pi, A[2].Str)
@@ -644,7 +902,18 @@ begin
     else
       GGuiError := ERR_NO_PROPERTY;             // an unsupported property kind
   except
-    on Exception do GGuiError := 1;
+    on Exception do
+    begin
+      GGuiError := 1;
+      if haveOld then
+      try
+        if IsStrKind(k) then SetStrProp(c, pi, oldStr)
+        else if k = tkFloat then SetFloatProp(c, pi, oldNum)
+        else if IsOrdKind(k) then SetOrdProp(c, pi, oldOrd);
+      except
+        on Exception do ;   // it held this value before; nothing more to try
+      end;
+    end;
   end;
 end;
 

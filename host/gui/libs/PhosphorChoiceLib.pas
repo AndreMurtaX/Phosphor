@@ -221,6 +221,7 @@ begin
   E := NoError;
   if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
   g := TRadioGroup.Create(pc); g.Parent := TWinControl(pc);
+  GuiCapSizes(g);     // before the caption, as label@ does
   if Length(A) >= 2 then g.Caption := A[1].Str;
   Result := ValHandle(GuiRegister(g, False));
 end;
@@ -230,12 +231,38 @@ begin
   E := NoError;
   if not GuiResolve(A[0].Hnd, TWinControl, pc) then begin Result := ValHandle(0); Exit; end;
   g := TCheckGroup.Create(pc); g.Parent := TWinControl(pc);
+  GuiCapSizes(g);     // before the caption, as label@ does
   if Length(A) >= 2 then g.Caption := A[1].Str;
   Result := ValHandle(GuiRegister(g, False));
 end;
 
+{ A GROUP'S ITEM IS A WINDOW OF ITS OWN. Adding one to a group on a shown form
+  creates its radio button there and then, and win32 cannot create one whose
+  caption is 100000 characters: radiogroup_add@ raised "Failed to create win32
+  control" (2026-10-09, round 4), from a package that raises nothing. An item
+  the widgetset cannot hold is taken back out and the add refused with
+  gui_error 1, the group as it was before. }
+procedure SafeGroupAdd(S: TStrings; const AText: String);
+var n: Integer;
+begin
+  n := S.Count;
+  try
+    S.Add(AText);
+  except
+    on Exception do
+    begin
+      GGuiError := 1;
+      try
+        while S.Count > n do S.Delete(S.Count - 1);
+      except
+        on Exception do ;
+      end;
+    end;
+  end;
+end;
+
 function f_rg_add(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then s.Add(A[1].Str); Result := A[0]; end;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then SafeGroupAdd(s, A[1].Str); Result := A[0]; end;
 function f_rg_count(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then Result := ValInt(s.Count) else Result := ValInt(0); end;
 function f_rg_item(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -288,7 +315,7 @@ var c: TComponent; begin E := NoError; Result := A[0];
     TRadioGroup(c).OnClick := GuiNotifyHandler(AVM, c, 'onchange', A[1].Str, A[0].Hnd); end;
 
 function f_cg_add(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TCheckGroup); if s <> nil then s.Add(A[1].Str); Result := A[0]; end;
+var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TCheckGroup); if s <> nil then SafeGroupAdd(s, A[1].Str); Result := A[0]; end;
 function f_cg_count(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TCheckGroup); if s <> nil then Result := ValInt(s.Count) else Result := ValInt(0); end;
 function f_cg_item(const A: array of TValue; out E: TPhosphorError): TValue;

@@ -49,7 +49,17 @@ from a `timer_ontimer@` tick.
 Every setter takes the value as a number and answers the handle; every getter
 takes the handle and answers a number. Values are narrowed to 32-bit signed on
 the way in (out-of-range numbers saturate at the 32-bit limits), and the widget's
-own limits apply after that — read the value back if it matters.
+own limits apply after that — read the value back if it matters. Two widgets are
+narrower still, and are settled here rather than by an exception:
+
+- **A min past the max, on a trackbar or a scroll bar, becomes the max; a max
+  below the min drags the min down to it.** That is the trackbar's own rule. The
+  scroll bar's LCL code raises instead ("ScrollBar property out of range"), so
+  until 2026-10-09 `scrollbar_min@(sb@, 200)` on a fresh `0..100` bar ended an
+  untrapped program; it now reads back `min 100, max 100` like the trackbar.
+- **An up/down holds a 16-bit signed number** (`-32768..32767`), so its three
+  setters saturate there: `updown_max@(ud@, 40000)` reads back `32767`. It used to
+  be truncated by the compiler and read back `-25536`.
 
 ### Trackbar — a slider the user drags
 

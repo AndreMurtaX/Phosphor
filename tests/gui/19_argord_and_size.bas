@@ -121,37 +121,41 @@ rem =================================================================
 rem PART 1b -- and the Int64 edge the boolean fix must not undo
 rem =================================================================
 
+rem (Probed through control_color@ since 2026-10-09: Left and Top are
+rem positions now, refused past a SmallInt, so they can no longer show
+rem whether the narrowing saturated or wrapped. Color is an Integer the
+rem host leaves unranged, through the same ArgOrd32.)
 test_case("int64/the largest Int64 still saturates and still does not trap")
 raised = 0
 n% = 9223372036854775807
-control_left@(b@, n%)
+control_color@(b@, n%)
 on error goto 0
 assert_eq(raised, 0, "High(Int64) did not raise")
-assert_eq(control_left(b@), 2147483647, "it saturated at High(Integer)")
+assert_eq(control_color(b@), 2147483647, "it saturated at High(Integer)")
 on error goto trapped
 
 test_case("int64/the negative end too")
 raised = 0
-control_top@(b@, -9223372036854775807)
+control_color@(b@, -9223372036854775807)
 on error goto 0
 assert_eq(raised, 0, "the negative end did not raise")
-assert_eq(control_top(b@), -2147483648, "it saturated at Low(Integer)")
+assert_eq(control_color(b@), -2147483648, "it saturated at Low(Integer)")
 on error goto trapped
 
 test_case("int64/a double past Integer does not wrap")
 raised = 0
-control_left@(b@, 3e9)
+control_color@(b@, 3e9)
 on error goto 0
 assert_eq(raised, 0, "3e9 did not raise")
-assert_eq(control_left(b@), 2147483647, "3e9 saturated, never -1294967296")
+assert_eq(control_color(b@), 2147483647, "3e9 saturated, never -1294967296")
 on error goto trapped
 
 test_case("int64/through the bridge, on both of its ordinal branches")
 raised = 0
-control_set@(b@, "Left", 1e19)
+control_set@(b@, "Color", 1e19)
 on error goto 0
 assert_eq(raised, 0, "1e19 through the bridge did not raise")
-assert_eq(control_left(b@), 2147483647, "and saturated instead of truncating")
+assert_eq(control_color(b@), 2147483647, "and saturated instead of truncating")
 on error goto trapped
 control_set@(b@, "Tag", 9007199254740992)
 on error goto 0
@@ -912,13 +916,18 @@ x = control_free(bpad2@)
 test_case("size/the gate does not touch a control that is not a grid")
 rem Every OTHER ordinal property goes through the same call. A gate
 rem that answered for all of them would have broken every setter in
-rem the package, silently.
+rem the package, silently. (Since 2026-10-09 a Left past a SmallInt is
+rem refused by the bridge's own position range -- gui_error 1, not a
+rem raise -- which is what tells it apart from the grid gate, which
+rem raises: 20000000 is past both.)
 raised = 0
 gui_clearerror()
+oldleft = control_left(b@)
 control_set@(b@, "Left", 20000000)
 on error goto 0
 assert_eq(raised, 0, "a button's Left is not a cell count")
-assert_eq(control_left(b@), 20000000, "and was written")
+assert_eq(gui_error(), 1, "it is a position, refused as one")
+assert_eq(control_left(b@), oldleft, "and the button did not move")
 on error goto trapped
 lb@ = listbox@(f@)
 list_add@(lb@, "alpha")

@@ -61,8 +61,20 @@ begin
   Result := ValHandle(GuiRegister(t, True));
 end;
 
+{ AN INTERVAL IS A Cardinal (TCustomTimer.SetInterval, lcl/customtimer.pas), and a
+  negative 32-bit count handed to one wraps: timer_interval@(t@, -1) read back
+  4294967295 -- a tick every 49.7 days, from a number that meant "as soon as you
+  can" or "never" (2026-10-09, round 4). A negative interval is 0 now, the one
+  Cardinal value it can honestly mean; a positive one is taken as before. }
 function f_interval_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Interval := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; n: Integer; begin E := NoError;
+  if GuiResolve(A[0].Hnd, TCustomTimer, c) then
+  begin
+    n := ArgI32(A[1]);
+    if n < 0 then n := 0;
+    TCustomTimer(c).Interval := Cardinal(n);
+  end;
+  Result := A[0]; end;
 function f_interval_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then Result := ValInt(TCustomTimer(c).Interval) else Result := ValInt(0); end;
 function f_enabled_set(const A: array of TValue; out E: TPhosphorError): TValue;

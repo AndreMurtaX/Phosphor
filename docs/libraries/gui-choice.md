@@ -83,7 +83,7 @@ because the group manages the mutual exclusion and the geometry.
 | radio group | check group | what it answers |
 | --- | --- | --- |
 | `radiogroup@(parent@) → handle`, `radiogroup@(parent@, caption$) → handle` | `checkgroup@(parent@) → handle`, `checkgroup@(parent@, caption$) → handle` | a new group on `parent@`, with the box caption set if given. Handle `0` when the parent cannot hold it |
-| `radiogroup_add@(g@, s$) → handle` | `checkgroup_add@(g@, s$) → handle` | the group, with one more button appended. The group creates the button itself; there is no child handle to hold |
+| `radiogroup_add@(g@, s$) → handle` | `checkgroup_add@(g@, s$) → handle` | the group, with one more button appended. The group creates the button itself; there is no child handle to hold. On a shown form the button's window is made there and then, and an item the widgetset cannot create (win32 refuses a radio button captioned with 100000 characters) is taken back out: the group is left as it was and `gui_error() = 1` |
 | `radiogroup_count(g@) → num` | `checkgroup_count(g@) → num` | how many buttons the group has; `0` when empty or when the handle is wrong |
 | `radiogroup_item$(g@, n) → str` | `checkgroup_item$(g@, n) → str` | the caption of button `n`, base-1; `""` outside `1..count` |
 | `radiogroup_clear@(g@) → handle` | `checkgroup_clear@(g@) → handle` | the group, emptied of buttons. **A radio group is not emptied from inside its own event** — `radiogroup_onchange@`'s handler, or any handler running while it is (a click it causes, say): its change is raised from inside one of the very buttons a clear destroys, so the clear is refused with `gui_error() = 1` and the items stay. Clear it after the event returns |

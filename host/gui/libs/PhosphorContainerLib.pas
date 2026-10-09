@@ -75,6 +75,7 @@ begin
   if not GuiResolve(A[0].Hnd, TPageControl, c) then begin Result := ValHandle(0); Exit; end;
   ts := TTabSheet.Create(c);
   ts.PageControl := TPageControl(c);   // adds it as a page
+  GuiCapSizes(ts);    // before the caption, as label@ does
   if Length(A) >= 2 then ts.Caption := A[1].Str;
   Result := ValHandle(GuiRegister(ts, False));
 end;

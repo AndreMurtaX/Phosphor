@@ -111,7 +111,7 @@ begin
   Err := NoError;
   frm := TForm.CreateNew(nil);
   if Length(Args) >= 1 then frm.Caption := Args[0].Str;
-  // A form is a TControl too, so form@(caption$, w, h) reaches the same trapping
+  // A form is a TControl too, so form@(caption$, w, h) is held to the same
   // ceiling as control_width@ -- see GuiMaxExtent. Refused, the window keeps the
   // default size it was created with and gui_error() says so.
   if Length(Args) >= 3 then
@@ -139,12 +139,31 @@ begin
   else Result := ValStr('');
 end;
 
+{ A form's size is held to GuiMaxExtent before the LCL sees it, and a resize the
+  LCL still refuses -- the layout of the children it sets off can raise on a shown
+  window -- is undone and recorded rather than left standing, the rule
+  control_width@ follows (PhosphorControlLib.SafeSetBounds). }
+procedure SafeFormSize(F: TForm; W, H: Integer);
+var oW, oH: Integer;
+begin
+  oW := F.Width; oH := F.Height;
+  try
+    F.SetBounds(F.Left, F.Top, W, H);
+  except
+    on Exception do
+    begin
+      GGuiError := 1;
+      try F.SetBounds(F.Left, F.Top, oW, oH); except on Exception do ; end;
+    end;
+  end;
+end;
+
 function f_form_width_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) and GuiExtentOk(ArgI32(Args[1]), TForm(c).Height) then
-    TForm(c).Width := ArgI32(Args[1]);
+  if GuiResolve(Args[0].Hnd, TForm, c) and GuiExtentOk(ArgI32(Args[1]), 0) then
+    SafeFormSize(TForm(c), ArgI32(Args[1]), TForm(c).Height);
   Result := Args[0];
 end;
 
@@ -160,8 +179,8 @@ function f_form_height_set(const Args: array of TValue; out Err: TPhosphorError)
 var c: TComponent;
 begin
   Err := NoError;
-  if GuiResolve(Args[0].Hnd, TForm, c) and GuiExtentOk(TForm(c).Width, ArgI32(Args[1])) then
-    TForm(c).Height := ArgI32(Args[1]);
+  if GuiResolve(Args[0].Hnd, TForm, c) and GuiExtentOk(0, ArgI32(Args[1])) then
+    SafeFormSize(TForm(c), TForm(c).Width, ArgI32(Args[1]));
   Result := Args[0];
 end;
 

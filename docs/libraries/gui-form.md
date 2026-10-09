@@ -49,9 +49,9 @@ it, with no window manager anywhere in the picture.
 | `form@() → handle` · `form@(caption$) → handle` · `form@(caption$, w, h) → handle` | a new top-level window, and the owning handle for it and everything later parented on it. There is no failing case and no in-between arity: `form@("Notes", 480)` matches no overload and fails as an unknown function (code `4`), it does not default the height |
 | `form_caption@(f@, s$) → handle` | set the title bar text; answers `f@` so the call chains. On a bad handle: `gui_error()` becomes `1`, nothing is set, and `f@` still comes back |
 | `form_caption$(f@) → str` | the title bar text; `""` when the handle is not a live form — indistinguishable from a form whose caption really is empty, so read `gui_error()` if the difference matters |
-| `form_width@(f@, n) → handle` | set the window width in pixels; answers `f@`. Bad handle: recorded, unapplied, handle returned |
+| `form_width@(f@, n) → handle` | set the window width in pixels; answers `f@`. Bad handle: recorded, unapplied, handle returned. A width past 32767 — the ceiling every control is held to, see [gui-control](gui-control.md#geometry) — is refused the same way, with `gui_error() = 1`; `form@(caption$, w, h)` keeps its default size for one |
 | `form_width(f@) → num` | the window width; `0` on a bad handle |
-| `form_height@(f@, n) → handle` | set the window height in pixels; answers `f@`. Bad handle: recorded, unapplied, handle returned |
+| `form_height@(f@, n) → handle` | set the window height in pixels; answers `f@`. Bad handle: recorded, unapplied, handle returned. Past 32767: refused, `gui_error() = 1` |
 | `form_height(f@) → num` | the window height; `0` on a bad handle |
 | `form_show@(f@) → handle` | realize the window: install the closer if it is not there yet, then show it. Answers the form, as `form_close@` does. On a bad handle nothing is shown and `gui_error()` is `1`. Headless, it makes the form visible without a window on screen, which is what `form_visible` then reports |
 | `form_close@(f@) → handle` | ask the form to close, along exactly the path the X button takes: `form_onclosequery@` first, then `form_onclose@`, then hide. Answers `f@` whether the close happened or was vetoed — ask `form_visible` which it was. Bad handle: nothing is asked |

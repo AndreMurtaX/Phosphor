@@ -73,12 +73,27 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TProgressBar, c) 
 // --- scroll bar -------------------------------------------------------------
 function f_scrollbar(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TScrollBar, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+{ A SCROLL BAR'S ENDS ARE SETTLED THE WAY ITS SIBLING'S ARE. TCustomScrollBar's
+  SetParams RAISES EInvalidOperation ("ScrollBar property out of range") when the
+  new min would pass the max (lcl/include/scrollbar.inc), where TCustomTrackBar's
+  FixParams pulls the min down to the max instead -- so scrollbar_min@(sb@, 200)
+  on a fresh 0..100 bar ended an untrapped program, from a package whose page
+  says no exception crosses into BASIC (2026-10-09, round 4). Both now go through
+  the trackbar's own rule, applied before the LCL sees the pair: a min past the
+  max becomes the max, and a max below the min drags the min down with it. The
+  position is then clamped into the range by SetParams itself, as it always was. }
+procedure SbSetRange(ASb: TScrollBar; AMin, AMax: Integer);
+begin
+  if AMin > AMax then AMin := AMax;      // TCustomTrackBar.FixParams, line for line
+  ASb.SetParams(ASb.Position, AMin, AMax);
+end;
+
 function f_sb_min_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then TScrollBar(c).Min := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then SbSetRange(TScrollBar(c), ArgI32(A[1]), TScrollBar(c).Max); Result := A[0]; end;
 function f_sb_min_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then Result := ValInt(TScrollBar(c).Min) else Result := ValInt(0); end;
 function f_sb_max_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then TScrollBar(c).Max := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then SbSetRange(TScrollBar(c), TScrollBar(c).Min, ArgI32(A[1])); Result := A[0]; end;
 function f_sb_max_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) then Result := ValInt(TScrollBar(c).Max) else Result := ValInt(0); end;
 function f_sb_pos_set(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -89,16 +104,30 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TScrollBar, c) th
 // --- up/down (a small pair of increment/decrement arrows) -------------------
 function f_updown(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if MakeChild(A[0].Hnd, TUpDown, c) then Result := ValHandle(GuiRegister(c, False)) else Result := ValHandle(0); end;
+{ AN UP/DOWN HOLDS A SmallInt. TCustomUpDown's Min, Max and Position are
+  declared SmallInt (lcl/include/customupdown.inc), and the 32-bit value this
+  package narrows to was handed over unchecked, so the compiler truncated it:
+  updown_max@(ud@, 40000) read back -25536 (2026-10-09, round 4). Saturated into
+  the type instead -- the rule control_cursor@ already applies to its own SmallInt. }
+function UdArg(const V: TValue): SmallInt;
+var n: Integer;
+begin
+  n := ArgI32(V);
+  if n < Low(SmallInt) then n := Low(SmallInt)
+  else if n > High(SmallInt) then n := High(SmallInt);
+  Result := SmallInt(n);
+end;
+
 function f_ud_min_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Min := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Min := UdArg(A[1]); Result := A[0]; end;
 function f_ud_min_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then Result := ValInt(TUpDown(c).Min) else Result := ValInt(0); end;
 function f_ud_max_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Max := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Max := UdArg(A[1]); Result := A[0]; end;
 function f_ud_max_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then Result := ValInt(TUpDown(c).Max) else Result := ValInt(0); end;
 function f_ud_pos_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Position := ArgI32(A[1]); Result := A[0]; end;
+var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then TUpDown(c).Position := UdArg(A[1]); Result := A[0]; end;
 function f_ud_pos_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TUpDown, c) then Result := ValInt(TUpDown(c).Position) else Result := ValInt(0); end;
 

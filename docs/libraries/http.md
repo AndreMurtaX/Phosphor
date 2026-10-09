@@ -85,7 +85,7 @@ something ambiguous say so again.
 | `http_status(c@, path$) → num` | the same request, answering its status; `0` when nothing connected or nothing was sent. Under a host that sets an execution budget, a query built from more params than the budget allows is a runtime error, the same refusal for all three client verbs |
 | `http_post$(c@, path$, body$) → str` | POST `body$` the same way; the client's content type, if set, goes with it |
 | `http_verify_peer(on) → num` | turn https certificate verification on (the default) or off, for the whole process; answers the value it set (`1`/`0`). `0` is the explicit opt-out for a self-signed dev server, never the default Off means off for the **name** as well as the chain. |
-| `http_ca_file$(path$) → str` | verify against this CA bundle (PEM); answers `path$` back, unchanged and unchecked — a path that does not exist is accepted here and shows up later as a failed connection |
+| `http_ca_file$(path$) → str` | verify against this CA bundle (PEM); answers `path$` back, and `ioerror()` `0`. A path that does not exist is accepted here and shows up later as a failed connection. Under a sandbox a path outside the root is refused: the answer is `""`, `ioerror()` is `5`, and the bundle recorded before stays — OpenSSL opens this file, so the setter asks the gate, as `http_clientcert` does |
 
 ### The client handle
 

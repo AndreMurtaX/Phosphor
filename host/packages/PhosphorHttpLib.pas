@@ -2270,12 +2270,26 @@ begin
 end;
 
 { http_ca_file$(path$) -- point verification at a specific CA bundle (PEM). Mainly for
-  platforms without a system bundle in a standard place (e.g. Windows). Returns path$. }
+  platforms without a system bundle in a standard place (e.g. Windows). Returns path$,
+  or "" with ioerror() 5 when the sandbox refuses it -- and then the bundle recorded
+  before stays. OpenSSL, not this engine, opens the file, which is why this setter
+  asks the gate itself, as http_clientcert does: until 2026-10-09 it recorded any
+  path, and a script confined to its root used an outside file as the bundle -- a
+  request that verified said the file was there and was that CA. Nothing is read
+  now: a missing file still shows up as a failed request. }
 function f_http_ca_file(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var path: String;
 begin
   Err := NoError();
-  gCAFile := Args[0].Str;
-  Result := ValStr(gCAFile);
+  path := Args[0].Str;
+  { The path made ABSOLUTE is both what the gate judges and what OpenSSL is
+    handed, so a later change of directory cannot make them two files. }
+  if path <> '' then path := ExpandFileName(path);
+  if (path <> '') and not IoGate(path, puRead) then
+    Exit(ValStr(''));
+  IoAnswer(True);              // only for its effect: ioerror() is THIS call's, 0
+  gCAFile := path;
+  Result := ValStr(Args[0].Str);
 end;
 
 { ===========================================================================

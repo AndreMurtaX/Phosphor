@@ -1060,7 +1060,7 @@ only when the request could not complete.
 | `http_status(url$) → num` | GET; the HTTP status code (0 on failure, and for a url carrying a control character or a port outside 1–65535, which sends nothing) |
 | `http_post$(url$, body$) → str` | POST; the response body |
 | `http_verify_peer(on) → num` | turn https certificate verification on (default) / off |
-| `http_ca_file$(path$) → str` | use a specific CA bundle for verification |
+| `http_ca_file$(path$) → str` | use a specific CA bundle for verification; `""` and `ioerror()` 5 when the sandbox refuses the path |
 
 **Client handle**
 

@@ -51,6 +51,13 @@ PRIMITIVES = [
     # writer adding a STRING) that it reported nine routines that never touch a
     # path. A primitive that cries wolf teaches people to widen ALLOWED.
     'Picture.LoadFrom',
+    # A PATH STORED FOR OPENSSL TO OPEN LATER. The setter is where the script's
+    # string becomes a file OpenSSL reads, so the setter must ask. http_ca_file$
+    # stored one with no gate until 2026-10-09 -- a confined script used an
+    # outside file as its CA bundle and read the answer off the next request --
+    # while http_clientcert, beside it, had always asked. Neither assignment is
+    # a Pascal file call, so this list had no way to tell the two apart.
+    'gCAFile :=', '.ClientCert :=', '.ClientKey :=',
 ]
 # DeleteTree and CopyTree are NOT in that list: they are this project's own
 # helpers and they ask the gate themselves, at every level of their recursion.
@@ -94,6 +101,11 @@ ALLOWED = {
     # cannot steer these anywhere, so a root would bound nothing.
     'PhosphorPlatformLib.pas:ReadFirstLine': 'reads /etc/os-release and friends; the path is a constant in this unit',
     'PhosphorHttpLib.pas:LocateCABundle': 'probes the platform CA bundle list, a constant array',
+    'PhosphorHttpLib.pas:initialization': 'installs the bundle LocateCABundle found in its constant '
+        'list; no script has run yet',
+    'PhosphorHttpLib.pas:ApplyClient': 'copies the certificate and key paths f_http_clientcert '
+        'already gated (absolute, the same string) onto the request; no script string arrives '
+        'here unjudged',
     # Routines that name a zip type without ever binding a path to it. The two
     # constructors that DO bind one ask the gate; these three are the registration
     # table, and a helper that inspects an already-open archive.
@@ -119,8 +131,16 @@ SCAN_DIRS = [
 # is everything a script can reach through a registered function.
 SCAN_FILES = []
 
-ROUTINE = re.compile(r'^(?:function|procedure|constructor|destructor)\s+'
-                     r'([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)',
+# A unit's INITIALIZATION and FINALIZATION sections are routines of their own
+# here. Without them the code there was read as the tail of whatever routine came
+# last, and judged in its name: on 2026-10-09 the unit's own
+# `gCAFile := LocateCABundle()` was reported as a hole in PreferOpenSSL3Pair,
+# which never touches a path -- the same misattribution the zip fixer met that
+# day with a class block. A gate that names the wrong routine teaches people to
+# exempt the wrong one.
+ROUTINE = re.compile(r'^(?:(?:function|procedure|constructor|destructor)\s+'
+                     r'([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)'
+                     r'|(initialization|finalization)\b)',
                      re.MULTILINE)
 
 
@@ -179,7 +199,7 @@ def routines_of(text):
     """Split into top-level routine bodies. A nested helper's calls count against
     the routine that encloses it -- conservative on purpose: the enclosing
     routine is where the guard belongs anyway."""
-    marks = [(m.start(), m.group(1)) for m in ROUTINE.finditer(text)]
+    marks = [(m.start(), m.group(1) or m.group(2)) for m in ROUTINE.finditer(text)]
     for i, (pos, name) in enumerate(marks):
         end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
         yield name, text[pos:end]

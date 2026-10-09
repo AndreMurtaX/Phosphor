@@ -196,7 +196,13 @@ assert_eq(n, 0, "an invented client answers nothing")
 assert_true(http_error(), "and says so")
 
 test_case("http/ca bundle path")
-assert_eq(http_ca_file$("/etc/ssl/certs/ca.pem"), "/etc/ssl/certs/ca.pem", "http_ca_file$ records and returns the CA bundle path")
+rem This used to record "/etc/ssl/certs/ca.pem" and pass -- a path outside
+rem the runner's root, accepted because the setter never asked the sandbox
+rem (2026-10-09). The test had pinned the defect. A path inside the root is
+rem recorded; one outside is refused -- 29_http_ca_sandbox has the rest.
+inside$ = sandboxroot$() + dirseparator$() + "no-such-bundle.pem"
+assert_eq(http_ca_file$(inside$), inside$, "http_ca_file$ records and returns a CA bundle path inside the root")
+assert_eq(http_ca_file$("/etc/ssl/certs/ca.pem"), "", "and refuses one outside it")
 
 http_free(c@)
 http_free(bare@)

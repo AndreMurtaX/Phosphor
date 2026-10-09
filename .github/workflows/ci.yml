@@ -101,8 +101,11 @@ jobs:
         if: success() || failure()
         run: |
           # The only case allowed to skip: it tests a Windows console behaviour.
-          allowed='^SKIP  V:a re-shown console \(Windows only'
-          if grep -HE '^SKIP|SKIPPED' ci-*.log | grep -vE ":$allowed"; then
+          # Matched after grep -H's `file:` prefix -- a `^` here sat in the
+          # middle of the pattern, matched nothing, and the first CI run failed
+          # on the one skip this line exists to allow.
+          allowed=':SKIP  V:a re-shown console \(Windows only'
+          if grep -HE '^SKIP|SKIPPED' ci-*.log | grep -vE "$allowed"; then
             echo "FAIL  a runner skipped work on the machine that exists to run all of it"
             exit 1
           fi

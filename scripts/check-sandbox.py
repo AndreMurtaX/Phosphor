@@ -103,6 +103,8 @@ ALLOWED = {
     'PhosphorHttpLib.pas:LocateCABundle': 'probes the platform CA bundle list, a constant array',
     'PhosphorHttpLib.pas:initialization': 'installs the bundle LocateCABundle found in its constant '
         'list; no script has run yet',
+    'PhosphorSqliteLib.pas:SqliteComplete': 'asks only whether each entry point RESOLVED '
+        '(Assigned(sqlite3_open) and the rest); calls none of them and opens nothing',
     'PhosphorHttpLib.pas:ApplyClient': 'copies the certificate and key paths f_http_clientcert '
         'already gated (absolute, the same string) onto the request; no script string arrives '
         'here unjudged',

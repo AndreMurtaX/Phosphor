@@ -185,7 +185,8 @@ type
     read through a sliding WINDOW: Buf holds only the bytes read ahead and not yet
     consumed (Pos is the 1-based cursor into it, BufStart the file offset of Buf[1]),
     so the logical file cursor is BufStart + Pos - 1 and memory is bounded by the
-    read chunk and the longest line -- never by the file size.
+    read chunk and about twice the longest line (the window grows geometrically,
+    see ChanMore) -- never by the file size.
 
     BINARY is read/write and positionable: SEEK moves the cursor, INPUT$ reads at it
     and PRINT # overwrites at it. OUTPUT/APPEND stay write-only and append-only. }
@@ -492,10 +493,12 @@ type
     // the opcode handlers can route a failure through Fault (ON ERROR-catchable).
     function ChanOpen(ANum, AMode: Integer; const APath: String): TPhosphorError;
     function ChanClose(ANum: Integer): TPhosphorError;
-    // Window management for the streaming readers. ChanMore pulls one more chunk
-    // from disk (False at end of file); ChanEnsure guarantees ANeed unconsumed
-    // bytes if the file has them; ChanCursor is the logical file offset.
-    function ChanMore(ANum: Integer): Boolean;
+    // Window management for the streaming readers. ChanMore pulls more bytes
+    // from disk -- at least AWant when the caller knows its need, else a chunk or
+    // as much as the window already holds, so a long run grows geometrically
+    // (False at end of file); ChanEnsure guarantees ANeed unconsumed bytes if the
+    // file has them; ChanCursor is the logical file offset.
+    function ChanMore(ANum: Integer; AWant: Int64): Boolean;
     function ChanEnsure(ANum, ANeed: Integer): Boolean;
     function ChanCursor(ANum: Integer): Int64;
     function ChanSeek(ANum: Integer; APos: Int64): TPhosphorError;
@@ -1248,12 +1251,51 @@ begin
   Result := CoerceField(field, ATypeCode, V);
 end;
 
+{ THE CONSOLE TWIN OF ChanMore's COST, and the same fix. A console INPUT$ that
+  needs more than one line pulled them one at a time through PullLine, and each
+  `FCharBuf := FCharBuf + line` copied everything buffered so far: input$(32 MB)
+  of 64-byte lines took 2.2 s where 8 MB took 0.24 -- four times the bytes, nine
+  times the time (tests/probe_readcost.lpr). The lines this call needs are now
+  collected first and joined ONCE, into a string sized for all of them. }
 function TPhosphorVM.InputChars(ACount: Integer): String;
+var
+  parts: array of String;
+  line, joined: String;
+  np, i, held, total, at: Integer;
 begin
   Result := '';
   if ACount <= 0 then Exit;
-  while (Length(FCharBuf) - FCharPos + 1) < ACount do
-    if not PullLine() then Break;   // EOF: hand back whatever is buffered
+  held := Length(FCharBuf) - FCharPos + 1;
+  if held < 0 then held := 0;
+  if held < ACount then
+  begin
+    parts := nil;
+    np := 0;
+    total := 0;
+    while held + total < ACount do
+    begin
+      if not (Assigned(OnInput) and OnInput(line)) then Break;   // EOF
+      if np = Length(parts) then SetLength(parts, np * 2 + 16);
+      parts[np] := line;
+      Inc(np);
+      Inc(total, Length(line) + 1);        // the stripped newline is significant
+    end;
+    if np > 0 then
+    begin
+      SetLength(joined, held + total);
+      if held > 0 then Move(FCharBuf[FCharPos], joined[1], held);
+      at := held + 1;
+      for i := 0 to np - 1 do
+      begin
+        if Length(parts[i]) > 0 then Move(parts[i][1], joined[at], Length(parts[i]));
+        Inc(at, Length(parts[i]));
+        joined[at] := #10;
+        Inc(at);
+      end;
+      FCharBuf := joined;
+      FCharPos := 1;
+    end;
+  end;
   if FCharPos > Length(FCharBuf) then Exit;
   Result := Copy(FCharBuf, FCharPos, ACount);
   Inc(FCharPos, Length(Result));
@@ -1334,9 +1376,29 @@ begin
   end;
 end;
 
-{ Pull one more chunk from disk into the window. False at end of file. }
-function TPhosphorVM.ChanMore(ANum: Integer): Boolean;
-var chunk: RawByteString; got: Integer;
+{ Pull more bytes from disk onto the end of the window. False at end of file.
+
+  HOW MUCH IS THE WHOLE OF THE COST MODEL, and it was one 64 KB chunk per call
+  appended with `Buf := Buf + chunk` -- a copy of everything the window held, per
+  chunk. A read that needs N bytes in the window at once (one long line, one long
+  field, one big input$) therefore copied about N^2 / 128 KB bytes inside ONE VM
+  instruction: a 32 MB line took 6.2 s and a 64 MB one 28 s, while the same bytes
+  as 1 MB input$ calls took 0.08 s (tests/suite/81_chan_read_linear.bas).
+
+  Now a call reads AT LEAST what the window already holds, so a run that keeps
+  needing more doubles the window each time and the copying sums to O(N); and a
+  caller that knows its need (ChanEnsure, for input$) passes it as AWant and gets
+  it in one read. The read is sized in place -- SetLength, then the stream writes
+  straight into the tail -- and is never larger than what the file has left past
+  the stream's position, so input$(2^30, #n) on a small file does not allocate a
+  gigabyte. A chunk is still the floor: a file that grows while it is open (a
+  channel is a live view) is still noticed.
+
+  The window can now stand at up to about twice the longest run being read, where
+  it was that run plus one chunk; it is still bounded by the run, never by the
+  file. The consumed prefix is dropped first, as before. }
+function TPhosphorVM.ChanMore(ANum: Integer; AWant: Int64): Boolean;
+var held, got: Integer; want, left: Int64;
 begin
   Result := False;
   if FChannels[ANum].Stream = nil then Exit;
@@ -1347,20 +1409,39 @@ begin
     Delete(FChannels[ANum].Buf, 1, FChannels[ANum].Pos - 1);
     FChannels[ANum].Pos := 1;
   end;
-  SetLength(chunk, ChanChunk);
-  got := FChannels[ANum].Stream.Read(chunk[1], ChanChunk);
-  if got <= 0 then Exit;
-  SetLength(chunk, got);
-  FChannels[ANum].Buf := FChannels[ANum].Buf + chunk;
-  Result := True;
+  held := Length(FChannels[ANum].Buf);
+  want := AWant;
+  if want < held then want := held;            // geometric: never less than held
+  if want > ChanChunk then
+  begin
+    left := FChannels[ANum].Stream.Size - FChannels[ANum].Stream.Position;
+    if want > left then want := left;          // no further than the file goes
+  end;
+  if want < ChanChunk then want := ChanChunk;
+  // A string's length is an Integer. A window that cannot grow is the end of what
+  // this read can see -- the same answer a 2 GB run always got.
+  if want > Int64(High(Integer)) - held - 16 then
+    want := Int64(High(Integer)) - held - 16;
+  if want <= 0 then Exit;
+  SetLength(FChannels[ANum].Buf, held + Integer(want));
+  got := FChannels[ANum].Stream.Read(FChannels[ANum].Buf[held + 1], Integer(want));
+  if got < 0 then got := 0;
+  SetLength(FChannels[ANum].Buf, held + got);
+  Result := got > 0;
 end;
 
-{ True once ANeed unconsumed bytes are in the window (or the file ran out). }
+{ True once ANeed unconsumed bytes are in the window (or the file ran out). The
+  shortfall is handed to ChanMore, so a big input$ is one read, not N/64 KB. }
 function TPhosphorVM.ChanEnsure(ANum, ANeed: Integer): Boolean;
+var avail: Integer;
 begin
-  while (Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1) < ANeed do
-    if not ChanMore(ANum) then Break;
-  Result := (Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1) >= ANeed;
+  avail := Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1;
+  while avail < ANeed do
+  begin
+    if not ChanMore(ANum, Int64(ANeed) - avail) then Break;
+    avail := Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1;
+  end;
+  Result := avail >= ANeed;
 end;
 
 { The logical file offset of the next byte to be read (0-based). }
@@ -1438,7 +1519,7 @@ begin
 end;
 
 function TPhosphorVM.ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
-var field: String; i, j, n: Integer; found: Boolean;
+var field: String; i, j, n, blanks, scan: Integer; found: Boolean;
 begin
   V := Default(TValue);
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
@@ -1446,38 +1527,66 @@ begin
   if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
   // Read ahead until the window holds THE WHOLE FIELD (or the file ends).
+  { EACH PASS RESUMES WHERE THE LAST ONE STOPPED. Both scans used to restart at
+    the cursor after every ChanMore, so a field N bytes long was scanned about
+    N / 64 KB times over -- quadratic inside one INPUT, on top of the copying
+    ChanMore did (tests/suite/81_chan_read_linear.bas). What a pass has learned
+    is kept as OFFSETS: `blanks` from the cursor, `scan` from the field's first
+    byte. ChanMore drops the consumed prefix and moves the cursor to 1, which
+    moves every index but no offset from the cursor, so they stay true.
+
+    A QUOTE AS THE LAST BYTE OF THE WINDOW DECIDES NOTHING. It closes the field,
+    or it is the first half of a "" escape whose second half has not been read
+    yet; the old scan called it a close, and an escape that straddled the window
+    boundary split the field there. It is now looked at again once the next
+    byte is in -- and at the end of the file it is a close, as NextFieldStr
+    reads it. }
+  blanks := 0;
+  scan := -1;
   repeat
     found := False;
     n := Length(FChannels[ANum].Buf);
     // Where the field really begins: after the blanks NextFieldStr will skip.
     // Looking for a terminator from the cursor found those blanks and stopped.
-    i := FChannels[ANum].Pos;
+    i := FChannels[ANum].Pos + blanks;
     while (i <= n) and ((FChannels[ANum].Buf[i] = ' ') or (FChannels[ANum].Buf[i] = #9) or
                         (FChannels[ANum].Buf[i] = #13) or (FChannels[ANum].Buf[i] = #10)) do
       Inc(i);
+    blanks := i - FChannels[ANum].Pos;
     if i <= n then
       if FChannels[ANum].Buf[i] = '"' then
       begin
         // a quoted field ends at its closing quote; "" is an escaped one
-        j := i + 1;
+        if scan < 1 then scan := 1;
+        j := i + scan;
         while j <= n do
           if FChannels[ANum].Buf[j] <> '"' then Inc(j)
-          else if (j < n) and (FChannels[ANum].Buf[j + 1] = '"') then Inc(j, 2)
+          else if j = n then Break                  // undecided: see above
+          else if FChannels[ANum].Buf[j + 1] = '"' then Inc(j, 2)
           else begin found := True; Break; end;
+        scan := j - i;
       end
       else
-        for j := i to n do
+      begin
+        if scan < 0 then scan := 0;
+        j := i + scan;
+        while j <= n do
+        begin
           if (FChannels[ANum].Buf[j] = ',') or (FChannels[ANum].Buf[j] = ' ') or
              (FChannels[ANum].Buf[j] = #9) or (FChannels[ANum].Buf[j] = #13) or
              (FChannels[ANum].Buf[j] = #10) then begin found := True; Break; end;
+          Inc(j);
+        end;
+        scan := j - i;
+      end;
     if found then Break;
-  until not ChanMore(ANum);
+  until not ChanMore(ANum, 0);
   field := NextFieldStr(FChannels[ANum].Buf, FChannels[ANum].Pos, True);
   Result := CoerceField(field, ATypeCode, V);
 end;
 
 function TPhosphorVM.ChanLine(ANum: Integer; out S: String): TPhosphorError;
-var p, n, start: Integer; found: Boolean;
+var p, n, start, scanned: Integer; found: Boolean;
 begin
   S := '';
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
@@ -1486,14 +1595,19 @@ begin
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
   Result := NoError();
   // Read ahead until the window holds a line terminator (or the file ends), so a
-  // line spanning a chunk boundary still comes back whole.
+  // line spanning a chunk boundary still comes back whole. Each pass starts where
+  // the last one stopped -- `scanned` bytes past the cursor, an offset ChanMore's
+  // shift leaves true -- instead of rescanning the whole line after every read,
+  // which made one long LINE INPUT quadratic (see ChanMore and ChanField).
+  scanned := 0;
   repeat
     found := False;
-    for p := FChannels[ANum].Pos to Length(FChannels[ANum].Buf) do
+    for p := FChannels[ANum].Pos + scanned to Length(FChannels[ANum].Buf) do
       if (FChannels[ANum].Buf[p] = #10) or (FChannels[ANum].Buf[p] = #13) then
         begin found := True; Break; end;
     if found then Break;
-  until not ChanMore(ANum);
+    scanned := Length(FChannels[ANum].Buf) - FChannels[ANum].Pos + 1;
+  until not ChanMore(ANum, 0);
   n := Length(FChannels[ANum].Buf);
   p := FChannels[ANum].Pos;
   start := p;
@@ -1512,7 +1626,7 @@ begin
     if p > n then
     begin
       FChannels[ANum].Pos := p;
-      if ChanMore(ANum) then
+      if ChanMore(ANum, 0) then
       begin
         p := FChannels[ANum].Pos;
         n := Length(FChannels[ANum].Buf);
@@ -1605,6 +1719,181 @@ begin
   end;
 end;
 
+{ THE DIGITS OF A DOUBLE, EXACTLY. Every finite Double is m * 2^e with an integer
+  m below 2^53, so it has a finite decimal expansion, and this produces all of it:
+  ADigits holds the significant digits with no leading zero ('0' for zero), and
+  APoint says how many of them stand before the decimal point (zero or negative
+  when the value is below 0.1). AV must be finite and not negative.
+
+  Arithmetic is on base-10^9 limbs, least significant first. A power of two is
+  applied 2^30 at a time and a power of five 5^13 at a time, so a limb times the
+  multiplier plus the carry stays below 2^63: (10^9 - 1) * 5^13 + 5^13 is about
+  1.22e18. The largest Double needs 309 digits and the smallest subnormal 751
+  significant ones -- m * 5^1074 -- which is 86 limbs at the outside. }
+procedure ExactDecimalDigits(AV: Double; out ADigits: String; out APoint: Integer);
+const
+  LimbBase = 1000000000;
+var
+  bits, m, carry, t, mul: QWord;
+  e, expField, n, i, step: Integer;
+  limbs: array of QWord;
+  part: String;
+
+  procedure MulSmall(AMul: QWord);
+  var j: Integer;
+  begin
+    carry := 0;
+    for j := 0 to n - 1 do
+    begin
+      t := limbs[j] * AMul + carry;
+      limbs[j] := t mod LimbBase;
+      carry := t div LimbBase;
+    end;
+    while carry > 0 do
+    begin
+      if n = Length(limbs) then SetLength(limbs, n * 2 + 4);
+      limbs[n] := carry mod LimbBase;
+      carry := carry div LimbBase;
+      Inc(n);
+    end;
+  end;
+
+begin
+  Move(AV, bits, SizeOf(bits));
+  expField := Integer((bits shr 52) and $7FF);
+  m := bits and QWord($000FFFFFFFFFFFFF);
+  if expField = 0 then
+    e := -1074                                    // subnormal (or zero)
+  else
+  begin
+    m := m or (QWord(1) shl 52);
+    e := expField - 1075;
+  end;
+  if m = 0 then
+  begin
+    ADigits := '0';
+    APoint := 1;
+    Exit;
+  end;
+  // Fewer factors to apply, same value: m * 2^e with the twos moved out of m.
+  while ((m and 1) = 0) and (e < 0) do
+  begin
+    m := m shr 1;
+    Inc(e);
+  end;
+  SetLength(limbs, 8);
+  n := 0;
+  while m > 0 do
+  begin
+    limbs[n] := m mod LimbBase;
+    m := m div LimbBase;
+    Inc(n);
+  end;
+  if e > 0 then
+  begin
+    i := e;
+    while i > 0 do
+    begin
+      if i > 30 then step := 30 else step := i;
+      MulSmall(QWord(1) shl step);
+      Dec(i, step);
+    end;
+  end
+  else if e < 0 then
+  begin
+    // m / 2^k = m * 5^k / 10^k: the digits of m * 5^k, with the point k from the right.
+    i := -e;
+    while i > 0 do
+    begin
+      if i > 13 then step := 13 else step := i;
+      mul := 1;
+      while step > 0 do begin mul := mul * 5; Dec(step); Dec(i); end;
+      MulSmall(mul);
+    end;
+  end;
+  ADigits := IntToStr(limbs[n - 1]);
+  for i := n - 2 downto 0 do
+  begin
+    part := IntToStr(limbs[i]);
+    ADigits := ADigits + StringOfChar('0', 9 - Length(part)) + part;
+  end;
+  if e >= 0 then APoint := Length(ADigits) else APoint := Length(ADigits) + e;
+end;
+
+{ A NON-NEGATIVE FINITE DOUBLE AS FIXED-POINT TEXT WITH EXACTLY AFrac DECIMALS,
+  never an exponent. The rule, which docs/language-reference.md states for PRINT
+  USING:
+
+    the digits are the value's own, up to its 17th significant digit -- the
+    precision that tells every Double apart -- and every position past that
+    prints as 0; the value is rounded ONCE, half away from zero, at whichever
+    comes first: the 17th significant digit or the field's last decimal.
+
+  This is the convention 1e16 .. 1e255 already printed with (FPC's ffFixed at
+  precision 18 gave 17 significant digits and zeros), carried to the whole range.
+  It replaced FloatToStrF, which from 1e256 up answers in EXPONENT form -- the
+  caller then split "1.0E+300" at its '.' and printed 1, with no overflow mark --
+  and which caps the decimals at 18, so a field with 25 '#' after the point got
+  18 of them. The value is computed exactly (ExactDecimalDigits), so the rounding
+  is of the real binary value: 2.675 is 2.67499999999999982236431605997495353221893310546875
+  and rounds to 2.67 at two decimals. }
+function FixedPointText(AV: Double; AFrac: Integer): String;
+var
+  dg: String;
+  p, cut, keep, i: Integer;
+  up: Boolean;
+begin
+  ExactDecimalDigits(AV, dg, p);
+  // The smallest place kept, as a power of ten: the 17th significant digit's,
+  // or the last decimal's, whichever is the coarser.
+  cut := p - 17;
+  if cut < -AFrac then cut := -AFrac;
+  keep := p - cut;                       // how many leading digits survive
+  if keep < Length(dg) then
+  begin
+    if keep < 0 then
+    begin
+      dg := '';                          // below half of the last place: zero
+      up := False;
+    end
+    else
+    begin
+      up := dg[keep + 1] >= '5';         // half away from zero: one digit decides
+      SetLength(dg, keep);
+    end;
+    if up then
+    begin
+      i := keep;
+      while (i >= 1) and (dg[i] = '9') do
+      begin
+        dg[i] := '0';
+        Dec(i);
+      end;
+      if i >= 1 then
+        dg[i] := Succ(dg[i])
+      else
+      begin
+        dg := '1' + dg;                  // 999.. carried into a new leading digit
+        Inc(p);
+      end;
+    end;
+    if dg = '' then
+    begin
+      dg := '0';
+      p := 1;
+    end;
+  end;
+  if p <= 0 then
+  begin
+    dg := StringOfChar('0', 1 - p) + dg;   // a leading 0 before the point
+    p := 1;
+  end;
+  if Length(dg) < p + AFrac then
+    dg := dg + StringOfChar('0', p + AFrac - Length(dg));
+  Result := Copy(dg, 1, p);
+  if AFrac > 0 then Result := Result + '.' + Copy(dg, p + 1, AFrac);
+end;
+
 function FormatNumericField(const Spec: String; const V: TValue): String;
 var
   s, core, intPartStr, fracPartStr, numText, leftSign, trailSignStr, dollarStr, intField: String;
@@ -1612,7 +1901,6 @@ var
   grouping, signLead, trailPlus, trailMinus, dollar, starFill, neg: Boolean;
   dotPos: Integer;
   av: Double;
-  fs: TFormatSettings;
   padChar: Char;
 begin
   s := Spec;
@@ -1655,9 +1943,6 @@ begin
     else Result := '%' + core;      // overflow: the classic leading '%'
     Exit;
   end;
-  fs := DefaultFormatSettings;
-  fs.DecimalSeparator := '.';
-  fs.ThousandSeparator := #0;
   { AN int% IS LAID OUT FROM ITS OWN DIGITS, for the same reason str$ grew a ':%'
     slot: AsDouble above is a widening, and above 2^53 the Double has already
     lost the low digits before any formatter sees it.
@@ -1682,7 +1967,7 @@ begin
   else
   begin
     neg := av < 0;
-    numText := FloatToStrF(Abs(av), ffFixed, 18, fracDigits, fs);
+    numText := FixedPointText(Abs(av), fracDigits);
   end;
   dotPos2 := Pos('.', numText);
   if dotPos2 = 0 then begin intPartStr := numText; fracPartStr := ''; end
@@ -2227,6 +2512,13 @@ var
       with the pc the statement ends at, so that pc IS the continuation -- the jump
       over the else, the jump to endselect, the loop's own tail -- and executing it
       does the right thing by construction.
+
+      A loop's own test or increment is a boundary too (B = 1, emitted by the
+      compiler's EmitLoopBoundary), and ITS A is the pc after the loop: a test
+      that faulted could not say "go round again". Before it existed a fault
+      there was blamed on the body's last statement, whose end IS the loop tail,
+      so resuming there faulted again and the second `resume next` ran off the
+      end of the program (tests/suite/80_resume_loop_tail.bas).
 
       The scan stays as the answer for A = 0, which is a statement whose parse
       failed and any .pbc written before this. Bounded by bodyEnd either way: a
@@ -2991,8 +3283,15 @@ begin
             lines and an editor's gutter should too. And a `for` HEADER's boundary
             executes ONCE, before the loop top, so a breakpoint on the `for` line
             fires on entry and never again while a breakpoint on the body line
-            fires every iteration. }
-          if FDbgArmed then
+            fires every iteration.
+
+            AND ONLY A SCRIPT'S STATEMENT IS ONE. B = 1 is a boundary the
+            compiler opened for a loop's OWN test or increment
+            (PhosphorCompiler, EmitLoopBoundary): it is a resume point -- the
+            three assignments above are all it is for -- and not a place a
+            person stepping through the program asked to stop, so the hook
+            skips it and stepping is what it was before those existed. }
+          if FDbgArmed and (ins.B = 0) then
             if not DebugPoll(ins.Line, pc, AStopFrameSP) then
               // daStop set FHalted and means the clean end opHalt means; a seam
               // that raised left it clear and set LastError. One test says which,

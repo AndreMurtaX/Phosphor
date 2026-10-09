@@ -552,6 +552,30 @@ println using "<#> "; 1; 2; 3          ' "<1> <2> <3> "  (format reused)
 Because string literals use backslash escapes, a `\…\` field is written with
 doubled backslashes: `println using "[\\  \\]"; "hi"` prints `[hi  ]`.
 
+**Which digits a number field shows.** Never an exponent: every finite number,
+up to the largest (about `1.8e308`), is written out in full, and a field with N
+`#` after the point shows exactly N decimals, however many. An `int%` shows its
+own digits exactly. A floating-point number shows **its first 17 significant
+digits** — the precision that tells every Double apart — and every position past
+the 17th prints as `0`. It is rounded **once, half away from zero**, at the 17th
+significant digit or at the field's last decimal, whichever comes first, and the
+rounding is of the number's exact binary value:
+
+```basic
+println using "#"; 1e300            ' "%1000000000000000100…0" -- 301 digits after the %
+println using "#.####################"; 0.1   ' "0.10000000000000001000"
+println using "#.##"; 0.125          ' "0.13"  -- an exact tie goes away from zero
+println using "##.##"; 2.675         ' " 2.67" -- 2.675 is 2.67499999999999982… exactly
+```
+
+A value too wide for its field still prints every one of those digits, after
+the `%`. Until 2026-10-09 a value from about `1e256` up (less, with decimals)
+printed a wrong number with no `%` — `1` for `1e300` in a `#` field, and
+`  1.0E+300` in `###.##` — and a field never showed more than 18 decimals.
+Values like `2.675` and `0.015`, whose exact binary value sits just below the
+written tie, used to round up and now round down, as C's `printf` and Python's
+`format` do.
+
 ---
 
 ## Console input
@@ -651,7 +675,13 @@ exactly `k` **bytes**). `close` with no number closes every open channel.
 
 **Reading is streamed.** `open … for input` does *not* load the file — it reads a
 window at a time, so a file far larger than memory is fine and opening one is
-instant regardless of its size.
+instant regardless of its size. A read costs what it reads: one `line input` of
+a 64 MB line, one `input` of a 64 MB field or one `input$` of 64 MB takes a
+fraction of a second, within a small factor of the same bytes read in many small
+pieces (measured: 0.18 s against 0.07 s), and the window grows to at most
+about twice the longest single run it has to hold. (Until 2026-10-09 such a read
+was quadratic: a 64 MB line took 28 seconds.) The console `input$` behaves the
+same way over many short lines.
 
 **`open … for binary` is read/write and positionable.** `seek #n, p` moves the
 cursor to the 1-based byte `p`; `input$` reads there and `print #` overwrites there.
@@ -751,6 +781,42 @@ branch not taken. If it is the last in a `case` arm, that is after the
 `endselect`. If it is the last in a loop body, that is the loop's next pass: the
 loop is not abandoned. Until 2026-09-10 each of those three went to the next line
 of text instead, which ran the branch that was excluded and cut loops short.
+
+**A loop's own test is a statement of its own.** The condition of a `while` or
+`do while`, the `until` test of a `repeat`, and a `for` loop's limit check and
+its increment can fail too — `while 10 / d > 1` with `d` at 0, or an `int%`
+`for` variable stepping past the largest `int%`. For those:
+
+- `resume` retries **that test** (or that increment) — not the last statement of
+  the body, which has already run;
+- `resume next` continues **after the loop**. The test could not say "go round
+  again", so the loop is left; it is never retried for ever, and it never ends
+  the program or the function it sits in.
+
+```basic
+on error goto fix
+d = 2
+while 10 / d > 1        ' passes with d = 2 and 1, then divides by zero
+  d -= 1
+endwhile
+println "after the loop, d = "; d
+end
+
+fix:
+  println "caught: "; errmsg$()
+  resume next
+```
+
+```
+caught: division by zero
+after the loop, d = 0
+```
+
+Until 2026-10-09 a fault in a loop's test was blamed on the body's last
+statement: `resume next` landed back on the test, failed again, and the second
+`resume next` ran past the handler — at top level the program **ended**, exit
+0, with the rest of the file unrun, and inside a function it returned its
+default. `resume` re-ran the body's last statement instead of the test.
 
 ```basic
 on error goto handler

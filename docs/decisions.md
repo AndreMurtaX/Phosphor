@@ -102,7 +102,11 @@ already exists.
 A channel keeps its `TFileStream` open and reads through a sliding 64 KB window, so
 `open … for input` never loads the file: memory is bounded by the window and the
 longest line, not by the file size, and opening a 200 MB file to read four bytes
-takes milliseconds. It follows that `lof(n)` is the file's **live** size and a
+takes milliseconds. A read that needs a long run in the window at once grows it
+geometrically (at least doubling) and resumes its scan where the last pass stopped,
+so it costs O(N) and the window holds at most about twice that run; until
+2026-10-09 it grew 64 KB at a time by copying, and one 64 MB line took 28 s
+(`tests/suite/81_chan_read_linear.bas`; the console twin is `tests/probe_readcost.lpr`). It follows that `lof(n)` is the file's **live** size and a
 channel is a live view rather than a snapshot.
 
 `OPEN … FOR BINARY` is the fourth mode: read/write and positionable. `seek #n, p`
@@ -124,6 +128,36 @@ trailing `+`/`-`; a value too wide for its field is prefixed with `%`. String fi
 2 + the inner spaces). `_x` emits `x` literally. Values fill fields left to right, and
 the format repeats while values remain. Because Phosphor string literals use backslash
 escapes, a `\`…`\` field is written with doubled backslashes: `"\\   \\"`.
+
+**The digits of a number field (2026-10-09).** Never an exponent, and exactly as many
+decimals as the field has `#` after the point. A Double shows its first **17
+significant digits** and `0` in every place past them; it is rounded **once, half away
+from zero**, at the 17th significant digit or the field's last decimal, whichever comes
+first, and the rounding is of the exact binary value. An `int%` shows its own digits.
+The 17-digit rule is the convention 1e16 .. 1e255 already printed with (FPC's
+`FloatToStrF(ffFixed, 18)`), carried to the whole range; the alternative -- every exact
+digit, so 1e300 shows 52504760255204420248… -- prints noise past the precision the value
+has, and shortest-round-trip digits would have changed what 1e16 .. 1e255 print. The
+change it does make: FloatToStrF rounded some values whose exact value lies just below a
+written tie UP (2.675 -> 2.68, 0.015 -> 0.02; 235 of the 10 000 values k/1000 at two
+decimals), and they now round down, as C's `printf` and Python's `format` do. Before,
+from about 1e256 up (less with decimals) FloatToStrF answered in exponent form and the
+field printed the mantissa's integer part -- `1` for 1e300 -- with no `%`, and a field
+never showed more than 18 decimals. `tests/print_using_sweep.py` crosses the range
+against Python's decimal module.
+
+### Resuming a fault in a loop's own test (2026-10-09)
+
+A `while` / `do while` condition, a `repeat` loop's `until` test, and a `for` loop's
+limit check and increment are each a **statement of their own** for `resume`. `resume`
+retries that test or increment. `resume next` continues **after the loop**: the test
+could not say "go round again", and the only other readings were retrying the same
+fault for ever or going round once more on a test that never answered. The compiler
+gives each of them a statement boundary (opStmt with B = 1, which the debugger does not
+stop on), so stepping is unchanged. Before this a fault there was blamed on the body's
+last statement, whose end is the loop tail: the second `resume next` ran past the
+handler and ended a top-level program at exit 0, or a function with its default value.
+`tests/suite/80_resume_loop_tail.bas`.
 
 ## What this language refuses that Plan9Basic accepts
 

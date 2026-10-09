@@ -128,6 +128,30 @@ else {
     }
 }
 
+# THE GENERATED PRINT USING SWEEP (tests/print_using_sweep.py, 2026-10-09): 80104
+# numeric fields -- 1eK and 1e-K over the whole Double range, each at 0..60
+# decimals, and 3000 random bit patterns in random fields -- each expected line
+# computed from the value's exact binary digits by Python's decimal module. The
+# goldens above are the readable half (19_print_using_wide); this is the grid.
+# Under -ProveFailure it corrupts one expected line and must see the mismatch.
+$py = (Get-Command python -ErrorAction SilentlyContinue)
+if (-not $py) { $py = (Get-Command python3 -ErrorAction SilentlyContinue) }
+if (-not $py) {
+    Write-Host 'FAIL  print using sweep: no python interpreter found' -ForegroundColor Red
+    $allOk = $false
+}
+else {
+    $sweepArgs = @((Join-Path $root 'tests\print_using_sweep.py'), $exe)
+    if ($ProveFailure) { $sweepArgs += '--prove-failure' }
+    $sout = & $py.Source -I @sweepArgs 2>&1
+    $scode = $LASTEXITCODE
+    foreach ($l in $sout) { Write-Host $l }
+    if ($scode -ne 0) {
+        Write-Host ("  (print_using_sweep.py exit {0})" -f $scode) -ForegroundColor Red
+        $allOk = $false
+    }
+}
+
 Write-Host ''
 if ($allOk) { Write-Host 'CLASSIC OK' -ForegroundColor Green; exit 0 }
 else { Write-Host 'CLASSIC FAILED' -ForegroundColor Red; exit 1 }

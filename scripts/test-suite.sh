@@ -322,8 +322,12 @@ done
 # without it nothing in the tree would notice either message being garbled. It is
 # listed in test-suite.ps1 too -- a probe in one runner only is a probe the other
 # operating system never runs.
+#
+# probe_readcost: a console INPUT$ costs what it reads. It drives OnInput itself,
+# because no runner hands a test program console input; the channel twin is
+# tests/suite/81_chan_read_linear.bas. Judged against a linear control.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handles.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_registry:tests/probe_registry.lpr" "probe_debug:tests/probe_debug.lpr" "probe_step:tests/probe_step.lpr" "probe_sweep:tests/probe_sweep.lpr" "probe_onerror:tests/probe_onerror.lpr" "bench_debug:tests/bench_debug.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handles.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_registry:tests/probe_registry.lpr" "probe_debug:tests/probe_debug.lpr" "probe_step:tests/probe_step.lpr" "probe_sweep:tests/probe_sweep.lpr" "probe_onerror:tests/probe_onerror.lpr" "probe_readcost:tests/probe_readcost.lpr" "bench_debug:tests/bench_debug.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
   # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.

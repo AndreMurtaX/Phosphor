@@ -152,6 +152,7 @@ type
     procedure AddCont(AInstr: Integer);
     procedure PatchBreaks(ATarget: Integer);
     procedure PatchConts(ATarget: Integer);
+    function EmitLoopBoundary(ALine: Integer): Integer;
     procedure RecordLabel(const AName: String; APos, ALine: Integer);
     procedure AddGoto(AInstr: Integer; const AName: String; AReturns: Boolean;
       ALine: Integer);
@@ -840,6 +841,42 @@ var i: Integer;
 begin
   for i := 0 to High(FLoopConts[FLoopDepth - 1]) do
     FProg.Patch(FLoopConts[FLoopDepth - 1][i], ATarget);
+end;
+
+{ A LOOP'S OWN CODE IS A STATEMENT FOR ERROR PURPOSES (2026-10-09).
+
+  The while / do while test, the repeat-until test, the for limit check and the
+  for increment are code the LOOP emits for itself, outside every statement in
+  its body, and until this boundary existed none of them carried one. A fault
+  there was blamed on whichever statement had last opened a boundary -- the
+  body's last statement, or a `continue` -- and both resumes went wrong:
+  `resume next` jumped to where that statement ends, which IS the loop tail, and
+  faulted again; the handler's second `resume next` then continued past the
+  handler, so a top-level program ENDED at exit 0 with the rest of the file
+  unrun, and a function returned its default. `resume` re-ran the body's last
+  statement instead of the test. tests/suite/80_resume_loop_tail.bas.
+
+  So each of those four pieces opens a boundary of its own, and the rule is the
+  one the boundary already carries: A is where "next" is. For a test that is
+  AFTER THE LOOP -- a test that could not say yes cannot say "go round again",
+  and the alternative to leaving is retrying the same fault for ever. For the
+  increment it is after the loop too, for the same reason: the step that would
+  have reached the next pass did not happen. `resume` retries exactly the test
+  or the increment, which is what pc = the boundary means.
+
+  B = 1 MARKS IT AS THE LOOP'S, NOT THE SCRIPT'S. It records the resume point
+  and nothing else: the debugger's hook in the VM's opStmt arm runs only for
+  B = 0, so stepping and breakpoints see exactly the boundaries they saw before
+  (a `for` header still fires once, a body line every pass), and the line it
+  carries is the loop's own header line, which already had a boundary -- so
+  TProgram.StoppableLines answers the same set. A VM that predates B = 1
+  treats one as an ordinary boundary; the only thing that changes there is
+  that a debugger would also stop on the header line each pass.
+
+  The caller patches A once the loop's end is known. }
+function TPhosphorCompiler.EmitLoopBoundary(ALine: Integer): Integer;
+begin
+  Result := FProg.Emit(opStmt, 0, 1, ALine);
 end;
 
 { ALine is the line the label is WRITTEN on, and it is a parameter rather than a
@@ -1657,7 +1694,7 @@ begin
   ln := FLex.Cur().Line;
   FLex.Advance(); // 'while'
   PushLoop();
-  condStart := FProg.Count;
+  condStart := EmitLoopBoundary(ln);   // the test is a statement; see EmitLoopBoundary
   ParseCondition();
   if FFailed then Exit;
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
@@ -1665,6 +1702,7 @@ begin
   if FFailed then Exit;
   FProg.Emit(opJump, condStart, 0, ln);
   afterLoop := FProg.Count;
+  FProg.Patch(condStart, afterLoop);
   FProg.Patch(jFalse, afterLoop);
   PatchBreaks(afterLoop);
   PatchConts(condStart);
@@ -1687,7 +1725,7 @@ begin
   if not IsKeyword('while') then begin Fail('only ''do while <cond> ... loop'' is supported', FLex.Cur().Line); Exit; end;
   FLex.Advance(); // 'while'
   PushLoop();
-  condStart := FProg.Count;
+  condStart := EmitLoopBoundary(ln);   // the test is a statement; see EmitLoopBoundary
   ParseCondition();
   if FFailed then Exit;
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
@@ -1695,6 +1733,7 @@ begin
   if FFailed then Exit;
   FProg.Emit(opJump, condStart, 0, ln);
   afterLoop := FProg.Count;
+  FProg.Patch(condStart, afterLoop);
   FProg.Patch(jFalse, afterLoop);
   PatchBreaks(afterLoop);
   PatchConts(condStart);
@@ -1712,13 +1751,16 @@ begin
   bodyStart := FProg.Count;
   ParseBlockUntil(['until']);
   if FFailed then Exit;
-  contTarget := FProg.Count;   // continue re-checks the until condition
   if not IsKeyword('until') then begin FailUnterminated('repeat', ['until'], ln); Exit; end;
   FLex.Advance();
+  // continue re-checks the until condition, and the check is a statement: see
+  // EmitLoopBoundary. Its line is the `repeat` line, which already has one.
+  contTarget := EmitLoopBoundary(ln);
   ParseCondition();
   if FFailed then Exit;
   FProg.Emit(opJumpIfFalse, bodyStart, 0, ln);  // loop back while condition is false
   afterLoop := FProg.Count;
+  FProg.Patch(contTarget, afterLoop);
   PatchBreaks(afterLoop);
   PatchConts(contTarget);
   PopLoop();
@@ -1778,20 +1820,25 @@ begin
   end;
 
   PushLoop();
-  condStart := FProg.Count;
+  { The limit check and the increment are each a statement of their own for
+    error purposes -- see EmitLoopBoundary. Two boundaries, not one: `resume`
+    after a fault in the check must not run the increment a second time. }
+  condStart := EmitLoopBoundary(ln);
   EmitLoadVar(vname, ln);
   EmitLoadHidden(endVar, ln);
   if down then FProg.Emit(opGE, 0, 0, ln) else FProg.Emit(opLE, 0, 0, ln);
   jFalse := FProg.Emit(opJumpIfFalse, 0, 0, ln);
   ParseBlockUntil(['next']);
   if FFailed then Exit;
-  incPoint := FProg.Count;                       // continue jumps to the increment
+  incPoint := EmitLoopBoundary(ln);              // continue jumps to the increment
   EmitLoadVar(vname, ln);
   FProg.Emit(opPushConst, FProg.Consts.Add(step), 0, ln);
   FProg.Emit(opAdd, 0, 0, ln);
   EmitStoreVar(vname, ln);
   FProg.Emit(opJump, condStart, 0, ln);
   afterLoop := FProg.Count;
+  FProg.Patch(condStart, afterLoop);
+  FProg.Patch(incPoint, afterLoop);
   FProg.Patch(jFalse, afterLoop);
   PatchBreaks(afterLoop);
   PatchConts(incPoint);
@@ -2373,6 +2420,11 @@ end;
   `then` block that pc is the jump over the `else`; at the end of a case arm it is
   the jump to `endselect`; at the end of a loop body it is the loop's own tail.
   Each of those does the right thing when executed, which is the point.
+
+  And that tail is no longer anonymous: the loop's own test and increment open a
+  boundary of their own (EmitLoopBoundary, opStmt with B = 1), so a fault THERE
+  is not blamed on the statement that resumed into it. This procedure is no
+  longer the only one that emits opStmt -- it is the only one that emits B = 0.
 
   A stays 0 for a statement whose parse failed, and for any .pbc written before
   this; the VM keeps the old scan for exactly that case and says so. }

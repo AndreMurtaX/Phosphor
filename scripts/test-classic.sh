@@ -92,5 +92,23 @@ else
   done
 fi
 
+# THE GENERATED PRINT USING SWEEP (tests/print_using_sweep.py, 2026-10-09): 80104
+# numeric fields -- 1eK and 1e-K over the whole Double range, each at 0..60
+# decimals, and 3000 random bit patterns in random fields -- each expected line
+# computed from the value's exact binary digits by Python's decimal module. The
+# goldens above are the readable half (19_print_using_wide); this is the grid.
+# Under --prove it corrupts one expected line and must see the mismatch.
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "$PY" ]; then
+  echo "FAIL  print using sweep: no python interpreter found"; allok=0
+else
+  if [ "$runner_prove" -eq 1 ]; then
+    "$PY" -I "$root/tests/print_using_sweep.py" "$exe" --prove-failure </dev/null; rc=$?
+  else
+    "$PY" -I "$root/tests/print_using_sweep.py" "$exe" </dev/null; rc=$?
+  fi
+  [ "$rc" -eq 0 ] || { echo "  (print_using_sweep.py exit $rc)"; allok=0; }
+fi
+
 echo ""
 if [ "$allok" -eq 1 ]; then echo "CLASSIC OK"; exit 0; else echo "CLASSIC FAILED"; exit 1; fi

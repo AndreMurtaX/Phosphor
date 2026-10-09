@@ -430,6 +430,10 @@ else {
         # compares exit codes only and tests\classic discards stderr, so without
         # this nothing in the tree would notice either message being garbled.
         @{ name='probe_onerror';  src='tests\probe_onerror.lpr' },
+        # A console INPUT$ costs what it reads. It drives OnInput itself, because
+        # no runner hands a test program console input; the channel twin is
+        # tests\suite\81_chan_read_linear.bas. Judged against a linear control.
+        @{ name='probe_readcost'; src='tests\probe_readcost.lpr' },
         # The COST of the seam, committed rather than quoted. Three review rounds
         # disagreed about one cell of docs/embedding.md's table and none could
         # settle it, because each ran a bench that lived in a scratch directory

@@ -409,11 +409,20 @@ x$ = string$(1000000000000000000, 65)   ' refused immediately, not attempted
 println regex_find$("(a+)+$", "aaaa...!")   ' refused: the pattern can backtrack
 ```
 
-The judge only ever refuses a pattern it can **show** is ambiguous. Anything it
-cannot parse confidently — nesting deeper than it tracks, more alternatives than
-it tracks, an unterminated class, a backreference — is allowed to run. That is
-the direction a host is entitled to know, because the other one refuses working
-patterns for a reason that is not true of them.
+The judge refuses a pattern only when it cannot **prove** the repeated part
+unambiguous, and it gives up in two directions, deliberately. A pattern too big
+for its tables — nesting deeper than it tracks, more alternatives than it
+tracks — is allowed to run: it was not judged, and refusing working patterns for
+a reason that is not true of them is the failure a host most needs to be spared.
+But inside a repeat it *is* judging, an atom whose bytes it cannot name — a
+backreference, or an escape it does not model, such as `\p{L}` or `a` — is
+treated as able to match anything, and that leans toward refusal: "unambiguous"
+is a claim of proof. It reads the pattern the way the matcher does: `\x61` is
+the byte `a` (so `^(\x61+)+$` is refused exactly as `^(a+)+$` is), an inline
+`(?i)` makes `a` and `A` the same character to the end of its group, `(?x)`
+makes blanks and `#` comments nothing, and an empty group or a `(?#comment)` is
+never mistaken for a separator. Until 2026-10-09 each of those was misread, and
+each misreading let a 2ⁿ pattern run under a budget.
 
 Two things follow for you. First, **a refusal of this kind is an ordinary
 catchable error, not a fatal ceiling** — `err()` is `7`, the message names the

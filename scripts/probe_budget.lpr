@@ -990,6 +990,88 @@ begin
           'println regex_find$("([\\w-]+\\.)+[a-z]{2,}", "www.example.com")' + LF,
           'www.example.com' + LF);
 
+  { (h2) THE JUDGE'S OWN MISREADINGS (2026-10-09). Every refusal below is a
+    pattern the judge called UNAMBIGUOUS while TRegExpr ran it 2^n -- measured
+    in a generated sweep against the real matcher, each one past 400 ms at a
+    26-character failing subject, while the same shape spelled plainly was
+    refused in microseconds. The judge did not misjudge the shape; it misREAD
+    the pattern, and a misreading produced a confident "unambiguous".
+
+    ESCAPES WITH OPERANDS. The reader took one character after the backslash
+    and the caller stepped two, so \x61 left "61" behind as two literal atoms,
+    and the '6' passed for a separator. \xNN and its braced form are one byte to 0.987,
+    so ^(\x61+)+$ IS ^(a+)+$; \cA is byte 01; \h is TAB SPACE NBSP, not 'h';
+    \v is all four line separators, not VT alone. An escape this judge does not
+    model (\u, \p, \z ...) is UNKNOWN, and unknown inside a repeat refuses. }
+  Pattern('^(\x61+)+$', False);
+  Pattern('^(\x{61}+)+$', False);
+  Pattern('^(a|\x61)+$', False);
+  Pattern('^(a|\cA|\x01)+$', False);
+  Pattern('^(\h|\x20)+$', False);
+  Pattern('^(\v|\n)+$', False);
+  Pattern('^(\f|\v)+$', False);             // \v has FF in it: 3953 ms at n=24
+  Pattern('^(a|[\x61])+$', False);
+  Pattern('^([\x61-\x62]|a)+$', False);
+  Pattern('^(a+)+$', False);
+  Pattern('^(\p{L}+)+$', False);
+  Pattern('^(\z|\z)+$', False);
+  { (?i) WAS NOT READ AT ALL, so the sets of 'a' and of 'A' looked disjoint. It holds to
+    the end of its enclosing group, across '|', and reaches classes too. }
+  Pattern('(?i)^(a|A)+$', False);
+  Pattern('^((?i)a|A)+$', False);
+  Pattern('^(a|(?i)A)+$', False);
+  Pattern('(?i)^([a]|A)+$', False);
+  Pattern('(?i)^(a|[A])+$', False);
+  Pattern('(?i)^(\x61|A)+$', False);
+  { NOTHING PASSED FOR A SEPARATOR. A comment, an empty group and an empty
+    non-capturing group consume nothing, and were folded in as fixed-width atoms
+    with no bytes -- disjoint from everything, the perfect barrier. Under (?x)
+    a blank is nothing too, and it was read as a literal space. }
+  Pattern('^(a+(?#c)a+)+$', False);
+  Pattern('^(a+(?:)a+)+$', False);
+  Pattern('^(a+()a+)+$', False);
+  Pattern('(?x)^(a+ a?)+$', False);
+  { NOTHING, MATCHED TWO WAYS. Found by the same sweep once the separators
+    above were honest: a body pinned by a mandatory byte is still 2^n when
+    there are two ways to match the EMPTY string after it -- take an empty
+    group or skip it, take the first nullable branch or the second. TRegExpr
+    does not memoise, so a failing tail tries every combination. Measured at
+    n=24 against the real matcher: 4188, 5907, 4828, 4859 and 4750 ms. }
+  Pattern('^(c()?)+$', False);
+  Pattern('^(c(a?|b?))+$', False);
+  Pattern('^(c(a*)?)+$', False);
+  Pattern('^(c(x?)?)+$', False);
+  Pattern('^(c(|))+$', False);
+  Pattern('^(c(x|y|)?)+$', False);
+  Pattern('^(a\B?)+$', False);
+  Pattern('^(a(?#c)?)+$', False);
+  Pattern('(?x)^((a) ?)+$', False);          // the blank, quantified
+  Pattern('^((a(?:)?)b)+$', False);          // carried up through a plain group
+  Pattern('^(c(x|y|))+$', True);             // ONE nullable branch is one way: 0 ms
+  Pattern('^(c(x?y?))+$', True);             // and so is a nullable sequence
+  { AND IT IS STILL A JUDGE THAT ALLOWS. The same features, spelled over bodies
+    that really are unambiguous, must not start refusing: refusing a safe
+    pattern is the failure this unit's header calls the worse one. }
+  Pattern('^(\d+\x2E)+\d+$', True);         // a dotted version, its dot in hex
+  Pattern('^(\x41|a)+$', True);             // case-sensitive: 'A' and 'a' differ
+  Pattern('^([\x00-\x1F]+;)+$', True);
+  Pattern('^(\t+\n)+$', True);
+  Pattern('(?i)^([a-z]+,)+$', True);
+  Pattern('(?i)^(\w+\.)+\w+$', True);
+  Pattern('(?i)^(a|b)+$', True);
+  Pattern('(?i)(?-i)^(a|A)+$', True);       // switched off again
+  Pattern('^((?i)x)(a|A)+$', True);         // (?i) ended with its group
+  Pattern('(?x)^(a+ ,)+$', True);           // the blank is nothing; ',' separates
+  Pattern('^(\w+(?#a comment),)+$', True);
+  Refused('regex_find$ refuses ^(\x61+)+$, the (a+)+ shape in hex',
+          'println regex_find$("^(\\x61+)+$", "' + aaa + '")' + LF);
+  Refused('regex_find$ refuses (?i)^(a|A)+$',
+          'println regex_find$("(?i)^(a|A)+$", "' + aaa + '")' + LF);
+  Allowed('a case-insensitive list still answers under a budget',
+          'println regex_find$("(?i)^([a-z]+,)+$", "Ab,cD,")' + LF, 'Ab,cD,' + LF);
+  Allowed('a hex-spelled separator still answers under a budget',
+          'println regex_find$("^(\\d+\\x2E)+\\d+$", "1.2.3")' + LF, '1.2.3' + LF);
+
   { (i) AND THE UNBUDGETED HOST IS STILL UNTOUCHED by every one of these. }
   Unbudgeted('an unbudgeted host still globs',
           'n$ = string$(12, 97)' + LF +

@@ -680,10 +680,22 @@ end;
   iterations over an ambiguous body is refused for the same reason -- the number
   of ways to cut the subject up is ambiguity^count either way.
 
-  Anything this cannot parse confidently is ALLOWED, as before: a pattern nested
-  past what the tables track, an unterminated class, a backreference. Every
-  uncertainty resolves toward letting the pattern run, and all of it applies ONLY
-  when the host installed a budget. }
+  TWO KINDS OF UNCERTAINTY, RESOLVED IN OPPOSITE DIRECTIONS, and the difference
+  is the whole of the 2026-10-09 repair. A pattern the TABLES cannot hold -- one
+  nested past MaxReDepth, a body past MaxReAtoms or MaxReBranch -- is ALLOWED:
+  this judge did not look at it, and refusing what it did not look at is the
+  failure the paragraphs above are about. But an ATOM whose bytes it cannot name
+  -- a backreference, an escape it does not model -- inside a body it IS
+  judging resolves toward REFUSAL: a set it cannot name is a set it cannot
+  prove disjoint, and "unambiguous" is a claim of proof. The judge used to make
+  that claim off its own misreadings: an escape's operand read as literal atoms
+  (^(\x61+)+$), (?i) ignored (^(a|A)+$ under it), an empty group or a comment
+  taken for a separator. Each produced a confident "unambiguous" over a body
+  that ran 2^n. The sets it intersects are now always SUPERSETS of what
+  TRegExpr 0.987 matches -- the version RegExpr is in FPC 3.2.2, read from its
+  source -- and a superset can only make it refuse more.
+
+  All of it applies ONLY when the host installed a budget. }
 
 const
   { A counted repeat of at least this many iterations over an ambiguous body is
@@ -748,6 +760,29 @@ type
       every other uncertainty in this unit. }
     BranchOverflow: Boolean;
     FixedWidth: Boolean;     // every branch consumes a fixed number of bytes
+    { THE MODIFIERS IN FORCE, which change what an atom MATCHES and therefore
+      every set this judge intersects. TRegExpr reads (?i) and (?x) as a
+      directive that holds to the end of the ENCLOSING group (ParseReg saves
+      fCompModifiers on entry and restores it on exit), across a '|' too, and a
+      nested group inherits whatever is in force where it opens. Ignoring them
+      was a confident wrong answer: (?i)^(a|A)+$ has two disjoint first sets as
+      written and two IDENTICAL ones as matched, and ran 2^n. }
+    CaseFold: Boolean;       // (?i): every literal and class matches both cases
+    Extended: Boolean;       // (?x): unescaped whitespace and #-comments are nothing
+    { THE EMPTY STRING, MATCHED IN MORE THAN ONE WAY. A body need not consume
+      anything to be ambiguous: ^(c()?)+$ and ^(c(a?|b?))+$ have a mandatory
+      'c' that pins every iteration, and still ran 2^n (4188 and 5907 ms at
+      n=24), because after each 'c' there are TWO ways to match nothing -- take
+      the empty group or skip it; take the first empty branch or the second --
+      and a failing tail tries every combination. TRegExpr does not memoise.
+      The three ways to get two empty matches: a quantifier on something that
+      can match empty (a zero-width piece, or a nullable group) unless it is an
+      exact count; two nullable branches in one alternation; or a nested level
+      that already has either. BranchNullable/NullableBranches track the second,
+      and EmptyAmb records any of them. }
+    BranchNullable: Boolean; // the current branch can still match the empty string
+    NullableBranches: Integer; // closed branches that can match the empty string
+    EmptyAmb: Boolean;       // the empty string matches here in more than one way
   end;
 
 function SetOfRange(A, B: Byte): TByteSet;
@@ -778,6 +813,58 @@ begin
   Result := [Byte(9), Byte(10), Byte(11), Byte(12), Byte(13), Byte(32)];
 end;
 
+{ \v and \h, as TRegExpr 0.987 defines them in a non-Unicode build:
+  RegExprLineSeparators (CR LF VT FF) and RegExprHorzSeparators (TAB SPACE NBSP).
+  This judge used to read \v as VT alone and \h as a literal 'h', so
+  ^(\h|\x20)+$ -- two branches that both match a space -- looked disjoint. }
+function VertSet: TByteSet;
+begin
+  Result := [Byte(10), Byte(11), Byte(12), Byte(13)];
+end;
+
+function HorzSet: TByteSet;
+begin
+  Result := [Byte(9), Byte(32), Byte($A0)];
+end;
+
+function AsciiLetterSet: TByteSet;
+begin
+  Result := SetOfRange(Ord('a'), Ord('z')) + SetOfRange(Ord('A'), Ord('Z'));
+end;
+
+function HighSet: TByteSet;
+begin
+  Result := SetOfRange(128, 255);
+end;
+
+function AsciiUp(B: Byte): Byte;
+begin
+  if (B >= Ord('a')) and (B <= Ord('z')) then Result := B - 32 else Result := B;
+end;
+
+{ What one LITERAL byte matches under (?i). TRegExpr's OP_EXACTLYCI accepts the
+  byte or InvertCase of it. For ASCII that is exactly the other case. For a byte
+  above 127 it is AnsiUpperCase/AnsiLowerCase of a lone byte, which depends on
+  the platform and the locale (a Turkish code page maps one of them to ASCII
+  'I'), so the answer is every byte it could be -- a SUPERSET, which can only
+  make the judge refuse more, never call an ambiguous body unambiguous. }
+function FoldLiteral(B: Byte): TByteSet;
+begin
+  if (B >= Ord('a')) and (B <= Ord('z')) then Result := [B, Byte(B - 32)]
+  else if (B >= Ord('A')) and (B <= Ord('Z')) then Result := [B, Byte(B + 32)]
+  else if B >= 128 then Result := [B] + HighSet() + AsciiLetterSet()
+  else Result := [B];
+end;
+
+function HexVal(C: Char; out AVal: Integer): Boolean;
+begin
+  Result := True;
+  if (C >= '0') and (C <= '9') then AVal := Ord(C) - Ord('0')
+  else if (C >= 'a') and (C <= 'f') then AVal := Ord(C) - Ord('a') + 10
+  else if (C >= 'A') and (C <= 'F') then AVal := Ord(C) - Ord('A') + 10
+  else begin AVal := 0; Result := False; end;
+end;
+
 function BudgetPatternBounded(const APattern: String; out AWhy: String): Boolean;
 var
   lv: array[0..MaxReDepth] of TReLevel;
@@ -785,9 +872,14 @@ var
   i, n: Integer;
   gaveUp: Boolean;
 
-  procedure ResetLevel(var L: TReLevel);
+  procedure ResetLevel(var L: TReLevel; ACaseFold, AExtended: Boolean);
   var b: Integer;
   begin
+    L.CaseFold := ACaseFold;
+    L.Extended := AExtended;
+    L.BranchNullable := True;
+    L.NullableBranches := 0;
+    L.EmptyAmb := False;
     L.Unbounded := False;
     L.Reps := 1;
     L.Opaque := False;
@@ -913,71 +1005,262 @@ var
     end;
   end;
 
-  { The set an escape sequence can start with. AKnown=False = do not judge it. }
-  procedure EscapeSet(AChar: Char; out ASet: TByteSet; out AKnown, AZeroWidth: Boolean);
+  (* An escape's brace operand, \p{...} or \u{...}: step past it when it is one,
+     and never past anything that is structure -- a paren, a bar, a bracket --
+     or another escape. *)
+  procedure SkipBraceOperand;
+  var k: Integer;
+  begin
+    if (i > n) or (APattern[i] <> '{') then Exit;
+    k := i + 1;
+    while (k <= n) and (APattern[k] <> '}') do
+    begin
+      if APattern[k] in ['(', ')', '|', '[', ']', '\'] then Exit;
+      Inc(k);
+    end;
+    if k <= n then i := k + 1;
+  end;
+
+  (* THE WHOLE ESCAPE, OPERAND INCLUDED. i is on the backslash; this steps past
+    every byte the escape owns and answers what it matches.
+
+    THE DEFECT THIS REPLACED. The old reader looked at ONE character after the
+    backslash and the caller always stepped two, so an escape that carries an
+    operand left its operand behind to be read as literal atoms: in ^(\x61+)+$
+    the '6' became a mandatory separator no flexible atom could consume, and the
+    judge called the body unambiguous. It is ^(a+)+$, which it refuses -- and it
+    ran 2^n under a budget (n=24 1.9 s, n=40 past 20 s).
+
+    THE MEANINGS ARE TRegExpr 0.987's, read from its ParseAtom and UnQuoteChar
+    (non-Unicode build): \xNN and \x{N..} are one byte, \cX is a control byte,
+    \t \n \r \f \a \e are bytes, \d \D \w \W \s \S \v \V \h \H are classes,
+    \b \B \A \Z are zero-width, \1..\9 are backreferences, and ANY OTHER escaped
+    byte is that byte. Escaped letters this judge does not model -- \u, \p, \P,
+    \z, \G, \k, \Q and the rest, and \0 -- mean a literal letter to 0.987 but
+    something else to a newer TRegExpr or to PCRE, so they are UNKNOWN (and \u
+    and \p take their operand with them, so a hex digit is never left behind to
+    pass for a separator). An unknown atom inside a repeat resolves toward
+    REFUSAL -- see BodyUnambiguous -- because a set this judge cannot name is a
+    set it cannot prove disjoint.
+
+    ACode is the single byte the escape stands for when it is a literal (a
+    class uses it as a range end, and (?i) folds it), and -1 otherwise.
+    Inside a class 0.987 has no zero-width escapes and no backreferences: \b is
+    a letter there, so in a class those are unknown too. *)
+  procedure ReadEscape(AInClass: Boolean; out ASet: TByteSet;
+                       out AKnown, AZeroWidth: Boolean; out ACode: Integer);
+  var c: Char; v, d, k: Integer;
   begin
     ASet := [];
     AKnown := True;
     AZeroWidth := False;
-    case AChar of
+    ACode := -1;
+    Inc(i);                                  // past the backslash
+    if i > n then begin AKnown := False; Exit; end;   // trailing '\': rejected anyway
+    c := APattern[i];
+    Inc(i);                                  // past the escape letter
+    case c of
       'd': ASet := DigitSet();
       'D': ASet := AllBytes() - DigitSet();
       'w': ASet := WordSet();
       'W': ASet := AllBytes() - WordSet();
       's': ASet := SpaceSet();
       'S': ASet := AllBytes() - SpaceSet();
-      'n': ASet := [Byte(10)];
-      'r': ASet := [Byte(13)];
-      't': ASet := [Byte(9)];
-      'f': ASet := [Byte(12)];
-      'v': ASet := [Byte(11)];
-      'a': ASet := [Byte(7)];
-      'e': ASet := [Byte(27)];
-      'b', 'B', 'A', 'Z', 'z', 'G': begin AKnown := False; AZeroWidth := True; end;
-      '0'..'9', 'x', 'c', 'p', 'P', 'u': AKnown := False;   // backref / numeric escape
+      'v': ASet := VertSet();
+      'V': ASet := AllBytes() - VertSet();
+      'h': ASet := HorzSet();
+      'H': ASet := AllBytes() - HorzSet();
+      't': ACode := 9;
+      'n': ACode := 10;
+      'r': ACode := 13;
+      'f': ACode := 12;
+      'a': ACode := 7;
+      'e': ACode := 27;
+      'c':
+        if (i <= n) and (APattern[i] in ['a'..'z', 'A'..'Z']) then
+        begin
+          ACode := Ord(UpCase(APattern[i])) - Ord('A') + 1;
+          Inc(i);
+        end
+        else
+          AKnown := False;                   // the engine rejects it
+      'x':
+        if (i <= n) and (APattern[i] = '{') then
+        begin
+          k := i + 1;
+          v := 0;
+          while (k <= n) and HexVal(APattern[k], d) do
+          begin
+            if v <= $FFFF then v := v * 16 + d;
+            Inc(k);
+          end;
+          if (k <= n) and (APattern[k] = '}') and (k > i + 1) and (v <= 255) then
+            ACode := v
+          else
+            AKnown := False;                 // too big for a byte, or malformed
+          if (k <= n) and (APattern[k] = '}') then i := k + 1 else i := k;
+        end
+        else if (i + 1 <= n) and HexVal(APattern[i], d) and HexVal(APattern[i + 1], v) then
+        begin
+          ACode := d * 16 + v;
+          Inc(i, 2);
+        end
+        else
+          AKnown := False;                   // the engine rejects it
+      'b', 'B', 'A', 'Z':
+        if AInClass then AKnown := False
+        else begin AKnown := False; AZeroWidth := True; end;
+      '1'..'9':
+        AKnown := False;                     // a backreference: any text at all
+      'u':
+        begin
+          AKnown := False;
+          if (i <= n) and (APattern[i] = '{') then SkipBraceOperand()
+          else
+          begin
+            k := 0;
+            while (k < 4) and (i <= n) and HexVal(APattern[i], d) do
+            begin
+              Inc(i);
+              Inc(k);
+            end;
+          end;
+        end;
+      'p', 'P':
+        begin
+          AKnown := False;
+          if (i <= n) and (APattern[i] = '{') then SkipBraceOperand()
+          else if (i <= n) and (APattern[i] in ['a'..'z', 'A'..'Z']) then Inc(i);
+        end;
+      '0', 'g', 'i'..'m', 'o', 'q', 'y', 'z',
+      'C', 'E'..'G', 'I'..'O', 'Q', 'R', 'T', 'U', 'X', 'Y':
+        AKnown := False;                     // an escape this judge does not model
     else
-      ASet := [Byte(Ord(AChar))];
+      ACode := Ord(c);                       // an escaped byte is that byte
     end;
+    if ACode >= 0 then ASet := [Byte(ACode)];
   end;
 
-  { Step past a [...] class and answer the bytes it can match. }
+  { Step past a [...] class and answer the bytes it can match.
+
+    The grammar is TRegExpr 0.987's: a ']' first is a literal, a '-' last is a
+    literal, a range's ends may be escapes (\x41-\x5A), and a class escape such
+    as \d cannot begin a range.
+
+    UNDER (?i) THE ENGINE UPPER-CASES. It stores every item upper-cased and
+    tests _UpperCase(subject) against them (FindInCharClass), so an ASCII
+    subject matches exactly when its upper case is in the upper-cased items --
+    which is computed here exactly. A subject above 127 upper-cases by the
+    locale, so it is counted as possibly matching any non-empty class. A NEGATED
+    class matches what the positive one does not, so its superset is everything
+    an ASCII subject provably avoids, plus every byte above 127. }
   procedure ClassSet(out ASet: TByteSet; out AKnown: Boolean);
-  var neg: Boolean; lo, hi: Integer; esc: TByteSet; ek, ez: Boolean; first: Boolean;
+  var
+    neg, fold, hiItem, hiRange: Boolean;
+    lo, hi, code, b: Integer;
+    raw, up, esc: TByteSet;
+    ek, ez: Boolean;
   begin
     ASet := [];
     AKnown := True;
+    fold := lv[top].CaseFold;
+    raw := [];
+    up := [];
+    hiItem := False;
+    hiRange := False;
     neg := False;
     Inc(i);                                  // past '['
     if (i <= n) and (APattern[i] = '^') then begin neg := True; Inc(i); end;
-    first := True;
-    while (i <= n) and ((APattern[i] <> ']') or first) do
+    // A ']' first is a member, not the end, so the loop's own test lets the
+    // first item through whatever it is: b counts the items taken so far.
+    b := 0;
+    while (i <= n) and ((APattern[i] <> ']') or (b = 0)) do
     begin
-      first := False;
-      if APattern[i] = '\' then
+      Inc(b);
+      if (APattern[i] = '-') and (i + 1 <= n) and (APattern[i + 1] = ']') then
       begin
-        if i + 1 > n then begin AKnown := False; Inc(i); Break; end;
-        EscapeSet(APattern[i + 1], esc, ek, ez);
-        if ek then ASet := ASet + esc else AKnown := False;
-        Inc(i, 2);
-        Continue;
-      end;
-      lo := Ord(APattern[i]);
-      if (i + 2 <= n) and (APattern[i + 1] = '-') and (APattern[i + 2] <> ']') then
+        lo := Ord('-');                      // a '-' last is a literal
+        Inc(i);
+      end
+      else if APattern[i] = '\' then
       begin
-        hi := Ord(APattern[i + 2]);
-        if hi >= lo then ASet := ASet + SetOfRange(Byte(lo), Byte(hi))
-        else AKnown := False;
-        Inc(i, 3);
+        ReadEscape(True, esc, ek, ez, code);
+        if not ek then begin AKnown := False; Continue; end;
+        if code < 0 then
+        begin
+          // a class escape: a set, and it cannot begin a range
+          raw := raw + esc;
+          up := up + esc;
+          Continue;
+        end;
+        lo := code;
       end
       else
       begin
-        Include(ASet, Byte(lo));
+        lo := Ord(APattern[i]);
         Inc(i);
+      end;
+      // A range: this item, a '-', and an end that is not the closing ']'.
+      if (i + 1 <= n) and (APattern[i] = '-') and (APattern[i + 1] <> ']') then
+      begin
+        Inc(i);                              // past '-'
+        if APattern[i] = '\' then
+        begin
+          ReadEscape(True, esc, ek, ez, code);
+          if (not ek) or (code < 0) then begin AKnown := False; Continue; end;
+          hi := code;
+        end
+        else
+        begin
+          hi := Ord(APattern[i]);
+          Inc(i);
+        end;
+        if hi < lo then begin AKnown := False; Continue; end;   // rejected, or (?r)
+        raw := raw + SetOfRange(Byte(lo), Byte(hi));
+        if (lo < 128) and (hi < 128) then
+          up := up + SetOfRange(AsciiUp(Byte(lo)), AsciiUp(Byte(hi)))
+        else
+          hiRange := True;
+      end
+      else
+      begin
+        Include(raw, Byte(lo));
+        if lo < 128 then Include(up, AsciiUp(Byte(lo))) else hiItem := True;
       end;
     end;
     if (i <= n) and (APattern[i] = ']') then Inc(i)
-    else AKnown := False;                    // unterminated: do not judge it
-    if neg then ASet := AllBytes() - ASet;
+    else AKnown := False;                    // unterminated: the engine rejects it
+    if not fold then
+    begin
+      if neg then ASet := AllBytes() - raw else ASet := raw;
+      Exit;
+    end;
+    ASet := [];
+    for b := 0 to 127 do
+      if (AsciiUp(Byte(b)) in up) <> neg then Include(ASet, Byte(b));
+    if neg then
+      ASet := ASet + HighSet()
+    else if hiRange then
+      ASet := AllBytes()
+    else
+    begin
+      if (up <> []) or hiItem then ASet := ASet + HighSet();
+      if hiItem then ASet := ASet + AsciiLetterSet();
+    end;
+  end;
+
+  { A modifier string such as i, -i, ix-s: what TRegExpr's ParseModifiers
+    reads. Only the two that change what an atom matches are tracked. }
+  procedure ApplyModifiers(var L: TReLevel; AFrom, ATo: Integer);
+  var k: Integer; isOn: Boolean;
+  begin
+    isOn := True;
+    for k := AFrom to ATo do
+      case APattern[k] of
+        '-': isOn := False;
+        'i', 'I': L.CaseFold := isOn;
+        'x', 'X': L.Extended := isOn;
+      end;
   end;
 
   { Do two of this level's branches share a possible first byte? That is the
@@ -1042,15 +1325,21 @@ var
 
     { The union of every atom that can slide -- optional, unbounded, or a
       variable-width group. Taken across ALL branches, because iteration k may
-      use one branch and iteration k+1 another. An unknown set poisons it: a
-      backreference or a Unicode property escape could match anything. }
+      use one branch and iteration k+1 another.
+
+      AN UNKNOWN ATOM ANYWHERE POISONS THE BODY, not only a sliding one. It used
+      to be skipped when it was mandatory, on the reasoning that it could not be
+      used as a barrier anyway -- but a backreference is mandatory AND of
+      variable width, and an escape this judge cannot name may be anything at
+      all, so leaving it out of flexAll let a neighbour pass for a separator
+      that the unknown atom could in fact swallow. A set this judge cannot name
+      is a set it cannot prove disjoint, and an unproven body is ambiguous. }
     flexAll := [];
     for k := 0 to L.NAtoms - 1 do
-      if L.Atoms[k].Kind <> akSep then
-      begin
-        if not L.Atoms[k].Known then Exit;
-        flexAll := flexAll + L.Atoms[k].CSet;
-      end;
+    begin
+      if not L.Atoms[k].Known then Exit;
+      if L.Atoms[k].Kind <> akSep then flexAll := flexAll + L.Atoms[k].CSet;
+    end;
 
     for b := 0 to cnt - 1 do
     begin
@@ -1069,10 +1358,18 @@ var
       // position can be split any number of ways.
       if not anyMandatory then Exit;
 
-      // (i) some fixed-width mandatory atom no flexible atom can consume.
+      { (i) some fixed-width mandatory atom no flexible atom can consume.
+
+        A BARRIER MUST CONSUME SOMETHING. An empty set is disjoint from
+        everything, so an atom with no bytes in it passed every test below as
+        the perfect separator -- and the atoms that have no bytes are the ones
+        that consume nothing: an empty group, (?:), and once the reader of (?
+        was wrong, a (?#comment) too. ^(a+()a+)+$ was judged unambiguous and is
+        (a+a+)+. Every barrier test now asks for a non-empty set. }
       for k := 0 to L.NAtoms - 1 do
         if (L.Atoms[k].Branch = b) and (L.Atoms[k].Kind = akSep) and
-           L.Atoms[k].Known and ((L.Atoms[k].CSet * flexAll) = []) then
+           L.Atoms[k].Known and (L.Atoms[k].CSet <> []) and
+           ((L.Atoms[k].CSet * flexAll) = []) then
         begin
           branchOk := True;
           Break;
@@ -1081,7 +1378,7 @@ var
       // (ii) the branch ENDS on a barrier: only the flexible atoms since the
       // previous barrier can reach across the boundary behind it.
       if (not branchOk) and (lastK >= 0) and (L.Atoms[lastK].Kind = akSep) and
-         L.Atoms[lastK].Known then
+         L.Atoms[lastK].Known and (L.Atoms[lastK].CSet <> []) then
       begin
         window := [];
         windowKnown := True;
@@ -1102,7 +1399,7 @@ var
       // (iii) the branch BEGINS on a barrier: only the flexible atoms up to the
       // next barrier can reach across the boundary in front of it.
       if (not branchOk) and (firstK >= 0) and (L.Atoms[firstK].Kind = akSep) and
-         L.Atoms[firstK].Known then
+         L.Atoms[firstK].Known and (L.Atoms[firstK].CSet <> []) then
       begin
         window := [];
         windowKnown := True;
@@ -1133,7 +1430,8 @@ var
   aknown, azero: Boolean;
   popped: TReLevel;
   kind: TReAtomKind;
-  ambiguous: Boolean;
+  ambiguous, groupNullable: Boolean;
+  j, code: Integer;
 begin
   AWhy := '';
   Result := True;
@@ -1141,24 +1439,44 @@ begin
   if n = 0 then Exit;
   top := 0;
   gaveUp := False;
-  ResetLevel(lv[0]);
+  // RegexGuard's TRegExpr starts with the library defaults, ModifierI and
+  // ModifierX both off (RegExprModifierI/X in regexpr.pas).
+  ResetLevel(lv[0], False, False);
   i := 1;
   while i <= n do
   begin
     c := APattern[i];
+    { (?x): an unescaped blank and a #-comment to the end of the line are not
+      atoms (ParseAtom emits OP_COMMENT for them). Read as literals, the blank
+      in (?x)^(a+ a?)+$ was a separator no flexible atom could consume, and the
+      body is (a+a?)+. }
+    if lv[top].Extended and (c in [' ', #9, #10, #13]) then
+    begin
+      Inc(i);
+      Continue;
+    end;
+    if lv[top].Extended and (c = '#') then
+    begin
+      while (i <= n) and (APattern[i] <> #10) and (APattern[i] <> #13) do Inc(i);
+      Continue;
+    end;
     case c of
       '\':
         begin
-          if i + 1 > n then begin Inc(i); Continue; end;
-          EscapeSet(APattern[i + 1], aset, aknown, azero);
-          Inc(i, 2);
+          ReadEscape(False, aset, aknown, azero, code);
           q := ReadQuant(qmin, qmax);
           if azero then
           begin
             // A zero-width assertion consumes nothing, so it neither starts a
-            // branch nor repeats anything.
+            // branch nor repeats anything -- but quantified (\B?) it is two
+            // ways to match nothing.
+            if q <> qkNone then lv[top].EmptyAmb := True;
             Continue;
           end;
+          // An unknown escape (a backreference) may match nothing at all, so
+          // only a known one ends the branch's ability to match empty.
+          if aknown and (qmin >= 1) then lv[top].BranchNullable := False;
+          if (code >= 0) and lv[top].CaseFold then aset := FoldLiteral(Byte(code));
           if q = qkUnbounded then lv[top].Unbounded := True
           else if q = qkBounded then
             if qmax > lv[top].Reps then lv[top].Reps := qmax;
@@ -1167,9 +1485,49 @@ begin
         end;
       '(':
         begin
+          { A MODIFIER DIRECTIVE OR A COMMENT IS NOT A GROUP. TRegExpr emits a
+            comment node for (?i) and (?#...), consuming nothing; this judge
+            used to open a level for them, close it empty, and fold that empty
+            level into its parent as a fixed-width atom with no bytes -- a
+            "separator" disjoint from everything. A directive now changes the
+            enclosing level's modifiers and opens nothing. (?i:...) -- a scoped
+            group, which 0.987 rejects and a newer TRegExpr accepts -- opens a
+            level with the modifiers applied to it alone. }
+          if (i + 1 <= n) and (APattern[i + 1] = '?') then
+          begin
+            if (i + 2 <= n) and (APattern[i + 2] = '#') then
+            begin
+              i := i + 3;
+              while (i <= n) and (APattern[i] <> ')') do Inc(i);
+              if i <= n then Inc(i);
+              // a quantified comment is two ways to match nothing
+              if ReadQuant(qmin, qmax) <> qkNone then lv[top].EmptyAmb := True;
+              Continue;
+            end;
+            j := i + 2;
+            while (j <= n) and (APattern[j] in ['i', 'I', 'r', 'R', 's', 'S', 'g', 'G',
+                                                 'm', 'M', 'x', 'X', '-']) do Inc(j);
+            if (j > i + 2) and (j <= n) and (APattern[j] = ')') then
+            begin
+              ApplyModifiers(lv[top], i + 2, j - 1);
+              i := j + 1;
+              if ReadQuant(qmin, qmax) <> qkNone then lv[top].EmptyAmb := True;
+              Continue;
+            end;
+            if (j > i + 2) and (j <= n) and (APattern[j] = ':') then
+            begin
+              if top >= MaxReDepth then begin gaveUp := True; Break; end;
+              Inc(top);
+              ResetLevel(lv[top], lv[top - 1].CaseFold, lv[top - 1].Extended);
+              ApplyModifiers(lv[top], i + 2, j - 1);
+              i := j + 1;
+              Continue;
+            end;
+          end;
           if top >= MaxReDepth then begin gaveUp := True; Break; end;
           Inc(top);
-          ResetLevel(lv[top]);
+          // A group inherits the modifiers in force where it opens.
+          ResetLevel(lv[top], lv[top - 1].CaseFold, lv[top - 1].Extended);
           Inc(i);
           if (i <= n) and (APattern[i] = '?') then
           begin
@@ -1199,7 +1557,9 @@ begin
               if (i <= n) and (APattern[i] = '>') then Inc(i);
             end
             else
-              // (?imsx) and friends: a modifier group, opaque and consuming nothing
+              // Any other (? form, which 0.987 rejects at compile time: step to
+              // its ')' -- the level it opened closes empty, and an empty level
+              // folds into nothing (below).
               while (i <= n) and (APattern[i] <> ')') do Inc(i);
           end;
         end;
@@ -1210,10 +1570,21 @@ begin
           Dec(top);
           Inc(i);
           q := ReadQuant(qmin, qmax);
+          // Close the last branch: two that can match nothing are two ways to.
+          if popped.BranchNullable then Inc(popped.NullableBranches);
+          if popped.NullableBranches >= 2 then popped.EmptyAmb := True;
+          groupNullable := popped.Opaque or (popped.NullableBranches > 0);
           ambiguous := False;
           if (q = qkUnbounded) or ((q = qkBounded) and (qmax >= BudgetAmbiguousRepeat)) then
           begin
             // THE JUDGEMENT, and the only place a pattern is ever refused.
+            if popped.EmptyAmb then
+            begin
+              AWhy := 'a repeat of a group that can match the empty string in more ' +
+                      'than one way (the (c()?)+ shape) can take exponentially ' +
+                      'many attempts';
+              Exit(False);
+            end;
             if BranchesOverlap(popped) then
             begin
               AWhy := 'a repeat of an alternation whose branches can start on the ' +
@@ -1265,6 +1636,18 @@ begin
             if popped.Reps > lv[top].Reps then lv[top].Reps := popped.Reps;
           end;
 
+          { The empty string, carried up. A level that matches nothing in two
+            ways makes its parent do so too, once per time the parent runs it;
+            a group that can match nothing, quantified by anything but an exact
+            count, is two more (take it empty, or skip it); and a group that
+            must consume something ends the parent branch's chance of matching
+            nothing. }
+          if popped.EmptyAmb then lv[top].EmptyAmb := True;
+          if groupNullable and (q <> qkNone) and
+             not ((q = qkBounded) and (qmin = qmax)) then
+            lv[top].EmptyAmb := True;
+          if (not groupNullable) and (qmin >= 1) then lv[top].BranchNullable := False;
+
           if popped.Opaque then
           begin
             // A lookaround consumes nothing: it cannot begin a branch, and it
@@ -1294,7 +1677,9 @@ begin
             else if popped.FixedWidth and (popped.Branches = 1) and
                     (not popped.Overflowed) then kind := akSep
             else kind := akWide;
-            PushAtom(aset, aknown, kind);
+            // A group that recorded no atom -- (), (?:), (\b) -- consumes
+            // nothing, and an atom that consumes nothing is not one.
+            if popped.NAtoms > 0 then PushAtom(aset, aknown, kind);
           end;
         end;
       '|':
@@ -1306,6 +1691,8 @@ begin
             the flag is what tells the judgement it is looking at an untracked
             level rather than an ambiguous one. }
           if lv[top].Branches > MaxReBranch then lv[top].BranchOverflow := True;
+          if lv[top].BranchNullable then Inc(lv[top].NullableBranches);
+          lv[top].BranchNullable := True;
           Inc(lv[top].Branches);
           lv[top].NeedFirst := True;
           lv[top].AnyFirst := False;
@@ -1314,6 +1701,7 @@ begin
         begin
           ClassSet(aset, aknown);
           q := ReadQuant(qmin, qmax);
+          if qmin >= 1 then lv[top].BranchNullable := False;
           if q = qkUnbounded then lv[top].Unbounded := True
           else if q = qkBounded then
             if qmax > lv[top].Reps then lv[top].Reps := qmax;
@@ -1321,11 +1709,15 @@ begin
           PushAtom(aset, aknown, KindOf(q, qmin, qmax));
         end;
       '^', '$':
-        Inc(i);                                 // zero-width anchors
+        begin
+          Inc(i);                               // zero-width anchors
+          if ReadQuant(qmin, qmax) <> qkNone then lv[top].EmptyAmb := True;
+        end;
       '.':
         begin
           Inc(i);
           q := ReadQuant(qmin, qmax);
+          if qmin >= 1 then lv[top].BranchNullable := False;
           if q = qkUnbounded then lv[top].Unbounded := True
           else if q = qkBounded then
             if qmax > lv[top].Reps then lv[top].Reps := qmax;
@@ -1333,12 +1725,20 @@ begin
           PushAtom(AllBytes(), True, KindOf(q, qmin, qmax));
         end;
       '*', '+', '?':
-        Inc(i);                                 // a quantifier with nothing before it
+        begin
+          { A quantifier with nothing before it is, to TRegExpr, a quantifier on
+            the zero-width piece before it -- under (?x) the blank in `(a) ?`
+            -- or a compile error. Either way it is two ways to match nothing. }
+          Inc(i);
+          lv[top].EmptyAmb := True;
+        end;
     else
       begin
-        aset := [Byte(Ord(c))];
+        if lv[top].CaseFold then aset := FoldLiteral(Byte(Ord(c)))
+        else aset := [Byte(Ord(c))];
         Inc(i);
         q := ReadQuant(qmin, qmax);
+        if qmin >= 1 then lv[top].BranchNullable := False;
         if q = qkUnbounded then lv[top].Unbounded := True
         else if q = qkBounded then
           if qmax > lv[top].Reps then lv[top].Reps := qmax;

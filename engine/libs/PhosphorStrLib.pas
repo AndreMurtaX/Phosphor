@@ -168,25 +168,33 @@ begin
   Result := ValStr(Copy(s0(A), st[startCp - 1], st[lastEx - 1] - st[startCp - 1]));
 end;
 
+{ THE DECODER ON THE OTHER SIDE OF Utf8Char's SURROGATE GAP (2026-10-09). The
+  three bytes ED A0 80 are what the bit pattern of U+D800 would encode to, and
+  RFC 3629 makes them ill-formed; they reach asc from a file or from bytestr$,
+  never from chr$ any more. asc answered 55296 for them -- a code chr$ will not
+  produce, and not a character. It answers U+FFFD, the same replacement chr$
+  makes, so no door of this library names a surrogate. }
 function f_asc(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String;
+var s: String; cp: Integer;
 begin
   E := NoError();
   s := CpAt(s0(A), 1);
-  if s = '' then Result := ValInt(0)
-  else if Ord(s[1]) < $80 then Result := ValInt(Ord(s[1]))
+  if s = '' then cp := 0
+  else if Ord(s[1]) < $80 then cp := Ord(s[1])
   else
   begin
     // decode the leading UTF-8 codepoint
     if (Ord(s[1]) >= $F0) and (Length(s) >= 4) then
-      Result := ValInt(((Ord(s[1]) and $07) shl 18) or ((Ord(s[2]) and $3F) shl 12) or ((Ord(s[3]) and $3F) shl 6) or (Ord(s[4]) and $3F))
+      cp := ((Ord(s[1]) and $07) shl 18) or ((Ord(s[2]) and $3F) shl 12) or ((Ord(s[3]) and $3F) shl 6) or (Ord(s[4]) and $3F)
     else if (Ord(s[1]) >= $E0) and (Length(s) >= 3) then
-      Result := ValInt(((Ord(s[1]) and $0F) shl 12) or ((Ord(s[2]) and $3F) shl 6) or (Ord(s[3]) and $3F))
+      cp := ((Ord(s[1]) and $0F) shl 12) or ((Ord(s[2]) and $3F) shl 6) or (Ord(s[3]) and $3F)
     else if (Ord(s[1]) >= $C0) and (Length(s) >= 2) then
-      Result := ValInt(((Ord(s[1]) and $1F) shl 6) or (Ord(s[2]) and $3F))
+      cp := ((Ord(s[1]) and $1F) shl 6) or (Ord(s[2]) and $3F)
     else
-      Result := ValInt(Ord(s[1]));
+      cp := Ord(s[1]);
   end;
+  if (cp >= $D800) and (cp <= $DFFF) then cp := $FFFD;
+  Result := ValInt(cp);
 end;
 
 { THE ENCODER IS PhosphorValue's Utf8Char, AND THERE IS NOW ONLY ONE OF IT.

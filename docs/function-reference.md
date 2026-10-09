@@ -167,8 +167,8 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 
 | function | description |
 | --- | --- |
-| `asc(s$) → num` | the codepoint of the first character (0 for the empty string) |
-| `chr$(code) → str` | the character (UTF-8) for codepoint `code` |
+| `asc(s$) → num` | the codepoint of the first character (0 for the empty string; 65533 for bytes that would spell a surrogate) |
+| `chr$(code) → str` | the character (UTF-8) for codepoint `code`; a surrogate (U+D800..U+DFFF) answers U+FFFD |
 | `hex$(n) → str` | hexadecimal text |
 | `bin$(n) → str` | binary text |
 | `oct$(n) → str` | octal text |

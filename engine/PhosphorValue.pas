@@ -246,9 +246,10 @@ function Utf8Len(const S: String): Integer;
 function Utf8Left(const S: String; ACount: Integer): String;
 function Utf8Right(const S: String; ACount: Integer): String;
 { The UTF-8 encoding of one codepoint, CLAMPED TO THE ENCODABLE RANGE at both
-  ends. Used by chr$, string$ and the pad family, so a character above U+007F is
-  emitted as its real multi-byte sequence and no argument can make it emit a
-  byte that UTF-8 does not have. }
+  ends, and a surrogate (U+D800..U+DFFF, which UTF-8 may not encode) answered as
+  U+FFFD. Used by chr$, string$ and the pad family, so a character above U+007F
+  is emitted as its real multi-byte sequence and no argument can make it emit a
+  sequence that UTF-8 does not have. }
 function Utf8Char(ACode: Integer): String;
 
 // Finiteness: the invariant, its tests, and its gate --------------------------
@@ -1074,11 +1075,20 @@ end;
   U+10FFFF is the last encodable codepoint, so the range clamps there exactly as
   it already clamped at 0 below. string$, lfill$, rfill$ and center$ all build
   runs of padding through this, so an unclamped code produced whole runs of
-  impossible bytes. }
+  impossible bytes.
+
+  AND THE MIDDLE OF THE RANGE HAD THE SAME GAP (2026-10-09). U+D800..U+DFFF are
+  UTF-16's surrogate halves, not characters, and RFC 3629 section 3 forbids
+  encoding them: the bit pattern gave ED A0 80 for U+D800, which no strict
+  reader accepts -- through chr$, string$ and every pad. A surrogate becomes
+  U+FFFD (EF BF BD), the replacement character, which is also what the JSON
+  decoder writes for an unpaired \u escape. Clamping to a neighbour instead
+  would have invented a real character the script never asked for. }
 function Utf8Char(ACode: Integer): String;
 begin
   if ACode < 0 then ACode := 0;
   if ACode > $10FFFF then ACode := $10FFFF;
+  if (ACode >= $D800) and (ACode <= $DFFF) then ACode := $FFFD;
   if ACode < $80 then Result := Chr(ACode and $FF)
   else if ACode < $800 then
     Result := Chr($C0 or (ACode shr 6)) + Chr($80 or (ACode and $3F))

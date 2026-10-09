@@ -125,6 +125,18 @@ err_clear()
 the modifier in the pattern instead: `regex_find$("(?i)abc", "xxABCyy")` answers
 `"ABC"`.
 
+**Under a host's execution budget, a pattern is judged before it runs.** The
+matcher cannot be interrupted, so when the host has set `MaxSteps` or `TimeoutMs`
+a pattern whose repeated part can match the same text in more than one way — the
+`(a+)+` shape — is refused with a catchable `peLimit` error instead of being run
+(see [docs/embedding.md](../embedding.md#the-ceilings-reach-inside-a-library-call-too)).
+The judge reads the pattern as the matcher does, so spelling the shape differently
+does not get it past: `^(\x61+)+$` is `^(a+)+$`, and under `(?i)` the alternation
+`(a|A)+` has two branches matching the same character. An escape the judge does
+not model (`\p{L}`, `a`, `\z`) or a backreference, inside a repeated group,
+counts as able to match anything, which leans toward refusal. Without a budget
+nothing is judged and every pattern runs.
+
 **`.` matches a newline here.** `TRegExpr` runs in single-line mode by default, so
 `regex_findpos("a.b", "a" + chr$(10) + "b")` answers `1` — a pattern meant for one
 line will happily run across two. Turn it off the same way you turn case-folding

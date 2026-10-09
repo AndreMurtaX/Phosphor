@@ -127,8 +127,8 @@ can fail.
 
 | function | what it answers |
 | --- | --- |
-| `asc(s$) → num` | the codepoint of the first character — `233` for `"é"`, not a byte. The empty string answers `0` |
-| `chr$(code) → str` | the character for `code`, UTF-8 encoded, so `chr$(233)` is **two bytes**. A negative `code` clamps to `0` (a NUL byte). For a raw byte, use `bytestr$` |
+| `asc(s$) → num` | the codepoint of the first character — `233` for `"é"`, not a byte. The empty string answers `0`. Bytes that would spell a UTF-16 surrogate (`ED A0 80` for U+D800) are not a character, and answer `65533` (U+FFFD) |
+| `chr$(code) → str` | the character for `code`, UTF-8 encoded, so `chr$(233)` is **two bytes**. A negative `code` clamps to `0` (a NUL byte) and one past `1114111` to U+10FFFF. A surrogate code `55296..57343` (U+D800..U+DFFF) is not a character and UTF-8 may not encode it (RFC 3629), so it answers U+FFFD, `EF BF BD` — as do `string$` and the pad functions, which encode the same way. For a raw byte, use `bytestr$` |
 | `hex$(n%) → str` | `n%` in hexadecimal, uppercase digits. **Sign and magnitude**: `hex$(-255)` is `"-FF"`, not a two's-complement word. `0` answers `"0"` |
 | `bin$(n%) → str` | the same in base 2 |
 | `oct$(n%) → str` | the same in base 8 |

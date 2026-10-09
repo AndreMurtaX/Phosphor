@@ -27,6 +27,13 @@
 # say symbolic link, whose target is its content and so is no name at all --
 # and the over-refusal half, including that an archive which merely went away
 # is still answered 0 rather than accused of escaping.
+# 27_zip_integrity is what a STORED entry could get away with: a CRC-32 nobody
+# checked, a copy nobody charged, records sharing or overlapping one local
+# header (the overlap bomb), one name twice, a name chosen case-insensitively,
+# and an archive rewritten between zip_open@ and the extraction. Its hostile
+# archives are built byte by byte in the file, like 11_zipslip's; the CRCs its
+# honest entries need are read out of zip_create@'s own output, pinned first
+# against the published check value. Its last case spends the run's budget.
 00_base64
 01_zip
 02_sqlite
@@ -54,3 +61,4 @@
 24_http_cut
 25_http_broken
 26_http_fields
+27_zip_integrity

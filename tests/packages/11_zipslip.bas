@@ -22,8 +22,15 @@ rem Every zip test in this tree builds its archives with zip_create@,
 rem which writes the same name into both headers -- which is exactly
 rem why no suite could reach this. So the malicious archive here is
 rem BUILT BY THIS FILE, byte by byte, the way an attacker builds one:
-rem a STORED (method 0) entry, which paszlib reads without a CRC
-rem check, so no checksum has to be computed in BASIC.
+rem a STORED (method 0) entry. This used to say paszlib reads one
+rem "without a CRC check, so no checksum has to be computed in BASIC",
+rem and the builder wrote a CRC of 0 -- which was the defect, recorded
+rem as a fixture: the honest archives below extracted only because
+rem nothing compared their bytes with their checksum. The package now
+rem does (tests/packages/27_zip_integrity.bas), so every entry here
+rem carries its real CRC-32, read out of an archive zip_create@ writes
+rem for the same bytes; that file pins the source against the published
+rem check value.
 rem
 rem THE ESCAPE IS AIMED INTO THIS TEST'S OWN DIRECTORY. The destination
 rem is bin/p9b_zipslip/dest/a/b and the entry climbs three levels to
@@ -61,13 +68,28 @@ rem OS that wrote the archive (3 = UNIX), and extattr is the external
 rem attributes field, whose high 16 bits carry the UNIX mode when the OS is 3.
 rem Those two together are the only way to say "this entry is a symbolic
 rem link", and zip_create@ can say neither.
-function storedattr$(cname$, lname$, data$, madeby, extattr) local lfh$, cd$, eocd$, n
+rem
+rem The CRC-32 of data$, as the four bytes a header stores, comes from the
+rem LOCAL header zip_create@ writes for the same bytes (offset 14, so bytes
+rem 15..18) -- TZipper computes it while compressing, a path through paszlib
+rem that is not the one under test. crctmp$ is a global: an undeclared name
+rem in a function is one.
+function crc4$(s$) local h@, ok%, z$
+  h@ = zip_create@(crctmp$)
+  ok% = zip_addstr(h@, s$, "c")
+  ok% = zip_close(h@)
+  z$ = file_readalltext$(crctmp$)
+  return bytemid$(z$, 15, 4)
+endfunction
+
+function storedattr$(cname$, lname$, data$, madeby, extattr) local lfh$, cd$, eocd$, n, crc$
   n = bytelen(data$)
+  crc$ = crc4$(data$)
   lfh$ = le32$(67324752) + le16$(20) + le16$(0) + le16$(0) + le16$(0) + le16$(0)
-  lfh$ = lfh$ + le32$(0) + le32$(n) + le32$(n)
+  lfh$ = lfh$ + crc$ + le32$(n) + le32$(n)
   lfh$ = lfh$ + le16$(bytelen(lname$)) + le16$(0) + lname$ + data$
   cd$ = le32$(33639248) + le16$(madeby) + le16$(20) + le16$(0) + le16$(0) + le16$(0) + le16$(0)
-  cd$ = cd$ + le32$(0) + le32$(n) + le32$(n)
+  cd$ = cd$ + crc$ + le32$(n) + le32$(n)
   cd$ = cd$ + le16$(bytelen(cname$)) + le16$(0) + le16$(0) + le16$(0) + le16$(0)
   cd$ = cd$ + le32$(extattr) + le32$(0) + cname$
   eocd$ = le32$(101010256) + le16$(0) + le16$(0) + le16$(1) + le16$(1)
@@ -84,6 +106,7 @@ dir_create("bin/p9b_zipslip")
 dir_create("bin/p9b_zipslip/dest")
 dir_create("bin/p9b_zipslip/dest/a")
 dir_create("bin/p9b_zipslip/dest/a/b")
+crctmp$ = "bin/p9b_zipslip/crc.zip"
 
 dest$ = "bin/p9b_zipslip/dest/a/b"
 esc$ = "bin/p9b_zipslip/escaped_here.txt"

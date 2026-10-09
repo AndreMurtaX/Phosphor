@@ -54,6 +54,22 @@ An entry whose attributes mark it a **symbolic link** is refused too, on both
 operating systems. A link's target is its content and not its name, so no name
 check can see where it points, and no function here is meant to create one.
 
+The second shape is **one stretch of bytes counted twice**. A well-formed archive
+lays its entries end to end; nothing in the format stops two directory records
+from pointing at the same entry, or one entry's header from sitting inside
+another's data. Three hundred records aimed at one stored megabyte made a 1 MB
+file unpack 300 MB. So `unzip_extract`, `zip_extract`, `zip_extractall` **and
+`zip_read$`** refuse — **raised**, writing nothing — an archive in which two
+entries point at the same local header, an entry overlaps another, or two entries
+carry **the same name** (compared byte for byte). The last is a deliberate
+choice: Info-ZIP and Python accept such an archive, but every reader here answers
+a name, and an archive that holds one name twice cannot say which entry a caller
+gets. Names that differ only in case are different names and are accepted —
+`zip_read$` and `zip_extract` pick an entry by the exact bytes of its name, as
+`zip_exists` always did. Each of these checks is made on the archive the
+extraction actually reads, at the moment it reads it, so an archive rewritten
+after `zip_open@` is judged as it now is.
+
 The third shape is a **size that lies**, and it only matters to a host that sets an
 execution budget (see [embedding](../embedding.md)). A zip's directory states each
 entry's uncompressed size, but the decompressor reads until the compressed stream
@@ -65,9 +81,18 @@ created; and then every byte that actually comes out is charged as it comes out,
 and the extraction stops when the budget does. Either refusal is **raised** as a
 runtime error. When it stops part-way through an entry, the half-written file of
 that entry is deleted rather than left holding whatever fitted; entries that
-finished before it stay where they were written. A *stored* (uncompressed) entry is
-copied without being metered — it cannot expand, so its cost is the bytes the
-archive file already holds.
+finished before it stay where they were written. A *stored* (uncompressed) entry
+is charged the same way, by the bytes actually copied — whatever size either
+header declared.
+
+One more failure is not hostile at all, only **damaged**: an entry whose bytes do not match the
+CRC-32 recorded for it (PKWARE APPNOTE 4.4.7). Stored or compressed alike, it is
+answered like any other failure — `""` from `zip_read$`, `0` from the extractors,
+`zip_error()` set, nothing raised — and the file the extractor had begun for it is
+deleted rather than left holding bytes that failed their check. Entries before it
+stay. A stored entry whose local header defers its sizes to a trailing data
+descriptor cannot be read by the underlying `paszlib` and fails here the same way,
+rather than coming back empty.
 
 Two more things worth knowing before you are surprised by them:
 `zip_compress` takes only the files **directly in** the directory, not
@@ -84,7 +109,7 @@ file take the whole archive down later inside `zip_close`.
 | function | what it answers |
 | --- | --- |
 | `zip_compress(zip$, srcdir$) → num` | `1` after writing `zip$` from the files sitting directly in `srcdir$` (subdirectories are not descended into; names are sorted byte-wise, so the entry order is identical on every filesystem). `0` if `srcdir$` is outside the sandbox root or anything fails, with `zip_error()` set to `1` |
-| `unzip_extract(zip$, destdir$) → num` | `1` after extracting every entry under `destdir$`. `0` when the archive is missing or corrupt. If any entry name escapes `destdir$`, if an entry's local file header names it differently from the central directory, or if any entry is a symbolic link, it **raises** a runtime error and writes nothing at all — not even the well-behaved entries. An archive that merely could not be read is answered `0`, not raised |
+| `unzip_extract(zip$, destdir$) → num` | `1` after extracting every entry under `destdir$`. `0` when the archive is missing or corrupt, or an entry fails its CRC-32 (that entry's file is removed). If any entry name escapes `destdir$`, if an entry's local file header names it differently from the central directory, if any entry is a symbolic link, if two entries share or overlap a local header, or if two carry the same name, it **raises** a runtime error and writes nothing at all — not even the well-behaved entries. An archive that merely could not be read is answered `0`, not raised |
 | `unzip_count(zip$) → num` | how many entries the archive holds. `0` for a missing or corrupt file *and* `zip_error()` set to `1` — that flag is the only thing separating a broken archive from a genuinely empty one, which is the whole question this function is asked |
 | `unzip_entry$(zip$, n) → str` | the name of the `n`-th entry, **1-based**. `""` with `zip_error()` set to `1` for an index outside the archive, or for an archive that could not be read: an out-of-range index is a refusal, not an empty name |
 
@@ -106,9 +131,9 @@ file take the whole archive down later inside `zip_close`.
 | `zip_exists(z@, name$) → num` | `1` when an entry with exactly that archive name is present, `0` when it is not — and also `0`, with `zip_error()` set, when `z@` is not a reader. Names match byte for byte, including their directory part |
 | `zip_list$(z@) → str` | every entry name, joined by a single newline (`chr$(10)`), in archive order. `""` for an archive with no entries and `""` for a handle that is not a reader — the two are told apart by `zip_error()` |
 | `zip_entrysize(z@, name$) → num` | the entry's **uncompressed** size in bytes. `0` with `zip_error()` set to `1` when there is no such entry, or when `z@` is not a reader |
-| `zip_read$(z@, name$) → str` | the entry's content decompressed straight into a string, never touching the disk. `""` with `zip_error()` set to `1` when the entry is absent, unreadable, or `z@` is not a reader — an entry that really is empty answers `""` with the error slot clear |
-| `zip_extract(z@, name$, dir$) → num` | `1` after writing that one entry under the **directory** `dir$`, keeping its path inside the archive (`doc/x.txt` lands at `dir$/doc/x.txt`). `0` when the entry is missing, when `z@` is not a reader, or when the archive could not be re-read; **raises** if any name in the archive escapes `dir$`, if a local file header names an entry differently from the central directory, or if any entry is a symbolic link |
-| `zip_extractall(z@, dir$) → num` | `1` after recreating the whole tree under `dir$`, regardless of any single-entry extraction done earlier on the same handle. `0` when `z@` is not a reader, and `0` for an archive that could not be re-read; **raises**, writing nothing, on an archive that escapes, whose local file headers disagree with its central directory, or that carries a symbolic link |
+| `zip_read$(z@, name$) → str` | the entry's content decompressed straight into a string, never touching the disk. The entry is the one whose name matches `name$` byte for byte, as `zip_exists` matches. `""` with `zip_error()` set to `1` when the entry is absent, unreadable, fails its CRC-32, or `z@` is not a reader — an entry that really is empty answers `""` with the error slot clear. **Raises** when two entries share or overlap a local header or carry the same name |
+| `zip_extract(z@, name$, dir$) → num` | `1` after writing that one entry — matched byte for byte — under the **directory** `dir$`, keeping its path inside the archive (`doc/x.txt` lands at `dir$/doc/x.txt`). `0` when the entry is missing, fails its CRC-32 (its file is removed), when `z@` is not a reader, or when the archive could not be re-read; **raises** if any name in the archive escapes `dir$`, if a local file header names an entry differently from the central directory, if any entry is a symbolic link, if two entries share or overlap a local header, or if two carry the same name |
+| `zip_extractall(z@, dir$) → num` | `1` after recreating the whole tree under `dir$`, regardless of any single-entry extraction done earlier on the same handle. `0` when `z@` is not a reader, for an archive that could not be re-read, and for an entry that fails its CRC-32 (its file is removed; earlier entries stay); **raises**, writing nothing, on an archive that escapes, whose local file headers disagree with its central directory, that carries a symbolic link, whose entries share or overlap a local header, or that holds one name twice |
 
 ### Closing, and what went wrong
 

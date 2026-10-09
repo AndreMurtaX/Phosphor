@@ -1525,6 +1525,51 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-09 · round 3 of "until two come back empty": fourteen distinct
+  findings, two of them crashes, and a third Windows that found three more.**
+  Five attackers aimed at the code rounds 1 and 2 had added, plus GUI and JSON
+  (never attacked). Nineteen claimed, one killed, eighteen survived -- fourteen
+  once two attackers' JSON findings were merged. The regex attacker was stopped
+  by a safety classifier before it ran anything, as two sandbox attempts had
+  been: **the sandbox and the regex guard cannot be swept through this
+  channel**, and neither may be counted as clean. A permanent regex fuzz gate
+  was started for that reason and could not be finished here either; its probe
+  is written and its driver is not.
+  - **The seam a fix did not reach is where the next defect is.** Round 2 made
+    one correctly rounded reader of number text and listed its doors; JSON was
+    not among them, so json_parse@ was still one ulp off one time in 4000,
+    refused numbers past 255 characters and read '5' NUL 'x' as 5. Its fixer
+    then found the same seam one package over: SQLite bound only 32-bit
+    integers as integers, so 2^53+1 was stored as a REAL and lost its last
+    digit. **When you replace the reader that decides, list every door, and
+    then grep the packages for the doors you did not list.**
+  - **A pre-scan that judges a frame differently from the parser is a second
+    parser, and it will disagree.** Round 2 bounded the debug protocol's JSON
+    nesting with a scan; a bare CR inside a string made the scan and fpjson
+    disagree, and the host crashed again. The fix counts the depth inside the
+    parser that recurses.
+  - **A free inside an event handler** left the dispatcher touching freed
+    memory. Frees requested during a dispatch are now deferred until it unwinds,
+    for every event and control kind.
+  - **The environment, temp and home paths were read through the ANSI code
+    page on Windows**: every non-ASCII value came back corrupted. No .bas runner
+    can set a variable for the program it runs, so the test is a test.ps1/
+    test.sh block (AA) that does, judged against .NET's and od's UTF-8 -- and
+    watched failing on the round-2 binary first.
+  - **The Windows CI job (new this day) was a third Windows, and it found three
+    things this desktop hid.** A sqlite3.dll on the runner image's PATH lacked
+    entry points, and sqlite_open@ was an ACCESS VIOLATION: FPC's loader leaves
+    a nil for every missing export, and the package called them blind -- now an
+    incomplete library is an absent one. probe_sandbox reported a file written
+    'before the NUL' while the refusal itself had passed: its file was called
+    nul.txt, and Windows before 11 maps that name to the NUL DEVICE. And OpenSSL
+    3 was not where the job first looked. **A machine nobody configured asks
+    questions a configured one cannot.**
+  - **Process.** The owner's desktop was unusable while five fixers and suite
+    runs shared it. Build and test processes now run at BelowNormal while agents
+    work, heavy verification moves to CI (Linux and Windows jobs), and agents
+    are to run remotely; see the memory note on keeping the machine usable.
+
 - **2026-10-09 · round 2 of "until two come back empty": twenty-one findings
   survived, six were killed, and the sandbox still has not been swept.** Five
   attackers (sandbox, the code round 1 added, the VM and number text, the debug

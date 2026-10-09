@@ -1155,4 +1155,19 @@ if [ "$zcode" -ne 2 ] || [[ "$zout" != *'names this binary'* ]] || ! cmp -s "$zd
 if [ "$okZ" -eq 0 ]; then echo 'PASS  Z:a repeated flag is refused, and no output may name an input (run, compile, pack)'
 else echo 'FAIL  Z:a repeated flag took the last value, or an output overwrote an input'; fail=1; fi
 
+# --- AA: THE ENVIRONMENT IS READ AS UTF-8 -----------------------------------------
+# The twin of block AA in scripts/test.ps1, whose comment carries the reason (on
+# Windows environ$ went through the ANSI code page). On Linux the environment is
+# bytes, so this is the control that the same text comes back the same here.
+# The name and value are written as UTF-8 byte escapes, and the expected hex is
+# made by od from the same bytes -- not by anything Phosphor printed.
+aaname=$'PHOSPHOR_T\xc3\x89ST'
+aavalue=$'caf\xc3\xa9 \xe2\x88\x91 \xe6\x97\xa5\xe6\x9c\xac'
+printf 'println hex_encode$(environ$("%s"))\n' "$aaname" > "$tmpdir/env.bas"
+aawant="$(printf '%s' "$aavalue" | od -An -tx1 | tr -d ' \n')"
+if aagot="$(env "$aaname=$aavalue" "$exe" "$tmpdir/env.bas" < /dev/null 2>&1)"; then aacode=0; else aacode=$?; fi
+aagot="$(printf '%s' "$aagot" | tr -d '\r\n' | tr 'A-F' 'a-f')"
+if [ "$aacode" -eq 0 ] && [ "$aagot" = "$aawant" ]; then echo 'PASS  AA:environ$ reads a non-ASCII name and value as UTF-8'
+else echo "FAIL  AA:environ\$ of a non-ASCII name: exit $aacode, want $aawant, got $aagot"; fail=1; fi
+
 exit "$fail"

@@ -1552,7 +1552,33 @@ if (($zCode -ne 2) -or ($t -notlike '*names this binary*') -or (-not (Same-Bytes
 if ($okZ) { Write-Host 'PASS  Z:a repeated flag is refused, and no output may name an input (run, compile, pack)' -ForegroundColor Green }
 else { Write-Host 'FAIL  Z:a repeated flag took the last value, or an output overwrote an input' -ForegroundColor Red }
 
+# --- AA: THE ENVIRONMENT IS READ AS UTF-8 -----------------------------------------
+# environ$ read the environment through the ANSI code page on Windows, so every
+# non-ASCII value came back corrupted and a non-ASCII NAME was not found at all
+# (round 3, 2026-10-09). No .bas runner can set a variable for the program it
+# runs, so this block does: a name and a value outside ASCII, set for the child
+# only, and the bytes the script reads compared with the UTF-8 encoding .NET
+# makes of the same text -- not with anything Phosphor printed. The characters
+# are built from code points so this file's own encoding cannot change them.
+$aaName  = 'PHOSPHOR_T' + [char]0x00C9 + 'ST'                       # PHOSPHOR_TÉST
+$aaValue = 'caf' + [char]0x00E9 + ' ' + [char]0x2211 + ' ' + [char]0x65E5 + [char]0x672C
+$aaDir = Join-Path $tmp 'aa'
+New-Item -ItemType Directory -Force $aaDir | Out-Null
+$aaBas = Join-Path $aaDir 'env.bas'
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($aaBas, ('println hex_encode$(environ$("' + $aaName + '"))' + "`n"), $utf8)
+$aaWant = (($utf8.GetBytes($aaValue) | ForEach-Object { $_.ToString('x2') }) -join '')
+[Environment]::SetEnvironmentVariable($aaName, $aaValue, 'Process')
+$aaOut = Join-Path $aaDir 'env.out'
+cmd /c "`"$exe`" `"$aaBas`" < NUL > `"$aaOut`" 2>&1"
+$aaCode = $LASTEXITCODE
+[Environment]::SetEnvironmentVariable($aaName, $null, 'Process')
+$aaGot = (Read-Text $aaOut).Trim().ToLower()
+$okAA = ($aaCode -eq 0) -and ($aaGot -eq $aaWant)
+if ($okAA) { Write-Host 'PASS  AA:environ$ reads a non-ASCII name and value as UTF-8' -ForegroundColor Green }
+else { Write-Host ("FAIL  AA:environ$ of a non-ASCII name: exit {0}, want {1}, got {2}" -f $aaCode, $aaWant, $aaGot) -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA) { exit 0 } else { exit 1 }

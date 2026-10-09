@@ -266,18 +266,20 @@ function f_free(const A: array of TValue; out E: TPhosphorError): TValue;
 var o, obj: TObject; h: TGuiHandle;
 begin
   E := NoError;
+  GuiFlushFrees();   // at depth 0, what an earlier handler deferred goes first
   o := HandleObj(A[0].Hnd);
   if not (o is TGuiHandle) then begin GGuiError := 1; Exit(ValInt(0)); end;
   h := TGuiHandle(o);
-  // THE ONE CONTROL THAT MUST NOT BE FREED IS THE ONE THE LCL IS STANDING ON.
+  // THE ONE CONTROL THAT IS REFUSED IS A FORM BEING CLOSED.
   // "Dispose of the window when it closes" -- form_onclose@ plus control_free, both
   // documented, the obvious pairing -- destroyed the form from inside
   // TCustomForm.Close, which then went on writing CloseAction and hiding an object
-  // that no longer existed: an access violation, 3 runs out of 3. Freeing a BUTTON
-  // inside its own click handler is fine and stays fine, because Click does not
-  // touch the control again; the close path does, and says so through GuiInUse.
-  // Refused, not raised -- gui_error 1 is the answer this package gives every
-  // operation a control will not accept. The window is still freed at ResetHandles.
+  // that no longer existed: an access violation, 3 runs out of 3. Refused, not
+  // raised -- gui_error 1 is the answer this package gives every operation a
+  // control will not accept, and tests/gui/18_faults.bas pins it. The window is
+  // still freed at ResetHandles. Every OTHER free inside a handler is deferred
+  // below, which is what made "freeing a button in its own click is fine" true:
+  // it was said here, and it held for a click only by luck of the LCL's order.
   if GuiInUse(h.Control) then begin GGuiError := 1; Exit(ValInt(0)); end;
   // A HANDLE WHOSE CONTROL IS ALREADY GONE NAMES NOTHING TO DESTROY. Freeing a form
   // frees the tree it owns; TGuiHandle.Notification then nils every child handle's
@@ -295,6 +297,21 @@ begin
     GGuiError := 1;
     FreeHandle(A[0].Hnd);
     Exit(ValInt(0));
+  end;
+  // INSIDE A HANDLER, THE LCL MAY BE STANDING ON IT -- or on the form that owns
+  // it, or on anything else it touches on the way out of the event; which one
+  // depends on each control's internals (TButtonControl.Click calls
+  // `inherited Click` on the sender AFTER the change event; a radio group's
+  // change arrives from inside one of its own buttons). So the free is deferred
+  // until no handler is running: dead to the program now, freed after. A
+  // bitmap is not deferred -- no LCL frame stands on one, and it is the object a
+  // handler is likeliest to make and free in a loop, which deferral would let
+  // pile up past the GUI budget. See GuiFreeLater (PhosphorGuiCore).
+  if GuiInDispatch() and (h.Watched or (h.Holder <> nil)) then
+  begin
+    GuiFreeLater(h);
+    FreeHandle(A[0].Hnd);
+    Exit(ValInt(1));
   end;
   if (not h.Owns) and (h.Control <> nil) then
   begin

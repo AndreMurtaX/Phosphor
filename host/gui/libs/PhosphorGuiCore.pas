@@ -65,8 +65,15 @@ type
     control_free(node@) was a double free reachable from ordinary BASIC (ledger
     n20); reading the node instead was an access violation (d10). A node can also
     die with a node above it, which no notification reports: GuiForgetNodes
-    covers that, called before a node is freed. }
-  TGuiHandle = class(TComponent)
+    covers that, called before a node is freed.
+
+    TGuiRef IS THE MECHANISM AND TGuiHandle IS THE ONE A PROGRAM CAN NAME. The
+    other kind of TGuiRef is a free DEFERRED until an event's dispatch unwinds
+    (see GuiFreeLater): it must watch and free its object exactly as a handle
+    does, and it must NOT resolve -- every reader asks `is TGuiHandle`, so a
+    deferred free is a different class, not a flag every reader would have to
+    remember to check. }
+  TGuiRef = class(TComponent)
   public
     // EXPLICIT visibility: TComponent is compiled {$M+}, so members with no section
     // default to PUBLISHED, and a plain TObject field cannot be published.
@@ -86,6 +93,9 @@ type
     procedure Watch;
     procedure Notification(AComponent: TComponent; Operation: TOperation); override;
     destructor Destroy; override;
+  end;
+
+  TGuiHandle = class(TGuiRef)
   end;
 
   { Carries one bound event back into BASIC. Owned by the control it serves; one
@@ -499,10 +509,11 @@ function GuiCloseQueryHandler(AVM: TObject; AControl: TComponent;
   const AEvent, AHandler: String; ASenderId: Int64): TCloseQueryEvent;
 
 { --- objects the LCL is standing on ----------------------------------------
-  A handler is usually the last thing that touches its sender: TControl.Click
-  calls the notify event and returns, so a program may free the control it was
-  just handed and nothing dereferences it afterwards. CLOSING A FORM is not like
-  that. TCustomForm.Close runs OnCloseQuery, then OnClose, and then keeps working
+  This said a handler is usually the last thing that touches its sender, and
+  that is FALSE -- see "a free asked for while an event is being dispatched"
+  below, which is now what keeps every handler's free safe. This list stays for
+  the one case that is REFUSED rather than deferred, and is pinned so by
+  tests/gui/18_faults.bas. CLOSING A FORM: TCustomForm.Close runs OnCloseQuery, then OnClose, and then keeps working
   on the same form -- it writes CloseAction, hides the window, unwinds through
   fields of the object. control_free inside an onclose handler destroyed the form
   underneath that, and the LCL walked on into freed memory: an access violation
@@ -520,6 +531,53 @@ function GuiInUse(AObj: TObject): Boolean;
 { Bracket a callback during which AObj must survive. Always in a try/finally. }
 procedure GuiEnterCallback(AObj: TObject);
 procedure GuiLeaveCallback(AObj: TObject);
+
+{ --- a free asked for while an event is being dispatched --------------------
+  THE CLOSE PATH WAS NOT THE ONLY ONE THE LCL STANDS ON (round 3, 2026-10-09).
+  The note above was right about TCustomForm.Close and wrong that a handler is
+  usually the last thing to touch its sender. TButtonControl.Click is
+  DoOnChange and THEN `inherited Click` on the same object; TCustomCheckBox.
+  SetState goes on reading LAction and FState after the change event; a list
+  box's Click calls Changed on itself; a radio group's change arrives from
+  inside one of its own radio buttons. So control_free of the sender -- or of
+  the form that owns it, or of anything else the dispatcher touches on its way
+  out -- inside checkbox_checked@, radio_checked@, togglebox_checked@,
+  edit_text@, spinedit_value@, radiogroup_itemindex@ or a list's click freed
+  memory the LCL was about to read. On the release heap that read stale bytes
+  and passed; on a heap that poisons freed blocks it was an access violation.
+
+  Guarding the sender alone, the way GuiInUse guards a closing form, could not
+  close the class: the object the LCL reads next need not be the sender, and
+  which one it is depends on LCL internals per control. What CAN be known
+  exactly is WHEN no LCL frame of the program's is on the stack: never while a
+  BASIC handler is running -- every handler reaches BASIC through GuiCallBack,
+  which counts -- and always when a GUI function is entered with that count at
+  zero, because a GUI function at depth zero was called by the program's own
+  top-level code.
+
+  So a free asked for during a dispatch is DEFERRED: for the program it happens
+  at once -- the handle is dead, and so is every handle into what will die with
+  the object, exactly as if it had been freed -- and the memory goes when the
+  next GUI function runs at depth zero, or the message loop finishes a message,
+  or the program ends (the deferred object is held by a registry entry no
+  program can name, so ResetHandles frees it like any other). A control whose
+  handle is dead raises no further events into BASIC (GuiCallBack). }
+{ True while a BASIC event handler is running, at any depth. }
+function GuiInDispatch: Boolean;
+{ True while a handler is running for an event AObj sent -- at any depth, so a
+  handler that clicks something else is still inside AObj's event. For the
+  operations that DESTROY a control's internal children rather than the control
+  itself, which no deferral can cover: radiogroup_clear frees the radio buttons
+  the group's change event is raised from (PhosphorChoiceLib). }
+function GuiDispatchingFrom(AObj: TObject): Boolean;
+{ Free AHandle's object later, and every handle that names it or anything that
+  dies with it NOW. The caller still releases AHandle's own registry entry. Only
+  for an object some LCL frame might be standing on: a component, or a node or
+  item (a handle with a Holder). }
+procedure GuiFreeLater(AHandle: TGuiHandle);
+{ Free whatever GuiFreeLater deferred, if no handler is running; otherwise do
+  nothing. Safe to call from any GUI function at its entry. }
+procedure GuiFlushFrees;
 
 { Call a BASIC routine the way an event bridge does: record a failing handler as
   error 2, honour END, and answer what the routine returned. Exposed because a
@@ -601,9 +659,10 @@ procedure GuiForgetNodes(AObj: TObject);
 implementation
 
 uses
-  ComCtrls;   // TTreeNode / TListItem: what a non-component handle can wrap
+  ComCtrls,   // TTreeNode / TListItem: what a non-component handle can wrap
+  Menus;      // TMenuItem: a menu item dies with the item above it, not its owner
 
-procedure TGuiHandle.Watch;
+procedure TGuiRef.Watch;
 begin
   Watched := Control is TComponent;   // asked ONCE, while the pointer is certainly live
   if Watched then
@@ -616,7 +675,7 @@ begin
     Holder.FreeNotification(Self);
 end;
 
-procedure TGuiHandle.Notification(AComponent: TComponent; Operation: TOperation);
+procedure TGuiRef.Notification(AComponent: TComponent; Operation: TOperation);
 begin
   inherited Notification(AComponent, Operation);
   // The control this handle names is going away. Drop the reference NOW, while the
@@ -638,7 +697,7 @@ var
   id: Int64;
   i: Integer;
   o: TObject;
-  h: TGuiHandle;
+  h: TGuiRef;
   dies: Boolean;
 begin
   if AObj = nil then Exit;
@@ -647,9 +706,9 @@ begin
   begin
     if id = 0 then Break;
     o := HandleObj(id);
-    if o is TGuiHandle then
+    if o is TGuiRef then
     begin
-      h := TGuiHandle(o);
+      h := TGuiRef(o);
       dies := (h.Control <> nil) and (h.Holder <> nil) and
               ((h.Control = AObj) or
                ((AObj is TTreeNode) and (h.Control is TTreeNode) and
@@ -665,7 +724,7 @@ begin
   end;
 end;
 
-destructor TGuiHandle.Destroy;
+destructor TGuiRef.Destroy;
 var
   c: TObject;
 begin
@@ -738,6 +797,151 @@ begin
   Result := False;
 end;
 
+// --- frees deferred until the dispatch unwinds (see the interface note) ------
+type
+  { A deferred free: the same watcher a handle is, so the object it holds can die
+    under it -- with its form, its tree, or a free at depth zero -- and leave a
+    nil behind instead of a dangling pointer. Never a TGuiHandle, so no reader
+    resolves it and control_free refuses it. Owns, always: it exists to free. }
+  TGuiPendingFree = class(TGuiRef)
+  end;
+
+var
+  { How many BASIC handlers are running right now. Every one is entered through
+    GuiCallBack, so this is exact. }
+  GDispatchDepth: Integer = 0;
+  { The registry ids of the deferred frees, in the order they were asked for. }
+  GPending: array of Int64;
+  { The sender of each handler now running, outermost first; nil where the
+    callback had none. Read only by identity, never dereferenced: a deferred
+    free keeps every one of them alive until the stack is empty. }
+  GSenders: array of TObject;
+
+function GuiInDispatch: Boolean;
+begin
+  Result := GDispatchDepth > 0;
+end;
+
+function GuiDispatchingFrom(AObj: TObject): Boolean;
+var
+  i: Integer;
+begin
+  if AObj = nil then Exit(False);
+  for i := 0 to High(GSenders) do
+    if GSenders[i] = AObj then Exit(True);
+  Result := False;
+end;
+
+{ Does AComp die when AObj is freed? A component is freed by its OWNER, so the
+  owner chain is the whole answer for a control -- LCL's TWinControl.Destroy only
+  UNPARENTS its children ("controls are freed by the owner", wincontrol.inc) --
+  except for a menu item, which TMenuItem.Destroy frees along with the items
+  under it while their owner is the menu. Every step is a single parent, so this
+  is linear in the depth of the tree, never in its size. }
+function DiesWith(AComp: TComponent; AObj: TObject): Boolean;
+var
+  m: TMenuItem;
+begin
+  while AComp <> nil do
+  begin
+    if AComp = AObj then Exit(True);
+    if AComp is TMenuItem then
+    begin
+      m := TMenuItem(AComp).Parent;
+      while m <> nil do
+      begin
+        if m = AObj then Exit(True);
+        m := m.Parent;
+      end;
+    end;
+    AComp := AComp.Owner;
+  end;
+  Result := False;
+end;
+
+{ Drop every reference -- a program's handle or another deferred free -- to AObj
+  or to anything that dies with it, as the free notifications would when it is
+  really freed. Run while everything is still alive, which is what lets each
+  Control and Holder be asked its owner: the registry's invariant (every non-nil
+  Control is live) holds until this returns. }
+procedure ForgetDying(AObj: TComponent);
+var
+  id: Int64;
+  i: Integer;
+  o: TObject;
+  h: TGuiRef;
+begin
+  id := FirstLiveHandle();
+  for i := 1 to LiveHandleCount() do
+  begin
+    if id = 0 then Break;
+    o := HandleObj(id);
+    if o is TGuiRef then
+    begin
+      h := TGuiRef(o);
+      if (h.Control <> nil) and
+         ((h.Watched and DiesWith(TComponent(h.Control), AObj)) or
+          ((h.Holder <> nil) and DiesWith(h.Holder, AObj))) then
+      begin
+        if h.Watched then TComponent(h.Control).RemoveFreeNotification(h);
+        if h.Holder <> nil then h.Holder.RemoveFreeNotification(h);
+        h.Holder := nil;
+        h.Control := nil;
+      end;
+    end;
+    id := NextLiveHandle(id);
+  end;
+end;
+
+procedure GuiFreeLater(AHandle: TGuiHandle);
+var
+  obj: TObject;
+  p: TGuiPendingFree;
+begin
+  obj := AHandle.Control;
+  if obj = nil then Exit;
+  // What dies with it is dead to the program NOW -- AHandle itself included,
+  // since it names the object.
+  if AHandle.Holder <> nil then
+    GuiForgetNodes(obj)
+  else if AHandle.Watched then
+    ForgetDying(TComponent(obj));
+  // ...and its memory is held by an entry nobody can name, until it is safe.
+  p := TGuiPendingFree.Create(nil);
+  p.Control := obj;
+  p.Owns := True;
+  p.Watch;
+  SetLength(GPending, Length(GPending) + 1);
+  GPending[High(GPending)] := RegisterHandle(p);
+end;
+
+procedure GuiFlushFrees;
+var
+  list: array of Int64;
+  i: Integer;
+begin
+  if (GDispatchDepth > 0) or (Length(GPending) = 0) then Exit;
+  // Taken off the list FIRST: freeing a form can run a destructor that reaches a
+  // GUI function, and that must find nothing left to flush rather than this list.
+  list := GPending;
+  GPending := nil;
+  for i := 0 to High(list) do
+    FreeHandle(list[i]);   // a no-op for an id ResetHandles already took
+end;
+
+{ An event of a control whose handle is dead does not reach BASIC: the program
+  freed it, so as far as the program knows it no longer exists. Every bridge
+  passes its sender's handle first; anything else passes through. }
+function SenderDead(const AArgs: array of TValue): Boolean;
+var
+  o: TObject;
+begin
+  Result := False;
+  if (Length(AArgs) = 0) or (AArgs[0].Kind <> vkHandle) then Exit;
+  o := HandleObj(AArgs[0].Hnd);
+  Result := not ((o is TGuiHandle) and (TGuiHandle(o).Control <> nil));
+end;
+
 function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
   const AArgs: array of TValue): TValue;
 var
@@ -745,7 +949,22 @@ var
 begin
   Result := ValInt(0);
   if (AVM = nil) or (AHandler = '') then Exit;
-  Result := AVM.CallUserFunc(AHandler, AArgs, err);
+  if SenderDead(AArgs) then Exit;
+  Inc(GDispatchDepth);
+  // The sender is live here (SenderDead said so) or there is none; either way
+  // the slot is popped in the finally, so the stack is exactly the senders of
+  // the handlers now running, outermost first.
+  SetLength(GSenders, GDispatchDepth);
+  if (Length(AArgs) > 0) and (AArgs[0].Kind = vkHandle) then
+    GSenders[GDispatchDepth - 1] := TGuiHandle(HandleObj(AArgs[0].Hnd)).Control
+  else
+    GSenders[GDispatchDepth - 1] := nil;
+  try
+    Result := AVM.CallUserFunc(AHandler, AArgs, err);
+  finally
+    Dec(GDispatchDepth);
+    SetLength(GSenders, GDispatchDepth);
+  end;
   if IsError(err) then
   begin
     GGuiError := 2;   // a handler that failed is recorded, not raised
@@ -1430,6 +1649,7 @@ function GuiRegister(AObj: TObject; AOwns: Boolean): Int64;
 var
   h: TGuiHandle;
 begin
+  GuiFlushFrees();               // a constructor at depth 0 is a safe point
   h := TGuiHandle.Create(nil);   // owned by the phosphor handle registry, not the LCL
   h.Control := AObj;
   h.Owns := AOwns;
@@ -1443,6 +1663,11 @@ var
   h: TGuiHandle;
 begin
   AObj := nil;
+  // Every GUI function resolves its handle, so this is where a free deferred by
+  // a handler is finished: at depth 0 no LCL frame of the program's is on the
+  // stack. A deferred object is named by no live handle, so freeing it here can
+  // never pull the object about to be resolved out from under this call.
+  GuiFlushFrees();
   o := HandleObj(AId);
   if not (o is TGuiHandle) then
   begin
@@ -1646,15 +1871,18 @@ begin
       slept: Idle still blocks exactly as before whenever the loop should keep
       running. }
     Application.ProcessMessages;
+    GuiFlushFrees();   // every message has been dispatched: nothing stands on them
     if GAppQuit or Application.Terminated then Break;
     Application.Idle(True);
   end;
+  GuiFlushFrees();
   Result := ValInt(0);
 end;
 function f_app_processmessages(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError;
   Application.ProcessMessages;
+  GuiFlushFrees();   // inside a handler this does nothing; see GuiFlushFrees
   Result := ValInt(0);
 end;
 function f_app_quit(const Args: array of TValue; out Err: TPhosphorError): TValue;

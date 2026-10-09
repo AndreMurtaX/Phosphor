@@ -202,6 +202,26 @@ tests therefore assert *wiring* (bind + read-back, and `button_click@` to fire
 `OnClick` synchronously), not spontaneous firing — which is exactly what
 `tests/gui/01_events` already does.
 
+### Freeing from inside an event
+
+A handler may free its own control, the form that owns it, or any other control,
+and `control_free` answers `1` at once: the handle is dead, every handle into what
+dies with it is dead, and none of it raises another event. What waits is the
+**memory**. The LCL is usually not finished when the handler returns —
+`TButtonControl.Click` runs the change event and then `inherited Click` on the same
+object, a check box goes on reading its own state, a list box calls `Changed` on
+itself, a radio group's change arrives from inside one of its own buttons — so the
+object is held until no handler is running and freed at the next GUI call made from
+top-level code, when the message loop has finished the message, or at the end of
+the run. Until 2026-10-09 it was freed at once, and `checkbox_checked@`,
+`radio_checked@`, `togglebox_checked@`, `edit_text@`, `spinedit_value@`,
+`radiogroup_itemindex@` and a list's click (among others) went on into freed memory
+— silently on the release heap, an access violation on one that poisons freed
+blocks. A bitmap is freed at once: nothing the framework dispatches stands on one.
+The single exception is the form being closed, from its own `form_onclose@` /
+`form_onclosequery@`: that free is refused with `gui_error() = 1`.
+`tests/gui/27_free_in_handler.bas` crosses every event kind with each victim.
+
 ### Error and handle model
 
 - **Shared `gui_error()` / `gui_clearerror()`** (increment 3's choice), not the

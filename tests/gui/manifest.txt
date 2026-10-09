@@ -28,3 +28,4 @@
 24_wave4
 25_wave4_canvas
 26_modal
+27_free_in_handler

@@ -560,6 +560,45 @@ begin
       Writeln(StdErr, '  FAIL ', Failures[i]);
 end;
 
+{ FREED MEMORY IS POISONED IN THIS RUNNER (2026-10-09, round 3).
+
+  A use-after-free of an LCL object is SILENT on the release heap: the block
+  keeps its bytes until something reuses it, so a control freed inside its own
+  change handler -- with TCustomCheckBox.SetState still on the stack, about to
+  call `inherited Click` on it -- read its old fields back and the run passed.
+  The defect was found only under heaptrc, which fills every freed block with
+  $F0. That fill is what is installed here, and nothing else of heaptrc: its
+  leak report writes to stdout, which is the golden. Every block is filled
+  with $F0 before the heap takes it back, so a method pointer read out of a
+  dead object is $F0F0F0F0F0F0F0F0 and calling it is an access violation the
+  run REPORTS, every time, on both widgetsets. Test only: no shipped binary
+  links this program. }
+var
+  GHeapBelow: TMemoryManager;
+
+function PoisonFreeMem(P: Pointer): PtrUInt;
+begin
+  if P <> nil then FillChar(P^, GHeapBelow.MemSize(P), $F0);
+  Result := GHeapBelow.FreeMem(P);
+end;
+
+function PoisonFreeMemSize(P: Pointer; Size: PtrUInt): PtrUInt;
+begin
+  if P <> nil then FillChar(P^, GHeapBelow.MemSize(P), $F0);
+  Result := GHeapBelow.FreeMemSize(P, Size);
+end;
+
+procedure PoisonFreedMemory;
+var
+  mm: TMemoryManager;
+begin
+  GetMemoryManager(GHeapBelow);
+  mm := GHeapBelow;
+  mm.FreeMem := @PoisonFreeMem;
+  mm.FreeMemSize := @PoisonFreeMemSize;
+  SetMemoryManager(mm);
+end;
+
 procedure ReleaseGuiFixtures;
 begin
   FreeAndNil(DogTimer);
@@ -580,6 +619,7 @@ begin
     Halt(2);
   end;
   if ParamCount = 3 then WatchdogMs := StrToInt(ParamStr(3));
+  PoisonFreedMemory();   // a use-after-free must fault here, not pass; see above
   path := ParamStr(1);
   if not FileExists(path) then
   begin

@@ -242,8 +242,26 @@ function f_rg_item(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: TStrings; n: Integer;
 begin E := NoError; Result := ValStr(''); s := ItemsOf(A[0].Hnd, TRadioGroup);
   if s <> nil then begin n := ArgI32(A[1]); if (n >= 1) and (n <= s.Count) then Result := ValStr(s[n-1]); end; end;
+{ NOT FROM INSIDE THE GROUP'S OWN EVENT (round 3, 2026-10-09). A radio group's
+  change is raised from inside one of its radio buttons -- TRadioButton.SetState
+  runs the button's OnChange, which is TCustomRadioGroup.Changed, which runs the
+  program's handler -- and clearing the items frees every button there and then
+  (TRadioGroupStringList.Changed calls UpdateItems even inside BeginUpdate, so
+  there is no batching to hide behind). SetState then went on into the freed
+  button: an access violation with a window shown, measured. control_free can be
+  deferred because the object stays whole until it goes; a clear cannot, because
+  the item list must read empty the moment it is cleared. So it is REFUSED, like
+  freeing a closing form: gui_error 1, the items unchanged. A check group raises
+  no event through its boxes and is cleared as before. }
 function f_rg_clear(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: TStrings; begin E := NoError; s := ItemsOf(A[0].Hnd, TRadioGroup); if s <> nil then s.Clear; Result := A[0]; end;
+var s: TStrings; c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TRadioGroup, c) then Exit;
+  if GuiDispatchingFrom(c) then begin GGuiError := 1; Exit; end;
+  s := TRadioGroup(c).Items;
+  s.Clear;
+end;
 // base-1 out, base-1 in; 0 means nothing is chosen, matching ItemIndex's own -1
 function f_rg_index_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);

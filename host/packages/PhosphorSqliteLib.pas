@@ -1627,6 +1627,35 @@ begin
   Reg.Add('sqlite_vacuum:@',        @f_vacuum);
 end;
 
+{ A LIBRARY THAT LOADED IS NOT A LIBRARY THAT WORKS. FPC's loader resolves each
+  entry point by name and leaves a nil where the DLL has none -- and this unit
+  called them unconditionally. The first Windows CI run (2026-10-09) found a
+  sqlite3.dll on the runner image's PATH with which sqlite_open@ was an ACCESS
+  VIOLATION, in three test files. Every entry point this unit calls without
+  asking first must be there, or the library counts as absent: GReady stays
+  False and sqlite_available() answers 0, which is a question a script can ask,
+  instead of a crash it cannot. sqlite3_set_authorizer and sqlite3_vfs_find are
+  NOT in the list: both are asked about where they are used. }
+function SqliteComplete: Boolean;
+begin
+  Result := Assigned(sqlite3_open) and Assigned(sqlite3_close) and
+    Assigned(sqlite3_prepare_v2) and Assigned(sqlite3_step) and
+    Assigned(sqlite3_finalize) and Assigned(sqlite3_reset) and
+    Assigned(sqlite3_exec) and Assigned(sqlite3_free) and
+    Assigned(sqlite3_errmsg) and Assigned(sqlite3_errcode) and
+    Assigned(sqlite3_errstr) and Assigned(sqlite3_libversion) and
+    Assigned(sqlite3_changes) and Assigned(sqlite3_total_changes) and
+    Assigned(sqlite3_last_insert_rowid) and Assigned(sqlite3_get_autocommit) and
+    Assigned(sqlite3_bind_double) and Assigned(sqlite3_bind_int64) and
+    Assigned(sqlite3_bind_null) and Assigned(sqlite3_bind_text) and
+    Assigned(sqlite3_bind_parameter_index) and Assigned(sqlite3_clear_bindings) and
+    Assigned(sqlite3_column_count) and Assigned(sqlite3_column_type) and
+    Assigned(sqlite3_column_name) and Assigned(sqlite3_column_text) and
+    Assigned(sqlite3_column_bytes) and Assigned(sqlite3_column_double) and
+    Assigned(sqlite3_column_int64) and Assigned(sqlite3_progress_handler) and
+    Assigned(sqlite3_enable_load_extension);
+end;
+
 initialization
   // Load the SQLite runtime library once. On a box without it TryInitializeSqlite
   // returns -1 without raising: GReady stays False,
@@ -1648,5 +1677,10 @@ initialization
     leaves the loader's count at zero, so a second name can be tried. }
   if not GReady then GReady := TryInitializeSqlite('libsqlite3.so.0') > 0;
   {$ENDIF}
+  if GReady and not SqliteComplete() then
+  begin
+    ReleaseSqlite;
+    GReady := False;
+  end;
 
 end.

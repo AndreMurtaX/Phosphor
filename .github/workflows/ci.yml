@@ -156,12 +156,37 @@ jobs:
           $sha3 = python -c "import hashlib,sys; print(hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest())" $zip
           if ($sha3 -ne 'f5fb500c73a3afd89976386bb8e4fdc8b5b65c052e187fb1ada1f5de034cd45b') { throw "sqlite zip SHA3-256 $sha3 is not the published one" }
           Expand-Archive $zip -DestinationPath $dlls
-          $git = 'C:\Program Files\Git\mingw64\bin'
-          foreach ($n in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
-            $src = Join-Path $git $n
-            if (-not (Test-Path $src)) { throw "$n is not in $git on this image" }
-            Copy-Item $src $dlls
+          # WHAT THE IMAGE ALREADY OFFERS, written into the log. The first run
+          # found a sqlite3.dll on the image's PATH that made sqlite_open@ an
+          # access violation, and no OpenSSL 3 where this step first looked.
+          Write-Host '--- on the image PATH before this step:'
+          foreach ($n in 'sqlite3.dll', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
+            $hits = @(where.exe $n 2>$null)
+            Write-Host ("  {0}: {1}" -f $n, ($(if ($hits) { $hits -join ' | ' } else { 'none' })))
           }
+          $probe = 'import ctypes,sys' + [char]10 +
+                   'need=sys.argv[2].split(",")' + [char]10 +
+                   'd=ctypes.WinDLL(sys.argv[1])' + [char]10 +
+                   'print("  missing exports:", [n for n in need if not hasattr(d,n)] or "none")'
+          $first = @(where.exe sqlite3.dll 2>$null) | Select-Object -First 1
+          if ($first) {
+            python -c $probe $first 'sqlite3_open,sqlite3_prepare_v2,sqlite3_step,sqlite3_set_authorizer,sqlite3_progress_handler,sqlite3_errstr,sqlite3_vfs_find,sqlite3_enable_load_extension,sqlite3_bind_parameter_index,sqlite3_clear_bindings,sqlite3_total_changes'
+          }
+          # OpenSSL 3, from the first of these NAMED places that has both halves.
+          $candidates = 'C:\Program Files\OpenSSL\bin', 'C:\Program Files\OpenSSL-Win64\bin',
+                        'C:\Program Files\Git\mingw64\bin', 'C:\Program Files\Git\usr\bin'
+          $found = $null
+          foreach ($c in $candidates) {
+            if ((Test-Path (Join-Path $c 'libssl-3-x64.dll')) -and (Test-Path (Join-Path $c 'libcrypto-3-x64.dll'))) { $found = $c; break }
+          }
+          if (-not $found) {
+            Write-Host '--- libssl-3-x64.dll anywhere under Program Files:'
+            Get-ChildItem 'C:\Program Files', 'C:\Program Files (x86)' -Recurse -Filter 'libssl-3-x64.dll' -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host ('  ' + $_.FullName) }
+            throw ('OpenSSL 3 is in none of: ' + ($candidates -join '; '))
+          }
+          Write-Host "OpenSSL 3 from: $found"
+          foreach ($n in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') { Copy-Item (Join-Path $found $n) $dlls }
           Get-ChildItem $dlls | Select-Object Name, Length | Format-Table | Out-String | Write-Host
           # The libraries are found by PATH, as on the desktop -- but this is the
           # only directory on it that holds them, and it is named here.

@@ -199,7 +199,7 @@ begin
   DeleteFile(IncludeTrailingPathDelimiter(GetTempDir(False)) + 'linkesc.txt');
   DeleteFile(OutDir + PathDelim + 'chan.txt');
   DeleteFile(OutDir + PathDelim + 'new.txt');
-  DeleteFile(OutDir + PathDelim + 'nul.txt');
+  DeleteFile(OutDir + PathDelim + 'nulbyte.txt');
   DeleteFile(OutDir + PathDelim + 'unbounded.txt');
   DeleteFile(OutDir + PathDelim + 'through.txt');
   DeleteFile(RootDir + PathDelim + 'ok.txt');
@@ -476,7 +476,7 @@ begin
 
     THE TAIL HAS TO REACH ALL THE WAY BACK IN, and getting that wrong is how a
     test passes on both sides of the defect it was written for. The first draft
-    of these three climbed ONE level -- '<outside>/nul.txt/../<root>/decoy.txt' --
+    of these three climbed ONE level -- '<outside>/nulbyte.txt/../<root>/decoy.txt' --
     which lands in '<outside>/<root>', not in the root, so the gate refused them
     for the ordinary reason and all three passed against the UNFIXED unit. Two
     levels is what reaches the root; measured by removing the fix and watching
@@ -487,9 +487,14 @@ begin
     own victim tree. }
   Check('a write whose path hides a NUL is refused',
         'z$ = chr$(0)' + LF +
-        'print file_writealltext("' + Slash(OutDir) + '/nul.txt" + z$ + "/../../' +
+        'print file_writealltext("' + Slash(OutDir) + '/nulbyte.txt" + z$ + "/../../' +
         'phosphor_probe_root/decoy.txt", "PWNED")' + LF, '0');
-  Report(not FileExists(OutDir + PathDelim + 'nul.txt'),
+  { NOT 'nul.txt', which this file used until 2026-10-09: NUL is a reserved
+    DEVICE name, and Windows before 11 -- Server 2022, the CI runner -- still
+    maps '<dir>/nul.txt' to that device, so FileExists answered yes for a
+    file nobody wrote and the first Windows CI run reported a sandbox hole that
+    was the test's own spelling. The refusal above had passed there. }
+  Report(not FileExists(OutDir + PathDelim + 'nulbyte.txt'),
          'and no file was written at the part before the NUL');
 
   Check('a read whose path hides a NUL answers empty',

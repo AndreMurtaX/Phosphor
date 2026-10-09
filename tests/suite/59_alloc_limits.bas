@@ -70,17 +70,25 @@ rem The ceiling is the representable range, not a policy about how much memory
 rem is reasonable. A count whose byte size is a perfectly good Int64 but larger
 rem than the machine has must keep failing the way it always has -- through
 rem SetLength raising, caught by the VM and reported as a value.
+rem
+rem "Larger than the machine has" is not a size a test can name: on Linux
+rem with vm.overcommit_memory = 1 -- Docker Desktop sets it for every WSL2
+rem distro, and containers often run with it -- a 48 TB reservation for
+rem 10^12 elements was GRANTED, and the run was killed filling it
+rem (2026-10-09). Larger than the ADDRESS SPACE is a size it can name:
+rem x86-64 gives a process 2^47 bytes (128 TiB), and 10^13 x 48 bytes is
+rem 480 TB, which no overcommit policy can reserve -- still a good Int64.
 caught4% = 0
 on error goto big4
-a4@ = dim@(1000000000000)
+a4@ = dim@(10000000000000)
 goto after4
 big4:
 caught4% = 1
 resume next
 after4:
 on error goto 0
-assert_eq(caught4%, 1, "10^12 elements is still a catchable error")
-assert_true(instr(errmsg$(), "array is too large") = 0, "but NOT the new refusal: 10^12 x 48 is a good Int64, so it fails on the allocation, exactly as it always did")
+assert_eq(caught4%, 1, "10^13 elements is still a catchable error")
+assert_true(instr(errmsg$(), "array is too large") = 0, "but NOT the new refusal: 10^13 x 48 is a good Int64, so it fails on the allocation, exactly as it always did")
 
 test_case("alloc/ordinary arrays are untouched by the size guard")
 b@ = dim@(3, 4)

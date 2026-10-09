@@ -1565,6 +1565,16 @@ the sweep above. Verify before fixing, as with everything on this page.
     nul.txt, and Windows before 11 maps that name to the NUL DEVICE. And OpenSSL
     3 was not where the job first looked. **A machine nobody configured asks
     questions a configured one cannot.**
+  - **A test whose premise was the machine's size.** `59_alloc_limits` asked
+    for `dim@(10^12)` -- 48 TB -- expecting the allocation to fail. On WSL it
+    was killed by the OOM killer after a minute, three times in a row, while CI
+    passed. Docker Desktop had been started that afternoon, and the WSL2 distros
+    share ONE kernel: it set `vm.overcommit_memory = 1` for all of them, and any
+    reservation was granted. **A WSL failure that appears in the middle of a
+    day is the environment before it is the code** -- check what else shares the
+    kernel. The test now asks for 10^13 elements (480 TB), past the 2^47-byte
+    address space x86-64 gives a process, which no overcommit policy can
+    reserve: 24 ms and a catchable "Out of memory" with overcommit on.
   - **Process.** The owner's desktop was unusable while five fixers and suite
     runs shared it. Build and test processes now run at BelowNormal while agents
     work, heavy verification moves to CI (Linux and Windows jobs), and agents

@@ -49,7 +49,9 @@
   '+' as %2B, so the two never collide on the way back; the decoder still reads '+' as a
   space so form-spelled data keeps working. http_error() is the ioerror/valcode pattern:
   a config op on a live handle clears it, a fabricated handle sets it non-zero, and no
-  op raises.
+  op raises. A header, cookie, credential or url that may not go on the wire -- a
+  control character, or a header name that is not a token -- is refused by its
+  setter (0, nothing stored) and by every verb (nothing sent), http_error() 6.
 
   Contract: http_get$/http_post$ return the response body for ANY status (the body of
   an error response too -- pair with http_status when the code matters). http_status
@@ -174,6 +176,9 @@ function HttpIsIPv4Literal(const AHost: String): Boolean;
 function HttpIsIPv6Literal(const AHost: String): Boolean;
 { Whether a redirect from A to B may carry what identifies the caller. }
 function HttpSameOrigin(const A, B: String): Boolean;
+{ The url a redirect from ABase to the Location ARef is sent to; '' when there is
+  none. Exported for the RFC 3986 section 5.4 sweep in the package tests. }
+function HttpResolveReference(const ABase, ARef: String): String;
 
 implementation
 
@@ -1282,12 +1287,315 @@ const
   HTTP_EHOST   = 3;   // https: the server's certificate is not for this host
   HTTP_ETIME   = 4;   // the run's time ran out mid-handshake or mid-response
   HTTP_EBROKEN = 5;   // reached, and the answer broke off before it was complete
+  HTTP_EFIELD  = 6;   // a header, cookie or url carries a control character
 
 var
   { What http_error() answers: the last configuration op's result, and since m5
     the last REQUEST's too -- 0 when it was not refused, HTTP_EHOST when its peer's
     certificate named another host. Declared above FetchCore because it writes it. }
   gHttpErr: Integer = 0;
+
+{ ---- what may reach the request head (2026-10-09) ----------------------------
+  A CR LF in a header value, a cookie, a token or the url was written raw into
+  the request head, and the server read one more header line: FPC's request
+  writer joins the strings it is given and checks nothing. So nothing reaches
+  it that the grammar of the place it lands does not allow:
+    * a header VALUE (RFC 9110 5.5): visible characters, SP and HTAB -- no other
+      control character, 0x00-0x1F or 0x7F;
+    * a header NAME (RFC 9110 5.1): a token, one or more tchar;
+    * a cookie name or value (RFC 6265 4.1.1): no control character at all,
+      HTAB included -- neither a token nor a cookie-octet admits one;
+    * a url (RFC 3986 2): no control character at all.
+  A setter given one refuses and stores nothing; a verb given such a url, or
+  led to one by a redirect, sends nothing. Both say HTTP_EFIELD. What is
+  ENCODED on its way out -- a param (percent), basic and proxy credentials
+  (base64) -- carries no control character to the wire, and is accepted. }
+function HasCtl(const S: String; AAllowTab: Boolean): Boolean;
+var i: Integer;
+begin
+  for i := 1 to Length(S) do
+    if ((Ord(S[i]) < 32) and not (AAllowTab and (S[i] = #9))) or (Ord(S[i]) = 127) then
+      Exit(True);
+  Result := False;
+end;
+
+function IsToken(const S: String): Boolean;
+var i: Integer;
+begin
+  Result := S <> '';
+  for i := 1 to Length(S) do
+    if not (S[i] in ['A'..'Z', 'a'..'z', '0'..'9', '!', '#', '$', '%', '&', '''',
+                     '*', '+', '-', '.', '^', '_', '`', '|', '~']) then
+      Exit(False);
+end;
+
+{ ---- a url's parts, as RFC 3986 writes them --------------------------------
+  Appendix B's regular expression, on the RAW text: nothing is decoded, so a
+  url put back together from its parts (section 5.3) is byte for byte the url
+  that was split, and a component copied from a reference is copied as it was
+  written. FPC's ParseURI decodes by default and its ResolveRelativeURI
+  re-encodes what it decoded, so a Location of g?a=1%262 was requested as
+  g?a=1&2 -- another query (2026-10-09). }
+type
+  TUriParts = record
+    Scheme, Authority, Path, Query, Fragment: String;
+    HasScheme, HasAuthority, HasQuery, HasFragment: Boolean;
+  end;
+
+procedure SplitUri(const S: String; out U: TUriParts);
+var i, j, n: Integer;
+begin
+  U := Default(TUriParts);
+  n := Length(S);
+  i := 1;
+  { scheme: one or more characters other than : / ? #, then ':' }
+  j := 1;
+  while (j <= n) and not (S[j] in [':', '/', '?', '#']) do Inc(j);
+  if (j > 1) and (j <= n) and (S[j] = ':') then
+  begin
+    U.HasScheme := True;
+    U.Scheme := Copy(S, 1, j - 1);
+    i := j + 1;
+  end;
+  if (i + 1 <= n) and (S[i] = '/') and (S[i + 1] = '/') then
+  begin
+    U.HasAuthority := True;
+    j := i + 2;
+    while (j <= n) and not (S[j] in ['/', '?', '#']) do Inc(j);
+    U.Authority := Copy(S, i + 2, j - i - 2);
+    i := j;
+  end;
+  j := i;
+  while (j <= n) and not (S[j] in ['?', '#']) do Inc(j);
+  U.Path := Copy(S, i, j - i);
+  i := j;
+  if (i <= n) and (S[i] = '?') then
+  begin
+    U.HasQuery := True;
+    j := i + 1;
+    while (j <= n) and (S[j] <> '#') do Inc(j);
+    U.Query := Copy(S, i + 1, j - i - 1);
+    i := j;
+  end;
+  if (i <= n) and (S[i] = '#') then
+  begin
+    U.HasFragment := True;
+    U.Fragment := Copy(S, i + 1, MaxInt);
+  end;
+end;
+
+function JoinUri(const U: TUriParts): String;
+begin
+  Result := '';
+  if U.HasScheme then Result := U.Scheme + ':';
+  if U.HasAuthority then Result := Result + '//' + U.Authority;
+  Result := Result + U.Path;
+  if U.HasQuery then Result := Result + '?' + U.Query;
+  if U.HasFragment then Result := Result + '#' + U.Fragment;
+end;
+
+{ RFC 3986 5.2.4, step by step. Only a LITERAL "." or ".." segment is a dot
+  segment: %2E%2E is two encoded dots and stays a name (RFC 3986 2.3 asks a
+  normaliser to decode them; a resolver does not).
+  LINEAR, on a path the script may have made as long as it liked (a base url):
+  the input buffer is APath read from index i onward, and where the RFC
+  "replaces a prefix with /" the index steps onto a '/' already there -- except
+  at the very end, where that '/' is written to the output directly (rule E
+  would move it there next). The output is written by index into a buffer of
+  the input's length, which it never exceeds, and a dropped segment is scanned
+  back over once: every byte is written once and passed back over at most once. }
+function RemoveDotSegs(const APath: String): String;
+var
+  r: RawByteString;
+  i, o: Integer;
+
+  { The input from i on begins with S, and S is a whole segment there: the input
+    ends after it or a '/' follows. }
+  function AtSeg(const S: String): Boolean;
+  var j: Integer;
+  begin
+    Result := False;
+    if i + Length(S) - 1 > Length(APath) then Exit;
+    for j := 1 to Length(S) do
+      if APath[i + j - 1] <> S[j] then Exit;
+    Result := (i + Length(S) > Length(APath)) or (APath[i + Length(S)] = '/');
+  end;
+
+  { "remove the last segment and its preceding '/' (if any) from the output". }
+  procedure DropLastSegment;
+  begin
+    while (o > 0) and (o <= Length(r)) and (r[o] <> '/') do Dec(o);
+    if o > 0 then Dec(o);
+  end;
+
+  procedure Put(C: Char);
+  begin
+    Inc(o);
+    r[o] := C;
+  end;
+
+begin
+  SetLength(r, Length(APath));
+  o := 0;
+  i := 1;
+  while i <= Length(APath) do
+  begin
+    if AtSeg('..') and (i < Length(APath) - 1) then Inc(i, 3)               // A: "../"
+    else if AtSeg('.') and (i < Length(APath)) then Inc(i, 2)              // A: "./"
+    else if (APath[i] = '/') and (i < Length(APath)) and
+            (APath[i + 1] = '.') and ((i + 2 > Length(APath)) or (APath[i + 2] = '/')) then
+    begin                                                                  // B
+      if i + 2 > Length(APath) then
+      begin
+        Put('/');                    // "/." at the end: the input becomes "/"
+        i := Length(APath) + 1;
+      end
+      else Inc(i, 2);                // "/./": the input now starts at that '/'
+    end
+    else if (APath[i] = '/') and (i + 2 <= Length(APath)) and (APath[i + 1] = '.') and
+            (APath[i + 2] = '.') and ((i + 3 > Length(APath)) or (APath[i + 3] = '/')) then
+    begin                                                                  // C
+      DropLastSegment();
+      if i + 3 > Length(APath) then
+      begin
+        Put('/');                    // "/.." at the end
+        i := Length(APath) + 1;
+      end
+      else Inc(i, 3);                // "/../"
+    end
+    else if (i = Length(APath)) and (APath[i] = '.') then Inc(i)           // D: "."
+    else if (i = Length(APath) - 1) and (APath[i] = '.') and (APath[i + 1] = '.') then
+      Inc(i, 2)                                                            // D: ".."
+    else
+    begin                                                                  // E
+      Put(APath[i]);
+      Inc(i);
+      while (i <= Length(APath)) and (APath[i] <> '/') do
+      begin
+        Put(APath[i]);
+        Inc(i);
+      end;
+    end;
+  end;
+  Result := Copy(r, 1, o);         // what was written; o never exceeds the input
+end;
+
+{ RFC 3986 5.2.2 (strict) with 5.2.3's merge: the reference's components are
+  COPIED, never decoded. '' when the base has no scheme, which no request url
+  lacks. }
+function HttpResolveReference(const ABase, ARef: String): String;
+var b, r, t: TUriParts;
+    k: Integer;
+begin
+  SplitUri(ABase, b);
+  SplitUri(ARef, r);
+  if not (b.HasScheme or r.HasScheme) then Exit('');
+  t := Default(TUriParts);
+  if r.HasScheme then
+  begin
+    t := r;
+    t.Path := RemoveDotSegs(r.Path);
+  end
+  else
+  begin
+    if r.HasAuthority then
+    begin
+      t.HasAuthority := True;
+      t.Authority := r.Authority;
+      t.Path := RemoveDotSegs(r.Path);
+      t.HasQuery := r.HasQuery;
+      t.Query := r.Query;
+    end
+    else
+    begin
+      if r.Path = '' then
+      begin
+        t.Path := b.Path;
+        if r.HasQuery then
+        begin
+          t.HasQuery := True;
+          t.Query := r.Query;
+        end
+        else
+        begin
+          t.HasQuery := b.HasQuery;
+          t.Query := b.Query;
+        end;
+      end
+      else
+      begin
+        if r.Path[1] = '/' then
+          t.Path := RemoveDotSegs(r.Path)
+        else
+        begin
+          { 5.2.3: the base's path up to its last '/', or '/' for an empty path
+            under an authority. }
+          if b.HasAuthority and (b.Path = '') then
+            t.Path := RemoveDotSegs('/' + r.Path)
+          else
+          begin
+            k := LastDelimiter('/', b.Path);
+            t.Path := RemoveDotSegs(Copy(b.Path, 1, k) + r.Path);
+          end;
+        end;
+        t.HasQuery := r.HasQuery;
+        t.Query := r.Query;
+      end;
+      t.HasAuthority := b.HasAuthority;
+      t.Authority := b.Authority;
+    end;
+    t.HasScheme := b.HasScheme;
+    t.Scheme := b.Scheme;
+    t.HasFragment := r.HasFragment;
+    t.Fragment := r.Fragment;
+  end;
+  Result := JoinUri(t);
+end;
+
+{ IS THE PORT A PORT? FPC keeps a url's port in a Word, so :65616 was dialled as
+  :80 and :(A + 65536) reached a server on A (2026-10-09); :0 meant "the
+  default". A port written in a url must be a decimal of 1..65535 (RFC 3986
+  3.2.3 reads digits; a TCP port is 16 bits and 0 is none a server listens on).
+  An EMPTY port -- h: -- is RFC 3986's "no port", the scheme's default. Asked of
+  the raw authority, after the userinfo, outside an IPv6 literal's brackets. }
+function UrlPortUsable(const AUrl: String): Boolean;
+var
+  u: TUriParts;
+  a, digits: String;
+  k, j: Integer;
+  v: LongInt;
+begin
+  Result := True;
+  SplitUri(AUrl, u);
+  if not u.HasAuthority then Exit;
+  a := u.Authority;
+  k := LastDelimiter('@', a);
+  if k > 0 then a := Copy(a, k + 1, MaxInt);
+  if (a <> '') and (a[1] = '[') then
+  begin
+    k := 1;
+    while (k <= Length(a)) and (a[k] <> ']') do Inc(k);
+    if k > Length(a) then Exit;         // not an address; the host check refuses it
+    a := Copy(a, k + 1, MaxInt);
+    if (a = '') or (a[1] <> ':') then Exit;
+    digits := Copy(a, 2, MaxInt);
+  end
+  else
+  begin
+    k := LastDelimiter(':', a);
+    if k = 0 then Exit;
+    digits := Copy(a, k + 1, MaxInt);
+  end;
+  if digits = '' then Exit;
+  v := 0;
+  for j := 1 to Length(digits) do
+  begin
+    if not (digits[j] in ['0'..'9']) then Exit(False);
+    v := v * 10 + (Ord(digits[j]) - Ord('0'));
+    if v > 65535 then Exit(False);
+  end;
+  Result := v >= 1;
+end;
 
 { Applies a client handle's configuration to one request. With ACreds False it
   leaves out everything that identifies the caller -- the Authorization header,
@@ -1298,6 +1606,16 @@ function ClientProxyActive(ACfg: TObject): Boolean; forward;
 function ClientProxyHost(ACfg: TObject): String; forward;
 function ClientFollow(ACfg: TObject; out AMax: Integer): Boolean; forward;
 function ProxyRefusedFor(ACfg: TObject; const AUrl: String): Boolean; forward;
+
+{ COOKIE NAMES MATCH EXACTLY (RFC 6265 5.3, 2026-10-09). FPC's cookie list is a
+  TStringList, case-insensitive by default, so across a redirect a jar's SID
+  replaced its sid and a server's THEME the script's own theme. Called only by
+  whoever is about to ADD a cookie: asking for c.Cookies creates the list, and a
+  list that exists is written as a Cookie line even when it is empty. }
+procedure ExactCookies(c: TPinnedClient);
+begin
+  if c.Cookies is TStringList then TStringList(c.Cookies).CaseSensitive := True;
+end;
 
 { The cookie each Set-Cookie header of a response sets, as `name=value`: the text
   before its first ';'. FPC's own list splits the header at EVERY ';', so its
@@ -1312,6 +1630,9 @@ begin
     h := c.ResponseHeaders[i];
     if CompareText(Copy(h, 1, 11), 'set-cookie:') <> 0 then Continue;
     nv := Copy(h, 12, MaxInt);
+    { A CONTROL CHARACTER, HTAB aside, and the whole Set-Cookie is ignored (RFC
+      6265bis 5.6, step 1): it would be sent on in the next hop's head. }
+    if HasCtl(nv, True) then Continue;
     p := Pos(';', nv);
     if p > 0 then nv := Copy(nv, 1, p - 1);
     nv := Trim(nv);
@@ -1398,12 +1719,15 @@ var
       c.ConnectTimeout := AConnectMs;         // ms; don't hang forever on a dead IP
       c.VerifyPeer := gVerifyPeer;
       if ACfg <> nil then ApplyClient(c, ACfg, ACreds);
-      if AJar <> nil then
+      if (AJar <> nil) and (AJar.Count > 0) then
+      begin
+        ExactCookies(c);
         for k := 0 to AJar.Count - 1 do
         begin
           p := c.Cookies.IndexOfName(AJar.Names[k]);
           if p >= 0 then c.Cookies[p] := AJar[k] else c.Cookies.Add(AJar[k]);
         end;
+      end;
       c.AllowRedirect := False;               // FetchCore follows, hop by hop
       { A NETWORK WAIT IS A LIBRARY CALL TOO, and it is the one shape the budget
         can neither size, charge nor judge: how long a server takes is the
@@ -1681,6 +2005,16 @@ begin
     gBudgetOut := True;
     Exit;
   end;
+  { A URL THAT CANNOT GO ON THE WIRE DIALS NOTHING (2026-10-09): one carrying a
+    control character (HTTP_EFIELD -- see HasCtl), or a port that is not a port
+    (see UrlPortUsable), which is refused as an unusable host is, status 0 and
+    no code. Asked again of every redirect hop below. }
+  if HasCtl(AUrl, False) then
+  begin
+    gHttpErr := HTTP_EFIELD;
+    Exit;
+  end;
+  if not UrlPortUsable(AUrl) then Exit;
   started := GetTickCount64();
   follow := ClientFollow(ACfg, maxHops);
   url := AUrl;
@@ -1702,6 +2036,7 @@ begin
   if remaining > 0 then gReqDeadline := GetTickCount64() + QWord(remaining)
   else gReqDeadline := 0;
   jar := TStringList.Create();
+  jar.CaseSensitive := True;     // cookie names match exactly -- see Attempt
   try
     Result := FetchHop(method, url, body, AForceAddrs, AStatus, AConnectMs, ACfg,
                        True, jar, loc);
@@ -1709,11 +2044,11 @@ begin
     begin
       Result := '';
       if loc = '' then Exit;
-      if not IsAbsoluteURI(loc) then
-      begin
-        if not ResolveRelativeURI(url, loc, next) then Exit;
-        loc := next;
-      end;
+      { RFC 3986 5.2, on the raw text: the Location's components are sent as
+        the server wrote them (see HttpResolveReference). }
+      next := HttpResolveReference(url, loc);
+      if next = '' then Exit;
+      loc := next;
       scheme := LowerCase(ParseURI(loc).Protocol);
       if (scheme <> 'http') and (scheme <> 'https') then Exit;
       Inc(hops);
@@ -1722,6 +2057,19 @@ begin
       begin
         AStatus := 0;
         gHttpErr := HTTP_EPROXY;      // nothing was sent to it
+        Exit;
+      end;
+      { The hop is a request of its own, under the first url's rules: a control
+        character in it, or a port that is not one, sends nothing. }
+      if HasCtl(loc, False) then
+      begin
+        AStatus := 0;
+        gHttpErr := HTTP_EFIELD;
+        Exit;
+      end;
+      if not UrlPortUsable(loc) then
+      begin
+        AStatus := 0;
         Exit;
       end;
       if AStatus = 303 then
@@ -2067,6 +2415,23 @@ begin
   if Result then AF := TPhosphorHttpForm(o) else AF := nil;
 end;
 
+{ A SETTER'S ANSWER for what it was given (2026-10-09): 1, and http_error() 0,
+  when it may go on the wire; 0 and HTTP_EFIELD when it may not, and then the
+  caller stores NOTHING -- an earlier value stays. See HasCtl for the rules. }
+function SetField(AOk: Boolean): TValue;
+begin
+  if AOk then
+  begin
+    gHttpErr := HTTP_OK;
+    Result := ValInt(1);
+  end
+  else
+  begin
+    gHttpErr := HTTP_EFIELD;
+    Result := ValInt(0);
+  end;
+end;
+
 { ---- pure encoders --------------------------------------------------------- }
 { RFC-3986 percent-encoding: unreserved (A-Z a-z 0-9 - _ . ~) pass through, everything
   else becomes %XX in UPPER hex. A space is %20 (not '+'), a literal '+' is %2B. }
@@ -2301,7 +2666,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.BaseUrl := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not HasCtl(Args[1].Str, False)); if gHttpErr = HTTP_OK then c.BaseUrl := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2348,7 +2713,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.Headers.SetVal(Args[1].Str, Args[2].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(IsToken(Args[1].Str) and not HasCtl(Args[2].Str, True)); if gHttpErr = HTTP_OK then c.Headers.SetVal(Args[1].Str, Args[2].Str); end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2440,7 +2805,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.Cookies.SetVal(Args[1].Str, Args[2].Str); Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not (HasCtl(Args[1].Str, False) or HasCtl(Args[2].Str, False))); if gHttpErr = HTTP_OK then c.Cookies.SetVal(Args[1].Str, Args[2].Str); end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2489,7 +2854,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.AuthHeader := 'Bearer ' + Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.AuthHeader := 'Bearer ' + Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2498,7 +2863,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.AuthHeader := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.AuthHeader := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2554,7 +2919,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.UserAgent := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.UserAgent := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2572,7 +2937,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.ContentType := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.ContentType := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2590,7 +2955,7 @@ var c: TPhosphorHttpClient;
 begin
   Err := NoError();
   if GetClient(Args[0].Hnd, c) then
-  begin c.Accept := Args[1].Str; Result := ValInt(1); gHttpErr := HTTP_OK; end
+  begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.Accept := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
 end;
 
@@ -2832,6 +3197,7 @@ begin
     HTTP_EHOST:   Result := ValStr('the server''s certificate is not for this host');
     HTTP_ETIME:   Result := ValStr('the run''s time ran out before the answer was complete');
     HTTP_EBROKEN: Result := ValStr('the answer broke off before it was complete');
+    HTTP_EFIELD:  Result := ValStr('a header, cookie or url carries a control character');
   else
     Result := ValStr('unknown error');
   end;
@@ -2905,9 +3271,12 @@ begin
   for i := 0 to cfg.Headers.Count - 1 do
     if ACreds or not IsCredentialHeader(cfg.Headers.NameAt(i)) then
       c.AddHeader(cfg.Headers.NameAt(i), cfg.Headers.ValueAt(i));
-  if ACreds then
+  if ACreds and (cfg.Cookies.Count > 0) then
+  begin
+    ExactCookies(c);
     for i := 0 to cfg.Cookies.Count - 1 do
       c.Cookies.Add(cfg.Cookies.NameAt(i) + '=' + cfg.Cookies.ValueAt(i));
+  end;
   if cfg.ProxyHost <> '' then
   begin
     c.Proxy.Host := cfg.ProxyHost;
@@ -2941,9 +3310,13 @@ begin
   Result := Copy(AUrl, i, 3) = '://';
 end;
 
+{ THE PARAMS GO BEFORE THE FRAGMENT (RFC 3986 3.5: the fragment follows the
+  query, and is never sent). Appended after it, as they were until 2026-10-09,
+  they were part of the fragment, and /p#top asked for /p with no params at all.
+  The fragment starts at the FIRST '#', so a '?' after it is not a query. }
 function ClientUrl(cfg: TPhosphorHttpClient; const APath: String; out AUrl: String): Boolean;
 var
-  base, p, q: String;
+  base, p, q, frag: String;
   i, k: Integer;
 begin
   Result := False;
@@ -2968,8 +3341,18 @@ begin
     q := q + DoUrlEncode(cfg.Params.NameAt(i)) + '=' + DoUrlEncode(cfg.Params.ValueAt(i));
   end;
   if q <> '' then
+  begin
+    frag := '';
+    k := Pos('#', AUrl);
+    if k > 0 then
+    begin
+      frag := Copy(AUrl, k, MaxInt);
+      SetLength(AUrl, k - 1);
+    end;
     if Pos('?', AUrl) > 0 then AUrl := AUrl + '&' + q
     else AUrl := AUrl + '?' + q;
+    AUrl := AUrl + frag;
+  end;
   Result := True;
 end;
 

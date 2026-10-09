@@ -41,6 +41,23 @@ only when the process-global `http_verify_peer` **and** the client's
 `http_validatessl` both ask for it, so either one can opt out and neither can
 switch the other back on.
 
+**Nothing reaches the request head that its grammar does not allow.** A header
+value may carry visible characters, spaces and HTAB, and no other control
+character (0x00–0x1F, 0x7F; RFC 9110 §5.5); a header name is a token (RFC 9110
+§5.1: letters, digits and ``!#$%&'*+-.^_`|~``); a cookie name or value carries no
+control character at all, HTAB included (RFC 6265 §4.1.1); a url carries none
+either. A setter given something else — `http_header`, `http_cookie`,
+`http_useragent`, `http_accept`, `http_contenttype`, `http_bearerauth`,
+`http_customauth`, `http_baseurl` — **refuses**: it answers `0`, stores nothing (an
+earlier value stays), and `http_error()` is `6`. A verb given such a url, by
+argument, through a client's base url or path, or by a redirect's `Location`,
+**sends nothing**: status `0`, no body, `http_error()` `6`. What is encoded on its
+way out cannot carry a control character to the wire and is accepted as it is: a
+param (percent-encoded, CR as `%0D`), basic and proxy credentials (base64). Until
+2026-10-09 every one of those strings was written into the head as given, so a CR
+LF in a header value, a cookie, a token or the url put one more header line in
+front of the server.
+
 **A proxy the client cannot honour is a refusal, never a detour.** The proxy is
 plain HTTP: an `https://` request through one would need `CONNECT`, which FPC's
 client does not have, so it is refused and nothing is sent; so is a proxy whose
@@ -53,15 +70,16 @@ way the verb answers its empty answer and `http_error()` is `2`.
 form `f@` behaves the same way when the handle is fabricated, already freed, or of
 the wrong kind: it does nothing, answers `0` (or `""` for a `$` name), and sets
 `http_error()` to `1`. On a live handle it answers as described and clears
-`http_error()` to `0`. Only the rows where that leaves something ambiguous say so
-again.
+`http_error()` to `0` — except a setter refusing a value that may not go on the
+wire (above), which answers `0` and sets it to `6`. Only the rows where that leaves
+something ambiguous say so again.
 
 ### Requests, and the process-global TLS posture
 
 | function | what it answers |
 | --- | --- |
 | `http_get$(url$) → str` | GET `url$`; the response body, whatever the status — an error page's body included. `""` when the request never completed, which is also what an empty 200 answers: pair it with `http_status` to tell those apart |
-| `http_status(url$) → num` | GET `url$`; the HTTP status code. `0`, and only `0`, when nothing connected — a dead host, a refused connection, a rejected certificate |
+| `http_status(url$) → num` | GET `url$`; the HTTP status code. `0`, and only `0`, when nothing connected — a dead host, a refused connection, a rejected certificate, or a url that was never sent: one carrying a control character (`http_error()` `6`), or one whose port is not 1–65535 |
 | `http_post$(url$, body$) → str` | POST `body$` to `url$`; the response body, on the same terms as `http_get$` |
 | `http_get$(c@, path$) → str` | GET `path$` on the client's base url, with everything the client carries; the body on the same terms as `http_get$(url$)`. `""` with `http_error()` `1` for a bad handle and `2` for a proxy it cannot use |
 | `http_status(c@, path$) → num` | the same request, answering its status; `0` when nothing connected or nothing was sent. Under a host that sets an execution budget, a query built from more params than the budget allows is a runtime error, the same refusal for all three client verbs |
@@ -77,7 +95,7 @@ again.
 | `http_free(c@) → num` | `1` when the client was live and is now released; `0` if it was already freed or was never a client |
 | `http_reset(c@) → num` | `1`; the client returns to the factory state — bags emptied, timeouts `0`, redirects followed with a cap of 5, SSL validation on, auth and proxy cleared. **The base url survives a reset**: it is the client's identity, not one of its settings |
 | `http_baseurl$(c@) → str` | its base url, `""` when it has none |
-| `http_baseurl(c@, u$) → num` | `1`; the base url is now `u$` |
+| `http_baseurl(c@, u$) → num` | `1`; the base url is now `u$`. `0` and `http_error()` `6` for a `u$` carrying a control character, and the old base url stays. (`http_client@(url$)` always answers a handle; a verb on it refuses such a url) |
 | `http_timeout(c@) → num` | the connect timeout in ms; `0` means none was set |
 | `http_timeout(c@, ms) → num` | `1`; the connect timeout is now `ms` |
 | `http_responsetimeout(c@, ms) → num` | `1`; the response timeout is now `ms`. Write-only — there is no getter |
@@ -88,12 +106,15 @@ Three name/value bags with the same shape. **Setting a name that is already ther
 replaces it** — the count does not grow and no duplicate is sent. Header names
 match case-insensitively (the HTTP rule); parameter and cookie names match exactly.
 An empty value is a stored value, so it counts, but the getter cannot tell it from
-a name that was never set.
+a name that was never set. A header or cookie that may not go on the wire (see
+"Nothing reaches the request head" above) is refused: `0`, nothing stored,
+`http_error()` `6`. A param is percent-encoded on the way out, so any byte is
+accepted.
 
 | function | what it answers |
 | --- | --- |
 | `http_headercount(c@) → num` | how many headers are set; `0` for an empty bag *and* for a bad handle — `http_error()` separates the two |
-| `http_header(c@, name$, value$) → num` | `1`; the header is set, replacing any earlier value under that name |
+| `http_header(c@, name$, value$) → num` | `1`; the header is set, replacing any earlier value under that name. `0` and `http_error()` `6` when `name$` is not a token or `value$` carries a control character other than HTAB |
 | `http_header$(c@, name$) → str` | its value; `""` when the name was never set, when it was set to `""`, or when the handle is bad |
 | `http_headerremove(c@, name$) → num` | `1` when a header of that name was there and is now gone, `0` when there was nothing to remove — and `0` again for a bad handle |
 | `http_headerclear(c@) → num` | `1`; every header is gone |
@@ -103,7 +124,7 @@ a name that was never set.
 | `http_paramremove(c@, name$) → num` | `1` when one was removed, `0` when there was none |
 | `http_paramclear(c@) → num` | `1`; every parameter is gone |
 | `http_cookiecount(c@) → num` | how many cookies are set |
-| `http_cookie(c@, name$, value$) → num` | `1`; the cookie is set, replacing any earlier one |
+| `http_cookie(c@, name$, value$) → num` | `1`; the cookie is set, replacing any earlier one. `0` and `http_error()` `6` when either carries a control character, HTAB included |
 | `http_cookie$(c@, name$) → str` | its value, `""` when unset |
 | `http_cookieremove(c@, name$) → num` | `1` when one was removed, `0` when there was none |
 | `http_cookieclear(c@) → num` | `1`; every cookie is gone |
@@ -111,22 +132,25 @@ a name that was never set.
 ### Authentication and proxy
 
 Auth is **write-only by design**: nothing reads a credential back out of a client,
-so a `1` is the only confirmation there is.
+so a `1` is the only confirmation there is — and a `0` with `http_error()` `6` the
+only sign a token was refused, in which case the one set before it is still sent.
 
 | function | what it answers |
 | --- | --- |
-| `http_basicauth(c@, user$, pass$) → num` | `1`; the client now carries `Basic <base64 of user:pass>` |
-| `http_bearerauth(c@, token$) → num` | `1`; the client now carries `Bearer <token$>` |
-| `http_customauth(c@, value$) → num` | `1`; the client carries `value$` as the whole Authorization value, unexamined |
+| `http_basicauth(c@, user$, pass$) → num` | `1`; the client now carries `Basic <base64 of user:pass>` — base64, so any byte is accepted |
+| `http_bearerauth(c@, token$) → num` | `1`; the client now carries `Bearer <token$>`. `0` and `http_error()` `6` for a token carrying a control character other than HTAB |
+| `http_customauth(c@, value$) → num` | `1`; the client carries `value$` as the whole Authorization value, examined only for control characters: one other than HTAB is refused like a bearer token's |
 | `http_clearauth(c@) → num` | `1`; whichever of the three was set is gone |
 | `http_proxy(c@, host$, port) → num` | `1`; the proxy is recorded, and checked when a request is made: a port outside 1–65535, or an `https://` request, is refused there with `http_error()` `2` |
-| `http_proxyauth(c@, user$, pass$) → num` | `1`; the proxy credentials are recorded, also write-only |
+| `http_proxyauth(c@, user$, pass$) → num` | `1`; the proxy credentials are recorded, also write-only, and sent base64-encoded, so any byte is accepted |
 | `http_clearproxy(c@) → num` | `1`; host, port, user and password are all cleared |
 
 ### Behaviour flags
 
 Each setter answers `1`; each getter answers the value. The getter and setter share
-a name where the types allow it and are told apart by arity.
+a name where the types allow it and are told apart by arity. The user agent,
+content type and accept are header values: one carrying a control character other
+than HTAB is refused — `0`, the earlier value kept, `http_error()` `6`.
 
 | function | what it answers |
 | --- | --- |
@@ -172,9 +196,9 @@ No handle, no network, no error code — these four are total functions on a str
 
 | function | what it answers |
 | --- | --- |
-| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to, `4` a request the run's time cut off mid-handshake or mid-response, `5` a response that broke off for any other reason — the peer went silent past the client's own read timeout, or the connection dropped. Either way it answers status `0` and no body, never the part that had arrived. Every request — bare-url or client — sets it: `0` when it was not refused or cut off. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
+| `http_error() → num` | the last code: `0` clean, `1` a bad client or form handle, `2` a request a client's proxy could not carry (nothing was sent), `3` an https request refused because the server's certificate is not for the host it was sent to, `4` a request the run's time cut off mid-handshake or mid-response, `5` a response that broke off for any other reason — the peer went silent past the client's own read timeout, or the connection dropped. Either way it answers status `0` and no body, never the part that had arrived. `6` a header, cookie, credential or url that may not go on the wire — a control character, or a header name that is not a token — refused by its setter (nothing stored) or by a verb (nothing sent, status `0`). Every request — bare-url or client — sets it: `0` when it was not refused or cut off. A 404, a dead host and an untrusted chain are still read from `http_status`, not from here |
 | `http_clearerror() → num` | `0`, always; the code is reset to `0` |
-| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"the server's certificate is not for this host"` for `3`, `"the run's time ran out before the answer was complete"` for `4`, `"the answer broke off before it was complete"` for `5`, `"unknown error"` for anything else — including a code this library would never produce |
+| `http_strerror$(code) → str` | `"no error"` for `0`, `"invalid handle"` for `1`, `"the request cannot go through this proxy"` for `2`, `"the server's certificate is not for this host"` for `3`, `"the run's time ran out before the answer was complete"` for `4`, `"the answer broke off before it was complete"` for `5`, `"a header, cookie or url carries a control character"` for `6`, `"unknown error"` for anything else — including a code this library would never produce |
 
 ## A worked example
 
@@ -212,7 +236,9 @@ Two things worth noticing:
   body.
 - **The params are the query.** They are url-encoded and appended in the order they
   were set, after a `?` — or after `&` when the path already carries a query of its
-  own — so a program never pastes a query string together by hand.
+  own — so a program never pastes a query string together by hand. They go before
+  a `#fragment`, which is never sent: `/q?x=2#top` asks for `/q?x=2&a=1`. (Until
+  2026-10-09 they were appended after it, inside the fragment, and lost.)
 
 ## Notes / Where the rest lives
 
@@ -286,6 +312,19 @@ through a proxy was opened with the PROXY, which was handed the bearer token, an
 credentials went to whatever host a redirect named. A bare url (`http_get$(url$)`)
 never follows redirects.
 
+**A relative `Location` is resolved as RFC 3986 §5.2 says, on the text as the
+server wrote it.** Its path and query are copied, never decoded: `g?a=1%262`
+against `/b/c/d;p?q` is asked for as `/b/c/g?a=1%262`, and `%2B`, `%2F`, `%3D`,
+`%20` stay what they were. Dot segments are removed (§5.2.4) — only literal ones;
+`%2E%2E` is a name. Until 2026-10-09 FPC's resolver decoded the reference and
+re-encoded the result, so that request went out as `/b/c/g?a=1&2`, another query.
+A hop whose url carries a control character is refused like a first url
+(`http_error()` `6`, nothing sent), and so is a hop whose port is not 1–65535.
+**Cookie names match exactly** across a redirect too (RFC 6265 §5.3): `SID` and
+`sid` are two cookies, and a server's `THEME` does not replace the client's own
+`theme`. A `Set-Cookie` carrying a control character other than HTAB is ignored
+whole (RFC 6265bis §5.6), so it never reaches the next hop.
+
 **What counts as a host.** An address is text that parses as one: four decimal
 numbers of 0..255 for IPv4, and for IPv6 what RFC 4291 writes inside the brackets,
 `::ffff:a.b.c.d` (an IPv4 address written as IPv6, dialled as that IPv4 address,
@@ -297,6 +336,12 @@ resolved and checked against the certificate without the dot -- Windows'
 resolver knew the dotted form and Linux's hosts-file lookup does not; an address is never sent as SNI, a name always
 is (RFC 6066). A path given to a client verb is a url of its own only when it
 BEGINS with a scheme — `/go?to=http://x/` is a path whose query holds a url.
+**A port is a decimal of 1–65535**, leading zeros allowed; anything else written
+after the host's `:` — `0`, `65536`, `99999999999`, `8o` — is refused before
+anything is dialled, exactly as an unusable host is: status `0`, no body,
+`http_error()` `0`. An empty port, `http://h:/`, is RFC 3986's "no port" and means
+the scheme's default. Until 2026-10-09 the port was kept in 16 bits, so port
+`A + 65536` reached a server listening on `A`, and `:0` meant the default.
 
 **Time.** A run with a time budget bounds a response as a whole, not only each read:
 a server that trickles a byte a second is cut off when the run's time is gone. The
@@ -351,4 +396,7 @@ that verification refuses it and that TLS works once relaxed) and
 `tests/packages/08_http_offline.bas`, which covers the whole configuration surface
 without a single request; `tests/packages/14_http_client.bas` sends that
 configuration to the loopback server and reads back what arrived, through a proxy
-as well.
+as well. `tests/packages/26_http_fields.bas` reads the request head BYTE FOR BYTE
+off a raw server the runner stands up: the refusals above, every example of RFC
+3986 §5.4.1 and §5.4.2, the percent-encoded Locations, the port bounds, params
+before a fragment, and exact cookie names across a redirect.

@@ -1053,7 +1053,7 @@ only when the request could not complete.
 | function | description |
 | --- | --- |
 | `http_get$(url$) → str` | GET; the response body (for any status) |
-| `http_status(url$) → num` | GET; the HTTP status code (0 on failure) |
+| `http_status(url$) → num` | GET; the HTTP status code (0 on failure, and for a url carrying a control character or a port outside 1–65535, which sends nothing) |
 | `http_post$(url$, body$) → str` | POST; the response body |
 | `http_verify_peer(on) → num` | turn https certificate verification on (default) / off |
 | `http_ca_file$(path$) → str` | use a specific CA bundle for verification |
@@ -1065,7 +1065,7 @@ only when the request could not complete.
 | `http_client@([url$]) → handle` | a client (a config accumulator), optionally with a base url |
 | `http_free(c@) → num` | release the client |
 | `http_reset(c@) → num` | return it to the factory state |
-| `http_baseurl$(c@) → str` / `http_baseurl(c@, u$) → num` | base url (get / set) |
+| `http_baseurl$(c@) → str` / `http_baseurl(c@, u$) → num` | base url (get / set); the setter refuses a url carrying a control character (`0`, `http_error()` 6) |
 | `http_timeout(c@) → num` / `http_timeout(c@, ms) → num` | connect timeout in ms (get / set) |
 | `http_responsetimeout(c@, ms) → num` | response timeout in ms (set) |
 
@@ -1073,17 +1073,17 @@ only when the request could not complete.
 
 | function | description |
 | --- | --- |
-| `http_headercount(c@) → num` / `http_header(c@, name$, value$) → num` / `http_header$(c@, name$) → str` / `http_headerremove(c@, name$) → num` / `http_headerclear(c@) → num` | request headers (case-insensitive names) |
+| `http_headercount(c@) → num` / `http_header(c@, name$, value$) → num` / `http_header$(c@, name$) → str` / `http_headerremove(c@, name$) → num` / `http_headerclear(c@) → num` | request headers (case-insensitive names); `http_header` refuses a name that is not an RFC 9110 token or a value with a control character other than HTAB (`0`, nothing stored, `http_error()` 6) |
 | `http_paramcount(c@) → num` / `http_param(c@, name$, value$) → num` / `http_param$(c@, name$) → str` / `http_paramremove(c@, name$) → num` / `http_paramclear(c@) → num` | query parameters |
-| `http_cookiecount(c@) → num` / `http_cookie(c@, name$, value$) → num` / `http_cookie$(c@, name$) → str` / `http_cookieremove(c@, name$) → num` / `http_cookieclear(c@) → num` | cookies |
+| `http_cookiecount(c@) → num` / `http_cookie(c@, name$, value$) → num` / `http_cookie$(c@, name$) → str` / `http_cookieremove(c@, name$) → num` / `http_cookieclear(c@) → num` | cookies (names match exactly); `http_cookie` refuses a control character, HTAB included (`0`, `http_error()` 6) |
 
 **Auth and proxy** (write-only setters)
 
 | function | description |
 | --- | --- |
 | `http_basicauth(c@, user$, pass$) → num` | HTTP Basic auth |
-| `http_bearerauth(c@, token$) → num` | Bearer-token auth |
-| `http_customauth(c@, value$) → num` | a raw Authorization value |
+| `http_bearerauth(c@, token$) → num` | Bearer-token auth; a control character other than HTAB is refused (`0`, `http_error()` 6) |
+| `http_customauth(c@, value$) → num` | a raw Authorization value; refused like a bearer token |
 | `http_clearauth(c@) → num` | clear auth |
 | `http_proxy(c@, host$, port) → num` | set a proxy |
 | `http_proxyauth(c@, user$, pass$) → num` | proxy credentials |
@@ -1093,7 +1093,7 @@ only when the request could not complete.
 
 | function | description |
 | --- | --- |
-| `http_useragent(c@, s$) → num` / `http_useragent$(c@) → str` | User-Agent (set / get) |
+| `http_useragent(c@, s$) → num` / `http_useragent$(c@) → str` | User-Agent (set / get); like the next two, a value with a control character other than HTAB is refused (`0`, `http_error()` 6) |
 | `http_contenttype(c@, s$) → num` / `http_contenttype$(c@) → str` | Content-Type (set / get) |
 | `http_accept(c@, s$) → num` / `http_accept$(c@) → str` | Accept (set / get) |
 | `http_followredirects(c@, on) → num` / `http_followredirects(c@) → num` | follow-redirects flag (set / get) |
@@ -1124,7 +1124,7 @@ only when the request could not complete.
 | `http_urldecode$(s$) → str` | percent-decode (`+` → space) |
 | `http_htmlencode$(s$) → str` | escape HTML entities |
 | `http_htmldecode$(s$) → str` | unescape HTML entities |
-| `http_error() → num` | the last code: 0 clean, 1 a bad client or form handle, 2 a request the client's proxy could not carry, 3 an https server whose certificate is not for the host, 4 the run's time ran out mid-handshake or mid-response, 5 the response broke off for another reason (either way the answer is status 0 and no body). Every request sets it; read `http_status` for the server's answer and `http_strerror$` for the words |
+| `http_error() → num` | the last code: 0 clean, 1 a bad client or form handle, 2 a request the client's proxy could not carry, 3 an https server whose certificate is not for the host, 4 the run's time ran out mid-handshake or mid-response, 5 the response broke off for another reason (either way the answer is status 0 and no body), 6 a header, cookie or url carrying a control character (or a header name that is not a token) was refused, by a setter or by a verb that then sent nothing. Every request sets it; read `http_status` for the server's answer and `http_strerror$` for the words |
 | `http_clearerror() → num` | reset the error code |
 | `http_strerror$(code) → str` | the text for an error code |
 

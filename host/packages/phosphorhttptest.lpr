@@ -16,6 +16,9 @@
                           and the headers a client handle sets (one per line)
     (anything else)  404  "not found"
 
+  Beside it, a RAW server (TV6Server in its Raw mode, server_url_raw$) answers the request head
+  it was sent, byte for byte, which a parsing server cannot show (2026-10-09).
+
   The BASIC program learns the server's address from server_url$() -- a host
   function this runner registers -- so the port never has to be hard-coded in the
   test. The server runs in a background thread; the process Halt()s when the test is
@@ -61,6 +64,11 @@ const
     record arriving late is so trickled INSIDE itself, which is what OpenSSL's
     own reads restarted the timeout on (fourth pass). }
   SRV_PORT_V6_RELAY = 18453;
+  { 127.0.0.1, a RAW server (2026-10-09): it answers the request head it was sent,
+    byte for byte, as the body -- so a test sees exactly what reached the wire,
+    which TFPHTTPServer, parsing the head into fields, cannot show: an injected
+    CR LF arrives there as one more well-formed header. Routes below. }
+  SRV_PORT_RAW = 18455;
 
 var
   BaseURL: String;
@@ -75,6 +83,8 @@ var
   GHits: LongInt = 0;      // how many requests /hit has seen
   GSniLock: TRTLCriticalSection;
   GSni: TStringList = nil; // the SNI per TLS connection; Objects[] is its stream
+  GRawHits: LongInt = 0;   // how many connections the raw server has accepted
+  GRawLocation: String = '';   // what the raw server's /b/c/d;p?q redirects to
 
 { ---- the local test server -------------------------------------------------}
 
@@ -341,6 +351,10 @@ type
     Trickle: Boolean;   // trickle a TLS handshake instead of serving
     LateHeader: Boolean;   // with Trickle: one late record header, then silence
     Drain: Boolean;        // read a request body in slow bursts
+    { THE RAW SERVER (SRV_PORT_RAW, 2026-10-09): on 127.0.0.1, not [::1], and it
+      answers the request head it was sent, byte for byte -- see ServeRaw. The
+      same accept loop and the same head reader as the IPv6 servers. }
+    Raw: Boolean;
     procedure Execute; override;
   private
     procedure Serve(AFd: TSocket);
@@ -451,15 +465,50 @@ begin
   end;
 end;
 
+{ raw_hits() -> how many connections the raw server has accepted so far. }
+function f_raw_hits(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GRawHits);
+end;
+
+{ raw_location$(loc$) -> loc$. The raw server's /b/c/d;p?q answers 302 with
+  exactly these bytes as its Location from now on. }
+function f_raw_location(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  GRawLocation := Args[0].Str;
+  UniqueString(GRawLocation);
+  Result := ValStr(GRawLocation);
+end;
+
+{ server_url_raw$() -> the raw server's base url, http://127.0.0.1:PORT }
+function f_server_url_raw(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValStr('http://127.0.0.1:' + IntToStr(SRV_PORT_RAW));
+end;
+
+{ http_resolve_ref$(base$, ref$) -> the url a redirect from base$ to the
+  Location ref$ is sent to: PhosphorHttpLib's own resolution, the one FetchCore
+  follows. '' when it cannot resolve one. }
+function f_http_resolve_ref(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValStr(HttpResolveReference(Args[0].Str, Args[1].Str));
+end;
+
 procedure TV6Server.Execute;
 var
   ls, cs: TSocket;
   a: TInetSockAddr6;
+  a4: TInetSockAddr;
   len: TSockLen;
   rcv: LongInt;
   {$IFDEF UNIX}one: LongInt;{$ENDIF}
 begin
-  ls := fpSocket(AF_INET6, SOCK_STREAM, 0);
+  if Raw then ls := fpSocket(AF_INET, SOCK_STREAM, 0)
+  else ls := fpSocket(AF_INET6, SOCK_STREAM, 0);
   {$IFDEF UNIX}
   one := 1;
   fpsetsockopt(ls, SOL_SOCKET, SO_REUSEADDR, @one, SizeOf(one));
@@ -468,7 +517,15 @@ begin
   a.sin6_family := AF_INET6;
   a.sin6_port := htons(Port);
   a.sin6_addr := StrToHostAddr6('::1');
-  if fpBind(ls, @a, SizeOf(a)) <> 0 then Exit;
+  FillChar(a4, SizeOf(a4), 0);
+  a4.sin_family := AF_INET;
+  a4.sin_port := htons(Port);
+  a4.sin_addr := StrToNetAddr('127.0.0.1');
+  if Raw then
+  begin
+    if fpBind(ls, @a4, SizeOf(a4)) <> 0 then Exit;
+  end
+  else if fpBind(ls, @a, SizeOf(a)) <> 0 then Exit;
   if Drain then
   begin
     rcv := 4096;
@@ -481,6 +538,9 @@ begin
     len := SizeOf(a);
     cs := fpAccept(ls, @a, @len);
     {$IFDEF WINDOWS}if cs = TSocket(-1) then Continue;{$ELSE}if cs < 0 then Continue;{$ENDIF}
+    { Counted before anything is read, so a test can prove a request that should
+      have sent nothing did not even connect. }
+    if Raw then InterLockedIncrement(GRawHits);
     try
       Serve(cs);
     except
@@ -559,6 +619,44 @@ begin
       hdrEnd := Pos(#13#10#13#10, req);
     until (n <= 0) or (hdrEnd > 0);
     if hdrEnd = 0 then Exit;
+    if Raw then
+    begin
+      { THE RAW ROUTES, matched anywhere in the request target, as the
+        TFPHTTPServer routes are, so a request through a proxy -- whose target
+        is the absolute url -- reaches them too:
+          /b/c/d;p?q    302, Location: what raw_location$ last set
+          /threecookies 302 setting SID=upper, sid=lower, THEME=x; Location /head
+          /ctlcookie    302 setting bad=a<0x01>b and good=1; Location /head
+          anything else 200, the body is the request head as it arrived: the
+                        request line and every header line, each with its CR LF,
+                        and not the blank line that ends the head. }
+      head := Copy(req, 1, hdrEnd + 1);
+      line := Copy(head, 1, Pos(#13, head) - 1);    // the request line
+      path := ExtractWord(2, line, [' ']);
+      extra := '';
+      if Pos('/b/c/d;p?q', path) > 0 then
+        extra := 'Location: ' + GRawLocation + #13#10
+      else if Pos('/threecookies', path) > 0 then
+        extra := 'Set-Cookie: SID=upper' + #13#10 + 'Set-Cookie: sid=lower' + #13#10 +
+                 'Set-Cookie: THEME=x' + #13#10 + 'Location: /head' + #13#10
+      else if Pos('/ctlcookie', path) > 0 then
+        extra := 'Set-Cookie: bad=a' + Chr(1) + 'b' + #13#10 + 'Set-Cookie: good=1' +
+                 #13#10 + 'Location: /head' + #13#10;
+      if extra <> '' then
+      begin
+        status := '302 Found';
+        resp := '';
+      end
+      else
+      begin
+        status := '200 OK';
+        resp := head;
+      end;
+      resp := 'HTTP/1.1 ' + status + #13#10 + extra + 'Content-Length: ' +
+              IntToStr(Length(resp)) + #13#10 + 'Connection: close' + #13#10#13#10 + resp;
+      st.WriteBuffer(resp[1], Length(resp));
+      Exit;
+    end;
     head := Copy(req, 1, hdrEnd - 1);
     body := Copy(req, hdrEnd + 4, MaxInt);
     want := 0;
@@ -1012,6 +1110,7 @@ var
   srvMtls: TMutualTlsServer;
   v6Plain, v6Tls, v6TlsIP, v6Trickle, v6Late, v6Drain: TV6Server;
   relay: TRelay;
+  raw: TV6Server;
   th, thTls, thTlsIP, thMtls: TServerThread;
   path, certDir: String;
   rc, i, waited: Integer;
@@ -1168,13 +1267,18 @@ begin
   relay.Upstream := SRV_PORT_V6_TLS_IP;
   relay.FreeOnTerminate := False;
   relay.Start;
+  raw := TV6Server.Create(True);
+  raw.Raw := True;
+  raw.Port := SRV_PORT_RAW;
+  raw.FreeOnTerminate := False;
+  raw.Start;
 
   { Wait for both sockets to be listening before the test fires requests. }
   waited := 0;
   while ((not srv.Active) or (not srvTls.Active) or (not srvTlsIP.Active) or
          (not srvMtls.Active) or (not v6Plain.Ready) or (not v6Tls.Ready) or
          (not v6TlsIP.Ready) or (not v6Trickle.Ready) or (not v6Late.Ready) or
-         (not v6Drain.Ready) or (not relay.Ready)) and (waited < 3000) do
+         (not v6Drain.Ready) or (not relay.Ready) or (not raw.Ready)) and (waited < 3000) do
     begin Sleep(20); Inc(waited, 20); end;
   Sleep(150);
 
@@ -1223,6 +1327,10 @@ begin
     eng.Registry.Add('http_is_ipv4:$', @f_http_is_ipv4);
     eng.Registry.Add('http_is_ipv6:$', @f_http_is_ipv6);
     eng.Registry.Add('http_same_origin:$$', @f_http_same_origin);
+    eng.Registry.Add('raw_hits:', @f_raw_hits);
+    eng.Registry.Add('raw_location$:$', @f_raw_location);
+    eng.Registry.Add('server_url_raw$:', @f_server_url_raw);
+    eng.Registry.Add('http_resolve_ref$:$$', @f_http_resolve_ref);
     ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

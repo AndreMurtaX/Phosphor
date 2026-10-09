@@ -32,7 +32,7 @@ program phosphorhttptest;
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
   SysUtils, Classes, Types, StrUtils, fphttpserver, httpdefs, openssl,
-  dynlibs, ctypes, ssockets, sslsockets, opensslsockets, fpopenssl, sockets,
+  dynlibs, ctypes, ssockets, sslsockets, opensslsockets, fpopenssl, sockets, URIParser,
   PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
   PhosphorHttpLib, PhosphorBudget;
 
@@ -547,6 +547,204 @@ begin
       // a broken client must not take the server down for the next one
     end;
   end;
+end;
+
+{ http_wire_url$(url$) -> the url the library hands FPC for url$, or '' when it
+  refuses url$ before any dial: PhosphorHttpLib's HttpWireUrl. }
+function f_http_wire_url(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var w: String;
+begin
+  Err := NoError();
+  if not HttpWireUrl(Args[0].Str, w) then w := '';
+  Result := ValStr(w);
+end;
+
+{ ---- the generated authority sweep (2026-10-09, round 2) --------------------
+  THE ORACLE, written apart from the library's HttpWireUrl and sharing none of
+  its code: RFC 3986's reading of an http url, by its own scan, against what
+  FPC's ParseURI -- the parser the client really dials with -- reads out of
+  the same text. A url is usable iff RFC 3986 reads a well-formed authority (at
+  most one '@'; a '[' host closed by ']' and followed by nothing or ':'; a port
+  of digits, 1..65535, or empty) and ParseURI, handed the url with its fragment
+  removed and an empty port's ':' dropped, reads the same scheme, user,
+  password, host and port. AWire is that url. }
+{ The first (or, with ALast, the last) index of C in S; 0 when it is absent. }
+function ChIdx(C: Char; const S: String; ALast: Boolean): Integer;
+var i: Integer;
+begin
+  Result := 0;
+  for i := 1 to Length(S) do
+    if S[i] = C then
+    begin
+      Result := i;
+      if not ALast then Exit;
+    end;
+end;
+
+function OracleWire(const U: String; out AWire: String): Boolean;
+var
+  w, rest, auth, tail, ui, hp, h, d, usr, pw: String;
+  i, n, ats, port: Integer;
+  colon: Boolean;
+  f: TURI;
+begin
+  Result := False;
+  AWire := '';
+  i := ChIdx('#', U, False);
+  if i > 0 then w := Copy(U, 1, i - 1) else w := U;
+  if Copy(w, 1, 7) <> 'http://' then Exit;
+  rest := Copy(w, 8, MaxInt);
+  n := 1;
+  while (n <= Length(rest)) and (rest[n] <> '/') and (rest[n] <> '?') do Inc(n);
+  auth := Copy(rest, 1, n - 1);
+  tail := Copy(rest, n, MaxInt);
+  ats := 0;
+  for i := 1 to Length(auth) do
+    if auth[i] = '@' then Inc(ats);
+  if ats > 1 then Exit;
+  ui := '';
+  hp := auth;
+  if ats = 1 then
+  begin
+    i := ChIdx('@', auth, False);
+    ui := Copy(auth, 1, i - 1);
+    hp := Copy(auth, i + 1, MaxInt);
+  end;
+  usr := ui;
+  pw := '';
+  i := ChIdx(':', ui, False);
+  if i > 0 then
+  begin
+    usr := Copy(ui, 1, i - 1);
+    pw := Copy(ui, i + 1, MaxInt);
+  end;
+  colon := False;
+  d := '';
+  if Copy(hp, 1, 1) = '[' then
+  begin
+    i := ChIdx(']', hp, False);
+    if i = 0 then Exit;
+    h := Copy(hp, 1, i);
+    if i < Length(hp) then
+    begin
+      if hp[i + 1] <> ':' then Exit;
+      colon := True;
+      d := Copy(hp, i + 2, MaxInt);
+    end;
+  end
+  else
+  begin
+    i := ChIdx(':', hp, True);
+    if i > 0 then
+    begin
+      colon := True;
+      h := Copy(hp, 1, i - 1);
+      d := Copy(hp, i + 1, MaxInt);
+    end
+    else h := hp;
+  end;
+  port := 0;
+  if d <> '' then
+  begin
+    for i := 1 to Length(d) do
+      if not (d[i] in ['0'..'9']) then Exit;
+    while (Length(d) > 1) and (d[1] = '0') do Delete(d, 1, 1);
+    if Length(d) > 5 then Exit;
+    port := StrToInt(d);
+    if (port < 1) or (port > 65535) then Exit;
+  end
+  else if colon then
+    auth := Copy(auth, 1, Length(auth) - 1);
+  w := 'http://' + auth + tail;
+  try
+    f := ParseURI(w, False);
+  except
+    Exit;
+  end;
+  if (f.Protocol <> 'http') or (not f.HasAuthority) or (f.Username <> usr) or
+     (f.Password <> pw) or (f.Host <> h) or (f.Port <> port) then
+    Exit;
+  AWire := w;
+  Result := True;
+end;
+
+{ http_url_sweep$() -> "checked=N usable=U refused=R mismatches=M" and, after a
+  space, the first mismatching urls. Every url is "http://" + an authority + a
+  tail, and the library's HttpWireUrl must give the oracle's answer -- the same
+  verdict and, when usable, the same url -- on each. The authorities:
+    * every string of 0..4 characters over ? # @ : [ ] / % h 1 -- 11111 of them;
+    * five realistic authorities with two of ? # @ : [ ] / % inserted, at every
+      pair of positions i <= j -- (L+1)(L+2)/2 * 64 for an authority of length L.
+  Each with all seven tails below. }
+const
+  SweepChars: array[0..9] of Char = ('?', '#', '@', ':', '[', ']', '/', '%', 'h', '1');
+  SweepTails: array[0..6] of String = ('', '/', '?', '#', '/p?a?b', '?a#b#c', '#a?b#c');
+  SweepReal: array[0..4] of String = ('u:p@127.0.0.1:8080', '[::1]:443', 'h.test', 'h:65616', 'h:');
+
+function f_http_url_sweep(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var
+  checked, usable, refused, bad: Int64;
+  firsts: array[1..3] of String;
+
+  procedure Check(const AAuth: String);
+  var t: Integer;
+      u, wl, wo: String;
+      vl, vo: Boolean;
+  begin
+    for t := 0 to High(SweepTails) do
+    begin
+      u := 'http://' + AAuth + SweepTails[t];
+      vl := HttpWireUrl(u, wl);
+      vo := OracleWire(u, wo);
+      Inc(checked);
+      if vo then Inc(usable) else Inc(refused);
+      if (vl <> vo) or (vl and (wl <> wo)) then
+      begin
+        Inc(bad);
+        if bad <= 3 then firsts[bad] := ' ' + u;
+      end;
+    end;
+  end;
+
+var
+  a, b, c, d, r, i, j: Integer;
+  s, ins: String;
+begin
+  Err := NoError();
+  checked := 0; usable := 0; refused := 0; bad := 0;
+  firsts[1] := ''; firsts[2] := ''; firsts[3] := '';
+  Check('');
+  for a := 0 to 9 do
+  begin
+    Check(SweepChars[a]);
+    for b := 0 to 9 do
+    begin
+      Check(SweepChars[a] + SweepChars[b]);
+      for c := 0 to 9 do
+      begin
+        Check(SweepChars[a] + SweepChars[b] + SweepChars[c]);
+        for d := 0 to 9 do
+          Check(SweepChars[a] + SweepChars[b] + SweepChars[c] + SweepChars[d]);
+      end;
+    end;
+  end;
+  for r := 0 to High(SweepReal) do
+  begin
+    for i := 0 to Length(SweepReal[r]) do
+      for j := i to Length(SweepReal[r]) do
+        for a := 0 to 7 do
+          for b := 0 to 7 do
+          begin
+            { the first character goes in after i characters of the authority,
+              the second after j of them -- so for i = j, both side by side. }
+            s := SweepReal[r];
+            ins := Copy(s, 1, i) + SweepChars[a] + Copy(s, i + 1, j - i) + SweepChars[b] +
+                   Copy(s, j + 1, MaxInt);
+            Check(ins);
+          end;
+  end;
+  Result := ValStr(Format('checked=%d usable=%d refused=%d mismatches=%d',
+                          [checked, usable, refused, bad]) + firsts[1] + firsts[2] + firsts[3]);
 end;
 
 procedure TV6Server.Serve(AFd: TSocket);
@@ -1331,6 +1529,8 @@ begin
     eng.Registry.Add('raw_location$:$', @f_raw_location);
     eng.Registry.Add('server_url_raw$:', @f_server_url_raw);
     eng.Registry.Add('http_resolve_ref$:$$', @f_http_resolve_ref);
+    eng.Registry.Add('http_wire_url$:$', @f_http_wire_url);
+    eng.Registry.Add('http_url_sweep$:', @f_http_url_sweep);
     ResetTestState();
     rc := eng.Run(ReadSource(path));
     if rc <> 0 then

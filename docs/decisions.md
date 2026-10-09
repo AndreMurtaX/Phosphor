@@ -819,8 +819,23 @@ behaviour; this is why it is that behaviour).
   now has its dot segments removed too, as 5.2.2 says it should.
 - **A port is a decimal in 1..65535 or the url is not used** -- nothing is
   dialled, as for any other url the library cannot use (status 0, error 0). An
-  EMPTY port (`h:/`) keeps meaning the scheme's default (RFC 3986 3.2.3).
-- **Params go before a fragment**, which is never sent.
+  EMPTY port (`h:/`) means the scheme's default (RFC 3986 3.2.3), and is sent
+  without its `:` (6.2.3) -- FPC's parser reads `h:` as the HOST.
+- **The url judged is the url dialled** (round 2, the same day). The range check
+  above read RFC 3986's authority, which ends at the FIRST `?` or `#`; FPC's
+  ParseURI, which dials, cuts at the LAST `#` and `?` first, so
+  `http://h:1?@h:(A+65536)?` passed as port 1 and reached `A`. Rather than
+  teach one parser the other's quirks, the fragment is removed before FPC sees
+  the url at all, and a url on which the two readings still differ in scheme,
+  userinfo, host or port is refused like a bad port. Refusing a disagreement
+  is the whole rule: neither reading is privileged, so nothing a url can hide
+  between them is ever dialled. Agreement on the four fields is also agreement
+  on the port digits FPC uses (its authority can outrun the RFC's only by a `?`,
+  which then sits in its userinfo or host), so the range checked is the range
+  dialled. A generated sweep against ParseURI itself holds the rule
+  (`tests/packages/28_http_authority.bas`).
+- **Params go before a fragment**, and the fragment -- from the FIRST `#` -- is
+  never sent: with two `#`, FPC used to send the text between them.
 - **Cookie names match exactly**, in the redirect jar as in the client's bag.
 
 Left as they are, and why: a SPACE in a url path is still written into the

@@ -179,6 +179,12 @@ function HttpSameOrigin(const A, B: String): Boolean;
 { The url a redirect from ABase to the Location ARef is sent to; '' when there is
   none. Exported for the RFC 3986 section 5.4 sweep in the package tests. }
 function HttpResolveReference(const ABase, ARef: String): String;
+{ The url FPC is handed for AUrl -- its fragment removed, an empty port's ':'
+  dropped -- in AWire, and True; False when the url cannot be used because RFC
+  3986 and FPC's ParseURI read a different scheme, userinfo, host or port out of
+  it, or its port is not 1..65535 (see HttpWireUrl in the implementation).
+  Exported for the generated sweep in the package tests. }
+function HttpWireUrl(const AUrl: String; out AWire: String): Boolean;
 
 implementation
 
@@ -1552,49 +1558,145 @@ begin
   Result := JoinUri(t);
 end;
 
-{ IS THE PORT A PORT? FPC keeps a url's port in a Word, so :65616 was dialled as
-  :80 and :(A + 65536) reached a server on A (2026-10-09); :0 meant "the
-  default". A port written in a url must be a decimal of 1..65535 (RFC 3986
-  3.2.3 reads digits; a TCP port is 16 bits and 0 is none a server listens on).
-  An EMPTY port -- h: -- is RFC 3986's "no port", the scheme's default. Asked of
-  the raw authority, after the userinfo, outside an IPv6 literal's brackets. }
-function UrlPortUsable(const AUrl: String): Boolean;
+{ Where C first occurs in S, or 0: one forward scan, linear in S. }
+function FindChar(C: Char; const S: String): Integer;
+var i: Integer;
+begin
+  for i := 1 to Length(S) do
+    if S[i] = C then Exit(i);
+  Result := 0;
+end;
+
+{ THE URL THAT IS JUDGED IS THE URL THAT IS DIALLED (2026-10-09, round 2).
+  Two parsers read every url here. RFC 3986 (SplitUri) ends the authority at the
+  FIRST '/', '?' or '#'; FPC's ParseURI -- which decides the host dialled, the
+  port, the Basic credentials of a userinfo and the request line -- first cuts the
+  bookmark at the LAST '#' and the params at the LAST '?', and only then reads the
+  authority, up to the first '/'. With a '?' or '#' before an '@' the two read
+  different hosts and ports out of one url: in http://h:1?@h:(A+65536)? the RFC
+  reads port 1, ParseURI the authority h:1?@h:(A+65536), host h after the first
+  '@', and a port it keeps in a Word -- A. Round 1's range check read the RFC's
+  copy and FPC dialled its own.
+
+  So the url is judged as the code that dials will read it:
+    * THE FRAGMENT IS REMOVED -- everything from the FIRST '#' (RFC 3986 3.5) --
+      before FPC sees the url at all. With two '#', ParseURI took only what
+      followed the last one, and the text between went into the request line.
+    * RFC 3986's reading: an authority with more than one '@' is none (3.2.1: a
+      userinfo holds no '@'); a host that opens with '[' closes with ']' and is
+      followed by nothing or by ':'; a port is a decimal of 1..65535 (3.2.3 reads
+      digits; a TCP port is 16 bits, and 0 is none a server listens on -- FPC
+      kept :0 as "the default"). An EMPTY port, h:, is "no port" and is written
+      without its ':' (6.2.3), because ParseURI would read "h:" as the host.
+    * FPC's reading, of exactly the text that will be handed to it -- in a try:
+      no reading at all is no agreement.
+    * The two must agree on scheme, userinfo (user and password), host and port,
+      or the url is not used: nothing is dialled, status 0, http_error() 0, as for
+      any url the library cannot use.
+  Agreement on those four fields is also agreement on the PORT DIGITS FPC uses:
+  its authority can only outrun the RFC's by a '?' the RFC's ended at, and that
+  '?' then sits in FPC's userinfo or host, where the RFC's has none -- so the
+  range checked above is the range of what is dialled. (The port comparison is
+  then implied by the others; it is kept as the rule's own statement, and a
+  build without it changed no verdict of the sweep.) The package tests sweep
+  the function with generated urls against ParseURI itself
+  (tests/packages/28_http_authority.bas). }
+function HttpWireUrl(const AUrl: String; out AWire: String): Boolean;
 var
   u: TUriParts;
-  a, digits: String;
-  k, j: Integer;
-  v: LongInt;
+  f: TURI;
+  s, hostport, userinfo, host, digits, user, pass: String;
+  k, j, port: Integer;
+  hasColon: Boolean;
 begin
+  Result := False;
+  AWire := '';
+  k := FindChar('#', AUrl);
+  if k > 0 then s := Copy(AUrl, 1, k - 1) else s := AUrl;
+  SplitUri(s, u);
+  user := '';
+  pass := '';
+  host := '';
+  port := 0;
+  if u.HasAuthority then
+  begin
+    hostport := u.Authority;
+    k := FindChar('@', hostport);
+    if k > 0 then
+    begin
+      userinfo := Copy(hostport, 1, k - 1);
+      hostport := Copy(hostport, k + 1, MaxInt);
+      if FindChar('@', hostport) > 0 then Exit;
+      j := FindChar(':', userinfo);
+      if j > 0 then
+      begin
+        user := Copy(userinfo, 1, j - 1);
+        pass := Copy(userinfo, j + 1, MaxInt);
+      end
+      else user := userinfo;
+    end;
+    hasColon := False;
+    digits := '';
+    if (hostport <> '') and (hostport[1] = '[') then
+    begin
+      k := FindChar(']', hostport);
+      if k = 0 then Exit;
+      host := Copy(hostport, 1, k);
+      if k < Length(hostport) then
+      begin
+        if hostport[k + 1] <> ':' then Exit;
+        hasColon := True;
+        digits := Copy(hostport, k + 2, MaxInt);
+      end;
+    end
+    else
+    begin
+      k := LastDelimiter(':', hostport);
+      if k > 0 then
+      begin
+        hasColon := True;
+        host := Copy(hostport, 1, k - 1);
+        digits := Copy(hostport, k + 1, MaxInt);
+      end
+      else host := hostport;
+    end;
+    if digits <> '' then
+    begin
+      for j := 1 to Length(digits) do
+      begin
+        if not (digits[j] in ['0'..'9']) then Exit;
+        port := port * 10 + (Ord(digits[j]) - Ord('0'));
+        if port > 65535 then Exit;
+      end;
+      if port < 1 then Exit;
+    end
+    else if hasColon then
+    begin
+      u.Authority := Copy(u.Authority, 1, Length(u.Authority) - 1);
+      s := JoinUri(u);
+    end;
+  end;
+  try
+    f := ParseURI(s, False);
+  except
+    Exit;
+  end;
+  if (f.Protocol <> u.Scheme) or (f.HasAuthority <> u.HasAuthority) or
+     (f.Username <> user) or (f.Password <> pass) or (f.Host <> host) or
+     (f.Port <> port) then
+    Exit;
+  AWire := s;
   Result := True;
+end;
+
+{ The scheme of a url as RFC 3986 reads it, in lower case: '' when it has none.
+  Read without ParseURI, so a url not yet judged (HttpWireUrl) is never handed
+  to it. }
+function UrlScheme(const AUrl: String): String;
+var u: TUriParts;
+begin
   SplitUri(AUrl, u);
-  if not u.HasAuthority then Exit;
-  a := u.Authority;
-  k := LastDelimiter('@', a);
-  if k > 0 then a := Copy(a, k + 1, MaxInt);
-  if (a <> '') and (a[1] = '[') then
-  begin
-    k := 1;
-    while (k <= Length(a)) and (a[k] <> ']') do Inc(k);
-    if k > Length(a) then Exit;         // not an address; the host check refuses it
-    a := Copy(a, k + 1, MaxInt);
-    if (a = '') or (a[1] <> ':') then Exit;
-    digits := Copy(a, 2, MaxInt);
-  end
-  else
-  begin
-    k := LastDelimiter(':', a);
-    if k = 0 then Exit;
-    digits := Copy(a, k + 1, MaxInt);
-  end;
-  if digits = '' then Exit;
-  v := 0;
-  for j := 1 to Length(digits) do
-  begin
-    if not (digits[j] in ['0'..'9']) then Exit(False);
-    v := v * 10 + (Ord(digits[j]) - Ord('0'));
-    if v > 65535 then Exit(False);
-  end;
-  Result := v >= 1;
+  Result := LowerCase(u.Scheme);
 end;
 
 { Applies a client handle's configuration to one request. With ACreds False it
@@ -1857,11 +1959,11 @@ begin
   begin
     SetLength(addrs, Length(AForceAddrs));
     for i := 0 to High(AForceAddrs) do addrs[i] := AForceAddrs[i];
-    dial := ParseURI(AUrl).Host;
+    dial := ParseURI(AUrl, False).Host;
   end
   else
   begin
-    uri := ParseURI(AUrl);
+    uri := ParseURI(AUrl, False);
     { THE HOST DIALLED IS THE PROXY'S when there is one -- only the proxy is
       dialled, and it resolves the destination, which is never looked up here --
       and the URL's otherwise. The same rules choose its addresses either way. }
@@ -1955,8 +2057,8 @@ var ua, ub: TURI;
   end;
 
 begin
-  ua := ParseURI(A);
-  ub := ParseURI(B);
+  ua := ParseURI(A, False);
+  ub := ParseURI(B, False);
   Result := SameText(ua.Protocol, ub.Protocol) and
             SameText(TlsName(ua.Host), TlsName(ub.Host)) and (PortOf(ua) = PortOf(ub));
 end;
@@ -1986,7 +2088,7 @@ function FetchCore(const AMethod, AUrl, ABody: String;
   AConnectMs: Integer; ACfg: TObject): String;
 var
   remaining: Int64;
-  url, method, body, loc, next, scheme: String;
+  url, first, method, body, loc, next, scheme: String;
   hops, maxHops: Integer;
   follow, creds: Boolean;
   jar: TStringList;
@@ -2006,18 +2108,21 @@ begin
     Exit;
   end;
   { A URL THAT CANNOT GO ON THE WIRE DIALS NOTHING (2026-10-09): one carrying a
-    control character (HTTP_EFIELD -- see HasCtl), or a port that is not a port
-    (see UrlPortUsable), which is refused as an unusable host is, status 0 and
-    no code. Asked again of every redirect hop below. }
+    control character (HTTP_EFIELD -- see HasCtl), or one the two parsers read
+    differently, or whose port is not a port (see HttpWireUrl), which is refused
+    as an unusable host is, status 0 and no code. Asked again of every redirect
+    hop below. What goes on is HttpWireUrl's url, fragment removed -- and it is
+    also the ORIGIN the credentials belong to: the url as written, handed to
+    ParseURI, can name another host inside its fragment. }
   if HasCtl(AUrl, False) then
   begin
     gHttpErr := HTTP_EFIELD;
     Exit;
   end;
-  if not UrlPortUsable(AUrl) then Exit;
+  if not HttpWireUrl(AUrl, first) then Exit;
   started := GetTickCount64();
   follow := ClientFollow(ACfg, maxHops);
-  url := AUrl;
+  url := first;
   method := AMethod;
   body := ABody;
   hops := 0;
@@ -2049,7 +2154,7 @@ begin
       next := HttpResolveReference(url, loc);
       if next = '' then Exit;
       loc := next;
-      scheme := LowerCase(ParseURI(loc).Protocol);
+      scheme := UrlScheme(loc);
       if (scheme <> 'http') and (scheme <> 'https') then Exit;
       Inc(hops);
       if hops > maxHops then Exit;
@@ -2060,14 +2165,15 @@ begin
         Exit;
       end;
       { The hop is a request of its own, under the first url's rules: a control
-        character in it, or a port that is not one, sends nothing. }
+        character in it, a url the two parsers read differently, or a port that
+        is not one, sends nothing -- and the fragment is never sent. }
       if HasCtl(loc, False) then
       begin
         AStatus := 0;
         gHttpErr := HTTP_EFIELD;
         Exit;
       end;
-      if not UrlPortUsable(loc) then
+      if not HttpWireUrl(loc, next) then
       begin
         AStatus := 0;
         Exit;
@@ -2077,8 +2183,8 @@ begin
         method := 'GET';
         body := '';
       end;
-      url := loc;
-      creds := SameOrigin(url, AUrl);
+      url := next;
+      creds := SameOrigin(url, first);
       if creds then
         Result := FetchHop(method, url, body, [], AStatus, AConnectMs, ACfg, True, jar, loc)
       else
@@ -3313,7 +3419,8 @@ end;
 { THE PARAMS GO BEFORE THE FRAGMENT (RFC 3986 3.5: the fragment follows the
   query, and is never sent). Appended after it, as they were until 2026-10-09,
   they were part of the fragment, and /p#top asked for /p with no params at all.
-  The fragment starts at the FIRST '#', so a '?' after it is not a query. }
+  The fragment starts at the FIRST '#', so a '?' after it is not a query; it is
+  kept here and removed by FetchCore (HttpWireUrl), on every path at once. }
 function ClientUrl(cfg: TPhosphorHttpClient; const APath: String; out AUrl: String): Boolean;
 var
   base, p, q, frag: String;
@@ -3370,7 +3477,9 @@ begin
   Result := False;
   if cfg.ProxyHost = '' then Exit;
   if (cfg.ProxyPort < 1) or (cfg.ProxyPort > 65535) then Exit(True);
-  if LowerCase(ParseURI(AUrl).Protocol) = 'https' then Exit(True);
+  { The scheme as RFC 3986 reads it: the url has not been judged yet (FetchCore
+    does that), and where the two parsers disagree it will not be used. }
+  if UrlScheme(AUrl) = 'https' then Exit(True);
 end;
 
 function HttpIsIPv4Literal(const AHost: String): Boolean;

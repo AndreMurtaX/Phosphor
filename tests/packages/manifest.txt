@@ -34,6 +34,10 @@
 # archives are built byte by byte in the file, like 11_zipslip's; the CRCs its
 # honest entries need are read out of zip_create@'s own output, pinned first
 # against the published check value. Its last case spends the run's budget.
+# 28_http_authority is the url as the code that DIALS reads it: RFC 3986 and
+# FPC's ParseURI must agree on scheme, userinfo, host and port, the fragment
+# never reaches FPC, and a generated sweep holds the library's verdict to an
+# oracle in the runner on 218897 urls.
 00_base64
 01_zip
 02_sqlite
@@ -62,3 +66,4 @@
 25_http_broken
 26_http_fields
 27_zip_integrity
+28_http_authority

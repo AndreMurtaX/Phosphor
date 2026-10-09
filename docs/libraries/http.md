@@ -79,7 +79,7 @@ something ambiguous say so again.
 | function | what it answers |
 | --- | --- |
 | `http_get$(url$) → str` | GET `url$`; the response body, whatever the status — an error page's body included. `""` when the request never completed, which is also what an empty 200 answers: pair it with `http_status` to tell those apart |
-| `http_status(url$) → num` | GET `url$`; the HTTP status code. `0`, and only `0`, when nothing connected — a dead host, a refused connection, a rejected certificate, or a url that was never sent: one carrying a control character (`http_error()` `6`), or one whose port is not 1–65535 |
+| `http_status(url$) → num` | GET `url$`; the HTTP status code. `0`, and only `0`, when nothing connected — a dead host, a refused connection, a rejected certificate, or a url that was never sent: one carrying a control character (`http_error()` `6`), or one whose port is not 1–65535, or one whose host or port RFC 3986 and the client's own parser would read differently (see below) |
 | `http_post$(url$, body$) → str` | POST `body$` to `url$`; the response body, on the same terms as `http_get$` |
 | `http_get$(c@, path$) → str` | GET `path$` on the client's base url, with everything the client carries; the body on the same terms as `http_get$(url$)`. `""` with `http_error()` `1` for a bad handle and `2` for a proxy it cannot use |
 | `http_status(c@, path$) → num` | the same request, answering its status; `0` when nothing connected or nothing was sent. Under a host that sets an execution budget, a query built from more params than the budget allows is a runtime error, the same refusal for all three client verbs |
@@ -319,7 +319,8 @@ against `/b/c/d;p?q` is asked for as `/b/c/g?a=1%262`, and `%2B`, `%2F`, `%3D`,
 `%2E%2E` is a name. Until 2026-10-09 FPC's resolver decoded the reference and
 re-encoded the result, so that request went out as `/b/c/g?a=1&2`, another query.
 A hop whose url carries a control character is refused like a first url
-(`http_error()` `6`, nothing sent), and so is a hop whose port is not 1–65535.
+(`http_error()` `6`, nothing sent), and so is a hop whose port is not 1–65535 or
+whose authority the two parsers read differently; a hop's fragment is never sent.
 **Cookie names match exactly** across a redirect too (RFC 6265 §5.3): `SID` and
 `sid` are two cookies, and a server's `THEME` does not replace the client's own
 `theme`. A `Set-Cookie` carrying a control character other than HTAB is ignored
@@ -340,8 +341,24 @@ BEGINS with a scheme — `/go?to=http://x/` is a path whose query holds a url.
 after the host's `:` — `0`, `65536`, `99999999999`, `8o` — is refused before
 anything is dialled, exactly as an unusable host is: status `0`, no body,
 `http_error()` `0`. An empty port, `http://h:/`, is RFC 3986's "no port" and means
-the scheme's default. Until 2026-10-09 the port was kept in 16 bits, so port
-`A + 65536` reached a server listening on `A`, and `:0` meant the default.
+the scheme's default: the url is sent as `http://h/` (§6.2.3). Until 2026-10-09 the
+port was kept in 16 bits, so port `A + 65536` reached a server listening on `A`,
+and `:0` meant the default; and until round 2 that day an empty port was refused
+in practice (sent on, through a proxy, as the host `h:`), because the client's
+parser read `h:` as the host.
+
+**The url judged is the url dialled.** Two parsers read a url: RFC 3986, which
+ends the authority at the FIRST `/`, `?` or `#`, and FPC's `ParseURI`, which the
+client dials with and which cuts at the LAST `#` and the LAST `?` before it looks
+for the authority. With a `?` or `#` before an `@` they read different hosts:
+`http://127.0.0.1:1?@127.0.0.1:(A+65536)?` is port 1 to the RFC and port `A` to
+`ParseURI`. So the **fragment** — everything from the first `#` (RFC 3986 §3.5) —
+is removed before the client sees the url, on every verb and every redirect hop
+(with two `#`, the text between them used to reach the request line), and a url
+on which the two readings still differ in scheme, userinfo, host or port is
+refused like a bad port: status `0`, nothing dialled, `http_error()` `0`. So is an
+authority with two `@` (a userinfo holds none, §3.2.1) and a `[` host that is not
+closed by `]` and followed by nothing or `:`.
 
 **Time.** A run with a time budget bounds a response as a whole, not only each read:
 a server that trickles a byte a second is cut off when the run's time is gone. The
@@ -400,3 +417,6 @@ as well. `tests/packages/26_http_fields.bas` reads the request head BYTE FOR BYT
 off a raw server the runner stands up: the refusals above, every example of RFC
 3986 §5.4.1 and §5.4.2, the percent-encoded Locations, the port bounds, params
 before a fragment, and exact cookie names across a redirect.
+`tests/packages/28_http_authority.bas` holds a url to the two readings: a `?` or
+`#` before an `@`, two `#` on every path, and a generated sweep of 218897 urls in
+which the library's verdict must match an oracle that asks `ParseURI` itself.

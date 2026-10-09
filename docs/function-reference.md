@@ -172,7 +172,7 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 | `hex$(n) → str` | hexadecimal text |
 | `bin$(n) → str` | binary text |
 | `oct$(n) → str` | octal text |
-| `val(s$) → num` | parse `s$` to a number; **0 unless the whole trimmed string is numeric** |
+| `val(s$) → num` | parse `s$` as [number text](language-reference.md#number-text), correctly rounded, any length; **0 unless the whole trimmed string is numeric** (a NUL anywhere makes it not) |
 | `valcode() → num` | 1-based position where the last `val` stopped; 0 when it was fully numeric |
 | `stri$(n) → str` | number → string, locale-invariant (`.` decimal); text that reads back as the same number, so `val(stri$(x)) = x` |
 | `str$(n) → str` | alias of `stri$` |
@@ -181,7 +181,7 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 
 | function | description |
 | --- | --- |
-| `isnumeric(s$) → num` | the whole string parses as a number |
+| `isnumeric(s$) → num` | the whole trimmed string is number text `val` can answer (finite) |
 | `isalpha(s$) → num` | every character is an ASCII letter |
 | `isdigits(s$) → num` | every character is a digit |
 | `isalnum(s$) → num` | every character is a letter or digit |

@@ -350,7 +350,15 @@ as unbounded as `PRINT` is, and with one set it is bounded by the same number.
 
 `MaxMemoryBytes` is measured from where the heap stood when the run began, so it
 bounds what the **script** adds and not how much your application was already
-holding. It is a ceiling and not a quota: an allocation already under way cannot
+holding. Over a prepared session it is cumulative — what the script still holds
+from one `CallFunction` counts against the next, so splitting work across calls
+does not escape it — but what **your application** allocates *between* calls
+(or between two `ReplRun` lines) is yours: the engine notes the heap when each
+call returns and, at the next one, moves its floor up by whatever grew while no
+script code ran. Until 2026-10-09 it did not, and a host that built 4 MiB of
+its own data between calls had a script that allocated nothing refused on its
+second call under an 8 MiB ceiling (`tests/probe_hostmem.lpr`). It is a ceiling
+and not a quota: an allocation already under way cannot
 be interrupted, so it stops the *next* one rather than preventing every
 overshoot. For an absolute bound on the process you still want a job object on
 Windows or an rlimit or cgroup on Linux — but without it, three instructions

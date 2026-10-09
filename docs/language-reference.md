@@ -125,6 +125,52 @@ a **file number** in the classic I/O statements (`open … as #1`, `print #1`,
 `input #1`, `close #1`), which names a channel rather than holding a value. File
 > work is done through handle functions (see *Files*).
 
+### Number text
+
+One reader turns decimal text into a number everywhere the language does it: a
+numeric **literal** in source, **`val`** and **`isnumeric`**, and a numeric
+**`input` / `input #` field**. So they all accept the same text and all give the
+same answer for it.
+
+**The grammar.** An optional sign, then digits with an optional `.` and more
+digits — at least one digit in all — then an optional exponent: `e` or `E`, an
+optional sign, and at least one digit.
+
+```
+[+|-] ( digits [ . [digits] ] | . digits ) [ (e|E) [+|-] digits ]
+```
+
+So `5.`, `.5`, `+5`, `1E+05` and `007` are numbers, and `.`, `e5`, `1e`, `1,5`,
+`0x10`, `inf` and `nan` are not. There is no length limit, on the digits or on
+the exponent, and a NUL byte anywhere makes the text **not** a number. A literal
+in source is the same text with no sign (a `-` in front is the operator) and,
+because a token cannot start with `.`, a digit first and a digit after any `.`.
+`val` and `isnumeric` first trim spaces, tabs, CR, LF, VT and FF from both ends
+— the bytes `isspace` calls whitespace, and nothing else.
+
+**The value is the nearest Double, correctly rounded** — IEEE 754 round-half-to-
+even, the same answer Python's `float` and C's `strtod` give, on every
+operating system. `1e126`, `57311.8821011` and `6.20035e28` each read as the
+Double nearest them; until 2026-10-09 the reader was the compiler library's,
+which was one step off for those and for about 7 random literals in 20 000, and
+which refused any number text longer than 255 characters. Text written out to
+hundreds of digits is rounded exactly too: `1.00000000000000011102230246251565404236316680908203125`
+is the exact midpoint between `1` and the next Double, so it reads as `1` (the
+even one), and the same digits followed by a `1` three hundred places further
+out read as the next Double up.
+
+A **plain integer** — no `.`, no exponent — that fits a 64-bit integer is read
+as an `int%`, exactly, even past `2^53` where a Double would round. `-0` (and
+`-0.0`) is a Double negative zero.
+
+**Out of range.** A value below half the smallest positive Double (about
+`2.47e-324`) is zero, with its sign; anything between reaches the subnormals,
+correctly rounded. A value at or past the midpoint above the largest Double
+(`1.7976931348623157e308`) has no Double, and each door says so in its own
+words: a literal is a compile error (`the number 1e999 is out of range`),
+`val` faults (`val has no finite result`), `isnumeric` answers `0`, and an
+`input` field is refused (`"1e999" is out of range`).
+
 ---
 
 ## Variables & CONST
@@ -593,6 +639,34 @@ line input note$                 ' reads the whole next line verbatim
 
 `input$(k)` reads exactly `k` **bytes**. A headless host with no console reads
 these as empty. (For reading from a *file*, see the `#`-channel forms under Files.)
+
+### Input fields
+
+How `input` and `input #` cut text into fields, and what a field becomes.
+
+- **From the console** a field runs to the next comma or the end of the line;
+  blanks inside it are kept and trailing ones dropped.
+- **From a file** (`input #`) blanks — space, tab, CR, LF — before a field are
+  skipped, line ends included, and an unquoted field ends at a comma **or** a
+  blank. A field that starts with `"` is quoted: it runs to the closing quote,
+  and `""` inside it is one quote. After a field, blanks are skipped and **one**
+  comma is taken as its separator. So `a ,b` is two fields, `a,,b` is three (the
+  middle one empty), and `a` then CR LF then `,b` is two.
+
+These rules do not depend on how the file is read: a channel is read a window
+at a time, and until 2026-10-09 a separator comma that fell just past the
+window's edge, behind a blank or a closing quote, was read as an extra, empty
+field.
+
+A field read into a **string** is kept as it is. Into a **number** or an
+`int%`, it is read as [number text](#number-text) after trimming the whitespace
+`val` trims (space, tab, CR, LF, VT, FF); an
+empty field is `0`, and text that is not a number is a catchable error
+(`"abc" is not a number`). A numeric field may also be an integer written in
+hexadecimal (`$FF`, `0x1F`), octal (`&17`) or binary (`%101`), with a sign —
+`input` has always read those, and `val` does not. A plain integer that fits
+64 bits is stored exactly. Into a **boolean**, `true`, `yes` and `1` are true
+and `false`, `no`, `0` and an empty field false, in any case.
 
 ---
 

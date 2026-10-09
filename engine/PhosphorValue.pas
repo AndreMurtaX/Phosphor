@@ -215,6 +215,76 @@ function KindName(K: TValueKind): String;
 function NumToInv(const V: Double): String;
 function ValToStr(const V: TValue): String;                // locale-independent
 
+// Number text -> number ------------------------------------------------------
+{ THE ENGINE'S ONE READER OF DECIMAL TEXT, and every door that turns script text
+  into a number goes through it: a numeric literal (PhosphorLexer), val() and
+  isnumeric() (PhosphorStrLib), an `input` / `input #` field (PhosphorVM's
+  CoerceField) and the round-trip check str$ makes on its own output
+  (ReadsBackAs, below). docs/language-reference.md#number-text states the grammar
+  and the rounding; this is that statement.
+
+  CORRECTLY ROUNDED, like Python's float() and every libc strtod: the Double
+  nearest the decimal value, a tie to the even one -- IEEE 754 round-half-even.
+  Until 2026-10-09 every door used FPC 3.2.2's Val, which is not: it scales the
+  digits by a cached power of ten that is itself inexact and rounds once with no
+  correction (rtl/inc/flt_core.inc val_real; FLOAT_ASCII_FALLBACK is off), so
+  `1e126` read as 5A17A2ECC414A040 where the nearest Double is ...03F, about 7
+  random literals in 20000 came back one ulp off, and Linux, where ValReal is
+  Extended, could read the same text differently from Windows. Val also goes
+  through a ShortString, so number text past 255 bytes was refused outright and
+  TryStrToFloat stopped reading at an embedded NUL.
+
+  THE GRAMMAR, all of it, byte for byte (no whitespace -- a caller that trims
+  says so, see TrimNumberSpace):
+      [sign] ( digits [ "." [digits] ] | "." digits ) [ (e|E) [sign] digits ]
+  so "5.", ".5", "+5" and "1E+05" are numbers and ".", "e5", "1e", "inf", "nan",
+  "0x10" and anything holding a NUL are not. Any number of digits, in the
+  mantissa and in the exponent.
+
+  THE ANSWER is a record rather than a Boolean because the doors ask different
+  questions of one parse:
+    Ok      the whole text is number text.
+    Stop    0 when Ok; otherwise the 1-based position of the first byte that does
+            not fit, or one past the end when the text ends too soon ("1e" stops
+            at 3). This is what valcode() reports.
+    Value   the correctly rounded Double, sign included (so "-0" is -0.0). A
+            magnitude past the largest Double -- at or beyond its upper midpoint,
+            1.797693134862315807...e308 -- is +-Inf, and each door refuses that in
+            its own documented words; one below half the smallest subnormal is a
+            signed zero, and everything between lands on a subnormal correctly.
+    IsInt   the text is a plain integer -- no ".", no exponent -- whose value fits
+            an Int64, and is not a negative zero; Int is then that value EXACTLY,
+            which a Double past 2^53 cannot hold. The lexer makes such a literal
+            an int%, and `input` stores such a field as one. "-0" is not IsInt:
+            its sign is real, and an Int64 has nowhere to keep it.
+
+  HOW. Up to 15 significant digits with a power of ten up to 10^22 is exact in
+  one IEEE operation (Clinger's fast path: both operands are exact Doubles, so the
+  one rounding the hardware does is the right one). Everything else is decided in
+  exact integer arithmetic: the decimal becomes N / D with N, D big integers, the
+  quotient is taken to 56 bits with the remainder kept, and the rounding is read
+  off the bits below the 53rd and the remainder -- no step of it is a guess. A
+  digit string longer than 800 significant digits is cut there with a sticky 1
+  after the cut, which cannot move the answer: a midpoint between two Doubles has
+  at most 768 significant digits, so nothing longer can sit between the cut text
+  and the real one. Dependency-free and identical on every OS: no Extended, no
+  library strtod. }
+type
+  TNumberText = record
+    Ok: Boolean;
+    Stop: Integer;
+    Value: Double;
+    IsInt: Boolean;
+    Int: Int64;
+  end;
+
+function ReadNumberText(const S: String): TNumberText;
+{ S without the whitespace val(), isnumeric() and the trimming doors drop: space,
+  tab, CR, LF, VT and FF, at both ends -- the set isspace() calls whitespace. Not
+  SysUtils.Trim, which drops EVERY byte below 33 and so turned "5" + NUL into 5:
+  a NUL is not whitespace, and text holding one is not a number. }
+function TrimNumberSpace(const S: String): String;
+
 // The UTF-8 codepoint layer --------------------------------------------------
 { ONE PLACE THAT KNOWS WHERE A CHARACTER STARTS, AND WHY IT LIVES HERE.
 
@@ -814,80 +884,457 @@ begin
   if neg then Result := '-' + Result;
 end;
 
-{ THE READ THAT DECIDES IS THE ONE THE CALLERS USE. TryStrToFloat with a DOUBLE
-  out-parameter is what val() and `input #` already call (PhosphorStrLib f_val,
-  PhosphorVM's field parser); sysstr.inc:1371-1375 hands it to TextToFloat, which
-  reaches `Val(S, Double(Value), E)` at :1332. Verifying a round trip with a
-  reader no caller uses is how a check passes while the thing it checks is wrong,
-  so this asks theirs.
+{ --- the exact half of ReadNumberText ----------------------------------------
+  A big natural number as little-endian 32-bit limbs with no zero limb on top;
+  the empty array is zero. Only what the reader needs: multiply-add by a small
+  number, a power of five, shifts, compare and subtract. }
+type
+  TBigNat = array of DWord;
 
-  AN EARLIER VERSION OF THIS COMMENT CLAIMED MORE THAN IS TRUE, and a review
-  caught it. It said StrToFloatDef would round a second time on a target with an
-  80-bit Extended while the Double overload would not. It would not: every FPC
-  Val on a real destination goes through fpc_Val_Real_ShortStr/AnsiStr, which
-  RETURN ValReal (compproc.inc:209-236 -- there is no size-specific variant), so
-  both doors narrow the same ValReal to a Double exactly once. Naming the Double
-  overload is a clarity choice here, not a correctness one.
+const
+  { 5^0 .. 5^13 and 10^0 .. 10^9: the largest powers that fit one limb. }
+  Pow5Limb: array[0..13] of DWord = (1, 5, 25, 125, 625, 3125, 15625, 78125,
+    390625, 1953125, 9765625, 48828125, 244140625, 1220703125);
+  Pow10Limb: array[0..9] of DWord = (1, 10, 100, 1000, 10000, 100000, 1000000,
+    10000000, 100000000, 1000000000);
+  { Significant digits kept before the sticky digit. A midpoint between two
+    Doubles needs at most 768 (an odd 54-bit number times 5^1075 at the bottom
+    of the subnormals); see the header of ReadNumberText. }
+  NumTextMaxSig = 800;
 
-  WHAT THIS CANNOT SEE, and it is the honest limit of the ladder below. FPC's Val
-  is not a correctly-rounded strtod: it accumulates the digits and then
-  multiplies or divides by a power of ten (sstrings.inc:1865-1888), so it can
-  answer a Double one ulp from the nearest. A spelling it accepts is therefore
-  text PHOSPHOR reads back exactly -- which is the promise val() and `input #`
-  keep, and the only promise the documentation makes -- and not, in general, text
-  that every reader in the world resolves the same way. Measured against a
-  correctly-rounded oracle over 474393 Doubles, 9 of the ladder's answers are
-  read as the neighbouring Double by such a reader; all 9 come off the FloatToStr
-  rung, all 9 are BYTE-IDENTICAL to what the engine wrote before this ladder
-  existed, and a 16-digit rung that added 71 more of them was measured and
-  removed. Closing the last 9 needs a correctly-rounded reader, which is a
-  bignum comparison of the decimal against the two midpoints, and not this
-  function.
+var
+  { 10^0 .. 10^22, each EXACT: built by multiplying by ten at initialization, not
+    written as literals, because a literal would be read by the compiler's own
+    text-to-float -- the routine this unit exists to stop trusting. Every power up
+    to 10^22 is exactly representable and each product of two exact values that
+    is itself representable is exact, so no step rounds. }
+  Pow10Exact: array[0..22] of Double;
 
-  ONE MORE CONSEQUENCE, FOR THE OTHER OPERATING SYSTEM, AND IT IS MEASURED AND
-  NOT FEARED. ValReal is Extended on Linux x86_64 and Double on Win64
-  (systemh.inc:183-194), so Val there narrows an 80-bit intermediate where Win64
-  narrows nothing, and the rung this function accepts DOES differ between them:
-  over 746198 Doubles swept identically on both machines -- built from their bit
-  patterns, since a value computed from a real literal is not even the same
-  Double on the two -- 14 take a different rung, 7 each way; an earlier sweep of
-  482068 counted 14 as well. Those 14 are also the ONLY values whose text the
-  other build reads as a different Double, and that was measured by having each
-  build read the other's file back rather than inferred: 14 misreads of 746198,
-  always by a single ulp, and the misread spelling is the 15-digit one every
-  time. Every spelling reads back on the machine that WROTE it, which is why
-  nothing but pinned TEXT can see any of this: on each system the same Val does
-  both the verifying and the reading.
+procedure InitPow10Exact;
+var i: Integer;
+begin
+  Pow10Exact[0] := 1;                    // integers, not real literals: see above
+  for i := 1 to High(Pow10Exact) do Pow10Exact[i] := Pow10Exact[i - 1] * 10;
+end;
 
-  THE SPELLING DIVERGES FAR MORE OFTEN THAN THE RUNG DOES, and an earlier
-  version of this comment quantified the whole thing with the rung's number.
-  ValReal is the WRITER's parameter too: str_real takes d: ValReal and rounds in
-  valReal locals (real2str.inc:27, and the maxDigits and TIntPartStack
-  declarations under it), so the digits Str(V:24) produces are themselves
-  platform-dependent. Over the same sweep, run on both machines: 670 of the
-  578913 values that take rung 2 on both are SPELLED DIFFERENTLY -- one in 864
-  -- against 4 of the 167271 that take rung 1. All 674 of those same-rung
-  differences name the SAME Double on both systems; only the 14 rung
-  disagreements do not.
+procedure BigTrim(var A: TBigNat);
+var n: Integer;
+begin
+  n := Length(A);
+  while (n > 0) and (A[n - 1] = 0) do Dec(n);
+  if n <> Length(A) then SetLength(A, n);
+end;
 
-  SO THE COST IS EXACTLY THIS, and it is aimed at whoever writes the next test.
-  The VALUE never differs between the two builds. A text file carried between
-  them is not guaranteed byte-identical. And a 17-DIGIT spelling is the fragile
-  thing to pin -- about one in 864 of them differs, not one in 34000 -- so a new
-  text pin belongs on a value that was spelled by both builds and compared, the
-  way the existing ones were: 3.1415926535897931, 0.33333333333333331 and
-  0.30000000000000004 are byte-identical on both, as is every short form
-  tests/suite/67_number_text_roundtrip.bas and tests/probe_value.lpr pin, and
-  both suites are byte-exact on both systems.
+procedure BigMulAdd(var A: TBigNat; AMul, AAdd: DWord);
+var
+  i: Integer;
+  carry: QWord;
+begin
+  carry := AAdd;
+  for i := 0 to High(A) do
+  begin
+    carry := QWord(A[i]) * AMul + carry;
+    A[i] := DWord(carry and $FFFFFFFF);
+    carry := carry shr 32;
+  end;
+  if carry <> 0 then
+  begin
+    SetLength(A, Length(A) + 1);
+    A[High(A)] := DWord(carry);
+  end;
+end;
 
-  A text that does not parse at all is not a round trip either, and back is not
-  read in that case: an unset out-parameter is not an answer. }
+procedure BigMulPow5(var A: TBigNat; AExp: Integer);
+begin
+  while AExp >= 13 do
+  begin
+    BigMulAdd(A, Pow5Limb[13], 0);
+    Dec(AExp, 13);
+  end;
+  if AExp > 0 then BigMulAdd(A, Pow5Limb[AExp], 0);
+end;
+
+function BigBitLen(const A: TBigNat): Integer;
+var top: DWord;
+begin
+  if Length(A) = 0 then Exit(0);
+  top := A[High(A)];
+  Result := High(A) * 32;
+  while top <> 0 do
+  begin
+    Inc(Result);
+    top := top shr 1;
+  end;
+end;
+
+procedure BigShl(var A: TBigNat; ABits: Integer);
+var
+  w, b, i, old: Integer;
+begin
+  if (Length(A) = 0) or (ABits <= 0) then Exit;
+  w := ABits div 32;
+  b := ABits mod 32;
+  old := Length(A);
+  SetLength(A, old + w + 1);
+  if b = 0 then
+  begin
+    A[old + w] := 0;
+    for i := old - 1 downto 0 do A[i + w] := A[i];
+  end
+  else
+  begin
+    // top down, so every limb is read before anything is written over it
+    A[old + w] := A[old - 1] shr (32 - b);
+    for i := old - 1 downto 1 do
+      A[i + w] := DWord((QWord(A[i]) shl b) and $FFFFFFFF) or (A[i - 1] shr (32 - b));
+    A[w] := DWord((QWord(A[0]) shl b) and $FFFFFFFF);
+  end;
+  for i := 0 to w - 1 do A[i] := 0;
+  BigTrim(A);
+end;
+
+procedure BigShr1(var A: TBigNat);
+var i: Integer;
+begin
+  for i := 0 to High(A) - 1 do
+    A[i] := (A[i] shr 1) or DWord((QWord(A[i + 1]) and 1) shl 31);
+  if Length(A) > 0 then A[High(A)] := A[High(A)] shr 1;
+  BigTrim(A);
+end;
+
+function BigCmp(const A, B: TBigNat): Integer;
+var i: Integer;
+begin
+  if Length(A) <> Length(B) then
+  begin
+    if Length(A) > Length(B) then Exit(1) else Exit(-1);
+  end;
+  for i := High(A) downto 0 do
+    if A[i] <> B[i] then
+    begin
+      if A[i] > B[i] then Exit(1) else Exit(-1);
+    end;
+  Result := 0;
+end;
+
+{ A := A - B, for A >= B. }
+procedure BigSub(var A: TBigNat; const B: TBigNat);
+var
+  i: Integer;
+  d, borrow: Int64;
+begin
+  borrow := 0;
+  for i := 0 to High(A) do
+  begin
+    d := Int64(A[i]) - borrow;
+    if i <= High(B) then d := d - Int64(B[i]);
+    if d < 0 then
+    begin
+      d := d + Int64($100000000);
+      borrow := 1;
+    end
+    else
+      borrow := 0;
+    A[i] := DWord(d);
+  end;
+  BigTrim(A);
+end;
+
+function TrimNumberSpace(const S: String): String;
+var
+  a, b: Integer;
+begin
+  a := 1;
+  b := Length(S);
+  while (a <= b) and (S[a] in [' ', #9, #10, #11, #12, #13]) do Inc(a);
+  while (b >= a) and (S[b] in [' ', #9, #10, #11, #12, #13]) do Dec(b);
+  if (a = 1) and (b = Length(S)) then Result := S
+  else Result := Copy(S, a, b - a + 1);
+end;
+
+function ReadNumberText(const S: String): TNumberText;
+const
+  SignBit = QWord($8000000000000000);
+var
+  n, p, intStart, nInt, fracStart, nFrac, total, first, last, sigLen, keep,
+    k, cnt, i, L, sh: Integer;
+  neg, hasDot, hasExp, eneg, sticky: Boolean;
+  expv, E, top, e2, biased: Int64;
+  acc, lim, q, m, rb, t: QWord;
+  chunk: DWord;
+  num, den: TBigNat;
+  dv: Double;
+  bits: TDoubleBits;
+
+  { Digit K (0-based) of the run the integer and fraction parts make together. }
+  function DigitAt(K: Integer): Integer;
+  begin
+    if K < nInt then Result := Ord(S[intStart + K]) - Ord('0')
+    else Result := Ord(S[fracStart + K - nInt]) - Ord('0');
+  end;
+
+  function IsDig(P: Integer): Boolean;
+  begin
+    Result := (P <= n) and (S[P] >= '0') and (S[P] <= '9');
+  end;
+
+begin
+  Result := Default(TNumberText);
+  n := Length(S);
+  p := 1;
+  neg := False;
+  if (p <= n) and ((S[p] = '+') or (S[p] = '-')) then
+  begin
+    neg := S[p] = '-';
+    Inc(p);
+  end;
+  intStart := p;
+  while IsDig(p) do Inc(p);
+  nInt := p - intStart;
+  fracStart := p;
+  nFrac := 0;
+  hasDot := False;
+  if (p <= n) and (S[p] = '.') then
+  begin
+    hasDot := True;
+    Inc(p);
+    fracStart := p;
+    while IsDig(p) do Inc(p);
+    nFrac := p - fracStart;
+  end;
+  if nInt + nFrac = 0 then
+  begin
+    Result.Stop := p;                      // no digit at all: "", "-", ".", "e5"
+    Exit;
+  end;
+  expv := 0;
+  hasExp := False;
+  if (p <= n) and ((S[p] = 'e') or (S[p] = 'E')) then
+  begin
+    Inc(p);
+    eneg := False;
+    if (p <= n) and ((S[p] = '+') or (S[p] = '-')) then
+    begin
+      eneg := S[p] = '-';
+      Inc(p);
+    end;
+    if not IsDig(p) then
+    begin
+      Result.Stop := p;                    // "1e", "1e+", "1ex"
+      Exit;
+    end;
+    { SATURATED, not overflowed: past 10^11 the exponent's own digits cannot
+      change the answer (a text is at most 2^31 bytes, so no run of zeros can
+      bring an exponent that size back into range), and they are still READ, so
+      a stray byte after them is still refused. }
+    while IsDig(p) do
+    begin
+      if expv < 100000000000 then expv := expv * 10 + (Ord(S[p]) - Ord('0'));
+      Inc(p);
+    end;
+    if eneg then expv := -expv;
+    hasExp := True;
+  end;
+  if p <= n then
+  begin
+    Result.Stop := p;                      // a byte the grammar has no place for
+    Exit;
+  end;
+  Result.Ok := True;
+
+  // A plain integer that fits an Int64 is also answered exactly as one.
+  if not (hasDot or hasExp) then
+  begin
+    lim := QWord(High(Int64)) + QWord(Ord(neg));
+    acc := 0;
+    Result.IsInt := True;
+    for i := intStart to intStart + nInt - 1 do
+    begin
+      k := Ord(S[i]) - Ord('0');
+      if acc > (lim - QWord(k)) div 10 then
+      begin
+        Result.IsInt := False;
+        Break;
+      end;
+      acc := acc * 10 + QWord(k);
+    end;
+    if Result.IsInt then
+    begin
+      if not neg then Result.Int := Int64(acc)
+      else if acc = 0 then Result.IsInt := False     // "-0": a Double, signed
+      else Result.Int := -Int64(acc - 1) - 1;        // reaches Low(Int64) safely
+    end;
+  end;
+
+  // The significant digits: the run without its leading and trailing zeros.
+  total := nInt + nFrac;
+  first := 0;
+  while (first < total) and (DigitAt(first) = 0) do Inc(first);
+  bits.Q := 0;
+  if first = total then
+  begin
+    if neg then bits.Q := SignBit;         // a zero, with its sign
+    Result.Value := bits.D;
+    Exit;
+  end;
+  last := total - 1;
+  while DigitAt(last) = 0 do Dec(last);
+  sigLen := last - first + 1;
+  // value = (those digits as an integer) * 10^E, and lies in [10^(top-1), 10^top)
+  E := expv - nFrac + (total - 1 - last);
+  top := E + sigLen;
+  if top >= 310 then                       // >= 10^309, past every Double
+  begin
+    bits.Q := ExpMask;
+    if neg then bits.Q := bits.Q or SignBit;
+    Result.Value := bits.D;
+    Exit;
+  end;
+  if top <= -324 then                      // < 10^-324, under half the least subnormal
+  begin
+    if neg then bits.Q := SignBit;
+    Result.Value := bits.D;
+    Exit;
+  end;
+
+  // Clinger's fast path: an exact integer and an exact power of ten, one rounding.
+  if (sigLen <= 15) and (E >= -22) and (E <= 22) then
+  begin
+    acc := 0;
+    for k := first to last do acc := acc * 10 + QWord(DigitAt(k));
+    dv := Int64(acc);                      // < 10^15 < 2^53: exact
+    if E >= 0 then dv := dv * Pow10Exact[E]
+    else dv := dv / Pow10Exact[-E];
+    if neg then dv := -dv;
+    Result.Value := dv;
+    Exit;
+  end;
+
+  // The exact path. The digits, cut with a sticky 1 if there are too many.
+  keep := sigLen;
+  sticky := sigLen > NumTextMaxSig;
+  if sticky then keep := NumTextMaxSig;
+  num := nil;
+  k := first;
+  while k < first + keep do
+  begin
+    chunk := 0;
+    cnt := 0;
+    while (cnt < 9) and (k < first + keep) do
+    begin
+      chunk := chunk * 10 + DWord(DigitAt(k));
+      Inc(k);
+      Inc(cnt);
+    end;
+    BigMulAdd(num, Pow10Limb[cnt], chunk);
+  end;
+  if sticky then
+  begin
+    BigMulAdd(num, 10, 1);
+    E := E + (sigLen - keep) - 1;
+  end;
+  { value = num * 10^E = num * 5^E * 2^E. The power of five goes into num or den;
+    the power of two only moves the binary exponent. }
+  SetLength(den, 1);
+  den[0] := 1;
+  if E >= 0 then BigMulPow5(num, Integer(E)) else BigMulPow5(den, Integer(-E));
+  { Scale so the quotient has 55 or 56 bits: num/den lies strictly between
+    2^(bn-bd-1) and 2^(bn-bd+1), so after 2^-s it lies in (2^54, 2^56). }
+  e2 := BigBitLen(num) - BigBitLen(den) - 55;
+  if e2 < 0 then BigShl(num, Integer(-e2)) else BigShl(den, Integer(e2));
+  e2 := e2 + E;                            // value = (q + rem/den) * 2^e2
+  // Long division, one quotient bit at a time: q < 2^56, so 57 steps.
+  BigShl(den, 56);
+  q := 0;
+  for i := 56 downto 0 do
+  begin
+    if BigCmp(num, den) >= 0 then
+    begin
+      BigSub(num, den);
+      q := q or (QWord(1) shl i);
+    end;
+    if i > 0 then BigShr1(den);
+  end;
+  sticky := Length(num) > 0;               // a non-zero remainder
+  // Keep 53 bits -- fewer at the bottom of the subnormals -- and round.
+  L := 0;
+  t := q;
+  while t <> 0 do
+  begin
+    Inc(L);
+    t := t shr 1;
+  end;
+  sh := L - 53;
+  if e2 + sh < -1074 then sh := Integer(-1074 - e2);
+  if sh >= 58 then                         // under 2^-1076: rounds to zero
+  begin
+    if neg then bits.Q := SignBit;
+    Result.Value := bits.D;
+    Exit;
+  end;
+  e2 := e2 + sh;                           // the exponent of the kept lowest bit
+  m := q shr sh;
+  rb := (q shr (sh - 1)) and 1;
+  if (q and ((QWord(1) shl (sh - 1)) - 1)) <> 0 then sticky := True;
+  if (rb = 1) and (sticky or ((m and 1) = 1)) then Inc(m);    // half-even
+  if m = QWord(1) shl 53 then
+  begin
+    m := QWord(1) shl 52;
+    Inc(e2);
+  end;
+  if m >= QWord(1) shl 52 then
+  begin
+    biased := e2 + 1075;
+    if biased >= 2047 then bits.Q := ExpMask
+    else bits.Q := (QWord(biased) shl 52) or (m and FracMask);
+  end
+  else
+    bits.Q := m;                           // a subnormal: e2 is -1074
+  if neg then bits.Q := bits.Q or SignBit;
+  Result.Value := bits.D;
+end;
+
+{ THE READ THAT DECIDES IS THE ONE THE CALLERS USE. ReadNumberText is what a
+  literal, val(), isnumeric() and `input #` all read number text with, so the
+  ladder below asks it whether a spelling comes back. Verifying a round trip with
+  a reader no caller uses is how a check passes while the thing it checks is
+  wrong.
+
+  AND THAT READER IS CORRECTLY ROUNDED, which is what makes the promise bigger
+  than this build. Until 2026-10-09 the check was TryStrToFloat -- FPC's Val,
+  which can answer a Double one ulp from the nearest -- so a spelling it accepted
+  was text PHOSPHOR read back, not text every reader in the world resolves the
+  same way. Measured then against a correctly-rounded oracle over 474393 Doubles:
+  9 of the ladder's answers named the neighbouring Double, all 9 off the
+  FloatToStr rung, and the Linux build (where ValReal is Extended and Val narrows
+  an 80-bit intermediate) read 14 of 746198 Windows spellings as the value next
+  door. Asked of a correctly-rounded reader, a rung-1 spelling is kept only when
+  it names V for EVERY such reader -- Python's float(), C's strtod, and this
+  engine on either OS -- and those few now fall through to rung 2.
+  tests/number_text_sweep.py reads str$ of 102740 Doubles back through float()
+  and through val() on every run.
+
+  WHAT IS STILL PLATFORM-DEPENDENT IS THE SPELLING, NOT THE VALUE. ValReal is the
+  WRITER's parameter too: str_real takes d: ValReal and rounds in valReal locals
+  (real2str.inc:27), so the digits FloatToStr and Str(V:24) produce can differ
+  between Win64 and Linux x86-64 -- measured before this reader, 670 of 578913
+  rung-2 values and 4 of 167271 rung-1 values were spelled differently, every
+  pair naming the same Double. Each spelling is still verified by the same
+  correctly-rounded reader on its own machine, so both read back everywhere; a
+  text file carried between the two is not guaranteed byte-identical. A 17-digit
+  spelling is the fragile thing to pin: a new text pin belongs on a value spelled
+  by both builds and compared, the way 3.1415926535897931, 0.33333333333333331,
+  0.30000000000000004 and every short form tests/suite/67_number_text_roundtrip.bas
+  and tests/probe_value.lpr pin were.
+
+  A text that does not parse at all is not a round trip either: Ok is asked
+  before Value is read. }
 function ReadsBackAs(const S: String; const V: Double): Boolean;
 var
-  back: Double;
+  back: TNumberText;
 begin
-  Result := TryStrToFloat(S, back, InvariantFS) and
-            (CompareByte(back, V, SizeOf(Double)) = 0);
+  back := ReadNumberText(S);
+  Result := back.Ok and (CompareByte(back.Value, V, SizeOf(Double)) = 0);
 end;
 
 { A NUMBER MUST COME BACK AS THE NUMBER THAT WENT IN, and FloatToStr alone
@@ -928,11 +1375,15 @@ end;
   resolves that tie in the writer's favour, so the rung's own check could never
   see it. This is the project's first-named failure mode, checking a different
   copy of the value than the one that acts, and the only defence against it is
-  not to offer a rung whose correctness rests on the checker. Removing it takes
-  the oracle's count from 80 to 9, and those 9 are FloatToStr's own answers,
-  unchanged. The price is ~38% of spellings carrying a 17th digit that a
-  correctly-rounded shortest form would not need; a wrong number is worse than a
-  long one.
+  not to offer a rung whose correctness rests on the checker. Removing it took
+  the oracle's count from 80 to 9, those 9 being FloatToStr's own answers that
+  the old Val accepted -- and since 2026-10-09 the checker is correctly rounded
+  (ReadNumberText), so those 9 fall through to rung 2 and the count is 0. (With
+  a correct checker a 16-digit rung would now be SAFE; it is not offered because
+  it would change the spelling of every value whose 17-digit form is printed
+  today, and nothing was measured to justify that churn.) The price is ~38% of
+  spellings carrying a 17th digit that a correctly-rounded shortest form would
+  not need; a wrong number is worse than a long one.
 
   THE COMPARISON IS ON THE BYTES of the two Doubles, not with `=`. FloatToStr
   writes -0.0 as "0", which reads back as +0.0; `=` calls that a successful
@@ -1821,5 +2272,6 @@ initialization
   InvariantFS := DefaultFormatSettings;
   InvariantFS.DecimalSeparator := '.';
   InvariantFS.ThousandSeparator := #0;
+  InitPow10Exact();
 
 end.

@@ -81,3 +81,4 @@
 80_resume_loop_tail
 81_chan_read_linear
 83_chr_surrogates
+84_number_text

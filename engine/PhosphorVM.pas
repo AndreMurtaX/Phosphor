@@ -360,6 +360,13 @@ type
     FHeapBase: PtrUInt;     // heap in use when this run began; see MaxMemoryBytes
     FUncharged: Int64;      // bytes added since the heap was last consulted
     FHeapBased: Boolean;    // FHeapBase has been sampled for this session
+    { THE HEAP WHEN THE HOST LAST GOT CONTROL BACK. Set when an outermost
+      execution (FExecDepth back to 0) ends; read when the next one begins, by
+      HostGapCredit, which moves FHeapBase up by whatever grew in between --
+      bytes the HOST allocated while no script code ran. FHeapIdle says the mark
+      is live. See HostGapCredit for why this is a credit and not a re-base. }
+    FHeapIdleMark: PtrUInt;
+    FHeapIdle: Boolean;
     FStartTick: QWord;
     // Debug tracing, set by the TRACE statement (opTrace). BREAKPOINT reports the
     // frame through OnBreakpoint only while this is on; off, it is a pure no-op.
@@ -549,6 +556,10 @@ type
     { Give the two wall clocks back every millisecond of the stopped window that
       has gone by since the last mark, and re-mark at now. See its body. }
     procedure DebugCreditPark;
+    { The memory ceiling's two marks around a HOST-initiated execution: Credit
+      at entry, Mark at exit. Both act only at the outermost level. See bodies. }
+    procedure HostGapCredit;
+    procedure HostGapMark;
     { True when ALine is one of the armed lines. Binary search: a session with a
       hundred breakpoints must not make `continue` linear in them. }
     function DebugLineArmed(ALine: Integer): Boolean;
@@ -1034,22 +1045,26 @@ function CoerceField(const AField: String; ATypeCode: Integer; out V: TValue): T
 var
   iv: Int64;
   dv: Double;
-  fs: TFormatSettings;
-  low: String;
+  low, trimmed: String;
+  num: TNumberText;
 
-  { A MINUS AND NOTHING BUT ZEROS -- spelled out rather than inferred from the
-    parsed value. "the Int64 came out 0 and the text has a minus in it" would
-    also catch "-$0", which TryStrToInt64 reads as a hexadecimal zero and
-    TryStrToFloat cannot read at all, so a field that works today would start
-    failing. This asks for the one shape `print #` can actually write. }
-  function IsMinusZeroText(const S: String): Boolean;
+  { A RADIX-PREFIXED INTEGER: $FF, &17, %101 or 0x1F, signed or not. FPC's
+    TryStrToInt64 reads these, `input` has always taken them through it, and a
+    field that works today keeps working (the "-$0" this function once protected
+    by name is one). It is now asked ONLY for this shape and never for decimal
+    text, which the engine's own reader answers: TryStrToInt64 also stops at an
+    embedded NUL and calls what came before it the number ("1" + NUL + "x" read
+    as 1), refuses past 255 bytes, and reads no fraction. }
+  function IsRadixText(const S: String): Boolean;
   var
-    zi: Integer;
+    ri: Integer;
   begin
-    Result := (Length(S) >= 2) and (S[1] = '-');
-    if not Result then Exit;
-    for zi := 2 to Length(S) do
-      if S[zi] <> '0' then Exit(False);
+    if Pos(#0, S) > 0 then Exit(False);
+    ri := 1;
+    if (ri <= Length(S)) and ((S[ri] = '+') or (S[ri] = '-')) then Inc(ri);
+    Result := (ri <= Length(S)) and
+              ((S[ri] in ['$', '&', '%']) or
+               ((ri < Length(S)) and (S[ri] = '0') and (S[ri + 1] in ['x', 'X'])));
   end;
 
 begin
@@ -1064,31 +1079,37 @@ begin
           if ATypeCode = 2 then V := ValInt(0) else V := ValInt(0);
           Exit;
         end;
-        { A NEGATIVE ZERO IS NOT AN INTEGER ZERO, and this is the one reader in
-          the engine that could not bring back what the writer wrote. `print #`
-          spells a negative zero "-0" now, because the sign is real information
-          (see NumToInv in PhosphorValue); TryStrToInt64 accepts "-0" and answers
-          the Int64 0, so the sign died here and `input #` handed back a
-          DIFFERENT number from the one printed -- exactly the defect this whole
-          change is about, one door further along. That one spelling goes to the
-          float branch below, where -0.0 survives.
+        { THE ENGINE'S ONE READER OF NUMBER TEXT (PhosphorValue.ReadNumberText):
+          correctly rounded, any length, and a NUL makes the field not a number.
+          Until 2026-10-09 this was TryStrToInt64 then TryStrToFloat -- FPC's
+          Val, one ulp off on some fields, refusing any past 255 bytes, and
+          reading only up to an embedded NUL.
 
-          Nothing else moves. The diverted set is exactly "-0", "-00", "-000" and
-          so on -- see IsMinusZeroText above, which asks the TEXT and not the
-          parsed value for that reason -- so "-1", "0", "-$0" and every other
-          field take the int path byte for byte as before; and an int% target
-          still lands on 0, because the float branch rounds -0.0 to the Int64 0. }
-        if TryStrToInt64(AField, iv) and not IsMinusZeroText(AField) then
+          A plain integer that fits an Int64 is stored as one, exactly (IsInt).
+          A NEGATIVE ZERO IS NOT AN INTEGER ZERO: `print #` spells -0.0 "-0"
+          because the sign is real (see NumToInv), and the reader answers "-0",
+          "-00" and so on as the Double -0.0 rather than IsInt -- so `input #`
+          brings back the number that was printed, and an int% target still
+          lands on 0, because the float branch rounds -0.0 to the Int64 0.
+
+          TRIMMED FIRST, with val()'s whitespace set (TrimNumberSpace): a console
+          field keeps its leading blanks -- `input a, b` over "3, 4" hands this
+          " 4" -- and both FPC readers it replaces skipped them. }
+        trimmed := TrimNumberSpace(AField);
+        num := ReadNumberText(trimmed);
+        if num.Ok and num.IsInt then
         begin
-          if ATypeCode = 2 then V := ValInt(iv)
-          else V := ValInt(iv);   // vtNumber holds an int% happily
+          V := ValInt(num.Int);   // vtNumber holds an int% happily
           Exit;
         end;
-        fs := DefaultFormatSettings;
-        fs.DecimalSeparator := '.';
-        fs.ThousandSeparator := #0;
-        if TryStrToFloat(AField, dv, fs) then
+        if (not num.Ok) and IsRadixText(trimmed) and TryStrToInt64(trimmed, iv) then
         begin
+          V := ValInt(iv);
+          Exit;
+        end;
+        if num.Ok then
+        begin
+          dv := num.Value;
           { NON-FINITE IS DECIDED FIRST, BEFORE ANY COMPARISON TOUCHES dv.
 
             The int% branch below reached InI64Range, whose own comment says "NaN
@@ -1113,8 +1134,8 @@ begin
 
             "no TValue ever holds a non-finite Double" (see FiniteD in
             PhosphorValue) is what makes it safe to run a program with the
-            invalid-operation trap unmasked -- and TryStrToFloat is perfectly happy
-            to answer a field like 1e999 with +Inf. `input x` over that field used
+            invalid-operation trap unmasked -- and the reader answers a field like
+            1e999 with +Inf, as it must. `input x` over that field used
             to store the Inf and carry on; the next operation on it (x - x, an Inf
             to NaN) then raised EInvalidOp OUTSIDE the engine's error path, so the
             process died with "unhandled EInvalidOp" at exit 3 and the running
@@ -1519,66 +1540,78 @@ begin
 end;
 
 function TPhosphorVM.ChanField(ANum, ATypeCode: Integer; out V: TValue): TPhosphorError;
-var field: String; i, j, n, blanks, scan: Integer; found: Boolean;
+var field: String; i, n, off, phase: Integer; c: Char; found, quoted, more: Boolean;
 begin
   V := Default(TValue);
   if not (ValidChannel(ANum) and FChannels[ANum].Open) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open'));
   if not (FChannels[ANum].Mode in [cmInput, cmBinary]) then
     Exit(MakeError(peRuntime, 'file #' + IntToStr(ANum) + ' is not open for input'));
-  // Read ahead until the window holds THE WHOLE FIELD (or the file ends).
-  { EACH PASS RESUMES WHERE THE LAST ONE STOPPED. Both scans used to restart at
-    the cursor after every ChanMore, so a field N bytes long was scanned about
-    N / 64 KB times over -- quadratic inside one INPUT, on top of the copying
-    ChanMore did (tests/suite/81_chan_read_linear.bas). What a pass has learned
-    is kept as OFFSETS: `blanks` from the cursor, `scan` from the field's first
-    byte. ChanMore drops the consumed prefix and moves the cursor to 1, which
-    moves every index but no offset from the cursor, so they stay true.
+  { Read ahead until the window holds EVERYTHING NextFieldStr WILL CONSUME: the
+    blanks before the field, the field, the blanks after it, and the byte after
+    those -- the separator comma it takes, or the first byte of whatever comes
+    next -- or until the file ends.
+
+    THE LAST PART WAS MISSING until 2026-10-09, and it is a phantom field. The
+    scan stopped at the field's terminator, but NextFieldStr goes on past it: it
+    skips the trailing blanks and takes ONE comma. When the terminator or those
+    blanks were the last bytes of the window, the comma was not in it yet, so it
+    was left behind and the next INPUT read it as an EMPTY field -- "a ,b" with
+    the blank on the window's last byte came back as "a", "" and "b", and every
+    later field was one place out. A CRLF after the file's last field did the
+    same at the end. tests/classic/20_input_field_window.bas places twelve
+    shapes on every offset around four window edges.
+
+    EACH PASS RESUMES WHERE THE LAST ONE STOPPED. Rescanning from the cursor
+    after every ChanMore made a field N bytes long cost about N / 64 KB scans
+    -- quadratic inside one INPUT (tests/suite/81_chan_read_linear.bas). So the
+    scan is a small state machine whose position is an OFFSET from the cursor,
+    `off`, and whose `phase` says what it is reading: 0 the blanks before the
+    field, 1 the field (quoted or not), 2 the blanks after it. ChanMore drops
+    the consumed prefix and moves the cursor to 1, which moves every index but
+    no offset from the cursor, so the state stays true across a refill.
 
     A QUOTE AS THE LAST BYTE OF THE WINDOW DECIDES NOTHING. It closes the field,
     or it is the first half of a "" escape whose second half has not been read
-    yet; the old scan called it a close, and an escape that straddled the window
-    boundary split the field there. It is now looked at again once the next
+    yet; an older scan called it a close, and an escape that straddled the
+    window boundary split the field there. It is looked at again once the next
     byte is in -- and at the end of the file it is a close, as NextFieldStr
     reads it. }
-  blanks := 0;
-  scan := -1;
+  off := 0;
+  phase := 0;
+  quoted := False;
   repeat
     found := False;
+    more := False;
     n := Length(FChannels[ANum].Buf);
-    // Where the field really begins: after the blanks NextFieldStr will skip.
-    // Looking for a terminator from the cursor found those blanks and stopped.
-    i := FChannels[ANum].Pos + blanks;
-    while (i <= n) and ((FChannels[ANum].Buf[i] = ' ') or (FChannels[ANum].Buf[i] = #9) or
-                        (FChannels[ANum].Buf[i] = #13) or (FChannels[ANum].Buf[i] = #10)) do
-      Inc(i);
-    blanks := i - FChannels[ANum].Pos;
-    if i <= n then
-      if FChannels[ANum].Buf[i] = '"' then
-      begin
-        // a quoted field ends at its closing quote; "" is an escaped one
-        if scan < 1 then scan := 1;
-        j := i + scan;
-        while j <= n do
-          if FChannels[ANum].Buf[j] <> '"' then Inc(j)
-          else if j = n then Break                  // undecided: see above
-          else if FChannels[ANum].Buf[j + 1] = '"' then Inc(j, 2)
-          else begin found := True; Break; end;
-        scan := j - i;
-      end
-      else
-      begin
-        if scan < 0 then scan := 0;
-        j := i + scan;
-        while j <= n do
-        begin
-          if (FChannels[ANum].Buf[j] = ',') or (FChannels[ANum].Buf[j] = ' ') or
-             (FChannels[ANum].Buf[j] = #9) or (FChannels[ANum].Buf[j] = #13) or
-             (FChannels[ANum].Buf[j] = #10) then begin found := True; Break; end;
-          Inc(j);
-        end;
-        scan := j - i;
+    i := FChannels[ANum].Pos + off;
+    while (i <= n) and not (found or more) do
+    begin
+      c := FChannels[ANum].Buf[i];
+      case phase of
+        0: if (c = ' ') or (c = #9) or (c = #13) or (c = #10) then Inc(i)
+           else
+           begin
+             phase := 1;
+             quoted := c = '"';
+             if quoted then Inc(i);           // past the opening quote
+           end;
+        1: if quoted then
+           begin
+             if c <> '"' then Inc(i)
+             else if i = n then more := True  // undecided: see above
+             else if FChannels[ANum].Buf[i + 1] = '"' then Inc(i, 2)
+             else begin Inc(i); phase := 2; end;   // past the closing quote
+           end
+           else if (c = ',') or (c = ' ') or (c = #9) or (c = #13) or (c = #10) then
+             phase := 2                       // the terminator is phase 2's to read
+           else
+             Inc(i);
+        2: if (c = ' ') or (c = #9) or (c = #13) or (c = #10) then Inc(i)
+           else found := True;                // the comma, or what follows: in hand
       end;
+    end;
+    off := i - FChannels[ANum].Pos;
     if found then Break;
   until not ChanMore(ANum, 0);
   field := NextFieldStr(FChannels[ANum].Buf, FChannels[ANum].Pos, True);
@@ -2164,6 +2197,7 @@ begin
   FStartTick := GetTickCount64;
   FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
   FHeapBased := True;
+  FHeapIdle := False;             // a fresh floor: no gap before it to credit
   FTrace := False;
   // The two per-run frame resets the step state machine's enumeration names. The
   // ARMING survives (a host arms once and debugs every run); the step does not.
@@ -2192,6 +2226,7 @@ begin
   finally
     Dec(FExecDepth);
     LeaveFPU(savedMask);
+    HostGapMark();                 // the host has control again; see HostGapCredit
   end;
 end;
 
@@ -2242,11 +2277,16 @@ begin
     memory ceiling mean nothing across a session: five lines each just under a
     256 MB ceiling reached 2575 MB and answered rc 0. The base is taken once, when
     the session starts, and ResetHandles-level teardown is what starts a new one. }
+  { ...BUT WHAT THE HOST ADDED BETWEEN TWO LINES IS NOT THE SESSION'S. The base
+    survives; it moves up by the heap that grew while the host had control. }
   if not FHeapBased then
   begin
     FHeapBase := GetFPCHeapStatus().CurrHeapUsed;
     FHeapBased := True;
-  end;
+    FHeapIdle := False;
+  end
+  else
+    HostGapCredit();
   savedMask := EnterFPU();
   // The second of three ExecFrom entries. See FExecDepth.
   Inc(FExecDepth); Inc(FExecEntries);
@@ -2263,7 +2303,56 @@ begin
   finally
     Dec(FExecDepth);
     LeaveFPU(savedMask);
+    HostGapMark();
   end;
+end;
+
+{ THE HOST'S BYTES BETWEEN TWO CALLS ARE THE HOST'S (2026-10-09).
+
+  MaxMemoryBytes is cumulative over a session -- docs/embedding.md says so, and
+  RunFrom above records why it must be: re-sampling the floor per REPL line let
+  five lines each just under a 256 MB ceiling reach 2575 MB. But the floor was
+  taken once and nothing else ever moved it up, so RoomFor's "process heap now
+  minus the floor" also counted every byte the HOST allocated between two
+  CallFunctions, or between two REPL lines: a prepared session whose script
+  allocated nothing was refused on its second call because the application had
+  built 4 MiB of its own data in between (tests/probe_hostmem.lpr).
+
+  A RE-BASE AT EACH CALL IS THE WRONG FIX, and the probe pins that too: it would
+  forgive the script everything it already holds, so splitting the work across
+  calls would escape the ceiling. Instead this is the debug seam's rule (see
+  DebugPoll's Ask) one level up. HostGapMark samples the heap when an OUTERMOST
+  execution ends -- FExecDepth back at 0, so the host has control and no script
+  code can run until it calls in again -- and HostGapCredit, at the next
+  outermost entry, moves the floor up by whatever the heap gained in between.
+  Only UP: a host that freed memory while it had control leaves the heap lower,
+  and lowering the floor to match would hand the script a tighter ceiling for
+  memory it never held; RoomFor already lowers the floor by its own rule when the
+  heap falls below it.
+
+  WHAT IS NOT CREDITED. A nested entry (FExecDepth > 0 -- a `callfunc`, an `on
+  error call` handler, a watch evaluated from a debugger stop) runs inside an
+  execution, so nothing is marked or credited at it; the stop itself has its own
+  credit in DebugPoll, which already declines when the host ran script code in
+  the window. A Run takes a fresh floor and clears the mark. }
+procedure TPhosphorVM.HostGapCredit;
+var
+  heapNow: PtrUInt;
+begin
+  if FExecDepth <> 0 then Exit;
+  if FHeapIdle and FHeapBased then
+  begin
+    heapNow := GetFPCHeapStatus().CurrHeapUsed;
+    if heapNow > FHeapIdleMark then Inc(FHeapBase, heapNow - FHeapIdleMark);
+  end;
+  FHeapIdle := False;
+end;
+
+procedure TPhosphorVM.HostGapMark;
+begin
+  if FExecDepth <> 0 then Exit;
+  FHeapIdleMark := GetFPCHeapStatus().CurrHeapUsed;
+  FHeapIdle := True;
 end;
 
 { How many bytes this value adds to a concatenation, WITHOUT building its text.
@@ -5039,6 +5128,11 @@ begin
     FInnerLimitErr := Err;
     Exit;
   end;
+  { The host's door: what the heap gained since the host got control back is the
+    host's, not this session's. A no-op on a nested entry. See HostGapCredit.
+    Here, BEFORE the frame below is built -- its locals and the host's arguments
+    are this call's, and the next exit is the finally that marks again. }
+  HostGapCredit();
   Inc(FFrameSlots, slots);
   saved := FFrameSP;
   savedSP := FSP;
@@ -5207,6 +5301,7 @@ begin
     Dec(FCallDepth);
     Dec(FExecDepth);
     LeaveFPU(savedMask);
+    HostGapMark();                // the host has control again (outermost only)
     { WHAT THE EVALUATION SPENT IS THE SCRIPT'S, so the window is re-marked at now
       and the next credit starts from here. Charged, not credited -- the same
       answer the heap gives a few lines down in DebugPoll's finally, and for the

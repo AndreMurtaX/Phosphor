@@ -323,32 +323,26 @@ end;
   could not keep it while it formatted with FloatToStr's 15 significant digits --
   an IEEE double needs 17 -- and two different Doubles then shared one spelling.
 
-  Read back with the DOUBLE overload of TryStrToFloat, because that is the
-  converter val() and `input #` actually call (PhosphorStrLib f_val,
-  PhosphorVM's field parser, both `Val(S, Double(...), E)` through
-  sysstr.inc:1371-1375 and :1332). StrToFloatDef would reach the SAME converter
-  -- every FPC Val on a real destination returns ValReal (compproc.inc:209-236),
-  so the Extended flavour differs only in where the single narrowing happens --
-  so this is the witness named for clarity, not a different arithmetic.
+  Read back with PhosphorValue.ReadNumberText, because that is the reader
+  val(), isnumeric(), `input #` and a literal actually use. Until 2026-10-09
+  this read with TryStrToFloat -- FPC's Val, which every door used then -- and
+  when the doors moved to the correctly rounded reader, this witness reported
+  2 of its 20000 Doubles as not reading back: they did read back, through the
+  engine; FPC's Val, which is not correctly rounded, read their (now correctly
+  verified) text as the value next door. A witness must read with the reader
+  that acts.
 
-  WHAT THIS WITNESS CANNOT SEE, said here because a probe that cannot fail is
-  measuring nothing: FPC's Val is not correctly rounded (sstrings.inc:1865-1888
-  accumulates and then scales by a power of ten), so it is the engine's reader
-  agreeing with the engine's writer. That is the promise the docs make, and it is
-  the whole promise: 9 of the ladder's spellings, measured over 474393 Doubles
-  against a correctly-rounded oracle outside this toolchain, are read as the
-  neighbouring Double by such a reader -- all 9 byte-identical to what FloatToStr
-  wrote before the ladder existed. }
+  WHAT THIS WITNESS CANNOT SEE: it is the engine's reader agreeing with the
+  engine's writer. That the reader is RIGHT -- correctly rounded, the same
+  answer as any strtod -- is measured outside this toolchain, against Python's
+  float(), by tests/number_text_sweep.py, which also reads str$ of 102740
+  Doubles back through float(). }
 function SpellingReadsBack(const D: Double): Boolean;
 var
-  fs: TFormatSettings;
-  back: Double;
+  back: TNumberText;
 begin
-  fs := DefaultFormatSettings;
-  fs.DecimalSeparator := '.';
-  fs.ThousandSeparator := #0;
-  Result := TryStrToFloat(ValToStr(ValDouble(D)), back, fs) and
-            (BitsOf(back) = BitsOf(D));
+  back := ReadNumberText(ValToStr(ValDouble(D)));
+  Result := back.Ok and (BitsOf(back.Value) = BitsOf(D));
 end;
 
 { ----------------------------------------------------------------------------

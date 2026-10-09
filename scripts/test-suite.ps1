@@ -434,6 +434,11 @@ else {
         # no runner hands a test program console input; the channel twin is
         # tests\suite\81_chan_read_linear.bas. Judged against a linear control.
         @{ name='probe_readcost'; src='tests\probe_readcost.lpr' },
+        # MaxMemoryBytes charges a session for what its SCRIPT adds, across all
+        # its calls, and not for what the HOST allocates between them -- both
+        # halves, through CallFunction and through ReplRun. A host question, so a
+        # host answers it.
+        @{ name='probe_hostmem';  src='tests\probe_hostmem.lpr' },
         # The COST of the seam, committed rather than quoted. Three review rounds
         # disagreed about one cell of docs/embedding.md's table and none could
         # settle it, because each ran a bench that lived in a scratch directory
@@ -602,6 +607,27 @@ if (-not $py) {
             $gout | ForEach-Object { Write-Host ("         {0}" -f $_) -ForegroundColor DarkGray }
             $allOk = $false
         }
+    }
+
+    # THE GENERATED NUMBER TEXT SWEEP (tests/number_text_sweep.py, 2026-10-09):
+    # about 300000 strings -- random digits and exponents, exact midpoints between
+    # adjacent Doubles written out past 255 bytes, the subnormal and DBL_MAX
+    # boundaries, text that is not a number -- read through every door the engine
+    # reads number text by (val/isnumeric, input #, literals), each answer judged
+    # against Python's float(), which is correctly rounded; and str$ of 100000+
+    # Doubles read back by float() and by val(). tests/suite/84_number_text.bas
+    # is the readable half; this is the grid. It runs bin\phosphor.exe, which
+    # this script does not build: check-examples.py above already fails the run
+    # when that binary is older than the engine, so a stale sweep cannot pass.
+    # Under -ProveFailure it corrupts one expectation per door and must see each.
+    $sweepArgs = @((Join-Path $root 'tests\number_text_sweep.py'), (Join-Path $binDir 'phosphor.exe'))
+    if ($ProveFailure) { $sweepArgs += '--prove-failure' }
+    $sout = & $py.Source -I @sweepArgs 2>&1
+    $scode = $LASTEXITCODE
+    foreach ($l in $sout) { Write-Host $l }
+    if ($scode -ne 0) {
+        Write-Host ("  (number_text_sweep.py exit {0})" -f $scode) -ForegroundColor Red
+        $allOk = $false
     }
 }
 

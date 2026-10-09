@@ -132,8 +132,8 @@ can fail.
 | `hex$(n%) → str` | `n%` in hexadecimal, uppercase digits. **Sign and magnitude**: `hex$(-255)` is `"-FF"`, not a two's-complement word. `0` answers `"0"` |
 | `bin$(n%) → str` | the same in base 2 |
 | `oct$(n%) → str` | the same in base 8 |
-| `val(s$) → num` | `s$` parsed as a number, after trimming, with `.` as the decimal point whatever the locale. **`0` unless the whole trimmed string is a number** — `val("12abc")` is `0`, not `12`. Ask `valcode()` to tell that apart from a genuine zero |
-| `valcode() → num` | the base-1 position where the **last** `val` stopped: `0` when the whole string parsed. `val("12abc")` leaves `3`. It reports on the most recent `val` call anywhere, so read it immediately |
+| `val(s$) → num` | `s$` read as [number text](../language-reference.md#number-text) after trimming spaces, tabs, CR, LF, VT and FF from both ends, with `.` as the decimal point whatever the locale: the nearest Double, **correctly rounded**, at any length. **`0` unless the whole trimmed string is a number** — `val("12abc")` is `0`, not `12`, and so is text holding a NUL anywhere, `inf`, `nan` and `0x10`. Ask `valcode()` to tell that apart from a genuine zero. A number too large for a Double (`"1e999"`) faults with `val has no finite result` |
+| `valcode() → num` | the base-1 position where the **last** `val` stopped: `0` when the whole string parsed; otherwise the first byte that does not fit, or one past the end when the text ends too soon. `val("12abc")` leaves `3`, `val("1e")` `3`, `val("")` `1`. It reports on the most recent `val` call anywhere, so read it immediately |
 | `stri$(n) → str` | `n` as text, locale-invariant (`.` decimal, no thousands separator) and with **no leading space** for a positive number, unlike classic BASIC `STR$`. **Text that reads back as the same number** — see below |
 | `str$(n) → str` | the same function under its familiar name — an exact alias of `stri$` |
 
@@ -152,18 +152,17 @@ Three things it does **not** promise. It is not always the *shortest* text that
 reads back: the readable 15-significant-digit form is used whenever that reads
 back, and a 17-digit one when it does not, so a value whose shortest form is 16
 digits gets 17 — `str$(1 / 3)` is `"0.33333333333333331"`, one digit longer than
-it strictly needs. And the round trip promised is **the one this build makes**:
-`val` and `input #` read back every string `str$` writes — on the machine that
-wrote it. A handful of 15-digit spellings are resolved to the *neighbouring*
-value by some other parser, and "some other parser" is not only another
-language: it includes Phosphor itself built for the other operating system,
-because the number reader FPC gives us accumulates in a wider intermediate on
-Linux x86-64 than on Windows. Measured over 482,068 Doubles read back by both
-builds, 14 are spelled by one in a way the other reads as the value next door —
-about one in 34,000, and always by a single step. (This is the *reader*, not
-`str$`; it is why `str$` verifies its short form before keeping it.) When a
-number has to cross that boundary bit for bit, write its eight bytes with
-`buffer_setdbl` instead of its text.
+it strictly needs. And the **spelling** is not promised to be the same on
+Windows and Linux — the formatter underneath works in a wider intermediate on
+Linux x86-64, so a few values are written with different digits by the two
+builds — but the **value** is: since 2026-10-09 `val`, `input #` and the check
+`str$` makes before keeping its short form all use one correctly rounded
+reader, so every string `str$` writes reads back as exactly its number on
+either system, and in any other correctly rounded reader (Python's `float`,
+C's `strtod`). Before that, the reader was the compiler library's, and 14 of
+482,068 values spelled by one build read as the value next door on the other.
+When a file has to be byte-identical across machines, write a number's eight
+bytes with `buffer_setdbl` instead of its text.
 
 And it does not promise the same **notation** for a number that needs the extra
 digits — the digits and the shape move together. Plain or `E` follows one rule:
@@ -189,7 +188,7 @@ letters, and no spaces in it.
 
 | function | what it answers |
 | --- | --- |
-| `isnumeric(s$) → num` | `1` when the whole trimmed string parses as a number **`val` can answer**. `"inf"`, `"nan"` and an out-of-range exponent such as `"1e999"` answer `0`, because no value in this engine holds a non-finite number — so what `isnumeric` approves, `val` returns without faulting |
+| `isnumeric(s$) → num` | `1` when the whole trimmed string is [number text](../language-reference.md#number-text) **`val` can answer** — the same reader and the same trim, at any length. `"inf"` and `"nan"` are not number text, text holding a NUL is not either, and an out-of-range exponent such as `"1e999"` answers `0` because no value in this engine holds a non-finite number — so what `isnumeric` approves, `val` returns without faulting |
 | `isalpha(s$) → num` | `1` when every byte is an ASCII letter — an accented letter answers `0` |
 | `isdigits(s$) → num` | `1` when every character is `0`–`9` |
 | `isalnum(s$) → num` | `1` when every character is an ASCII letter or digit |

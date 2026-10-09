@@ -326,8 +326,12 @@ done
 # probe_readcost: a console INPUT$ costs what it reads. It drives OnInput itself,
 # because no runner hands a test program console input; the channel twin is
 # tests/suite/81_chan_read_linear.bas. Judged against a linear control.
+#
+# probe_hostmem: MaxMemoryBytes charges a session for what its SCRIPT adds,
+# across all its calls, and not for what the HOST allocates between them --
+# both halves, through CallFunction and through ReplRun.
 echo
-for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handles.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_registry:tests/probe_registry.lpr" "probe_debug:tests/probe_debug.lpr" "probe_step:tests/probe_step.lpr" "probe_sweep:tests/probe_sweep.lpr" "probe_onerror:tests/probe_onerror.lpr" "probe_readcost:tests/probe_readcost.lpr" "bench_debug:tests/bench_debug.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
+for pair in "probe_value:tests/probe_value.lpr" "probe_handles:tests/probe_handles.lpr" "probe_limits:tests/probe_limits.lpr" "probe_bytecode:tests/probe_bytecode.lpr" "probe_sandbox:tests/probe_sandbox.lpr" "probe_registry:tests/probe_registry.lpr" "probe_debug:tests/probe_debug.lpr" "probe_step:tests/probe_step.lpr" "probe_sweep:tests/probe_sweep.lpr" "probe_onerror:tests/probe_onerror.lpr" "probe_readcost:tests/probe_readcost.lpr" "probe_hostmem:tests/probe_hostmem.lpr" "bench_debug:tests/bench_debug.lpr" "probe_crt:tests/probe_crt.lpr" "probe_budget:scripts/probe_budget.lpr" "phosphorembed:host/embed/phosphorembed.lpr" "probe_demo:lazarus/demo/demo_smoke.lpr"; do
   name="${pair%%:*}"; src="${pair#*:}"
   # A probe whose SOURCE has gone missing used to be skipped in silence, so deleting
   # tests/probe_bytecode.lpr or host/embed/phosphorembed.lpr still printed SUITE OK.
@@ -454,6 +458,25 @@ else
       allok=1
     fi
   done
+
+  # THE GENERATED NUMBER TEXT SWEEP (tests/number_text_sweep.py, 2026-10-09):
+  # about 300000 strings -- random digits and exponents, exact midpoints between
+  # adjacent Doubles written out past 255 bytes, the subnormal and DBL_MAX
+  # boundaries, text that is not a number -- read through every door the engine
+  # reads number text by (val/isnumeric, input #, literals), each answer judged
+  # against Python's float(), which is correctly rounded; and str$ of 100000+
+  # Doubles read back by float() and by val(). tests/suite/84_number_text.bas is
+  # the readable half; this is the grid. It runs bin/phosphor, which this script
+  # does not build: check-examples.py above already fails the run when that
+  # binary is older than the engine, so a stale sweep cannot pass. Under --prove
+  # it corrupts one expectation per door and must see each. The twin of the same
+  # block in test-suite.ps1.
+  if [ "$runner_prove" -eq 1 ]; then
+    "$PY" -I "$root/tests/number_text_sweep.py" "$bin/phosphor" --prove-failure </dev/null; rc=$?
+  else
+    "$PY" -I "$root/tests/number_text_sweep.py" "$bin/phosphor" </dev/null; rc=$?
+  fi
+  [ "$rc" -eq 0 ] || { echo "  (number_text_sweep.py exit $rc)"; allok=1; }
 fi
 
 echo

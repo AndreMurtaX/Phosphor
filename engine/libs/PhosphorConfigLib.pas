@@ -27,9 +27,6 @@ procedure RegisterConfigFuncs(Reg: TPhosphorRegistry);
 
 implementation
 
-var
-  InvFS: TFormatSettings;
-
 type
   TPhosphorConfig = class
     Ini: TMemIniFile;
@@ -482,23 +479,23 @@ begin
   c.Ini.WriteString(Sec, Key, NumToInv(V));
   c.Touch();
 end;
-{ TryStrToFloat with a DOUBLE, not StrToFloatDef, so this reader is spelled the
-  same as the one the writer's round-trip proof uses (PhosphorValue.ReadsBackAs)
-  and the same as val() and `input #`. It is a CLARITY change, not a correctness
-  one, and a review corrected an earlier comment here that claimed otherwise:
-  StrToFloatDef reaches the same converter, because every FPC Val on a real
-  destination goes through fpc_Val_Real_ShortStr/AnsiStr and those return ValReal
-  (compproc.inc:209-236), so both doors narrow one ValReal to a Double exactly
-  once. Naming the door the writer proved against is still worth doing -- a
-  reader chosen for a different reason is how "exactly the number that went in"
-  quietly stops being true -- but it is not load-bearing here. }
+{ THE READER THE WRITER PROVED AGAINST, and since 2026-10-09 that is
+  load-bearing. WriteNum spells a value with NumToInv, which keeps a spelling
+  only when PhosphorValue.ReadNumberText -- the engine's one, correctly rounded
+  reader of number text -- brings it back as the same Double. This used to be
+  TryStrToFloat (FPC's Val), which matched while the writer verified with Val
+  too; once the writer verifies with a correctly rounded reader, Val reads about
+  one value in 10000 of what it writes as the neighbouring Double (measured in
+  tests/probe_value.lpr's sweep: 2 of 20000). Reading with anything but the
+  writer's reader is how "exactly the number that went in" quietly stops being
+  true. Text that is not a number still reads as 0, as before. }
 function ReadNum(c: TPhosphorConfig; const Sec, Key: String; const Def: TValue): TValue;
 var
-  d: Double;
+  r: TNumberText;
 begin
   if not c.Ini.ValueExists(Sec, Key) then Exit(Def);
-  if not TryStrToFloat(c.Ini.ReadString(Sec, Key, ''), d, InvFS) then d := 0;
-  Result := ValDouble(d);
+  r := ReadNumberText(TrimNumberSpace(c.Ini.ReadString(Sec, Key, '')));
+  if r.Ok then Result := ValDouble(r.Value) else Result := ValDouble(0);
 end;
 function t_cfg_setn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -754,10 +751,5 @@ begin
   Reg.Add('cfg_clear@:@',         @t_cfg_clear);
   Reg.Add('cfg_autosave@:@n',     @t_cfg_autosave);
 end;
-
-initialization
-  InvFS := DefaultFormatSettings;
-  InvFS.DecimalSeparator := '.';
-  InvFS.ThousandSeparator := #0;
 
 end.

@@ -26,7 +26,6 @@ procedure RegisterStrFuncs(Reg: TPhosphorRegistry);
 implementation
 
 var
-  InvFS: TFormatSettings;
   GValCode: Integer;   // set by val(), read by valcode(): 0 clean, else stop position
 
 // --- UTF-8 codepoint helpers ------------------------------------------------
@@ -255,14 +254,23 @@ begin E := NoError(); Result := ValStr(ToRadix(ArgI64(A[0]), 2)); end;
 function f_oct(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(ToRadix(ArgI64(A[0]), 8)); end;
 
+{ ONE PARSE, read twice. val() used to run Pascal's Val for valcode() and then
+  TryStrToFloat for the value -- two parses of the same text that did not even
+  agree: TryStrToFloat stops at a NUL (StrPas) where Val did not, so
+  val("12" + chr$(0) + "34") answered 12 with valcode() 3, and both go through a
+  ShortString, so any number text past 255 bytes answered 0. Now the engine's
+  one reader (PhosphorValue.ReadNumberText) decides both answers: correctly
+  rounded, any length, and text holding a NUL is not a number. The trim is the
+  whitespace one (TrimNumberSpace), not SysUtils.Trim, which also dropped a NUL
+  or any other control byte at either end. A number too large for a Double is
+  +Inf here, and the registry's finiteness gate refuses it, as it always did. }
 function f_val(const A: array of TValue; out E: TPhosphorError): TValue;
-var d: Double; code: Integer; s: String;
+var r: TNumberText;
 begin
   E := NoError();
-  s := Trim(s0(A));
-  Val(s, d, code);      // Pascal Val: code = 0 on success, else 1-based stop position
-  GValCode := code;
-  if TryStrToFloat(s, d, InvFS) then Result := ValDouble(d) else Result := ValDouble(0);
+  r := ReadNumberText(TrimNumberSpace(s0(A)));
+  GValCode := r.Stop;   // 0 when the whole text parsed, else where it stopped
+  if r.Ok then Result := ValDouble(r.Value) else Result := ValDouble(0);
 end;
 { NumToInv, not FloatToStr, and the difference is a whole class of wrong answer.
   This is the function the language is named after for turning a number into
@@ -271,9 +279,7 @@ end;
   str$(MaxDouble) produced text val() refused outright. The one formatter lives
   in PhosphorValue so that str$, println and the config writer cannot drift
   apart again -- read its comment for the measurement and for why ffGeneral 17
-  is not the repair. InvFS and PhosphorValue's InvariantFS are the same two
-  settings ('.' and no thousands separator), so nothing about the invariant
-  spelling changes here. }
+  is not the repair. }
 function f_stri(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(NumToInv(AsDouble(A[0]))); end;
 
@@ -742,18 +748,25 @@ begin
   Result := ValInt(Ord(ft = fx));
 end;
 
-{ isnumeric ANSWERS FOR THE VALUE, NOT FOR THE PARSE. TryStrToFloat succeeds on
+{ isnumeric ANSWERS FOR THE VALUE, NOT FOR THE PARSE. TryStrToFloat succeeded on
   "inf", "nan" and on an out-of-range exponent like "1e999", handing back a
   non-finite Double -- and this function used to throw that Double away and report
   1. But str.md's documented idiom is to guard a val() with isnumeric, and val()
   cannot return a non-finite Double: the engine's finiteness gate (PhosphorValue)
   turns one into `val has no finite result for those arguments`. So the guard said
   yes and the call it guarded faulted, and an unguarded program exited 1 with no
-  output at all. A string isnumeric approves must be one val can hand back. }
+  output at all. A string isnumeric approves must be one val can hand back -- and
+  it is asked of the SAME reader and the same trim val uses, so the two cannot
+  drift apart (they did: isnumeric used SysUtils.Trim and FPC's ShortString Val,
+  and answered 0 for any number past 255 bytes). "inf" and "nan" are not number
+  text at all now; "1e999" is, and is still 0 here, because val cannot answer it. }
 function f_isnumeric(const A: array of TValue; out E: TPhosphorError): TValue;
-var d: Double;
-begin E := NoError();
-  Result := ValInt(Ord((s0(A) <> '') and TryStrToFloat(Trim(s0(A)), d, InvFS) and IsFiniteD(d))); end;
+var r: TNumberText;
+begin
+  E := NoError();
+  r := ReadNumberText(TrimNumberSpace(s0(A)));
+  Result := ValInt(Ord(r.Ok and IsFiniteD(r.Value)));
+end;
 function f_isalpha(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: Integer; ok: Boolean;
 begin
@@ -1474,10 +1487,5 @@ begin
   Reg.Add('line$:$n', @f_line);
   Reg.Add('valcode:', @f_valcode);
 end;
-
-initialization
-  InvFS := DefaultFormatSettings;
-  InvFS.DecimalSeparator := '.';
-  InvFS.ThousandSeparator := #0;
 
 end.

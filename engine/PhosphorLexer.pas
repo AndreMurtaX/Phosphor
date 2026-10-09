@@ -98,10 +98,8 @@ type
 implementation
 
 uses
-  Math;   // IsNan/IsInfinite: the finiteness check on a numeric literal, below
-
-var
-  LexFS: TFormatSettings;   // invariant: '.' as decimal separator
+  Math,           // IsNan/IsInfinite: the finiteness check on a numeric literal, below
+  PhosphorValue;  // ReadNumberText: the engine's one reader of number text
 
 function IsDigit(C: Char): Boolean; inline;
 begin
@@ -253,7 +251,7 @@ var
   s: String;
   hasDot: Boolean;
   strClosed: Boolean;
-  iv: Int64;
+  num: TNumberText;
 begin
   len := Length(FSrc);
   while FPos <= len do
@@ -314,36 +312,41 @@ begin
       s := Copy(FSrc, n, FPos - n);
       T := Default(TToken);
       T.Line := startLine;
-      if (not hasDot) and TryStrToInt64(s, iv) then
+      { READ BY THE ENGINE'S ONE NUMBER READER (PhosphorValue.ReadNumberText),
+        correctly rounded, at any length. Until 2026-10-09 this was TryStrToInt64
+        and TryStrToFloat -- FPC's Val, which read `1e126` one ulp off and refused
+        a literal past 255 characters as "out of range" whatever its value. A
+        plain digit run that fits an Int64 is still an int%, exactly; hasDot (set
+        for a '.' or an exponent above) must agree with IsInt, and does, because
+        IsInt is only ever true for a spelling with neither. }
+      num := ReadNumberText(s);
+      if (not hasDot) and num.IsInt then
       begin
         T.Kind := tkInt;
-        T.IntVal := iv;
+        T.IntVal := num.Int;
       end
       else
       begin
         T.Kind := tkDouble;
-        // TRY, not StrToFloat. An unguarded conversion raised EConvertError out of
-        // the lexer and killed the process on a literal FPC cannot represent -- a
-        // 400-digit integer pasted into a source file was enough. A number the
-        // machine cannot hold is a source error, and the user gets told which one.
-        //
-        // ...AND TRY ALONE IS NOT ENOUGH, which is the second half of the same
-        // bug. TryStrToFloat SUCCEEDS on an exponent that overflows Double:
-        // '1e999' returns True and hands back +Inf. So the plain-digit spelling
-        // was rejected while the exponent spelling of the same impossible number
-        // walked a non-finite value into the constant pool. That falsifies the
+        T.DblVal := num.Value;
+        // A NUMBER THE MACHINE CANNOT HOLD IS A SOURCE ERROR, and the user is told
+        // which one. The reader answers a magnitude past the largest Double as
+        // +Inf, and it must not reach the constant pool: that would falsify the
         // invariant FiniteD states in PhosphorValue -- "no TValue ever holds a
         // non-finite Double" -- which is the sole reason it is safe to leave the
-        // invalid-operation trap unmasked while a program runs. `x = 1e999`
+        // invalid-operation trap unmasked while a program runs. Once, `x = 1e999`
         // printed +Inf and then `x - x` raised EInvalidOp and killed the process
-        // at exit 3, past an `on error goto` that was already in force, taking
-        // any embedding host with it. Same message as the digit form, because it
-        // is the same mistake written another way. (NaN cannot be spelled as a
-        // literal here -- a number token always starts with a digit -- but it is
-        // checked with the same breath, so the guarantee this makes is the whole
-        // one FiniteD relies on and not a corner of it.)
-        if (not TryStrToFloat(s, T.DblVal, LexFS)) or
-           IsNan(T.DblVal) or IsInfinite(T.DblVal) then
+        // at exit 3, past an `on error goto` already in force, taking any
+        // embedding host with it; and before that an unguarded StrToFloat raised
+        // EConvertError out of the lexer on a 400-digit integer. Both spellings
+        // of an impossible number get the same message. (NaN cannot be spelled
+        // as a literal -- a number token starts with a digit -- but it is checked
+        // in the same breath, so the guarantee is the whole one FiniteD relies
+        // on and not a corner of it. Not Ok cannot happen for a token this loop
+        // built, and is refused the same way rather than trusted.) A literal
+        // UNDER the smallest subnormal is not an error: it is the nearest
+        // Double, which is zero, as for every other reader of number text.
+        if (not num.Ok) or IsNan(T.DblVal) or IsInfinite(T.DblVal) then
         begin
           FErr := 'the number ' + s + ' is out of range';
           FErrLine := startLine;
@@ -633,10 +636,5 @@ function TLexer.Ok: Boolean;
 begin
   Result := FErr = '';
 end;
-
-initialization
-  LexFS := DefaultFormatSettings;
-  LexFS.DecimalSeparator := '.';
-  LexFS.ThousandSeparator := #0;
 
 end.

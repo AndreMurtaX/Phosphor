@@ -1525,6 +1525,87 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-09 · round 2 of "until two come back empty": twenty-one findings
+  survived, six were killed, and the sandbox still has not been swept.** Five
+  attackers (sandbox, the code round 1 added, the VM and number text, the debug
+  protocol and embedding API, the console host and small packages), each
+  finding refuted independently, then five fixers by file set plus one for a
+  crash a fixer found. The killed six were each documented behaviour (the
+  TimeoutMs sampling granularity, nested engines sharing a budget, a trusted
+  editor's per-condition compile, an index that saturates on purpose) -- and
+  one REAL defect killed as "already known": the decimal-literal misread round
+  1 had recorded as open. **"Already known" is a reason not to count a finding
+  twice, never a reason not to fix it**; it was fixed this round.
+  - **The sandbox, three times.** Two attacker agents and then the lead's own
+    generic containment sweep were each stopped by a safety classifier before
+    running anything, so a systematic spelling sweep of the sandbox cannot be
+    done through this channel. A DIRECTED check could: of the paths a
+    third-party library opens itself, `http_clientcert` asked the gate and
+    `http_ca_file$` did not -- a confined script used a file outside its root
+    as the CA bundle and read the answer off the next request (200 when the
+    file was that CA, 0 when not). `scripts/check-sandbox.py` could not see it,
+    because it knows Pascal file primitives and an assignment OpenSSL will open
+    later is not one; it now lists those assignments, and was watched naming
+    `f_http_ca_file` on the old library. Its routine splitter also learned that
+    a unit's `initialization` is not part of the routine above it. And
+    `08_http_offline` had pinned the defect -- it asserted that an outside path
+    was recorded. **The sandbox area is NOT attacked systematically; it must
+    not be counted as clean.**
+  - **Console host: judge a peer's bytes and an operator's flags before
+    acting.** About 120 KB of '[' in a debug frame killed the debuggee and
+    800 KB was an access violation: a SIZE limit is not a DEPTH limit, and
+    fpjson both parses and frees by recursion. One byte 0x00 from the peer was
+    the reader's own "socket closed" sentinel: **when a queue carries two kinds
+    of thing, the kind belongs outside the payload.** A second `--sandbox`
+    replaced the first -- last-wins is a WIDENING when the flag is a cage -- and
+    every single-valued flag was then judged. `--out` naming the program
+    truncated it before it was read: never open an output before its input is
+    read, and ask every output about every input, by file identity (a hard link
+    is the same file under another name).
+  - **HTTP: the range check judged one parser's copy and the client dialled the
+    other's.** Round 1 checked the port RFC 3986 reads; FPC's ParseURI, which
+    dials, cuts at the LAST '#' and '?'. The fix does not teach either parser the
+    other's quirks: the fragment goes first, then any url the two readings
+    disagree on is refused. **The fix for "two parsers" is to refuse their
+    disagreement, not to pick one.** ParseURI was assumed to raise on a huge
+    port; measured, it keeps the low 16 bits.
+  - **Number text: one correctly rounded reader, and the witness that read with
+    the old one.** FPC's Val was the reader at five doors and is not correctly
+    rounded; a generated sweep against Python's float() found 108465 mismatches
+    in 819193 cases on the old build and 0 now. Replacing the reader that
+    DECIDES turned the checks written against the old reader red on correct
+    text: **when you replace a reader, grep for every reader that CHECKS, and
+    list what the old one did for free** (it trimmed).
+  - **The regex judge: implement the definition the rules of thumb
+    approximated.** Three rules of thumb kept sprouting exceptions -- and also
+    refused (a|ab)+, a uniquely decodable code that runs in 0 ms. The judge now
+    tests exponential ambiguity as Weber and Seidl define it, on an automaton
+    built the way TRegExpr walks the pattern. A 30000-pattern sweep against the
+    real matcher then found what no definition could: TRegExpr 0.987 shares a
+    counted repeat's counter between nesting levels. **Model the matcher you
+    have, not the language the pattern names.** The same sweep found a pattern
+    shape that recurses without end inside TRegExpr's compiler; the second such
+    stack overflow in one thread killed the host on Windows, and on Linux the
+    FIRST does, because the RTL installs no alternate signal stack -- so "it was
+    caught" never ends a stack-overflow report. A dedicated fixer, sweeping each
+    pattern in a fresh process with the stack painted, turned that one shape
+    into four classes: endless recursion at compile (a repeated group that can
+    match nothing, reached from the start), endless recursion at match (an
+    unbounded repeat over one), an out-of-bounds read (`()\1*?x` returned 5994
+    bytes of HEAP as a match of a one-byte subject), and plain depth (`(a|b)*`
+    over 20 KB, on the first call). RegexGuard now reads every pattern with a
+    parser that mirrors 0.987's, refuses the shapes, and refuses depth by a frame
+    bound against the stack the thread has left -- 0 crashes missed on either OS,
+    the safe corpus untouched. The cost, documented in regex.md: on Windows'
+    main thread a CSV-line pattern is refused past about 5.4 KB of text.
+  - **Dates: a TDateTime before 1899-12-30 is not a line, and the sixth place
+    that forgot it was the rounding.** Every date is now taken apart into a day
+    and a time, computed, and spelled once; the sweep against Python's
+    calendar found two instances nobody had listed. **Compare instants on the
+    line, never their spellings.** A config setter's refusal was a list of
+    shapes one sweep had found; it now asks the line the same functions the
+    loader asks, and the round trip is swept over 14462 generated pairs.
+
 - **2026-10-09 · round 1 of "until two come back empty": thirteen findings,
   and the round does not count as empty for a reason that had nothing to do
   with them.** Five attackers by risk area (net, sandbox, budget, language,

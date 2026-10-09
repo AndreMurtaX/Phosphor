@@ -764,3 +764,31 @@ whatever the other is doing -- measurably, and it is the missing explanation for
 two agents reading the same VM an hour apart and getting minima 9% apart. It
 changes no correctness result; it is why a timing disagreement between rounds is
 the first thing to suspect and the last thing to conclude from.
+
+## What reaches the wire (2026-10-09)
+
+The first adversarial round against a third machine found five ways a request
+could carry something the script did not ask for (docs/libraries/http.md has the
+behaviour; this is why it is that behaviour).
+
+- **No control character reaches the request head.** A header value may carry a
+  horizontal tab and nothing else below 0x20, nor 0x7F; a header name is an RFC
+  9110 token; a cookie name or value carries no control character at all, HTAB
+  included (RFC 6265 4.1.1 excludes it from cookie-octet); a url carries none. A
+  setter given one refuses -- it stores nothing and keeps the earlier value,
+  answering 0 as `http_clientcert` already did -- and a verb given such a url, or
+  a redirect hop to one, sends NOTHING. Both say `http_error()` 6. Refusing at
+  the setter rather than sanitising is deliberate: a header that silently lost
+  its tail would be a request nobody wrote.
+- **A relative redirect is resolved on the raw text** (RFC 3986 5.2, with
+  remove_dot_segments) and never decoded: `%26` stays `%26`. An absolute Location
+  now has its dot segments removed too, as 5.2.2 says it should.
+- **A port is a decimal in 1..65535 or the url is not used** -- nothing is
+  dialled, as for any other url the library cannot use (status 0, error 0). An
+  EMPTY port (`h:/`) keeps meaning the scheme's default (RFC 3986 3.2.3).
+- **Params go before a fragment**, which is never sent.
+- **Cookie names match exactly**, in the redirect jar as in the client's bag.
+
+Left as they are, and why: a SPACE in a url path is still written into the
+request line (it cannot start a new header line, and refusing it would refuse
+urls servers accept today); a cookie name may still hold `;` or `=`.

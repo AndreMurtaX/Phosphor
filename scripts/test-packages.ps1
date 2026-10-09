@@ -70,7 +70,14 @@ Write-Host ''
 $pkg = Join-Path $root 'tests\packages'
 $manifest = Get-Content (Join-Path $pkg 'manifest.txt') |
     ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
-$tmp = [System.IO.Path]::GetTempPath()
+# A per-PROCESS scratch directory, as scripts/test-classic.ps1 explains -- and
+# not removed, for the reason it gives. This runner was the one CLAUDE.md's
+# "two runs at once clobber each other" entry missed: it kept fixed names in the
+# shared TEMP until 2026-10-09, when three fixers' parallel worktrees died on
+# 'file in use' at phosphorpkgtest.out. (The HTTP runner's fixed ports still
+# make two concurrent package runs collide; run one at a time.)
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) "phosphor-run-$PID"
+if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }
 
 # A package needing an external runtime library is skipped where it is absent --
 # and the question is put to the RUNNER, not to a list of directories.

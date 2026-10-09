@@ -1525,6 +1525,77 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-09 · round 1 of "until two come back empty": thirteen findings,
+  and the round does not count as empty for a reason that had nothing to do
+  with them.** Five attackers by risk area (net, sandbox, budget, language,
+  data), each finding reproduced on a fresh build and then handed to an
+  independent refuter told to default to "refuted". Sixteen claimed, three
+  killed -- a polynomial regex outside the judge's documented scope, a lenient
+  base64 decoder the docs call lenient, a gzip reserved bit with a correct
+  answer -- and thirteen survived. The refuters rejecting is what makes the
+  thirteen worth something. Four fixers in parallel worktrees, partitioned by
+  FILE, each test seen failing before its fix. The **sandbox attacker was
+  interrupted early and reported nothing**: that is an area not attacked, not
+  an area found clean, and the next round must take it first.
+  - **HTTP: what reaches the wire.** CR/LF in a header, cookie, token, user
+    agent or url wrote a header line of the caller's choosing; a relative
+    Location was decoded and re-encoded (`%26` became `&`, another query); a
+    port lived in a Word (`A+65536` reached `A`); params went after a
+    `#fragment`; the cookie jar ignored case. Now refused as code 6 at the
+    setter and at the verb, resolved on raw text per RFC 3986, range-checked,
+    placed before the fragment, matched exactly (docs/decisions.md). TFPHTTPServer
+    could not have shown the injection -- it parses an injected line into one
+    more well-formed header -- so the runner gained a RAW server that answers
+    the request head byte for byte. **To test what is on the wire, read the
+    wire, not a parser's view of it.** And **asking a lazy list a question
+    creates it**: setting CaseSensitive on FPC's cookie list made every request
+    carry an empty `Cookie: ` line, caught only because a sibling test happened
+    to send one.
+  - **VM: code a block emits for itself belongs to no statement.** A fault in
+    a loop's test or a for increment was blamed on the body's last statement;
+    `resume next` went to where that statement ends -- the loop tail -- and
+    faulted again, and the program ended at exit 0. The test and the
+    increment are now statements of their own: `resume` retries them, `resume
+    next` leaves the loop. **When a resume point is "where this statement
+    ends", ask what runs after that end and to whom it belongs.** PRINT USING
+    printed `1` for 1e300: FloatToStrF changes FORM (to exponent text) past
+    255 characters and the caller split at the '.'; the formatter now expands
+    the Double exactly, proved by a generated sweep of 80104 fields whose
+    values are built by exact doubling, because the lexer reads some literals
+    one ulp off. Channel reads were quadratic (`Buf := Buf + chunk`, and a
+    rescan from the cursor after every refill): 28 s for a 64 MB line inside
+    ONE instruction no budget sees.
+  - **Regex judge: two kinds of uncertainty must give up in opposite
+    directions.** "I could not look" resolves toward allow; "I looked and
+    cannot name this atom's bytes" must resolve toward REFUSE, because
+    "unambiguous" is a claim of proof. The header said every uncertainty
+    resolves toward allow, and that sentence let `\x61` (read as '6', '1')
+    and an ignored `(?i)` become confident verdicts on 2^n patterns. An EMPTY
+    set passes every disjointness test, which is how `()` and `(?#...)` became
+    perfect barriers. The judge now reads the pattern as regexpr.pas does and
+    keeps every set a superset of what the matcher matches.
+  - **Zip: the meter sat on the copy that compresses.** A stored entry never
+    reached it, so 300 central records aimed at one stored megabyte unpacked
+    300 MiB under a budget that refuses `string$(300000000)`, and paszlib's
+    stored branch carries `TODO: Implement CRC Check`. The meter now sits on
+    the input stream. Closing the class found three more cases of "the value
+    that decides is not the value judged": paszlib re-reads the central
+    directory at extraction, so an archive swapped after `zip_open@` put a
+    `../` entry outside the destination; its Files filter is a
+    case-insensitive TStringList; a failed CRC left its file on disk. **A
+    fixture can record a defect as well as a golden can**: `11_zipslip` built
+    its honest stored archives with CRC 0, green only because nothing checked.
+  - **Process.** Agents of one workflow share ONE scratchpad: a fixer's commit
+    message was overwritten by a sibling's between Write and `git commit -F`.
+    Give every agent its own subdirectory, and read `git log -1` after a
+    commit. `scripts/test-packages.ps1` still wrote fixed names in the shared
+    TEMP -- the one runner CLAUDE.md's entry on concurrent runs missed -- and
+    three fixers lost runs to it; it now has a per-process directory. Its HTTP
+    servers' fixed ports still make two package runs on one machine collide.
+  - **Found and not fixed:** 7 of 20000 random decimal literals read back as a
+    different Double than the correctly rounded one (`1e126`). Open for the
+    next round.
+
 - **2026-10-09 · a third Linux, and two defects on its first run that two
   machines had hidden for a month.** The VirtualBox VM could not judge
   anything timed: its own log says `fall back to NEM: VT-x is not

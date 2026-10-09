@@ -266,7 +266,11 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
   two worktrees running suites at the same moment died on a file lock -- which reads
   exactly like a test failure. Three reviewers lost a run to it on 2026-09-11 before
   anyone named it. `$tmp` is now a per-process directory; the bash twins always used
-  `mktemp`. Its cleanup is a plain `rmdir` that can only succeed on an EMPTY directory,
+  `mktemp`. **`test-packages.ps1` was missed** and kept fixed names until
+  2026-10-09, when three parallel fixers lost runs to it -- and its HTTP test servers
+  still listen on FIXED PORTS, so two package runs on one machine still collide:
+  before reading a 21/22/24/25 failure as a defect, ask whether another worktree's
+  `phosphorhttptest` was running. Its cleanup is a plain `rmdir` that can only succeed on an EMPTY directory,
   deliberately, because this tree has lost thirteen working copies to a recursive one.
 - **A `.gitignore` pattern with no leading slash matches at EVERY depth.** `lib/` sits
   in the compiled-artifacts block, and it also swallowed `scripts/lib/` -- a source

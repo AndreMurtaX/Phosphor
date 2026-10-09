@@ -1578,7 +1578,54 @@ $okAA = ($aaCode -eq 0) -and ($aaGot -eq $aaWant)
 if ($okAA) { Write-Host 'PASS  AA:environ$ reads a non-ASCII name and value as UTF-8' -ForegroundColor Green }
 else { Write-Host ("FAIL  AA:environ$ of a non-ASCII name: exit {0}, want {1}, got {2}" -f $aaCode, $aaWant, $aaGot) -ForegroundColor Red }
 
+# --- AB: WITH NEITHER TEMP NOR TMP SET, THE TEMP DIRECTORY IS STILL A DIRECTORY ----
+# HostTempDir read TEMP, then TMP, and answered "" when both were unset -- the
+# RTL's GetTempDir did the same -- so temppath$() was "" and tempfilename$() the
+# RELATIVE 'TMP00000.tmp', a file in the working directory (round 4,
+# 2026-10-09). It now asks Windows' GetTempPathW, whose documentation gives
+# the order TMP, TEMP, USERPROFILE, the Windows directory: with the first two
+# unset, the answer is USERPROFILE with a trailing backslash. That is the
+# expected value here, read from this process's own environment, not from
+# anything Phosphor printed. No .bas runner can unset a variable for the
+# program it runs, so this block does, for the child only.
+$abDir = Join-Path $tmp 'ab'
+New-Item -ItemType Directory -Force $abDir | Out-Null
+$abBas = Join-Path $abDir 'tmp.bas'
+[IO.File]::WriteAllText($abBas, ('println temppath$()' + "`n" + 'println tempfilename$()' + "`n"), $utf8)
+$abOut = Join-Path $abDir 'tmp.out'
+$abTemp = $env:TEMP; $abTmp = $env:TMP
+$env:TEMP = $null; $env:TMP = $null
+cmd /c "`"$exe`" `"$abBas`" < NUL > `"$abOut`" 2>&1"
+$abCode = $LASTEXITCODE
+$env:TEMP = $abTemp; $env:TMP = $abTmp
+$abLines = @((Read-Text $abOut) -split "`r?`n")
+$abWant = $env:USERPROFILE.TrimEnd('\') + '\'
+$okAB = ($abCode -eq 0) -and ($abLines.Count -ge 2) -and ($abLines[0] -eq $abWant) -and
+        ($abLines[1] -match ('^' + [regex]::Escape($abWant) + 'TMP\d{5}\.tmp$'))
+if ($okAB) { Write-Host 'PASS  AB:with TEMP and TMP unset, temppath$ and tempfilename$ answer full paths' -ForegroundColor Green }
+else { Write-Host ("FAIL  AB:TEMP and TMP unset: exit {0}, want '{1}' and a TMP#####.tmp in it, got '{2}'" -f $abCode, $abWant, ($abLines -join ' / ')) -ForegroundColor Red }
+
+# --- AC: A VALUE THAT IS NOT WELL-FORMED IS STILL UTF-8 ------------------------
+# The rule environ$ keeps on both systems (round 4, 2026-10-09; sys.md): what
+# the OS holds that is not a well-formed character comes back as U+FFFD. Here
+# it is an unpaired surrogate, which a Windows environment block can hold; the
+# Linux twin sets raw bytes that are not UTF-8 and a name that is not, which is
+# where the rule had been missing. Expected: 'a', EF BF BD, 'b' -- U+FFFD's
+# UTF-8, from the Unicode Standard, not from a run.
+$acName = 'PHOSPHOR_T_SURROGATE'
+$acBas = Join-Path $abDir 'env.bas'
+[IO.File]::WriteAllText($acBas, ('println hex_encode$(environ$("' + $acName + '"))' + "`n"), $utf8)
+[Environment]::SetEnvironmentVariable($acName, ('a' + [char]0xD800 + 'b'), 'Process')
+$acOut = Join-Path $abDir 'env.out'
+cmd /c "`"$exe`" `"$acBas`" < NUL > `"$acOut`" 2>&1"
+$acCode = $LASTEXITCODE
+[Environment]::SetEnvironmentVariable($acName, $null, 'Process')
+$acGot = (Read-Text $acOut).Trim().ToLower()
+$okAC = ($acCode -eq 0) -and ($acGot -eq '61efbfbd62')
+if ($okAC) { Write-Host 'PASS  AC:environ$ answers U+FFFD for what is not a character' -ForegroundColor Green }
+else { Write-Host ("FAIL  AC:environ$ of an unpaired surrogate: exit {0}, want 61efbfbd62, got {1}" -f $acCode, $acGot) -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC) { exit 0 } else { exit 1 }

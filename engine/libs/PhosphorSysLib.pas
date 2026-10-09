@@ -42,7 +42,98 @@ function HostTempDir: String;
 function HostUserDir: String;
 function HostAppConfigDir: String;
 
+{ WELL-FORMED UTF-8, AND WHAT IS NOT (2026-10-09, round 4). On Windows the
+  environment is UTF-16 and HostEnv converts it, so a name that is not
+  well-formed UTF-8 is never asked about and a value is always UTF-8 (an
+  unpaired surrogate becomes U+FFFD). On Linux the environment is bytes, and
+  until round 4 HostEnv handed both straight through: a name of ill-formed
+  bytes was looked up, and a value of ill-formed bytes came back as they were.
+  The same rule now holds on both: the name must be well-formed, and in the
+  value every maximal ill-formed subsequence is ONE U+FFFD -- the Unicode
+  Standard's "substitution of maximal subparts" (chapter 3, U+FFFD
+  substitution), which is also what Python's errors='replace' does. Exported so
+  a probe can sweep them on a machine whose environment never needs them. }
+function IsWellFormedUtf8(const S: String): Boolean;
+function Utf8Scrub(const S: String): String;
+
 implementation
+
+{ The length of the well-formed UTF-8 sequence that starts at S[I] (1 to 4),
+  or, when none does, MINUS the length of its maximal subpart: the longest
+  prefix of some well-formed sequence (at least 1). Table 3-7 of the Unicode
+  Standard: the second byte's range depends on the first (E0 A0..BF, ED 80..9F,
+  F0 90..BF, F4 80..8F), every other continuation is 80..BF. }
+function Utf8SeqAt(const S: String; I: Integer): Integer;
+var b, need, k, lo2, hi2: Integer;
+begin
+  b := Ord(S[I]);
+  if b < $80 then Exit(1);
+  lo2 := $80; hi2 := $BF;
+  if (b >= $C2) and (b <= $DF) then need := 1
+  else if (b >= $E0) and (b <= $EF) then
+  begin
+    need := 2;
+    if b = $E0 then lo2 := $A0 else if b = $ED then hi2 := $9F;
+  end
+  else if (b >= $F0) and (b <= $F4) then
+  begin
+    need := 3;
+    if b = $F0 then lo2 := $90 else if b = $F4 then hi2 := $8F;
+  end
+  else Exit(-1);                     // 80..C1, F5..FF: no sequence starts here
+  for k := 1 to need do
+  begin
+    if I + k > Length(S) then Exit(-k);
+    b := Ord(S[I + k]);
+    if k = 1 then
+    begin
+      if (b < lo2) or (b > hi2) then Exit(-1);
+    end
+    else if (b < $80) or (b > $BF) then Exit(-k);
+  end;
+  Result := need + 1;
+end;
+
+function IsWellFormedUtf8(const S: String): Boolean;
+var i, n: Integer;
+begin
+  i := 1;
+  while i <= Length(S) do
+  begin
+    n := Utf8SeqAt(S, i);
+    if n < 0 then Exit(False);
+    Inc(i, n);
+  end;
+  Result := True;
+end;
+
+function Utf8Scrub(const S: String): String;
+var i, n, o: Integer;
+begin
+  if IsWellFormedUtf8(S) then Exit(S);
+  SetLength(Result, 3 * Length(S));  // a byte becomes at most EF BF BD
+  o := 0;
+  i := 1;
+  while i <= Length(S) do
+  begin
+    n := Utf8SeqAt(S, i);
+    if n > 0 then
+    begin
+      Move(S[i], Result[o + 1], n);
+      Inc(o, n);
+      Inc(i, n);
+    end
+    else
+    begin
+      Result[o + 1] := Chr($EF);
+      Result[o + 2] := Chr($BF);
+      Result[o + 3] := Chr($BD);
+      Inc(o, 3);
+      Inc(i, -n);
+    end;
+  end;
+  SetLength(Result, o);
+end;
 
 {$IFDEF WINDOWS}
 { The OS's own lookup, so a name matches exactly as Windows matches it -- with
@@ -53,6 +144,11 @@ implementation
   'windows' unit, which the engine boundary keeps out. }
 function GetEnvironmentVariableW(lpName, lpBuffer: PWideChar; nSize: LongWord): LongWord;
   stdcall; external 'kernel32.dll' name 'GetEnvironmentVariableW';
+{ The OS's own temp directory, for when neither TEMP nor TMP is set: TMP, TEMP,
+  USERPROFILE, then the Windows directory, with a trailing backslash
+  (GetTempPathW's documentation). Same unit, same reason, as above. }
+function GetTempPathW(nBufferLength: LongWord; lpBuffer: PWideChar): LongWord;
+  stdcall; external 'kernel32.dll' name 'GetTempPathW';
 
 { UTF-16 to the engine's UTF-8: a surrogate pair is one code point, and an
   unpaired surrogate -- which a Windows environment block can hold -- is
@@ -156,7 +252,9 @@ begin
 end;
 {$ELSE}
 begin
-  Result := GetEnvironmentVariable(AName);
+  // the rule the Windows branch keeps by converting (see IsWellFormedUtf8)
+  if not IsWellFormedUtf8(AName) then Exit('');
+  Result := Utf8Scrub(GetEnvironmentVariable(AName));
 end;
 {$ENDIF}
 
@@ -165,13 +263,39 @@ end;
   as the RTL asks it. Under a sandbox, the scratch directory inside the root:
   the decision temppath$ and cfg_path$ make, made here so that no caller can
   reach the real one by forgetting it. }
+{ WITH NEITHER SET, THE OS IS ASKED (2026-10-09, round 4). The RTL's
+  GetTempDir answers '' on Windows when TEMP and TMP are both unset, and the
+  round-3 rewrite kept that: temppath$ was "" and tempfilename$ the RELATIVE
+  'TMP00000.tmp', a file in whatever the working directory was. Windows'
+  GetTempPathW goes on to USERPROFILE and then the Windows directory, which is
+  what every other program on the machine would call its temp directory. The
+  order with either variable set is unchanged (TEMP first, as the RTL reads it
+  -- GetTempPathW would take TMP first). Linux's RTL already falls back to
+  /tmp/. }
 function HostTempDir: String;
+{$IFDEF WINDOWS}
+var buf: UnicodeString; got: LongWord;
+{$ENDIF}
 begin
   if SandboxActive then Exit(SandboxScratchPath);
   {$IFDEF WINDOWS}
   if Assigned(OnGetTempDir) then Exit(GetTempDir(False));
   Result := HostEnv('TEMP');
   if Result = '' then Result := HostEnv('TMP');
+  if Result = '' then
+  begin
+    // the answer is the length written, without its NUL; a larger one is the
+    // size the path needs, and a second call with that size reads it
+    SetLength(buf, 1024);
+    got := GetTempPathW(1024, PWideChar(buf));
+    if got >= 1024 then
+    begin
+      SetLength(buf, got + 1);
+      got := GetTempPathW(got + 1, PWideChar(buf));
+      if got >= LongWord(Length(buf)) then got := 0;
+    end;
+    if got > 0 then Result := WideToUtf8(Copy(buf, 1, got));
+  end;
   if Result <> '' then Result := IncludeTrailingPathDelimiter(Result);
   {$ELSE}
   Result := GetTempDir(False);
@@ -277,11 +401,20 @@ begin
   if WithSeparators then Result := s
   else Result := StringReplace(s, '-', '', [rfReplaceAll]);
 end;
+{ NO TEMP DIRECTORY, NO NAME (2026-10-09, round 4). Handed '', the RTL's
+  GetTempFileName asks its own GetTempDir -- the ANSI reader round 3 replaced --
+  and, that being '' too, answered the bare 'TMP00000.tmp': a relative name,
+  resolved against the working directory. HostTempDir now answers whenever the
+  OS has a temp directory at all; when a host's OnGetTempDir answers none, the
+  answer is "", which a program can see, and never a relative name. }
 function t_tempfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var dir: String;
 begin
   Err := NoError();
-  if SandboxActive then Result := ValStr(SandboxScratchPath + GuidHex(False) + '.tmp')
-  else Result := ValStr(GetTempFileName(HostTempDir, ''));   // the RTL's search, in the UTF-8 temp dir
+  if SandboxActive then Exit(ValStr(SandboxScratchPath + GuidHex(False) + '.tmp'));
+  dir := HostTempDir;
+  if dir = '' then Exit(ValStr(''));
+  Result := ValStr(GetTempFileName(dir, ''));   // the RTL's search, in the UTF-8 temp dir
 end;
 function t_randomfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValStr(GuidHex(False)); end;
@@ -371,14 +504,72 @@ end;
 const
   MaxColor = Int64($FFFFFFFF);
 
+{ A LITERAL IS SIGN AND MAGNITUDE, AT ANY LENGTH (2026-10-09, round 4). The
+  literal used to go to FPC's TryStrToInt64, which reads a radix magnitude as a
+  QWord, reinterprets it as an Int64 and only then negates it -- so
+  color("-$FFFFFFFFFFFFFFFF") was -(-1) = 1 and color("-$FFFFFFFF00000001")
+  white -- and which reads through a 255-byte ShortString, so "$", 300 zeros
+  and "FF" (the literal 255) was refused; it also stopped at a NUL. Round 3
+  fixed exactly this at the input # door (PhosphorVM's ReadRadixText, a local
+  routine nothing else can call), and the rule here is that one: the sign
+  applies to the magnitude the digits spell, however many digits there are.
+  The SHAPE accepted is the one FPC's reader accepted, unchanged: leading
+  blanks and tabs, one optional sign, then decimal digits or a '$', 'x', '0x',
+  '&' or '%' prefix and at least one digit valid in that base. A NUL is no
+  digit. True with the magnitude, saturated past MaxColor (AOver), and the
+  sign; the caller decides what is a colour. }
+function ReadColorLiteral(const S: String; out AMag: Int64; out ANeg, AOver: Boolean): Boolean;
+var i, n, base, dv: Integer; c: Char;
+begin
+  Result := False;
+  AMag := 0;
+  ANeg := False;
+  AOver := False;
+  n := Length(S);
+  i := 1;
+  while (i <= n) and (S[i] in [' ', #9]) do Inc(i);
+  if (i <= n) and (S[i] in ['+', '-']) then
+  begin
+    ANeg := S[i] = '-';
+    Inc(i);
+  end;
+  if i > n then Exit;
+  base := 10;
+  if S[i] in ['$', 'x', 'X'] then begin base := 16; Inc(i); end
+  else if S[i] = '&' then begin base := 8; Inc(i); end
+  else if S[i] = '%' then begin base := 2; Inc(i); end
+  else if (S[i] = '0') and (i < n) and (S[i + 1] in ['x', 'X']) then
+    begin base := 16; Inc(i, 2); end;
+  if i > n then Exit;                        // a sign or a prefix with no digit
+  while i <= n do
+  begin
+    c := S[i];
+    if c in ['0'..'9'] then dv := Ord(c) - Ord('0')
+    else if c in ['a'..'f'] then dv := Ord(c) - Ord('a') + 10
+    else if c in ['A'..'F'] then dv := Ord(c) - Ord('A') + 10
+    else Exit;                               // NUL, a blank, anything else
+    if dv >= base then Exit;                 // '8' in octal, 'A' in decimal
+    // keep reading past the largest colour, so a bad digit later still
+    // makes the text no literal, but stop growing: the answer is "too big"
+    if not AOver then
+    begin
+      AMag := AMag * base + dv;
+      if AMag > MaxColor then AOver := True;
+    end;
+    Inc(i);
+  end;
+  Result := True;
+end;
+
 function ColorOf(const AName: String): Int64;
-var i: Integer; v: Int64;
+var i: Integer; mag: Int64; neg, over: Boolean;
 begin
   for i := 0 to High(ColorNames) do
     if SameText(ColorNames[i], AName) then Exit(ColorVals[i]);
-  // a '$rrggbb' or decimal literal also reads, as the RTL's Val reads it
-  if TryStrToInt64(AName, v) and (v >= 0) and (v <= MaxColor) then
-    Result := v
+  // a '$bbggrr' or decimal literal also reads; -0 is 0, any other negative
+  // and anything past 2^32 - 1 is no colour
+  if ReadColorLiteral(AName, mag, neg, over) and not over and ((not neg) or (mag = 0)) then
+    Result := mag
   else
     Result := 0;
 end;

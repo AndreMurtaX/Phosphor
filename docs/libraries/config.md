@@ -39,16 +39,31 @@ back as it was (until 2026-10-07 it was not read as a header at all, and a set
 added a second `[s]`). So is a line no read could reach: `=value`, whose key is
 empty, and a header naming no section a read can ask for — `[]`, and `[;x]`,
 whose name begins with the comment marker — which is kept as text **with its
-whole block**, so none of its lines becomes a key of the section above. None of
+whole block**, so none of its lines becomes a key of the section above. That
+block belongs to no section: a set into the section above it writes its key in
+that section, and deleting that section leaves the block where it was. None of
 them counts as a key or a section: `cfg_keycount`, `cfg_keys$`,
 `cfg_sectioncount` and `cfg_sections$` see only the real ones. (Until
 2026-10-09, round 3, all three were counted and listed — `cfg_keys$` with an
 empty line in it — and a save wrote `[;x]` back as `;x`, a comment, so on the
-next load its keys belonged to the section before.) A file this library wrote
-itself comes out of a save byte for byte as it always did. What a save does NOT
-keep is layout: it writes the platform's line endings and a final one, one blank
-line between sections and none inside them, and `key=value` without the spaces a
-person may have put around the `=`.
+next load its keys belonged to the section before. Until round 4 the block was
+held at the end of the section above it, so a key set into that section was
+saved under the unreachable header and was gone after a reload, and
+`cfg_section_delete@` of that section deleted the hand-written block.)
+
+A line kept as text is kept **byte for byte**, its ends included — trailing
+blanks, tabs and control bytes too, and a line made only of control bytes. (Until
+round 4 a save cut every byte at or below a space from the end of such a line,
+and from both ends of a `;` comment, and dropped a line made only of a NUL.) A
+**blank line** is one of nothing but spaces and tabs, and that is layout. A file
+this library wrote itself comes out of a save byte for byte as it always did.
+What a save does NOT keep is layout: it writes the platform's line endings and a
+final one, one blank line between blocks (sections, and each unreachable
+header's block) and none inside them, and a section header and a `key=value`
+line as what they mean — `[name]`, and the key and the value the reader reads,
+without the blanks a person may have put around the `=` or at either end of the
+line. The reader trims every byte at or below a space from both ends of a key
+and a value, control bytes included, which is why a setter refuses such a value.
 
 **A section written twice is one section, and a key written twice is its first
 line.** Names are matched as every name here is, without regard to (ASCII) case,
@@ -270,4 +285,6 @@ Two things worth noticing:
   ordinarily behave; the *values* are stored and returned exactly as given.
   The folding is ASCII's (`CompareText`): `é` and `É` are two names.
 - The hand-edited shapes — repeated sections and keys, empty keys, unreachable
-  headers — are pinned by `tests/suite/91_config_round3.bas`.
+  headers — are pinned by `tests/suite/91_config_round3.bas`, and an unreachable
+  header's block beside a set or a delete, and the bytes at the ends of a kept
+  line, by `tests/suite/94_config_sys_round4.bas`.

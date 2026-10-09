@@ -1170,4 +1170,39 @@ aagot="$(printf '%s' "$aagot" | tr -d '\r\n' | tr 'A-F' 'a-f')"
 if [ "$aacode" -eq 0 ] && [ "$aagot" = "$aawant" ]; then echo 'PASS  AA:environ$ reads a non-ASCII name and value as UTF-8'
 else echo "FAIL  AA:environ\$ of a non-ASCII name: exit $aacode, want $aawant, got $aagot"; fail=1; fi
 
+# --- AB: WITH NEITHER TEMP NOR TMP SET, THE TEMP DIRECTORY IS STILL A DIRECTORY ----
+# The twin of block AB in scripts/test.ps1, whose comment carries the reason (on
+# Windows temppath$ answered "" and tempfilename$ a relative name). Here the
+# RTL's GetTempDir reads TEMP, TMP, TMPDIR and falls back to /tmp/
+# (rtl/unix/sysutils.pp), so with all three unset the answer is /tmp/ -- a
+# control that the rule holds on this system too.
+printf '%s\n' 'println temppath$()' 'println tempfilename$()' > "$tmpdir/tmp.bas"
+if abgot="$(env -u TEMP -u TMP -u TMPDIR "$exe" "$tmpdir/tmp.bas" < /dev/null 2>&1)"; then abcode=0; else abcode=$?; fi
+abgot="$(printf '%s' "$abgot" | tr -d '\r')"
+ab1="$(printf '%s\n' "$abgot" | sed -n 1p)"
+ab2="$(printf '%s\n' "$abgot" | sed -n 2p)"
+if [ "$abcode" -eq 0 ] && [ "$ab1" = "/tmp/" ] && [[ "$ab2" =~ ^/tmp/TMP[0-9]{5}\.tmp$ ]]; then
+  echo 'PASS  AB:with TEMP and TMP unset, temppath$ and tempfilename$ answer full paths'
+else echo "FAIL  AB:TEMP, TMP and TMPDIR unset: exit $abcode, want /tmp/ and a TMP#####.tmp in it, got '$ab1' / '$ab2'"; fail=1; fi
+
+# --- AC: A NAME OR A VALUE THAT IS NOT UTF-8 ---------------------------------
+# sys.md: a name "whose bytes are not well-formed UTF-8" answers "" without
+# asking the OS, and "the name and the value are UTF-8". On Linux the name went
+# straight to getenv and the value came back as raw bytes, so both held on
+# Windows only (round 4, 2026-10-09). Now an ill-formed name answers "" and in
+# a value every maximal ill-formed subsequence is one U+FFFD (the Unicode
+# Standard's substitution of maximal subparts; Python's errors='replace').
+# Expected for a FF b E2 88 c: 61, EF BF BD for the lone FF, 62, ONE EF BF BD
+# for E2 88 -- the start of a three-byte sequence cut short is one maximal
+# subpart -- then 63. Written out here, not taken from a run.
+printf '%s\n' 'println "[" + environ$("PHOSPHOR_T_" + bytestr$(255)) + "]"' \
+  'println hex_encode$(environ$("PHOSPHOR_T_BYTES"))' > "$tmpdir/acenv.bas"
+if acgot="$(env $'PHOSPHOR_T_\xff=1' $'PHOSPHOR_T_BYTES=a\xffb\xe2\x88c' "$exe" "$tmpdir/acenv.bas" < /dev/null 2>&1)"; then accode=0; else accode=$?; fi
+acgot="$(printf '%s' "$acgot" | tr -d '\r' | tr 'A-F' 'a-f')"
+ac1="$(printf '%s\n' "$acgot" | sed -n 1p)"
+ac2="$(printf '%s\n' "$acgot" | sed -n 2p)"
+if [ "$accode" -eq 0 ] && [ "$ac1" = "[]" ] && [ "$ac2" = "61efbfbd62efbfbd63" ]; then
+  echo 'PASS  AC:environ$ answers U+FFFD for what is not a character'
+else echo "FAIL  AC:environ\$ of bytes that are not UTF-8: exit $accode, want [] and 61efbfbd62efbfbd63, got '$ac1' / '$ac2'"; fail=1; fi
+
 exit "$fail"

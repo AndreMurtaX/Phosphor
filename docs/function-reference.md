@@ -852,11 +852,11 @@ on desktop by design.
 | `dirseparator$() → str` | the path-component separator (`\` or `/`) |
 | `pathseparator$() → str` | the PATH list separator (`;` or `:`) |
 | `altseparator$() → str` | the alternate separator (`/` on Windows, else `""`) |
-| `temppath$() → str` | the system temp directory — or, under a [sandbox root](embedding.md#the-filesystem-sandbox), a scratch directory inside it |
+| `temppath$() → str` | the system temp directory (with no TEMP or TMP on Windows, what Windows answers: the profile folder) — or, under a [sandbox root](embedding.md#the-filesystem-sandbox), a scratch directory inside it |
 | `homepath$() → str` | the user's home directory — the sandbox scratch directory when a root is set |
 | `documentspath$() → str` | the user's Documents directory — the sandbox scratch directory when a root is set |
 | `sandboxroot$() → str` | the filesystem root this script is confined to, or `""` when it is unconfined. Read-only: there is no function that sets or clears it, so a program cannot widen its own cage — only the host can, in Pascal |
-| `tempfilename$() → str` | a fresh temp file name |
+| `tempfilename$() → str` | a fresh temp file name, as a full path in the temp directory — never a relative name; `""` when there is no temp directory |
 | `randomfilename$() → str` | a random name (GUID hex, no separators) |
 | `guidfilename$(withdashes) → str` | a GUID-based name, with or without dashes |
 | `mkdir(path$) → num` | create a directory: `1` if created, `0` if not (`ioerror()` `3`) or refused (`5`) |
@@ -865,8 +865,8 @@ on desktop by design.
 | `chdir(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`, which includes `""`) |
 | `fileexists(path$, followlinks) → num` | 1 if a file exists; `ioerror()` is `0` after the answer and `5` for a refusal |
 | `kill(path$) → num` | delete a file: `1` if deleted, `0` if not (`ioerror()` `3`) or refused (`5`) |
-| `environ$(name$) → str` | an environment variable's value, in UTF-8; `""` when unset, and for a name that is empty, holds `=` or NUL, or is not UTF-8 |
-| `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal in 0..4294967295 (anything else answers `0`). It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
+| `environ$(name$) → str` | an environment variable's value, in UTF-8 on every system (what is not a well-formed character reads U+FFFD); `""` when unset, and for a name that is empty, holds `=` or NUL, or is not UTF-8 |
+| `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal (also `0x`, `&` octal, `%` binary; signed, read as sign and magnitude, any length) in 0..4294967295 (anything else answers `0`). It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
 | `colortostr$(n) → str` | the colour name for a colour number, or `$` and its whole unsigned 32-bit value in hex; `""` outside -2^31..2^32-1 |
 | `alphacolor(name$) → num` | the colour number with an opaque alpha byte, as an unsigned 32-bit number |
 | *mobile directory paths (18)* | `shareddocumentspath$`, `librarypath$`, `cachepath$`, `publicpath$`, `picturespath$`, `sharedpicturespath$`, `camerapath$`, `sharedcamerapath$`, `musicpath$`, `sharedmusicpath$`, `moviespath$`, `sharedmoviespath$`, `alarmspath$`, `sharedalarmspath$`, `downloadspath$`, `shareddownloadspath$`, `ringtonespath$`, `sharedringtonespath$` — each `() → str`, answering `""` on desktop |

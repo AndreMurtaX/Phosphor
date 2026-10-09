@@ -468,6 +468,15 @@ ALLOWED = {
         'already in the list',
     'PhosphorSysLib.pas:GuidHex':
         'strips the braces and dashes of a GUID: a fixed 38-character string',
+    'PhosphorSysLib.pas:Utf8SeqAt':
+        'the continuation bytes of ONE UTF-8 sequence: need is 1, 2 or 3, set by '
+        'the lead byte, never by a count',
+    'PhosphorSysLib.pas:Utf8Scrub':
+        'shrinks the answer to the bytes written, at most 3 * Length(S) -- the size '
+        'the routine allocated from the string already in memory two lines up',
+    'PhosphorSysLib.pas:HostTempDir':
+        'the size GetTempPathW says the temp path needs: an OS path, which Windows '
+        'caps at 32767 characters, never a number from the script',
     'PhosphorSqliteLib.pas:QuoteIdent':
         'doubles one quote character inside one identifier',
     'PhosphorSqliteLib.pas:EscapeSql':

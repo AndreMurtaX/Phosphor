@@ -65,9 +65,13 @@ type
     * before the first section: anything that is not a ';' comment;
     * inside a section: a '#' line, any line with no '=', and a line whose key
       is empty ("=value");
-    * a header no read can reach ("[]", "[;x]") and every line of its block;
+    * a header no read can reach ("[]", "[;x]") and every line of its block,
+      in a block of its own (round 4, below);
     * the header of a later copy of a section (round 3, below);
+    * a ';' line with a byte <= ' ' at either end, and a line made only of
+      such bytes that is not blank -- not only spaces and tabs (round 4);
     * anywhere: a line that begins with a marker.
+  Every marked line ends in TailMark, so the RTL's Trim cannot reach its text.
   And a later line of a key already in its section is kept under DupMark. }
 { A HEADER WITH A COMMENT AFTER IT -- `[s] ; note` -- is a header to a person and
   was not one to anyone else: the RTL wants a line that ENDS in ']', so the
@@ -101,14 +105,67 @@ type
   belonged to the section before. An empty-keyed line is wrapped; an
   unreachable header is wrapped WITH ITS BLOCK, every line to the next header,
   so none of its keys joins the section above. }
+{ AND THE BLOCK IS NO SECTION'S (2026-10-09, round 4). Round 3 put that block's
+  lines at the end of the block that was open -- the section ABOVE -- where the
+  RTL held them as that section's comment lines. So a set into that section
+  appended its key AFTER them, a save wrote it under the unreachable header,
+  and the reload did not find it; and cfg_section_delete@ of the section above
+  took the hand-written block with it. The block is now handed to the RTL as a
+  section of its own, under the header line "[" + UnreachName + "]": a name
+  beginning with the RTL's comment marker, which SectionByName, ReadSections
+  and EraseSection all refuse to see, so no call can count, read, set or erase
+  it. GetStrings writes such a name bare, without its brackets; Save drops
+  that line (the real header is the block's first wrapped line), and the one
+  reader that hands the text back to the RTL (DropShadows) brackets it again.
+  A line that already begins ';' #4 is wrapped, like the other markers.
+
+  A WRAPPED LINE KEEPS ITS LAST BYTE (round 4 too). FillSectionList stores
+  Trim(line), which cuts every byte <= ' ' at BOTH ends: the marker protected
+  the front of a wrapped line and nothing protected its end, so ' #'#1 was
+  saved as ' #', a trailing tab of a kept duplicate went, and a line made only
+  of control bytes -- not blank, it trims to nothing -- vanished. Every marked
+  line now ends in TailMark, which Unwrap removes. A ';' line with a byte <= ' '
+  at either end is wrapped rather than left to the RTL, which would trim it;
+  and a line made only of such bytes is wrapped unless every one of them is a
+  space or a tab -- that, and only that, is a blank line, which is layout. }
 const
   WrapMark = ';' + #1;
   HeadMark = ';' + #2;
   DupMark = ';' + #3;
+  UnreachName = ';' + #4;
+  TailMark = #127;
 
 function IsWrapped(const S: String): Boolean;
 begin
   Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #1);
+end;
+
+function IsUnreachMarked(const S: String): Boolean;
+begin
+  Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #4);
+end;
+
+{ A line as the layer hands it to the RTL under a marker, and back. }
+function Wrap(const AMark, S: String): String;
+begin
+  Result := AMark + S + TailMark;
+end;
+
+function Unwrap(const S: String): String;
+begin
+  if (Length(S) >= 3) and (S[Length(S)] = TailMark) then
+    Result := Copy(S, 3, Length(S) - 3)
+  else
+    Result := Copy(S, 3, MaxInt);
+end;
+
+{ Blank, and so layout: nothing but spaces and tabs. }
+function IsBlankLine(const S: String): Boolean;
+var p: Integer;
+begin
+  for p := 1 to Length(S) do
+    if not (S[p] in [' ', #9]) then Exit(False);
+  Result := True;
 end;
 
 function IsHeadMarked(const S: String): Boolean;
@@ -190,10 +247,15 @@ begin
     for i := 0 to L.Count - 1 do
     begin
       t := Trim(L[i]);
-      if t = '' then begin blocks[cur].Add(L[i]); Continue; end;
-      if IsWrapped(t) or IsHeadMarked(t) or IsDupMarked(t) then
+      if t = '' then
       begin
-        blocks[cur].Add(WrapMark + L[i]);
+        if IsBlankLine(L[i]) then blocks[cur].Add(L[i])   // layout: the RTL drops it
+        else blocks[cur].Add(Wrap(WrapMark, L[i]));       // control bytes are text
+        Continue;
+      end;
+      if IsWrapped(t) or IsHeadMarked(t) or IsDupMarked(t) or IsUnreachMarked(t) then
+      begin
+        blocks[cur].Add(Wrap(WrapMark, L[i]));
         Continue;
       end;
       commented := False;
@@ -210,9 +272,14 @@ begin
         name := Copy(hdr, 2, Length(hdr) - 2);   // FillSectionList's own cut
         if not ReachableName(name) then
         begin
-          // no read reaches it: the header and its block are text
+          // no read reaches it: the header and its block are text, in a
+          // block of their own that no section owns
           foreign := True;
-          blocks[cur].Add(WrapMark + L[i]);
+          cur := Length(blocks);
+          SetLength(blocks, cur + 1);
+          blocks[cur] := TStringList.Create();
+          blocks[cur].Add('[' + UnreachName + ']');
+          blocks[cur].Add(Wrap(WrapMark, L[i]));
           Continue;
         end;
         foreign := False;
@@ -221,7 +288,7 @@ begin
         begin
           // a later copy: its lines join the first, under its header as text
           cur := PtrInt(THTDataNode(node).Data);
-          blocks[cur].Add(WrapMark + L[i]);
+          blocks[cur].Add(Wrap(WrapMark, L[i]));
         end
         else
         begin
@@ -232,7 +299,7 @@ begin
           if commented then
           begin
             blocks[cur].Add(hdr);
-            blocks[cur].Add(HeadMark + L[i]);
+            blocks[cur].Add(Wrap(HeadMark, L[i]));
           end
           else
             blocks[cur].Add(L[i]);
@@ -240,18 +307,18 @@ begin
         Continue;
       end;
       if foreign then
-        blocks[cur].Add(WrapMark + L[i])
-      else if t[1] = ';' then
-        blocks[cur].Add(L[i])                    // the RTL keeps those
-      else if (not inSection) or (t[1] = '#') or (Pos('=', t) = 0) then
-        blocks[cur].Add(WrapMark + L[i])
+        blocks[cur].Add(Wrap(WrapMark, L[i]))
+      else if (t[1] = ';') and (t = L[i]) then
+        blocks[cur].Add(L[i])                    // the RTL keeps those whole
+      else if (t[1] = ';') or (not inSection) or (t[1] = '#') or (Pos('=', t) = 0) then
+        blocks[cur].Add(Wrap(WrapMark, L[i]))    // a padded ';' line too: the RTL trims
       else
       begin
         key := KeyOfLine(t);
         if key = '' then
-          blocks[cur].Add(WrapMark + L[i])       // "=value": no read reaches it
+          blocks[cur].Add(Wrap(WrapMark, L[i]))  // "=value": no read reaches it
         else if seen.Find(IntToStr(cur) + #0 + UpperCase(key)) <> nil then
-          blocks[cur].Add(DupMark + L[i])        // the key's first line wins
+          blocks[cur].Add(Wrap(DupMark, L[i]))   // the key's first line wins
         else
         begin
           seen.Add(IntToStr(cur) + #0 + UpperCase(key), nil);
@@ -290,10 +357,17 @@ begin
     while i < raw.Count do
     begin
       t := raw[i];
-      if (t <> '') and (t[1] <> ';') and IsHeader(t) then
+      if IsUnreachMarked(t) then
+      begin
+        // GetStrings wrote this section's name bare; handed back so, it would
+        // be a comment line of the section above (see UnreachName)
+        inSec := False;
+        raw[i] := '[' + t + ']';
+      end
+      else if (t <> '') and (t[1] <> ';') and IsHeader(t) then
         inSec := CompareText(Copy(t, 2, Length(t) - 2), ASec) = 0
       else if inSec and IsDupMarked(t) and
-              (CompareText(KeyOfLine(Trim(Copy(t, 3, MaxInt))), AKey) = 0) then
+              (CompareText(KeyOfLine(Trim(Unwrap(t))), AKey) = 0) then
       begin
         raw.Delete(i);
         changed := True;
@@ -413,6 +487,15 @@ begin
         prevBlank := True;
         Continue;
       end;
+      // An unreachable block's section name: not a line of the file (its own
+      // header is the wrapped line after it), and a section like any other
+      // for the blank line after it.
+      if IsUnreachMarked(raw[i]) then
+      begin
+        headerIsComment := False;
+        prevBlank := False;
+        Continue;
+      end;
       if prevBlank then headerIsComment := raw[i][1] = ';';
       prevBlank := False;
       { A commented header's own text replaces the bare header the RTL kept --
@@ -422,11 +505,11 @@ begin
       if IsHeadMarked(raw[i]) then
       begin
         if (sl.Count > 0) and IsHeader(Trim(sl[sl.Count - 1])) then
-          sl[sl.Count - 1] := Copy(raw[i], 3, MaxInt)
+          sl[sl.Count - 1] := Unwrap(raw[i])
         else
-          sl.Add(Copy(raw[i], 3, MaxInt));
+          sl.Add(Unwrap(raw[i]));
       end
-      else if IsWrapped(raw[i]) or IsDupMarked(raw[i]) then sl.Add(Copy(raw[i], 3, MaxInt))
+      else if IsWrapped(raw[i]) or IsDupMarked(raw[i]) then sl.Add(Unwrap(raw[i]))
       else sl.Add(raw[i]);
     end;
     sl.WriteBOM := Bom;

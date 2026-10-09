@@ -107,7 +107,12 @@ assert_eq(cfg_sections$(c@), "a" + nl$ + "b", "and are not listed as empty or co
 assert_eq(cfg_keys$(c@, "a"), "x", "their lines do not become keys of a")
 assert_eq(cfg_get$(c@, "b", "y", "<absent>"), "2", "b still reads")
 x = cfg_save(c@)
-assert_eq(text$(p$), "[a]" + nl$ + "x=1" + nl$ + "[]" + nl$ + "q=1" + nl$ + "[;x]" + nl$ + "r=2" + nl$ + nl$ + "[b]" + nl$ + "y=2" + nl$, "the save writes them back as they were, [;x] with its brackets")
+rem Each unreachable header's block is a block of its own (round 4,
+rem tests/suite/94_config_sys_round4.bas), so a save writes one blank line
+rem between it and its neighbours, as between sections. Until round 4 this
+rem line expected none: the blocks were glued to [a], which is what lost a
+rem key later set into [a].
+assert_eq(text$(p$), "[a]" + nl$ + "x=1" + nl$ + nl$ + "[]" + nl$ + "q=1" + nl$ + nl$ + "[;x]" + nl$ + "r=2" + nl$ + nl$ + "[b]" + nl$ + "y=2" + nl$, "the save writes them back as they were, [;x] with its brackets")
 c@ = cfg_reload@(c@)
 assert_eq(cfg_sectioncount(c@), 2, "and a reload reads the same")
 assert_eq(cfg_keys$(c@, "a"), "x", "with the same keys")

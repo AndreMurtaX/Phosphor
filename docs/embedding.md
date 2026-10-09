@@ -47,7 +47,8 @@ try
   // ... register host functions, set OnOutput/limits, run or prepare ...
 finally
   eng.Free;                        // frees any prepared VM -- and every live handle
-                                   // in the process; see "Handles are process-wide"
+                                   // its scripts made, one-shot runs included; see
+                                   // "Handles are process-wide"
 end;
 ```
 
@@ -79,13 +80,25 @@ numbers, arrays, dictionaries, JSON, date/time, regex, I/O, config, `callfunc`,
   **Handles are process-wide.** The table a `@` value indexes is one per
   process, like the sandbox root and the library budget, because a library
   function is a plain callback with no engine to ask. Every `Run`,
-  `RunBytecode`, `Prepare`, `Finish` and `Free` resets it, so a second engine
-  starting work frees the first engine's dictionaries, lists and documents.
-  The first engine's globals survive and its handles do not: what it gets back
-  is the refusal of a handle that no longer exists (`not a valid dictionary
-  handle`), never the other engine's object — an id from before a reset can
-  never name one made after it. One engine at a time is the supported shape;
-  two that must both keep live handles belong in two processes.
+  `RunBytecode` and `Prepare` resets it, so a second engine starting work frees
+  the first engine's dictionaries, lists and documents. The first engine's
+  globals survive and its handles do not: what it gets back is the refusal of
+  a handle that no longer exists (`not a valid dictionary handle`), never the
+  other engine's object — an id from before a reset can never name one made
+  after it. One engine at a time is the supported shape; two that must both
+  keep live handles belong in two processes.
+
+  **`Finish` and `Free` give back what this engine's scripts made** — after a
+  one-shot `Run` or `RunBytecode` as much as after a `Prepare` — but only while
+  the live handles are still this engine's: the one that last started work
+  owns them, and once that one is finished or freed, the next engine to run
+  code adopts whatever is left. So an engine that never ran anything, or whose
+  work came before another engine's session started, frees nothing when it is
+  freed, and that session's handles survive it. A REPL session's handles go
+  with `ReplReset` (and `Free`), not with `Finish`. Until round 4 of 2026-10-09
+  `Free` after a one-shot `Run` freed nothing: the last script's arrays and
+  documents — 915 MB for one `dim@(20000000)` — stayed in the process until
+  some later engine started.
 
   **`end` means two different things and the difference is the one an embedder
   has to know.** A script's top level ends with `end` more often than not — the

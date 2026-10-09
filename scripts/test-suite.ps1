@@ -439,6 +439,10 @@ else {
         # halves, through CallFunction and through ReplRun. A host question, so a
         # host answers it.
         @{ name='probe_hostmem';  src='tests\probe_hostmem.lpr' },
+        # An engine that is freed gives back every handle its scripts made --
+        # after a one-shot Run too, which it did not until 2026-10-09 -- and
+        # never one another engine's live session still holds.
+        @{ name='probe_engfree';  src='tests\probe_engfree.lpr' },
         # The COST of the seam, committed rather than quoted. Three review rounds
         # disagreed about one cell of docs/embedding.md's table and none could
         # settle it, because each ran a bench that lived in a scratch directory

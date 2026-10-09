@@ -7,16 +7,22 @@
   fabricated or stale handle is detectable (IsHandle) instead of dereferencing
   arbitrary memory -- the property Plan9Basic's HandleRegistry existed to give.
   ResetHandles frees every live object and is called at the start of each Run so
-  handles never leak between programs.
+  handles never leak between programs, and when the engine that ran them is
+  finished or freed (see below).
 
   THE TABLE IS THE PROCESS'S, NOT THE ENGINE'S (ledger d13), and it says so here
   the way PhosphorSandbox and PhosphorBudget say it about themselves. A library
   function is a plain callback with no VM to ask, so there is one table, and
-  every engine's Run, RunBytecode, Prepare, Finish and Free resets it -- which
-  frees every OTHER engine's live handles too. docs/embedding.md promised three
-  times that handles were the engine's; it says this now. Owning a table per
-  engine is the fix the first time a host wants two at once, and no host in the
-  tree does.
+  every engine's Run, RunBytecode and Prepare resets it -- which frees every
+  OTHER engine's live handles too. docs/embedding.md promised three times that
+  handles were the engine's; it says this now. Owning a table per engine is the
+  fix the first time a host wants two at once, and no host in the tree does.
+
+  An engine's Finish and Free reset it too, but only while that engine is the
+  one whose scripts the live handles belong to (PhosphorEngine's handle owner,
+  2026-10-09 round 4): before that, a one-shot Run's handles outlived the engine
+  that made them, and a reset in every Free would let an engine that never ran
+  anything free another engine's live session.
 
   WHAT IS NOT ALLOWED TO FOLLOW FROM IT is reading the other engine's DATA. Ids
   used to restart at 1, generation 0, after every reset, so engine A's handle

@@ -46,7 +46,8 @@ function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
 implementation
 
 uses
-  Classes;   // TStringList, for the placeholder JsonShortenNumbers picks
+  Classes,       // TStringList, for the placeholder JsonShortenNumbers picks
+  jsonscanner;   // tkNumber, for TJsonNumParser.MarkError
 
 type
   { Wraps one fpjson node. Owns=True for a root built or parsed here; Owns=False
@@ -406,10 +407,18 @@ end;
   the program handed us intact. fpjson has TJSONInt64Number for exactly this, so
   the fix is to pick the node type the value needs rather than the one the
   smaller range fits. }
+{ AND -0 IS A FLOAT NODE (2026-10-09, round 4). Frac(-0) is 0, so a negative
+  zero went down the integer branch and was stored as the integer 0: json_setn@
+  of val("-0") read back +0 and was written `0`. An integer node has no sign
+  for zero; the float node keeps it, json_getn reads it back bit for bit, and
+  json_stringify$ writes it with its sign -- the same answer json_parse@ now
+  gives for the text -0 (TJsonNumParser.IntegerValue). }
 function NumNode(d: Double): TJSONData;
 var v: Int64;
 begin
-  if (Frac(d) = 0) and (Abs(d) < 9.2e18) then
+  if (d = 0) and (PInt64(@d)^ <> 0) then
+    Result := TJSONFloatNumber.Create(d)
+  else if (Frac(d) = 0) and (Abs(d) < 9.2e18) then
   begin
     v := Round(d);
     if (v >= Low(Integer)) and (v <= High(Integer)) then
@@ -1931,6 +1940,32 @@ end;
   is `0e<k>` with a k no number in the document spells, so a real `0e0` is never
   mistaken for one, and the parser counts the placeholders it met: a document
   where that count disagrees with the rewrite is refused rather than read. }
+{ ROUND 4 (2026-10-09) closed three more places where the text a number was
+  written in did not decide what the parser said about it.
+
+  -0. An INTEGER token stays with fpjson's TryStrToQWord / TryStrToInt64, and
+  TryStrToInt64 reads `-0` as the integer 0 -- an integer has no negative zero.
+  language-reference.md#number-text says -0 is a Double negative zero, and so
+  did every other door: the string "-0", `-0.0`, val("-0") and the same zero
+  spelled past 255 bytes all read -0, the number -0 read +0 and was written
+  back `0`. IntegerValue now hands a zero whose token carries a '-' to the
+  engine's reader instead, which answers -0, and the node is a float node --
+  the one kind that holds the sign.
+
+  A LONG INTEGER. fpjson takes leading zeros (`09007199254740993`), and reads
+  such a token exactly, as an integer. Past 255 bytes the same integer was
+  moved and read as a Double: 2^53 + 1 lost its last digit and came back
+  `9.0071992547409920E+015`. A moved token that is integer text is now read the
+  way ParseNumber reads a short one, once its leading zeros are gone -- a
+  spelling with more zeros changes neither the value nor the kind.
+
+  AN ERROR ON THE PLACEHOLDER. The padding kept every position AFTER a moved
+  token the caller's, but an error raised ON it -- a number where a colon, a
+  comma or a member name belongs -- quoted the placeholder (`0e0`, a token the
+  caller never wrote) at the column where the placeholder ended, before its
+  padding: Pos 8 for an error at Pos 306. The padding now goes BEFORE the
+  placeholder, so it ends where the token ended, and MarkError names the token
+  the caller wrote. }
 type
   TJsonNumParser = class(TJSONParser)
   private
@@ -1938,14 +1973,66 @@ type
     FMark: String;          // the placeholder spelling; '' when nothing was moved
     FLong: array of String; // the moved tokens, in document order
     FNextLong: Integer;
+    function ReadInteger(const S: String): Boolean;
   protected
     procedure NumberValue(const AValue: TJSONStringType); override;
     procedure FloatValue(const AValue: Double); override;
+    procedure IntegerValue(const AValue: Integer); override;
+  public
+    function MarkError(const AMessage: String; out AFixed: String): Boolean;
   end;
 
 procedure TJsonNumParser.NumberValue(const AValue: TJSONStringType);
 begin
   FTok := AValue;
+end;
+
+{ The only integer kind a zero arrives as (Int64Value and QWordValue are for
+  magnitudes past MaxInt). A '-' in the token makes it the negative zero. }
+procedure TJsonNumParser.IntegerValue(const AValue: Integer);
+begin
+  if (AValue = 0) and (FTok <> '') and (FTok[1] = '-') then
+    inherited FloatValue(ReadNumberText(FTok).Value)
+  else
+    inherited IntegerValue(AValue);
+end;
+
+{ ParseNumber's integer reading, for a moved token S that is integer text: its
+  leading zeros dropped, then the same readers in the same order, the same
+  node kinds -- and the same -0 rule, through IntegerValue. False when S is not
+  integer text or does not fit 64 bits, and the caller reads it as a real. }
+function TJsonNumParser.ReadInteger(const S: String): Boolean;
+var
+  i, first: Integer;
+  t: String;
+  qw: QWord;
+  i64: Int64;
+begin
+  Result := False;
+  first := 1;
+  if (S <> '') and (S[1] = '-') then first := 2;
+  if first > Length(S) then Exit;
+  for i := first to Length(S) do
+    if not (S[i] in ['0'..'9']) then Exit;
+  i := first;
+  while (i < Length(S)) and (S[i] = '0') do Inc(i);
+  t := Copy(S, i, Length(S) - i + 1);       // at least one digit is left
+  if Length(t) > 20 then Exit;              // past QWord, whatever it spells
+  if first = 2 then t := '-' + t;
+  FTok := t;                                // what IntegerValue judges the sign by
+  if TryStrToQWord(t, qw) then
+  begin
+    if qw > QWord(High(Int64)) then QWordValue(qw)
+    else if qw > MaxInt then Int64Value(Int64(qw))
+    else IntegerValue(Integer(qw));
+    Exit(True);
+  end;
+  if TryStrToInt64(t, i64) then
+  begin
+    if (i64 > MaxInt) or (i64 < -MaxInt) then Int64Value(i64)
+    else IntegerValue(Integer(i64));
+    Exit(True);
+  end;
 end;
 
 procedure TJsonNumParser.FloatValue(const AValue: Double);
@@ -1960,12 +2047,45 @@ begin
       DoError('a long number could not be placed (the rewrite and the parser disagree)');
     txt := FLong[FNextLong];
     Inc(FNextLong);
+    if ReadInteger(txt) then Exit;
   end;
   // AValue is Val's reading of the same token, and the reason this class exists.
   r := ReadNumberText(txt);
   if not r.Ok then
     DoError('Number is not an integer or real number: ' + txt);
   inherited FloatValue(r.Value);
+end;
+
+{ After Parse raised AMessage: True, with AFixed, when the error was raised ON a
+  placeholder the parser had not consumed yet -- the scanner's current token is
+  the mark, and every placeholder before it was read as a value (a number token
+  anywhere else is an error at once), so it is FLong[FNextLong]. fpjson quotes
+  the current token at the very END of every message a number token can raise
+  (jsonreader.pp: `got token "%s".` for a colon or a comma, `got token "%s"`
+  for a member name), so the token is found by comparing the message's tail
+  with those two shapes -- no search through the text. The position needs no
+  change: the padding is in front. }
+function TJsonNumParser.MarkError(const AMessage: String; out AFixed: String): Boolean;
+const
+  Closes: array[0..1] of String = ('".', '"');
+var
+  k, n: Integer;
+  tail: String;
+begin
+  AFixed := AMessage;
+  Result := False;
+  if (FMark = '') or (FNextLong >= Length(FLong)) then Exit;
+  if (Scanner.CurToken <> tkNumber) or (Scanner.CurTokenString <> FMark) then Exit;
+  for k := 0 to High(Closes) do
+  begin
+    tail := '"' + FMark + Closes[k];
+    n := Length(AMessage) - Length(tail);
+    if (n >= 0) and (Copy(AMessage, n + 1, Length(tail)) = tail) then
+    begin
+      AFixed := Copy(AMessage, 1, n) + '"' + FLong[FNextLong] + Closes[k];
+      Exit(True);
+    end;
+  end;
 end;
 
 { True when fpjson's scanner, outside strict mode, reads the WHOLE of S as one
@@ -2119,10 +2239,16 @@ begin
       at := Integer(PtrInt(long.Objects[k]));
       // What fpjson hands NumberValue for this run (JsonIsScannerNumber).
       if run[1] = '.' then ALong[k] := '0' + run else ALong[k] := run;
-      // In place: the mark, then spaces to the run's own length (a mark is at
-      // most 2 + 10 bytes, a moved run at least 256).
+      // In place: spaces, then the mark, filling the run's own length (a mark
+      // is at most 2 + 10 bytes, a moved run at least 256). The mark goes
+      // LAST, so it ends where the run ended: fpjson's "Pos n" for an error
+      // raised on the token itself is the column where the token ends, and
+      // with the mark first it was the mark's own end, before the padding.
+      // The byte before a run cannot join it (the run started there), so
+      // the spaces change no token.
       for j := 0 to Length(run) - 1 do
-        if j < Length(AMark) then AOut[at + j] := AMark[j + 1]
+        if j >= Length(run) - Length(AMark) then
+          AOut[at + j] := AMark[j - (Length(run) - Length(AMark)) + 1]
         else AOut[at + j] := ' ';
     end;
   finally
@@ -2140,7 +2266,7 @@ end;
 function JsonParseText(const AText: String): TJSONData;
 var
   p: TJsonNumParser;
-  txt, mark: String;
+  txt, mark, fixed: String;
   long: TStringArray;
 begin
   txt := AText;
@@ -2152,7 +2278,16 @@ begin
     p.FMark := mark;
     p.FLong := long;
     p.FNextLong := 0;
-    Result := p.Parse();
+    try
+      Result := p.Parse();
+    except
+      // An error raised ON a placeholder names the token the caller wrote.
+      on E: EJSONParser do
+        if p.MarkError(E.Message, fixed) then
+          raise EJSONParser.Create(fixed)
+        else
+          raise;
+    end;
     if p.FNextLong <> Length(long) then
     begin
       Result.Free();

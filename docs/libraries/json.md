@@ -266,6 +266,26 @@ than 255 characters as "not an integer or real number", read a numeric string
 that long as `0` and `"5"` + NUL + `"x"` as `5`, and raised a fatal error on the
 strings `"nan"`, `"inf"` and `"1e999"`.
 
+**`-0` is a negative zero, in and out.** The number `-0` reads as the Double
+negative zero, as `-0.0`, the string `"-0"` and `val("-0")` do, and it is
+written back with its sign (`[-0]` stringifies as `[-0.0000000000000000E+000]`,
+fpjson's spelling for every non-integer, which reads back as `-0`). The same
+holds for a `-0` a program puts in: `json_setn@`, `json_pushn@`, `json_setval@`,
+`json_pushval@` and `json_number@` keep the sign, where `0` stays the integer
+`0`. A spelling with more leading zeros — which the parser accepts outside
+RFC 8259 — changes neither the value nor the kind: `09007199254740993` and the
+same integer behind 280 zeros are both the exact integer, and both are written
+back as `9007199254740993`. Until round 4 of 2026-10-09 the number `-0` read
+`+0` and was written `0`, and a long spelling of an integer came back a Double
+(`9.0071992547409920E+015`).
+
+**A refusal names what you wrote, where it ends.** `json_parse@`'s message for a
+token in the wrong place quotes the token and gives the column where it ends
+(`Error at line 1, Pos 6: Expected colon (:), got token "1".` for
+`{"a" 1}`), on the line it sits on. That holds for a number of any length; until
+round 4 an error raised on a number longer than 255 characters quoted a stand-in
+the library uses internally (`"0e0"`) at a column near the token's start.
+
 **Prefer `json_get@` to a path for an unusual key.** The direct member lookups
 scan names byte for byte, but the dotted walk behind `json_paths$` and its
 siblings still uses fpjson's own name lookup, which the unit header records as

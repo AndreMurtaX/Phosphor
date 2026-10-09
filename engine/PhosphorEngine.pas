@@ -93,6 +93,9 @@ type
     function GetSandboxRoot: String;
     procedure SetSandboxRootProp(const AValue: String);
     procedure SetOnDebugProp(AValue: TPhosphorDebugProc);
+    procedure ClaimHandles;
+    procedure AdoptHandles;
+    procedure ReleaseHandles;
   public
     constructor Create;
     destructor Destroy; override;
@@ -401,10 +404,65 @@ begin
   FReplPC := 0;
 end;
 
+{ ------------------------------------------------------------------------------
+  WHOSE HANDLES THE LIVE ONES ARE (2026-10-09, round 4).
+
+  The handle table is the process's (PhosphorHandles, its header). Run,
+  RunBytecode and Prepare reset it as they start, which is the documented cost
+  of a second engine starting work. What they never had was the other end:
+  Destroy called Finish and ReplReset, each reset the table only if ITS VM
+  existed, and a one-shot Run's VM is a local that is gone by the time Run
+  returns. So eng.Free after eng.Run freed nothing the script made -- measured,
+  915 MB still held after eng.Free for one `dim@(20000000)`, and the same for a
+  run refused by MaxMemoryBytes -- until some later engine happened to start. A
+  host that creates, runs and frees an engine per script kept the last
+  script's memory for good.
+
+  "Reset in Destroy" is not the fix. An engine that never ran anything -- the
+  console host builds a throwaway one to read the registry -- would then free a
+  live session another engine is serving, and so would an engine whose own work
+  came BEFORE that session started. So one engine at a time is the OWNER of
+  the live handles: the one that last reset the table, or, once nobody owns
+  it, the next one to run code in it. Finish and Free give the table back only
+  if they are freeing their OWN handles. tests/probe_engfree.lpr asserts both
+  halves: every handle is gone after Free, and a session survives an idle
+  engine's Free and a finished engine's Free. }
+var
+  GHandleOwner: TPhosphorEngine = nil;
+
+{ Starting work: everything live belongs to whoever ran before, so it goes. }
+procedure TPhosphorEngine.ClaimHandles;
+begin
+  ResetHandles();
+  GHandleOwner := Self;
+end;
+
+{ Continuing work (a CallFunction, a REPL line, the end of any run): the handles
+  made from here on are this engine's -- unless another engine has claimed the
+  table since, in which case it is that one's and nothing changes hands. Nobody
+  owns it after an owner was freed or finished, which is the case a nested
+  engine (a host function that runs one) leaves its caller in. }
+procedure TPhosphorEngine.AdoptHandles;
+begin
+  if GHandleOwner = nil then GHandleOwner := Self;
+end;
+
+{ Finishing: free the live handles if they are this engine's own. }
+procedure TPhosphorEngine.ReleaseHandles;
+begin
+  if GHandleOwner <> Self then Exit;
+  GHandleOwner := nil;
+  ResetHandles();
+end;
+
 destructor TPhosphorEngine.Destroy;
 begin
   Finish();
   ReplReset();
+  // Finish released the handles unless a REPL session held them, and then
+  // ReplReset did; this is the line that makes "never points at a freed engine"
+  // true of GHandleOwner without reasoning about the two.
+  if GHandleOwner = Self then GHandleOwner := nil;
   FRegistry.Free;
   inherited Destroy();
 end;
@@ -553,7 +611,7 @@ var
 begin
   ClearErrorState();
   Finish();         // a one-shot run discards any prepared state
-  ResetHandles();   // no handles leak between programs
+  ClaimHandles();   // no handles leak between programs; see GHandleOwner
 
   if not CompileSource(ASource, prog) then Exit(FErrorLine);
 
@@ -585,6 +643,7 @@ begin
     finally
       BudgetEnd();
       FLiveVM := savedLive;               // never outlives the VM it points at
+      AdoptHandles();   // what it made is this engine's, if nobody claimed since
     end;
   finally
     vm.Free;
@@ -601,7 +660,7 @@ var
 begin
   ClearErrorState();
   Finish();
-  ResetHandles();
+  ClaimHandles();
 
   if not ReadProgram(AStream, prog, err) then
   begin
@@ -630,6 +689,7 @@ begin
     finally
       BudgetEnd();
       FLiveVM := savedLive;               // never outlives the VM it points at
+      AdoptHandles();   // what it made is this engine's, if nobody claimed since
     end;
   finally
     vm.Free;
@@ -643,7 +703,7 @@ var
 begin
   ClearErrorState();
   Finish();         // discard a previous preparation
-  ResetHandles();
+  ClaimHandles();
 
   if not CompileSource(ASource, FProg) then Exit(FErrorLine);
 
@@ -675,6 +735,7 @@ begin
   finally
     BudgetEnd();
     FLiveVM := savedLive;
+    AdoptHandles();
   end;
 end;
 
@@ -706,12 +767,14 @@ begin
   // VM resets its step counter and start tick per Run, and this is the same
   // boundary for the library side.
   savedLive := FLiveVM; FLiveVM := FVM;                      // see DebugVM
+  AdoptHandles();
   BudgetBegin(FMaxSteps, FTimeoutMs);
   try
     Result := FVM.CallUserFunc(AName, Args, err);
   finally
     BudgetEnd();
     FLiveVM := savedLive;
+    AdoptHandles();
   end;
   if IsError(err) then
   begin
@@ -750,13 +813,17 @@ begin
   begin
     FVM.Free;
     FVM := nil;
-    ResetHandles();   // the prepared program's handles go with it
   end;
   if FProg <> nil then
   begin
     FProg.Free;
     FProg := nil;
   end;
+  { The handles go with it -- a prepared program's AND a one-shot run's, which
+    this used to leave behind because only a prepared VM triggered the reset.
+    Not while a REPL session is open: its handles are not a preparation, and
+    ReplReset is the door that ends it. }
+  if FReplVM = nil then ReleaseHandles();
 end;
 
 procedure TPhosphorEngine.ReplReset;
@@ -765,8 +832,9 @@ begin
   begin
     FReplVM.Free;
     FReplVM := nil;
-    ResetHandles();
   end;
+  // The session's handles go with it, unless a prepared VM still holds them.
+  if FVM = nil then ReleaseHandles();
   if FReplProg <> nil then
   begin
     FReplProg.Free;
@@ -791,7 +859,7 @@ begin
   if FReplVM = nil then
   begin
     Finish();         // a session and a prepared script do not share a VM
-    ResetHandles();
+    ClaimHandles();
     FReplVM := TPhosphorVM.Create();
     ConfigureVM(FReplVM);
   end;
@@ -820,6 +888,7 @@ begin
   finally
     BudgetEnd();
     FLiveVM := savedLive;
+    AdoptHandles();
   end;
   // Safe only now: the VM no longer refers to the previous program, and every value
   // that came out of its constant pool is reference-counted in the globals.

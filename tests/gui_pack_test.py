@@ -44,6 +44,7 @@ Exit 0 pass, 1 fail, 2 could not set up (no display, say).
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -258,6 +259,15 @@ def case(name, flags, own_console=False, mode='quit'):
 if not WIN and not os.environ.get('DISPLAY'):
     print('SETUP no display: run this under xvfb-run, as scripts/test.sh does')
     sys.exit(2)
+# The window is seen through xwininfo and xprop (x11-utils). Without them
+# visible_windows() answers "no window", and the first run on a machine that
+# lacked them (WSL, 2026-10-09) reported six product failures -- windows that
+# never opened -- for what was a missing tool. Say which, and stop.
+if not WIN:
+    missing = [t for t in ('xwininfo', 'xprop') if shutil.which(t) is None]
+    if missing:
+        print('SETUP %s not found: install x11-utils' % ' and '.join(missing))
+        sys.exit(2)
 
 case('piped', [])
 case('fault', [], mode='fault')

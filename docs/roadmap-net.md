@@ -156,8 +156,10 @@ TFPHTTPClient's socket is private, but its socket HANDLER is told of the socket
 and every read and write goes through the handler. An IPv6 request's handler
 re-classes that TInetSocket to `TInet6Socket` -- no fields of its own, checked by
 InstanceSize -- whose Connect dials AF_INET6, and does the I/O, plain or TLS, on
-that descriptor. AAAA comes from `netdb` on Unix and `getaddrinfo` (ws2_32) on
-Windows. Proven by `tests/packages/18_http_ipv6.bas` and `19_https_ipv6.bas`
+that descriptor. AAAA comes from the system's `getaddrinfo` -- libc's on Unix,
+ws2_32's on Windows. (Until 2026-10-09 Unix used `netdb`'s `ResolveName6`, which
+only queries DNS: an AAAA in `/etc/hosts` resolved only where systemd-resolved
+served the hosts file, and not on WSL.) Proven by `tests/packages/18_http_ipv6.bas` and `19_https_ipv6.bas`
 against IPv6 servers the runner stands up on [::1]; see `docs/libraries/http.md`.
 The original note follows.*
 

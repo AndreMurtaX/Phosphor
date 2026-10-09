@@ -1,0 +1,116 @@
+# THE THIRD MACHINE (2026-10-09). The two development machines are a Windows
+# desktop and a Linux that lives on it; this runs every runner on a clean
+# Ubuntu nobody configured by hand. It exists because the Linux VM could not
+# judge anything timed: VirtualBox there runs on the Windows hypervisor
+# ("fall back to NEM: VT-x is not available" in its own log), and a process
+# sleeping 10 ms woke 2633 ms late -- the committed HEAD failed its own timing
+# tests on it. See docs/dev-agent-playbook.md, the 2026-10-08 sweep entry.
+#
+# The toolchain is the one the development machines use, byte for byte: the
+# official Lazarus 4.8 packages (FPC 3.2.2), checked against the SHA-256 of the
+# copies installed there -- NOT the distribution's lazarus, which is 3.0.
+#
+# A SKIP here is a FAILURE. On a developer's machine a missing library is
+# skipped with a yellow line; on the one machine whose whole job is to run
+# everything, a skip means the job did not do its job. The one exception is a
+# case that cannot exist on Linux at all, named below.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain -- Lazarus 4.8 and FPC 3.2.2, the development machines' packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3 openssl libsqlite3-0 sqlite3 xvfb xauth \
+            x11-utils libgtk2.0-dev libx11-dev
+          base='https://sourceforge.net/projects/lazarus/files/Lazarus%20Linux%20amd64%20DEB/Lazarus%204.8'
+          mkdir -p "$RUNNER_TEMP/debs"
+          cd "$RUNNER_TEMP/debs"
+          for f in fpc-laz_3.2.2-210709_amd64.deb fpc-src_3.2.2-210709_amd64.deb \
+                   lazarus-project_4.8.0-0_amd64.deb; do
+            curl -fsSL --retry 5 --retry-delay 10 -o "$f" "$base/$f/download"
+          done
+          printf '%s\n' \
+            '92000f2b831184e153aab0c910f8ae9240450e5c6d76dc189cf53116ee501d83  fpc-laz_3.2.2-210709_amd64.deb' \
+            '8c9e145d8056754a9ca39ce3e52e982b8e4816124984c5f542f2a874e721ad53  fpc-src_3.2.2-210709_amd64.deb' \
+            '401742cefb01ad99a628188034bf728fb5360d641ed2be5f91fb0ee183a301cd  lazarus-project_4.8.0-0_amd64.deb' \
+            > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          sudo apt-get install -y -q ./fpc-laz_3.2.2-210709_amd64.deb \
+            ./fpc-src_3.2.2-210709_amd64.deb ./lazarus-project_4.8.0-0_amd64.deb
+          fpc -iV
+
+      # Each runner's exit code is captured on its own line: `$?` after a pipe
+      # measures the pipe (CLAUDE.md, "An exit code answers the question the
+      # tool asked").
+      - name: build
+        run: |
+          bash scripts/build.sh 2>&1 | tee ci-build.log
+          exit "${PIPESTATUS[0]}"
+      - name: test-suite
+        if: success() || failure()
+        run: |
+          bash scripts/test-suite.sh 2>&1 | tee ci-test-suite.log
+          exit "${PIPESTATUS[0]}"
+      - name: test-suite -ProveFailure
+        if: success() || failure()
+        run: |
+          bash scripts/test-suite.sh -ProveFailure 2>&1 | tee ci-prove.log
+          exit "${PIPESTATUS[0]}"
+      - name: test-classic
+        if: success() || failure()
+        run: |
+          bash scripts/test-classic.sh 2>&1 | tee ci-test-classic.log
+          exit "${PIPESTATUS[0]}"
+      - name: test-examples
+        if: success() || failure()
+        run: |
+          bash scripts/test-examples.sh 2>&1 | tee ci-test-examples.log
+          exit "${PIPESTATUS[0]}"
+      - name: test-packages
+        if: success() || failure()
+        run: |
+          bash scripts/test-packages.sh 2>&1 | tee ci-test-packages.log
+          exit "${PIPESTATUS[0]}"
+      - name: test-gui (under Xvfb)
+        if: success() || failure()
+        run: |
+          xvfb-run -a bash scripts/test-gui.sh 2>&1 | tee ci-test-gui.log
+          exit "${PIPESTATUS[0]}"
+      - name: test
+        if: success() || failure()
+        run: |
+          xvfb-run -a bash scripts/test.sh 2>&1 | tee ci-test.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: nothing was skipped
+        if: success() || failure()
+        run: |
+          # The only case allowed to skip: it tests a Windows console behaviour.
+          allowed='^SKIP  V:a re-shown console \(Windows only'
+          if grep -HE '^SKIP|SKIPPED' ci-*.log | grep -vE ":$allowed"; then
+            echo "FAIL  a runner skipped work on the machine that exists to run all of it"
+            exit 1
+          fi
+          echo "PASS  nothing skipped but the Windows-only case"
+
+      - name: keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-logs
+          path: ci-*.log

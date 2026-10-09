@@ -22,9 +22,15 @@ Nothing is done on a claim. An increment is complete when:
 - **`-ProveFailure` was seen catching a corrupted expectation.** A harness nobody has
   watched fail is not known to be able to fail.
 - The **boundary check** passes: `engine/` reaches no host or GUI unit.
-- Green on **Linux too**: `ssh -i ~/.ssh/phosphor_vm andre@192.168.15.14`,
-  `cd ~/Phosphor && git pull -q && bash scripts/test-suite.sh`. Windows-green has
-  shipped Linux-broken defects (SIGPIPE, OpenSSL-3 soname, cert generation).
+- Green on **Linux too**, in the WSL2 Ubuntu on this machine, cloned from the
+  Windows working copy (remote `win`): `wsl -d Ubuntu-24.04 -- bash -lc 'cd
+  ~/Phosphor && git pull -q win main && bash scripts/test-suite.sh'` -- and in
+  **CI** (`.github/workflows/ci.yml`, a clean Ubuntu where a SKIP fails) once
+  pushed. Windows-green has shipped Linux-broken defects (SIGPIPE, OpenSSL-3
+  soname, cert generation, an AAAA resolver that never read `/etc/hosts`). The
+  VirtualBox VM (`192.168.15.14`) runs on Hyper-V's emulated path ("fall back to
+  NEM" in its log) and stalls for seconds: **never judge a timed test on it**
+  (2026-10-09).
 - Committed **and pushed** as `--author="AndreMurtaX <andre.murta@fhinck.com>"`, docs
   and the playbook updated. A green uncommitted increment is not shipped.
 

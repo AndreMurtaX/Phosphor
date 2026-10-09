@@ -99,8 +99,9 @@
   descriptor. The socket's Host stays the URL's, so SNI and the hostname check read
   the right name. Candidates: an IPv6 literal URL ([::1]) is dialled as itself; a
   name is tried over IPv4 first, exactly as before, and its AAAA records only when
-  no IPv4 address connected -- never through a proxy. AAAA comes from netdb on Unix
-  and from getaddrinfo in ws2_32 on Windows, where FPC has no IPv6 resolver.
+  no IPv4 address connected -- never through a proxy. AAAA comes from the
+  system's getaddrinfo on both: libc's on Unix (see HttpResolveAAAA for why not
+  netdb) and ws2_32's on Windows, where FPC has no IPv6 resolver.
 ******************************************************************************}
 unit PhosphorHttpLib;
 
@@ -177,7 +178,7 @@ function HttpSameOrigin(const A, B: String): Boolean;
 implementation
 
 uses
-  {$IFDEF UNIX}BaseUnix, netdb{$ENDIF}
+  {$IFDEF UNIX}BaseUnix, cnetdb{$ENDIF}
   {$IFDEF WINDOWS}winsock2{$ENDIF};
 
 var
@@ -1193,11 +1194,21 @@ var
   gFreeAddrInfo: TFreeAddrInfo = nil;
 {$ENDIF}
 
+{ THE SYSTEM'S RESOLVER, on both OSes. Unix used netdb's ResolveName6, which
+  sends a DNS query to the first server in /etc/resolv.conf and does nothing
+  else: no /etc/hosts, no nsswitch. It answered `ip6-localhost` only where that
+  server was systemd-resolved, which serves the hosts file over DNS -- so on WSL,
+  whose resolv.conf names the Windows host's proxy, an AAAA the hosts file holds
+  was not there at all, and nor would it be in a container or on a server with
+  no systemd-resolved (found 2026-10-09, the first run on a third Linux). libc's
+  getaddrinfo is what every other program on the machine asks; the binary
+  already links libc. }
 function HttpResolveAAAA(const AHost: String): TStringDynArray;
 var
   {$IFDEF UNIX}
-  addrs: array[0..15] of THostAddr6;
-  n, i: Integer;
+  uhints: cnetdb.TAddrInfo;
+  ures, up: cnetdb.PAddrInfo;
+  uh: AnsiString;
   {$ENDIF}
   {$IFDEF WINDOWS}
   hints: TAddrInfoA;
@@ -1209,13 +1220,26 @@ begin
   Result := nil;
   if AHost = '' then Exit;
   {$IFDEF UNIX}
-  n := ResolveName6(AHost, addrs);
-  for i := 0 to n - 1 do
-    if i <= High(addrs) then
+  FillChar(uhints, SizeOf(uhints), 0);
+  uhints.ai_family := AF_INET6;
+  uhints.ai_socktype := SOCK_STREAM;
+  uh := AnsiString(AHost);
+  ures := nil;
+  if cnetdb.getaddrinfo(PAnsiChar(uh), nil, @uhints, @ures) <> 0 then Exit;
+  try
+    up := ures;
+    while up <> nil do
     begin
-      SetLength(Result, Length(Result) + 1);
-      Result[High(Result)] := HostAddrToStr6(addrs[i]);
+      if (up^.ai_family = AF_INET6) and (up^.ai_addr <> nil) then
+      begin
+        SetLength(Result, Length(Result) + 1);
+        Result[High(Result)] := HostAddrToStr6(PInetSockAddr6(up^.ai_addr)^.sin6_addr);
+      end;
+      up := up^.ai_next;
     end;
+  finally
+    cnetdb.freeaddrinfo(ures);
+  end;
   {$ENDIF}
   {$IFDEF WINDOWS}
   if gWs2 = NilHandle then

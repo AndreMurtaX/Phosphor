@@ -1525,6 +1525,34 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-09 · a third Linux, and two defects on its first run that two
+  machines had hidden for a month.** The VirtualBox VM could not judge
+  anything timed: its own log says `fall back to NEM: VT-x is not
+  available` -- Hyper-V is on (Docker, memory integrity), so VirtualBox runs
+  on the Windows hypervisor's emulated path, and the committed HEAD failed
+  its own timing tests there. Linux now runs in WSL2 (native on Hyper-V: no
+  pause over 100 ms in 349 s, where the VM had 2.6 s), cloned from the
+  Windows working copy so `git pull` carries work instead of `tar`, with the
+  same Lazarus 4.8 / FPC 3.2.2 packages; and `.github/workflows/ci.yml` runs
+  every runner on a clean Ubuntu, where a SKIP is a FAILURE.
+  - **IPv6 resolution on Linux never read /etc/hosts.** netdb's
+    `ResolveName6` is a DNS query and nothing else. It answered
+    `ip6-localhost` on the VM only because systemd-resolved serves the hosts
+    file over DNS; WSL's resolver is the Windows host's proxy, which does not.
+    A container or a server without systemd-resolved would have been the
+    same. Now libc's `getaddrinfo`, which the binary already linked. The test
+    that caught it was right; the machine it had always run on was the
+    accident.
+  - **A missing tool read as six product failures.** The packed-GUI test
+    finds windows with `xwininfo`; absent, it answered "no window", and the
+    report said six windows never opened. It now refuses with the tool's
+    name. **A probe that cannot run must say so -- `except: return []` is a
+    verdict, not an error path.**
+  - **Two machines that were configured by the same hand agree on the same
+    accidents.** Windows, for its part, finds OpenSSL in Laragon's PHP
+    directory and SQLite in Embarcadero's, by PATH -- nothing in this tree
+    says so. A machine nobody configured is the only one that asks.
+
 - **2026-10-08 · the generated HTTP sweep: the axes crossed instead of
   sampled, and four defects the hand-written tests had walked past.** Four
   rounds that day had each found ONE instance of the same class -- an answer

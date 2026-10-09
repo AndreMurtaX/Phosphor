@@ -67,7 +67,7 @@ difference when it matters.
 | `json_object@() → handle` | a new empty object, owning its own tree |
 | `json_array@() → handle` | a new empty array |
 | `json_free(j@) → num` | gives a JSON **document** back — anything constructed, parsed or cloned — with every view borrowed into it, which become stale: `1` when this call freed it, `0` for one already freed or not JSON. A **view** (`json_get@`, `json_item@`, `json_path@`) is part of its document and is not freed on its own: `0`, and nothing changes. What it costs is the document's own views. Until 2026-10-08 nothing freed a JSON value |
-| `json_parse@(text$) → handle` | the document `text$` describes. Malformed text is a runtime error (`invalid json: ...`); so is empty or whitespace-only input, rather than a live handle onto nothing. Only the FIRST value is read: anything after it is ignored, unread, and since 2026-10-05 nothing in that tail can affect the result either — before, a stray quote there switched off the escape repair and brackets there counted as nesting |
+| `json_parse@(text$) → handle` | the document `text$` describes. Malformed text is a runtime error (`invalid json: ...`); so is empty or whitespace-only input, rather than a live handle onto nothing. Only the FIRST value is read: anything after it is ignored, unread, and since 2026-10-05 nothing in that tail can affect the result either — before, a stray quote there switched off the escape repair and brackets there counted as nesting. Numbers are read the way a literal is (the note on numbers below): correctly rounded, at any length, and a number too large for a Double refuses the document (`invalid json: the number at [1] is out of range`) |
 | `json_null@() → handle` | a JSON null as a value in its own right |
 | `json_bool@(n) → handle` | a JSON boolean; any non-zero `n` is true |
 | `json_number@(n) → handle` | a JSON number — stored as an integer when `n` is whole and within int64 range, as a float otherwise |
@@ -110,7 +110,7 @@ JSON reader stops at 64.
 
 | function | what it answers |
 | --- | --- |
-| `json_getn(o@, key$ [, default]) → num` | the member as a number. **Absent** → `default`, or `0` when none was given. **Present but off-type** is coerced, never defaulted: a numeric string reads as its number, any other string reads `0`, a boolean reads `1`/`0`, and null, an object or an array read `0` |
+| `json_getn(o@, key$ [, default]) → num` | the member as a number. **Absent** → `default`, or `0` when none was given. **Present but off-type** is coerced, never defaulted: a numeric string — one `isnumeric` approves — reads as its number, any other string reads `0` (`"nan"`, `"inf"` and `"1e999"` included), a boolean reads `1`/`0`, and null, an object or an array read `0` |
 | `json_gets$(o@, key$ [, default$]) → str` | the member as a string. Absent → `default$` or `""`; a null member reads `""`; an object or array member reads as its own compact JSON text |
 | `json_getb(o@, key$) → num` | `1` only when the member really is a JSON boolean and true. `0` for false, for absent, and for the *string* `"true"`. There is no default form: `0` covers both "false" and "not there" |
 | `json_get@(o@, key$) → handle` | a borrowed handle onto the member. An absent key is an error (`no such json member`) — there is no handle that means "nothing", which is what `json_has` is for |
@@ -156,7 +156,7 @@ refused with `json value is not an array`.
 | `json_isstr(v@) → num` | `1` when it is a string |
 | `json_type(v@) → num` | the kind as a code: `1` number, `2` string, `3` boolean, `4` null, `5` array, `6` object (`0` unknown). Useful for comparing two values' kinds; to *name* one, use `json_typename$` |
 | `json_typename$(v@) → str` | `"object"`, `"array"`, `"number"`, `"string"`, `"boolean"` or `"null"`; `"unknown"` for a node of no known kind |
-| `json_value(v@) → num` | any node at all as a number, without ever raising: a number is itself, a boolean `1`/`0`, a numeric string its value, and a non-numeric string, null, object or array `0` |
+| `json_value(v@) → num` | any node at all as a number, without ever raising: a number is itself, a boolean `1`/`0`, a numeric string its value, and a non-numeric string, null, object or array `0`. A string is numeric when `isnumeric` approves it, so `"nan"`, `"inf"`, `"5"` + NUL and `"1e999"` (number text with no Double) are `0` here — until 2026-10-09 each of those but the NUL made this function **raise** |
 | `json_value$(v@) → str` | any node as a string: a null reads `""`, an object or array its compact JSON text, everything else its own text |
 
 ### Dotted paths
@@ -246,6 +246,25 @@ member *names* in a hash that goes through the system code page, so writing a
 **non-ASCII key** out to text and reading it back does not round trip where that
 code page is not UTF-8. Setting and getting such a key through the same call is
 symmetric everywhere, and non-ASCII *values* are unaffected.
+
+**Numbers are number text, read by the language's one reader.** A number in
+a parsed document, and a numeric string a reader coerces, go through the same
+reader as a literal, `val` and `input`
+([language-reference.md](../language-reference.md#number-text)): the nearest
+Double, correctly rounded — the answer Python's `json.loads` gives — with no
+limit on length. An integer that fits 64 bits is kept exact (`json_stringify$`
+writes every digit back), and read as a number it is the nearest Double too. A
+number too large for a Double has none, so `json_parse@` refuses the document
+and names where the number sits, as a literal `1e999` is a compile error. A
+*string* member is numeric when `isnumeric` approves it — after the same
+whitespace trim `val` makes — and anything else reads `0`: `"abc"`, `"0x10"`,
+`"nan"`, `"inf"`, text holding a NUL, and `"1e999"`, which is number text but
+has no Double (`val` would fault on it; a reader here never does). Until
+2026-10-09 this library read numbers with the compiler's own routine, which was
+one step off for about 7 values in 20 000 (`1e126`), refused any number longer
+than 255 characters as "not an integer or real number", read a numeric string
+that long as `0` and `"5"` + NUL + `"x"` as `5`, and raised a fatal error on the
+strings `"nan"`, `"inf"` and `"1e999"`.
 
 **Prefer `json_get@` to a path for an unusual key.** The direct member lookups
 scan names byte for byte, but the dotted walk behind `json_paths$` and its

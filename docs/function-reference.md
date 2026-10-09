@@ -349,7 +349,7 @@ default when a member is absent.
 | --- | --- |
 | `json_object@() → handle` | a new empty object |
 | `json_array@() → handle` | a new empty array |
-| `json_parse@(text$) → handle` | parse JSON text (error on malformed input) |
+| `json_parse@(text$) → handle` | parse JSON text (error on malformed input, or on a number too large for a Double); numbers are read correctly rounded, at any length, like a literal |
 | `json_free(j@) → num` | free a JSON document with every view borrowed into it: `1` when this call freed it, `0` otherwise -- including for a view, which is part of its document and is not freed on its own |
 | `json_null@() → handle` | a JSON null scalar |
 | `json_bool@(n) → handle` | a JSON boolean scalar |
@@ -368,7 +368,7 @@ default when a member is absent.
 | `json_set@(o@, key$, v@) → handle` | set a member to a (cloned) handle value |
 | `json_setval@(o@, key$, value) → handle` | set a member, kind from the value (num/str/bool/handle) |
 | `json_remove@(o@, key$) → handle` | delete a member |
-| `json_getn(o@, key$ [, default]) → num` | number member; optional default when absent |
+| `json_getn(o@, key$ [, default]) → num` | number member; optional default when absent. A string member reads as its number when `isnumeric` approves it, else `0` |
 | `json_gets$(o@, key$ [, default$]) → str` | string member; optional default |
 | `json_getb(o@, key$) → num` | boolean member (1/0) |
 | `json_get@(o@, key$) → handle` | a (borrowed) handle onto a member (error if absent) |
@@ -407,7 +407,7 @@ default when a member is absent.
 | `json_isstr(v@) → num` | 1 if a string |
 | `json_type(v@) → num` | the fpjson type code |
 | `json_typename$(v@) → str` | `"object"`/`"array"`/`"number"`/`"string"`/`"boolean"`/`"null"` |
-| `json_value(v@) → num` | a scalar's numeric value |
+| `json_value(v@) → num` | any node's numeric value, never raising: a non-numeric string (`"nan"`, `"inf"`, `"1e999"`) is `0` |
 | `json_value$(v@) → str` | a scalar's string value |
 
 **Dotted paths, serialize, id**

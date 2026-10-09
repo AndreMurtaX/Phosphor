@@ -45,6 +45,9 @@ function JsonNodeFromHandle(AHandleId: Int64; out ANode: TJSONData): Boolean;
 
 implementation
 
+uses
+  Classes;   // TStringList, for the placeholder JsonShortenNumbers picks
+
 type
   { Wraps one fpjson node. Owns=True for a root built or parsed here; Owns=False
     for a child handed out by json_get@ (its node belongs to the parent tree). }
@@ -633,22 +636,48 @@ end;
 { Read any node as a number without ever raising. A number is exact; a bool is
   0/1; a numeric string is parsed (else 0); null / object / array read as 0. (The
   old code called AsFloat on every non-number, which raised EConvertError on a
-  non-numeric string and crashed the program -- a reader must return a value.) }
+  non-numeric string and crashed the program -- a reader must return a value.)
+
+  A NUMERIC STRING IS ONE isnumeric() APPROVES (2026-10-09, round 3): the
+  engine's one reader of number text (PhosphorValue.ReadNumberText) after val's
+  whitespace trim, and a value val can hand back. This was TryStrToFloat, FPC's
+  Val behind a ShortString, and it broke the promise above four ways: about 7
+  strings in 20000 read one ulp off ("1e126"); a numeric string past 255 bytes
+  read 0; "5" NUL "x" read 5, because it stops at a NUL; and it ACCEPTS "nan",
+  "inf" and "-inf" and turns "1e999" into +Inf -- a non-finite Double the
+  registry's gate then turned into a fatal `json_value has no finite result`,
+  from the reader whose whole contract is that it never raises. Under the
+  language's grammar inf and nan are not number text, and 1e999 is number text
+  with no Double, which isnumeric answers 0 for; here all four read 0.
+
+  The same guard covers a NUMBER node: a parse never leaves a non-finite one
+  (FirstWildNumber refuses the document), but a sibling package that builds a
+  tree itself can -- the SQLite one adds a REAL column with Add(name, Double),
+  and SQLite stores 1e999 as +Inf -- and that, too, reads 0 rather than raising. }
 function NumVal(N: TJSONData): TValue;
-var d: Double; fs: TFormatSettings;
+var d: Double; r: TNumberText;
 begin
   case N.JSONType of
     jtNumber:
       if TJSONNumber(N).NumberType = ntInteger then Result := ValInt(N.AsInt64)
-      else Result := ValDouble(N.AsFloat);
+      else if TJSONNumber(N).NumberType = ntQWord then
+        { An integer past High(Int64), which fpjson keeps exact as a QWord. Its
+          AsFloat is FPC's QWord-to-Double conversion, and that is NOT correctly
+          rounded: the generated sweep found 9848624006817426123 read as
+          ...816982 where the nearest Double is ...816981, 3 in 20000. Its
+          digits go through the one reader instead. }
+        Result := ValDouble(ReadNumberText(N.AsString).Value)
+      else
+      begin
+        d := N.AsFloat;
+        if IsFiniteD(d) then Result := ValDouble(d) else Result := ValInt(0);
+      end;
     jtBoolean:
       if N.AsBoolean then Result := ValInt(1) else Result := ValInt(0);
     jtString:
       begin
-        fs := DefaultFormatSettings;
-        fs.DecimalSeparator := '.';
-        fs.ThousandSeparator := #0;
-        if TryStrToFloat(N.AsString, d, fs) then Result := ValDouble(d)
+        r := ReadNumberText(TrimNumberSpace(N.AsString));
+        if r.Ok and IsFiniteD(r.Value) then Result := ValDouble(r.Value)
         else Result := ValInt(0);
       end;
   else
@@ -1268,10 +1297,12 @@ end;
   is over a tree whose depth JsonNestsTooDeep has already capped at 256, so the
   recursion here is bounded by the same ceiling the parse was.
 
-  Only ntFloat is asked: an integer node cannot be non-finite, and a plain-digit
-  overflow (`1` and four hundred zeros) is already refused by fpjson itself with
-  "Number is not an integer or real number". Exponent form was the spelling that
-  walked through. }
+  Only ntFloat is asked: an integer node cannot be non-finite. A plain-digit
+  overflow (`1` and four hundred zeros) used to be refused by fpjson itself, as
+  "Number is not an integer or real number" -- a false description, since Val
+  refuses ANY real past 255 characters. Since 2026-10-09 such a token is read by
+  the engine's own reader (see TJsonNumParser), lands here as +Inf like `1e400`,
+  and is refused by this walk in the same words. }
 function FirstWildNumber(N: TJSONData; const APath: String;
   out AWhere: String): Boolean;
 var
@@ -1859,6 +1890,280 @@ begin
   end;
 end;
 
+{ ------------------------------------------------------------------------------
+  JSON IS A NUMBER-TEXT DOOR, AND READS THROUGH THE ENGINE'S ONE READER
+  (2026-10-09, round 3).
+
+  docs/language-reference.md#number-text: one reader -- PhosphorValue's
+  ReadNumberText -- turns decimal text into a number everywhere the language
+  does it, correctly rounded and at any length. Round 2 put the lexer, val,
+  isnumeric, input and the config reader on it and missed this door. A number in
+  a parsed document was read by fcl-json's TBaseJSONReader.ParseNumber
+  (jsonreader.pp), which gives anything that is not a 64-bit integer to FPC's
+  Val. Two defects, both measured on a fresh build:
+
+    - Val is not correctly rounded. 1e126 read as 5A17A2ECC414A040 where the
+      nearest Double is ...03F, and so did about 7 random literals in 20000
+      (a sweep against Python's float()).
+    - fpc_Val_Real_AnsiStr (rtl/inc/astrings.inc) answers code 256 for ANY text
+      longer than 255 bytes, so ParseNumber raised "Number is not an integer or
+      real number" and the whole document was refused -- for `1` and 300 zeros,
+      which RFC 8259 calls a number and Python reads as 1e300.
+
+  THE PARSER BELOW keeps fpjson's grammar and tree and changes only who reads a
+  real number. ParseNumber hands the token text to NumberValue BEFORE it tries
+  its integer readers and Val, and calls FloatValue only for a token that was not
+  an integer, so NumberValue keeps the text and FloatValue reads THAT through
+  ReadNumberText instead of trusting the Double Val made of it. Integer tokens
+  stay where they were: TryStrToQWord / TryStrToInt64 are exact, and an integer
+  fpjson stores as one is the same integer.
+
+  A TOKEN PAST 255 BYTES never reaches FloatValue: Val refuses it first, and
+  DoError is not virtual. So such a token is taken out of the text before fpjson
+  sees it (JsonShortenNumbers) and replaced, in place, by a short placeholder
+  padded with spaces to the token's own length -- so every "Pos n" fpjson reports
+  after it is still the caller's position -- and FloatValue puts the original
+  text back when the placeholder arrives. Only a token fpjson's scanner would
+  have taken whole, followed by a byte that ends a number for it, and read by
+  ReadNumberText, is moved; anything else is handed over untouched and fpjson's
+  own verdict on it stands -- so the rewrite changes no document from malformed
+  to well formed, only from refused-for-its-length to read. The placeholder
+  is `0e<k>` with a k no number in the document spells, so a real `0e0` is never
+  mistaken for one, and the parser counts the placeholders it met: a document
+  where that count disagrees with the rewrite is refused rather than read. }
+type
+  TJsonNumParser = class(TJSONParser)
+  private
+    FTok: String;           // the text of the number token NumberValue saw last
+    FMark: String;          // the placeholder spelling; '' when nothing was moved
+    FLong: array of String; // the moved tokens, in document order
+    FNextLong: Integer;
+  protected
+    procedure NumberValue(const AValue: TJSONStringType); override;
+    procedure FloatValue(const AValue: Double); override;
+  end;
+
+procedure TJsonNumParser.NumberValue(const AValue: TJSONStringType);
+begin
+  FTok := AValue;
+end;
+
+procedure TJsonNumParser.FloatValue(const AValue: Double);
+var
+  txt: String;
+  r: TNumberText;
+begin
+  txt := FTok;
+  if (FMark <> '') and (txt = FMark) then
+  begin
+    if FNextLong >= Length(FLong) then
+      DoError('a long number could not be placed (the rewrite and the parser disagree)');
+    txt := FLong[FNextLong];
+    Inc(FNextLong);
+  end;
+  // AValue is Val's reading of the same token, and the reason this class exists.
+  r := ReadNumberText(txt);
+  if not r.Ok then
+    DoError('Number is not an integer or real number: ' + txt);
+  inherited FloatValue(r.Value);
+end;
+
+{ True when fpjson's scanner, outside strict mode, reads the WHOLE of S as one
+  number token -- a line-for-line mirror of the number branch of
+  TJSONScanner.FetchToken (jsonscanner.pp), which is more lenient than RFC 8259
+  (it takes `01`, `.5` and `1.e5`). A long token is moved only when the scanner
+  would have taken it whole, so the rewrite never changes which documents are
+  well formed -- only that a well-formed one is no longer refused for its
+  length. ATok is the text fpjson hands NumberValue: S, with a '0' in front when
+  it starts with '.', as the scanner does. }
+function JsonIsScannerNumber(const S: String; out ATok: String): Boolean;
+var
+  p, n: Integer;
+
+  function At(I: Integer): Char;           // the scanner reads a #0 past the end
+  begin
+    if I <= n then Result := S[I] else Result := #0;
+  end;
+
+begin
+  Result := False;
+  ATok := '';
+  n := Length(S);
+  p := 1;
+  if At(p) = '-' then Inc(p);
+  case At(p) of
+    '1'..'9', '0': Inc(p);
+    '.': ;                                  // not consumed here; the loop does
+  else
+    Exit;
+  end;
+  // The scanner's `while true`, bounded by the text: past the end At answers
+  // #0, which is the scanner's own Break, so `p <= n` changes no answer.
+  while p <= n do
+    case At(p) of
+      '0'..'9': Inc(p);
+      '.':
+        begin
+          case At(p + 1) of
+            '0'..'9': Inc(p, 2);
+            'e', 'E': Inc(p);
+          else
+            Exit;
+          end;
+          while (p <= n) and (S[p] in ['0'..'9']) do Inc(p);
+          Break;
+        end;
+    else
+      Break;
+    end;
+  if At(p) in ['e', 'E'] then
+  begin
+    Inc(p);
+    if At(p) in ['-', '+'] then Inc(p);
+    if not (At(p) in ['0'..'9']) then Exit;
+    repeat
+      Inc(p);
+    until (p > n) or not (S[p] in ['0'..'9']);
+  end;
+  if p <= n then Exit;                      // the scanner's token ends early
+  if S[1] = '.' then ATok := '0' + S else ATok := S;
+  Result := True;
+end;
+
+const
+  JSON_VAL_MAX = 255;   // the longest text FPC's Val will read (astrings.inc)
+
+{ Moves every number token longer than JSON_VAL_MAX out of AText -- see the note
+  above TJsonNumParser. False, with AOut = AText, when there is none. The scan
+  is fpjson's lexical rule, as JsonValueEnd's: a literal opens on " or ' and
+  closes on the same delimiter, a backslash escapes the next byte; outside one,
+  an identifier (true, false, null, or a bare name) is a run of letters, digits
+  and '_' that starts with a letter or '_', and a number starts at a digit, '-'
+  or '.'. Only as far as the parser reads. }
+function JsonShortenNumbers(const AText: String; out AOut: String;
+  out ALong: TStringArray; out AMark: String): Boolean;
+var
+  i, j, stop, k, at: Integer;
+  delim: Char;
+  esc: Boolean;
+  run, tok: String;
+  marks, long: TStringList;
+begin
+  Result := False;
+  AOut := AText;
+  ALong := nil;
+  AMark := '';
+  stop := JsonValueEnd(AText);
+  delim := #0;
+  esc := False;
+  long := nil;
+  marks := TStringList.Create();
+  try
+    long := TStringList.Create();       // each moved run, its start in Objects
+    marks.Sorted := True;
+    marks.CaseSensitive := True;
+    marks.Duplicates := dupIgnore;
+    j := 0;                                   // the end of a run already taken
+    for i := 1 to Length(AText) do
+    begin
+      if i > stop then Break;
+      if i <= j then Continue;
+      if delim <> #0 then
+      begin
+        if esc then esc := False
+        else if AText[i] = '\' then esc := True
+        else if AText[i] = delim then delim := #0;
+        Continue;
+      end;
+      case AText[i] of
+        '"', '''': delim := AText[i];
+        'A'..'Z', 'a'..'z', '_':
+          begin
+            j := i;
+            while (j < Length(AText)) and
+                  (AText[j + 1] in ['A'..'Z', 'a'..'z', '0'..'9', '_']) do Inc(j);
+          end;
+        '0'..'9', '-', '.':
+          begin
+            j := i;
+            while (j < Length(AText)) and
+                  (AText[j + 1] in ['0'..'9', '-', '+', '.', 'e', 'E']) do Inc(j);
+            run := Copy(AText, i, j - i + 1);
+            if (Length(run) <= 32) and (Copy(run, 1, 2) = '0e') then
+              marks.Add(run);
+            // Moved only when fpjson would have read this whole run as one
+            // token, accepted the byte after it, and the engine's reader reads
+            // the token -- otherwise fpjson's own refusal stands.
+            if (Length(run) > JSON_VAL_MAX) and JsonIsScannerNumber(run, tok) and
+               ReadNumberText(tok).Ok and
+               ((j = Length(AText)) or
+                (AText[j + 1] in [#13, #10, '}', ']', ',', #9, ' '])) then
+              long.AddObject(run, TObject(PtrInt(i)));
+          end;
+      end;
+    end;
+    if long.Count = 0 then Exit;
+    // The first 0e<k> no token in the document spells. At most marks.Count of
+    // them can be taken, so one of the first marks.Count + 1 is free.
+    for k := 0 to marks.Count do
+      if marks.IndexOf('0e' + IntToStr(k)) < 0 then
+      begin
+        AMark := '0e' + IntToStr(k);
+        Break;
+      end;
+    UniqueString(AOut);
+    SetLength(ALong, long.Count);
+    for k := 0 to long.Count - 1 do
+    begin
+      run := long[k];
+      at := Integer(PtrInt(long.Objects[k]));
+      // What fpjson hands NumberValue for this run (JsonIsScannerNumber).
+      if run[1] = '.' then ALong[k] := '0' + run else ALong[k] := run;
+      // In place: the mark, then spaces to the run's own length (a mark is at
+      // most 2 + 10 bytes, a moved run at least 256).
+      for j := 0 to Length(run) - 1 do
+        if j < Length(AMark) then AOut[at + j] := AMark[j + 1]
+        else AOut[at + j] := ' ';
+    end;
+  finally
+    marks.Free();
+    long.Free();
+  end;
+  Result := True;
+end;
+
+{ The one place a JSON text becomes a tree: fpjson's grammar, with every real
+  number read by the engine's own reader. Raises as GetJSON does (EJSONParser /
+  EScannerError), and answers nil for empty or whitespace-only text as GetJSON
+  does. Options are empty, as GetJSON(S, False) leaves them -- see t_json_parse
+  for why UseUTF8 must be off. }
+function JsonParseText(const AText: String): TJSONData;
+var
+  p: TJsonNumParser;
+  txt, mark: String;
+  long: TStringArray;
+begin
+  txt := AText;
+  mark := '';
+  long := nil;
+  JsonShortenNumbers(AText, txt, long, mark);
+  p := TJsonNumParser.Create(txt, []);
+  try
+    p.FMark := mark;
+    p.FLong := long;
+    p.FNextLong := 0;
+    Result := p.Parse();
+    if p.FNextLong <> Length(long) then
+    begin
+      Result.Free();
+      raise EJSONParser.Create(
+        'a long number could not be placed (the rewrite and the parser disagree)');
+    end;
+  finally
+    p.Free();
+  end;
+end;
+
 { The message to report when the text handed to GetJSON was the REWRITTEN one and
   it failed. fpjson counts "Pos n" in the text it was given, and a \u escape is
   six characters where the byte it denotes is one, so a position taken from the
@@ -1878,8 +2183,8 @@ begin
   if not ARespelled then Exit;
   d := nil;
   try
-    d := GetJSON(AOriginal, False);
-    d.Free();                           // Free is nil-safe; GetJSON may answer nil
+    d := JsonParseText(AOriginal);
+    d.Free();                           // Free is nil-safe; the parse may answer nil
   except
     on E: Exception do Result := E.Message;
   end;
@@ -1953,7 +2258,9 @@ begin
     //     Linux   GetJSON(t)        -> 63 61 66 E9        (4 bytes, lossy)
     //             GetJSON(t, False) -> 63 61 66 C3 A9
     //     Windows both               -> 63 61 66 C3 A9
-    d := GetJSON(txt, False);
+    // JsonParseText keeps that (its options are empty, as GetJSON(t, False)'s
+    // are) and reads every real number through the engine's own reader.
+    d := JsonParseText(txt);
   except
     on E: Exception do
     begin

@@ -128,9 +128,13 @@ a **file number** in the classic I/O statements (`open … as #1`, `print #1`,
 ### Number text
 
 One reader turns decimal text into a number everywhere the language does it: a
-numeric **literal** in source, **`val`** and **`isnumeric`**, and a numeric
-**`input` / `input #` field**. So they all accept the same text and all give the
-same answer for it.
+numeric **literal** in source, **`val`** and **`isnumeric`**, a numeric
+**`input` / `input #` field**, and **JSON** — a number in a document
+`json_parse@` reads, and a string member `json_getn`, `json_itemn`, `json_pathn`
+or `json_value` reads as a number ([json.md](libraries/json.md)). So they all
+accept the same text and all give the same answer for it. (The JSON parser's grammar
+decides what a number in a *document* may look like — a `+` in front is not
+JSON — and this reader decides its value.)
 
 **The grammar.** An optional sign, then digits with an optional `.` and more
 digits — at least one digit in all — then an optional exponent: `e` or `E`, an
@@ -168,8 +172,13 @@ as an `int%`, exactly, even past `2^53` where a Double would round. `-0` (and
 correctly rounded. A value at or past the midpoint above the largest Double
 (`1.7976931348623157e308`) has no Double, and each door says so in its own
 words: a literal is a compile error (`the number 1e999 is out of range`),
-`val` faults (`val has no finite result`), `isnumeric` answers `0`, and an
-`input` field is refused (`"1e999" is out of range`).
+`val` faults (`val has no finite result`), `isnumeric` answers `0`, an
+`input` field is refused (`"1e999" is out of range`), `json_parse@` refuses the
+document (`the number at [1] is out of range`), and a JSON reader coercing a
+string reads it as `0`, as it reads any string `isnumeric` does not approve —
+those readers never raise. Until 2026-10-09 JSON read numbers with the compiler
+library's routine, with the defects above, and raised on the strings `"nan"`,
+`"inf"` and `"1e999"`.
 
 ---
 

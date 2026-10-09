@@ -129,6 +129,43 @@ trailing `+`/`-`; a value too wide for its field is prefixed with `%`. String fi
 the format repeats while values remain. Because Phosphor string literals use backslash
 escapes, a `\`…`\` field is written with doubled backslashes: `"\\   \\"`.
 
+**The field grammar (2026-10-09, round 3).** A numeric field is
+
+    [+] [ **$ | $$ | ** ] [+]  digits  [ . #... ]  [ + | - ]
+
+with one sign mark at most (a `+` before or after the fill, or a trailing `+`/`-`); a
+`,` that belongs to the field only between digit positions (after a `#` or the fill,
+before another `#` or the field's point); a point that belongs to the field only when
+a `#` follows it; and at least one `#`, a fill or a point. One scanner
+(`ScanUsingField`) cuts the format by this grammar and the layout reads the record it
+fills -- before, the start condition and the consumer were two grammars, and a format
+the start condition took as one field (`+$$##.##`) was consumed as two, the first a
+zero-width overflow and the second taking the NEXT value. The choices, each with its
+reason:
+
+- **A field may start at its point** (`.##`). Classic BASIC's rule is that a digit
+  position before the point is always printed, with 0 if need be -- so with none, a
+  value below 1 prints `.78`, and one of 1 or more overflows (`%1.50`). The fill
+  counts as positions (`$$` is two, one of them the `$`; `**` two; `**$` three), so
+  `$$.##` keeps printing `$0.78` as it always did. Before, `.##` was a literal `.` and
+  an integer field: 0.78 printed `. 1`, a different number with no `%`.
+- **`+` before the fill is the same field as `+` after it.** The sign prints where it
+  was written: `+$$##.##` gives `+$5.00`, `$$+##.##` the `$+5.00` it always gave.
+  `**$` is classic BASIC's fill-plus-dollar and is now one field, not `**` and then a
+  literal `$`.
+- **A comma or a point that no digit follows is text.** `Total ###.##.` keeps its
+  period (it vanished into the field) and `##, ##` is two fields with a comma between
+  (the comma was taken as grouping, and the field grew a column). `###.` prints exactly
+  as it did, since a point with no decimals after it printed nothing more than a `.`.
+- **One sign mark per field.** After a leading `+`, a trailing `+` or `-` is text:
+  `+##-` was one field whose `+` was ignored but still took a column.
+- **`^^^^` is not part of the subset**; it prints as text. The digits rule below says a
+  field is never an exponent, and that stays true.
+
+`tests/print_using_sweep.py` implements the grammar in Python from this text and
+crosses every format of 1 to 4 tokens over `# . , + - $$ ** $ * ^^^^ x` (16104
+formats, four values each) against the engine.
+
 **The digits of a number field (2026-10-09).** Never an exponent, and exactly as many
 decimals as the field has `#` after the point. A Double shows its first **17
 significant digits** and `0` in every place past them; it is rounded **once, half away
@@ -145,6 +182,24 @@ from about 1e256 up (less with decimals) FloatToStrF answered in exponent form a
 field printed the mantissa's integer part -- `1` for 1e300 -- with no `%`, and a field
 never showed more than 18 decimals. `tests/print_using_sweep.py` crosses the range
 against Python's decimal module.
+
+### A radix input field is sign and magnitude, and must fit an int% (2026-10-09)
+
+`input` and `input #` read a numeric field written `$FF`, `0x1F`, `&17` or `%101`,
+with an optional sign. It is read as **sign and magnitude**, and a value outside
+`-2^63 .. 2^63-1` is refused (`"..." is out of integer range`) -- into a number as
+into an `int%`. The reasons: the language's own radix text is sign and magnitude
+(`hex$(-255)` is `-FF`), `hex$`/`oct$`/`bin$` write every Int64 and nothing past it,
+so this is exactly the set they produce, and the decimal door already refuses an
+integer it cannot hold rather than wrapping it. A radix text names an integer; reading
+one past Int64 as the nearest Double would invent a rounding no writer of radix text
+asked for. Before, the field went to FPC's `TryStrToInt64`, which reads a magnitude up
+to 2^64-1, reinterprets it as signed and only then negates: `-$FFFFFFFFFFFFFFFF` read
+as `1`, `$FFFFFFFFFFFFFFFF` as `-1`, silently, one past 2^64 was "not a number", and a
+field past 255 bytes was refused. The accepted shape is unchanged (measured against
+`TryStrToInt64`); `val` and source literals still read no radix at all.
+`tests/classic/21_input_radix_fields.bas` crosses 11 magnitudes x 5 prefixes x 3 signs
+x 0/1/260 leading zeros at both doors.
 
 ### Resuming a fault in a loop's own test (2026-10-09)
 

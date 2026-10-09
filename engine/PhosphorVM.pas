@@ -1048,23 +1048,88 @@ var
   low, trimmed: String;
   num: TNumberText;
 
-  { A RADIX-PREFIXED INTEGER: $FF, &17, %101 or 0x1F, signed or not. FPC's
-    TryStrToInt64 reads these, `input` has always taken them through it, and a
-    field that works today keeps working (the "-$0" this function once protected
-    by name is one). It is now asked ONLY for this shape and never for decimal
-    text, which the engine's own reader answers: TryStrToInt64 also stops at an
-    embedded NUL and calls what came before it the number ("1" + NUL + "x" read
-    as 1), refuses past 255 bytes, and reads no fraction. }
-  function IsRadixText(const S: String): Boolean;
+  { A RADIX-PREFIXED INTEGER, read as SIGN AND MAGNITUDE.
+
+      [+|-] ( $ hex | 0x hex | 0X hex | & octal | % binary )
+
+    at least one digit, any number of leading zeros, hex digits in either case.
+    Answers 0 when S is not of that shape, 1 with AVal set when it is and its
+    value fits an Int64, 2 when it is and does not.
+
+    Until 2026-10-09 (round 3) this shape went to FPC's TryStrToInt64, whose
+    fpc_val_int64_shortstr reads a radix magnitude up to High(QWord), CASTS it
+    to Int64 and only then applies the sign: "-$FFFFFFFFFFFFFFFF" read as 1,
+    "-$8000000000000001" as 9223372036854775807 and "$FFFFFFFFFFFFFFFF" as -1,
+    all silently -- a minus sign that gave a positive number. One past 2^64
+    was "not a number", and any field past 255 bytes (leading zeros) was
+    refused, because Val goes through a ShortString. The language's own radix
+    text is sign and magnitude (hex$(-255) is "-FF", and hex$ writes every
+    Int64 and nothing else), and the decimal door refuses an integer it cannot
+    hold; this reader does both. The magnitude is accumulated in a QWord with
+    the overflow decided BEFORE each step, and the sign is applied to the
+    magnitude, never to a reinterpreted word: -2^63 is the one magnitude past
+    High(Int64) that a minus sign brings back into range.
+
+    The accepted SHAPE is exactly the one TryStrToInt64 accepted behind the old
+    IsRadixText pre-check (measured: '$', '0x', '0X', '&', '%' after an optional
+    sign, no blank anywhere, at least one digit), so a field that read before
+    and fits still reads the same. A NUL is not a digit, so text holding one is
+    not of the shape. }
+  function ReadRadixText(const S: String; out AVal: Int64): Integer;
   var
-    ri: Integer;
+    ri, base, dv: Integer;
+    mag: QWord;
+    neg, over: Boolean;
+    c: Char;
   begin
-    if Pos(#0, S) > 0 then Exit(False);
+    Result := 0;
+    AVal := 0;
     ri := 1;
-    if (ri <= Length(S)) and ((S[ri] = '+') or (S[ri] = '-')) then Inc(ri);
-    Result := (ri <= Length(S)) and
-              ((S[ri] in ['$', '&', '%']) or
-               ((ri < Length(S)) and (S[ri] = '0') and (S[ri + 1] in ['x', 'X'])));
+    neg := False;
+    if (ri <= Length(S)) and ((S[ri] = '+') or (S[ri] = '-')) then
+    begin
+      neg := S[ri] = '-';
+      Inc(ri);
+    end;
+    if ri > Length(S) then Exit;
+    if S[ri] = '$' then begin base := 16; Inc(ri); end
+    else if S[ri] = '&' then begin base := 8; Inc(ri); end
+    else if S[ri] = '%' then begin base := 2; Inc(ri); end
+    else if (S[ri] = '0') and (ri < Length(S)) and (S[ri + 1] in ['x', 'X']) then
+      begin base := 16; Inc(ri, 2); end
+    else Exit;
+    if ri > Length(S) then Exit;            // a prefix with no digit
+    mag := 0;
+    over := False;
+    while ri <= Length(S) do
+    begin
+      c := S[ri];
+      if c in ['0'..'9'] then dv := Ord(c) - Ord('0')
+      else if c in ['a'..'f'] then dv := Ord(c) - Ord('a') + 10
+      else if c in ['A'..'F'] then dv := Ord(c) - Ord('A') + 10
+      else Exit;                             // not a digit of any radix: not the shape
+      if dv >= base then Exit;               // '8' in octal, '2' in binary
+      // past the largest magnitude any Int64 has (2^63): keep reading, so that a
+      // bad digit later still makes the field "not a number", but remember it
+      if (not over) and (mag > (QWord(High(Int64)) + 1 - QWord(dv)) div QWord(base)) then
+        over := True;
+      if not over then mag := mag * QWord(base) + QWord(dv);
+      Inc(ri);
+    end;
+    if over then Exit(2);
+    if neg then
+    begin
+      // -High - 1, not Low(Int64): CoerceField's local `low` (a string)
+      // shadows Low in here, Pascal being case-insensitive
+      if mag = QWord(High(Int64)) + 1 then AVal := -High(Int64) - 1
+      else AVal := -Int64(mag);
+    end
+    else
+    begin
+      if mag > QWord(High(Int64)) then Exit(2);
+      AVal := Int64(mag);
+    end;
+    Result := 1;
   end;
 
 begin
@@ -1102,11 +1167,17 @@ begin
           V := ValInt(num.Int);   // vtNumber holds an int% happily
           Exit;
         end;
-        if (not num.Ok) and IsRadixText(trimmed) and TryStrToInt64(trimmed, iv) then
-        begin
-          V := ValInt(iv);
-          Exit;
-        end;
+        { A radix field past what an int% holds is refused, into an int% and
+          into a number alike: radix text is integer text, and hex$/oct$/bin$
+          never write one outside the Int64 range (docs/decisions.md). }
+        if not num.Ok then
+          case ReadRadixText(trimmed, iv) of
+            1: begin
+                 V := ValInt(iv);
+                 Exit;
+               end;
+            2: Exit(MakeError(peRuntime, '"' + AField + '" is out of integer range'));
+          end;
         if num.Ok then
         begin
           dv := num.Value;
@@ -1927,39 +1998,140 @@ begin
   if AFrac > 0 then Result := Result + '.' + Copy(dg, p + 1, AFrac);
 end;
 
-function FormatNumericField(const Spec: String; const V: TValue): String;
+{ ONE NUMERIC FIELD OF A PRINT USING FORMAT, as the scanner cut it. }
+type
+  TUsingField = record
+    Lead: Boolean;        // a '+' written first, before any fill
+    PlusAfter: Boolean;   // a '+' written after the fill ("$$+", "**+")
+    Dollar: Boolean;      // '$$' or '**$': a floating '$'
+    StarFill: Boolean;    // '**' or '**$': pad with '*'
+    Grouping: Boolean;    // an interior ','
+    Point: Boolean;       // a decimal point, which always has a '#' after it
+    NDig: Integer;        // '#' before the point
+    Width: Integer;       // columns before the point (or the whole field), trailing sign excluded
+    Frac: Integer;        // '#' after the point
+    TrailPlus, TrailMinus: Boolean;
+  end;
+
+{ THE GRAMMAR OF A NUMERIC FIELD -- the one docs/decisions.md writes down, and
+  the only place it lives:
+
+    [+] [ **$ | $$ | ** ] [+]  digits  [ . #... ]  [ + | - ]
+
+  * one sign mark at most: a '+' before or after the fill, or a trailing '+'
+    or '-' -- once a leading '+' is taken, a '+' or '-' after the field is text;
+  * digits are '#' and ','; a ',' (or a run of them) belongs to the field only
+    after a digit position (a '#' or the fill) and before another '#' or the
+    field's point -- so "##, ##" is two fields with a comma between them;
+  * the point belongs to the field only when a '#' follows it, so a sentence
+    may end in "###.##." and "###." is "###" and then a '.';
+  * a field holds at least one '#', a fill or a point: a bare '+' is text.
+
+  Answers False, with nothing consumed, when no field starts at AStart; else
+  True with AEnd one past the field.
+
+  Until 2026-10-09 (round 3) the START condition and the CONSUMER were two
+  different grammars. A field could start only at '#', '+', '$$' or '**', so
+  ".##" was a literal '.' and then an integer field -- 0.78 printed ". 1", a
+  different number with no '%'. The start condition took '+' before '$$' or
+  '**', but the consumer skipped '$$'/'**' only BEFORE a '+', so "+$$##.##"
+  became a zero-width '+' field that printed its value as an overflow ("%+5")
+  and a second field that took the NEXT value: every later field shifted. The
+  consumer also took every '#', ',' and '.' in a run, so "**$" split in two,
+  the period ending "Total ###.##." vanished into the field, and the comma in
+  "##, ##" became grouping. Cutting and laying out now read the same record. }
+function ScanUsingField(const Fmt: String; AStart: Integer; out F: TUsingField;
+  out AEnd: Integer): Boolean;
 var
-  s, core, intPartStr, fracPartStr, numText, leftSign, trailSignStr, dollarStr, intField: String;
-  fracDigits, width, pad, dotPos2, i: Integer;
-  grouping, signLead, trailPlus, trailMinus, dollar, starFill, neg: Boolean;
-  dotPos: Integer;
+  n, j, k: Integer;
+  fill: Boolean;
+begin
+  F := Default(TUsingField);
+  n := Length(Fmt);
+  j := AStart;
+  AEnd := AStart;
+  if (j <= n) and (Fmt[j] = '+') then
+  begin
+    F.Lead := True;
+    Inc(j);
+  end;
+  fill := True;
+  if (j + 2 <= n) and (Fmt[j] = '*') and (Fmt[j + 1] = '*') and (Fmt[j + 2] = '$') then
+  begin
+    F.StarFill := True; F.Dollar := True; Inc(j, 3);
+  end
+  else if (j + 1 <= n) and (Fmt[j] = '$') and (Fmt[j + 1] = '$') then
+  begin
+    F.Dollar := True; Inc(j, 2);
+  end
+  else if (j + 1 <= n) and (Fmt[j] = '*') and (Fmt[j + 1] = '*') then
+  begin
+    F.StarFill := True; Inc(j, 2);
+  end
+  else
+    fill := False;
+  if fill and (not F.Lead) and (j <= n) and (Fmt[j] = '+') then
+  begin
+    F.PlusAfter := True;
+    Inc(j);
+  end;
+  while j <= n do
+  begin
+    if Fmt[j] = '#' then
+    begin
+      Inc(F.NDig);
+      Inc(j);
+    end
+    else if (Fmt[j] = ',') and ((F.NDig > 0) or fill) then
+    begin
+      k := j;
+      while (k <= n) and (Fmt[k] = ',') do Inc(k);
+      if (k <= n) and ((Fmt[k] = '#') or
+                       ((Fmt[k] = '.') and (k < n) and (Fmt[k + 1] = '#'))) then
+      begin
+        F.Grouping := True;
+        j := k;
+      end
+      else
+        Break;
+    end
+    else
+      Break;
+  end;
+  F.Width := j - AStart;
+  if (j < n) and (Fmt[j] = '.') and (Fmt[j + 1] = '#') then
+  begin
+    F.Point := True;
+    Inc(j);
+    while (j <= n) and (Fmt[j] = '#') do
+    begin
+      Inc(F.Frac);
+      Inc(j);
+    end;
+  end;
+  if (F.NDig = 0) and (not fill) and (not F.Point) then Exit(False);
+  if (not F.Lead) and (not F.PlusAfter) and (j <= n) then
+  begin
+    if Fmt[j] = '+' then begin F.TrailPlus := True; Inc(j); end
+    else if Fmt[j] = '-' then begin F.TrailMinus := True; Inc(j); end;
+  end;
+  AEnd := j;
+  Result := True;
+end;
+
+function FormatNumericField(const F: TUsingField; const V: TValue): String;
+var
+  core, intPartStr, fracPartStr, numText, leftSign, trailSignStr, dollarStr, intField: String;
+  pad, dotPos2: Integer;
+  neg: Boolean;
   av: Double;
   padChar: Char;
 begin
-  s := Spec;
-  dollar := False; starFill := False; signLead := False;
-  trailPlus := False; trailMinus := False;
-  if (Length(s) >= 2) and (s[1] = '$') and (s[2] = '$') then begin dollar := True; Delete(s, 1, 2); end
-  else if (Length(s) >= 2) and (s[1] = '*') and (s[2] = '*') then begin starFill := True; Delete(s, 1, 2); end;
-  if (Length(s) >= 1) and (s[1] = '+') then begin signLead := True; Delete(s, 1, 1); end;
-  if (Length(s) >= 1) and (s[Length(s)] = '+') then begin trailPlus := True; SetLength(s, Length(s) - 1); end
-  else if (Length(s) >= 1) and (s[Length(s)] = '-') then begin trailMinus := True; SetLength(s, Length(s) - 1); end;
-  grouping := Pos(',', s) > 0;
-  dotPos := Pos('.', s);
-  fracDigits := 0;
-  if dotPos > 0 then
-    for i := dotPos + 1 to Length(s) do if s[i] = '#' then Inc(fracDigits);
-  // The integer field width is the count of positions the spec devotes to the
-  // integer part -- including any leading '$$'/'**'/'+' and grouping commas, but
-  // not a trailing sign -- so the sign or floating '$' occupies a real column.
-  begin
-    core := Spec;
-    if (Length(core) >= 1) and (core[Length(core)] in ['+', '-']) then
-      SetLength(core, Length(core) - 1);
-    dotPos2 := Pos('.', core);
-    if dotPos2 > 0 then width := dotPos2 - 1 else width := Length(core);
-  end;
-
+  // The integer field width (F.Width) is the count of positions the format
+  // devotes to the integer part -- including any '+', '$$', '**$' or '**' and
+  // grouping commas, but not a trailing sign -- so the sign or floating '$'
+  // occupies a real column.
+  if F.StarFill then padChar := '*' else padChar := ' ';
   av := AsDouble(V);
   { `av < 0` IS AN ORDERED COMPARISON and PRINT USING is reached with whatever the
     program -- or a host, through CallFunction -- put in the value. A NaN operand
@@ -1970,8 +2142,7 @@ begin
   if IsNan(av) or IsInfinite(av) then
   begin
     core := ValToStr(V);
-    if starFill then padChar := '*' else padChar := ' ';
-    pad := width - Length(core);
+    pad := F.Width - Length(core);
     if pad >= 0 then Result := StringOfChar(padChar, pad) + core
     else Result := '%' + core;      // overflow: the classic leading '%'
     Exit;
@@ -1995,33 +2166,43 @@ begin
     neg := V.Int < 0;
     numText := IntToStr(V.Int);
     if neg then Delete(numText, 1, 1);
-    if fracDigits > 0 then numText := numText + '.' + StringOfChar('0', fracDigits);
+    if F.Frac > 0 then numText := numText + '.' + StringOfChar('0', F.Frac);
   end
   else
   begin
     neg := av < 0;
-    numText := FixedPointText(Abs(av), fracDigits);
+    numText := FixedPointText(Abs(av), F.Frac);
   end;
   dotPos2 := Pos('.', numText);
   if dotPos2 = 0 then begin intPartStr := numText; fracPartStr := ''; end
   else begin intPartStr := Copy(numText, 1, dotPos2 - 1); fracPartStr := Copy(numText, dotPos2 + 1, MaxInt); end;
-  if grouping then intPartStr := GroupThousands(intPartStr);
+  if F.Grouping then intPartStr := GroupThousands(intPartStr);
+  { NO DIGIT POSITION BEFORE THE POINT (".##", "+.##"): a value below 1 shows no
+    leading 0 -- the classic rule is that a digit position before the point is
+    always filled, with 0 if need be, and this field has none. A fill counts as
+    positions ("$$.##" is "$0.78"). A value of 1 or more still prints all its
+    digits, after the overflow '%'. }
+  if F.Point and (F.NDig = 0) and (not F.Dollar) and (not F.StarFill) and
+     (intPartStr = '0') then
+    intPartStr := '';
 
   leftSign := ''; trailSignStr := '';
-  if trailPlus then begin if neg then trailSignStr := '-' else trailSignStr := '+'; end
-  else if trailMinus then begin if neg then trailSignStr := '-' else trailSignStr := ' '; end
-  else if signLead then begin if neg then leftSign := '-' else leftSign := '+'; end
+  if F.TrailPlus then begin if neg then trailSignStr := '-' else trailSignStr := '+'; end
+  else if F.TrailMinus then begin if neg then trailSignStr := '-' else trailSignStr := ' '; end
+  else if F.Lead or F.PlusAfter then begin if neg then leftSign := '-' else leftSign := '+'; end
   else if neg then leftSign := '-';
-  if dollar then dollarStr := '$' else dollarStr := '';
+  if F.Dollar then dollarStr := '$' else dollarStr := '';
 
-  core := dollarStr + leftSign + intPartStr;
-  if starFill then padChar := '*' else padChar := ' ';
-  pad := width - Length(core);
+  // A '+' written before the fill prints before the '$' ("+$$" -> "+$5.00");
+  // otherwise the '$' floats outside the sign, as "$$+" and "$$" always printed.
+  if F.Lead then core := leftSign + dollarStr + intPartStr
+  else core := dollarStr + leftSign + intPartStr;
+  pad := F.Width - Length(core);
   if pad >= 0 then intField := StringOfChar(padChar, pad) + core
   else intField := '%' + core;   // overflow: the classic leading '%'
 
   Result := intField;
-  if dotPos > 0 then Result := Result + '.' + fracPartStr;
+  if F.Point then Result := Result + '.' + fracPartStr;
   Result := Result + trailSignStr;
 end;
 
@@ -2033,7 +2214,8 @@ end;
 function FormatUsing(const Fmt: String; const Vals: array of TValue): String;
 var
   i, j, n, vi: Integer;
-  spec, sv: String;
+  sv: String;
+  fld: TUsingField;
   width, svLen: Integer;
   fieldSeen: Boolean;
 
@@ -2052,19 +2234,10 @@ begin
   while i <= n do
   begin
     // numeric field?
-    if (Fmt[i] = '#') or
-       ((Fmt[i] = '+') and (i < n) and (Fmt[i + 1] in ['#', '.', '$', '*'])) or
-       ((Fmt[i] = '$') and (i < n) and (Fmt[i + 1] = '$')) or
-       ((Fmt[i] = '*') and (i < n) and (Fmt[i + 1] = '*')) then
+    // ONE grammar cuts the field and lays it out: see ScanUsingField.
+    if ScanUsingField(Fmt, i, fld, j) then
     begin
-      j := i;
-      if (Fmt[j] = '$') and (j < n) and (Fmt[j + 1] = '$') then Inc(j, 2)
-      else if (Fmt[j] = '*') and (j < n) and (Fmt[j + 1] = '*') then Inc(j, 2);
-      if (j <= n) and (Fmt[j] = '+') then Inc(j);
-      while (j <= n) and (Fmt[j] in ['#', ',', '.']) do Inc(j);
-      if (j <= n) and (Fmt[j] in ['+', '-']) then Inc(j);
-      spec := Copy(Fmt, i, j - i);
-      Result := Result + FormatNumericField(spec, NextVal());
+      Result := Result + FormatNumericField(fld, NextVal());
       fieldSeen := True;
       i := j;
     end

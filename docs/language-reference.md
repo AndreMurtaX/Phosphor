@@ -594,15 +594,45 @@ exactly what it is.
 `print using <format$>; <value>[; <value>…]` fills the format's fields with the
 values. Numeric fields use `#` for digit positions, `.` for the decimal point, `,`
 for thousands grouping, a leading `+` or `$$` (floating dollar) or `**` (asterisk
-fill), and a trailing `+`/`-`; a value too wide for its field gets a leading `%`.
-String fields are `&` (the whole string), `!` (its first character), and `\…\` (a
-fixed-width field). The format repeats while values remain.
+fill) or `**$` (both), and a trailing `+`/`-`; a value too wide for its field gets
+a leading `%`. String fields are `&` (the whole string), `!` (its first character),
+and `\…\` (a fixed-width field). The format repeats while values remain.
 
 ```basic
 println using "###.##"; 3.14159        ' "  3.14"
 println using "$$#,###.##"; 1250.5     ' " $1,250.50" -- ten wide, so one pad space
 println using "<#> "; 1; 2; 3          ' "<1> <2> <3> "  (format reused)
 ```
+
+**Where a numeric field begins and ends.** One grammar decides it:
+
+```
+[+] [ **$ | $$ | ** ] [+]  digits  [ . #… ]  [ + | - ]
+```
+
+- **One sign mark per field**: a `+` written before or after the fill, or a
+  trailing `+` or `-`. `"+$$##.##"` is one field (`  +$5.00` for 5), as
+  `"$$+##.##"` is (`  $+5.00`); after a leading `+`, a `+` or `-` is text.
+- **A `,` belongs to the field only between digit positions** — after a `#` or
+  the fill and before another `#` or the field's point. So `"##, ##"` is two
+  fields with a comma between them.
+- **The point belongs to the field only when a `#` follows it**, so a sentence
+  can end a format: `"Total: ###.##."` keeps its period.
+- **A field may start at the point**: `".##"` has no integer positions, and a
+  value below 1 prints with no leading zero (`.78` for 0.78); one of 1 or more
+  overflows (`%1.50`). A fill counts as positions: `"$$.##"` prints `$0.78`.
+- A bare `+` is text, and so is `^^^^`: a field is never an exponent.
+
+```basic
+println using "Rate: .###"; 0.125      ' "Rate: .125"
+println using "**$#,###.##"; 1234.5    ' "**$1,234.50"
+println using "+$$##.##"; 5; 6         ' "  +$5.00  +$6.00"
+```
+
+Until 2026-10-09 a field could only start at `#`, `+`, `$$` or `**`, so `".##"`
+printed 0.78 as `. 1`; and `"+$$##.##"` became two fields, the first printing
+`%+5` and the second taking the *next* value, which shifted every field after
+it.
 
 Because string literals use backslash escapes, a `\…\` field is written with
 doubled backslashes: `println using "[\\  \\]"; "hi"` prints `[hi  ]`.
@@ -673,8 +703,15 @@ A field read into a **string** is kept as it is. Into a **number** or an
 empty field is `0`, and text that is not a number is a catchable error
 (`"abc" is not a number`). A numeric field may also be an integer written in
 hexadecimal (`$FF`, `0x1F`), octal (`&17`) or binary (`%101`), with a sign —
-`input` has always read those, and `val` does not. A plain integer that fits
-64 bits is stored exactly. Into a **boolean**, `true`, `yes` and `1` are true
+`input` has always read those, and `val` and a literal in source do not. Such a
+field is **sign and magnitude**, the way `hex$` writes it (`-$FF` is -255,
+never a two's-complement word), with any number of leading zeros, and it must
+fit an `int%`: from `-$8000000000000000` to `$7FFFFFFFFFFFFFFF`. One outside
+that range is refused, into a number as into an `int%`
+(`"$FFFFFFFFFFFFFFFF" is out of integer range`). Until 2026-10-09 such a field
+wrapped instead — `-$FFFFFFFFFFFFFFFF` read as `1` and `$FFFFFFFFFFFFFFFF` as
+`-1` — and one longer than 255 characters was refused. A plain integer that
+fits 64 bits is stored exactly. Into a **boolean**, `true`, `yes` and `1` are true
 and `false`, `no`, `0` and an empty field false, in any case.
 
 ---

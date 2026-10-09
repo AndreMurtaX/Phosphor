@@ -32,6 +32,22 @@ THE GRID, crossed rather than sampled:
     random decimals 0..60, and a random choice of leading '+', trailing '-'
     and ',' grouping.
 
+THE FIELD GRAMMAR GRID (2026-10-09, round 3). The scanner that cuts a format
+into fields had one start condition and a different consumer: ".##" was not a
+field (0.78 printed ". 1" -- a literal '.' and then an integer field), and in
+"+$$##.##" the start condition took '+' before '$$' but the consumer only
+skipped '$$' BEFORE a '+', so the '+' became a zero-width field that ate one
+value and '$$##.##' ate the next. using_line() below is the grammar as
+docs/decisions.md ("PRINT USING format language") writes it, implemented from
+that text, and the grid is EVERY format of 1 to 4 tokens over
+
+    #  .  ,  +  -  $$  **  $  *  ^^^^  x
+
+(16104 formats; '**' followed by '$' is how '**$' arises, and '^^^^' and 'x'
+are literal text), each printed with four values, so a scanner that consumes
+the wrong number of values shows in every later field and in the format's
+repetition. Then a hand list of formats a person writes.
+
 Usage: print_using_sweep.py <phosphor> [--prove-failure]
   --prove-failure corrupts one expected line and must see the mismatch.
 Exit 0 when every line matches; 1 with the first mismatches named; 2 on a bad
@@ -73,32 +89,138 @@ def group(digits):
     return ''.join(reversed(out))
 
 
-def reference(spec, x):
-    """What `print using spec; x` must print for one numeric field."""
-    s = spec
-    lead_plus = s.startswith('+')
-    trail_minus = s.endswith('-')
-    core = s[:-1] if trail_minus else s
-    width = core.index('.') if '.' in core else len(core)
-    frac = core[core.index('.') + 1:].count('#') if '.' in core else 0
-    neg = x < 0
-    text = fixed_text(abs(Decimal(x)), frac)
-    ip, _, fp = text.partition('.')
-    if ',' in core:
-        ip = group(ip)
+def scan_field(fmt, i):
+    """The numeric field starting at fmt[i], or None. docs/decisions.md:
+
+      [+] [**$ | $$ | **] [+]  digits  [. #...]  [+ | -]
+
+    * one sign mark at most: a leading '+' (before or after the fill) or a
+      trailing '+' / '-';
+    * digits are '#' and ',' -- a ',' (or a run of them) belongs to the field
+      only after a digit position and before another '#' or the field's point;
+    * the point belongs to the field only when a '#' follows it;
+    * a field holds at least one '#', a fill, or a point: a bare '+' is text.
+    Returns (end, info)."""
+    n = len(fmt)
+    j = i
+    lead = False
+    if j < n and fmt[j] == '+':
+        lead = True
+        j += 1
+    fill = ''
+    for f in ('**$', '$$', '**'):
+        if fmt.startswith(f, j):
+            fill = f
+            j += len(f)
+            break
+    plus_after = False
+    if fill and not lead and j < n and fmt[j] == '+':
+        plus_after = True
+        j += 1
+    ndig = 0
+    grouping = False
+    while j < n:
+        if fmt[j] == '#':
+            ndig += 1
+            j += 1
+        elif fmt[j] == ',' and (ndig > 0 or fill):
+            k = j
+            while k < n and fmt[k] == ',':
+                k += 1
+            if k < n and (fmt[k] == '#' or (fmt[k] == '.' and k + 1 < n and fmt[k + 1] == '#')):
+                grouping = True
+                j = k
+            else:
+                break
+        else:
+            break
+    width = j - i
+    point = False
+    frac = 0
+    if j + 1 < n and fmt[j] == '.' and fmt[j + 1] == '#':
+        point = True
+        j += 1
+        while j < n and fmt[j] == '#':
+            frac += 1
+            j += 1
+    if not (ndig or fill or point):
+        return None
     trail = ''
+    if not (lead or plus_after) and j < n and fmt[j] in '+-':
+        trail = fmt[j]
+        j += 1
+    return j, dict(lead=lead, plus_after=plus_after, fill=fill, ndig=ndig,
+                   grouping=grouping, width=width, point=point, frac=frac,
+                   trail=trail)
+
+
+def lay_out(f, x):
+    """One numeric field, laid out: x is a Python int (an int%) or a float."""
+    if isinstance(x, int):
+        neg = x < 0
+        ip = str(abs(x))
+        fp = '0' * f['frac']
+    else:
+        neg = x < 0
+        text = fixed_text(abs(Decimal(x)), f['frac'])
+        ip, _, fp = text.partition('.')
+    if f['grouping']:
+        ip = group(ip)
+    # no digit position before the point: a value below 1 shows no leading 0
+    if f['point'] and f['ndig'] == 0 and not f['fill'] and ip == '0':
+        ip = ''
     left = ''
-    if trail_minus:
+    trail = ''
+    if f['trail'] == '+':
+        trail = '-' if neg else '+'
+    elif f['trail'] == '-':
         trail = '-' if neg else ' '
-    elif lead_plus:
+    elif f['lead'] or f['plus_after']:
         left = '-' if neg else '+'
     elif neg:
         left = '-'
-    body = left + ip
-    field = ' ' * (width - len(body)) + body if len(body) <= width else '%' + body
-    if '.' in core:
+    dollar = '$' if '$' in f['fill'] else ''
+    if f['lead']:
+        body = left + dollar + ip          # written '+' first: the sign leads
+    else:
+        body = dollar + left + ip
+    pad = '*' if f['fill'].startswith('**') else ' '
+    w = f['width']
+    field = pad * (w - len(body)) + body if len(body) <= w else '%' + body
+    if f['point']:
         field += '.' + fp
     return field + trail
+
+
+def using_line(fmt, vals):
+    """What `print using fmt; v1; v2; ...` prints (numeric fields and literal
+    text only). A field past the last value gets the int% 0; the format
+    repeats while values remain, if it has a field at all."""
+    out = []
+    i = 0
+    vi = 0
+    seen = False
+    n = len(fmt)
+    while i < n:
+        r = scan_field(fmt, i)
+        if r is not None:
+            end, f = r
+            v = vals[vi] if vi < len(vals) else 0
+            vi += 1
+            out.append(lay_out(f, v))
+            seen = True
+            i = end
+        else:
+            out.append(fmt[i])
+            i += 1
+        if i >= n and seen and vi < len(vals):
+            i = 0
+    return ''.join(out)
+
+
+def reference(spec, x):
+    """What `print using spec; x` must print."""
+    return using_line(spec, [x])
 
 
 def literal(x):
@@ -189,7 +311,36 @@ def build():
             spec += '-'
         lines.append('println using "%s"; %s' % (spec, construction(x)))
         cases.append((spec, x, reference(spec, x)))
+
+    # THE FIELD GRAMMAR GRID: every format of 1..4 tokens, four values each.
+    # The values are exact in binary (0.75, 1234.5, -0.25) or integers, so the
+    # decimal literals are not a second thing under test here.
+    toks = ['#', '.', ',', '+', '-', '$$', '**', '$', '*', '^^^^', 'x']
+    vals = [0.75, -5, 1234.5, -0.25]
+    vtext = '0.75; -5; 1234.5; -0.25'
+    fmts = []
+    frontier = ['']
+    for _ in range(4):
+        frontier = [f + t for f in frontier for t in toks]
+        fmts.extend(frontier)
+    fmts.extend(HAND_FORMATS)
+    for fmt in fmts:
+        lines.append('println using "%s"; %s' % (fmt, vtext))
+        cases.append((fmt, tuple(vals), using_line(fmt, vals)))
     return '\n'.join(lines) + '\n', cases
+
+
+# Formats a person writes, beside the generated grid: a field with no integer
+# positions, a sign before or after a fill, a sentence that ends in a period, a
+# comma that separates two fields, a phone number, a sign at both ends.
+HAND_FORMATS = [
+    '.##', 'Rate: .###', '+.##', '.##-', '-.##', '.##.##', '$$.##', '**.##',
+    '**$.##', '+$$##.##', '+**##.##', '+**$##.##', '**$#,###.##', '**$#,###.##-',
+    '$$+##.##', '**+##.##', '+$$#,###.##', 'Total: ###.##.', '##, ##', '###-####',
+    '+##-', '+##+', '##.##^^^^', '#,,##', '#,###,###.##', '$$,###.##', '##,',
+    ',##', '+', '$', '*', 'x+.y', '+,##', '#,.##', '.#.#.#', '+$5', '$$$##',
+    '***##', '**$$##', '$$**##', '+-##', '++##',
+]
 
 
 def main(argv):

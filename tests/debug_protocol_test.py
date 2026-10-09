@@ -2578,14 +2578,15 @@ def answers(got, s):
     return [m for m in got if m.get('seq') == s]
 
 
-# C1. NESTING IS BOUNDED BEFORE THE PARSER IS ENTERED. fpjson's GetJSON is
-#     recursive descent and the tree it returns is freed by a recursive
-#     destructor, so a frame of about 120 KB of '[' killed the debuggee, and
-#     800 KB crashed the host with an access violation -- inside the 1 MB frame
-#     limit, so that limit was no defence. The ceiling is 256, the number
-#     json_parse@ already refuses past (MaxJsonDepth in PhosphorJsonLib), and
-#     the expected depths below are COUNTED, not read off a run: an object is one
-#     level and every '[' inside it one more.
+# C1. NESTING IS BOUNDED. fpjson's GetJSON is recursive descent and the tree
+#     it returns is freed by a recursive destructor, so a frame of about 120 KB
+#     of '[' killed the debuggee, and 800 KB crashed the host with an access
+#     violation -- inside the 1 MB frame limit, so that limit was no defence.
+#     The ceiling is 256, the number json_parse@ already refuses past
+#     (MaxJsonDepth in PhosphorJsonLib), and the expected depths below are
+#     COUNTED, not read off a run: an object is one level and every '[' inside
+#     it one more. Round 2 counted on the TEXT, in front of the parser; since
+#     round 3 the parser counts as it opens each container (C3 below says why).
 DEEP = 300000   # '[' bytes: well past the crash, well inside the 1 MB frame limit
 for label, frame in (
         ('pure nesting', '[' * DEEP),
@@ -2593,7 +2594,9 @@ for label, frame in (
         # scan that knew only " is flipped INTO a string by the lone " inside a
         # single-quoted value, out again by the next key's opening quote, and
         # then reads every bracket after it as text. The scanner that guards
-        # json_parse@ learned this the hard way (see JsonNestsTooDeep).
+        # json_parse@ learned this the hard way (see JsonNestsTooDeep); kept
+        # here now that no scan stands in front of this parser, as a case any
+        # future one would have to get right.
         ('hidden behind a single-quoted "', '{"seq":2,"cmd":"x","a":\'"\',"b":' + '[' * DEEP)):
     wc1 = Wire(SLOW, 'deep_c1.bas')
     wc1.init()
@@ -2701,6 +2704,181 @@ for byte in (0, 1):
           and '1048576' not in text, str(got)[:200])
     check('  and the host exits 0, as for any unparseable frame', exit_of(wc2) == 0)
     wc2.close()
+
+# C3. THE DEPTH IS COUNTED BY THE PARSER THAT RECURSES (round 3, 2026-10-09).
+#     Round 2 bounded the nesting with a SCAN of the frame's text in front of
+#     fpjson, and the scan and fpjson disagreed about where a string ends.
+#     fpjson's scanner is line-oriented (jsonscanner.pp, FetchLine): a bare CR
+#     ends its "line", a string literal runs on past that end to its closing
+#     quote, and when the next token finds the terminating #0 it fetches the
+#     next line -- from the byte after the CR, INSIDE the string it already
+#     read. So in  ["<CR>,[[[...["  the brackets are string text to any
+#     scanner that reads JSON, and real array-opens to fpjson the second time
+#     through: the scan passed it, GetJSON recursed once per '[', and the host
+#     died with an access violation (exit 0xC0000005, the editor saw a reset).
+#     The depth is now counted by the parser itself, as it opens each array or
+#     object, so there is no second reading to disagree with -- and the
+#     expected answers below are derived from the frames as they were BUILT,
+#     and from jsonscanner.pp read by hand, never off a run.
+QUICK = ('rem ends at once when the session lets it go\n'   # 1
+         'println "done"\n'                                 # 2
+         'end\n')                                           # 3
+REFUSALS = ('nests deeper than 256 levels', 'did not parse as JSON', 'not a JSON object')
+
+
+def one_frame(payload, name):
+    """One session, one payload of raw bytes (it carries its own LF), then a
+    disconnect. Answers (what the host sent, its exit code)."""
+    w = Wire(QUICK, name)
+    w.init()
+    try:
+        w.conn.sendall(payload + b'{"seq":9,"cmd":"disconnect","terminate":true}\n')
+    except OSError:
+        pass
+    got, secs = until_close(w)
+    rc = exit_of(w)
+    w.close()
+    return got, rc
+
+
+def said(got):
+    """The host's one word on the frame: its error event's text, or 'answered'
+    when seq 2 was answered as the unknown command it is, or '' for nothing."""
+    errs = [m for m in got if m.get('event') == 'error']
+    if errs:
+        return errs[0].get('text') or ''
+    if any(m.get('seq') == 2 and m.get('ok') is False and 'nosuch' in (m.get('error') or '')
+           for m in got):
+        return 'answered'
+    return ''
+
+
+# The finding's own frame, at both sizes it crashed at. The CR is the trigger:
+# the same frame with a space for the CR is a string followed by nothing, and
+# does not parse.
+for n in (300000, 120000):
+    got, rc = one_frame(b'["\r,' + b'[' * n + b'"\n', 'cr_c3_%d.bas' % n)
+    check('round 3 C3: ["<CR>,  + %d x [ + "  is refused for its depth' % n,
+          'nests deeper than 256 levels' in said(got), str(got)[:200])
+    check('  and the host survives it (exit 0, not 0xC0000005)', rc == 0, 'rc=%r' % rc)
+got, rc = one_frame(b'[" ,' + b'[' * 300000 + b'"\n', 'cr_c3_space.bas')
+check('round 3 C3: the control -- a space for the CR -- is a string, and does not parse',
+      'did not parse as JSON' in said(got) and rc == 0, '%r rc=%r' % (str(got)[:200], rc))
+
+# A GENERATED SWEEP over the axes a reading can disagree on: what comes before
+# the tower, how a string is opened, where a CR / CR LF / LF sits, the tower's
+# shape, and what follows it. Two kinds of frame:
+#
+#   IN PLAIN SIGHT -- no CR, no LF, no string left open in front of the tower,
+#   and a prefix fpjson reads without error (the table says which, from
+#   jsonscanner.pp: a BOM is an invalid character to its string constructor,
+#   which skips one only from a stream with joBOMCheck; '/' is one unless
+#   joComments is set, and GetJSON sets neither). Its depth is the prefix's
+#   plus the tower's, counted from how it was built, and the verdict is
+#   exactly: past 256, the depth refusal; at or under it, not that.
+#
+#   HIDDEN -- every other combination. What fpjson makes of these is its own
+#   business (several re-read bytes, as above); what is asserted is that the
+#   host says one of its refusals or answers the request, and exits 0.
+import random
+rng = random.Random(20261009)
+PREFIXES = (   # (bytes, depth fpjson has opened at its end, read without error)
+    (b'', 0, True),
+    (b'{"seq":2,"cmd":"nosuch","x":', 1, True),
+    (b'[', 1, True),
+    (b'[1,', 1, True),
+    (b'{"a":[', 2, True),
+    (b'["\\u005b",', 1, True),             # an escaped '[' is text
+    (b"['\\'',", 1, True),                 # an escaped single quote, inside single quotes
+    (b'["\\\\",', 1, True),                # an escaped backslash: the quote after it closes
+    (b'\xef\xbb\xbf[', 0, False),          # a BOM
+    (b'[/*c*/', 1, False),                 # a comment
+)
+TOWERS = ((b'[', 1), (b'{"k":', 1), (b'[{"k":', 2))
+OPENERS = (b'"', b"'", b'"\\"', b"'\\'", b'"\\u0022', b"'\"", b'"\'', b'"x\\\\')
+BREAKS = (b'\r', b'\r\r', b'\r ', b' \r', b'\\\r', b'\r\n', b'\n', b'\r,', b'\r\r,')
+SUFFIXES = (b'', b'"', b"'", b'"]', b'xyz', b'\r', b'"\r[[[', b']', b'\r"')
+
+plain_bad, hidden_bad, cases = [], [], 0
+# In plain sight: every reachable prefix, every tower shape, at the boundary and
+# one past it, and far past it.
+for pre, pdepth, reachable in PREFIXES:
+    for tower, tdepth in TOWERS:
+        for want_depth in (256, 257, 150000):
+            n = max(0, -(-(want_depth - pdepth) // tdepth))   # towers to reach it
+            depth = pdepth + n * tdepth
+            frame = pre + tower * n
+            got, rc = one_frame(frame + b'\n', 'plain_c3.bas')
+            cases += 1
+            text = said(got)
+            if reachable:
+                want = depth > 256
+                good = rc == 0 and (('nests deeper than 256 levels' in text) == want) and \
+                    (text == 'answered' or any(r in text for r in REFUSALS))
+            else:
+                good = rc == 0 and 'did not parse as JSON' in text
+            if not good:
+                plain_bad.append('%r..%r x%d depth %d: rc=%r %r'
+                                 % (pre, tower, n, depth, rc, text[:60]))
+check('round 3 C3: in plain sight, a frame is refused for depth exactly when it '
+      'nests past 256 (%d frames)' % cases, not plain_bad, '; '.join(plain_bad[:3]))
+
+# Hidden: the shape that crashed needs the string CLOSED by the frame's last
+# byte (so the next token meets the #0 and re-reads from the CR) and a ','
+# after the CR (so the re-read brackets are elements, not a syntax error) --
+# so half the frames close with the opener's own quote, and half the breaks
+# carry the comma. The first run of this sweep drew neither often enough and
+# passed on the build that crashed; a sweep that cannot fail measures nothing.
+hcases, hdeep = 0, 0
+for k in range(160):
+    pre = rng.choice(PREFIXES)[0]
+    opener = rng.choice(OPENERS)
+    brk = rng.choice(BREAKS)
+    if rng.random() < 0.5 and not brk.endswith(b','):
+        brk += b','
+    tower = rng.choice(TOWERS)[0]
+    suffix = opener[:1] if rng.random() < 0.5 else rng.choice(SUFFIXES)
+    n = rng.choice((300, 100000, 300000)) // len(tower)
+    frame = pre + opener + brk + tower * n + suffix
+    got, rc = one_frame(frame + b'\n', 'hidden_c3.bas')
+    hcases += 1
+    text = said(got)
+    if 'nests deeper than 256 levels' in text:
+        hdeep += 1
+    if not (rc == 0 and (text == 'answered' or any(r in text for r in REFUSALS))):
+        hidden_bad.append('%r+%r+%r+%r x%d+%r: rc=%r %r'
+                          % (pre, opener, brk, tower, n, suffix, rc, text[:60]))
+check('round 3 C3: no generated frame with a CR, LF, quote or escape in front of a '
+      'tower kills the host (%d frames)' % hcases, not hidden_bad,
+      '%d bad, first: %s' % (len(hidden_bad), '; '.join(hidden_bad[:2])))
+check('  and the sweep reached a hidden tower (%d refused for depth)' % hdeep, hdeep > 0)
+
+# AND THE SECOND PARSE: RefuseQueued, which answers what was queued behind a
+# disconnect, read that frame with the same pair. Built as wc1d is above.
+wc3 = Wire(PAUSE1, 'deep_c3q.bas')
+wc3.init()
+wc3.send(seq=2, cmd='launch', stopAtEntry=False)
+for _ in range(10):
+    m = wc3.recv(timeout=15)
+    if m is None or m.get('seq') == 2:
+        break
+try:
+    wc3.conn.sendall(b'{"seq":3,"cmd":"disconnect","terminate":false}\n'
+                     + b'["\r,' + b'[' * 300000 + b'"\n')
+except OSError:
+    pass
+got, secs = until_close(wc3)
+check('round 3 C3: the CR frame queued behind a disconnect does not kill the host',
+      [m.get('ok') for m in answers(got, 3)] == [True], str(got)[:200])
+try:
+    outc3, _ = wc3.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    wc3.proc.kill()
+    outc3 = b''
+check('  and the detached program runs to its end, exit 0',
+      b'done' in outc3 and wc3.proc.returncode == 0,
+      'rc=%r out=%r' % (wc3.proc.returncode, outc3[:40]))
+wc3.close()
 
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))

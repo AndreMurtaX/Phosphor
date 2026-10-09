@@ -38,6 +38,10 @@
 # FPC's ParseURI must agree on scheme, userinfo, host and port, the fragment
 # never reaches FPC, and a generated sweep holds the library's verdict to an
 # oracle in the runner on 218897 urls.
+# 30_http_path_colon is the request TARGET as the url writes it: FPC rebuilt it
+# from ParseURI's pieces and appended a '/' after a last segment holding a ':'
+# (or a '.' / '..'), and dropped an empty query's '?'. A generated sweep of 416
+# paths read back off the raw server.
 00_base64
 01_zip
 02_sqlite
@@ -68,3 +72,4 @@
 27_zip_integrity
 28_http_authority
 29_http_ca_sandbox
+30_http_path_colon

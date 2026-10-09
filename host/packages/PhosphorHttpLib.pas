@@ -482,7 +482,9 @@ type
     HostRefused: Boolean;  // a TLS handler of this request refused the peer's name
     ClientCert: String;    // m7: PEM certificate to present, '' for none
     ClientKey: String;     //     and its private key (may be the same file)
+    WireUrl: String;       // the url handed to HTTPMethod: its target is sent as written
   protected
+    procedure SendRequest(const AMethod: String; URI: TURI); override;
     procedure ConnectToServer(const AHost: String; APort: Integer;
       UseSSL: Boolean = False); override;
     function GetSocketHandler(const UseSSL: Boolean): TSocketHandler; override;
@@ -1567,6 +1569,55 @@ begin
   Result := 0;
 end;
 
+{ THE REQUEST TARGET IS THE URL'S OWN TEXT (2026-10-09, round 3).
+  FPC writes the request line from ParseURI's pieces (fphttpclient.pp,
+  GetServerURL): Path, a '/' whenever Path does not end in one, Document, and
+  '?' + Params when Params is not empty. ParseURI (uriparser.pp) takes Document
+  as the text after the last '/' -- but its backward scan stops at a ':', and a
+  last segment of '.' or '..' is left in Path too. So /v1/items:batchGet went out
+  as /v1/items:batchGet/, /a:b?q as /a:b/?q, /a/.. as /a/../, and /a? lost its
+  '?': status 200, no error, another resource.
+  The target RFC 9112 3.2.1 asks for is the url's path and query as written
+  (the path '/' when it is empty), which is RFC 3986's reading of WireUrl --
+  the url HTTPMethod was handed. Before it is used, FPC's own pieces must join
+  back to the same text (modulo the empty query's '?', which is the one thing
+  they lose): this is then the request for that url and nothing else, and a
+  disagreement is refused rather than either reading picked (round 2's rule).
+  The target is then handed to GetServerURL as a Path that ends in its last '/'
+  and a Document holding the rest, query included, so its join adds nothing --
+  and through a proxy it still prefixes the scheme and authority. }
+procedure TPinnedClient.SendRequest(const AMethod: String; URI: TURI);
+var
+  u: TUriParts;
+  s, fpcText, rfcText, pathPart: String;
+  k: Integer;
+begin
+  if WireUrl <> '' then
+  begin
+    k := FindChar('#', WireUrl);
+    if k > 0 then s := Copy(WireUrl, 1, k - 1) else s := WireUrl;
+    SplitUri(s, u);
+    rfcText := u.Path;
+    if u.HasQuery then rfcText := rfcText + '?' + u.Query;
+    fpcText := URI.Path + URI.Document;
+    if URI.Params <> '' then fpcText := fpcText + '?' + URI.Params;
+    { ParseURI cuts Params at the LAST '?': a query that ends in '?' leaves
+      Params empty, and GetServerURL then writes no '?' at all. }
+    if not (u.HasAuthority and
+            ((rfcText = fpcText) or
+             ((URI.Params = '') and (rfcText = fpcText + '?')))) then
+      raise EHTTPClient.Create('the request target reads two ways');
+    pathPart := u.Path;
+    if pathPart = '' then pathPart := '/';
+    k := LastDelimiter('/', pathPart);
+    URI.Path := Copy(pathPart, 1, k);
+    URI.Document := Copy(pathPart, k + 1, MaxInt);
+    if u.HasQuery then URI.Document := URI.Document + '?' + u.Query;
+    URI.Params := '';
+  end;
+  inherited SendRequest(AMethod, URI);
+end;
+
 { THE URL THAT IS JUDGED IS THE URL THAT IS DIALLED (2026-10-09, round 2).
   Two parsers read every url here. RFC 3986 (SplitUri) ends the authority at the
   FIRST '/', '?' or '#'; FPC's ParseURI -- which decides the host dialled, the
@@ -1831,6 +1882,7 @@ var
         end;
       end;
       c.AllowRedirect := False;               // FetchCore follows, hop by hop
+      c.WireUrl := AUrl;                      // and its target goes out as written
       { A NETWORK WAIT IS A LIBRARY CALL TOO, and it is the one shape the budget
         can neither size, charge nor judge: how long a server takes is the
         server's business. What CAN be done is to hand the run's remaining time

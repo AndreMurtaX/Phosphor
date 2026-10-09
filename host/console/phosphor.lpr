@@ -77,7 +77,7 @@ uses
     binary size, and it is the SAME encoder the editor's udebugproto.pas uses, so
     the two ends cannot disagree about escaping. ssockets is likewise already
     here, through host/packages/PhosphorHttpLib. }
-  fpjson, jsonparser, ssockets, sockets, syncobjs,
+  fpjson, jsonparser, jsonscanner, ssockets, sockets, syncobjs,
   PhosphorBytecode, PhosphorRegistry,
   // the GUI function packages -- registered only when a widgetset is up
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
@@ -1502,8 +1502,9 @@ type
                     const AOperands: array of TValue);
   end;
 
-(* HOW DEEP A DEBUG FRAME MAY NEST, judged on the TEXT before the parser is
-   entered (round 2 of the adversarial loop, 2026-10-09).
+(* HOW DEEP A DEBUG FRAME MAY NEST, counted BY THE PARSER as it opens each array
+   or object (round 2 of the adversarial loop, 2026-10-09; round 3 moved the count
+   into the parser).
 
    fpjson's GetJSON is recursive descent and the tree it hands back is freed by a
    recursive destructor, so a frame's nesting is spent on the stack twice. A
@@ -1520,66 +1521,95 @@ type
    scalars and flat arrays -- three levels at most -- so 256 refuses nothing an
    editor sends.
 
-   THE SCAN IS fpjson's OWN LEXICAL RULE, and it is the one JsonNestsTooDeep had
-   to learn twice: a literal opens on a double quote OR a single quote (fpjson
-   accepts the single quote unless joStrict is set, and GetJSON does not set it)
-   and closes on the SAME delimiter; a backslash escapes the next character; a
-   bracket inside a literal is text. A scan that knew only the double quote could
-   be flipped into a string by a lone double quote inside a single-quoted value,
-   and would then read every bracket after it as text -- the depth never rises and
-   the parser gets the whole tower. tests/debug_protocol_test.py sends exactly
-   that frame.
+   NOT A SCAN IN FRONT OF THE PARSER. Round 2 judged the depth on the frame's
+   TEXT before GetJSON was entered: a second lexer, taught fpjson's rules one at a
+   time (a literal opens on either quote and closes on the same one; a backslash
+   escapes; the scan stops where the first value ends). Round 3 found the rule it
+   had not been taught. fpjson's scanner is LINE-oriented (jsonscanner.pp,
+   FetchLine): a bare CR ends its line, a string literal runs on past that end to
+   its closing quote, and when the next token then meets the terminating #0 it
+   fetches the "next line" -- from the byte after the CR, inside the string it has
+   already read. So in  ["<CR>,[[[...["  every '[' is string text to the scan and
+   a real array-open to fpjson the second time through; the scan passed the frame
+   and the host died with an access violation. A second reader can only ever be
+   as right as its model of the first.
 
-   AND ONLY AS FAR AS THE PARSER READS. fpjson parses one value and, without
-   joStrict, never looks past it, so the scan stops where that value ends: a bare
-   scalar at its first delimiter, a string at its closing quote, a container at
-   the bracket that closes it. Linear in the frame, which DBG_MAX_FRAME bounds. *)
+   So the parser that recurses counts: TDbgJsonParser is fpjson's own TJSONParser,
+   and StartArray/StartObject -- which TBaseJSONReader.ParseArray/ParseObject call
+   BEFORE recursing into the elements -- refuse the 257th open container by
+   raising. The recursion is then at most DBG_MAX_NESTING deep whatever the bytes
+   are and however fpjson's lexer reads them, and the tree TJSONParser.Parse frees
+   on the way out is no deeper. Everything else is GetJSON's answer unchanged. *)
 const
   DBG_MAX_NESTING = 256;
 
-function DbgFrameNestsTooDeep(const ARaw: String): Boolean;
-var
-  i: Integer;
-  depth: Integer;
-  delim: Char;
-  esc: Boolean;
+type
+  EDbgFrameTooDeep = class(Exception);
+
+  { GetJSON's own parser, with a depth count where it opens a container. }
+  TDbgJsonParser = class(TJSONParser)
+  private
+    FOpen: Integer;                     // containers open right now
+  protected
+    procedure StartArray; override;
+    procedure StartObject; override;
+    procedure EndArray; override;
+    procedure EndObject; override;
+  end;
+
+procedure TDbgJsonParser.StartArray;
 begin
-  Result := False;
-  i := 1;
-  while (i <= Length(ARaw)) and (ARaw[i] in [' ', #9, #10, #13]) do Inc(i);
-  if i > Length(ARaw) then Exit;
-  // A bare scalar ends before any bracket could open: nothing to recurse into.
-  if not (ARaw[i] in ['[', '{', '"', '''']) then Exit;
-  depth := 0;
-  delim := #0;                          // #0 = not inside a literal
-  esc := False;
-  while i <= Length(ARaw) do
-  begin
-    if delim <> #0 then
-    begin
-      if esc then esc := False
-      else if ARaw[i] = '\' then esc := True
-      else if ARaw[i] = delim then
+  Inc(FOpen);
+  if FOpen > DBG_MAX_NESTING then
+    raise EDbgFrameTooDeep.Create('a debug frame nests too deep');
+  inherited StartArray;
+end;
+
+procedure TDbgJsonParser.StartObject;
+begin
+  Inc(FOpen);
+  if FOpen > DBG_MAX_NESTING then
+    raise EDbgFrameTooDeep.Create('a debug frame nests too deep');
+  inherited StartObject;
+end;
+
+procedure TDbgJsonParser.EndArray;
+begin
+  Dec(FOpen);
+  inherited EndArray;
+end;
+
+procedure TDbgJsonParser.EndObject;
+begin
+  Dec(FOpen);
+  inherited EndObject;
+end;
+
+{ One debug frame, parsed exactly as GetJSON(ARaw) parses it -- the same
+  parser class, the same options ([joUTF8], which is what GetJSON's default
+  UseUTF8 = True hands DefJSONStringParserHandler) -- except that the 257th
+  open container is refused. nil for a frame that does not parse, and then
+  ATooDeep says whether depth was the reason. }
+function ParseDbgFrame(const ARaw: String; out ATooDeep: Boolean): TJSONData;
+var
+  p: TDbgJsonParser;
+begin
+  Result := nil;
+  ATooDeep := False;
+  p := TDbgJsonParser.Create(ARaw, [joUTF8]);
+  try
+    try
+      Result := p.Parse();
+    except
+      on EDbgFrameTooDeep do
       begin
-        delim := #0;                    // the SAME delimiter closes it
-        if depth = 0 then Exit;         // a top-level string is the whole value
+        Result := nil;
+        ATooDeep := True;
       end;
-    end
-    else
-      case ARaw[i] of
-        '"', '''': delim := ARaw[i];
-        '[', '{':
-          begin
-            Inc(depth);
-            if depth > DBG_MAX_NESTING then Exit(True);
-          end;
-        ']', '}':
-          begin
-            Dec(depth);
-            if depth <= 0 then Exit;    // the first value has closed
-          end;
-      end;
-    Inc(i);
+      on Exception do Result := nil;
+    end;
+  finally
+    p.Free;
   end;
 end;
 
@@ -2983,9 +3013,10 @@ end;
   socket is a disconnect) covers those. Only frames that parse and carry a seq are
   answered; a line that does not parse arrived after the session ended and there
   is no request to answer. The reader's own signals (TDbgSignal) are not frames
-  and are skipped; so is a frame nested past DBG_MAX_NESTING, which is never
-  handed to the parser at all -- this was the second unbounded GetJSON on peer
-  input (round 2, 2026-10-09). }
+  and are skipped; so is a frame nested past DBG_MAX_NESTING, which the parser
+  refuses at its 257th open container -- this was the second unbounded GetJSON
+  on peer input (round 2, 2026-10-09), and round 3's CR frame crashed it here
+  too, behind a disconnect. }
 procedure TDebugProto.RefuseQueued(const AWhy: String; ADisconnectOk: Boolean);
 var
   raw, cmd: String;
@@ -2993,18 +3024,14 @@ var
   d: TJSONData;
   res: TJSONObject;
   seq: Integer;
+  tooDeep: Boolean;
 begin
   while TakeLine(raw, sig) do
   begin
     if sig <> dsFrame then Continue;
-    if DbgFrameNestsTooDeep(raw) then Continue;
     d := nil;
     try
-      try
-        d := GetJSON(raw);
-      except
-        on Exception do d := nil;
-      end;
+      d := ParseDbgFrame(raw, tooDeep);
       if (d <> nil) and (d is TJSONObject) then
       begin
         if not IntField(TJSONObject(d), 'seq', 0, seq) then seq := 0;
@@ -3036,7 +3063,7 @@ var
   cmd, cond, evVal, evKind, evErr: String;
   seq, i, n, k, fr: Integer;
   v: Int64;
-  stopped, keepLine: Boolean;
+  stopped, keepLine, tooDeep: Boolean;
 begin
   Result := False;
   stopped := (FState = dbgStopped);
@@ -3071,13 +3098,15 @@ begin
     Exit(True);
   end;
 
-  { NESTING IS BOUNDED BEFORE THE PARSER IS ENTERED (round 2, 2026-10-09). See
-    DbgFrameNestsTooDeep: about 120 KB of '[' -- inside DBG_MAX_FRAME, so that
-    limit was no defence -- overflowed the stack in GetJSON or in the Free of
-    the tree it built, and the host died with an access violation. Refused like
-    any frame this end cannot read: an `error` event that says why, and the
-    session ends. }
-  if DbgFrameNestsTooDeep(ARaw) then
+  { NESTING IS BOUNDED BY THE PARSER (round 2, 2026-10-09; round 3 moved the
+    count into it). See TDbgJsonParser: about 120 KB of '[' -- inside
+    DBG_MAX_FRAME, so that limit was no defence -- overflowed the stack in
+    GetJSON or in the Free of the tree it built, and the host died with an
+    access violation; round 3 did it again past a text scan, with a bare CR.
+    Refused like any frame this end cannot read: an `error` event that says
+    why, and the session ends. }
+  d := ParseDbgFrame(ARaw, tooDeep);
+  if tooDeep then
   begin
     res := TJSONObject.Create();
     res.Add('text', Format('a frame of %d bytes nests deeper than %d levels and ' +
@@ -3090,13 +3119,7 @@ begin
     Exit(True);
   end;
 
-  d := nil;
   try
-    try
-      d := GetJSON(ARaw);
-    except
-      on Exception do d := nil;
-    end;
     { A line that does not parse is a protocol error and the session ends. It is
       not skipped: a stream that produced one unreadable frame has no claim to be
       understood from the next. }

@@ -360,6 +360,19 @@ refused like a bad port: status `0`, nothing dialled, `http_error()` `0`. So is 
 authority with two `@` (a userinfo holds none, §3.2.1) and a `[` host that is not
 closed by `]` and followed by nothing or `:`.
 
+**The request target is the url's path and query, as written.** The request line
+carries exactly the text between the authority and the fragment — `/` when the
+path is empty (RFC 9112 §3.2.1), and through a proxy that text behind the scheme
+and authority. Nothing is decoded, re-encoded or normalised: a `:`, `@`, `;`, `=`
+or `%3A` in any segment goes out as it stands, a `.` or `..` segment is sent for
+the server to resolve (as `curl --path-as-is` does — a request url is not a
+reference being resolved; a redirect's `Location` is, and is resolved by RFC 3986
+§5.2), and an empty query keeps its `?` (§6.2.3). Until round 3 of 2026-10-09 the
+client rebuilt the line from its own parser's pieces and appended a `/` after a
+last segment holding a `:` or a dot segment — `/v1/items:batchGet` was asked for as
+`/v1/items:batchGet/`, `/a:b?q` as `/a:b/?q` — and dropped an empty query's `?`,
+all with status `200` and no error.
+
 **Time.** A run with a time budget bounds a response as a whole, not only each read:
 a server that trickles a byte a second is cut off when the run's time is gone. The
 connect wait is whole seconds, rounded up, because the system's connect timeout is;
@@ -420,3 +433,6 @@ before a fragment, and exact cookie names across a redirect.
 `tests/packages/28_http_authority.bas` holds a url to the two readings: a `?` or
 `#` before an `@`, two `#` on every path, and a generated sweep of 218897 urls in
 which the library's verdict must match an oracle that asks `ParseURI` itself.
+`tests/packages/30_http_path_colon.bas` reads the request line back for 416
+generated paths — every special segment in every position, with and without a
+query — and through a client, its params, a proxy and a redirect hop.

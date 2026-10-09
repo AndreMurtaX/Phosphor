@@ -278,16 +278,20 @@ any field of it is read:**
 
 - **A frame may nest at most 256 levels deep**, and one that nests deeper is
   refused like a frame that does not parse: an `error` event whose text names the
-  limit, and the session ends. It is judged on the text BEFORE the parser runs,
-  because fpjson parses by recursion and frees the tree by recursion -- about
-  120 KB of `[` killed the debuggee, and 800 KB crashed it with an access
-  violation, both well inside the 1 MB frame limit. 256 is the ceiling
-  `json_parse@` already puts on a document (docs/libraries/json.md), for the
-  same reason; a real frame nests three levels at most. Brackets inside a string
-  -- single-quoted as well as double-quoted, since fpjson accepts both -- are
-  text, and only the first JSON value on the line is judged, because it is the
-  only one the parser reads. The same bound guards the frames answered after a
-  session ends, which went through a second, equally unbounded parse.
+  limit, and the session ends. The parser itself counts, as it opens each array
+  or object, and refuses the 257th -- because fpjson parses by recursion and
+  frees the tree by recursion: about 120 KB of `[` killed the debuggee, and
+  800 KB crashed it with an access violation, both well inside the 1 MB frame
+  limit. 256 is the ceiling `json_parse@` already puts on a document
+  (docs/libraries/json.md), for the same reason; a real frame nests three levels
+  at most. What counts is what the parser actually reads: brackets inside a
+  string are text, and only the first JSON value on the line is read. The same
+  bound guards the frames answered after a session ends, which went through a
+  second, equally unbounded parse. (Until round 3 of 2026-10-09 the depth was
+  judged by a scan of the text in front of the parser, and the two disagreed:
+  fpjson's lexer works by lines, and after a bare CR inside a string it
+  re-reads the rest of that string as tokens, so `["` + CR + `,[[[…["` was shallow
+  to the scan and 300000 deep to the parser, and crashed the host.)
 - **No frame can be mistaken for the host's own bookkeeping.** The thread that
   reads the socket used to report "the connection closed" and "a frame was too
   long" as the one-byte lines `0x00` and `0x01`, in the same queue as the

@@ -117,3 +117,121 @@ jobs:
         with:
           name: linux-logs
           path: ci-*.log
+
+  # THE WINDOWS TWIN (2026-10-09). Until this job the Windows half of "green on
+  # both machines" was one desktop, whose OpenSSL came from Laragon's PHP and
+  # whose SQLite came from Embarcadero's directory -- by PATH, written down
+  # nowhere. Here every runtime library has a named source and a checked hash:
+  # the official Lazarus 4.8 installer (FPC 3.2.2, the desktop's version; MD5 as
+  # SourceForge publishes it), SQLite's own Windows DLL (SHA3-256 as sqlite.org
+  # publishes it), and OpenSSL 3 from Git for Windows on the image, copied by
+  # name and refused if absent. And no runner may SKIP here: nothing in the
+  # suite is Linux-only, so a skip on Windows means a library went missing.
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain -- Lazarus 4.8 and FPC 3.2.2, the desktop's version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://sourceforge.net/projects/lazarus/files/Lazarus%20Windows%2064%20bits/Lazarus%204.8/lazarus-4.8-fpc-3.2.2-win64.exe/download'
+          $exe = Join-Path $env:RUNNER_TEMP 'lazarus-4.8-fpc-3.2.2-win64.exe'
+          curl.exe -fsSL --retry 5 --retry-delay 10 -o $exe $url
+          $md5 = (Get-FileHash -Algorithm MD5 $exe).Hash.ToLower()
+          if ($md5 -ne 'eb7e75999b6370d4ef9bba1ac407d6c9') { throw "lazarus installer MD5 $md5 is not the published one" }
+          Start-Process -Wait -FilePath $exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\lazarus'
+          & C:\lazarus\fpc\3.2.2\bin\x86_64-win64\fpc.exe -iV
+
+      - name: Runtime libraries -- SQLite and OpenSSL 3, from named sources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dlls = Join-Path $env:RUNNER_TEMP 'dlls'
+          New-Item -ItemType Directory -Force $dlls | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlite.zip'
+          curl.exe -fsSL --retry 5 --retry-delay 10 -o $zip 'https://www.sqlite.org/2026/sqlite-dll-win-x64-3540000.zip'
+          $sha3 = python -c "import hashlib,sys; print(hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest())" $zip
+          if ($sha3 -ne 'f5fb500c73a3afd89976386bb8e4fdc8b5b65c052e187fb1ada1f5de034cd45b') { throw "sqlite zip SHA3-256 $sha3 is not the published one" }
+          Expand-Archive $zip -DestinationPath $dlls
+          $git = 'C:\Program Files\Git\mingw64\bin'
+          foreach ($n in 'libssl-3-x64.dll', 'libcrypto-3-x64.dll') {
+            $src = Join-Path $git $n
+            if (-not (Test-Path $src)) { throw "$n is not in $git on this image" }
+            Copy-Item $src $dlls
+          }
+          Get-ChildItem $dlls | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+          # The libraries are found by PATH, as on the desktop -- but this is the
+          # only directory on it that holds them, and it is named here.
+          Add-Content $env:GITHUB_PATH $dlls
+
+      # Each runner under Windows PowerShell 5.1, as on the desktop, with its own
+      # exit code -- not a pipeline's.
+      - name: build
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\build.ps1 *>&1 | Tee-Object ci-build.log
+          exit $LASTEXITCODE
+      - name: test-suite
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test-suite.ps1 *>&1 | Tee-Object ci-test-suite.log
+          exit $LASTEXITCODE
+      - name: test-suite -ProveFailure
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test-suite.ps1 -ProveFailure *>&1 | Tee-Object ci-prove.log
+          exit $LASTEXITCODE
+      - name: test-classic
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test-classic.ps1 *>&1 | Tee-Object ci-test-classic.log
+          exit $LASTEXITCODE
+      - name: test-examples
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test-examples.ps1 *>&1 | Tee-Object ci-test-examples.log
+          exit $LASTEXITCODE
+      - name: test-packages
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test-packages.ps1 *>&1 | Tee-Object ci-test-packages.log
+          exit $LASTEXITCODE
+      - name: test-gui
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test-gui.ps1 *>&1 | Tee-Object ci-test-gui.log
+          exit $LASTEXITCODE
+      - name: test
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\test.ps1 *>&1 | Tee-Object ci-test.log
+          exit $LASTEXITCODE
+
+      - name: nothing was skipped
+        if: success() || failure()
+        shell: pwsh
+        run: |
+          $skips = Select-String -Path ci-*.log -Pattern '^SKIP|SKIPPED'
+          if ($skips) {
+            $skips | ForEach-Object { Write-Host $_ }
+            Write-Host 'FAIL  a runner skipped work on Windows, where nothing is platform-only'
+            exit 1
+          }
+          Write-Host 'PASS  nothing skipped'
+
+      - name: keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-logs
+          path: ci-*.log

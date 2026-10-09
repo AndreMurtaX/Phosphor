@@ -425,9 +425,13 @@ default when a member is absent.
 ## DateTime — dates and times (68 names / 68 registry entries)
 
 A date is a plain number (a `TDateTime`: days since 1899-12-30, time in the
-fraction). Thin wrappers over the RTL's `DateUtils`. String rendering/parsing is
-fixed **ISO 8601** (`yyyy-mm-dd`, `hh:nn:ss`), so text round-trips identically on
-every machine. `now`/`today`/`tomorrow`/`yesterday` read the clock.
+fraction). Before 1899-12-30 it is negative and spelled sign-and-magnitude, so
+plain `+`/`-` on it is right only after the epoch: the `inc*` functions move a
+date correctly on both sides, and every reader rounds it to the millisecond on
+the line. The calendar is the RTL's `DateUtils`; the arithmetic and the parsers
+are the library's own. String rendering/parsing is fixed **ISO 8601**
+(`yyyy-mm-dd`, `hh:nn:ss`), so text round-trips identically on every machine.
+`now`/`today`/`tomorrow`/`yesterday` read the clock.
 
 **The clock (no arguments)**
 
@@ -482,8 +486,8 @@ every machine. `now`/`today`/`tomorrow`/`yesterday` read the clock.
 
 | function | description |
 | --- | --- |
-| `incday(d, n) → num` | add `n` days |
-| `incweek(d, n) → num` | add `n` weeks |
+| `incday(d, n) → num` | add `n` days, keeping the time of day; `n` is a whole quantity, never clipped |
+| `incweek(d, n) → num` | add `n` weeks, keeping the time of day |
 | `incmonth(d, n) → num` | add `n` months, **clamping the day** onto a shorter month: 31 January plus one is 28 February |
 | `incyear(d, n) → num` | add `n` years (clamps Feb 29 to the 28th) |
 | `inchour(d, n) → num` | add `n` hours |
@@ -518,9 +522,9 @@ every machine. `now`/`today`/`tomorrow`/`yesterday` read the clock.
 | `time$() → str` | now, time only |
 | `datetime$() → str` | now, date and time |
 | `formatdatetime$(fmt$, d) → str` | format `d` with an explicit pattern (ISO settings) |
-| `strtodate(s$) → num` | parse a date string (error if invalid) |
-| `strtotime(s$) → num` | parse a time string |
-| `strtodatetime(s$) → num` | parse a date-time string |
+| `strtodate(s$) → num` | parse exactly `yyyy-mm-dd` (error otherwise -- nothing is completed by a guess) |
+| `strtotime(s$) → num` | parse exactly `hh:nn` or `hh:nn:ss` (error otherwise) |
+| `strtodatetime(s$) → num` | parse `yyyy-mm-dd`, `yyyy-mm-dd hh:nn` or `yyyy-mm-dd hh:nn:ss` (error otherwise) |
 
 ## StrList — string lists (60 names / 70 registry entries)
 
@@ -858,10 +862,10 @@ on desktop by design.
 | `chdir(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`, which includes `""`) |
 | `fileexists(path$, followlinks) → num` | 1 if a file exists; `ioerror()` is `0` after the answer and `5` for a refusal |
 | `kill(path$) → num` | delete a file: `1` if deleted, `0` if not (`ioerror()` `3`) or refused (`5`) |
-| `environ$(name$) → str` | an environment variable's value |
-| `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal. It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
-| `colortostr$(n) → str` | the colour name for an RGB number (or `$rrggbb`) |
-| `alphacolor(name$) → num` | the colour number with an opaque alpha channel |
+| `environ$(name$) → str` | an environment variable's value; `""` when unset, and for a name that is empty or holds `=` or NUL |
+| `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal in 0..4294967295 (anything else answers `0`). It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
+| `colortostr$(n) → str` | the colour name for a colour number, or `$` and its whole unsigned 32-bit value in hex; `""` outside -2^31..2^32-1 |
+| `alphacolor(name$) → num` | the colour number with an opaque alpha byte, as an unsigned 32-bit number |
 | *mobile directory paths (18)* | `shareddocumentspath$`, `librarypath$`, `cachepath$`, `publicpath$`, `picturespath$`, `sharedpicturespath$`, `camerapath$`, `sharedcamerapath$`, `musicpath$`, `sharedmusicpath$`, `moviespath$`, `sharedmoviespath$`, `alarmspath$`, `sharedalarmspath$`, `downloadspath$`, `shareddownloadspath$`, `ringtonespath$`, `sharedringtonespath$` — each `() → str`, answering `""` on desktop |
 
 ## Platform — platform info and StdLib remainder (17 names / 18 registry entries)

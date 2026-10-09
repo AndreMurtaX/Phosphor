@@ -133,20 +133,24 @@ here can be told from whatever the previous file call left in that slot.
 
 | function | what it answers |
 | --- | --- |
-| `environ$(name$) → str` | the value of that environment variable, and `""` when it is not set. A variable set to the empty string and one that does not exist give the same answer, so this cannot test for presence. Read-only: there is no setter |
+| `environ$(name$) → str` | the value of that environment variable, and `""` when it is not set. A variable set to the empty string and one that does not exist give the same answer, so this cannot test for presence. Read-only: there is no setter. A name that is empty or holds `=` or a NUL answers `""` without asking the OS: no program can have set such a variable, and the OS would have answered for a different one — until 2026-10-09 `environ$("")` on Windows answered `C:=C:\...`, the hidden per-drive entry at the head of the environment block |
 
 ### Colours
 
 The engine has no GUI, so this is a **self-contained name↔number table** — the
 sixteen HTML colour names, held here and nowhere else. The numbers are in TColor
 byte order (`$00BBGGRR`), which is why `Red` is `255` and `Blue` is `16711680`
-rather than the other way round.
+rather than the other way round. A colour is an **unsigned 32-bit number** — the
+top byte is the alpha `alphacolor` sets — so every colour is in
+`0`..`4294967295`. (Until 2026-10-09 a literal was read as a *signed* 32-bit
+number: `color("4294967295")` was `-1`, `alphacolor("$80FF0000")` was `-65536`,
+and `colortostr$` clamped everything from 2^31 up to `"$7FFFFFFF"`.)
 
 | function | what it answers |
 | --- | --- |
-| `color(name$) → num` | the number for a colour name, matched case-insensitively against the sixteen. Failing that it parses the string as a literal, so `"$00FF00"` and `"65280"` both read. A name it does not know answers `0` — which *is* Black, so an unrecognised name cannot be told apart from a request for black |
-| `colortostr$(n) → str` | the name, when `n` is exactly one of the sixteen values. Otherwise a `$` and the number in hex, padded to six digits: `colortostr$(12345)` is `"$003039"`. A negative number is not clipped — `colortostr$(-1)` is `"$FFFFFFFF"` |
-| `alphacolor(name$) → num` | the same lookup with an opaque alpha byte set: `alphacolor("Red")` is `4278190335`. Because the alpha byte is always added, an unknown name answers `4278190080` — opaque black — and never `0` |
+| `color(name$) → num` | the number for a colour name, matched case-insensitively against the sixteen. Failing that it parses the string as a literal, so `"$00FF00"` and `"65280"` both read, and so does `"$FF0000FF"`, `4278190335`. A name it does not know answers `0` — which *is* Black, so an unrecognised name cannot be told apart from a request for black — and so does a literal outside `0`..`4294967295`: `"-1"`, `"4294967296"`, `"$100000000"` |
+| `colortostr$(n) → str` | the name, when `n` is exactly one of the sixteen values. Otherwise a `$` and the whole unsigned 32-bit value in hex, padded to six digits: `colortostr$(12345)` is `"$003039"`, `colortostr$(4294967295)` is `"$FFFFFFFF"`. A negative number is its 32-bit pattern — `colortostr$(-1)` is `"$FFFFFFFF"` too — so the domain is `-2147483648`..`4294967295`; outside it no 32-bit pattern spells the number, and the answer is `""`. `color(colortostr$(n))` is `n` for every colour |
+| `alphacolor(name$) → num` | the same lookup with an opaque alpha byte set: `alphacolor("Red")` is `4278190335`, and `alphacolor("$80FF0000")` is `4294901760` — an alpha byte already there is made opaque. Because the alpha byte is always added, an unknown name answers `4278190080` — opaque black — and never `0` |
 
 ## A worked example
 

@@ -82,3 +82,6 @@
 81_chan_read_linear
 83_chr_surrogates
 84_number_text
+85_datetime_round2
+86_config_roundtrip
+87_sys_round2

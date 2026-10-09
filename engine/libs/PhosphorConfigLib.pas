@@ -311,8 +311,15 @@ end;
     * an empty key -- never written at all;
     * leading or trailing blanks on a key or a value -- the reader trims them.
   A value ending in a backslash was suspected (ifoEscapeLineFeeds) and measured to
-  survive, so it is NOT refused. Answers '' when the triple can be stored. }
-function UnstorableWhy(const Sec, Key, Val: String; CheckVal: Boolean): String;
+  survive, so it is NOT refused. Answers '' when the triple can be stored.
+
+  The number and flag setters used to skip the value half (their values are
+  written by this library, never by the program). They now hand over the text
+  they will write, so every setter's line is judged by the same questions --
+  the header question below is about the LINE, and a rule that holds for one
+  door and is assumed for the others is how the last shape was missed. }
+function UnstorableWhy(const Sec, Key, Val: String): String;
+var line, hdr: String;
   function HasNewline(const S: String): Boolean;
   begin
     Result := (Pos(#10, S) > 0) or (Pos(#13, S) > 0);
@@ -327,21 +334,29 @@ begin
   if Key[1] = '#' then Exit('a key may not begin with "#", which makes it a comment');
   if Pos('=', Key) > 0 then Exit('a key may not contain "=", which ends it');
   if Trim(Key) <> Key then Exit('a key may not begin or end with blanks, which the reader trims');
-  if not CheckVal then Exit;
   if HasNewline(Val) then Exit('the value contains a line break');
-  { `[k` = `v]` is written `[k=v]`, which IS a header line: the key was gone after a
-    reload and a section named `k=v` had appeared (2026-10-07). Measured as the
-    only shape of the 4050 triples a sweep wrote that did not read back. }
-  if (Key[1] = '[') and (Val <> '') and (Val[Length(Val)] = ']') then
-    Exit('a key beginning "[" with a value ending "]" is written as a section header');
   if Trim(Val) <> Val then Exit('a value may not begin or end with blanks, which the reader trims');
+  { THE LINE IS JUDGED BY THE READER THAT WILL READ IT, not by a list of shapes.
+    `[k` = `v]` is written `[k=v]`, a header line (2026-10-07), and a rule for
+    exactly that shape was added -- the only one of 4050 triples a sweep wrote
+    that did not read back. The sweep's values were too short to hold the next
+    one: `[k` = `v] ;c` is written `[k=v] ;c`, which WrapForeign reads as a
+    header with a comment after it, so the key was gone after a reload, a
+    section `k=v` had appeared, and every key after it in its section now
+    belonged to that one (2026-10-09). Both are now one question, asked of the
+    line that will be written, through the two functions the load path asks:
+    would IsHeader or IsCommentedHeader take it for a section header?
+    tests/suite/86_config_roundtrip.bas sweeps it. }
+  line := Trim(Key + '=' + Val);
+  if IsHeader(line) or IsCommentedHeader(line, hdr) then
+    Exit('a key beginning "[" with this value is written as a line the reader takes for a section header');
 end;
 
-function Storable(const AWho, Sec, Key, Val: String; CheckVal: Boolean;
+function Storable(const AWho, Sec, Key, Val: String;
                   out Err: TPhosphorError): Boolean;
 var why: String;
 begin
-  why := UnstorableWhy(Sec, Key, Val, CheckVal);
+  why := UnstorableWhy(Sec, Key, Val);
   Result := why = '';
   if not Result then
     Err := MakeError(peRuntime, AWho + ': cannot be stored in an .ini and read back -- ' + why);
@@ -426,7 +441,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  if not Storable('cfg_set@', Args[1].Str, Args[2].Str, Args[3].Str, True, Err) then Exit;
+  if not Storable('cfg_set@', Args[1].Str, Args[2].Str, Args[3].Str, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, Args[3].Str);
   c.Touch();
 end;
@@ -443,7 +458,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  if not Storable('cfg_sets@', '', Args[1].Str, Args[2].Str, True, Err) then Exit;
+  if not Storable('cfg_sets@', '', Args[1].Str, Args[2].Str, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, Args[2].Str);
   c.Touch();
 end;
@@ -502,7 +517,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  if not Storable('cfg_setn@', Args[1].Str, Args[2].Str, '', False, Err) then Exit;
+  if not Storable('cfg_setn@', Args[1].Str, Args[2].Str, NumToInv(AsDouble(Args[3])), Err) then Exit;
   WriteNum(c, SecName(Args[1].Str), Args[2].Str, AsDouble(Args[3]));
 end;
 function t_cfg_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -517,7 +532,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  if not Storable('cfg_setns@', '', Args[1].Str, '', False, Err) then Exit;
+  if not Storable('cfg_setns@', '', Args[1].Str, NumToInv(AsDouble(Args[2])), Err) then Exit;
   WriteNum(c, 'General', Args[1].Str, AsDouble(Args[2]));
 end;
 function t_cfg_getns(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -541,7 +556,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  if not Storable('cfg_setb@', Args[1].Str, Args[2].Str, '', False, Err) then Exit;
+  if not Storable('cfg_setb@', Args[1].Str, Args[2].Str, IntToStr(Ord(AsDouble(Args[3]) <> 0)), Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, IntToStr(Ord(AsDouble(Args[3]) <> 0)));
   c.Touch();
 end;
@@ -557,7 +572,7 @@ var c: TPhosphorConfig;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
-  if not Storable('cfg_setbs@', '', Args[1].Str, '', False, Err) then Exit;
+  if not Storable('cfg_setbs@', '', Args[1].Str, IntToStr(Ord(AsDouble(Args[2]) <> 0)), Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, IntToStr(Ord(AsDouble(Args[2]) <> 0)));
   c.Touch();
 end;

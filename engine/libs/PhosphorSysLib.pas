@@ -158,22 +158,59 @@ begin
 end;
 
 // --- environment ------------------------------------------------------------
+{ A NAME THAT IS NO VARIABLE ANSWERS "" (2026-10-09, round 2). The OS is not
+  asked about a name nobody can have set: on Windows environ$("") answered
+  "C:=C:\..." -- the empty name matched the first entry of the environment
+  block, one of the hidden per-drive "=C:" entries cmd.exe keeps there. A name
+  holding "=" cannot be set (the "=" ends it), and one holding NUL is read by
+  the OS only up to the NUL -- a different name from the one the program
+  passed, so "PATH" + chr$(0) + "X" would be asking about PATH. }
 function t_environ(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(GetEnvironmentVariable(Args[0].Str)); end;
+var name: String;
+begin
+  Err := NoError();
+  name := Args[0].Str;
+  // one scan for either character
+  if (name = '') or (LastDelimiter('=' + #0, name) > 0) then
+    Exit(ValStr(''));
+  Result := ValStr(GetEnvironmentVariable(name));
+end;
 
 // --- colours ----------------------------------------------------------------
-function ColorOf(const AName: String): Integer;
-var i: Integer;
+{ A COLOUR IS AN UNSIGNED 32-BIT NUMBER (2026-10-09, round 2): $AABBGGRR, the
+  alpha byte on top -- alphacolor("Red") is 4278190335, which the page has always
+  shown. The literal used to be read into a SIGNED 32-bit Integer, so
+  color("4294967295") was -1 and color("2147483648") -2147483648, and
+  alphacolor("$80FF0000") OR-ed the alpha byte into a negative number and
+  answered -65536. It is read whole now, and a literal outside 0..2^32 - 1
+  names no colour: 0, as an unknown name does. }
+const
+  MaxColor = Int64($FFFFFFFF);
+
+function ColorOf(const AName: String): Int64;
+var i: Integer; v: Int64;
 begin
   for i := 0 to High(ColorNames) do
     if SameText(ColorNames[i], AName) then Exit(ColorVals[i]);
-  Result := StrToIntDef(AName, 0);   // a '$rrggbb' or decimal literal also reads
+  // a '$rrggbb' or decimal literal also reads, as the RTL's Val reads it
+  if TryStrToInt64(AName, v) and (v >= 0) and (v <= MaxColor) then
+    Result := v
+  else
+    Result := 0;
 end;
+
+{ The whole unsigned value, in hex. The number used to be narrowed by ArgI32,
+  which CLAMPS: everything from 2^31 up printed "$7FFFFFFF". A negative number is
+  its 32-bit pattern, as the page has always said ("$FFFFFFFF" for -1), so the
+  domain is -2^31 .. 2^32 - 1; outside it no 32-bit pattern spells the number,
+  and the answer is "" -- this library answers, it does not raise. }
 function t_colortostr(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var n, i: Integer;
+var n: Int64; i: Integer;
 begin
   Err := NoError();
-  n := ArgI32(Args[0]);
+  n := ArgI64(Args[0]);
+  if (n < Low(Integer)) or (n > MaxColor) then Exit(ValStr(''));
+  n := n and MaxColor;
   for i := 0 to High(ColorVals) do
     if ColorVals[i] = n then begin Result := ValStr(ColorNames[i]); Exit; end;
   Result := ValStr('$' + IntToHex(n, 6));
@@ -181,7 +218,7 @@ end;
 function t_color(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValInt(ColorOf(Args[0].Str)); end;
 function t_alphacolor(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Int64(ColorOf(Args[0].Str)) or $FF000000); end;   // opaque alpha
+begin Err := NoError(); Result := ValInt(ColorOf(Args[0].Str) or Int64($FF000000)); end;   // opaque alpha
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 const

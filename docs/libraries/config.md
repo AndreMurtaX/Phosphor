@@ -49,9 +49,23 @@ and the reason) for a section, key or value holding a line break; a section or
 key beginning with `;`, or a key beginning with `#` — each of those is a comment
 line; a key holding `=`, which would end it early; an empty key; and blanks at
 either end of a key or a value, which the reader trims; and a key beginning with
-`[` whose value ends with `]`, which is written as the line `[key=value]` — a
-section header. Inside a value, `=`, `#` and `;` are ordinary characters and come
-back whole.
+`[` whose line `key=value` the reader would take for a section header — a value
+ending in `]` (`[key=value]`), or holding a `]` followed by a comment, as
+`"v] ;c"` does (`[key=v] ;c`, a header with a comment after it). That last rule is
+asked of the line itself, by the same test the reader applies on the way in, and
+the number and flag setters ask it of the text they will write. Inside a value,
+`=`, `#` and `;` are ordinary characters and come back whole.
+
+The property all of these refusals serve is one sentence: **whatever a setter
+accepts reads back identically after a save and a reload, and nothing else in the
+file changes.** It is swept rather than listed — `tests/suite/86_config_roundtrip.bas`
+generates every key and value up to a length from the characters an `.ini` line
+gives a meaning to (`[`, `]`, `;`, `#`, `=`, blank, tab, quote, CR, LF, NUL,
+backslash, non-ASCII, a lone byte 255) and checks each accepted pair, and its two
+neighbours, after a reload. Until 2026-10-09 the header rule covered only a value
+*ending* in `]`: `"[k"` = `"v] ;c"` was accepted, and after a reload the key was
+gone, a section `k=v` had appeared, and every later key of its section belonged
+to that one.
 
 What *is* an error is a bad handle. `cfg_open@` answers a handle, and every other
 call rejects a value that is not one with a catchable runtime error, `not a valid

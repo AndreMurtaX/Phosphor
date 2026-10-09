@@ -4,11 +4,19 @@
   MIT License. Copyright (c) 2026 Andre Murta.
 
   A date is a plain number: a TDateTime, days since 1899-12-30 with the time in
-  the fraction (so 45351.5 is noon on 2024-02-29). Every function here is a thin
-  wrapper over the RTL's DateUtils/SysUtils, which makes the arithmetic -- leap
-  years, ISO weeks, month lengths, clamping IncMonth and IncYear onto a shorter
-  month -- the RTL's job rather than ours. now/today/tomorrow/yesterday read the
-  clock and take no arguments.
+  the fraction (so 45351.5 is noon on 2024-02-29). The CALENDAR is the RTL's --
+  leap years, month lengths, encoding and decoding a day -- but the ARITHMETIC is
+  not. Before 1899-12-30 a TDateTime is negative and spelled sign-and-magnitude
+  (the time of day moves the number DOWN), and DateUtils' arithmetic was written
+  for the positive half and patched at the epoch, wrongly, in six places this
+  file has met so far: issameday, dayoftheyear, the sixteen distances, the
+  increments, the ISO week, and the rounding of a date to the millisecond.
+  Every function that moves a date or measures between two therefore works on
+  the LINE -- the day and the time of day as two separate parts (Split, Linear)
+  -- and writes the sign-and-magnitude spelling once, at the end (Join); every
+  function that reads one reads it rounded on the line (Canon). The text
+  parsers are this file's own too: the RTL's invent what the text leaves out.
+  now/today/tomorrow/yesterday read the clock and take no arguments.
 
   Most functions cannot fail: a date is a number and almost any number is some
   date. The EIGHTEEN that can are of three kinds.
@@ -50,6 +58,79 @@ function D0(const A: array of TValue): TDateTime; begin Result := AsDouble(A[0])
 function D1(const A: array of TValue): TDateTime; begin Result := AsDouble(A[1]); end;
 function I0(const A: array of TValue): Integer; begin Result := ArgI32(A[0]); end;
 function I1(const A: array of TValue): Integer; begin Result := ArgI32(A[1]); end;
+
+const
+  TwoTo52 = 4503599627370496.0;
+  TwoTo62 = 4611686018427387904.0;
+
+{ The day of an instant and its time of day, as the two halves of a line. For
+  a number in (-1, 0) the day is 0 (Int answers -0.0, which compares equal),
+  which is what DecodeDate says that number is. Int and Frac guard at 2^52 and
+  hand back the argument, so no Double can make them signal. }
+procedure Split(const D: TDateTime; out ADay, ATime: Double);
+begin
+  ADay := Int(D);
+  ATime := Abs(Frac(D));
+end;
+
+{ The spelling of (day, time of day): the inverse of Split for every day the
+  calendar holds, and the inverse of Linear at the distances.
+
+  ONE ROUNDING IS ITSELF A SIGN-AND-MAGNITUDE TRAP. A time of day within an ulp
+  of 1 rounds the sum to the next integer: on the positive side that is the next
+  day's midnight, which is the instant it is closest to; on the negative side
+  ADay - ATime rounds to ADay - 1, which SPELLS the midnight of the day BEFORE --
+  two days from the right one. Measured by the generated sweep: 2699255 days
+  and 72468509 ms after the epoch, moved back by exactly the milliseconds that
+  reach 0001-01-01 00:00, answered -693595 -- a day below the calendar, which
+  rendered as 0000-00-00. The instant is the next midnight, so that is what is
+  written. }
+function Join(const ADay, ATime: Double): TDateTime;
+begin
+  if ADay >= 0 then Exit(ADay + ATime);
+  Result := ADay - ATime;
+  if Result <= ADay - 1 then Result := ADay + 1;
+end;
+
+{ A DATE IS READ TO THE MILLISECOND, AND THE ROUNDING IS DONE ON THE LINE
+  (2026-10-09, round 2).
+
+  Every renderer and every decomposition reads a TDateTime to the millisecond,
+  and the RTL rounds to it in the SPELLING: DecodeDate nudges the number half a
+  millisecond away from zero, DateTimeToTimeStamp likewise, and DayOfWeek does
+  not round at all. On the positive side "away from zero" is "later", so
+  23:59:59.9997 reads as the next day's midnight and every function agrees. On
+  the negative side away from zero is "an earlier DAY": 1899-12-29 23:59:59.9997
+  is -1.9999999965, the nudge makes it -2.0000000023, and DecodeDate read it as
+  1899-12-28 -- two days from the 1899-12-30 midnight it rounds to -- while
+  dayofweek, which truncates, said 1899-12-29. Such a number is what the
+  arithmetic hands back whenever the true answer is a midnight and the inputs
+  were not exactly on the millisecond grid.
+
+  So the functions that read a date are handed this canonical form: the time of
+  day rounded half up to a whole millisecond on the line, a 1000th of a second
+  that reaches the next midnight carried into the next day, and the spelling
+  rebuilt. Its time of day is at most 86399999 ms, so the RTL's half-millisecond
+  nudge can no longer cross a midnight in either direction, and DecodeDate,
+  DecodeTime and DayOfWeek agree on every number. On the positive side this is
+  the RTL's own rounding, so no answer there moves -- except DayOfWeek's for the
+  last half millisecond of a day, which now agrees with the date it is on. }
+function Canon(const D: TDateTime): TDateTime;
+var dd, tt, ms: Double;
+begin
+  if Abs(D) >= TwoTo52 then Exit(D);
+  Split(D, dd, tt);
+  ms := Int(tt * MSecsPerDay + 0.5);
+  if ms >= MSecsPerDay then
+  begin
+    ms := 0;
+    dd := dd + 1;
+  end;
+  Result := Join(dd, ms / MSecsPerDay);
+end;
+
+function C0(const A: array of TValue): TDateTime; begin Result := Canon(AsDouble(A[0])); end;
+function C1(const A: array of TValue): TDateTime; begin Result := Canon(AsDouble(A[1])); end;
 
 { The representable span as plain numbers, derived in the initialization section
   rather than written down here, so it cannot disagree with TryEncodeDate.
@@ -112,15 +193,15 @@ end;
 
 // --- decomposition ----------------------------------------------------------
 function t_yearof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(YearOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(YearOf(C0(A))); end;
 function t_monthof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MonthOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(MonthOf(C0(A))); end;
 function t_dayof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(DayOf(C0(A))); end;
 function t_dayofthemonth(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOfTheMonth(D0(A))); end;
+begin E := NoError(); Result := ValInt(DayOfTheMonth(C0(A))); end;
 function t_monthoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MonthOfTheYear(D0(A))); end;
+begin E := NoError(); Result := ValInt(MonthOfTheYear(C0(A))); end;
 { COUNTED FROM THE DECOMPOSED DATE, not from arithmetic on the number.
 
   A TDateTime before 1899-12-30 is negative, and FPC stores such a value as
@@ -136,8 +217,8 @@ begin
   { SourceOk first, or the accumulator runs over a Year=0/Month=0 decomposition
     and answers 0 -- which is no day of any year -- as a clean success. }
   Result := ValInt(0);
-  if not SourceOk('dayoftheyear', D0(A), E) then Exit;
-  DecodeDate(D0(A), y, m, d);
+  if not SourceOk('dayoftheyear', C0(A), E) then Exit;
+  DecodeDate(C0(A), y, m, d);
   n := d;
   for i := 1 to Integer(m) - 1 do
     n := n + DaysInAMonth(y, i);
@@ -146,13 +227,13 @@ end;
 
 // --- week-day: two bases ----------------------------------------------------
 function t_dayofweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOfWeek(D0(A))); end;         // Sunday = 1
+begin E := NoError(); Result := ValInt(DayOfWeek(C0(A))); end;         // Sunday = 1
 function t_dayoftheweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOfTheWeek(D0(A))); end;      // ISO: Monday = 1
+begin E := NoError(); Result := ValInt(DayOfTheWeek(C0(A))); end;      // ISO: Monday = 1
 
 // --- leap years and month lengths -------------------------------------------
 function t_isinleapyear(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(IsInLeapYear(D0(A)))); end;
+begin E := NoError(); Result := ValInt(Ord(IsInLeapYear(C0(A)))); end;
 { A year or a month that came from the program, checked before it reaches
   DateUtils. DaysInAMonth(2024, 13) indexed the RTL's month table OUT OF BOUNDS and
   returned 65450 as a clean success; WeeksInAYear(0) raised EConvertError with the
@@ -200,8 +281,8 @@ end;
 function t_daysinmonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  if not SourceOk('daysinmonth', D0(A), E) then Exit;
-  Result := ValInt(DaysInMonth(D0(A)));
+  if not SourceOk('daysinmonth', C0(A), E) then Exit;
+  Result := ValInt(DaysInMonth(C0(A)));
 end;
 function t_daysinamonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
@@ -213,16 +294,16 @@ end;
 
 // --- time-of-day ------------------------------------------------------------
 function t_hourof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(HourOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(HourOf(C0(A))); end;
 function t_minuteof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MinuteOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(MinuteOf(C0(A))); end;
 function t_secondof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(SecondOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(SecondOf(C0(A))); end;
 // FPC's DateUtils has no IsAM/IsPM; the clock half is decided by the hour.
 function t_isam(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) < 12)); end;
+begin E := NoError(); Result := ValInt(Ord(HourOf(C0(A)) < 12)); end;
 function t_ispm(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) >= 12)); end;
+begin E := NoError(); Result := ValInt(Ord(HourOf(C0(A)) >= 12)); end;
 { THE SAME DAY IS THE SAME YEAR, MONTH AND DAY -- compared as numbers, so the
   answer cannot depend on which argument came first.
 
@@ -232,36 +313,65 @@ begin E := NoError(); Result := ValInt(Ord(HourOf(D0(A)) >= 12)); end;
   ITSELF, while swapping the arguments answered 1. }
 function t_issameday(const A: array of TValue; out E: TPhosphorError): TValue;
 { Named ya/ma/da, not y1/m1/d1: Pascal is case-insensitive, so a local `d1`
-  SHADOWS the D1 helper two dozen lines up and `D1(A)` stops parsing. }
+  SHADOWS the D1 helper at the top of this unit and `D1(A)` stops parsing --
+  and a `c1` would shadow C1, which is what this function reads now. }
 var ya, ma, da, yb, mb, db: Word;
 begin
   E := NoError();
-  DecodeDate(D0(A), ya, ma, da);
-  DecodeDate(D1(A), yb, mb, db);
+  DecodeDate(C0(A), ya, ma, da);
+  DecodeDate(C1(A), yb, mb, db);
   Result := ValInt(Ord((ya = yb) and (ma = mb) and (da = db)));
 end;
 
 // --- weeks ------------------------------------------------------------------
 { All three RAISED for a below-range number, in the RTL's words about a date the
   program never wrote ("0-1-1 is not a valid date specification"). SourceOk turns
-  that into this library's own refusal, naming the function the script called. }
+  that into this library's own refusal, naming the function the script called.
+
+  THE ISO WEEK IS COUNTED ON DAY NUMBERS, never by subtracting two spelled
+  dates -- the lesson dayoftheyear and issameday already carry (2026-10-09,
+  round 2).
+  DateUtils.DecodeDateWeek counts the day of the year as Trunc(AValue - YS) + 1,
+  a subtraction of two sign-and-magnitude numbers: before 1899-12-30 a time of
+  day moved the answer one day EARLY, so a Monday carrying one fell back to the
+  Sunday and answered the PREVIOUS week -- 1850-06-17 was week 25 at midnight
+  and week 24 at noon, and 1600-01-03 00:00:00.001 week 52 of the year before.
+
+  ISO 8601's own rule, on DAY NUMBERS -- integers, which are a line on both
+  sides of the epoch: a week runs Monday to Sunday and belongs to the year that
+  holds its Thursday, and is that Thursday's (day of that year - 1) div 7 + 1.
+  The day is Trunc(D), the day DecodeDate reads once D is read to the
+  millisecond (C0), and the weekday is DayOfTheWeek, which reads the same
+  Trunc. Neither end of the calendar sends the Thursday outside it: 0001-01-01
+  is a Monday, 9999-12-31 a Friday. }
+function IsoWeek(const D: TDateTime): Integer;
+var day, thu, jan1: Int64; ty, tm, td: Word; first: TDateTime;
+begin
+  day := Trunc(D);
+  thu := day + 4 - DayOfTheWeek(D);
+  DecodeDate(thu, ty, tm, td);
+  if not TryEncodeDate(ty, 1, 1, first) then Exit(0);   // unreachable: see above
+  jan1 := Trunc(first);
+  Result := (thu - jan1) div 7 + 1;
+end;
+
 function t_weekoftheyear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  if not SourceOk('weekoftheyear', D0(A), E) then Exit;
-  Result := ValInt(WeekOfTheYear(D0(A)));
+  if not SourceOk('weekoftheyear', C0(A), E) then Exit;
+  Result := ValInt(IsoWeek(C0(A)));
 end;
 function t_weekof(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  if not SourceOk('weekof', D0(A), E) then Exit;
-  Result := ValInt(WeekOfTheYear(D0(A)));    // answers the same
+  if not SourceOk('weekof', C0(A), E) then Exit;
+  Result := ValInt(IsoWeek(C0(A)));    // answers the same
 end;
 function t_weekofthemonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  if not SourceOk('weekofthemonth', D0(A), E) then Exit;
-  Result := ValInt(WeekOfTheMonth(D0(A)));
+  if not SourceOk('weekofthemonth', C0(A), E) then Exit;
+  Result := ValInt(WeekOfTheMonth(C0(A)));
 end;
 function t_weeksinayear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
@@ -307,10 +417,123 @@ begin
 end;
 
 // --- incrementing -----------------------------------------------------------
+{ EVERY STEP IS TAKEN ON A LINE, and the sign-and-magnitude spelling is written
+  once, at the end (2026-10-09, round 2).
+
+  This is the fourth appearance of the class the distance functions below were
+  fixed for. A TDateTime before 1899-12-30 carries its time of day as a
+  NEGATIVE fraction, so the number is not a line, and DateUtils' increments
+  are additions on it, patched at the epoch by MaybeSkipTimeWarp
+  (fpc/3.2.2/packages/rtl-objpas/src/inc/dateutil.inc, MaybeSkipTimeWarp).
+  The patch nudges by TDateTimeEpsilon, 2.2e-16, which is LOST in any sum of
+  magnitude 2 or more -- so incday(1899-12-29, 6) answered 1900-01-05 and
+  incweek(1899-12-20, 2) 1900-01-04, a midnight one day too far, whenever the
+  step crossed the epoch. And the step itself was an Integer: ArgI32 is right
+  for an index and wrong for a quantity, so 2^31 minutes from 2000-01-01 came
+  back as 2^31 - 1 minutes, and 1e300 weeks as 2^31 - 1 weeks, without a word.
+
+  So an instant is taken apart into the two things it means -- the DAY, an
+  integer, and the TIME OF DAY, a fraction in [0, 1) -- which is the
+  decomposition DecodeDate and DecodeTime themselves use, so it agrees with
+  yearof, hourof and datetimetostr$ by construction. A step of whole days moves
+  the day and leaves the time alone; a step of hours, minutes, seconds or
+  milliseconds is split into whole days and a remainder (Int64 div and mod,
+  both exact) and the remainder is added to the time of day with one carry.
+  Only then is the spelling rebuilt: day + time at or after the epoch, day -
+  time before it.
+
+  THE STEP IS A QUANTITY. Below 2^62 it is the Int64 every other count is
+  (ArgI64: an integer exactly, a fraction rounded as before); at or above, it
+  is the Double the program wrote, added as it is -- far outside the calendar
+  either way, and the answer is the plain sum rather than a clipped step. A sum
+  past the largest Double is not answered at all: the engine's finiteness gate
+  refuses every library result that is not a number, this one included.
+
+  What the result may then be is unchanged and documented: incday and incweek
+  -- and now the four finer steps, which are the same kind of addition -- do
+  not refuse a sum outside 0001-01-01..9999-12-31; the nine date-taking
+  functions do. }
+{ A point on the line (see Linear, at the distances) back to the spelling.
+  Past 2^52 a Double holds no fraction, and the number is its own spelling --
+  an infinity included, which is then the finiteness gate's to refuse; the
+  guard also keeps `L - day` from ever meeting Inf - Inf. }
+function FromLinear(const L: Double): TDateTime;
+var dd, tt: Double;
+begin
+  if Abs(L) >= TwoTo52 then Exit(L);
+  dd := Int(L);
+  tt := L - dd;
+  if tt < 0 then
+  begin
+    tt := tt + 1;
+    dd := dd - 1;
+  end;
+  Result := Join(dd, tt);
+end;
+
+{ A step as a quantity: AExact with the Int64 in N below 2^62, otherwise the
+  Double in S. }
+procedure StepOf(const V: TValue; out AExact: Boolean; out N: Int64; out S: Double);
+begin
+  N := 0;
+  S := AsDouble(V);
+  AExact := (V.Kind = vkInt) or (Abs(S) < TwoTo62);
+  if AExact then N := ArgI64(V);
+end;
+
+function Linear(const D: TDateTime): Double; forward;
+
+{ D moved by a step of ADays whole days each (1 for incday, 7 for incweek). }
+function MoveDays(const D: TDateTime; const V: TValue; ADays: Integer): TDateTime;
+var dd, tt, s: Double; exact: Boolean; n: Int64;
+begin
+  StepOf(V, exact, n, s);
+  if exact then s := n;
+  Split(D, dd, tt);
+  dd := dd + s * ADays;
+  if Abs(dd) >= TwoTo52 then Exit(dd);
+  Result := Join(dd, tt);
+end;
+
+{ D moved by a step of units, APerDay of which make a day (24, 1440, 86400 or
+  86400000). The whole days and the remainder are separated in Int64 before any
+  Double sees them, so the time of day only ever receives less than one day. }
+function MoveUnits(const D: TDateTime; const V: TValue; APerDay: Int64): TDateTime;
+var dd, tt, s: Double; exact: Boolean; n, q, r: Int64;
+begin
+  StepOf(V, exact, n, s);
+  if not exact then
+    Exit(FromLinear(Linear(D) + s / APerDay));
+  q := n div APerDay;              // both truncate toward zero, so r has n's sign
+  r := n mod APerDay;
+  Split(D, dd, tt);
+  dd := dd + q;
+  tt := tt + r / APerDay;
+  if tt >= 1 then
+  begin
+    tt := tt - 1;
+    dd := dd + 1;
+  end
+  else if tt < 0 then
+  begin
+    tt := tt + 1;
+    dd := dd - 1;
+    { -1e-20 + 1 rounds to exactly 1: a moment a hair before midnight is
+      midnight, and midnight belongs to the next day. }
+    if tt >= 1 then
+    begin
+      tt := 0;
+      dd := dd + 1;
+    end;
+  end;
+  if Abs(dd) >= TwoTo52 then Exit(dd);
+  Result := Join(dd, tt);
+end;
+
 function t_incday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncDay(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(MoveDays(D0(A), A[1], 1)); end;
 function t_incweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncWeek(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(MoveDays(D0(A), A[1], 7)); end;
 
 { Off-the-end, restated.
 
@@ -337,60 +560,69 @@ begin E := NoError(); Result := ValDouble(IncWeek(D0(A), I1(A))); end;
   word, so incmonth(9999-06-15, 12) came back as 1899-12-30 -- a plausible date,
   silently wrong, the worst of the three outcomes. The step is therefore REFUSED
   in advance, by computing the year it lands in. }
-function SteppedOff(const AFn: String; ABy: Integer; const AUnit: String;
+function SteppedOff(const AFn: String; const ABy: TValue; const AUnit: String;
                     out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  E := MakeError(peRuntime, AFn + ': ' + IntToStr(ABy) + ' ' + AUnit +
+  E := MakeError(peRuntime, AFn + ': ' + ValToStr(ABy) + ' ' + AUnit +
                  ' from that date leaves 0001-01-01..9999-12-31');
 end;
 
-{ The year a month step lands in, computed the way the RTL's own IncAMonth
-  computes it, so the answer can be judged before the RTL is asked. Int64
-  throughout: a year near 9999 times twelve, plus an Integer step, overflows a
-  32-bit total -- and an overflow here would approve exactly the call this
-  function exists to refuse. `div` truncates toward zero, so a negative remainder
-  means the year below. Only meaningful once SourceOk has passed. }
-function MonthStepYear(const D: TDateTime; ABy: Integer): Int64;
-var y, m, dd: Word; tot: Int64;
+{ The month count a step names, judged before anything is computed from it. A
+  step is a QUANTITY (see the note at incday), so it is read whole rather than
+  narrowed to an Integer; but the whole calendar is 9999 * 12 = 119988 months
+  long, so a step of more than that from any date inside it leaves it, and
+  refusing those here keeps every later sum far from Int64's edge. }
+function MonthCount(const V: TValue; AMonthsPerUnit: Integer; out AMonths: Int64): Boolean;
+var exact: Boolean; n: Int64; s: Double;
 begin
-  DecodeDate(D, y, m, dd);
-  tot := Int64(y) * 12 + (Int64(m) - 1) + ABy;
-  Result := tot div 12;
-  if (tot mod 12) < 0 then Dec(Result);
+  StepOf(V, exact, n, s);
+  AMonths := 0;
+  Result := exact and (Abs(n) <= 119988 div AMonthsPerUnit);
+  if Result then AMonths := n * AMonthsPerUnit;
 end;
 
-{ 31 January plus one month is 28 February -- the day is CLAMPED to the length of
-  the month it lands in, 29 February in a leap year -- and the time of day is
-  carried through untouched. Backwards clamps identically. }
+{ incmonth and incyear: the date moved by a number of months, the day CLAMPED
+  to the length of the month it lands in -- 31 January plus one month is 28
+  February, or the 29th in a leap year, and 29 February plus a year is the
+  28th -- and the time of day carried through EXACTLY, as the second half of
+  the line. Both used to go to the RTL: IncMonth composed correctly, but
+  IncYear decoded the time to the millisecond and rebuilt it (a fraction of a
+  millisecond was lost), and on a pre-1900 moment a hair before midnight its
+  rounding fallback, DecodeDate(Round(AValue)), rounded the sign-and-magnitude
+  number to the PREVIOUS day. One routine now does both.
+
+  The year a step lands in is computed first, so a step that leaves the
+  calendar is refused by name and nothing is encoded: the RTL's IncMonth
+  answers 1899-12-30 for a date it cannot encode, without a word, and its
+  IncYear raised. }
+function MoveMonths(const AFn, AUnit: String; const D: TDateTime; const V: TValue;
+                    AMonthsPerUnit: Integer; out E: TPhosphorError): TValue;
+var y, m, dd: Word; months, tot, ty, tm, last: Int64; day: TDateTime;
+begin
+  Result := ValInt(0);
+  if not SourceOk(AFn, D, E) then Exit;
+  if not MonthCount(V, AMonthsPerUnit, months) then
+    Exit(SteppedOff(AFn, V, AUnit, E));
+  DecodeDate(D, y, m, dd);
+  tot := Int64(y) * 12 + (Int64(m) - 1) + months;
+  ty := tot div 12;
+  tm := tot mod 12;
+  if tm < 0 then begin Inc(tm, 12); Dec(ty); end;   // div and mod truncate
+  if (ty < 1) or (ty > 9999) then
+    Exit(SteppedOff(AFn, V, AUnit, E));
+  last := DaysInAMonth(Word(ty), Word(tm + 1));
+  if dd > last then dd := Word(last);
+  if not TryEncodeDate(Word(ty), Word(tm + 1), dd, day) then
+    Exit(SteppedOff(AFn, V, AUnit, E));
+  E := NoError();
+  Result := ValDouble(Join(day, Abs(Frac(D))));
+end;
+
 function t_incmonth(const A: array of TValue; out E: TPhosphorError): TValue;
-var ty: Int64;
-begin
-  Result := ValInt(0);
-  if not SourceOk('incmonth', D0(A), E) then Exit;
-  ty := MonthStepYear(D0(A), I1(A));
-  if (ty < 1) or (ty > 9999) then
-  begin
-    Result := SteppedOff('incmonth', I1(A), 'months', E);
-    Exit;
-  end;
-  E := NoError();
-  Result := ValDouble(IncMonth(D0(A), I1(A)));
-end;
+begin Result := MoveMonths('incmonth', 'months', C0(A), A[1], 1, E); end;
 function t_incyear(const A: array of TValue; out E: TPhosphorError): TValue;
-var ty: Int64;
-begin
-  Result := ValInt(0);
-  if not SourceOk('incyear', D0(A), E) then Exit;
-  ty := Int64(YearOf(D0(A))) + I1(A);
-  if (ty < 1) or (ty > 9999) then
-  begin
-    Result := SteppedOff('incyear', I1(A), 'years', E);
-    Exit;
-  end;
-  E := NoError();
-  Result := ValDouble(IncYear(D0(A), I1(A)));  // clamps a leap day to the 28th
-end;
+begin Result := MoveMonths('incyear', 'years', C0(A), A[1], 12, E); end;
 
 // --- distances --------------------------------------------------------------
 { MEASURED ON A CONTINUUM, because a TDateTime is not one.
@@ -439,7 +671,7 @@ end;
   The sixteen formulas below are then the RTL's own, unchanged and reading from
   the same constants, so the truncation and the half-millisecond rounding are
   what they always were. The only thing replaced is the distance they measure. }
-function Linear(const D: TDateTime): Double;
+function Linear(const D: TDateTime): Double;   // declared forward at incday
 begin
   Result := Int(D) + Abs(Frac(D));
 end;
@@ -493,8 +725,17 @@ function t_tomorrow(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(Tomorrow); end;
 function t_yesterday(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(Yesterday); end;
+{ Through the decomposition, as issameday is: DateUtils.IsToday is IsSameDay,
+  the subtraction whose pre-1900 asymmetry issameday's note records. Today is
+  never before 1900, so the old answer was right -- by that accident only. }
 function t_istoday(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(IsToday(D0(A)))); end;
+var ya, ma, da, yb, mb, db: Word;
+begin
+  E := NoError();
+  DecodeDate(C0(A), ya, ma, da);
+  DecodeDate(Date, yb, mb, db);
+  Result := ValInt(Ord((ya = yb) and (ma = mb) and (da = db)));
+end;
 
 // --- ISO 8601 rendering and parsing -----------------------------------------
 // Phosphor's date strings are ISO 8601 (yyyy-mm-dd, hh:nn:ss), fixed rather than
@@ -512,16 +753,16 @@ var
 function t_datetostr(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValStr('');
-  if not SourceOk('datetostr$', D0(A), E) then Exit;
-  Result := ValStr(DateToStr(D0(A), ISOFS));
+  if not SourceOk('datetostr$', C0(A), E) then Exit;
+  Result := ValStr(DateToStr(C0(A), ISOFS));
 end;
 function t_timetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(TimeToStr(D0(A), ISOFS)); end;
+begin E := NoError(); Result := ValStr(TimeToStr(C0(A), ISOFS)); end;
 function t_datetimetostr(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValStr('');
-  if not SourceOk('datetimetostr$', D0(A), E) then Exit;
-  Result := ValStr(DateTimeToStr(D0(A), ISOFS));
+  if not SourceOk('datetimetostr$', C0(A), E) then Exit;
+  Result := ValStr(DateTimeToStr(C0(A), ISOFS));
 end;
 function t_date_s(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(DateToStr(Date, ISOFS)); end;
@@ -530,31 +771,135 @@ begin E := NoError(); Result := ValStr(TimeToStr(Time, ISOFS)); end;
 function t_datetime_s(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValStr(DateTimeToStr(Now, ISOFS)); end;
 function t_formatdatetime(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(FormatDateTime(A[0].Str, AsDouble(A[1]), ISOFS)); end;
+begin E := NoError(); Result := ValStr(FormatDateTime(A[0].Str, C1(A), ISOFS)); end;
+
+{ THE PARSERS READ EXACTLY THE ISO 8601 FORMS date-time.md LISTS, and nothing
+  is completed by a guess (2026-10-09, round 2).
+
+  They used to be the RTL's StrToDate/StrToTime/StrToDateTime under pinned ISO
+  separators, and the RTL is a LENIENT reader that fills in what is missing:
+  "0-6-15" was 2000-06-15 and "20-06-15" 2020-06-15 (a two-digit year is
+  pivoted into a century), "06-15" was June 15 of the CURRENT year and "10" the
+  10th of the current month -- the same text a different number on a different
+  day -- "1:2" was 01:02, "10:20:30 PM" 22:20:30, and strtodatetime took a time
+  alone as a time on 1899-12-30. A date that arrives as text is data from
+  somewhere, and a parser that invents its missing parts turns a malformed
+  record into a plausible wrong one.
+
+  So the grammar is written here, and it is the one the renderers write:
+    date      yyyy-mm-dd            four digits, two, two; 0001-01-01..9999-12-31
+    time      hh:nn  or  hh:nn:ss   two digits each; 00:00..23:59:59
+    datetime  date, or date + one blank + time
+  -- the date alone because datetimetostr$ renders a midnight that way, and
+  render and parse are inverses. No blank at either end, no 'T', no fraction of
+  a second, no sign. The day is checked against the month it is in.
+
+  The numbers are built by the RTL's own TryEncodeDate/TryEncodeTime and joined
+  as the sign-and-magnitude spelling, so every accepted text answers exactly
+  what it answered before. }
+{ Two decimal digits at S[P], S[P+1]; four are two pairs. Every field of the
+  grammar is two or four digits wide, so there is no loop to bound. }
+function TwoDigits(const S: String; P: Integer; out V: Integer): Boolean;
+begin
+  V := 0;
+  Result := (P >= 1) and (P + 1 <= Length(S)) and
+            (S[P] in ['0'..'9']) and (S[P + 1] in ['0'..'9']);
+  if Result then V := (Ord(S[P]) - Ord('0')) * 10 + (Ord(S[P + 1]) - Ord('0'));
+end;
+
+function DigitsAt(const S: String; P, N: Integer; out V: Integer): Boolean;
+var hi, lo: Integer;
+begin
+  if N = 2 then Exit(TwoDigits(S, P, V));
+  V := 0;
+  Result := (N = 4) and TwoDigits(S, P, hi) and TwoDigits(S, P + 2, lo);
+  if Result then V := hi * 100 + lo;
+end;
+
+{ yyyy-mm-dd at S[P..P+9]. The caller has checked the length. }
+function DateAt(const S: String; P: Integer; out D: TDateTime): Boolean;
+var y, m, dd: Integer;
+begin
+  Result := False;
+  D := 0;
+  if not DigitsAt(S, P, 4, y) or (S[P + 4] <> '-') then Exit;
+  if not DigitsAt(S, P + 5, 2, m) or (S[P + 7] <> '-') then Exit;
+  if not DigitsAt(S, P + 8, 2, dd) then Exit;
+  if (y < 1) or (m < 1) or (m > 12) or (dd < 1) then Exit;
+  if dd > DaysInAMonth(Word(y), Word(m)) then Exit;
+  Result := TryEncodeDate(Word(y), Word(m), Word(dd), D);
+end;
+
+{ hh:nn or hh:nn:ss, and nothing else, from S[P] to the end. }
+function TimeFrom(const S: String; P: Integer; out T: TDateTime): Boolean;
+var len, h, n, sec: Integer;
+begin
+  Result := False;
+  T := 0;
+  len := Length(S) - P + 1;
+  if (len <> 5) and (len <> 8) then Exit;
+  if not DigitsAt(S, P, 2, h) or (S[P + 2] <> ':') then Exit;
+  if not DigitsAt(S, P + 3, 2, n) then Exit;
+  sec := 0;
+  if len = 8 then
+    if (S[P + 5] <> ':') or not DigitsAt(S, P + 6, 2, sec) then Exit;
+  if (h > 23) or (n > 59) or (sec > 59) then Exit;
+  Result := TryEncodeTime(Word(h), Word(n), Word(sec), 0, T);
+end;
+
+{ The text, quoted, when it is short printable ASCII -- anything else could
+  carry a control byte or a cut UTF-8 sequence into an error message -- and
+  otherwise just "that text". }
+function Cited(const S: String): String;
+var i: Integer;
+begin
+  Result := 'that text';
+  if Length(S) > 40 then Exit;
+  for i := 1 to Length(S) do
+    if (S[i] < ' ') or (S[i] > '~') then Exit;
+  Result := '"' + S + '"';
+end;
 
 function t_strtodate(const A: array of TValue; out E: TPhosphorError): TValue;
 var d: TDateTime;
 begin
   Result := ValInt(0);
-  try d := StrToDate(A[0].Str, ISOFS);
-  except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid date: ' + Ex.Message); Exit; end; end;
+  if (Length(A[0].Str) <> 10) or not DateAt(A[0].Str, 1, d) then
+  begin
+    E := MakeError(peRuntime, 'invalid date: ' + Cited(A[0].Str) +
+                   ' is not a yyyy-mm-dd date in 0001-01-01..9999-12-31');
+    Exit;
+  end;
   E := NoError(); Result := ValDouble(d);
 end;
 function t_strtotime(const A: array of TValue; out E: TPhosphorError): TValue;
-var d: TDateTime;
+var t: TDateTime;
 begin
   Result := ValInt(0);
-  try d := StrToTime(A[0].Str, ISOFS);
-  except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid time: ' + Ex.Message); Exit; end; end;
-  E := NoError(); Result := ValDouble(d);
+  if not TimeFrom(A[0].Str, 1, t) then
+  begin
+    E := MakeError(peRuntime, 'invalid time: ' + Cited(A[0].Str) +
+                   ' is not an hh:nn or hh:nn:ss time in 00:00..23:59:59');
+    Exit;
+  end;
+  E := NoError(); Result := ValDouble(t);
 end;
 function t_strtodatetime(const A: array of TValue; out E: TPhosphorError): TValue;
-var d: TDateTime;
+var s: String; d, t: TDateTime; ok: Boolean;
 begin
   Result := ValInt(0);
-  try d := StrToDateTime(A[0].Str, ISOFS);
-  except on Ex: Exception do begin E := MakeError(peRuntime, 'invalid datetime: ' + Ex.Message); Exit; end; end;
-  E := NoError(); Result := ValDouble(d);
+  s := A[0].Str;
+  t := 0;
+  ok := (Length(s) >= 10) and DateAt(s, 1, d);
+  if ok and (Length(s) > 10) then
+    ok := (s[11] = ' ') and TimeFrom(s, 12, t);
+  if not ok then
+  begin
+    E := MakeError(peRuntime, 'invalid datetime: ' + Cited(s) +
+                   ' is not yyyy-mm-dd, yyyy-mm-dd hh:nn or yyyy-mm-dd hh:nn:ss');
+    Exit;
+  end;
+  E := NoError(); Result := ValDouble(Join(d, t));
 end;
 
 // --- the clock (no arguments) -----------------------------------------------
@@ -566,14 +911,17 @@ function t_gettime(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(Now); end;
 
 // --- finer increments -------------------------------------------------------
+// On the line, like incday: see the note there. The RTL's four took an Int64
+// step but were handed ArgI32's, and their negative-date path
+// (IncNegativeTime) is followed by the same MaybeSkipTimeWarp.
 function t_inchour(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncHour(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(MoveUnits(D0(A), A[1], 24)); end;
 function t_incminute(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncMinute(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(MoveUnits(D0(A), A[1], 1440)); end;
 function t_incsecond(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncSecond(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(MoveUnits(D0(A), A[1], 86400)); end;
 function t_incmillisecond(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValDouble(IncMilliSecond(D0(A), I1(A))); end;
+begin E := NoError(); Result := ValDouble(MoveUnits(D0(A), A[1], 86400000)); end;
 
 // --- year lengths taking a date ---------------------------------------------
 { The date-TAKING half of the pair whose year-taking half daysinayear/weeksinayear
@@ -582,14 +930,14 @@ begin E := NoError(); Result := ValDouble(IncMilliSecond(D0(A), I1(A))); end;
 function t_daysinyear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  if not SourceOk('daysinyear', D0(A), E) then Exit;
-  Result := ValInt(DaysInYear(D0(A)));
+  if not SourceOk('daysinyear', C0(A), E) then Exit;
+  Result := ValInt(DaysInYear(C0(A)));
 end;
 function t_weeksinyear(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValInt(0);
-  if not SourceOk('weeksinyear', D0(A), E) then Exit;
-  Result := ValInt(WeeksInYear(D0(A)));
+  if not SourceOk('weeksinyear', C0(A), E) then Exit;
+  Result := ValInt(WeeksInYear(C0(A)));
 end;
 
 // --- more distances ---------------------------------------------------------
@@ -643,7 +991,7 @@ function t_yearspan(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) / ApproxDaysPerYear); end;
 
 function t_millisecondof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MilliSecondOf(D0(A))); end;
+begin E := NoError(); Result := ValInt(MilliSecondOf(C0(A))); end;
 
 procedure RegisterDateTimeFuncs(Reg: TPhosphorRegistry);
 begin

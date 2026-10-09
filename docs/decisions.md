@@ -841,3 +841,43 @@ behaviour; this is why it is that behaviour).
 Left as they are, and why: a SPACE in a url path is still written into the
 request line (it cannot start a new header line, and refusing it would refuse
 urls servers accept today); a cookie name may still hold `;` or `=`.
+
+## Dates, settings and colours: what a library accepts is what it can answer (2026-10-09)
+
+Round 2 of the adversarial loop, over three libraries. Each page has the
+behaviour; this is why it is that behaviour.
+
+- **Date arithmetic is done on the line, not on the number.** A TDateTime before
+  1899-12-30 is spelled sign-and-magnitude, so the RTL's arithmetic -- written for
+  the positive half and patched at the epoch -- was wrong in a fifth and sixth
+  place: the increments and the ISO week. Rather than patch two more call sites,
+  every function that moves or measures takes the number apart into a day and a
+  time of day, computes, and writes the spelling once (`Split`, `Join`, `Linear`
+  in PhosphorDateTimeLib.pas); every function that READS a date first rounds it
+  to the millisecond on the line, because the RTL's own rounding, done in the
+  spelling, reads a pre-1900 moment just before midnight as the day before. The
+  calendar itself -- leap years, month lengths, encoding a day -- stays the RTL's.
+- **A step is a quantity.** `inc*` read their count through ArgI32, which clamps:
+  right for an index, wrong for an amount. The count is read whole (Int64 below
+  2^62, the Double above), so an answer is never a clipped step. What a step may
+  land on is unchanged: the six additive increments still answer a number outside
+  the calendar rather than refuse it (tests pin that such a number can be held),
+  and `incmonth`/`incyear` still refuse.
+- **The date parsers accept exactly the ISO 8601 forms the page lists, and
+  complete nothing.** Unpadded parts (`2024-2-9`), which the page used to allow,
+  are refused with the rest: a two-digit year, a missing year, `PM`, a time alone
+  for a date-time. The accepted language is the rendered language plus `hh:nn`,
+  so render and parse stay inverses, and a malformed record is an error instead of
+  a plausible date.
+- **A config setter refuses what it cannot round-trip; it does not escape it.**
+  Decision 6 of the attack plan again: an escape would invent a convention a
+  person editing the file cannot see. The refusal is now asked of the LINE the
+  setter would write, through the same two functions the reader asks, instead of
+  of a list of shapes -- the list had missed `[k` = `v] ;c`.
+- **A colour is an unsigned 32-bit number.** A literal outside 0..2^32 - 1 is no
+  colour and answers 0, as an unknown name does; `colortostr$` formats the whole
+  value and answers `""` for a number no 32-bit pattern spells. The library still
+  answers and never raises, as its page promises.
+- **An environment name nobody can have set answers `""`** without asking the OS
+  -- empty, or holding `=` or NUL -- because the OS answers such a name for a
+  DIFFERENT variable than the one the program named.

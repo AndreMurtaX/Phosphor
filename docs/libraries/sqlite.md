@@ -37,7 +37,9 @@ Phosphor; the package maps that onto SQLite's own mixed convention (1-based bind
 a bad handle, a statement that will not compile, a column that is not there all
 answer an empty value — `""`, `0`, an empty JSON object — and leave a code behind
 for `sqlite_error()` and `sqlite_errormsg$()`. That is the last-error-as-a-value
-pattern `ioerror()` and `http_error()` follow. The consequence is worth stating
+pattern `ioerror()` and `http_error()` follow. (Two engine-wide rules still
+stop a call here as they stop any library call: the run's budget running out,
+and a number read back that is not finite — see the note on infinity below.) The consequence is worth stating
 plainly: `sqlite_scalar$()` answering `""` may mean *no rows*, *a NULL*, *an empty
 string*, or *the query was nonsense* — only `sqlite_error()` separates them.
 
@@ -99,7 +101,7 @@ watching. An unsandboxed host is unaffected.
 | `sqlite_isopen(db@) → num` | `1` while the handle really is an open database. `0` for a closed one, a stale id, or a handle belonging to some other library |
 | `sqlite_path$(db@) → str` | the path it was opened on — `":memory:"` for the memory form, `""` when the handle is not a database |
 | `sqlite_version$() → str` | the SQLite library version, `""` when no library loaded |
-| `sqlite_close(db@) → num` | `1` when it closed and freed the database and every cursor on it. `0` when the handle is not a database — closing a JSON handle destroys nothing — and `0` for one already closed |
+| `sqlite_close(db@) → num` | `1` when it closed and freed the database and every cursor on it — closed for real, its file released. `0` when the handle is not a database — closing a JSON handle destroys nothing — and `0` for one already closed. `0` also if SQLite refuses to close the connection, with its code in `sqlite_error()`; the handle then stays open (`sqlite_isopen` says `1`) and can be closed again. Nothing in this package leaves SQLite a reason to refuse, so that answer means something outside it is holding the connection |
 
 ### Running a statement
 
@@ -139,7 +141,7 @@ which reads exactly like an empty table, and is meant to.
 | `sqlite_bindstr(s@, i, v$) → num` | binds a string to parameter `i` (1-based). `1` whenever the handle is a statement — an index outside the statement's parameters is ignored, silently, so `1` is not proof that parameter `i` exists |
 | `sqlite_bindnum(s@, i, v) → num` | binds a number, keeping an integer an integer; same `1`/`0` meaning |
 | `sqlite_bindnull(s@, i) → num` | binds SQL NULL to parameter `i` |
-| `sqlite_bindjson(s@, obj@) → num` | binds an object's members **by name**, each key `k` to a parameter written `:k`. `0` when the handle is not a statement, or the second handle is not a JSON object. A key with no matching parameter is skipped — so a statement full of `?` binds nothing at all and still answers `1` |
+| `sqlite_bindjson(s@, obj@) → num` | binds an object's members **by name**, each key `k` to a parameter written `:k`. A member that is itself an array or an object is bound as its JSON **text**, the text `json_stringify$` writes for it (see [Nested members](#nested-members)). `0` when the handle is not a statement, or the second handle is not a JSON object — and `0`, with `sqlite_error()` `20`, when a member has no JSON text; then **nothing** is bound and the statement keeps the values it had. A key with no matching parameter is skipped — so a statement full of `?` binds nothing at all and still answers `1` |
 
 ### Columns of the current row
 
@@ -165,8 +167,8 @@ which reads exactly like an empty table, and is meant to.
 | `sqlite_row@(s@) → handle` | the current row as a JSON object, column names as keys. An **empty object** when the cursor is not on a row; handle `0` for a non-statement handle. One member per **name**: when two columns share one — `select *` over a join of two tables that both have an `id` — the **later** column is kept, as in a row read into a dictionary; alias them (`a.id as a_id`) to keep both. A column name past 255 bytes cannot be a JSON member name and is a runtime error (the same rule holds for `sqlite_fetchone@` and `sqlite_fetchall@`) |
 | `sqlite_fetchone@(s@) → handle` | steps first, then hands back the new current row. At the end of the result that is an empty object — check with `json_count` rather than expecting a failure |
 | `sqlite_fetchall@(s@) → handle` | a JSON array of every **remaining** row, stepping a fresh cursor onto the first one for you. Empty array when the cursor is already exhausted. Count it with `json_len` |
-| `sqlite_insertjson(db@, t$, o@) → num` | inserts an object as a row, keys as columns, values bound rather than pasted into SQL; an integer member is stored as an INTEGER, every digit kept up to 2^63-1 (past it, the REAL nearest to it); answers the number of rows written. `0` for an empty object, a handle that is not an object, or an insert SQLite refused |
-| `sqlite_updatejson(db@, t$, o@, where$) → num` | sets the object's keys on the rows matching `where$`, and answers **how many rows changed** — `0` when none matched, which is not an error. `where$` is spliced in as SQL, so it is the one place here you still have to escape by hand; an empty `where$` means *every row* |
+| `sqlite_insertjson(db@, t$, o@) → num` | inserts an object as a row, keys as columns, values bound rather than pasted into SQL; an integer member is stored as an INTEGER, every digit kept up to 2^63-1 (past it, the REAL nearest to it); answers the number of rows written. An array or object member is stored as its JSON text (see [Nested members](#nested-members)). `0` for an empty object, a handle that is not an object, an insert SQLite refused, or a member with no JSON text (`sqlite_error()` `20`, and no row is written) |
+| `sqlite_updatejson(db@, t$, o@, where$) → num` | sets the object's keys on the rows matching `where$`, and answers **how many rows changed** — `0` when none matched, which is not an error. `where$` is spliced in as SQL, so it is the one place here you still have to escape by hand; an empty `where$` means *every row*. Members are bound as `sqlite_insertjson` binds them, nested ones as JSON text, and a member with no JSON text changes nothing and answers `0` with `sqlite_error()` `20` |
 
 ### Transactions
 
@@ -266,6 +268,24 @@ rather than raising, the shape of careful code is `sqlite_clearerror()`, then th
 operation, then `if sqlite_error() then ...`. Testing the returned value alone
 cannot distinguish "no rows" from "that was not SQL".
 
+**Infinity and NaN are SQLite's to answer.** SQL is free to make them —
+`1e999`, `'1e999' + 0`, `1e308 * 10 - 1e308 * 10`, the square root of a negative number — and SQLite has
+an answer for each: a NaN is stored and returned as **NULL**, an overflow is a
+REAL **infinity**. Every call into the library runs with the processor's
+floating-point traps masked, the way C code expects to be called, and the
+program's own settings are put back on the way out, so such a statement
+completes or fails as SQLite decides and never interrupts SQLite halfway through
+a write. (Until 2026-10-09 it could: valid SQL that made a NaN raised `Invalid
+floating point operation` from inside SQLite, left the connection holding an open
+transaction, and every later write that answered `1` was lost when the database
+was opened again.) An infinity reaches a program as its text — `sqlite_scalar$`
+and `sqlite_getstr$` answer `Inf` or `-Inf`, `sqlite_coltype` says `2` — but read
+as a number it meets the engine's rule that no running value is infinite
+(see [num.md](num.md)): `sqlite_scalar`, `sqlite_getnum` and `sqlite_getn` stop
+with `... has no finite result for those arguments`, catchable like any runtime
+error. Ask SQL's own typeof function in the query, or read the column as text, when a column
+can hold one.
+
 **Bytes survive.** A text or blob column is read by its byte length, not to the
 first NUL, so a value holding a zero byte comes back whole — `bytelen(v$)` of what
 `sqlite_getstr$` answers matches what SQL's own length function reports for the
@@ -277,3 +297,24 @@ apart.
 `sqlite_fetchone@` and `sqlite_fetchall@` each answer a JSON handle that the json
 library owns and reads; see [json.md](json.md). They are fresh documents, not
 borrowed views into the cursor, so they stay valid after the next `sqlite_step`.
+
+## Nested members
+
+`sqlite_bindjson`, `sqlite_insertjson` and `sqlite_updatejson` bind a member that
+is an array or an object as its **JSON text**, exactly as `json_stringify$`
+writes it — no padding inside an object, `, ` between array elements — and the
+same text `json_gets$` reads such a member as:
+
+```basic
+db@ = sqlite_open@()
+sqlite_exec(db@, "create table t (a, b)")
+sqlite_insertjson(db@, "t", json_parse@("{""a"": 1, ""b"": {""tags"": [1, 2]}}"))
+println sqlite_scalar$(db@, "select b from t")    ' {"tags":[1, 2]}
+```
+
+It is stored as TEXT, which SQLite's own JSON functions read directly. A member
+with **no** JSON text — a non-finite number, which a row fetched from SQLite can
+carry and which `json_stringify$` refuses to write — is refused before anything
+is bound: the call answers `0`, `sqlite_error()` is `20` (SQLITE_MISMATCH) and the
+message names the member, no row is written or changed, and a statement handed
+to `sqlite_bindjson` keeps the bindings it had.

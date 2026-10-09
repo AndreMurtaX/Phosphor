@@ -186,7 +186,7 @@ unit PhosphorSqliteLib;
 interface
 
 uses
-  SysUtils, Classes, ctypes, fpjson, SQLite3Dyn,
+  SysUtils, Classes, Math, ctypes, fpjson, SQLite3Dyn,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
   PhosphorSandbox, PhosphorBudget;
 
@@ -220,6 +220,65 @@ var
     (or no sandbox, where there is nothing to re-check). }
   GAuthPath: String = '';
 
+{ NO FPU EXCEPTION MAY BE RAISED INSIDE C CODE (2026-10-09, round 4).
+
+  The VM runs a program with the invalid-operation trap UNMASKED, on purpose (see
+  TPhosphorVM.EnterFPU and NonFinite in engine/PhosphorVM.pas): a NaN made by
+  the program's own arithmetic must stop at the instruction that made it. This
+  package called into sqlite3 with that mask live -- and SQLite's C code makes
+  NaNs and compares infinities as a matter of course: Inf - Inf, Inf * 0,
+  sqrt(-1), acos(2), and a literal 1e999 compared at PREPARE. Each one raised
+  EInvalidOp in the middle of SQLite, and the unwind went straight through the C
+  frames. SQLite's own cleanup never ran and neither did this unit's
+  sqlite3_finalize: the statement's write transaction stayed open while the
+  autocommit flag said none was, so every later insert that answered 1 was
+  never committed; sqlite3_close then answered BUSY to nobody, the file stayed
+  open and locked, and a new connection found the rows gone. Valid SQL --
+  Python's sqlite3 answers every one of those statements (NULL for a NaN, inf
+  for 1e999).
+
+  So every call into the library runs with EVERY FPU exception masked, the way
+  C code expects to be called, and the VM's state is put back exactly as it was
+  on the way out. Exactly: on x86-64 the whole MXCSR is saved and restored --
+  mask, rounding and the sticky status flags -- so a flag SQLite raised while
+  masked does not survive into the program; the x87 control word goes back
+  through SetExceptionMask, whose Set8087CW clears any pending x87 exception
+  (fnclex) before it unmasks. A NaN SQLite makes is SQLite's to answer, and it
+  answers NULL; an infinity is an ordinary REAL to SQLite, and reaches the program
+  as its text ('Inf') or -- read as a number -- meets the VM's finiteness refusal
+  at the call, as every non-finite library result does (docs/libraries/num.md).
+
+  WHERE THE MASK IS SET. Every registered function is entered through Masked
+  (see the w_ wrappers above RegisterSqliteFuncs), so a call made from a script
+  cannot reach the library unmasked whatever its body does; the two destructors
+  and the unit's initialization, which run outside any script call (the VM's
+  handle teardown, process start), set it themselves. }
+type
+  TSqlFpu = record
+    Mask: TFPUExceptionMask;
+    {$IFDEF CPUX86_64}
+    Csr: DWord;
+    {$ENDIF}
+  end;
+
+function SqlFpuEnter: TSqlFpu;
+begin
+  Result.Mask := GetExceptionMask();
+  {$IFDEF CPUX86_64}
+  Result.Csr := GetMXCSR();
+  {$ENDIF}
+  SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow,
+                    exUnderflow, exPrecision]);
+end;
+
+procedure SqlFpuLeave(const ASaved: TSqlFpu);
+begin
+  {$IFDEF CPUX86_64}
+  SetMXCSR(ASaved.Csr);          // SSE: mask, rounding and flags, as they were
+  {$ENDIF}
+  SetExceptionMask(ASaved.Mask); // x87 (and SSE's mask again, to the same value)
+end;
+
 type
   TSqliteStmt = class;
 
@@ -231,6 +290,9 @@ type
     Path: String;
     Children: TFPList;   // of TSqliteStmt
     constructor Create(ADb: psqlite3; const APath: String);
+    { Finalize every statement and close the connection; SQLite's answer.
+      SQLITE_OK leaves DbPtr nil. See the body for the BUSY case. }
+    function CloseConn: Integer;
     destructor Destroy; override;
   end;
 
@@ -266,7 +328,25 @@ begin
   Children := TFPList.Create();
 end;
 
-destructor TSqliteDb.Destroy;
+{ CLOSING IS A QUESTION, AND ITS ANSWER WAS THROWN AWAY.
+
+  This used to call sqlite3_close and ignore what it said, under a comment that
+  every statement had been finalized "so this cannot be BUSY". That was true of
+  the statements a SCRIPT holds, which are children here; it was not true of
+  the ones the package prepares for itself inside one call, and a Pascal
+  exception through any of those (an FPU trap in SQLite, fpjson's raise on a
+  nested member) skipped their finalize. sqlite3_close then answered BUSY, the
+  connection, its file handle and its open transaction lived on for the life of
+  the process, and sqlite_close answered 1 (2026-10-09, round 4).
+
+  Those exits are closed now (every internal prepare is finalized in a finally,
+  and no FPU exception can be raised in the library). And the close itself no
+  longer trusts that: a BUSY answer is met by finalizing every statement SQLite
+  still knows on this connection -- sqlite3_next_stmt walks them, and none of
+  them can belong to a script, whose statements were freed just above -- and
+  asking again. What survives that is reported to the caller, not dropped. }
+function TSqliteDb.CloseConn: Integer;
+var st: psqlite3_stmt; fpu: TSqlFpu;
 begin
   // Finalize and invalidate every child statement FIRST. FreeHandle frees the
   // TSqliteStmt (its destructor calls sqlite3_finalize) and nils its registry
@@ -274,17 +354,49 @@ begin
   // dereferenced into a freed sqlite3_stmt. Each child removes itself from the
   // list as it is freed, so always take the last.
   if Children <> nil then
-  begin
     while Children.Count > 0 do
       FreeHandle(TSqliteStmt(Children[Children.Count - 1]).HandleId);
-    Children.Free;
-    Children := nil;
+  if DbPtr = nil then Exit(SQLITE_OK);
+  fpu := SqlFpuEnter();
+  try
+    Result := sqlite3_close(DbPtr);
+    if (Result = SQLITE_BUSY) and Assigned(sqlite3_next_stmt) then
+    begin
+      st := sqlite3_next_stmt(DbPtr, nil);
+      while st <> nil do
+      begin
+        sqlite3_finalize(st);
+        st := sqlite3_next_stmt(DbPtr, nil);
+      end;
+      Result := sqlite3_close(DbPtr);
+    end;
+    if Result = SQLITE_OK then DbPtr := nil;
+  finally
+    SqlFpuLeave(fpu);
   end;
-  if DbPtr <> nil then
+end;
+
+destructor TSqliteDb.Destroy;
+var fpu: TSqlFpu;
+begin
+  CloseConn();
+  { Still open means SQLite refused even after every statement was finalized --
+    which nothing in this package can cause (an unfinished sqlite3_backup is the
+    other holder, and none is ever made). The object is going away regardless,
+    so hand the connection to sqlite3_close_v2, which closes it the moment the
+    last holder lets go, rather than leak it outright. }
+  if (DbPtr <> nil) and Assigned(sqlite3_close_v2) then
   begin
-    sqlite3_close(DbPtr);   // every statement is finalized, so this cannot be BUSY
-    DbPtr := nil;
+    fpu := SqlFpuEnter();
+    try
+      sqlite3_close_v2(DbPtr);
+    finally
+      SqlFpuLeave(fpu);
+    end;
   end;
+  DbPtr := nil;
+  Children.Free;
+  Children := nil;
   inherited Destroy();
 end;
 
@@ -300,10 +412,18 @@ begin
 end;
 
 destructor TSqliteStmt.Destroy;
+var fpu: TSqlFpu;
 begin
   if StmtPtr <> nil then
   begin
-    sqlite3_finalize(StmtPtr);
+    // Reached from the VM's handle teardown too, outside any script call; see
+    // SqlFpuEnter.
+    fpu := SqlFpuEnter();
+    try
+      sqlite3_finalize(StmtPtr);
+    finally
+      SqlFpuLeave(fpu);
+    end;
     StmtPtr := nil;
   end;
   if (Owner <> nil) and (Owner.Children <> nil) then
@@ -600,9 +720,17 @@ end;
 function RegisterStmt(AOwner: TSqliteDb; AStmt: psqlite3_stmt): TValue;
 var s: TSqliteStmt;
 begin
+  { From the Create on, the statement belongs to s, whose destructor finalizes
+    it; if registering raises, s is freed here so the statement goes with it
+    rather than holding the connection open (see TSqliteDb.CloseConn). }
   s := TSqliteStmt.Create(AOwner, AStmt);
-  s.AuthPath := GAuthPath;
-  s.HandleId := RegisterHandle(s);
+  try
+    s.AuthPath := GAuthPath;
+    s.HandleId := RegisterHandle(s);
+  except
+    s.Free;
+    raise;
+  end;
   AOwner.Children.Add(s);
   Result := ValHandle(s.HandleId);
 end;
@@ -725,10 +853,22 @@ end;
   (past 2^63-1) cannot be an SQLite INTEGER, so it is a REAL -- read from its
   exact digits by the one correctly rounded reader, not by FPC's QWord-to-Double
   conversion, which is one ulp off for some of them. }
-procedure BindNode(AStmt: psqlite3_stmt; AParam: Integer; ANode: TJSONData);
+procedure BindNode(AStmt: psqlite3_stmt; AParam: Integer; ANode: TJSONData;
+  const ANested: String);
 var s: String;
 begin
   case ANode.JSONType of
+    { A NESTED MEMBER IS BOUND AS ITS JSON TEXT (2026-10-09, round 4). This
+      routine used to send it to fpjson's AsString, which RAISES for an array or
+      an object ("Cannot convert data from array value"): mid-bind, past every
+      finalize, so insertjson leaked its statement and the connection could not
+      be closed. Its text is the one json_stringify$ writes for that member --
+      the same reading json_gets$ gives a nested member -- and the caller has
+      rendered it already (ANested, see NestedTexts), because a member with NO
+      text has to be found before anything is bound, not halfway through. }
+    jtArray, jtObject:
+      sqlite3_bind_text(AStmt, AParam, PAnsiChar(ANested), Length(ANested),
+        sqlite3_destructor_type(SQLITE_TRANSIENT));
     jtNumber:
       case TJSONNumber(ANode).NumberType of
         ntInteger, ntInt64:
@@ -747,6 +887,48 @@ begin
       s := ANode.AsString;
       sqlite3_bind_text(AStmt, AParam, PAnsiChar(s), Length(s),
         sqlite3_destructor_type(SQLITE_TRANSIENT));
+    end;
+  end;
+end;
+
+{ THE TEXT EACH NESTED MEMBER WILL BE BOUND AS, before anything is bound.
+
+  ATexts[i] is the JSON text of member i when it is an array or an object and
+  AWanted[i] is True (bindjson passes False for a key no parameter names: it is
+  never bound, so it is never asked). Result False names the first member that
+  has NO text -- JsonText answers '' exactly when the renderer refused, and no
+  array or object has '' as its text ('[]' at the least). There are two
+  refusals: the run's budget ran out while rendering (reported as the budget
+  refusal, AErr), or the member holds a non-finite number, which a tree this
+  package built can carry (a fetched REAL 1e999) and which json_stringify$
+  refuses to write -- reported as SQLITE_MISMATCH with the member's name. Either
+  way the caller binds NOTHING: a refusal halfway through a bind left the
+  members before it bound and the rest stale, and the next step wrote a row of
+  the two mixed. }
+function NestedTexts(AObj: TJSONObject; const AWanted: array of Boolean;
+  const AFn: String; out ATexts: TStringArray; out AErr: TPhosphorError): Boolean;
+var i: Integer; n: TJSONData;
+begin
+  AErr := NoError();
+  Result := True;
+  SetLength(ATexts, AObj.Count);
+  for i := 0 to AObj.Count - 1 do
+  begin
+    ATexts[i] := '';
+    n := AObj.Items[i];
+    if (not AWanted[i]) or not (n.JSONType in [jtArray, jtObject]) then Continue;
+    ATexts[i] := JsonText(n, False, 2, 0);
+    if ATexts[i] = '' then
+    begin
+      if BudgetSpent() then
+        AErr := BudgetRefusal(AFn)
+      else
+      begin
+        GLastErr := SQLITE_MISMATCH;
+        GLastMsg := AFn + ': member "' + AObj.Names[i] +
+                    '" holds a number out of range and has no JSON text';
+      end;
+      Exit(False);
     end;
   end;
 end;
@@ -871,7 +1053,7 @@ begin
 end;
 
 function f_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var db: TSqliteDb;
+var db: TSqliteDb; rc: Integer;
 begin
   Err := NoError();
   // TYPE-CHECKED before freeing. This used to free whatever the handle named, so
@@ -879,7 +1061,19 @@ begin
   // use-after-free waiting for the next read of o@. Lenient about a stale handle
   // (0, like every other free), strict about freeing something it does not own.
   if not GetDb(Args[0].Hnd, db) then Exit(ValInt(0));
-  Result := ValInt(Ord(FreeHandle(Args[0].Hnd)));   // the destructor closes the db
+  { 1 MEANS CLOSED. It used to mean "the handle was freed", while sqlite3_close
+    answered BUSY unread and the database stayed open and locked underneath. Ask
+    first: a refusal is reported like any other failure here -- 0, with SQLite's
+    code and message left for sqlite_error() -- and the handle stays open, so
+    the program can see it (sqlite_isopen) and close it again. }
+  rc := db.CloseConn();
+  if rc <> SQLITE_OK then
+  begin
+    GLastErr := rc;
+    GLastMsg := PtrStr(sqlite3_errmsg(db.DbPtr));   // still open: it can be asked
+    Exit(ValInt(0));
+  end;
+  Result := ValInt(Ord(FreeHandle(Args[0].Hnd)));   // closed already; frees the object
 end;
 
 function f_isopen(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -920,14 +1114,21 @@ begin
   Result := ValStr('');
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
-  if sqlite3_step(st) = SQLITE_ROW then Result := ValStr(ColStr(st, 0));
-  { A path refused inside the SQL can be refused at the STEP rather than at the
-    prepare -- VACUUM INTO's callback arrives there -- and this route reported
-    nothing at all for it: no code, no message, an empty answer. PrepareStmt
-    cleared the flag just above, and only the refusal is recorded, so an ordinary
-    step failure still answers exactly what it always answered. }
-  if GAuthDenied then RefusePath();
-  sqlite3_finalize(st);
+  { EVERY STATEMENT PREPARED INSIDE A CALL IS FINALIZED IN A FINALLY -- here and
+    in every routine below that prepares one. One that is not, on any exit an
+    exception takes, holds the connection open after sqlite_close (see
+    TSqliteDb.CloseConn). }
+  try
+    if sqlite3_step(st) = SQLITE_ROW then Result := ValStr(ColStr(st, 0));
+    { A path refused inside the SQL can be refused at the STEP rather than at the
+      prepare -- VACUUM INTO's callback arrives there -- and this route reported
+      nothing at all for it: no code, no message, an empty answer. PrepareStmt
+      cleared the flag just above, and only the refusal is recorded, so an
+      ordinary step failure still answers exactly what it always answered. }
+    if GAuthDenied then RefusePath();
+  finally
+    sqlite3_finalize(st);
+  end;
 end;
 
 function f_scalar_num(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -937,14 +1138,17 @@ begin
   Result := ValDouble(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, Args[1].Str, st) then Exit;
-  if sqlite3_step(st) = SQLITE_ROW then Result := ValDouble(sqlite3_column_double(st, 0));
-  { A path refused inside the SQL can be refused at the STEP rather than at the
-    prepare -- VACUUM INTO's callback arrives there -- and this route reported
-    nothing at all for it: no code, no message, an empty answer. PrepareStmt
-    cleared the flag just above, and only the refusal is recorded, so an ordinary
-    step failure still answers exactly what it always answered. }
-  if GAuthDenied then RefusePath();
-  sqlite3_finalize(st);
+  try
+    if sqlite3_step(st) = SQLITE_ROW then Result := ValDouble(sqlite3_column_double(st, 0));
+    { A path refused inside the SQL can be refused at the STEP rather than at the
+      prepare -- VACUUM INTO's callback arrives there -- and this route reported
+      nothing at all for it: no code, no message, an empty answer. PrepareStmt
+      cleared the flag just above, and only the refusal is recorded, so an
+      ordinary step failure still answers exactly what it always answered. }
+    if GAuthDenied then RefusePath();
+  finally
+    sqlite3_finalize(st);
+  end;
 end;
 
 function f_query_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -963,30 +1167,32 @@ begin
     this binding: sqlite3_progress_handler is not among the entry points
     SQLite3Dyn imports. That is stated in scripts/check-budget.py rather than
     left to be discovered.) }
-  while sqlite3_step(st) = SQLITE_ROW do
-  begin
-    row := '';
-    cnt := sqlite3_column_count(st);
-    for i := 0 to cnt - 1 do
+  try
+    while sqlite3_step(st) = SQLITE_ROW do
     begin
-      if i > 0 then row := row + #9;
-      row := row + ColStr(st, i);
+      row := '';
+      cnt := sqlite3_column_count(st);
+      for i := 0 to cnt - 1 do
+      begin
+        if i > 0 then row := row + #9;
+        row := row + ColStr(st, i);
+      end;
+      r := r + row + #10;
+      if not BudgetCharge(Int64(1) + Length(row)) then
+      begin
+        Err := BudgetRefusal('sqlite_query$');
+        Exit(ValStr(''));   // the finally finalizes
+      end;
     end;
-    r := r + row + #10;
-    if not BudgetCharge(Int64(1) + Length(row)) then
-    begin
-      sqlite3_finalize(st);
-      Err := BudgetRefusal('sqlite_query$');
-      Exit(ValStr(''));
-    end;
+    { A path refused inside the SQL can be refused at the STEP rather than at the
+      prepare -- VACUUM INTO's callback arrives there -- and this route reported
+      nothing at all for it: no code, no message, an empty answer. PrepareStmt
+      cleared the flag above and only the first failing step can set it, so the
+      loop has already ended by the time this is read. }
+    if GAuthDenied then RefusePath();
+  finally
+    sqlite3_finalize(st);
   end;
-  { A path refused inside the SQL can be refused at the STEP rather than at the
-    prepare -- VACUUM INTO's callback arrives there -- and this route reported
-    nothing at all for it: no code, no message, an empty answer. PrepareStmt
-    cleared the flag above and only the first failing step can set it, so the
-    loop has already ended by the time this is read. }
-  if GAuthDenied then RefusePath();
-  sqlite3_finalize(st);
   Result := ValStr(r);
 end;
 
@@ -1023,10 +1229,13 @@ begin
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   if not PrepareStmt(db, 'SELECT 1 FROM sqlite_master WHERE type=''table'' AND name=?', st) then Exit;
-  nm := Args[1].Str;
-  sqlite3_bind_text(st, 1, PAnsiChar(nm), Length(nm), sqlite3_destructor_type(SQLITE_TRANSIENT));
-  if sqlite3_step(st) = SQLITE_ROW then Result := ValInt(1);
-  sqlite3_finalize(st);
+  try
+    nm := Args[1].Str;
+    sqlite3_bind_text(st, 1, PAnsiChar(nm), Length(nm), sqlite3_destructor_type(SQLITE_TRANSIENT));
+    if sqlite3_step(st) = SQLITE_ROW then Result := ValInt(1);
+  finally
+    sqlite3_finalize(st);
+  end;
 end;
 
 function f_tables(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1036,22 +1245,27 @@ begin
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   arr := TJSONArray.Create();
-  if PrepareStmt(db, 'SELECT name FROM sqlite_master WHERE type=''table'' AND ' +
-    'name NOT LIKE ''sqlite_%'' ORDER BY name', st) then
-  begin
-    while sqlite3_step(st) = SQLITE_ROW do
-    begin
-      // Add(TJSONData): the plain-string array overload re-encodes any byte >= $80,
-      // so a table holding accented text came back mojibake.
-      arr.Add(TJSONString.Create(ColStr(st, 0)));
-      if not BudgetCharge(BudgetUnitsPerStep) then
+  try
+    if PrepareStmt(db, 'SELECT name FROM sqlite_master WHERE type=''table'' AND ' +
+      'name NOT LIKE ''sqlite_%'' ORDER BY name', st) then
+    try
+      while sqlite3_step(st) = SQLITE_ROW do
       begin
-        sqlite3_finalize(st);
-        Err := BudgetRefusal('sqlite_tables@');
-        Exit(ValHandle(JsonRegisterNode(arr, True)));
+        // Add(TJSONData): the plain-string array overload re-encodes any byte >= $80,
+        // so a table holding accented text came back mojibake.
+        arr.Add(TJSONString.Create(ColStr(st, 0)));
+        if not BudgetCharge(BudgetUnitsPerStep) then
+        begin
+          Err := BudgetRefusal('sqlite_tables@');
+          Break;   // the array so far is handed back, as it always was
+        end;
       end;
+    finally
+      sqlite3_finalize(st);
     end;
-    sqlite3_finalize(st);
+  except
+    arr.Free;
+    raise;
   end;
   Result := ValHandle(JsonRegisterNode(arr, True));
 end;
@@ -1063,24 +1277,29 @@ begin
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
   arr := TJSONArray.Create();
-  if PrepareStmt(db, 'PRAGMA table_info(' + QuoteIdent(Args[1].Str) + ')', st) then
-  begin
-    while sqlite3_step(st) = SQLITE_ROW do
-    begin
-      o := TJSONObject.Create();
-      o.Add('name', ColStr(st, 1));
-      o.Add('type', ColStr(st, 2));
-      o.Add('notnull', sqlite3_column_int64(st, 3));
-      o.Add('pk', sqlite3_column_int64(st, 5));
-      arr.Add(o);
-      if not BudgetCharge(BudgetUnitsPerStep) then
+  try
+    if PrepareStmt(db, 'PRAGMA table_info(' + QuoteIdent(Args[1].Str) + ')', st) then
+    try
+      while sqlite3_step(st) = SQLITE_ROW do
       begin
-        sqlite3_finalize(st);
-        Err := BudgetRefusal('sqlite_columns@');
-        Exit(ValHandle(JsonRegisterNode(arr, True)));
+        o := TJSONObject.Create();
+        arr.Add(o);
+        o.Add('name', ColStr(st, 1));
+        o.Add('type', ColStr(st, 2));
+        o.Add('notnull', sqlite3_column_int64(st, 3));
+        o.Add('pk', sqlite3_column_int64(st, 5));
+        if not BudgetCharge(BudgetUnitsPerStep) then
+        begin
+          Err := BudgetRefusal('sqlite_columns@');
+          Break;   // the array so far is handed back, as it always was
+        end;
       end;
+    finally
+      sqlite3_finalize(st);
     end;
-    sqlite3_finalize(st);
+  except
+    arr.Free;
+    raise;
   end;
   Result := ValHandle(JsonRegisterNode(arr, True));
 end;
@@ -1180,7 +1399,8 @@ begin
 end;
 
 function f_bindjson(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var s: TSqliteStmt; node: TJSONData; obj: TJSONObject; i, p: Integer;
+var s: TSqliteStmt; node: TJSONData; obj: TJSONObject; i: Integer;
+    params: array of Integer; wanted: array of Boolean; texts: TStringArray;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -1188,13 +1408,20 @@ begin
   if not JsonNodeFromHandle(Args[1].Hnd, node) then Exit;
   if not (node is TJSONObject) then Exit;
   obj := TJSONObject(node);
+  // Match by name: a parameter written :key. A key with no such parameter is
+  // skipped, exactly as the reference documents -- and is never rendered.
+  SetLength(params, obj.Count);
+  SetLength(wanted, obj.Count);
   for i := 0 to obj.Count - 1 do
   begin
-    // Match by name: a parameter written :key. A key with no such parameter is
-    // skipped, exactly as the reference documents.
-    p := sqlite3_bind_parameter_index(s.StmtPtr, PAnsiChar(':' + obj.Names[i]));
-    if p > 0 then BindNode(s.StmtPtr, p, obj.Items[i]);
+    params[i] := sqlite3_bind_parameter_index(s.StmtPtr, PAnsiChar(':' + obj.Names[i]));
+    wanted[i] := params[i] > 0;
   end;
+  // All or nothing: a member with no text is found before anything is bound,
+  // and the statement's bindings are then left exactly as they were.
+  if not NestedTexts(obj, wanted, 'sqlite_bindjson', texts, Err) then Exit;
+  for i := 0 to obj.Count - 1 do
+    if wanted[i] then BindNode(s.StmtPtr, params[i], obj.Items[i], texts[i]);
   Result := ValInt(1);
 end;
 
@@ -1402,7 +1629,7 @@ end;
 // --- JSON write path --------------------------------------------------------
 function f_insertjson(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; node: TJSONData; obj: TJSONObject; st: psqlite3_stmt;
-    cols, vals, sql: String; i: Integer;
+    cols, vals, sql: String; i: Integer; wanted: array of Boolean; texts: TStringArray;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -1420,17 +1647,23 @@ begin
     vals := vals + '?';
   end;
   sql := 'INSERT INTO ' + QuoteIdent(Args[1].Str) + ' (' + cols + ') VALUES (' + vals + ')';
+  SetLength(wanted, obj.Count);
+  for i := 0 to obj.Count - 1 do wanted[i] := True;
+  if not NestedTexts(obj, wanted, 'sqlite_insertjson', texts, Err) then Exit;
   if not PrepareStmt(db, sql, st) then Exit;
-  for i := 0 to obj.Count - 1 do
-    BindNode(st, i + 1, obj.Items[i]);
-  if sqlite3_step(st) = SQLITE_DONE then Result := ValInt(sqlite3_changes(db.DbPtr))
-  else SetErrFromDb(db);
-  sqlite3_finalize(st);
+  try
+    for i := 0 to obj.Count - 1 do
+      BindNode(st, i + 1, obj.Items[i], texts[i]);
+    if sqlite3_step(st) = SQLITE_DONE then Result := ValInt(sqlite3_changes(db.DbPtr))
+    else SetErrFromDb(db);
+  finally
+    sqlite3_finalize(st);
+  end;
 end;
 
 function f_updatejson(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var db: TSqliteDb; node: TJSONData; obj: TJSONObject; st: psqlite3_stmt;
-    sets, sql, where: String; i: Integer;
+    sets, sql, where: String; i: Integer; wanted: array of Boolean; texts: TStringArray;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -1448,12 +1681,18 @@ begin
   where := Args[3].Str;
   sql := 'UPDATE ' + QuoteIdent(Args[1].Str) + ' SET ' + sets;
   if where <> '' then sql := sql + ' WHERE ' + where;
+  SetLength(wanted, obj.Count);
+  for i := 0 to obj.Count - 1 do wanted[i] := True;
+  if not NestedTexts(obj, wanted, 'sqlite_updatejson', texts, Err) then Exit;
   if not PrepareStmt(db, sql, st) then Exit;
-  for i := 0 to obj.Count - 1 do
-    BindNode(st, i + 1, obj.Items[i]);
-  if sqlite3_step(st) = SQLITE_DONE then Result := ValInt(sqlite3_changes(db.DbPtr))
-  else SetErrFromDb(db);
-  sqlite3_finalize(st);
+  try
+    for i := 0 to obj.Count - 1 do
+      BindNode(st, i + 1, obj.Items[i], texts[i]);
+    if sqlite3_step(st) = SQLITE_DONE then Result := ValInt(sqlite3_changes(db.DbPtr))
+    else SetErrFromDb(db);
+  finally
+    sqlite3_finalize(st);
+  end;
 end;
 
 // --- transactions -----------------------------------------------------------
@@ -1564,79 +1803,270 @@ begin
   Result := GReady;
 end;
 
+{ EVERY DOOR INTO THE LIBRARY, ENTERED WITH THE FPU MASKED.
+
+  Each registered function is reached through one of these, and each is only
+  Masked(@f_name): the body runs with every FPU exception masked and the VM's
+  state is restored on every exit, an exception's included. See SqlFpuEnter for
+  why. Wrapping the DOOR rather than each sqlite3_* call means a call site
+  added later cannot be the one that forgot; RegisterSqliteFuncs names only
+  w_ functions, and a f_ function registered directly would be that mistake.
+  Functions that never reach the library (the escapers, the error readers) go
+  through the same door, so the rule has no exceptions to keep track of. }
+function Masked(AFn: TPhosphorFunc; const Args: array of TValue;
+  out Err: TPhosphorError): TValue;
+var fpu: TSqlFpu;
+begin
+  Err := NoError();
+  fpu := SqlFpuEnter();
+  try
+    Result := AFn(Args, Err);
+  finally
+    SqlFpuLeave(fpu);
+  end;
+end;
+
+function w_available(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_available, Args, Err); end;
+
+function w_open_mem(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_open_mem, Args, Err); end;
+
+function w_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_open, Args, Err); end;
+
+function w_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_close, Args, Err); end;
+
+function w_isopen(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_isopen, Args, Err); end;
+
+function w_path(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_path, Args, Err); end;
+
+function w_version(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_version, Args, Err); end;
+
+function w_exec(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_exec, Args, Err); end;
+
+function w_scalar_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_scalar_str, Args, Err); end;
+
+function w_scalar_num(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_scalar_num, Args, Err); end;
+
+function w_query_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_query_str, Args, Err); end;
+
+function w_changes(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_changes, Args, Err); end;
+
+function w_totalchanges(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_totalchanges, Args, Err); end;
+
+function w_lastid(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_lastid, Args, Err); end;
+
+function w_tableexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_tableexists, Args, Err); end;
+
+function w_tables(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_tables, Args, Err); end;
+
+function w_columns(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_columns, Args, Err); end;
+
+function w_prepare(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_prepare, Args, Err); end;
+
+function w_step(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_step, Args, Err); end;
+
+function w_eof(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_eof, Args, Err); end;
+
+function w_reset(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_reset, Args, Err); end;
+
+function w_clearbind(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_clearbind, Args, Err); end;
+
+function w_finalize(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_finalize, Args, Err); end;
+
+function w_bindstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_bindstr, Args, Err); end;
+
+function w_bindnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_bindnum, Args, Err); end;
+
+function w_bindnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_bindnull, Args, Err); end;
+
+function w_bindjson(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_bindjson, Args, Err); end;
+
+function w_colcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_colcount, Args, Err); end;
+
+function w_colname(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_colname, Args, Err); end;
+
+function w_colindex(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_colindex, Args, Err); end;
+
+function w_coltype(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_coltype, Args, Err); end;
+
+function w_coltypename(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_coltypename, Args, Err); end;
+
+function w_getstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_getstr, Args, Err); end;
+
+function w_getnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_getnum, Args, Err); end;
+
+function w_gets(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_gets, Args, Err); end;
+
+function w_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_getn, Args, Err); end;
+
+function w_isnull(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_isnull, Args, Err); end;
+
+function w_isn(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_isn, Args, Err); end;
+
+function w_isblob(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_isblob, Args, Err); end;
+
+function w_row(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_row, Args, Err); end;
+
+function w_fetchone(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_fetchone, Args, Err); end;
+
+function w_fetchall(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_fetchall, Args, Err); end;
+
+function w_insertjson(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_insertjson, Args, Err); end;
+
+function w_updatejson(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_updatejson, Args, Err); end;
+
+function w_begin(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_begin, Args, Err); end;
+
+function w_commit(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_commit, Args, Err); end;
+
+function w_rollback(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_rollback, Args, Err); end;
+
+function w_intrans(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_intrans, Args, Err); end;
+
+function w_escape(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_escape, Args, Err); end;
+
+function w_quote(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_quote, Args, Err); end;
+
+function w_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_error, Args, Err); end;
+
+function w_errormsg(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_errormsg, Args, Err); end;
+
+function w_strerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_strerror, Args, Err); end;
+
+function w_clearerror(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_clearerror, Args, Err); end;
+
+function w_backup(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_backup, Args, Err); end;
+
+function w_vacuum(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin Result := Masked(@f_vacuum, Args, Err); end;
+
 procedure RegisterSqliteFuncs(Reg: TPhosphorRegistry);
 begin
   // connection
-  Reg.Add('sqlite_available:',      @f_available);
-  Reg.Add('sqlite_open@:',          @f_open_mem);
-  Reg.Add('sqlite_open@:$',         @f_open);
-  Reg.Add('sqlite_close:@',         @f_close);
-  Reg.Add('sqlite_isopen:@',        @f_isopen);
-  Reg.Add('sqlite_path$:@',         @f_path);
-  Reg.Add('sqlite_version$:',       @f_version);
+  Reg.Add('sqlite_available:',      @w_available);
+  Reg.Add('sqlite_open@:',          @w_open_mem);
+  Reg.Add('sqlite_open@:$',         @w_open);
+  Reg.Add('sqlite_close:@',         @w_close);
+  Reg.Add('sqlite_isopen:@',        @w_isopen);
+  Reg.Add('sqlite_path$:@',         @w_path);
+  Reg.Add('sqlite_version$:',       @w_version);
   // simple query
-  Reg.Add('sqlite_exec:@$',         @f_exec);
-  Reg.Add('sqlite_scalar$:@$',      @f_scalar_str);
-  Reg.Add('sqlite_scalar:@$',       @f_scalar_num);
-  Reg.Add('sqlite_query$:@$',       @f_query_str);
+  Reg.Add('sqlite_exec:@$',         @w_exec);
+  Reg.Add('sqlite_scalar$:@$',      @w_scalar_str);
+  Reg.Add('sqlite_scalar:@$',       @w_scalar_num);
+  Reg.Add('sqlite_query$:@$',       @w_query_str);
   // bookkeeping
-  Reg.Add('sqlite_changes:@',       @f_changes);
-  Reg.Add('sqlite_totalchanges:@',  @f_totalchanges);
-  Reg.Add('sqlite_lastid:@',        @f_lastid);
+  Reg.Add('sqlite_changes:@',       @w_changes);
+  Reg.Add('sqlite_totalchanges:@',  @w_totalchanges);
+  Reg.Add('sqlite_lastid:@',        @w_lastid);
   // introspection
-  Reg.Add('sqlite_tableexists:@$',  @f_tableexists);
-  Reg.Add('sqlite_tables@:@',       @f_tables);
-  Reg.Add('sqlite_columns@:@$',     @f_columns);
+  Reg.Add('sqlite_tableexists:@$',  @w_tableexists);
+  Reg.Add('sqlite_tables@:@',       @w_tables);
+  Reg.Add('sqlite_columns@:@$',     @w_columns);
   // prepared statements / cursors
-  Reg.Add('sqlite_prepare@:@$',     @f_prepare);
-  Reg.Add('sqlite_query@:@$',       @f_prepare);   // a cursor is a prepared SELECT
-  Reg.Add('sqlite_step:@',          @f_step);
-  Reg.Add('sqlite_eof:@',           @f_eof);
-  Reg.Add('sqlite_reset:@',         @f_reset);
-  Reg.Add('sqlite_clearbind:@',     @f_clearbind);
-  Reg.Add('sqlite_finalize:@',      @f_finalize);
+  Reg.Add('sqlite_prepare@:@$',     @w_prepare);
+  Reg.Add('sqlite_query@:@$',       @w_prepare);   // a cursor is a prepared SELECT
+  Reg.Add('sqlite_step:@',          @w_step);
+  Reg.Add('sqlite_eof:@',           @w_eof);
+  Reg.Add('sqlite_reset:@',         @w_reset);
+  Reg.Add('sqlite_clearbind:@',     @w_clearbind);
+  Reg.Add('sqlite_finalize:@',      @w_finalize);
   // binding (parameters 1-based)
-  Reg.Add('sqlite_bindstr:@n$',     @f_bindstr);
-  Reg.Add('sqlite_bindnum:@nn',     @f_bindnum);
-  Reg.Add('sqlite_bindnull:@n',     @f_bindnull);
-  Reg.Add('sqlite_bindjson:@@',     @f_bindjson);
+  Reg.Add('sqlite_bindstr:@n$',     @w_bindstr);
+  Reg.Add('sqlite_bindnum:@nn',     @w_bindnum);
+  Reg.Add('sqlite_bindnull:@n',     @w_bindnull);
+  Reg.Add('sqlite_bindjson:@@',     @w_bindjson);
   // column metadata (columns 1-based)
-  Reg.Add('sqlite_colcount:@',      @f_colcount);
-  Reg.Add('sqlite_colname$:@n',     @f_colname);
-  Reg.Add('sqlite_colindex:@$',     @f_colindex);
-  Reg.Add('sqlite_coltype:@n',      @f_coltype);
-  Reg.Add('sqlite_coltypename$:n',  @f_coltypename);
+  Reg.Add('sqlite_colcount:@',      @w_colcount);
+  Reg.Add('sqlite_colname$:@n',     @w_colname);
+  Reg.Add('sqlite_colindex:@$',     @w_colindex);
+  Reg.Add('sqlite_coltype:@n',      @w_coltype);
+  Reg.Add('sqlite_coltypename$:n',  @w_coltypename);
   // row getters
-  Reg.Add('sqlite_getstr$:@n',      @f_getstr);
-  Reg.Add('sqlite_getnum:@n',       @f_getnum);
-  Reg.Add('sqlite_gets$:@$',        @f_gets);
-  Reg.Add('sqlite_getn:@$',         @f_getn);
-  Reg.Add('sqlite_isnull:@n',       @f_isnull);
-  Reg.Add('sqlite_isn:@$',          @f_isn);
-  Reg.Add('sqlite_isblob:@n',       @f_isblob);
+  Reg.Add('sqlite_getstr$:@n',      @w_getstr);
+  Reg.Add('sqlite_getnum:@n',       @w_getnum);
+  Reg.Add('sqlite_gets$:@$',        @w_gets);
+  Reg.Add('sqlite_getn:@$',         @w_getn);
+  Reg.Add('sqlite_isnull:@n',       @w_isnull);
+  Reg.Add('sqlite_isn:@$',          @w_isn);
+  Reg.Add('sqlite_isblob:@n',       @w_isblob);
   // rows as JSON
-  Reg.Add('sqlite_row@:@',          @f_row);
-  Reg.Add('sqlite_fetchone@:@',     @f_fetchone);
-  Reg.Add('sqlite_fetchall@:@',     @f_fetchall);
+  Reg.Add('sqlite_row@:@',          @w_row);
+  Reg.Add('sqlite_fetchone@:@',     @w_fetchone);
+  Reg.Add('sqlite_fetchall@:@',     @w_fetchall);
   // JSON write path
-  Reg.Add('sqlite_insertjson:@$@',  @f_insertjson);
-  Reg.Add('sqlite_updatejson:@$@$', @f_updatejson);
+  Reg.Add('sqlite_insertjson:@$@',  @w_insertjson);
+  Reg.Add('sqlite_updatejson:@$@$', @w_updatejson);
   // transactions
-  Reg.Add('sqlite_begin:@',         @f_begin);
-  Reg.Add('sqlite_commit:@',        @f_commit);
-  Reg.Add('sqlite_rollback:@',      @f_rollback);
-  Reg.Add('sqlite_intrans:@',       @f_intrans);
+  Reg.Add('sqlite_begin:@',         @w_begin);
+  Reg.Add('sqlite_commit:@',        @w_commit);
+  Reg.Add('sqlite_rollback:@',      @w_rollback);
+  Reg.Add('sqlite_intrans:@',       @w_intrans);
   // text helpers
-  Reg.Add('sqlite_escape$:$',       @f_escape);
-  Reg.Add('sqlite_quote$:$',        @f_quote);
+  Reg.Add('sqlite_escape$:$',       @w_escape);
+  Reg.Add('sqlite_quote$:$',        @w_quote);
   // errors
-  Reg.Add('sqlite_error:',          @f_error);
-  Reg.Add('sqlite_errormsg$:',      @f_errormsg);
-  Reg.Add('sqlite_strerror$:n',     @f_strerror);
-  Reg.Add('sqlite_clearerror:',     @f_clearerror);
+  Reg.Add('sqlite_error:',          @w_error);
+  Reg.Add('sqlite_errormsg$:',      @w_errormsg);
+  Reg.Add('sqlite_strerror$:n',     @w_strerror);
+  Reg.Add('sqlite_clearerror:',     @w_clearerror);
   // maintenance
-  Reg.Add('sqlite_backup:@$',       @f_backup);
-  Reg.Add('sqlite_vacuum:@',        @f_vacuum);
+  Reg.Add('sqlite_backup:@$',       @w_backup);
+  Reg.Add('sqlite_vacuum:@',        @w_vacuum);
 end;
 
 { A LIBRARY THAT LOADED IS NOT A LIBRARY THAT WORKS. FPC's loader resolves each
@@ -1648,6 +2078,9 @@ end;
   False and sqlite_available() answers 0, which is a question a script can ask,
   instead of a crash it cannot. sqlite3_set_authorizer and sqlite3_vfs_find are
   NOT in the list: both are asked about where they are used. }
+var
+  GInitFpu: TSqlFpu;   // the initialization's saved FPU state (see SqlFpuEnter)
+
 function SqliteComplete: Boolean;
 begin
   Result := Assigned(sqlite3_open) and Assigned(sqlite3_close) and
@@ -1678,21 +2111,28 @@ initialization
   // it at finalization -- the OS reclaims it at process exit, and releasing early
   // would unload the library before PhosphorHandles frees any lingering database
   // (whose destructor calls sqlite3_close).
-  GReady := TryInitializeSqlite('') > 0;
-  {$IFDEF UNIX}
-  { FPC asks for `libsqlite3.so`, the name only the -dev package installs. A
-    stock system carries the RUNTIME soname alone, so on Linux -- the VM, WSL, any
-    machine nobody put headers on -- there was no SQLite at all, and the package
-    suite skipped its three SQLite files, the sandbox corpus among them, behind a
-    yellow line (found 2026-10-09 by a CI rule that a skip is a failure). The
-    OpenSSL-3 soname, one directory over, is the same defect. A failed attempt
-    leaves the loader's count at zero, so a second name can be tried. }
-  if not GReady then GReady := TryInitializeSqlite('libsqlite3.so.0') > 0;
-  {$ENDIF}
-  if GReady and not SqliteComplete() then
-  begin
-    ReleaseSqlite;
-    GReady := False;
+  { Loading runs the library's own initialization code; it is a call into C like
+    any other, so it runs masked too (see SqlFpuEnter). }
+  GInitFpu := SqlFpuEnter();
+  try
+    GReady := TryInitializeSqlite('') > 0;
+    {$IFDEF UNIX}
+    { FPC asks for `libsqlite3.so`, the name only the -dev package installs. A
+      stock system carries the RUNTIME soname alone, so on Linux -- the VM, WSL, any
+      machine nobody put headers on -- there was no SQLite at all, and the package
+      suite skipped its three SQLite files, the sandbox corpus among them, behind a
+      yellow line (found 2026-10-09 by a CI rule that a skip is a failure). The
+      OpenSSL-3 soname, one directory over, is the same defect. A failed attempt
+      leaves the loader's count at zero, so a second name can be tried. }
+    if not GReady then GReady := TryInitializeSqlite('libsqlite3.so.0') > 0;
+    {$ENDIF}
+    if GReady and not SqliteComplete() then
+    begin
+      ReleaseSqlite;
+      GReady := False;
+    end;
+  finally
+    SqlFpuLeave(GInitFpu);
   end;
 
 end.

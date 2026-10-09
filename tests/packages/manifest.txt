@@ -42,6 +42,12 @@
 # from ParseURI's pieces and appended a '/' after a last segment holding a ':'
 # (or a '.' / '..'), and dropped an empty query's '?'. A generated sweep of 416
 # paths read back off the raw server.
+# 32_sqlite_fpu_and_nesting is conditional (the same runtime-library gate as
+# 02_sqlite): valid SQL that makes a NaN or an infinity, at prepare and at step,
+# must not raise from inside SQLite -- the reporter's sequence, an insert-select
+# that makes one followed by three inserts, is checked for durability through a
+# second connection -- and a JSON member that is an array or an object is bound
+# as its JSON text. Every connection it opens must really close.
 00_base64
 01_zip
 02_sqlite
@@ -74,3 +80,4 @@
 29_http_ca_sandbox
 30_http_path_colon
 31_sqlite_json_integers
+32_sqlite_fpu_and_nesting

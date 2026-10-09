@@ -991,3 +991,42 @@ the behaviour; this is why it is that behaviour.
   own wide reader folds a..z only. The known folders come from the RTL's
   `windirs.GetWindowsSpecialDirUnicode`. A name that is not well-formed UTF-8
   answers `""`: no variable can have it.
+
+## SQLite: the C library runs masked, a nested member is its JSON text, a close is asked (2026-10-09, round 4)
+
+docs/libraries/sqlite.md has the behaviour; this is why it is that behaviour.
+
+- **Every call into sqlite3 runs with every FPU exception masked**, and the
+  VM's own state -- the MXCSR whole, sticky flags included, and the x87 control
+  word -- is put back on the way out. The VM keeps the invalid-operation trap
+  unmasked for the program's arithmetic, on purpose; C code does not expect it,
+  and SQLite computes `Inf - Inf` or compares `1e999` as a matter of course. A
+  trap there unwound through the C frames, skipped SQLite's cleanup and this
+  package's finalize, left a write transaction open under an autocommit flag
+  that said none was, and lost every later write that had answered 1. The other
+  reading -- refuse the statements that make a NaN -- was rejected: they are
+  valid SQL, SQLite has an answer for each (NULL for a NaN, a REAL infinity for
+  1e999), and nothing outside SQLite can list which statements make one. The
+  mask sits on the package's DOOR (each registered function is entered through
+  one masked wrapper), not on each `sqlite3_*` call, so a call site added later
+  cannot be the one that forgot.
+- **An infinity SQLite returns is SQLite's answer, and the engine's rule still
+  holds.** Its text is `Inf`/`-Inf`; read as a number it meets the finiteness
+  refusal every library result meets (docs/libraries/num.md). Nothing in this
+  package makes a non-finite value finite.
+- **A nested member (array or object) handed to `sqlite_bindjson`,
+  `sqlite_insertjson` or `sqlite_updatejson` is bound as its JSON text** -- the
+  text `json_stringify$` writes for it, which is also what `json_gets$` reads a
+  nested member as. The alternative, refusing the object, would make a
+  document the json library builds freely unstorable without a hand-written
+  flattening step, and SQLite's own JSON functions take exactly this text. A
+  member with NO JSON text (a non-finite number, which a fetched row can carry)
+  is refused before anything is bound: `0`, `sqlite_error()` 20
+  (SQLITE_MISMATCH), the statement's bindings left as they were. A refusal
+  halfway through binding is what wrote a row of old and new values mixed.
+- **`sqlite_close` answers `1` only when the connection closed.** Every
+  statement the package prepares inside a call is finalized in a `finally`; a
+  BUSY answer is then met by finalizing whatever SQLite still lists on the
+  connection and asking again, and what survives that is `0` with SQLite's code
+  in `sqlite_error()` and the handle still open, rather than a `1` over a
+  connection that is still holding its file.

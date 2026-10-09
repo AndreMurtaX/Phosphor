@@ -442,6 +442,10 @@ ALLOWED = {
         'one step of an INSERT',
     'PhosphorSqliteLib.pas:f_updatejson':
         'one step of an UPDATE',
+    'PhosphorSqliteLib.pas:TSqliteDb.CloseConn':
+        'finalizes statements the PACKAGE leaked on this connection (a script\'s '
+        'are children, freed before it), so no script count reaches it -- and a '
+        'close cut short by the budget would leave the file held open',
 
     # ---- A SEARCH WHOSE NEEDLE IS A CONSTANT OF THIS UNIT --------------------
     # The rule that put these on the list is right: Pos/StringReplace cost

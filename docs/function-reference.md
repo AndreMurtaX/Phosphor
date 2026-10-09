@@ -1149,7 +1149,7 @@ Closing a database finalizes and invalidates every cursor opened on it.
 | --- | --- |
 | `sqlite_available() → num` | 1 if the SQLite library loaded |
 | `sqlite_open@([path$]) → handle` | open a database (in-memory when no path; `":memory:"` too) |
-| `sqlite_close(db@) → num` | close and free the database (and its cursors) |
+| `sqlite_close(db@) → num` | close and free the database (and its cursors); 0 if it did not close |
 | `sqlite_isopen(db@) → num` | 1 while the handle is an open database |
 | `sqlite_path$(db@) → str` | the file the database was opened on |
 | `sqlite_version$() → str` | the SQLite library version |
@@ -1188,7 +1188,7 @@ Closing a database finalizes and invalidates every cursor opened on it.
 | `sqlite_bindstr(s@, i, v$) → num` | bind a string to parameter `i` |
 | `sqlite_bindnum(s@, i, v) → num` | bind a number to parameter `i` |
 | `sqlite_bindnull(s@, i) → num` | bind SQL NULL to parameter `i` |
-| `sqlite_bindjson(s@, obj@) → num` | bind a JSON object's members by name (`:key`) |
+| `sqlite_bindjson(s@, obj@) → num` | bind a JSON object's members by name (`:key`); a nested member as its JSON text |
 
 **Column access** (1-based)
 
@@ -1214,7 +1214,7 @@ Closing a database finalizes and invalidates every cursor opened on it.
 | `sqlite_row@(s@) → handle` | the current row as a JSON object |
 | `sqlite_fetchone@(s@) → handle` | step, then the new current row as a JSON object |
 | `sqlite_fetchall@(s@) → handle` | every remaining row as a JSON array |
-| `sqlite_insertjson(db@, t$, o@) → num` | insert a JSON object as a row (returns rows) |
+| `sqlite_insertjson(db@, t$, o@) → num` | insert a JSON object as a row (returns rows); a nested member as its JSON text |
 | `sqlite_updatejson(db@, t$, o@, where$) → num` | update rows from a JSON object (returns rows) |
 
 **Transactions, escaping, errors, maintenance**

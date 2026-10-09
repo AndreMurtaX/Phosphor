@@ -56,22 +56,35 @@ is closest to — while `dayofweek`, which did not round at all, named a third
 day.)
 
 A further family breaks the pass-through the same way and for the same reason, at
-the other end. Nine functions that take a **date** cannot survive the number
+the other end. Ten functions that take a **date** cannot survive the number
 being outside `0001-01-01`..`9999-12-31`, because the RTL's `DecodeDate` answers
 year 0 below that range instead of refusing, and clamps above it. They ask the
 same guard `incmonth` and `incyear` ask, and answer `that number is not a date in
 0001-01-01..9999-12-31`: `daysinmonth`, `daysinyear`, `weeksinyear`,
-`weekoftheyear`, `weekof`, `weekofthemonth`, `dayoftheyear`, `datetostr$` and
-`datetimetostr$`. Everything else on this page always answers.
+`weekoftheyear`, `weekof`, `weekofthemonth`, `dayoftheyear`, `datetostr$`,
+`datetimetostr$` and `formatdatetime$`. Everything else on this page always
+answers, **for every number a program can hold**, however far outside the
+calendar: the time of day is read off the number's fraction (past 2^52 a Double
+has none, so every such number is a midnight), the weekday off its day number by
+exact arithmetic, and a whole distance is the count however large. Until
+2026-10-09 (round 3) the RTL did those three readings by converting the whole
+number to an integer, and `hourof`, `isam`, `timetostr$`, `formatdatetime$` and
+the rest raised its `Invalid floating point operation` from about 1.07e11 days
+on — numbers `incday` had just answered as the plain sum.
 
 Text is ISO 8601 and **pinned**, not locale-following: `yyyy-mm-dd`, `hh:nn:ss`,
-`.` for decimals, and English month and day names, on every machine. So a
-hard-coded `"2020-06-15"` is read the same everywhere, rendering and parsing are
-exact inverses, and `formatdatetime$("dddd", d)` answers `Monday` under a
+`.` for decimals, English month and day names, and `AM`/`PM`, on every machine.
+So a hard-coded `"2020-06-15"` is read the same everywhere, rendering and parsing
+are exact inverses, and `formatdatetime$("dddd", d)` answers `Monday` under a
 Portuguese locale too. The price is that `strtodate("15/06/2020")` is an error
 rather than a guess — and so are `"20-06-15"`, `"2020-6-5"` and `"06-15"`, which
 the parsers used to complete with a century, a zero or the current year — which
-is the intended trade.
+is the intended trade. The renderer is this library's own since 2026-10-09
+(round 3): it was the RTL's, under settings copied from the machine and pinned
+field by field, and the fields nobody pinned still followed it — `ampm` printed
+the locale's designators, which a pt-BR Windows leaves *empty*, so 06:00 and
+18:00 both rendered `6:00 `; `e` and `g` were era specifiers on Windows alone;
+and every answer was cut at 255 bytes.
 
 Two naming families read alike and are not. `dayofweek` counts from Sunday while
 `dayoftheweek` is ISO and counts from Monday. And the extra `a` in the middle
@@ -210,6 +223,16 @@ family are computed from the day count (30.4375 days to a month, 365.25 to a
 year) rather than walked over the calendar — which is why 31 January to 1 March
 is `0` whole months.
 
+A whole count is the count **however large**: past 2^63 units it is the number
+it is rather than an integer that no longer holds it, so
+`secondsbetween(incday(0, 1e15), 0)` is `8.64e19`. Until 2026-10-09 (round 3)
+`daysbetween`, `weeksbetween`, `monthsbetween` and `yearsbetween` narrowed to a
+32-bit integer — three billion days answered `-1294967296`, a negative distance —
+and past 2^63 units every `*between` raised the RTL's `Invalid floating point
+operation`. A distance too large to be a number at all, as between `1e308` and
+`-1e308`, is refused by the engine, `has no finite result for those arguments`,
+as every library result that is not a number is.
+
 | function | what it answers |
 | --- | --- |
 | `daysbetween(a, b) → num` | whole days elapsed; twelve hours is `0` |
@@ -234,9 +257,9 @@ is `0` whole months.
 | function | what it answers |
 | --- | --- |
 | `datetostr$(d) → str` | the date part as `2024-02-29`; the time is dropped. Refuses a number outside `0001-01-01`..`9999-12-31` rather than rendering text `strtodate` would then refuse — below the range it used to answer `0000-00-00`, and above it a clamped `9999-12-31` reported as though it were real |
-| `timetostr$(d) → str` | the time part as `12:00:00`; the date is dropped |
-| `datetimetostr$(d) → str` | both, as `2024-02-29 12:00:00` — **except** that a value whose time is exactly midnight renders as the date alone, `2020-06-15`. It still parses back to the identical number, but the string is shorter than a fixed-width reader expects. Refuses a number outside `0001-01-01`..`9999-12-31`, as `datetostr$` does |
-| `formatdatetime$(pattern$, d) → str` | `d` rendered through `pattern$` — note the **pattern comes first**, the opposite of the Delphi call it wraps. `yyyy mm dd hh nn ss zzz` for numbers, `ddd/dddd/mmm/mmmm` for pinned-English names. Literal words must be quoted inside the pattern: `formatdatetime$("'week' ww", d)` answers `week WW`, while an unquoted `"week ww"` answers `WeK WW` — every letter is a candidate specifier. An empty pattern gives the ISO date |
+| `timetostr$(d) → str` | the time part as `12:00:00`; the date is dropped. Answers for any number: it reads only the fraction |
+| `datetimetostr$(d) → str` | both, as `2024-02-29 12:00:00` — **except** that a value whose time is exactly midnight renders as the date alone, `2020-06-15`. It still parses back to the identical number, but the string is shorter than a fixed-width reader expects. *Exactly*: until 2026-10-09 (round 3) any instant in the first second of a day — `00:00:00.500` — rendered as the bare date too, because the RTL's rule looked at hour, minute and second and not at the milliseconds. Refuses a number outside `0001-01-01`..`9999-12-31`, as `datetostr$` does |
+| `formatdatetime$(pattern$, d) → str` | `d` rendered through `pattern$` — note the **pattern comes first**, the opposite of the Delphi call it mirrors. `yyyy mm dd hh nn ss zzz` for numbers, `ddd/dddd/mmm/mmmm` for pinned-English names, `ampm` for `AM`/`PM` (and `am/pm`, `a/p` for those letters, case kept), `c` for what `datetimetostr$` writes. Literal words must be quoted inside the pattern: `formatdatetime$("'week' ww", d)` answers `week WW`, while an unquoted `"week ww"` answers `WEEK WW` — every letter is a candidate specifier, and a letter that is none prints upper-cased (on Windows `e` and `g` were era specifiers until round 3, and `"week ww"` printed `WeK WW` there and `WEEK WW` on Linux; a lone `a` raised the RTL's `Illegal character in format string`). An empty pattern gives the ISO date. Refuses a number outside `0001-01-01`..`9999-12-31`, as `datetostr$` does — above the range it used to render a clamped `9999-12-31` as though it were real, below it month 0 (`mmm` read the name table one element before its start), and past about 1.07e11 days it raised |
 | `strtodate(s$) → num` | the date `s$` names. Must be exactly ISO `yyyy-mm-dd` — four digits, two, two, in `0001-01-01`..`9999-12-31`, a day the month has. Anything else — a `15/06/2020`, an impossible 2020-13-45, a two-digit year, an unpadded `2020-6-5`, a blank at either end — raises a catchable runtime error whose message begins `invalid date:` rather than answering a plausible number |
 | `strtotime(s$) → num` | the time `s$` names, as a fraction below 1. Exactly `hh:nn` or `hh:nn:ss`, two digits each, `00:00`..`23:59:59` — no `AM`/`PM`, no fraction of a second. Anything else is an error, message beginning `invalid time:` |
 | `strtodatetime(s$) → num` | date and time together: `yyyy-mm-dd hh:nn:ss`, `yyyy-mm-dd hh:nn`, or the date alone (which is how `datetimetostr$` renders a midnight), with exactly one blank between — not a `T`. A time alone is not a date-time. Anything else is an error, message beginning `invalid datetime:` |
@@ -340,23 +363,28 @@ refused while a step of 13 was not.
 do **not** have this check, because they are additions and need no calendar to
 make them. Stepping past the end with them answers a number outside the range —
 the plain sum, however large the step, never a clipped one — and what happens
-next depends on which door that number reaches. The nine date-taking functions
-above refuse it by name. `yearof`, `monthof`, `dayof` and `formatdatetime$` do
-not: they hand it to the RTL, which clamps the top end back to `9999-12-31` and
-reports it as though it were real, and answers year 0 below the range. Worth
-knowing before you add a large number of days to a date near the year 9999. A
-sum too large to be a number at all — `incweek(d, 1e308)` — is refused by the
-engine as every library result is, `has no finite result for those arguments`.
+next depends on which door that number reaches. The ten date-taking functions
+above refuse it by name. `yearof`, `monthof`, `dayof` (and `monthoftheyear`,
+`dayofthemonth`) do not: they hand it to the RTL, which clamps the top end back
+to `9999-12-31` and reports it as though it were real, and answers year 0 below
+the range. Every reader of the time of day, the weekday and the distances
+answers for it exactly (see *What it is for*). Worth knowing before you add a
+large number of days to a date near the year 9999. A sum too large to be a
+number at all — `incweek(d, 1e308)` — is refused by the engine as every library
+result is, `has no finite result for those arguments`.
 
-**The eighteen that can fail** are `strtodate`, `strtotime`, `strtodatetime`,
+**The nineteen that can fail** are `strtodate`, `strtotime`, `strtodatetime`,
 `daysinayear`, `daysinamonth`, `weeksinayear`, `encodedate`, `incmonth`,
-`incyear`, and the nine that take a date outside the representable range:
+`incyear`, and the ten that take a date outside the representable range:
 `daysinmonth`, `daysinyear`, `weeksinyear`, `weekoftheyear`, `weekof`,
-`weekofthemonth`, `dayoftheyear`, `datetostr$` and `datetimetostr$` —
-`weeksinyear` in its own right, beside its year-taking twin `weeksinayear`. They
-fail as ordinary runtime errors — code `6`, catchable with
-`on error goto` and readable through `err()` and `errmsg$()` — never by answering
-a wrong number. See [err.md](err.md) for the handler side.
+`weekofthemonth`, `dayoftheyear`, `datetostr$`, `datetimetostr$` and
+`formatdatetime$` (since 2026-10-09, round 3) — `weeksinyear` in its own right,
+beside its year-taking twin `weeksinayear`. They fail as ordinary runtime
+errors — code `6`, catchable with `on error goto` and readable through `err()`
+and `errmsg$()` — never by answering a wrong number. See [err.md](err.md) for the
+handler side. (Like every function that builds a string, the renderers can also
+be refused by the run's budget, and any function by the engine's finiteness
+gate; those are the engine's limits, not this library's.)
 
 **Where the rest lives.** The one-line catalogue of every name is in
 [function-reference.md](../function-reference.md); the assertions that pin the
@@ -366,4 +394,6 @@ out-of-range cases in `tests/suite/50_robustness.bas`, and
 `tests/suite/85_datetime_round2.bas` — the strict parsers, and a sweep generated
 by `tests/datetime_round2_sweep.py` from Python's proleptic Gregorian calendar
 of every decomposition, increment and distance over thousands of instants, dense
-around 1899-12-30 and at both ends of the range.
+around 1899-12-30 and at both ends of the range; and
+`tests/suite/90_datetime_round3.bas` — numbers far outside the calendar, the
+pinned `AM`/`PM` and letters, long patterns, and the exact-midnight rule.

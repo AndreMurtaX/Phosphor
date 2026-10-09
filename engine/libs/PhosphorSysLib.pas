@@ -20,12 +20,196 @@ interface
 
 uses
   SysUtils,
+  {$IFDEF WINDOWS} windirs, {$ENDIF}   // the RTL's wide special-folder reader
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox,
   PhosphorIoLib;   // IoGate: a refusal here is recorded in ioerror() too
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 
+{ TEXT FROM THE HOST, AS THE ENGINE'S UTF-8 (2026-10-09, round 3). Every string
+  in the engine is UTF-8 bytes. On Windows the RTL's narrow readers of the
+  environment and of the known folders hand back the ANSI code page instead:
+  GetEnvironmentVariable(String) reads GetEnvironmentStringsA -- characters
+  outside the code page become '?' -- and tags the bytes CP_OEMCP, so
+  environ$("PHX_A") of 'ação日本€' answered 'aþÒo??Ç', and a non-ASCII name was
+  never found at all (it was converted to OEM before the compare). GetTempDir
+  reads TEMP that way, and GetUserDir and GetAppConfigDir convert the wide
+  folder path to the ANSI code page. These read the wide forms and encode
+  them as UTF-8; on every other platform the environment and the paths are
+  already bytes and the RTL's readers are used as they are. }
+function HostEnv(const AName: String): String;
+function HostTempDir: String;
+function HostUserDir: String;
+function HostAppConfigDir: String;
+
 implementation
+
+{$IFDEF WINDOWS}
+{ The OS's own lookup, so a name matches exactly as Windows matches it -- with
+  its Unicode case folding. The RTL's wide reader, GetEnvironmentVariable
+  (UnicodeString), walks the block itself and folds only a..z, so 'ção' would
+  not find 'ÇÃO', which Windows calls the same variable. Declared here, from
+  kernel32 -- the unit the RTL itself links -- rather than through the
+  'windows' unit, which the engine boundary keeps out. }
+function GetEnvironmentVariableW(lpName, lpBuffer: PWideChar; nSize: LongWord): LongWord;
+  stdcall; external 'kernel32.dll' name 'GetEnvironmentVariableW';
+
+{ UTF-16 to the engine's UTF-8: a surrogate pair is one code point, and an
+  unpaired surrogate -- which a Windows environment block can hold -- is
+  U+FFFD, Utf8Char's own answer for one. }
+function WideToUtf8(const W: UnicodeString): String;
+var i, n, cp, o: Integer; hi, lo: Word; ch, buf: String;
+begin
+  n := Length(W);
+  SetLength(buf, 3 * n);           // a UTF-16 unit is at most 3 bytes; a pair, 4 for 2
+  o := 0;
+  i := 1;
+  while i <= n do
+  begin
+    hi := Word(W[i]);
+    cp := hi;
+    if (hi >= $D800) and (hi <= $DBFF) and (i < n) then
+    begin
+      lo := Word(W[i + 1]);
+      if (lo >= $DC00) and (lo <= $DFFF) then
+      begin
+        cp := $10000 + ((Integer(hi) - $D800) shl 10) + (Integer(lo) - $DC00);
+        Inc(i);
+      end;
+    end;
+    ch := Utf8Char(cp);
+    Move(ch[1], buf[o + 1], Length(ch));
+    Inc(o, Length(ch));
+    Inc(i);
+  end;
+  Result := Copy(buf, 1, o);
+end;
+
+{ The engine's UTF-8 to UTF-16, STRICTLY: False for bytes that are not
+  well-formed UTF-8 (a stray continuation byte, a truncated or overlong
+  sequence, a surrogate, a code point past U+10FFFF). No variable can be named
+  by such bytes, and a lenient decoder would turn them into some other name. }
+function Utf8ToWide(const S: String; out W: UnicodeString): Boolean;
+var i, n, k, need, o: Integer; cp, lo: LongWord; b: Byte; buf: UnicodeString;
+begin
+  Result := False;
+  W := '';
+  n := Length(S);
+  SetLength(buf, n);               // never more UTF-16 units than UTF-8 bytes
+  o := 0;
+  i := 1;
+  while i <= n do
+  begin
+    b := Ord(S[i]);
+    if b < $80 then begin cp := b; need := 0; lo := 0; end
+    else if (b >= $C2) and (b <= $DF) then begin cp := b and $1F; need := 1; lo := $80; end
+    else if (b >= $E0) and (b <= $EF) then begin cp := b and $0F; need := 2; lo := $800; end
+    else if (b >= $F0) and (b <= $F4) then begin cp := b and $07; need := 3; lo := $10000; end
+    else Exit;
+    if i + need > n then Exit;
+    for k := 1 to 3 do             // the continuation bytes: at most three
+    begin
+      if k > need then Break;
+      b := Ord(S[i + k]);
+      if (b and $C0) <> $80 then Exit;
+      cp := (cp shl 6) or (b and $3F);
+    end;
+    if (cp < lo) or (cp > $10FFFF) or ((cp >= $D800) and (cp <= $DFFF)) then Exit;
+    if cp >= $10000 then
+    begin
+      buf[o + 1] := WideChar($D800 + ((cp - $10000) shr 10));
+      buf[o + 2] := WideChar($DC00 + ((cp - $10000) and $3FF));
+      Inc(o, 2);
+    end
+    else
+    begin
+      buf[o + 1] := WideChar(cp);
+      Inc(o);
+    end;
+    Inc(i, need + 1);
+  end;
+  W := Copy(buf, 1, o);
+  Result := True;
+end;
+{$ENDIF}
+
+function HostEnv(const AName: String): String;
+{$IFDEF WINDOWS}
+var wn, buf: UnicodeString; got: LongWord;
+begin
+  Result := '';
+  if not Utf8ToWide(AName, wn) then Exit;
+  { One read into a buffer of the largest value Windows sets: "the maximum size
+    of a user-defined environment variable is 32,767 characters"
+    (SetEnvironmentVariable's documentation). The answer is the length written,
+    without its NUL, or 0 for a variable that is not set. A larger answer is the
+    size a longer value would need; no such value can be set, but were one read
+    the RTL's own wide reader copies it whole -- the same characters, matched by
+    name with a..z folding only. }
+  SetLength(buf, 32768);
+  got := GetEnvironmentVariableW(PWideChar(wn), PWideChar(buf), 32768);
+  if got = 0 then Exit;
+  if got < 32768 then
+    Result := WideToUtf8(Copy(buf, 1, got))
+  else
+    Result := WideToUtf8(GetEnvironmentVariable(wn));
+end;
+{$ELSE}
+begin
+  Result := GetEnvironmentVariable(AName);
+end;
+{$ENDIF}
+
+{ The RTL's GetTempDir(False) -- TEMP, then TMP, with a trailing separator --
+  read through HostEnv on Windows. A host that installed OnGetTempDir is asked,
+  as the RTL asks it. Under a sandbox, the scratch directory inside the root:
+  the decision temppath$ and cfg_path$ make, made here so that no caller can
+  reach the real one by forgetting it. }
+function HostTempDir: String;
+begin
+  if SandboxActive then Exit(SandboxScratchPath);
+  {$IFDEF WINDOWS}
+  if Assigned(OnGetTempDir) then Exit(GetTempDir(False));
+  Result := HostEnv('TEMP');
+  if Result = '' then Result := HostEnv('TMP');
+  if Result <> '' then Result := IncludeTrailingPathDelimiter(Result);
+  {$ELSE}
+  Result := GetTempDir(False);
+  {$ENDIF}
+end;
+
+{ GetUserDir: the profile folder, from the RTL's wide reader on Windows; under a
+  sandbox, the scratch directory, as for HostTempDir. }
+function HostUserDir: String;
+begin
+  if SandboxActive then Exit(SandboxScratchPath);
+  {$IFDEF WINDOWS}
+  Result := WideToUtf8(GetWindowsSpecialDirUnicode(CSIDL_PROFILE));
+  {$ELSE}
+  Result := GetUserDir;
+  {$ENDIF}
+end;
+
+{ GetAppConfigDir(False), spelled as the RTL spells it on Windows -- the local
+  application-data folder, then the vendor's name when there is one, then the
+  application's -- from the wide folder path. ApplicationName comes from
+  ParamStr(0), which the RTL already answers in UTF-8. With no such folder the
+  RTL's own fallback answers. }
+function HostAppConfigDir: String;
+{$IFDEF WINDOWS}
+var w: UnicodeString;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  w := GetWindowsSpecialDirUnicode(CSIDL_LOCAL_APPDATA);
+  if w = '' then Exit(GetAppConfigDir(False));
+  Result := IncludeTrailingPathDelimiter(WideToUtf8(w));
+  if VendorName <> '' then Result := IncludeTrailingPathDelimiter(Result + VendorName);
+  Result := IncludeTrailingPathDelimiter(Result + ApplicationName);
+  {$ELSE}
+  Result := GetAppConfigDir(False);
+  {$ENDIF}
+end;
 
 const
   ColorNames: array[0..15] of String =
@@ -61,19 +245,19 @@ function t_temppath(const Args: array of TValue; out Err: TPhosphorError): TValu
 begin
   Err := NoError();
   if SandboxActive then Result := ValStr(SandboxScratchPath)
-  else Result := ValStr(GetTempDir(False));
+  else Result := ValStr(HostTempDir);
 end;
 function t_homepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if SandboxActive then Result := ValStr(SandboxScratchPath)
-  else Result := ValStr(GetUserDir);
+  else Result := ValStr(HostUserDir);
 end;
 function t_documentspath(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
   if SandboxActive then Result := ValStr(SandboxScratchPath)
-  else Result := ValStr(IncludeTrailingPathDelimiter(GetUserDir) + 'Documents' + PathDelim);
+  else Result := ValStr(IncludeTrailingPathDelimiter(HostUserDir) + 'Documents' + PathDelim);
 end;
 // Reports the cage; it cannot open it. There is no setter registered for a
 // script to call -- only the host, in Pascal, can set or clear a root.
@@ -97,7 +281,7 @@ function t_tempfilename(const Args: array of TValue; out Err: TPhosphorError): T
 begin
   Err := NoError();
   if SandboxActive then Result := ValStr(SandboxScratchPath + GuidHex(False) + '.tmp')
-  else Result := ValStr(GetTempFileName);
+  else Result := ValStr(GetTempFileName(HostTempDir, ''));   // the RTL's search, in the UTF-8 temp dir
 end;
 function t_randomfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValStr(GuidHex(False)); end;
@@ -173,7 +357,7 @@ begin
   // one scan for either character
   if (name = '') or (LastDelimiter('=' + #0, name) > 0) then
     Exit(ValStr(''));
-  Result := ValStr(GetEnvironmentVariable(name));
+  Result := ValStr(HostEnv(name));   // UTF-8 in and out, on Windows too (round 3)
 end;
 
 // --- colours ----------------------------------------------------------------

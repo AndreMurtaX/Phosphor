@@ -495,7 +495,7 @@ are the library's own. String rendering/parsing is fixed **ISO 8601**
 | `incsecond(d, n) → num` | add `n` seconds |
 | `incmillisecond(d, n) → num` | add `n` milliseconds |
 
-**Distances** — `*between` are whole units; `*span` are fractional units.
+**Distances** — `*between` are whole units, never negative and however large (past 2^63 units, the number itself); `*span` are fractional units.
 
 | function | description |
 | --- | --- |
@@ -517,11 +517,11 @@ are the library's own. String rendering/parsing is fixed **ISO 8601**
 | --- | --- |
 | `datetostr$(d) → str` | date as `yyyy-mm-dd` |
 | `timetostr$(d) → str` | time as `hh:nn:ss` |
-| `datetimetostr$(d) → str` | date and time |
+| `datetimetostr$(d) → str` | date and time; the date alone at an exact midnight |
 | `date$() → str` | today as `yyyy-mm-dd` |
 | `time$() → str` | now, time only |
 | `datetime$() → str` | now, date and time |
-| `formatdatetime$(fmt$, d) → str` | format `d` with an explicit pattern (ISO settings) |
+| `formatdatetime$(fmt$, d) → str` | format `d` with an explicit pattern (pinned ISO text, English names, `AM`/`PM`); refuses a number outside 0001-01-01..9999-12-31 |
 | `strtodate(s$) → num` | parse exactly `yyyy-mm-dd` (error otherwise -- nothing is completed by a guess) |
 | `strtotime(s$) → num` | parse exactly `hh:nn` or `hh:nn:ss` (error otherwise) |
 | `strtodatetime(s$) → num` | parse `yyyy-mm-dd`, `yyyy-mm-dd hh:nn` or `yyyy-mm-dd hh:nn:ss` (error otherwise) |
@@ -674,7 +674,7 @@ rejected.
 | `cfg_reload@(c@) → handle` | re-read from disk, discarding in-memory changes |
 | `cfg_delete@(c@, section$, key$) → handle` | delete a key in a section |
 | `cfg_deletekey@(c@, key$) → handle` | delete a key in the default section |
-| `cfg_section_delete@(c@, section$) → handle` | erase a whole section |
+| `cfg_section_delete@(c@, section$) → handle` | erase a whole section, every copy of it |
 | `cfg_clear@(c@) → handle` | clear the whole config |
 | `cfg_autosave@(c@, on) → handle` | turn autosave on/off |
 
@@ -865,7 +865,7 @@ on desktop by design.
 | `chdir(path$) → num` | change the working directory: `1` if it moved, `0` if not (`ioerror()` `3`) or refused (`5`, which includes `""`) |
 | `fileexists(path$, followlinks) → num` | 1 if a file exists; `ioerror()` is `0` after the answer and `5` for a refusal |
 | `kill(path$) → num` | delete a file: `1` if deleted, `0` if not (`ioerror()` `3`) or refused (`5`) |
-| `environ$(name$) → str` | an environment variable's value; `""` when unset, and for a name that is empty or holds `=` or NUL |
+| `environ$(name$) → str` | an environment variable's value, in UTF-8; `""` when unset, and for a name that is empty, holds `=` or NUL, or is not UTF-8 |
 | `color(name$) → num` | the colour number for a name, or a `$bbggrr`/decimal literal in 0..4294967295 (anything else answers `0`). It is a Lazarus `TColor`, **not** RGB: the byte order is blue-green-red, so `color("red")` is `255` and `color("blue")` is `16711680` |
 | `colortostr$(n) → str` | the colour name for a colour number, or `$` and its whole unsigned 32-bit value in hex; `""` outside -2^31..2^32-1 |
 | `alphacolor(name$) → num` | the colour number with an opaque alpha byte, as an unsigned 32-bit number |

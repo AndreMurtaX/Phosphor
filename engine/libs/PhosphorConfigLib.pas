@@ -19,9 +19,9 @@ unit PhosphorConfigLib;
 interface
 
 uses
-  SysUtils, Classes, IniFiles,
+  SysUtils, Classes, IniFiles, contnrs,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox,
-  PhosphorBudget;
+  PhosphorBudget, PhosphorSysLib;
 
 procedure RegisterConfigFuncs(Reg: TPhosphorRegistry);
 
@@ -63,8 +63,12 @@ type
 
   What is wrapped:
     * before the first section: anything that is not a ';' comment;
-    * inside a section: a '#' line, and any line with no '=';
-    * anywhere: a line that begins with the marker. }
+    * inside a section: a '#' line, any line with no '=', and a line whose key
+      is empty ("=value");
+    * a header no read can reach ("[]", "[;x]") and every line of its block;
+    * the header of a later copy of a section (round 3, below);
+    * anywhere: a line that begins with a marker.
+  And a later line of a key already in its section is kept under DupMark. }
 { A HEADER WITH A COMMENT AFTER IT -- `[s] ; note` -- is a header to a person and
   was not one to anyone else: the RTL wants a line that ENDS in ']', so the
   header was wrapped as a foreign line, the section never existed, its keys were
@@ -72,9 +76,35 @@ type
   RTL as the bare `[s]`, followed by a line carrying HeadMark and the header as
   it was written, which Save puts back in the header's place. A line that
   already begins with HeadMark is wrapped, like one beginning with WrapMark. }
+{ A SECTION WRITTEN TWICE IS ONE SECTION, AND A KEY WRITTEN TWICE IS ITS FIRST
+  LINE (2026-10-09, round 3). TMemIniFile makes one section object per header
+  LINE and every lookup takes the first, so a hand-edited file that wrote [a]
+  twice had keys no read could reach (the second copy's), cfg_sections$ listed
+  "a" twice, and cfg_section_delete@ removed one copy -- the section still
+  existed. A key written twice in one section was counted twice and cfg_delete@
+  removed the first line, after which the key read the second.
+
+  So the layer below merges: a later copy of a section -- the same name as the
+  RTL compares names, CompareText -- is moved up to follow the first, its header
+  line kept as wrapped text where the copy began, so nothing a person wrote is
+  lost and the file reloads the same way. A later line of a key already in its
+  section is kept as text too, marked DupMark rather than WrapMark so that
+  deleting the key can remove its shadows (DropShadows) -- otherwise a deleted
+  key would come back from the file on the next load. The first line wins,
+  which is the RTL's own reading and Windows' GetPrivateProfileString's.
+
+  AND A LINE NO READ CAN REACH IS NO KEY. The RTL reads "=value" as a key whose
+  name is EMPTY, and "[]" and "[;x]" as sections named "" and ";x"; its own
+  lookups refuse both names (SectionByName and KeyByName answer nil for "" and
+  for a comment), so each was counted and listed and never readable -- and
+  "[;x]" was written back as ";x", a comment, so on the next load its keys
+  belonged to the section before. An empty-keyed line is wrapped; an
+  unreachable header is wrapped WITH ITS BLOCK, every line to the next header,
+  so none of its keys joins the section above. }
 const
   WrapMark = ';' + #1;
   HeadMark = ';' + #2;
+  DupMark = ';' + #3;
 
 function IsWrapped(const S: String): Boolean;
 begin
@@ -84,6 +114,28 @@ end;
 function IsHeadMarked(const S: String): Boolean;
 begin
   Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #2);
+end;
+
+function IsDupMarked(const S: String): Boolean;
+begin
+  Result := (Length(S) >= 2) and (S[1] = ';') and (S[2] = #3);
+end;
+
+{ The key a key=value line names, as FillSectionList reads it: the trimmed text
+  before the first '='. }
+function KeyOfLine(const T: String): String;
+var p: Integer;
+begin
+  Result := '';
+  for p := 1 to Length(T) do
+    if T[p] = '=' then Exit(Trim(Copy(T, 1, p - 1)));
+end;
+
+{ A section name the RTL can look up: SectionByName answers nil for "" and for
+  a name beginning with its comment marker. }
+function ReachableName(const N: String): Boolean;
+begin
+  Result := (N <> '') and (N[1] <> ';');
 end;
 
 function IsHeader(const T: String): Boolean;
@@ -112,38 +164,146 @@ begin
     end;
 end;
 
+{ The lines of L, wrapped and grouped as the notes above say. Every block --
+  the lines before the first section, and each section with every later copy
+  of it -- is written out in the order its first line appeared, so a file with
+  no repeated section comes out in exactly the order it went in. Names are
+  matched through a hash of their ASCII upper case, which is CompareText's own
+  folding, so a file with many keys costs its length and not its square. }
 procedure WrapForeign(L: TStrings);
 var
-  i: Integer;
-  t, hdr: String;
-  inSection: Boolean;
-  outL: TStringList;
+  i, cur: Integer;
+  t, hdr, name, key: String;
+  inSection, foreign, isHdr, commented: Boolean;
+  blocks: array of TStringList;
+  secIdx, seen: TFPDataHashTable;
+  node: THTCustomNode;
 begin
   inSection := False;
-  outL := TStringList.Create();
+  foreign := False;
+  SetLength(blocks, 1);
+  blocks[0] := TStringList.Create();          // the lines before any section
+  cur := 0;
+  secIdx := TFPDataHashTable.CreateWith(L.Count div 4 + 17, @RSHash);
+  seen := TFPDataHashTable.CreateWith(L.Count + 17, @RSHash);
   try
     for i := 0 to L.Count - 1 do
     begin
       t := Trim(L[i]);
-      if t = '' then begin outL.Add(L[i]); Continue; end;
-      if IsWrapped(t) or IsHeadMarked(t) then begin outL.Add(WrapMark + L[i]); Continue; end;
-      if IsHeader(t) then begin inSection := True; outL.Add(L[i]); Continue; end;
-      if IsCommentedHeader(t, hdr) then
+      if t = '' then begin blocks[cur].Add(L[i]); Continue; end;
+      if IsWrapped(t) or IsHeadMarked(t) or IsDupMarked(t) then
       begin
-        inSection := True;
-        outL.Add(hdr);
-        outL.Add(HeadMark + L[i]);
+        blocks[cur].Add(WrapMark + L[i]);
         Continue;
       end;
-      if (t[1] <> ';') and                                 // the RTL keeps those
-         ((not inSection) or (t[1] = '#') or (Pos('=', t) = 0)) then
-        outL.Add(WrapMark + L[i])
+      commented := False;
+      isHdr := IsHeader(t);
+      if isHdr then hdr := t
       else
-        outL.Add(L[i]);
+      begin
+        isHdr := IsCommentedHeader(t, hdr);
+        commented := isHdr;
+      end;
+      if isHdr then
+      begin
+        inSection := True;
+        name := Copy(hdr, 2, Length(hdr) - 2);   // FillSectionList's own cut
+        if not ReachableName(name) then
+        begin
+          // no read reaches it: the header and its block are text
+          foreign := True;
+          blocks[cur].Add(WrapMark + L[i]);
+          Continue;
+        end;
+        foreign := False;
+        node := secIdx.Find(UpperCase(name));
+        if node <> nil then
+        begin
+          // a later copy: its lines join the first, under its header as text
+          cur := PtrInt(THTDataNode(node).Data);
+          blocks[cur].Add(WrapMark + L[i]);
+        end
+        else
+        begin
+          cur := Length(blocks);
+          SetLength(blocks, cur + 1);
+          blocks[cur] := TStringList.Create();
+          secIdx.Add(UpperCase(name), Pointer(PtrInt(cur)));
+          if commented then
+          begin
+            blocks[cur].Add(hdr);
+            blocks[cur].Add(HeadMark + L[i]);
+          end
+          else
+            blocks[cur].Add(L[i]);
+        end;
+        Continue;
+      end;
+      if foreign then
+        blocks[cur].Add(WrapMark + L[i])
+      else if t[1] = ';' then
+        blocks[cur].Add(L[i])                    // the RTL keeps those
+      else if (not inSection) or (t[1] = '#') or (Pos('=', t) = 0) then
+        blocks[cur].Add(WrapMark + L[i])
+      else
+      begin
+        key := KeyOfLine(t);
+        if key = '' then
+          blocks[cur].Add(WrapMark + L[i])       // "=value": no read reaches it
+        else if seen.Find(IntToStr(cur) + #0 + UpperCase(key)) <> nil then
+          blocks[cur].Add(DupMark + L[i])        // the key's first line wins
+        else
+        begin
+          seen.Add(IntToStr(cur) + #0 + UpperCase(key), nil);
+          blocks[cur].Add(L[i]);
+        end;
+      end;
     end;
-    L.Assign(outL);
+    L.Clear();
+    for i := 0 to High(blocks) do
+      L.AddStrings(blocks[i]);
   finally
-    outL.Free;
+    for i := 0 to High(blocks) do
+      blocks[i].Free;
+    secIdx.Free;
+    seen.Free;
+  end;
+end;
+
+{ After a key is deleted, the lines that shadowed it go too -- they are the
+  same key to a person, and left in the file they would be the key again on
+  the next load. Through the RTL's own text of the config: a DupMark line under
+  a header naming ASec, whose key is AKey. }
+procedure DropShadows(Ini: TMemIniFile; const ASec, AKey: String);
+var
+  raw: TStringList;
+  i: Integer;
+  inSec, changed: Boolean;
+  t: String;
+begin
+  raw := TStringList.Create();
+  try
+    Ini.GetStrings(raw);
+    inSec := False;
+    changed := False;
+    i := 0;
+    while i < raw.Count do
+    begin
+      t := raw[i];
+      if (t <> '') and (t[1] <> ';') and IsHeader(t) then
+        inSec := CompareText(Copy(t, 2, Length(t) - 2), ASec) = 0
+      else if inSec and IsDupMarked(t) and
+              (CompareText(KeyOfLine(Trim(Copy(t, 3, MaxInt))), AKey) = 0) then
+      begin
+        raw.Delete(i);
+        changed := True;
+        Continue;
+      end;
+      Inc(i);
+    end;
+    if changed then Ini.SetStrings(raw);
+  finally
+    raw.Free;
   end;
 end;
 
@@ -266,7 +426,7 @@ begin
         else
           sl.Add(Copy(raw[i], 3, MaxInt));
       end
-      else if IsWrapped(raw[i]) then sl.Add(Copy(raw[i], 3, MaxInt))
+      else if IsWrapped(raw[i]) or IsDupMarked(raw[i]) then sl.Add(Copy(raw[i], 3, MaxInt))
       else sl.Add(raw[i]);
     end;
     sl.WriteBOM := Bom;
@@ -430,8 +590,12 @@ begin
   // a script that writes its settings where cfg_path$ points then stays contained
   // instead of reaching the real user profile.
   if SandboxActive then begin Result := ValStr(SandboxScratchPath); Exit; end;
-  d := GetAppConfigDir(False);
+  d := HostAppConfigDir;    // UTF-8 on Windows too (round 3): see PhosphorSysLib
+  {$IFDEF WINDOWS}
+  if d = '' then d := HostTempDir;    // GetTempDir reads TEMP through the ANSI code page
+  {$ELSE}
   if d = '' then d := GetTempDir;
+  {$ENDIF}
   Result := ValStr(d);
 end;
 
@@ -695,6 +859,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.DeleteKey(SecName(Args[1].Str), Args[2].Str);
+  DropShadows(c.Ini, SecName(Args[1].Str), Args[2].Str);
   c.Touch();
 end;
 function t_cfg_deletekey(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -703,6 +868,7 @@ begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   c.Ini.DeleteKey('General', Args[1].Str);
+  DropShadows(c.Ini, 'General', Args[1].Str);
   c.Touch();
 end;
 function t_cfg_section_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;

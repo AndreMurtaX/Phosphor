@@ -71,7 +71,11 @@ to run wide open, silently, at exit 0.
 ### Known directories
 
 Each answers a path with a trailing separator, and each answers inside the sandbox
-root when one is set.
+root when one is set. Each is UTF-8, as every string in the engine is: on Windows
+the temp directory is read from `TEMP` (then `TMP`) through the same reader as
+`environ$`, and the home directory from the wide folder path. Until 2026-10-09
+(round 3) both came through the ANSI code page, so a temp or profile folder with
+a non-ASCII name came back wrong — `tmpé日\` as `tmpÚ?\`.
 
 | function | what it answers |
 | --- | --- |
@@ -133,7 +137,16 @@ here can be told from whatever the previous file call left in that slot.
 
 | function | what it answers |
 | --- | --- |
-| `environ$(name$) → str` | the value of that environment variable, and `""` when it is not set. A variable set to the empty string and one that does not exist give the same answer, so this cannot test for presence. Read-only: there is no setter. A name that is empty or holds `=` or a NUL answers `""` without asking the OS: no program can have set such a variable, and the OS would have answered for a different one — until 2026-10-09 `environ$("")` on Windows answered `C:=C:\...`, the hidden per-drive entry at the head of the environment block |
+| `environ$(name$) → str` | the value of that environment variable, and `""` when it is not set. A variable set to the empty string and one that does not exist give the same answer, so this cannot test for presence. Read-only: there is no setter. A name that is empty or holds `=` or a NUL answers `""` without asking the OS: no program can have set such a variable, and the OS would have answered for a different one — until 2026-10-09 `environ$("")` on Windows answered `C:=C:\...`, the hidden per-drive entry at the head of the environment block. So does a name whose bytes are not well-formed UTF-8, which no variable can have. The name and the value are **UTF-8**, on Windows too, and a name is matched as the OS matches it — on Windows without regard to case, non-ASCII letters included, so `environ$("phx_ção")` reads `PHX_ÇÃO` |
+
+Until 2026-10-09 (round 3) `environ$` on Windows read the environment through the
+ANSI code page and tagged the bytes as the OEM one: a variable holding `ação日本€`
+came back as `aþÒo??Ç`, and a name with a non-ASCII letter was never found at
+all. It reads the wide environment now. The suite cannot show this — a program
+cannot set a variable, and the runners give it none with a non-ASCII value — so
+it was measured from outside: a child started with `PHX_A=ação日本€` and
+`PHX_ÇÃO=ok`, its output compared byte for byte with Python's UTF-8 encoding of
+the same text.
 
 ### Colours
 

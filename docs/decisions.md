@@ -881,3 +881,58 @@ behaviour; this is why it is that behaviour.
 - **An environment name nobody can have set answers `""`** without asking the OS
   -- empty, or holding `=` or NUL -- because the OS answers such a name for a
   DIFFERENT variable than the one the program named.
+
+## Dates far outside the calendar, text that does not follow the machine, hand-edited .ini files (2026-10-09, round 3)
+
+Round 3 of the adversarial loop, over the same three libraries. Each page has
+the behaviour; this is why it is that behaviour.
+
+- **A reader that is not on the refusal list answers every number.** The page
+  had promised it since round 2 made `incday`'s plain sum documented output, and
+  the RTL could not keep the promise: DecodeTime, DayOfWeek and the `*between`
+  formulas convert the whole number into an integer and raised "Invalid
+  floating point operation" from about 1.07e11 days. The time of day is now read
+  off the number's fraction (rounded half up to the millisecond, exactly as the
+  canonical form reads it), the weekday off the day number by exact arithmetic
+  mod 7 (from the Double's bits past 2^62), and a whole distance is its count --
+  an Int64 below 2^63, the Double at and above. A distance that is not a number
+  at all is the engine's finiteness refusal, as for every library result.
+- **formatdatetime$ renders a DATE, so it refuses a number that is none**, like
+  `datetostr$` and `datetimetostr$`. The alternative the page used to describe
+  -- hand the number to the RTL, which clamps the top end to 9999-12-31 -- reports
+  a fabricated date as real, and below the range it read the month-name table at
+  index 0. `yearof`, `monthof` and `dayof` keep their documented clamp; the
+  refusal list is nineteen functions now.
+- **The renderer is this library's own, and every piece of its text is
+  pinned.** The RTL's FormatDateTime was used under a TFormatSettings copied
+  from the machine and pinned field by field; the fields nobody pinned
+  (TimeAMString/TimePMString, empty under pt-BR) and the code paths that read
+  the thread locale (Windows' `e`/`g` era specifiers) still followed the
+  machine. Pinning two more fields would have left the next one. The walker
+  reads patterns exactly as dati.inc does -- proved against the RTL by a
+  differential sweep of 9000 generated patterns and dates with zero differences
+  outside the decided cases -- and decides: `AM`/`PM` (the RTL's own built-in
+  designators); `e`, `g` and a lone `a` are letters like any other, printed
+  upper-cased (the Linux behaviour, and what every other non-specifier letter
+  already did); no 255-byte cut; `c` omits the time only at an exact midnight.
+- **A section written twice is one section; a key written twice is its first
+  line.** The other readings were: refuse the file (Python's strict
+  configparser), or let the last line win (its non-strict one). Refusing a file
+  a person edited is a failure the program cannot recover from at `cfg_open@`,
+  which answers a handle; "last wins" contradicts what the RTL and Windows'
+  GetPrivateProfileString already read for a repeated key. So the line layer
+  merges copies (moving their lines up on a save, the repeated header kept as
+  text so nothing written is lost) and keeps later lines of a key as text that
+  `cfg_delete@` removes with the key.
+- **A line no read can reach is text, not a key or a section** -- `=value`,
+  `[]`, `[;x]` and the block under such a header -- because counting a name no
+  call can read is the shape round 1 removed for comment lines. The block goes
+  with its header so that none of its keys silently joins the section above.
+- **Text from the host is UTF-8 on Windows too.** `environ$`, `temppath$`,
+  `tempfilename$`, `homepath$`, `documentspath$` and `cfg_path$` read the wide
+  forms: the environment through kernel32's GetEnvironmentVariableW, declared in
+  PhosphorSysLib itself (the `windows` unit stays outside the engine boundary),
+  so a name is matched as Windows matches it, Unicode case included -- the RTL's
+  own wide reader folds a..z only. The known folders come from the RTL's
+  `windirs.GetWindowsSpecialDirUnicode`. A name that is not well-formed UTF-8
+  answers `""`: no variable can have it.

@@ -19,7 +19,7 @@
   now/today/tomorrow/yesterday read the clock and take no arguments.
 
   Most functions cannot fail: a date is a number and almost any number is some
-  date. The EIGHTEEN that can are of three kinds.
+  date. The NINETEEN that can are of three kinds.
 
   Seven take a year, a month or a day as SEPARATE numbers, where the RTL either
   indexed its month table out of bounds or raised with its own words: daysinayear,
@@ -28,13 +28,19 @@
   Two, incmonth and incyear, refuse a step that would leave
   0001-01-01..9999-12-31, or that starts from a number outside it.
 
-  And nine TAKE A DATE that the RTL cannot decompose. At or below -693594 -- the
+  And ten TAKE A DATE that the RTL cannot decompose. At or below -693594 -- the
   day before 0001-01-01 -- DecodeDate answers Year=0, Month=0, Day=0 instead of
   refusing, and the functions built on that answer read a month table out of
   bounds, raise, count no day at all, or render text no parser accepts:
   daysinmonth, daysinyear, weeksinyear, weekoftheyear, weekof, weekofthemonth,
-  dayoftheyear, datetostr$ and datetimetostr$. They ask SourceOk, the same guard
-  incmonth and incyear ask about their starting date.
+  dayoftheyear, datetostr$, datetimetostr$ and formatdatetime$. They ask
+  SourceOk, the same guard incmonth and incyear ask about their starting date.
+
+  Every other function answers for EVERY number a program can hold, however far
+  outside the calendar: the time of day and the weekday are read off the number
+  (TimeMs, Weekday) and a whole distance is the count however large
+  (WholeCount) -- the RTL's routines convert the whole number into an integer
+  and signalled past about 1.07e11 days (round 3).
 
   Each answers this library's own runtime error with the offending value or the
   range in it, never a wrong number.
@@ -48,7 +54,7 @@ interface
 
 uses
   SysUtils, DateUtils,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorBudget;
 
 procedure RegisterDateTimeFuncs(Reg: TPhosphorRegistry);
 
@@ -131,6 +137,78 @@ end;
 
 function C0(const A: array of TValue): TDateTime; begin Result := Canon(AsDouble(A[0])); end;
 function C1(const A: array of TValue): TDateTime; begin Result := Canon(AsDouble(A[1])); end;
+
+{ THE TIME OF DAY IS READ OFF THE NUMBER, NOT OFF THE RTL (2026-10-09, round 3).
+
+  incday and the finer increments answer the plain sum however large the step,
+  and the page promises that everything outside its list of refusals answers
+  it. The RTL's DecodeTime cannot: DateTimeToTimeStamp multiplies the WHOLE
+  number by 86400000 and Truncs it into an integer, which signals "Invalid
+  floating point operation" from about 1.07e11 days on -- so hourof, isam,
+  timetostr$ and formatdatetime$ raised the RTL's words about a number this
+  library had just handed back as a date.
+
+  The time of day needs only the fraction, and Canon already reads it: the
+  fraction times 86400000, rounded half up to a whole millisecond, a 1000th of
+  a second that reaches midnight belonging to the next day (and so reading as
+  0). This is that same reading with nothing joined back, so it agrees with
+  Canon -- and therefore with DecodeTime of Canon, which is what hourof used to
+  answer -- on every number the calendar holds, and answers on every other.
+  Past 2^52 a Double holds no fraction: every such number is a midnight. }
+function TimeMs(const D: TDateTime): Int64;
+var dd, tt, ms: Double;
+begin
+  if Abs(D) >= TwoTo52 then Exit(0);
+  Split(D, dd, tt);
+  ms := Int(tt * MSecsPerDay + 0.5);
+  if ms >= MSecsPerDay then ms := 0;
+  Result := Trunc(ms);
+end;
+
+{ THE DAY A READER READS: the integer part of the canonical form (so the last
+  half millisecond of a day is the next day, as everywhere else), or past 2^52
+  the number itself, which is already an integer. }
+function DayNumber(const D: TDateTime): Double;
+begin
+  if Abs(D) >= TwoTo52 then Exit(D);
+  Result := Int(Canon(D));
+end;
+
+{ An integral Double mod 7, into 0..6, EXACTLY, at any magnitude. Below 2^62
+  it is Int64 arithmetic. Above, the Double is a 53-bit integer M times 2^E,
+  read straight from its bits (an integer operation, which cannot signal), and
+  (M * 2^E) mod 7 = ((M mod 7) * (2^E mod 7)) mod 7, where 2^E mod 7 runs
+  1, 2, 4 with period 3. DayOfWeek Trunc'ed the number into an Int64, which
+  signals past 2^63. }
+function DayMod7(const ADay: Double): Integer;
+var x: Double; bits, mant: QWord; e: Integer; neg: Boolean; n: Int64;
+begin
+  if Abs(ADay) < TwoTo62 then
+  begin
+    n := Trunc(ADay);
+    Result := Integer(n mod 7);
+    if Result < 0 then Inc(Result, 7);
+    Exit;
+  end;
+  x := ADay;
+  bits := PQWord(@x)^;
+  neg := (bits shr 63) <> 0;
+  e := Integer((bits shr 52) and $7FF) - 1075;    // >= 10 here: |x| >= 2^62
+  mant := (bits and QWord($FFFFFFFFFFFFF)) or QWord($10000000000000);
+  Result := Integer(mant mod 7);
+  case e mod 3 of
+    1: Result := (Result * 2) mod 7;
+    2: Result := (Result * 4) mod 7;
+  end;
+  if neg and (Result <> 0) then Result := 7 - Result;
+end;
+
+{ Sunday = 1 .. Saturday = 7: the RTL's DayOfWeek, 1 + ((N - 1) mod 7) with the
+  mod taken into 0..6, on the day number N -- 1899-12-30, day 0, a Saturday. }
+function Weekday(const D: TDateTime): Integer;
+begin
+  Result := 1 + (DayMod7(DayNumber(D)) + 6) mod 7;
+end;
 
 { The representable span as plain numbers, derived in the initialization section
   rather than written down here, so it cannot disagree with TryEncodeDate.
@@ -226,10 +304,14 @@ begin
 end;
 
 // --- week-day: two bases ----------------------------------------------------
+// On the day number by exact arithmetic (Weekday), because the RTL's DayOfWeek
+// Truncs the number into an Int64 and signalled past 2^63 days.
 function t_dayofweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOfWeek(C0(A))); end;         // Sunday = 1
+begin E := NoError(); Result := ValInt(Weekday(D0(A))); end;           // Sunday = 1
+{ ISO: Monday = 1 .. Sunday = 7. DateUtils.DayOfTheWeek is its DOWMap over
+  DayOfWeek -- Sunday 1 -> 7, Monday 2 -> 1 -- which is ((dow + 5) mod 7) + 1. }
 function t_dayoftheweek(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(DayOfTheWeek(C0(A))); end;      // ISO: Monday = 1
+begin E := NoError(); Result := ValInt((Weekday(D0(A)) + 5) mod 7 + 1); end;
 
 // --- leap years and month lengths -------------------------------------------
 function t_isinleapyear(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -293,17 +375,19 @@ begin
 end;
 
 // --- time-of-day ------------------------------------------------------------
+// Read off the number by TimeMs (see the note there), never through the RTL's
+// DecodeTime, which signalled past about 1.07e11 days.
 function t_hourof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(HourOf(C0(A))); end;
+begin E := NoError(); Result := ValInt(TimeMs(D0(A)) div 3600000); end;
 function t_minuteof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MinuteOf(C0(A))); end;
+begin E := NoError(); Result := ValInt(TimeMs(D0(A)) div 60000 mod 60); end;
 function t_secondof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(SecondOf(C0(A))); end;
+begin E := NoError(); Result := ValInt(TimeMs(D0(A)) div 1000 mod 60); end;
 // FPC's DateUtils has no IsAM/IsPM; the clock half is decided by the hour.
 function t_isam(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(HourOf(C0(A)) < 12)); end;
+begin E := NoError(); Result := ValInt(Ord(TimeMs(D0(A)) < 12 * 3600000)); end;
 function t_ispm(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(HourOf(C0(A)) >= 12)); end;
+begin E := NoError(); Result := ValInt(Ord(TimeMs(D0(A)) >= 12 * 3600000)); end;
 { THE SAME DAY IS THE SAME YEAR, MONTH AND DAY -- compared as numbers, so the
   answer cannot depend on which argument came first.
 
@@ -548,12 +632,13 @@ begin E := NoError(); Result := ValDouble(MoveDays(D0(A), A[1], 7)); end;
 
   incday and incweek are NOT given the same treatment, because they do not raise
   -- they answer a number outside the representable range. What that number then
-  means depends on which door it reaches. The nine date-taking functions listed
-  in this file's header ask SourceOk and refuse it by name. yearof, monthof,
-  dayof and formatdatetime$ do not: they still hand it to DecodeDate, which
-  clamps the top end back to 9999-12-31 and reports it as if it were real, and
-  answers year 0 below the range. That remaining half is a wider defect and
-  belongs to the whole library rather than to these two functions.
+  means depends on which door it reaches. The ten date-taking functions listed
+  in this file's header ask SourceOk and refuse it by name (formatdatetime$
+  joined them in round 3). yearof, monthof, dayof and their aliases do not:
+  they still hand it to DecodeDate, which clamps the top end back to
+  9999-12-31 and reports it as if it were real, and answers year 0 below the
+  range -- documented on the page, and a wider question that belongs to the
+  whole library rather than to these two functions.
 
   AND THE TWO FAIL DIFFERENTLY, which is why neither can be guarded by catching.
   incyear raises. incmonth does NOT: its re-encode answers 0 on failure without a
@@ -685,35 +770,45 @@ const
   // dateutil.inc's own private constant, spelled the same way it spells it.
   HalfMilliSecond = OneMillisecond / 2;
 
+{ A WHOLE COUNT IS NON-NEGATIVE AND IS THE COUNT, HOWEVER LARGE (2026-10-09,
+  round 3). The RTL's formulas Trunc into an Integer (DaysBetween's own return
+  type, which daysbetween, weeksbetween, monthsbetween and yearsbetween kept "so
+  it narrows where it did") or an Int64 -- so three billion days answered
+  -1294967296, a NEGATIVE distance, and past 2^63 units the Trunc signalled
+  "Invalid floating point operation". X is the truncated count as a Double
+  (Int, which cannot signal); below 2^63 it is the Int64 it always was, and at
+  or above it is that Double. A distance too large to be a number at all is
+  Infinity, which the engine's finiteness gate refuses as it refuses every
+  library result that is not a number. }
+const
+  TwoTo63 = 9223372036854775808.0;
+
+function WholeCount(const X: Double): TValue;
+begin
+  if X < TwoTo63 then Result := ValInt(Trunc(X)) else Result := ValDouble(X);
+end;
+
 function t_daysbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Integer;    // DaysBetween's own return type, so it narrows where it did
 begin
   E := NoError();
-  r := Trunc(DistDays(D0(A), D1(A)) + HalfMilliSecond);
-  Result := ValInt(r);
+  Result := WholeCount(Int(DistDays(D0(A), D1(A)) + HalfMilliSecond));
 end;
 function t_dayspan(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A))); end;
 function t_hoursbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Int64;
 begin
   E := NoError();
-  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * HoursPerDay);
-  Result := ValInt(r);
+  Result := WholeCount(Int((DistDays(D0(A), D1(A)) + HalfMilliSecond) * HoursPerDay));
 end;
 function t_minutesbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Int64;
 begin
   E := NoError();
-  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * MinsPerDay);
-  Result := ValInt(r);
+  Result := WholeCount(Int((DistDays(D0(A), D1(A)) + HalfMilliSecond) * MinsPerDay));
 end;
 function t_secondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Int64;
 begin
   E := NoError();
-  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * SecsPerDay);
-  Result := ValInt(r);
+  Result := WholeCount(Int((DistDays(D0(A), D1(A)) + HalfMilliSecond) * SecsPerDay));
 end;
 
 // --- the clock (no arguments) -----------------------------------------------
@@ -742,36 +837,297 @@ end;
 // locale-following, so the same text parses and renders the same on any machine
 // -- render/parse are exact inverses and a hard-coded "2020-06-15" is read the
 // same everywhere. (The reference used the machine's locale format.)
+
+{ THE RENDERER IS THIS LIBRARY'S OWN (2026-10-09, round 3).
+
+  It was the RTL's FormatDateTime under a TFormatSettings copied from the
+  machine's and then pinned field by field -- separators, the four formats, the
+  month and day names -- and every field nobody pinned still followed the
+  machine, and so did the code around them:
+    * "ampm" printed TimeAMString/TimePMString, which a pt-BR Windows leaves
+      EMPTY: 06:00 and 18:00 both rendered "6:00 ";
+    * "e" and "g" were Japanese/Chinese era specifiers on Windows only, decided
+      by the THREAD locale, and on any other locale they printed one letter and
+      SKIPPED the rest of the run -- "week" was "WeK" on Windows and "WEEK" on
+      Linux, which the page documented as fact;
+    * a lone "a" raised EConvertError, "Illegal character in format string";
+    * the answer was built in a 256-byte buffer and silently cut at 255;
+    * DecodeTime overflowed past about 1.07e11 days, and below the calendar
+      DecodeDate answered month 0, so "mmm" read the name table one element
+      before its start (it printed "hh:nn:ss", the adjacent field);
+    * "c" -- datetimetostr$ -- dropped the time whenever hour, minute and second
+      were 0, so 00:00:00.500 rendered as a bare date, where the page says only
+      an exact midnight does.
+  This walker reads a pattern exactly as dati.inc's StoreFormat does -- the
+  same runs, the same "m after h is a minute" rule, the same quoting, the same
+  12-hour pre-scan -- with those six answers decided instead: AM/PM are the
+  RTL's own built-in "AM" and "PM" (sysinth.inc), "e", "g" and a lone "a" are
+  letters like any other (upper-cased, as the RTL prints every letter that is
+  no specifier), nothing is cut, the parts come from TimeMs/Weekday and a
+  calendar date SourceOk has already admitted, and "c" omits the time only at
+  an exact midnight. }
+const
+  FmtDate = 'yyyy-mm-dd';     // ShortDateFormat and LongDateFormat, pinned
+  FmtTime = 'hh:nn:ss';       // ShortTimeFormat and LongTimeFormat, pinned
+  ShortMonths: array[1..12] of String =
+    ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+  LongMonths: array[1..12] of String =
+    ('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+     'September', 'October', 'November', 'December');
+  ShortDays: array[1..7] of String = ('Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat');
+  LongDays: array[1..7] of String =
+    ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday');
+
+type
+  TDTParts = record
+    Year, Month, Day, Dow, Hour, Minute, Second, MSec: Integer;
+  end;
+  TFmtOut = record
+    S: String;
+    N: Integer;
+  end;
+
+{ The parts a pattern can name. ADate says whether D is a calendar date (the
+  caller asked SourceOk); without one the date fields are never read -- only
+  timetostr$, whose pattern has none, passes False. }
+function PartsOf(const D: TDateTime; ADate: Boolean): TDTParts;
+var ms: Int64; y, m, dd: Word;
+begin
+  ms := TimeMs(D);
+  Result.Hour := Integer(ms div 3600000);
+  Result.Minute := Integer(ms div 60000 mod 60);
+  Result.Second := Integer(ms div 1000 mod 60);
+  Result.MSec := Integer(ms mod 1000);
+  Result.Dow := Weekday(D);
+  Result.Year := 0; Result.Month := 1; Result.Day := 0;
+  if ADate then
+  begin
+    DecodeDate(Canon(D), y, m, dd);
+    Result.Year := y; Result.Month := m; Result.Day := dd;
+  end;
+end;
+
+{ Appended in place, the buffer doubling, so a long pattern costs its length
+  and not its square. }
+procedure Put(var O: TFmtOut; const T: String);
+begin
+  if T = '' then Exit;
+  if O.N + Length(T) > Length(O.S) then
+    SetLength(O.S, 2 * Length(O.S) + Length(T) + 16);
+  Move(T[1], O.S[O.N + 1], Length(T));
+  O.N := O.N + Length(T);
+end;
+
+{ V in decimal, zero-padded on the left to AWidth (0: no padding) -- StoreInt.
+  Every part is non-negative and every width this file asks for is 2, 3 or 4,
+  so at most three zeros are ever wanted. }
+function Pad(V, AWidth: Integer): String;
+begin
+  Result := IntToStr(V);
+  if Length(Result) < AWidth then
+    Result := Copy('000', 1, AWidth - Length(Result)) + Result;
+end;
+
+{ Does P at position I begin with AWord, ignoring case? (StrLIComp over a
+  NUL-terminated pattern: a shorter tail never matches.) }
+function HeadIs(const P: String; I: Integer; const AWord: String): Boolean;
+var k: Integer;
+begin
+  Result := I + Length(AWord) - 1 <= Length(P);
+  if not Result then Exit;
+  for k := 1 to Length(AWord) do
+    if UpCase(P[I + k - 1]) <> AWord[k] then Exit(False);
+end;
+
+{ An unquoted A/P, AMPM or AM/PM anywhere in P switches every h of P to the
+  12-hour clock -- the RTL's pre-scan, quote for quote. }
+function HasClock12(const P: String): Boolean;
+var i: Integer; quote: Char;
+begin
+  Result := False;
+  i := 1;
+  while i <= Length(P) do
+  begin
+    quote := P[i];
+    if (quote = '''') or (quote = '"') then
+    begin
+      Inc(i);
+      while (i <= Length(P)) and (P[i] <> quote) do Inc(i);
+    end
+    else if (UpCase(quote) = 'A') and
+            (HeadIs(P, i, 'A/P') or HeadIs(P, i, 'AMPM') or HeadIs(P, i, 'AM/PM')) then
+      Exit(True);
+    Inc(i);
+  end;
+end;
+
+procedure FormatInto(var O: TFmtOut; const P: String; const T: TDTParts;
+                     ANesting: Integer; ATimeFlag: Boolean);
 var
-  ISOFS: TFormatSettings;
+  i, j, cnt, h: Integer;
+  tok, last: Char;
+  clock12: Boolean;
+begin
+  if ANesting > 1 then Exit;    // the pinned formats nest once, and only once
+  clock12 := HasClock12(P);
+  last := ' ';
+  i := 1;
+  while i <= Length(P) do
+  begin
+    tok := UpCase(P[i]);
+    cnt := 1;
+    if (tok = '''') or (tok = '"') then
+    begin
+      // to the matching quote, or -- unterminated -- the rest of the pattern
+      j := i + 1;
+      while (j <= Length(P)) and (P[j] <> tok) do Inc(j);
+      Put(O, Copy(P, i + 1, j - i - 1));
+      cnt := j - i + 1;
+    end
+    else if tok = 'A' then
+    begin
+      if HeadIs(P, i, 'AMPM') then
+      begin
+        cnt := 4;
+        if T.Hour < 12 then Put(O, 'AM') else Put(O, 'PM');
+      end
+      else if HeadIs(P, i, 'AM/PM') then
+      begin
+        cnt := 5;
+        if T.Hour < 12 then Put(O, Copy(P, i, 2)) else Put(O, Copy(P, i + 3, 2));
+      end
+      else if HeadIs(P, i, 'A/P') then
+      begin
+        cnt := 3;
+        if T.Hour < 12 then Put(O, Copy(P, i, 1)) else Put(O, Copy(P, i + 2, 1));
+      end
+      else
+        Put(O, 'A');
+    end
+    else if tok = '/' then Put(O, '-')          // the pinned date separator
+    else if tok = ':' then Put(O, ':')
+    else if tok in [' ', 'C', 'D', 'F', 'H', 'M', 'N', 'S', 'T', 'Y', 'Z'] then
+    begin
+      j := i + 1;
+      while (j <= Length(P)) and (UpCase(P[j]) = tok) do Inc(j);
+      cnt := j - i;
+      case tok of
+        ' ': Put(O, Copy(P, i, cnt));
+        'Y': if cnt > 2 then Put(O, Pad(T.Year, 4)) else Put(O, Pad(T.Year mod 100, 2));
+        'M':
+          if (last = 'H') or ATimeFlag then
+          begin
+            if cnt = 1 then Put(O, Pad(T.Minute, 0)) else Put(O, Pad(T.Minute, 2));
+          end
+          else
+            case cnt of
+              1: Put(O, Pad(T.Month, 0));
+              2: Put(O, Pad(T.Month, 2));
+              3: Put(O, ShortMonths[T.Month]);
+            else
+              Put(O, LongMonths[T.Month]);
+            end;
+        'D':
+          case cnt of
+            1: Put(O, Pad(T.Day, 0));
+            2: Put(O, Pad(T.Day, 2));
+            3: Put(O, ShortDays[T.Dow]);
+            4: Put(O, LongDays[T.Dow]);
+          else
+            FormatInto(O, FmtDate, T, ANesting + 1, False);
+          end;
+        'H':
+          begin
+            h := T.Hour;
+            if clock12 then
+            begin
+              h := h mod 12;
+              if h = 0 then h := 12;
+            end;
+            if cnt = 1 then Put(O, Pad(h, 0)) else Put(O, Pad(h, 2));
+          end;
+        'N': if cnt = 1 then Put(O, Pad(T.Minute, 0)) else Put(O, Pad(T.Minute, 2));
+        'S': if cnt = 1 then Put(O, Pad(T.Second, 0)) else Put(O, Pad(T.Second, 2));
+        'Z': if cnt = 1 then Put(O, Pad(T.MSec, 0)) else Put(O, Pad(T.MSec, 3));
+        'T': FormatInto(O, FmtTime, T, ANesting + 1, True);
+        'C':
+          begin
+            FormatInto(O, FmtDate, T, ANesting + 1, False);
+            if (T.Hour <> 0) or (T.Minute <> 0) or (T.Second <> 0) or (T.MSec <> 0) then
+            begin
+              Put(O, ' ');
+              FormatInto(O, FmtTime, T, ANesting + 1, True);
+            end;
+          end;
+        'F':
+          begin
+            FormatInto(O, FmtDate, T, ANesting + 1, False);
+            Put(O, ' ');
+            FormatInto(O, FmtTime, T, ANesting + 1, True);
+          end;
+      end;
+      last := tok;
+    end
+    else
+      Put(O, tok);                              // any other byte, letters upper-cased
+    Inc(i, cnt);
+  end;
+end;
+
+{ The text of P over T. The walk is linear in P and writes at most twenty bytes
+  for each byte of it (a lone "c" is nineteen), and the bytes written are
+  charged to the budget as every other string this size is built. }
+function Render(const AWho, P: String; const T: TDTParts; out E: TPhosphorError): TValue;
+var o: TFmtOut;
+begin
+  o.S := '';
+  o.N := 0;
+  if P = '' then FormatInto(o, 'C', T, 0, False) else FormatInto(o, P, T, 0, False);
+  SetLength(o.S, o.N);
+  if not BudgetCharge(Int64(o.N) * BudgetUnitsPerAppendedByte) then
+  begin
+    E := BudgetRefusal(AWho);
+    Exit(ValStr(''));
+  end;
+  E := NoError();
+  Result := ValStr(o.S);
+end;
 
 { RENDER AND PARSE ARE EXACT INVERSES, and below the range they were not: a
   number at or under -693594 decomposes to Year=0, Month=0, Day=0 and rendered as
-  "0000-00-00", which strtodate then refuses as invalid text. The two renderers
-  that carry a DATE therefore ask SourceOk; timetostr$ does not, because it reads
-  only the fraction and every number has one. }
+  "0000-00-00", which strtodate then refuses as invalid text. The renderers that
+  carry a DATE therefore ask SourceOk -- formatdatetime$ too, since round 3;
+  timetostr$ does not, because it reads only the fraction and every number has
+  one. }
 function t_datetostr(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValStr('');
   if not SourceOk('datetostr$', C0(A), E) then Exit;
-  Result := ValStr(DateToStr(C0(A), ISOFS));
+  Result := Render('datetostr$', FmtDate, PartsOf(D0(A), True), E);
 end;
 function t_timetostr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(TimeToStr(C0(A), ISOFS)); end;
+begin Result := Render('timetostr$', FmtTime, PartsOf(D0(A), False), E); end;
 function t_datetimetostr(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   Result := ValStr('');
   if not SourceOk('datetimetostr$', C0(A), E) then Exit;
-  Result := ValStr(DateTimeToStr(C0(A), ISOFS));
+  Result := Render('datetimetostr$', 'c', PartsOf(D0(A), True), E);
 end;
 function t_date_s(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(DateToStr(Date, ISOFS)); end;
+begin Result := Render('date$', FmtDate, PartsOf(Date, True), E); end;
 function t_time_s(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(TimeToStr(Time, ISOFS)); end;
+begin Result := Render('time$', FmtTime, PartsOf(Time, False), E); end;
 function t_datetime_s(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(DateTimeToStr(Now, ISOFS)); end;
+begin Result := Render('datetime$', 'c', PartsOf(Now, True), E); end;
+{ A DATE, so the nineteenth function that refuses a number outside the calendar
+  (round 3): above it the RTL clamped to 9999-12-31 and reported that as real,
+  and below it read month 0. }
 function t_formatdatetime(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(FormatDateTime(A[0].Str, C1(A), ISOFS)); end;
+begin
+  Result := ValStr('');
+  if not SourceOk('formatdatetime$', C1(A), E) then Exit;
+  Result := Render('formatdatetime$', A[0].Str, PartsOf(D1(A), True), E);
+end;
 
 { THE PARSERS READ EXACTLY THE ISO 8601 FORMS date-time.md LISTS, and nothing
   is completed by a guess (2026-10-09, round 2).
@@ -943,35 +1299,32 @@ end;
 // --- more distances ---------------------------------------------------------
 // The same substitution as the five above: the RTL's formula, over Linear's
 // distance instead of DateTimeDiff's. See the long note at t_daysbetween.
+{ Whole weeks are whole days div 7, in Int64 while the day count is one, and
+  the truncated quotient past 2^62 days. }
 function t_weeksbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Integer;
+var days: Double;
 begin
   E := NoError();
-  r := Trunc(DistDays(D0(A), D1(A)) + HalfMilliSecond) div 7;
-  Result := ValInt(r);
+  days := Int(DistDays(D0(A), D1(A)) + HalfMilliSecond);
+  if days < TwoTo62 then Result := ValInt(Trunc(days) div 7)
+  else Result := WholeCount(Int(days / 7));
 end;
 function t_monthsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Integer;
 begin
   // AExact is False here, as it is in the call this replaces, so it is the
   // approximate branch -- 30.4375 days to a month, the RTL's own constant.
   E := NoError();
-  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) / ApproxDaysPerMonth);
-  Result := ValInt(r);
+  Result := WholeCount(Int((DistDays(D0(A), D1(A)) + HalfMilliSecond) / ApproxDaysPerMonth));
 end;
 function t_yearsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Integer;
 begin
   E := NoError();
-  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) / ApproxDaysPerYear);
-  Result := ValInt(r);
+  Result := WholeCount(Int((DistDays(D0(A), D1(A)) + HalfMilliSecond) / ApproxDaysPerYear));
 end;
 function t_millisecondsbetween(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: Int64;
 begin
   E := NoError();
-  r := Trunc((DistDays(D0(A), D1(A)) + HalfMilliSecond) * MSecsPerDay);
-  Result := ValInt(r);
+  Result := WholeCount(Int((DistDays(D0(A), D1(A)) + HalfMilliSecond) * MSecsPerDay));
 end;
 
 // --- spans (fractional distances) -------------------------------------------
@@ -991,7 +1344,7 @@ function t_yearspan(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValDouble(DistDays(D0(A), D1(A)) / ApproxDaysPerYear); end;
 
 function t_millisecondof(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(MilliSecondOf(C0(A))); end;
+begin E := NoError(); Result := ValInt(TimeMs(D0(A)) mod 1000); end;
 
 procedure RegisterDateTimeFuncs(Reg: TPhosphorRegistry);
 begin
@@ -1076,38 +1429,9 @@ initialization
   TryEncodeDate(1, 1, 1, FirstDay);
   TryEncodeDate(9999, 12, 31, LastMoment);
   LastMoment := LastMoment + 1;      // the first instant AFTER the last day
-  ISOFS := DefaultFormatSettings;
-  ISOFS.DateSeparator := '-';
-  ISOFS.TimeSeparator := ':';
-  ISOFS.ShortDateFormat := 'yyyy-mm-dd';
-  ISOFS.LongDateFormat := 'yyyy-mm-dd';
-  ISOFS.ShortTimeFormat := 'hh:nn:ss';
-  ISOFS.LongTimeFormat := 'hh:nn:ss';
-  // The separators and patterns were pinned; the NAME ARRAYS were not, so they
-  // still came from DefaultFormatSettings -- the machine's locale. formatdatetime$
-  // with mmm/mmmm/ddd/dddd answered "junho" here, "June" on an en-US box and "Jun"
-  // under a C locale, for the same date. Pinned to English, which is what the ISO
-  // formats around them already assume.
-  ISOFS.ShortMonthNames[1] := 'Jan';  ISOFS.LongMonthNames[1] := 'January';
-  ISOFS.ShortMonthNames[2] := 'Feb';  ISOFS.LongMonthNames[2] := 'February';
-  ISOFS.ShortMonthNames[3] := 'Mar';  ISOFS.LongMonthNames[3] := 'March';
-  ISOFS.ShortMonthNames[4] := 'Apr';  ISOFS.LongMonthNames[4] := 'April';
-  ISOFS.ShortMonthNames[5] := 'May';  ISOFS.LongMonthNames[5] := 'May';
-  ISOFS.ShortMonthNames[6] := 'Jun';  ISOFS.LongMonthNames[6] := 'June';
-  ISOFS.ShortMonthNames[7] := 'Jul';  ISOFS.LongMonthNames[7] := 'July';
-  ISOFS.ShortMonthNames[8] := 'Aug';  ISOFS.LongMonthNames[8] := 'August';
-  ISOFS.ShortMonthNames[9] := 'Sep';  ISOFS.LongMonthNames[9] := 'September';
-  ISOFS.ShortMonthNames[10] := 'Oct'; ISOFS.LongMonthNames[10] := 'October';
-  ISOFS.ShortMonthNames[11] := 'Nov'; ISOFS.LongMonthNames[11] := 'November';
-  ISOFS.ShortMonthNames[12] := 'Dec'; ISOFS.LongMonthNames[12] := 'December';
-  ISOFS.ShortDayNames[1] := 'Sun'; ISOFS.LongDayNames[1] := 'Sunday';
-  ISOFS.ShortDayNames[2] := 'Mon'; ISOFS.LongDayNames[2] := 'Monday';
-  ISOFS.ShortDayNames[3] := 'Tue'; ISOFS.LongDayNames[3] := 'Tuesday';
-  ISOFS.ShortDayNames[4] := 'Wed'; ISOFS.LongDayNames[4] := 'Wednesday';
-  ISOFS.ShortDayNames[5] := 'Thu'; ISOFS.LongDayNames[5] := 'Thursday';
-  ISOFS.ShortDayNames[6] := 'Fri'; ISOFS.LongDayNames[6] := 'Friday';
-  ISOFS.ShortDayNames[7] := 'Sat'; ISOFS.LongDayNames[7] := 'Saturday';
-  ISOFS.DecimalSeparator := '.';
-  ISOFS.ThousandSeparator := #0;
+  { The names used to be pinned HERE, one field at a time, into a copy of the
+    machine's DefaultFormatSettings -- and TimeAMString/TimePMString were not,
+    so "ampm" followed the locale (see FormatInto). Nothing in this unit reads a
+    TFormatSettings now: the formats and names are the constants above it. }
 
 end.

@@ -36,12 +36,34 @@ written — `;` lines and `#` lines alike, before the first section or inside on
 and so is any line the reader cannot place as `key=value`, and a section header
 with a comment after it, `[s] ; note`, which is the section `s` and is written
 back as it was (until 2026-10-07 it was not read as a header at all, and a set
-added a second `[s]`). None of them counts as a key: `cfg_keycount` and
-`cfg_keys$` see only the real ones. A file this library wrote itself comes out of
-a save byte for byte as it always did. What a save does NOT keep is layout: it
-writes the platform's line endings and a final one, one blank line between
-sections and none inside them, and `key=value` without the spaces a person may
-have put around the `=`.
+added a second `[s]`). So is a line no read could reach: `=value`, whose key is
+empty, and a header naming no section a read can ask for — `[]`, and `[;x]`,
+whose name begins with the comment marker — which is kept as text **with its
+whole block**, so none of its lines becomes a key of the section above. None of
+them counts as a key or a section: `cfg_keycount`, `cfg_keys$`,
+`cfg_sectioncount` and `cfg_sections$` see only the real ones. (Until
+2026-10-09, round 3, all three were counted and listed — `cfg_keys$` with an
+empty line in it — and a save wrote `[;x]` back as `;x`, a comment, so on the
+next load its keys belonged to the section before.) A file this library wrote
+itself comes out of a save byte for byte as it always did. What a save does NOT
+keep is layout: it writes the platform's line endings and a final one, one blank
+line between sections and none inside them, and `key=value` without the spaces a
+person may have put around the `=`.
+
+**A section written twice is one section, and a key written twice is its first
+line.** Names are matched as every name here is, without regard to (ASCII) case,
+so `[a]` … `[A]` is one section, named as it was first written. Its later copies'
+lines are moved up on a save to follow the first copy, under their own header
+line, which is kept as text: nothing a person wrote is lost, and the file reads
+the same after a reload. A key that appears twice in one section — in one copy
+or across two — reads its **first** line, the way the RTL and Windows'
+`GetPrivateProfileString` read it; the later lines are kept as text, a set
+changes the first, and `cfg_delete@` removes them all, so a deleted key does not
+come back from the file. `cfg_section_delete@` removes every copy. (Until
+2026-10-09, round 3, every copy of a section was a section of its own: the keys
+of the second `[a]` were unreadable, `cfg_sections$` listed `a` twice, deleting
+the section left the second copy, and deleting a twice-written key left its
+second line to be read.)
 
 **And a set that could not be read back is refused, not written.** The setters
 raise a catchable runtime error (`cannot be stored in an .ini and read back --`
@@ -104,7 +126,7 @@ refusal and the ordinary case together.
 | `cfg_open@(path$) → handle` | a config handle bound to `path$`, holding the file's contents in memory. A path that does not exist is not an error: the config is simply empty, and the file appears on the first save. A path **outside the sandbox root** binds no file at all — see *An .ini is a file* above |
 | `cfg_open_auto@(path$) → handle` | the same, with autosave already on — every later set writes the whole file through. Nothing is written until that first set |
 | `cfg_filename$(c@) → str` | the path the handle was opened with, unchanged |
-| `cfg_path$() → str` | the platform's per-application configuration directory, as a path; the system temp directory when the platform names none, and a directory **inside the sandbox root** when a root is set. It answers a location, it does not create it |
+| `cfg_path$() → str` | the platform's per-application configuration directory, as a path; the system temp directory when the platform names none, and a directory **inside the sandbox root** when a root is set. It answers a location, it does not create it. In UTF-8 like every string here — on Windows it is read from the wide folder path; until 2026-10-09 (round 3) the RTL converted that path to the ANSI code page, so a non-ASCII profile folder came back as ANSI bytes, and a character outside the code page as `?` |
 
 ### Strings
 
@@ -176,9 +198,9 @@ take the section name **literally**, so `""` there means a section actually name
 
 | function | what it answers |
 | --- | --- |
-| `cfg_delete@(c@, section$, key$) → handle` | the handle. Deleting a key that was not there is not an error and changes nothing that a later read can see — but the handle is still marked modified, and under autosave the file is still rewritten |
+| `cfg_delete@(c@, section$, key$) → handle` | the handle. Every line of that key goes — a hand-edited file that wrote it twice included. Deleting a key that was not there is not an error and changes nothing that a later read can see — but the handle is still marked modified, and under autosave the file is still rewritten |
 | `cfg_deletekey@(c@, key$) → handle` | the handle; deletes from `General` |
-| `cfg_section_delete@(c@, section$) → handle` | the handle, with that whole section and its keys gone |
+| `cfg_section_delete@(c@, section$) → handle` | the handle, with that whole section and its keys gone — every copy of it, in a file that wrote its header twice |
 | `cfg_clear@(c@) → handle` | the handle, now empty. This empties the *memory* copy: the file on disk keeps its old contents until the next save |
 
 ### Autosave
@@ -246,3 +268,6 @@ Two things worth noticing:
   `cfg_save`, or autosave, is the only path to disk.
 - Section and key names are matched case-insensitively, the way INI files
   ordinarily behave; the *values* are stored and returned exactly as given.
+  The folding is ASCII's (`CompareText`): `é` and `É` are two names.
+- The hand-edited shapes — repeated sections and keys, empty keys, unreachable
+  headers — are pinned by `tests/suite/91_config_round3.bas`.

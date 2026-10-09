@@ -1638,5 +1638,15 @@ initialization
   // would unload the library before PhosphorHandles frees any lingering database
   // (whose destructor calls sqlite3_close).
   GReady := TryInitializeSqlite('') > 0;
+  {$IFDEF UNIX}
+  { FPC asks for `libsqlite3.so`, the name only the -dev package installs. A
+    stock system carries the RUNTIME soname alone, so on Linux -- the VM, WSL, any
+    machine nobody put headers on -- there was no SQLite at all, and the package
+    suite skipped its three SQLite files, the sandbox corpus among them, behind a
+    yellow line (found 2026-10-09 by a CI rule that a skip is a failure). The
+    OpenSSL-3 soname, one directory over, is the same defect. A failed attempt
+    leaves the loader's count at zero, so a second name can be tried. }
+  if not GReady then GReady := TryInitializeSqlite('libsqlite3.so.0') > 0;
+  {$ENDIF}
 
 end.

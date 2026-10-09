@@ -1543,6 +1543,16 @@ the sweep above. Verify before fixing, as with everything on this page.
     same. Now libc's `getaddrinfo`, which the binary already linked. The test
     that caught it was right; the machine it had always run on was the
     accident.
+  - **SQLite on Linux was never loaded, and the suite said OK.** FPC asks for
+    `libsqlite3.so`, which only the -dev package installs; the VM and WSL
+    carry `libsqlite3.so.0` alone. So `02_sqlite`, `07_sqlite_full` and
+    `10_sqlite_sandbox` -- a sandbox corpus for a security fix among them --
+    were skipped on Linux behind yellow lines, and PACKAGES OK was printed,
+    run after run. The Windows twin of this (a PATH guess) was fixed on
+    2026-09; the Linux one survived because its SKIP looked like the
+    machine's business. Found by the first rule that a skip is a failure.
+    Now the runtime soname is tried after the default name, as for OpenSSL 3.
+    **A SKIP that nobody is required to clear is a pass that nobody earned.**
   - **A missing tool read as six product failures.** The packed-GUI test
     finds windows with `xwininfo`; absent, it answered "no window", and the
     report said six windows never opened. It now refuses with the tool's

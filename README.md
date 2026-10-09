@@ -145,7 +145,15 @@ path is not confined: it is opened before the root is bound, so `--sandbox cage
 --out ../outside.txt` writes outside the cage — the operator named that path, as
 they named the root. An empty `--out` is refused rather than quietly dropped,
 `phosphor: --out needs a path` and exit 2, because `--out "$LOG"` with `LOG`
-unset used to print to the terminal and exit 0. The three ceilings that bound how
+unset used to print to the terminal and exit 0. **Each flag takes one value**:
+a second `--sandbox` or `--out` is refused (exit 2, naming the flag) rather than
+quietly replacing the first, which let `--sandbox cage --sandbox .` run in the
+wider root. **And no output may name an input**: `--out` naming the program,
+`compile`'s `.pbc` naming the source or the `--names` file, `pack`'s executable
+naming the `.pbc` or the `phosphor` binary it copies — each is refused before
+anything is opened, by any spelling that reaches the same file (a `..` detour,
+case on Windows, a hard or symbolic link). `--out job.bas job.bas` used to
+truncate the program before reading it. The three ceilings that bound how
 **long** a script runs are the embedder's to set, and this host sets none of them:
 [docs/embedding.md](docs/embedding.md) has those, and says what all five ceilings
 together still do not bound.

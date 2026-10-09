@@ -309,9 +309,24 @@ $dmg3 = Join-Path $tmp 'phosphor_damaged_flags.exe'     # flag bits this build h
 New-Damaged $dmg1 ($bytesA.Length - 32) (Tail $bytesB 32)
 New-Damaged $dmg2 ($bytesA.Length - 16) ((Tail $bytesB 16)[0..3] + (Tail $bytesA 12))
 New-Damaged $dmg3 ($bytesA.Length - 12) (([byte[]](0xFF,0xFF,0xFF,0xFF)) + (Tail $bytesA 8))
+# AN OFFSET AND A SIZE WHOSE SUM OVERFLOWS (round 2 of the adversarial loop,
+# 2026-10-09). The bounds check added them in an Int64: 2^63-1 + 1 wraps to the
+# most negative value, which is "less than the file", so the check passed and
+# the read at offset 2^63-1 raised -- exit 3, an unhandled exception, where the
+# file is simply corrupt. The second shape wraps the other way round: offset 1,
+# size 2^63-1. Little-endian, as WLE64 writes them; the checksum, flags and magic
+# are A's own, so only the two fields under test are wrong.
+$dmg4 = Join-Path $tmp 'phosphor_damaged_offwrap.exe'
+$dmg5 = Join-Path $tmp 'phosphor_damaged_sizwrap.exe'
+$i64max = [BitConverter]::GetBytes([Int64]::MaxValue)
+$i64one = [BitConverter]::GetBytes([Int64]1)
+New-Damaged $dmg4 ($bytesA.Length - 32) ($i64max + $i64one + (Tail $bytesA 16))
+New-Damaged $dmg5 ($bytesA.Length - 32) ($i64one + $i64max + (Tail $bytesA 16))
 
 $okJ = $true
-foreach ($d in @(@($dmg1,'trailer'), @($dmg2,'checksum'), @($dmg3,'unknown flags'))) {
+foreach ($d in @(@($dmg1,'trailer'), @($dmg2,'checksum'), @($dmg3,'unknown flags'),
+                 @($dmg4,'offset+size overflows (offset 2^63-1)'),
+                 @($dmg5,'offset+size overflows (size 2^63-1)'))) {
     cmd /c "`"$($d[0])`" < NUL > `"$hiOut`" 2>&1"
     $code = $LASTEXITCODE
     $text = Get-Content -Raw $hiOut
@@ -1029,6 +1044,28 @@ if (-not ($q6err -cmatch '(?m)^   N +\S')) { Write-Host '        spelling: the p
 if (-not ($q6err -cmatch '(?m)^   Total +\S')) { Write-Host '        spelling: the global was not listed as Total' -ForegroundColor DarkGray; $okQ = $false }
 if ($q6err -cmatch '(?m)^   (n|total) +\S') { Write-Host '        spelling: a variable was listed by the fold' -ForegroundColor DarkGray; $okQ = $false }
 
+# 7. REPEATED FLAGS (round 2 of the adversarial loop, 2026-10-09). See test.sh's
+#    step 7. A second --break used to REPLACE the first list; lists accumulate,
+#    so line 9 once plus line 7 three times is 4 stops. A second --port is
+#    refused. And --stop-at-entry is honoured wherever it stands on the line --
+#    it used to lose to a --break written after it -- while the two entry flags
+#    together are a contradiction, refused.
+$cmds7 = Join-Path $dbgDir 'cmds7'
+Set-Content -LiteralPath $cmds7 -Encoding ascii -Value @('c','c','c','c','c','c')
+$q7 = Dbg-Run "debug --break 9 --break 7 `"$qBas`"" $cmds7 'q7'
+$hits7 = ([regex]::Matches((Read-Text $q7.Err), '-- breakpoint at')).Count
+if ($hits7 -ne 4) { Write-Host ("        --break 9 --break 7: stopped {0} times, wanted 1 + 3 = 4" -f $hits7) -ForegroundColor DarkGray; $okQ = $false }
+$q7b = Dbg-Run "debug --port 1 --port 2 `"$qBas`"" '' 'q7b'
+if (($q7b.Code -ne 2) -or ((Read-Text $q7b.Err) -notlike '*--port is given twice*')) {
+    Write-Host ("        --port twice: exit {0}, said '{1}'" -f $q7b.Code, (Read-Text $q7b.Err)) -ForegroundColor DarkGray; $okQ = $false }
+$q7c = Dbg-Run "debug --stop-at-entry --break 9 `"$qBas`"" $cmds7 'q7c'
+$q7cErr = Read-Text $q7c.Err
+if (($q7cErr -notlike '*-- entry at*') -or (([regex]::Matches($q7cErr, '-- breakpoint at')).Count -ne 1)) {
+    Write-Host '        --stop-at-entry --break 9: did not stop at entry and once at 9' -ForegroundColor DarkGray; $okQ = $false }
+$q7d = Dbg-Run "debug --stop-at-entry --no-stop-at-entry `"$qBas`"" '' 'q7d'
+if (($q7d.Code -ne 2) -or ((Read-Text $q7d.Err) -notlike '*contradict*')) {
+    Write-Host ("        both entry flags: exit {0}, said '{1}'" -f $q7d.Code, (Read-Text $q7d.Err)) -ForegroundColor DarkGray; $okQ = $false }
+
 if ($okQ) { Write-Host "PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)" -ForegroundColor Green }
 else { Write-Host "FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program" -ForegroundColor Red }
 
@@ -1396,7 +1433,126 @@ else {
     Write-Host ("        said: " + ($yText -replace "`n", ' / ')) -ForegroundColor DarkGray
 }
 
+# --- Z: ONE VALUE PER FLAG, AND NO OUTPUT THAT NAMES AN INPUT -------------------
+# Round 2 of the adversarial loop, 2026-10-09. Two findings and their class:
+#
+#   A SECOND --sandbox SILENTLY REPLACED THE FIRST. `--sandbox cage --sandbox .`
+#   ran with the WIDER root, at exit 0: a wrapper that adds its own --sandbox in
+#   front of a caller's arguments had its cage widened by the caller. Every
+#   single-valued flag had the same last-wins assignment; each is now refused
+#   when repeated (exit 2, naming the flag). docs/decisions.md has the list.
+#
+#   --out NAMING THE PROGRAM ITSELF TRUNCATED IT BEFORE IT WAS READ.
+#   TConsoleHost.Create opened the output with fmCreate before ReadSource ran, so
+#   the program read back as empty, ran, and exited 0 -- with the source gone.
+#   Now refused before anything is opened, by every spelling that reaches the
+#   same file (case on Windows, a `..` detour, a hard link), and the same rule
+#   holds for every output path the host takes: compile's .pbc, compile's
+#   --names file, pack's executable, and the binary pack copies itself from.
+#
+# Every expectation is "refused, exit 2, and the file that would have been
+# destroyed is byte-identical afterwards" -- derived from what the user asked
+# for, never from a run.
+$okZ = $true
+$zDir = Join-Path $tmp 'phosphor_z'
+New-Item -ItemType Directory -Force $zDir | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $zDir 'cage') | Out-Null
+$zBas = Join-Path $zDir 'job.bas'
+Set-Content -LiteralPath $zBas -Encoding ascii -Value @(
+    'println "SECRET-OUTPUT"',
+    'n = file_writealltext("escaped_outside.txt", "ESCAPED")'
+)
+$zBasBytes = [IO.File]::ReadAllBytes($zBas)
+$zLog = Join-Path $tmp 'phosphor_z.txt'
+$zEscaped = Join-Path $zDir 'escaped_outside.txt'
+function Invoke-Z([string] $tail) {
+    cmd /c "cd /d `"$zDir`" && `"$exe`" $tail < NUL > `"$zLog`" 2>&1"
+    $script:zCode = $LASTEXITCODE
+    return (Read-Text $zLog)
+}
+function Same-Bytes([string] $path, [byte[]] $want) {
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    # A loop, not Compare-Object: a TRUNCATED file is the failure under test, and
+    # Compare-Object refuses an empty array as a null argument -- which under
+    # ErrorActionPreference Stop would end the run instead of reporting it.
+    $got = [IO.File]::ReadAllBytes($path)
+    if ($got.Length -ne $want.Length) { return $false }
+    for ($k = 0; $k -lt $got.Length; $k++) { if ($got[$k] -ne $want[$k]) { return $false } }
+    return $true
+}
+function Z-Fail([string] $what, [string] $said) {
+    Write-Host ("        {0}: exit {1}, said '{2}'" -f $what, $zCode, ($said -replace "`r?`n", ' / ')) -ForegroundColor DarkGray
+    $script:okZ = $false
+}
+
+# Z1. --sandbox twice: refused, and the wider root never takes effect.
+if (Test-Path $zEscaped) { Remove-Item $zEscaped -Force }
+$t = Invoke-Z '--sandbox cage --sandbox . job.bas'
+if (($zCode -ne 2) -or ($t -notlike '*--sandbox is given twice*') -or ($t -like '*SECRET-OUTPUT*') -or
+    (Test-Path $zEscaped)) { Z-Fail '--sandbox cage --sandbox .' $t }
+
+# Z2. --out twice: refused, and neither file is created.
+$zA = Join-Path $zDir 'a.txt'; $zB = Join-Path $zDir 'b.txt'
+$t = Invoke-Z '--out a.txt --out b.txt job.bas'
+if (($zCode -ne 2) -or ($t -notlike '*--out is given twice*') -or (Test-Path $zA) -or (Test-Path $zB)) {
+    Z-Fail '--out a.txt --out b.txt' $t }
+
+# Z3. --out naming the program, four spellings of one file. Each must leave the
+#     source byte-identical. The case spelling is Windows-only: NTFS is
+#     case-insensitive, so JOB.BAS IS job.bas here, and on Linux it is not.
+$null = cmd /c "mklink /H `"$(Join-Path $zDir 'link.bas')`" `"$zBas`" > NUL 2>&1"
+$zSpellings = @('job.bas', 'JOB.BAS', 'cage\..\job.bas', "`"$zBas`"")
+if (Test-Path (Join-Path $zDir 'link.bas')) { $zSpellings += 'link.bas' }
+else { Write-Host '        (no hard link could be made here; that spelling is not asked)' -ForegroundColor DarkGray }
+foreach ($sp in $zSpellings) {
+    $t = Invoke-Z "--out $sp job.bas"
+    if (($zCode -ne 2) -or ($t -notlike '*names the program*') -or (-not (Same-Bytes $zBas $zBasBytes))) {
+        Z-Fail "--out $sp job.bas" $t
+        [IO.File]::WriteAllBytes($zBas, $zBasBytes)   # restore, so the next spelling is judged alone
+    }
+}
+# ...and the documented case still works: another file is written.
+$zReal = Join-Path $zDir 'real.txt'
+if (Test-Path $zReal) { Remove-Item $zReal -Force }
+$t = Invoke-Z '--out real.txt job.bas'
+if (($zCode -ne 0) -or (-not (Test-Path $zReal)) -or ((Read-Text $zReal) -notlike '*SECRET-OUTPUT*')) {
+    Z-Fail '--out real.txt job.bas (must still work)' $t }
+
+# Z4. compile: the .pbc naming the source, and naming the --names file.
+$t = Invoke-Z 'compile job.bas JOB.BAS'
+if (($zCode -ne 2) -or ($t -notlike '*names the*') -or (-not (Same-Bytes $zBas $zBasBytes))) {
+    Z-Fail 'compile job.bas JOB.BAS' $t; [IO.File]::WriteAllBytes($zBas, $zBasBytes) }
+$zNames = Join-Path $zDir 'names.txt'
+Set-Content -LiteralPath $zNames -Encoding ascii -Value 'nosuchname:n'
+$zNamesBytes = [IO.File]::ReadAllBytes($zNames)
+$t = Invoke-Z 'compile --check --names names.txt job.bas names.txt'
+if (($zCode -ne 2) -or ($t -notlike '*names the*') -or (-not (Same-Bytes $zNames $zNamesBytes))) {
+    Z-Fail 'compile --check --names names.txt job.bas names.txt' $t }
+
+# Z5. pack: the executable naming the .pbc, and naming the binary it copies
+#     itself from. The second runs a COPY of the interpreter, so a refusal that
+#     failed could only ever overwrite the copy.
+$zPbc = Join-Path $zDir 'job.pbc'
+$null = Invoke-Z 'compile job.bas job.pbc'
+$zPbcBytes = [IO.File]::ReadAllBytes($zPbc)
+$t = Invoke-Z 'pack job.pbc .\job.pbc'
+if (($zCode -ne 2) -or ($t -notlike '*names the*') -or (-not (Same-Bytes $zPbc $zPbcBytes))) {
+    Z-Fail 'pack job.pbc .\job.pbc' $t }
+# Its own .pbc, so this case is judged alone even if the one above broke job.pbc.
+$null = Invoke-Z 'compile job.bas stubjob.pbc'
+$zStub = Join-Path $zDir 'stubcopy.exe'
+Copy-Item -LiteralPath $exe -Destination $zStub -Force
+$zStubBytes = [IO.File]::ReadAllBytes($zStub)
+cmd /c "cd /d `"$zDir`" && `"$zStub`" pack stubjob.pbc stubcopy.exe < NUL > `"$zLog`" 2>&1"
+$zCode = $LASTEXITCODE
+$t = Read-Text $zLog
+if (($zCode -ne 2) -or ($t -notlike '*names this binary*') -or (-not (Same-Bytes $zStub $zStubBytes))) {
+    Z-Fail 'stubcopy pack stubjob.pbc stubcopy.exe' $t }
+
+if ($okZ) { Write-Host 'PASS  Z:a repeated flag is refused, and no output may name an input (run, compile, pack)' -ForegroundColor Green }
+else { Write-Host 'FAIL  Z:a repeated flag took the last value, or an output overwrote an input' -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ) { exit 0 } else { exit 1 }

@@ -210,7 +210,18 @@ tail -c 12 "$packed"             >> "$dmg2"
 head -c $((sizeA - 12)) "$packed" > "$dmg3"
 printf '\377\377\377\377'        >> "$dmg3"
 tail -c 8 "$packed"              >> "$dmg3"
-chmod +x "$dmg1" "$dmg2" "$dmg3"
+# AN OFFSET AND A SIZE WHOSE SUM OVERFLOWS (round 2, 2026-10-09) -- the twin of
+# test.ps1's dmg4/dmg5, whose comment has the arithmetic. Little-endian Int64s:
+# 2^63-1 is ff x7 then 7f; 1 is 01 then seven zero bytes. A's own checksum,
+# flags and magic follow, so only the two fields under test are wrong.
+dmg4="$hidir/damaged_offwrap";  dmg5="$hidir/damaged_sizwrap"
+head -c $((sizeA - 32)) "$packed" > "$dmg4"
+printf '\377\377\377\377\377\377\377\177\001\000\000\000\000\000\000\000' >> "$dmg4"
+tail -c 16 "$packed"             >> "$dmg4"
+head -c $((sizeA - 32)) "$packed" > "$dmg5"
+printf '\001\000\000\000\000\000\000\000\377\377\377\377\377\377\377\177' >> "$dmg5"
+tail -c 16 "$packed"             >> "$dmg5"
+chmod +x "$dmg1" "$dmg2" "$dmg3" "$dmg4" "$dmg5"
 
 okJ=0
 check_refused() {  # path what
@@ -227,6 +238,8 @@ check_refused() {  # path what
 check_refused "$dmg1" "trailer"       || okJ=1
 check_refused "$dmg2" "checksum"      || okJ=1
 check_refused "$dmg3" "unknown flags" || okJ=1
+check_refused "$dmg4" "offset+size overflows (offset 2^63-1)" || okJ=1
+check_refused "$dmg5" "offset+size overflows (size 2^63-1)"   || okJ=1
 if [ "$okJ" -eq 0 ]; then echo "PASS  J:corrupt payload    (exit 2, says so, never opens a prompt)"
 else echo "FAIL  J:corrupt payload falls through to the CLI"; fail=1; fi
 
@@ -775,6 +788,27 @@ if ! grep -q -E '^   N +[^ ]' "$dbgdir/q6.err"; then echo '        spelling: the
 if ! grep -q -E '^   Total +[^ ]' "$dbgdir/q6.err"; then echo '        spelling: the global was not listed as Total'; okQ=1; fi
 if grep -q -E '^   (n|total) +[^ ]' "$dbgdir/q6.err"; then echo '        spelling: a variable was listed by the fold'; okQ=1; fi
 
+# 7. REPEATED FLAGS (round 2 of the adversarial loop, 2026-10-09). A second
+#    --break used to REPLACE the first list; lists now accumulate, so line 9 once
+#    plus line 7 three times is 1 + 3 = 4 stops. A second --port is refused. And
+#    --stop-at-entry is honoured wherever it stands -- it used to lose to a
+#    --break written after it -- while both entry flags together contradict
+#    each other and are refused.
+printf 'c\nc\nc\nc\nc\nc\n' > "$dbgdir/cmds7"
+"$exe" debug --break 9 --break 7 "$dbgdir/q.bas" < "$dbgdir/cmds7" > /dev/null 2>"$dbgdir/q7.err"
+q7="$(grep -c -- '-- breakpoint at' "$dbgdir/q7.err" || true)"
+if [ "$q7" -ne 4 ]; then echo "        --break 9 --break 7: stopped $q7 times, wanted 1 + 3 = 4"; okQ=1; fi
+if "$exe" debug --port 1 --port 2 "$dbgdir/q.bas" < /dev/null > /dev/null 2>"$dbgdir/q7b.err"; then q7b=0; else q7b=$?; fi
+if [ "$q7b" -ne 2 ] || [[ "$(cat "$dbgdir/q7b.err")" != *'--port is given twice'* ]]; then
+  echo "        --port twice: exit $q7b, said '$(cat "$dbgdir/q7b.err")'"; okQ=1; fi
+"$exe" debug --stop-at-entry --break 9 "$dbgdir/q.bas" < "$dbgdir/cmds7" > /dev/null 2>"$dbgdir/q7c.err"
+q7c="$(grep -c -- '-- breakpoint at' "$dbgdir/q7c.err" || true)"
+if ! grep -q -- '-- entry at' "$dbgdir/q7c.err" || [ "$q7c" -ne 1 ]; then
+  echo '        --stop-at-entry --break 9: did not stop at entry and once at 9'; okQ=1; fi
+if "$exe" debug --stop-at-entry --no-stop-at-entry "$dbgdir/q.bas" < /dev/null > /dev/null 2>"$dbgdir/q7d.err"; then q7d=0; else q7d=$?; fi
+if [ "$q7d" -ne 2 ] || [[ "$(cat "$dbgdir/q7d.err")" != *contradict* ]]; then
+  echo "        both entry flags: exit $q7d, said '$(cat "$dbgdir/q7d.err")'"; okQ=1; fi
+
 if [ "$okQ" -eq 0 ]; then echo 'PASS  Q:phosphor debug (steps, names frames and variables, invisible to the program)'
 else echo 'FAIL  Q:the debugger waits with no terminal, cannot name what it stopped in, or moves the program'; fail=1; fi
 
@@ -1038,5 +1072,87 @@ else
   sed 's/^/        said: /' "$tmpdir/y.out"
   fail=1
 fi
+
+# --- Z: ONE VALUE PER FLAG, AND NO OUTPUT THAT NAMES AN INPUT -------------------
+# The twin of block Z in scripts/test.ps1, whose comment carries the two findings
+# and the class. Every expectation is "refused, exit 2, and the file that would
+# have been destroyed is byte-identical afterwards".
+#
+# THE SPELLINGS DIFFER BY PLATFORM, ON PURPOSE. Windows asks JOB.BAS, because NTFS
+# folds case and JOB.BAS IS job.bas there; here it is a different file and the
+# run must SUCCEED, which is asked below as its own case. Here a SYMLINK is asked
+# as well as a hard link -- SameSourceFile's stat() follows it to the file that
+# would be truncated.
+okZ=0
+zdir="$tmpdir/z"
+mkdir -p "$zdir/cage"
+printf '%s\n' 'println "SECRET-OUTPUT"' 'n = file_writealltext("escaped_outside.txt", "ESCAPED")' > "$zdir/job.bas"
+cp "$zdir/job.bas" "$zdir/job.bas.orig"
+zout=''; zcode=0
+z_run() {  # args... -> $zout and $zcode; never a substitution around the exit code
+  if zout="$(cd "$zdir" && "$exe" "$@" < /dev/null 2>&1)"; then zcode=0; else zcode=$?; fi
+}
+z_fail() {  # what
+  echo "        $1: exit $zcode, said '$zout'"; okZ=1
+}
+
+# Z1. --sandbox twice: refused, and the wider root never takes effect.
+rm -f "$zdir/escaped_outside.txt"
+z_run --sandbox cage --sandbox . job.bas
+if [ "$zcode" -ne 2 ] || [[ "$zout" != *'--sandbox is given twice'* ]] || [[ "$zout" == *SECRET-OUTPUT* ]] \
+   || [ -e "$zdir/escaped_outside.txt" ]; then z_fail '--sandbox cage --sandbox .'; fi
+
+# Z2. --out twice: refused, and neither file is created.
+z_run --out a.txt --out b.txt job.bas
+if [ "$zcode" -ne 2 ] || [[ "$zout" != *'--out is given twice'* ]] || [ -e "$zdir/a.txt" ] \
+   || [ -e "$zdir/b.txt" ]; then z_fail '--out a.txt --out b.txt'; fi
+
+# Z3. --out naming the program: five spellings of one file.
+ln "$zdir/job.bas" "$zdir/hard.bas"
+ln -s "$zdir/job.bas" "$zdir/soft.bas"
+for sp in job.bas ./cage/../job.bas "$zdir/job.bas" hard.bas soft.bas; do
+  z_run --out "$sp" job.bas
+  if [ "$zcode" -ne 2 ] || [[ "$zout" != *'names the program'* ]] || ! cmp -s "$zdir/job.bas" "$zdir/job.bas.orig"; then
+    z_fail "--out $sp job.bas"
+    cat "$zdir/job.bas.orig" > "$zdir/job.bas"   # restore IN PLACE: the links must keep pointing at it
+  fi
+done
+# ...and the documented cases still work: another file is written -- JOB.BAS
+# among them, which on this filesystem is another file.
+for sp in real.txt JOB.BAS; do
+  rm -f "$zdir/$sp"
+  z_run --out "$sp" job.bas
+  if [ "$zcode" -ne 0 ] || [ ! -e "$zdir/$sp" ] || [[ "$(cat "$zdir/$sp")" != *SECRET-OUTPUT* ]] \
+     || ! cmp -s "$zdir/job.bas" "$zdir/job.bas.orig"; then z_fail "--out $sp job.bas (must still work)"; fi
+done
+
+# Z4. compile: the .pbc naming the source, and naming the --names file.
+z_run compile job.bas ./job.bas
+if [ "$zcode" -ne 2 ] || [[ "$zout" != *'names the'* ]] || ! cmp -s "$zdir/job.bas" "$zdir/job.bas.orig"; then
+  z_fail 'compile job.bas ./job.bas'; cat "$zdir/job.bas.orig" > "$zdir/job.bas"; fi
+printf '%s\n' 'nosuchname:n' > "$zdir/names.txt"
+cp "$zdir/names.txt" "$zdir/names.txt.orig"
+z_run compile --check --names names.txt job.bas names.txt
+if [ "$zcode" -ne 2 ] || [[ "$zout" != *'names the'* ]] || ! cmp -s "$zdir/names.txt" "$zdir/names.txt.orig"; then
+  z_fail 'compile --check --names names.txt job.bas names.txt'; fi
+
+# Z5. pack: the executable naming the .pbc, and naming the binary it copies
+#     itself from. The second runs a COPY of the interpreter, so a refusal that
+#     failed could only ever replace the copy -- which on this platform it DID:
+#     rename(2) replaces a running binary without complaint.
+z_run compile job.bas job.pbc
+cp "$zdir/job.pbc" "$zdir/job.pbc.orig"
+z_run pack job.pbc ./job.pbc
+if [ "$zcode" -ne 2 ] || [[ "$zout" != *'names the'* ]] || ! cmp -s "$zdir/job.pbc" "$zdir/job.pbc.orig"; then
+  z_fail 'pack job.pbc ./job.pbc'; fi
+z_run compile job.bas stubjob.pbc
+cp "$exe" "$zdir/stubcopy"; chmod +x "$zdir/stubcopy"
+cp "$zdir/stubcopy" "$zdir/stubcopy.orig"
+if zout="$(cd "$zdir" && ./stubcopy pack stubjob.pbc stubcopy < /dev/null 2>&1)"; then zcode=0; else zcode=$?; fi
+if [ "$zcode" -ne 2 ] || [[ "$zout" != *'names this binary'* ]] || ! cmp -s "$zdir/stubcopy" "$zdir/stubcopy.orig"; then
+  z_fail './stubcopy pack stubjob.pbc stubcopy'; fi
+
+if [ "$okZ" -eq 0 ]; then echo 'PASS  Z:a repeated flag is refused, and no output may name an input (run, compile, pack)'
+else echo 'FAIL  Z:a repeated flag took the last value, or an output overwrote an input'; fail=1; fi
 
 exit "$fail"

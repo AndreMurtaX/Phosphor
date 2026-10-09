@@ -42,7 +42,14 @@ phosphor debug [--stop-at-entry] [--break N,N] <file.bas>
 ```
 
 With no `--break` it stops on the first statement. With `--break` it stops only
-where you said, unless you also pass `--stop-at-entry`.
+where you said, unless you also pass `--stop-at-entry` -- anywhere on the line:
+until 2026-10-09 `--stop-at-entry --break 9` lost the entry stop that
+`--break 9 --stop-at-entry` kept. `--no-stop-at-entry` says the opposite, and
+the two together are refused (exit 2). **`--break` may be repeated and the lists
+add up**: `--break 9 --break 7` arms both lines (a second `--break` used to
+replace the first list in silence). `--port` is single-valued, and a second one
+is refused (exit 2) rather than taking over. docs/decisions.md has every flag's
+rule and why.
 
 | key | what it does |
 | --- | ------------ |
@@ -265,6 +272,29 @@ integer is dropped, a JSON number with a fraction or an exponent included:
   went out raw, which a strict editor must refuse; each such byte is written as
   the four characters `\xFF` instead. That is for display and cannot be undone: a
   string that already holds those four characters looks the same.
+
+**And two from the round of 2026-10-09, about what a frame's bytes can do before
+any field of it is read:**
+
+- **A frame may nest at most 256 levels deep**, and one that nests deeper is
+  refused like a frame that does not parse: an `error` event whose text names the
+  limit, and the session ends. It is judged on the text BEFORE the parser runs,
+  because fpjson parses by recursion and frees the tree by recursion -- about
+  120 KB of `[` killed the debuggee, and 800 KB crashed it with an access
+  violation, both well inside the 1 MB frame limit. 256 is the ceiling
+  `json_parse@` already puts on a document (docs/libraries/json.md), for the
+  same reason; a real frame nests three levels at most. Brackets inside a string
+  -- single-quoted as well as double-quoted, since fpjson accepts both -- are
+  text, and only the first JSON value on the line is judged, because it is the
+  only one the parser reads. The same bound guards the frames answered after a
+  session ends, which went through a second, equally unbounded parse.
+- **No frame can be mistaken for the host's own bookkeeping.** The thread that
+  reads the socket used to report "the connection closed" and "a frame was too
+  long" as the one-byte lines `0x00` and `0x01`, in the same queue as the
+  editor's frames -- so an editor (or anything on loopback) sending `0x00` and a
+  newline detached the session in silence, and `0x01` drew a false "longer than
+  1048576 bytes". Those two facts now travel beside the queue, not in it, and a
+  one-byte frame of either is what it is: one byte that does not parse as JSON.
 
 **`continued` is never sent, by design.** The specification sends it for a resume
 the editor did not ask for, and every resume this host makes after a `stopped`

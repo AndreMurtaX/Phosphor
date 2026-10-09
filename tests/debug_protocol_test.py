@@ -2561,6 +2561,147 @@ check('  and the byte reads as the four characters \\xFF', vals == ['\\xFF'], st
 w23.send(seq=5, cmd='continue')
 w23.close()
 
+
+# ---------------------------------------------------------------------------
+# 2026-10-09, round 2 of the adversarial loop: what a PEER'S BYTES can do to
+# the host before a single field of them is read.
+# ---------------------------------------------------------------------------
+def exit_of(w, timeout=20):
+    try:
+        return w.proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        w.proc.kill()
+        return None
+
+
+def answers(got, s):
+    return [m for m in got if m.get('seq') == s]
+
+
+# C1. NESTING IS BOUNDED BEFORE THE PARSER IS ENTERED. fpjson's GetJSON is
+#     recursive descent and the tree it returns is freed by a recursive
+#     destructor, so a frame of about 120 KB of '[' killed the debuggee, and
+#     800 KB crashed the host with an access violation -- inside the 1 MB frame
+#     limit, so that limit was no defence. The ceiling is 256, the number
+#     json_parse@ already refuses past (MaxJsonDepth in PhosphorJsonLib), and
+#     the expected depths below are COUNTED, not read off a run: an object is one
+#     level and every '[' inside it one more.
+DEEP = 300000   # '[' bytes: well past the crash, well inside the 1 MB frame limit
+for label, frame in (
+        ('pure nesting', '[' * DEEP),
+        # The delimiter case: fpjson opens a string on ' as well as on ", so a
+        # scan that knew only " is flipped INTO a string by the lone " inside a
+        # single-quoted value, out again by the next key's opening quote, and
+        # then reads every bracket after it as text. The scanner that guards
+        # json_parse@ learned this the hard way (see JsonNestsTooDeep).
+        ('hidden behind a single-quoted "', '{"seq":2,"cmd":"x","a":\'"\',"b":' + '[' * DEEP)):
+    wc1 = Wire(SLOW, 'deep_c1.bas')
+    wc1.init()
+    try:
+        wc1.raw(frame + chr(10))
+    except OSError:
+        pass
+    got, secs = until_close(wc1)
+    errs = [m for m in got if m.get('event') == 'error']
+    check('round 2 C1: a frame nested %d deep (%s) is refused with an error event naming 256'
+          % (DEEP, label),
+          len(errs) == 1 and '256' in (errs[0].get('text') or '')
+          and not any('seq' in m for m in got), str(got)[:200])
+    check('  and the host survives it (exit 0, not a crash)', exit_of(wc1) == 0)
+    wc1.close()
+
+# The boundary, both sides of it. 1 (the object) + 255 = 256 is allowed and is
+# answered like any unknown command; 1 + 256 = 257 is not.
+wc1b = Wire(SLOW, 'deep_c1b.bas')
+wc1b.init()
+wc1b.raw('{"seq":2,"cmd":"nosuch","x":' + '[' * 255 + ']' * 255 + '}' + chr(10))
+r256 = None
+for _ in range(10):
+    m = wc1b.recv(timeout=15)
+    if m is None or m.get('seq') == 2:
+        r256 = m
+        break
+check('round 2 C1: nesting of exactly 256 is parsed and answered (unknown command)',
+      r256 is not None and r256.get('ok') is False and 'nosuch' in (r256.get('error') or ''),
+      str(r256))
+wc1b.raw('{"seq":3,"cmd":"nosuch","x":' + '[' * 256 + ']' * 256 + '}' + chr(10))
+got, secs = until_close(wc1b)
+errs = [m for m in got if m.get('event') == 'error']
+check('  and 257 is refused, with no answer under its seq',
+      len(errs) == 1 and '256' in (errs[0].get('text') or '') and not answers(got, 3),
+      str(got)[:200])
+check('  and the host exits 0', exit_of(wc1b) == 0)
+wc1b.close()
+
+# Brackets inside a string are TEXT: a frame that is shallow and merely mentions
+# brackets must not be refused. 300 of them in a value, depth 1.
+wc1c = Wire(SLOW, 'deep_c1c.bas')
+wc1c.init()
+wc1c.raw('{"seq":2,"cmd":"nosuch","x":"' + '[' * 300 + '","y":\'' + '{' * 300 + '\'}' + chr(10))
+r = None
+for _ in range(10):
+    m = wc1c.recv(timeout=15)
+    if m is None or m.get('seq') == 2:
+        r = m
+        break
+check('round 2 C1: brackets inside a string literal are not nesting',
+      r is not None and r.get('ok') is False and 'nosuch' in (r.get('error') or ''), str(r))
+wc1c.send(seq=3, cmd='disconnect', terminate=True)
+until_close(wc1c)
+wc1c.close()
+
+# THE SECOND GetJSON. RefuseQueued answers frames the reader had already queued
+# when the session ended -- and parsed each with the same unbounded call. The
+# program sits inside ONE statement (pause) while both frames arrive, so they
+# are both queued before the VM drains either: the disconnect is handled, and
+# the deep frame behind it reaches RefuseQueued, deterministically.
+PAUSE1 = ('rem one statement that takes a second, so frames queue behind it\n'   # 1
+          'x = pause(1)\n'                                                      # 2
+          'println "done"\n'                                                    # 3
+          'end\n')                                                              # 4
+wc1d = Wire(PAUSE1, 'deep_c1d.bas')
+wc1d.init()
+wc1d.send(seq=2, cmd='launch', stopAtEntry=False)
+for _ in range(10):
+    m = wc1d.recv(timeout=15)
+    if m is None or m.get('seq') == 2:
+        break
+try:
+    wc1d.raw('{"seq":3,"cmd":"disconnect","terminate":false}' + chr(10) + '[' * DEEP + chr(10))
+except OSError:
+    pass
+got, secs = until_close(wc1d)
+check('round 2 C1: a deep frame queued behind a disconnect does not kill the host',
+      [m.get('ok') for m in answers(got, 3)] == [True], str(got)[:200])
+try:
+    outc1d, _ = wc1d.proc.communicate(timeout=20)
+except subprocess.TimeoutExpired:
+    wc1d.proc.kill()
+    outc1d = b''
+check('  and the detached program runs to its end, exit 0',
+      b'done' in outc1d and wc1d.proc.returncode == 0,
+      'rc=%r out=%r' % (wc1d.proc.returncode, outc1d[:40]))
+wc1d.close()
+
+# C2. NO PEER BYTE SEQUENCE IS THE READER'S OWN SIGNAL. The reader queued #0
+#     for "the socket closed" and #1 for "a frame was too long" into the SAME
+#     inbox as the peer's lines, so a one-byte frame 0x00 was a silent detach
+#     (and exit 2) and 0x01 a false "frame longer than 1048576". Each is one byte
+#     that is not JSON, and the answer is the one every unparseable frame gets.
+for byte in (0, 1):
+    wc2 = Wire(SLOW, 'byte_c2_%d.bas' % byte)
+    wc2.init()
+    wc2.conn.sendall(bytes([byte, 10]))
+    got, secs = until_close(wc2)
+    errs = [m for m in got if m.get('event') == 'error']
+    text = (errs[0].get('text') or '') if errs else ''
+    check('round 2 C2: a one-byte frame 0x%02x is reported as a frame that does not parse'
+          % byte,
+          len(errs) == 1 and 'did not parse' in text and '1 bytes' in text
+          and '1048576' not in text, str(got)[:200])
+    check('  and the host exits 0, as for any unparseable frame', exit_of(wc2) == 0)
+    wc2.close()
+
 print('')
 print('PASS %d   FAIL %d' % (len(ok), len(bad)))
 if bad:

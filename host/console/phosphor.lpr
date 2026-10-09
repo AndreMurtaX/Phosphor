@@ -1194,11 +1194,42 @@ begin
   end;
 end;
 
+{ Defined with the debug protocol below, which needed it first. }
+function SameSourceFile(const AWanted, AKnown: String): Boolean; forward;
+
+{ DOES AN OUTPUT PATH NAME ONE OF THE COMMAND'S INPUTS? Said, and answered True,
+  when it does; the caller refuses with exit 2 BEFORE OPENING ANYTHING (round 2
+  of the adversarial loop, 2026-10-09).
+
+  `phosphor run job.bas --out job.bas` opened the output with fmCreate before the
+  source was read, so the program was truncated and then read back as nothing
+  -- an empty program, exit 0 on Linux, the source gone. Every output path this
+  host takes asks the same question of every input it reads: run's --out of the
+  program, compile's .pbc of the source and of the --names file, pack's
+  executable of the .pbc and of this binary (the stub it copies).
+
+  SameSourceFile is the test, and it was built for exactly this question about a
+  breakpoint's path: the expanded spelling first (a `..` detour, either
+  separator, and case wherever the platform's filesystem ignores it), then the
+  file's identity (volume and file index on Windows, device and inode on Unix),
+  which is what catches a hard link or a symlink. A path that does not exist yet
+  cannot be an input, and answers no. }
+function OutputNamesInput(const AVerb, AOut, AIn, AWhat: String): Boolean;
+begin
+  Result := (AOut <> '') and (AIn <> '') and SameSourceFile(AOut, AIn);
+  if Result then
+  begin
+    Writeln(StdErr, 'phosphor: ', AVerb, ': ', AOut, ' names ', AWhat, ' (', AIn, ')');
+    Writeln(StdErr, '  refused before anything was opened: writing there would destroy what is read');
+  end;
+end;
+
 function RunFile(const APath, AOutPath: String): Integer;
 var
   host: TConsoleHost;
   eng: TPhosphorEngine;
   fs: TFileStream;
+  pbc: TBytesStream;
   line: Integer;
   isPbc: Boolean;
   source: String;
@@ -1207,6 +1238,41 @@ begin
   begin
     Writeln(StdErr, 'phosphor: file not found: ', APath);
     Exit(2);
+  end;
+  if OutputNamesInput('--out', AOutPath, APath, 'the program being run') then Exit(2);
+  { THE INPUT IS READ WHOLE BEFORE THE OUTPUT IS OPENED (round 2, 2026-10-09).
+    The output used to be created first -- fmCreate, which truncates -- so an
+    --out that reached the program by any path the check above cannot see had
+    already destroyed it by the time it was read. Reading first makes the order
+    itself safe: whatever the output turns out to be, the program was already
+    in memory. A .pbc is read into memory for the same reason, rather than run
+    from an open file.
+
+    OPENING the input is guarded; RUNNING it is deliberately not. An engine
+    crash reported as "cannot read" would be the same wrong answer wearing a
+    different message, so the two are separated: everything that touches the
+    filesystem happens here, and the interpreter runs below, where the net
+    around the program body is the one that answers for it. }
+  pbc := nil;
+  try
+    isPbc := IsBytecode(APath);
+    if isPbc then
+    begin
+      // a precompiled .pbc: run it without the lexer/compiler
+      pbc := TBytesStream.Create();
+      fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+      try pbc.CopyFrom(fs, 0); finally fs.Free; end;
+      pbc.Position := 0;
+    end
+    else
+      source := ReadSource(APath);
+  except
+    on Ex: Exception do
+    begin
+      pbc.Free;
+      Writeln(StdErr, 'phosphor: cannot read ', APath, ': ', Ex.Message);
+      Exit(2);
+    end;
   end;
   { --out THAT CANNOT BE OPENED IS A FAILURE, not a quiet nothing. This used to
     leave the program unrun, print not one character, and exit 0 -- so a script
@@ -1218,38 +1284,18 @@ begin
   except
     on Ex: Exception do
     begin
+      pbc.Free;
       Writeln(StdErr, 'phosphor: cannot write to ', AOutPath, ': ', Ex.Message);
       Exit(2);
     end;
   end;
   eng := TPhosphorEngine.Create();
-  BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
   try
+    BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
     BindHostSeams(eng, host, APath);   // a file run has a path; a breakpoint names it
     RegisterAllPackages(eng);
-    { OPENING the input is guarded; RUNNING it is deliberately not. An engine
-      crash reported as "cannot read" would be the same wrong answer wearing a
-      different message, so the two are separated: everything that touches the
-      filesystem happens here, and the interpreter runs below, where the net
-      around the program body is the one that answers for it. }
-    try
-      isPbc := IsBytecode(APath);
-      if isPbc then
-        // a precompiled .pbc: run it without the lexer/compiler
-        fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone)
-      else
-        source := ReadSource(APath);
-    except
-      on Ex: Exception do
-      begin
-        Writeln(StdErr, 'phosphor: cannot read ', APath, ': ', Ex.Message);
-        Exit(2);
-      end;
-    end;
     if isPbc then
-    begin
-      try line := eng.RunBytecode(fs); finally fs.Free; end;
-    end
+      line := eng.RunBytecode(pbc)
     else
       line := eng.Run(source);
     if line <> 0 then
@@ -1261,6 +1307,7 @@ begin
   finally
     eng.Free;
     host.Free;
+    pbc.Free;            // nil for a source run
   end;
 end;
 
@@ -1288,6 +1335,16 @@ end;
 
 type
   TDbgState = (dbgConnected, dbgInitialized, dbgRunning, dbgStopped, dbgDone);
+
+  { WHAT AN INBOX ENTRY IS, said beside it rather than inside it (round 2 of the
+    adversarial loop, 2026-10-09). The reader used to report "the socket closed"
+    as the one-byte line #0 and "a frame was too long" as #1, queued into the
+    SAME list as the peer's own lines -- and a peer can send either byte as a
+    frame. `0x00 LF` detached the session in silence (and the host exited 2);
+    `0x01 LF` was refused as "longer than 1048576 bytes". The reader's two facts
+    now travel as a tag on the entry, which no byte sequence on the wire can
+    set: every peer line is dsFrame, whatever it holds. }
+  TDbgSignal = (dsFrame, dsClosed, dsOversize);
 
   TDebugProto = class;
 
@@ -1406,13 +1463,13 @@ type
     procedure SendJSON(AObj: TJSONObject);
     procedure SendEvent(const AName: String; AExtra: TJSONObject);
     procedure SendError(ASeq: Integer; const AText: String);
-    function TakeLine(out ALine: String): Boolean;
+    function TakeLine(out ALine: String; out ASig: TDbgSignal): Boolean;
     procedure DoStackTrace(ASeq, ALine, ADepth: Integer);
     procedure DoVariables(ASeq, AFrameIx, ADepth: Integer);
     function EvaluateExpr(AFrameIx, ADepth: Integer; const AExpr: String;
       ACompileOnly: Boolean; out AValue, AKind, AError: String): Boolean;
     procedure DoEvaluate(ASeq, AFrameIx, ADepth: Integer; const AExpr: String);
-    function Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
+    function Handle(ASig: TDbgSignal; const ARaw: String; ALine, ADepth: Integer): Boolean;
     procedure RefuseQueued(const AWhy: String; ADisconnectOk: Boolean);
   public
     { WHERE A BREAKPOINT STATEMENT GOES ONCE THE EDITOR HAS GONE. A detached
@@ -1424,6 +1481,7 @@ type
     destructor Destroy; override;
     function Connect(APort: Integer): Boolean;
     procedure Push(const ALine: String);
+    procedure PushSignal(ASig: TDbgSignal);
     procedure InterruptVM;
     procedure InterruptRun;   // safe from the socket thread; see FRunVM
     procedure ReleaseRunVM;   // call the moment Run returns
@@ -1443,6 +1501,87 @@ type
     procedure Trace(const AMessage: String; ALine: Integer;
                     const AOperands: array of TValue);
   end;
+
+(* HOW DEEP A DEBUG FRAME MAY NEST, judged on the TEXT before the parser is
+   entered (round 2 of the adversarial loop, 2026-10-09).
+
+   fpjson's GetJSON is recursive descent and the tree it hands back is freed by a
+   recursive destructor, so a frame's nesting is spent on the stack twice. A
+   frame of about 120 KB of open brackets killed the debuggee, and 800 KB crashed
+   this host with an access violation -- both inside DBG_MAX_FRAME, so the frame
+   limit was no defence. A stack overflow is not an exception a handler catches,
+   which is why the try/except around both GetJSON calls never saw it.
+
+   256 IS THE NUMBER json_parse@ ALREADY REFUSES PAST: MaxJsonDepth in
+   engine/libs/PhosphorJsonLib.pas, adopted there from the compiler's own ceiling
+   on nested expressions. It is restated here rather than imported because that
+   constant lives in the engine's implementation section; the two are the same
+   decision, and docs/debugging.md says so. A protocol frame is an object holding
+   scalars and flat arrays -- three levels at most -- so 256 refuses nothing an
+   editor sends.
+
+   THE SCAN IS fpjson's OWN LEXICAL RULE, and it is the one JsonNestsTooDeep had
+   to learn twice: a literal opens on a double quote OR a single quote (fpjson
+   accepts the single quote unless joStrict is set, and GetJSON does not set it)
+   and closes on the SAME delimiter; a backslash escapes the next character; a
+   bracket inside a literal is text. A scan that knew only the double quote could
+   be flipped into a string by a lone double quote inside a single-quoted value,
+   and would then read every bracket after it as text -- the depth never rises and
+   the parser gets the whole tower. tests/debug_protocol_test.py sends exactly
+   that frame.
+
+   AND ONLY AS FAR AS THE PARSER READS. fpjson parses one value and, without
+   joStrict, never looks past it, so the scan stops where that value ends: a bare
+   scalar at its first delimiter, a string at its closing quote, a container at
+   the bracket that closes it. Linear in the frame, which DBG_MAX_FRAME bounds. *)
+const
+  DBG_MAX_NESTING = 256;
+
+function DbgFrameNestsTooDeep(const ARaw: String): Boolean;
+var
+  i: Integer;
+  depth: Integer;
+  delim: Char;
+  esc: Boolean;
+begin
+  Result := False;
+  i := 1;
+  while (i <= Length(ARaw)) and (ARaw[i] in [' ', #9, #10, #13]) do Inc(i);
+  if i > Length(ARaw) then Exit;
+  // A bare scalar ends before any bracket could open: nothing to recurse into.
+  if not (ARaw[i] in ['[', '{', '"', '''']) then Exit;
+  depth := 0;
+  delim := #0;                          // #0 = not inside a literal
+  esc := False;
+  while i <= Length(ARaw) do
+  begin
+    if delim <> #0 then
+    begin
+      if esc then esc := False
+      else if ARaw[i] = '\' then esc := True
+      else if ARaw[i] = delim then
+      begin
+        delim := #0;                    // the SAME delimiter closes it
+        if depth = 0 then Exit;         // a top-level string is the whole value
+      end;
+    end
+    else
+      case ARaw[i] of
+        '"', '''': delim := ARaw[i];
+        '[', '{':
+          begin
+            Inc(depth);
+            if depth > DBG_MAX_NESTING then Exit(True);
+          end;
+        ']', '}':
+          begin
+            Dec(depth);
+            if depth <= 0 then Exit;    // the first value has closed
+          end;
+      end;
+    Inc(i);
+  end;
+end;
 
 constructor TDbgReader.Create(AOwner: TDebugProto);
 begin
@@ -1494,10 +1633,10 @@ begin
     if got <= 0 then
     begin
       { A closed socket IS a disconnect; the spec says the editor treats it that
-        way and so does this end. Queue the sentinel so the VM thread leaves its
+        way and so does this end. Queue the signal so the VM thread leaves its
         stop instead of waiting for a frame that will never come -- and wake a
         RUNNING program for it too, or the close is read only when it ends. }
-      FOwner.Push(#0);
+      FOwner.PushSignal(dsClosed);
       FOwner.InterruptRun();
       Break;
     end;
@@ -1526,15 +1665,16 @@ begin
     TakeRun(runFrom, got);
     if Length(acc) > DBG_MAX_FRAME then
     begin
-      { #1, NOT #0 (2026-10-08, second adversarial round): #0 means the peer
-        closed, and Handle answers that by detaching in silence -- so a frame
-        past the limit ended the session with no word to the editor. #1 is a
-        frame this end refuses, which Handle reports as an `error` event.
+      { dsOversize, NOT dsClosed (2026-10-08, second adversarial round): a close
+        is answered by detaching in silence -- so a frame past the limit ended
+        the session with no word to the editor. dsOversize is a frame this end
+        refuses, which Handle reports as an `error` event. (Until 2026-10-09 these
+        two were the lines #0 and #1, which a peer could send: see TDbgSignal.)
         AND THE PROGRAM IS WOKEN FOR IT, as for any frame: pushed without the
         nudge, a sentinel that arrived while the program RAN sat in the inbox
         until the program ended -- no event, the socket open behind it (a third
         adversarial pass, 2026-10-08). }
-      FOwner.Push(#1);
+      FOwner.PushSignal(dsOversize);
       FOwner.InterruptRun();
       Break;
     end;
@@ -1692,23 +1832,38 @@ begin
   Result := True;
 end;
 
+{ A peer's line: always dsFrame, whatever bytes it holds. The tag rides in the
+  list's Objects slot, so it is set by WHICH of these two was called and never by
+  the content -- see TDbgSignal. }
 procedure TDebugProto.Push(const ALine: String);
 begin
   FLock.Enter();
   try
-    FInbox.Add(ALine);
+    FInbox.AddObject(ALine, TObject(PtrUInt(Ord(dsFrame))));
   finally
     FLock.Leave();
   end;
 end;
 
-function TDebugProto.TakeLine(out ALine: String): Boolean;
+procedure TDebugProto.PushSignal(ASig: TDbgSignal);
+begin
+  FLock.Enter();
+  try
+    FInbox.AddObject('', TObject(PtrUInt(Ord(ASig))));
+  finally
+    FLock.Leave();
+  end;
+end;
+
+function TDebugProto.TakeLine(out ALine: String; out ASig: TDbgSignal): Boolean;
 begin
   ALine := '';
+  ASig := dsFrame;
   FLock.Enter();
   try
     if FInbox.Count = 0 then Exit(False);
     ALine := FInbox[0];
+    ASig := TDbgSignal(PtrUInt(FInbox.Objects[0]));
     FInbox.Delete(0);
   finally
     FLock.Leave();
@@ -2827,17 +2982,22 @@ end;
   in flight when the socket closes cannot be, and the editor's own rule (a closed
   socket is a disconnect) covers those. Only frames that parse and carry a seq are
   answered; a line that does not parse arrived after the session ended and there
-  is no request to answer. #0 is the reader's closed-socket sentinel. }
+  is no request to answer. The reader's own signals (TDbgSignal) are not frames
+  and are skipped; so is a frame nested past DBG_MAX_NESTING, which is never
+  handed to the parser at all -- this was the second unbounded GetJSON on peer
+  input (round 2, 2026-10-09). }
 procedure TDebugProto.RefuseQueued(const AWhy: String; ADisconnectOk: Boolean);
 var
   raw, cmd: String;
+  sig: TDbgSignal;
   d: TJSONData;
   res: TJSONObject;
   seq: Integer;
 begin
-  while TakeLine(raw) do
+  while TakeLine(raw, sig) do
   begin
-    if (raw = #0) or (raw = #1) then Continue;
+    if sig <> dsFrame then Continue;
+    if DbgFrameNestsTooDeep(raw) then Continue;
     d := nil;
     try
       try
@@ -2866,7 +3026,7 @@ begin
   end;
 end;
 
-function TDebugProto.Handle(const ARaw: String; ALine, ADepth: Integer): Boolean;
+function TDebugProto.Handle(ASig: TDbgSignal; const ARaw: String; ALine, ADepth: Integer): Boolean;
 var
   d: TJSONData;
   o, res, caps: TJSONObject;
@@ -2889,7 +3049,7 @@ begin
     end. The decision taken when the session ended stands. }
   if FDisconnected then Exit(True);
 
-  if ARaw = #0 then
+  if ASig = dsClosed then
   begin
     { The socket closed. Detach and let the program finish, which is the same
       thing `disconnect terminate:false` asks for. }
@@ -2898,12 +3058,31 @@ begin
     FAction := daRun;
     Exit(True);
   end;
-  if ARaw = #1 then
+  if ASig = dsOversize then
   begin
     { A frame past DBG_MAX_FRAME: reported, then the session ends like any
       frame this end cannot read. }
     res := TJSONObject.Create();
     res.Add('text', 'a frame longer than 1048576 bytes was refused; the session is closed');
+    SendEvent('error', res);
+    EndSession();
+    FDisconnected := True;
+    FAction := daRun;
+    Exit(True);
+  end;
+
+  { NESTING IS BOUNDED BEFORE THE PARSER IS ENTERED (round 2, 2026-10-09). See
+    DbgFrameNestsTooDeep: about 120 KB of '[' -- inside DBG_MAX_FRAME, so that
+    limit was no defence -- overflowed the stack in GetJSON or in the Free of
+    the tree it built, and the host died with an access violation. Refused like
+    any frame this end cannot read: an `error` event that says why, and the
+    session ends. }
+  if DbgFrameNestsTooDeep(ARaw) then
+  begin
+    res := TJSONObject.Create();
+    res.Add('text', Format('a frame of %d bytes nests deeper than %d levels and ' +
+                           'was not parsed; the session is closed',
+                           [Length(ARaw), DBG_MAX_NESTING]));
     SendEvent('error', res);
     EndSession();
     FDisconnected := True;
@@ -3325,6 +3504,7 @@ function TDebugProto.OnStop(AReason: TPhosphorStopReason; ALine: Integer;
                             ADepth: Integer): TPhosphorDebugAction;
 var
   raw, why, condWhy: String;
+  sig: TDbgSignal;
   ev: TJSONObject;
   pending: Boolean;
   entryQuiet, stopHere: Boolean;
@@ -3401,8 +3581,8 @@ begin
     not to be able to see. }
   if FState = dbgRunning then
   begin
-    while TakeLine(raw) do
-      if Handle(raw, ALine, ADepth) then Break;
+    while TakeLine(raw, sig) do
+      if Handle(sig, raw, ALine, ADepth) then Break;
     if FPendingArm then
     begin
       { Armed HERE rather than left for the next boundary: this is a safe point
@@ -3528,9 +3708,9 @@ begin
     while True do
     begin
       if FClosed then Break;
-      if TakeLine(raw) then
+      if TakeLine(raw, sig) then
       begin
-        if Handle(raw, ALine, ADepth) then Break;
+        if Handle(sig, raw, ALine, ADepth) then Break;
       end
       else
         Sleep(5);   { the VM thread is parked here on purpose: this seam MAY block }
@@ -3550,15 +3730,16 @@ end;
 function TDebugProto.Session: Integer;
 var
   raw: String;
+  sig: TDbgSignal;
 begin
   { Nothing is answered before `initialize`, and nothing runs before `launch`. }
   while (FState <> dbgInitialized) or (not FLaunched) do
   begin
     if FClosed then Exit(2);
-    if TakeLine(raw) then
+    if TakeLine(raw, sig) then
     begin
-      if raw = #0 then Exit(2);
-      Handle(raw, -1, 0);
+      if sig = dsClosed then Exit(2);
+      Handle(sig, raw, -1, 0);
       if FDisconnected then Exit(0);
     end
     else
@@ -3963,15 +4144,19 @@ end;
 { Parse `--break 3,11,42` into the armed set. A line that no statement starts on
   can be asked for and simply never fires; StoppableLines would let this refuse
   it, but the program is not compiled yet at flag-parsing time, and refusing a
-  line late is worse than a breakpoint that never hits. }
-function ParseBreakList(const AText: String; out ALines: array of Integer;
-                        out ACount: Integer): Boolean;
+  line late is worse than a breakpoint that never hits.
+
+  APPENDS, from ACount on (round 2, 2026-10-09). It used to reset ACount to 0,
+  so `--break 9 --break 7` armed 7 alone and said nothing. The caller starts
+  the count at 0, once; every --break adds to the same set, and the ceiling is
+  the array's, whichever list crosses it. }
+function ParseBreakList(const AText: String; var ALines: array of Integer;
+                        var ACount: Integer): Boolean;
 var
   i, v, e: Integer;
   part: String;
   rest: String;
 begin
-  ACount := 0;
   rest := AText;
   while rest <> '' do
   begin
@@ -4623,7 +4808,17 @@ begin
     fs.Position := total - trailer;
     off := RLE64(fs); siz := RLE64(fs); ck := RLE32(fs);
     if trailer = PACK_TRAILER_V2 then AFlags := RLE32(fs);
-    if (off < 0) or (siz <= 0) or (off + siz > total - trailer) then
+    { NO SUM OF TWO FIELDS THE FILE CHOSE (round 2, 2026-10-09). This read
+      `off + siz > total - trailer`, and an offset of 2^63-1 with a size of 1
+      wraps that sum to the most negative Int64 -- "it fits" -- so the read at
+      that offset raised, and the host ended in an unhandled exception (exit 3)
+      instead of this refusal. Each field is now compared against what is LEFT:
+      total - trailer is a difference of two non-negative values and cannot
+      wrap, and once off is known to lie inside it, so is the remainder. The
+      other trailer fields are compared and never added: ck against a checksum,
+      the flags against a mask, the magic against a constant. }
+    if (off < 0) or (siz <= 0) or (off > total - trailer) or
+       (siz > (total - trailer) - off) then
     begin
       AWhy := Format('the trailer places a %d-byte program at offset %d, which does not fit a %d-byte file',
                      [siz, off, total]);
@@ -4964,7 +5159,12 @@ var
   dbgCount: Integer;
   dbgPort, dbgErr: Integer;
   dbgEntry: Boolean;
+  { WHICH ENTRY FLAG WAS WRITTEN, if any: 0 none, 1 --stop-at-entry, 2
+    --no-stop-at-entry. Recorded rather than applied, so the answer does not
+    depend on where the flag stands relative to --break. }
+  dbgEntrySaid: Integer;
   dbgPath: String;
+  sandboxSeen, outSeen: Boolean;
 begin
   // A packed application: run the embedded .pbc and stop, ignoring CLI arguments.
   embState := TryReadEmbeddedPayload(payload, embFlags, embWhy);
@@ -5028,22 +5228,49 @@ begin
   begin
     dbgPort := 0;
     dbgCount := 0;
-    dbgEntry := True;    // the useful default: with no --break, stop on line one
+    dbgEntrySaid := 0;
     dbgPath := '';
     i := 2;
     while i <= ParamCount do
     begin
       arg := ParamStr(i);
+      { ONE VALUE PER FLAG, AND NO FLAG LOSES TO ANOTHER BY POSITION (round 2,
+        2026-10-09). A second --break used to REPLACE the first list, a second
+        --port the first port, and `--stop-at-entry --break 9` dropped the
+        entry stop that `--break 9 --stop-at-entry` kept. Now: --break lists
+        accumulate (a breakpoint is a set, and two lists name a bigger one);
+        --port is single-valued and refused when repeated; the entry flags are
+        honoured wherever they stand, and the two together contradict each
+        other and are refused. docs/debugging.md has the table. }
       if arg = '--stop-at-entry' then
-        dbgEntry := True
+      begin
+        if dbgEntrySaid = 2 then
+        begin
+          Writeln(StdErr, 'phosphor debug: --stop-at-entry and --no-stop-at-entry contradict each other');
+          Halt(2);
+        end;
+        dbgEntrySaid := 1;
+      end
       else if arg = '--no-stop-at-entry' then
-        dbgEntry := False
+      begin
+        if dbgEntrySaid = 1 then
+        begin
+          Writeln(StdErr, 'phosphor debug: --stop-at-entry and --no-stop-at-entry contradict each other');
+          Halt(2);
+        end;
+        dbgEntrySaid := 2;
+      end
       else if arg = '--port' then
       begin
         Inc(i);
         if i > ParamCount then
         begin
           Writeln(StdErr, 'phosphor debug: --port needs a port number');
+          Halt(2);
+        end;
+        if dbgPort <> 0 then
+        begin
+          Writeln(StdErr, 'phosphor debug: --port is given twice; a session has one editor');
           Halt(2);
         end;
         Val(ParamStr(i), dbgPort, dbgErr);
@@ -5062,9 +5289,6 @@ begin
           Halt(2);
         end;
         if not ParseBreakList(ParamStr(i), dbgLines, dbgCount) then Halt(2);
-        { An explicit --break means the person said where to stop, so entry is no
-          longer implied. --stop-at-entry after it says both, and is honoured. }
-        dbgEntry := False;
       end
       else if (Length(arg) > 0) and (arg[1] = '-') then
       begin
@@ -5080,6 +5304,12 @@ begin
       end;
       Inc(i);
     end;
+    { An explicit entry flag says what it says. Without one, a --break means the
+      person said where to stop, so entry is no longer implied; with no --break
+      either, the useful default is to stop on line one. }
+    if dbgEntrySaid = 1 then dbgEntry := True
+    else if dbgEntrySaid = 2 then dbgEntry := False
+    else dbgEntry := (dbgCount = 0);
     if dbgPath = '' then
     begin
       Writeln(StdErr, 'phosphor debug: which file?');
@@ -5148,6 +5378,14 @@ begin
         Writeln(StdErr, '  --names says which host --check judges against; without --check it does nothing');
       Halt(2);
     end;
+    { NO OUTPUT MAY NAME AN INPUT (round 2, 2026-10-09). `compile a.bas a.bas`
+      read the source and then wrote the bytecode over it, and an output naming
+      the --names file did the same to that. Both are refused before anything
+      is opened, by the identity test the debugger uses for a breakpoint's
+      path -- see SameSourceFile. }
+    if OutputNamesInput('compile', packOut, packIn, 'the program it compiles') or
+       (namesGiven and OutputNamesInput('compile', packOut, namesPath, 'the --names file')) then
+      Halt(2);
     if namesGiven then
     begin
       arg := LoadCheckNames(namesPath);
@@ -5192,11 +5430,22 @@ begin
               {$IFDEF WINDOWS}'.exe>'{$ELSE}'>'{$ENDIF});
       Halt(2);
     end;
+    { The same rule for pack, which has TWO inputs: the .pbc, and this binary,
+      which it copies as the stub. pack reads both whole before it writes, so
+      neither was truncated -- it was REPLACED, at exit 0: the .pbc by an
+      executable, or (on Linux, where a running binary can be renamed over) the
+      interpreter itself by a packed application that ignores its command
+      line. Neither is something a person asks for on purpose. }
+    if OutputNamesInput('pack', packOut, packIn, 'the program it packs') or
+       OutputNamesInput('pack', packOut, SelfExePath(), 'this binary itself, which it copies as the stub') then
+      Halt(2);
     Halt(PackFile(packIn, packOut, packFlags));
   end;
 
   filePath := '';
   outPath := '';
+  sandboxSeen := False;
+  outSeen := False;
   i := 1;
   while i <= ParamCount do
   begin
@@ -5210,6 +5459,8 @@ begin
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
       Writeln('       phosphor debug [--stop-at-entry] [--break N,N] <file.bas>');
+      Writeln('              --break may be repeated and the lines add up; with');
+      Writeln('              --stop-at-entry it stops on line one as well');
       Writeln('              stop and step: s step into, n step over, o step out,');
       Writeln('              c continue, w call stack, v variables, l list, q quit');
       Writeln('              with no --break it stops on the first statement; the');
@@ -5239,6 +5490,8 @@ begin
       Writeln('       phosphor --sandbox <dir> <file.bas>');
       Writeln('              confine the script to <dir>: every file, directory and');
       Writeln('              channel it names must resolve inside, or it is refused');
+      Writeln('              each flag takes one value: a second --sandbox or --out');
+      Writeln('              is refused, and no output may name the program');
       Writeln('              a GUI program needs no flag: this binary brings the');
       Writeln('              widgetset up when a graphical session is reachable');
       Writeln('       phosphor            (REPL)');
@@ -5276,6 +5529,19 @@ begin
         Writeln(StdErr, 'phosphor: --sandbox needs a directory');
         Halt(2);
       end;
+      { REFUSED WHEN REPEATED (round 2, 2026-10-09). The second one silently
+        REPLACED the first: `--sandbox cage --sandbox .` ran in the WIDER root,
+        so a wrapper that puts its own --sandbox in front of a caller's
+        arguments had its cage widened by the caller. Narrowing (intersect the
+        two) would be the only safe merge, and two roots that do not nest have
+        no intersection to run in -- so one run has one root, and two is a
+        usage error naming the flag. }
+      if sandboxSeen then
+      begin
+        Writeln(StdErr, 'phosphor: --sandbox is given twice; one run has one root');
+        Halt(2);
+      end;
+      sandboxSeen := True;
       GSandboxDir := ParamStr(i);
       { RECORDED HERE, where the flag is actually seen. Whatever ParamStr gives
         back -- a directory, whitespace, or the empty string an unset shell
@@ -5291,6 +5557,14 @@ begin
         Writeln(StdErr, 'phosphor: --out needs a path');
         Halt(2);
       end;
+      { The same rule as --sandbox above: one run writes one output, and the
+        second used to win in silence. }
+      if outSeen then
+      begin
+        Writeln(StdErr, 'phosphor: --out is given twice; one run writes one output');
+        Halt(2);
+      end;
+      outSeen := True;
       outPath := ParamStr(i);
       { THE SAME SHAPE AS --sandbox ABOVE, ONE BRANCH DOWN, and it had the same
         hole: TConsoleHost.Create guards with `if AOutPath <> ''`, so '' is the

@@ -765,6 +765,40 @@ two agents reading the same VM an hour apart and getting minima 9% apart. It
 changes no correctness result; it is why a timing disagreement between rounds is
 the first thing to suspect and the last thing to conclude from.
 
+## One value per flag, and no output that names an input (2026-10-09)
+
+The second adversarial round found the console host's command line answering a
+repeated flag by keeping the LAST value, silently. For a confinement flag that
+is a widening: `phosphor --sandbox cage --sandbox . job.bas` ran in `.`, so a
+wrapper that puts its own `--sandbox` in front of a caller's arguments was
+undone by the caller. Every flag was judged, not just that one:
+
+| flag | repeated | why |
+| --- | --- | --- |
+| `--sandbox <dir>` | refused, exit 2 | one run has one root; the only safe merge is an intersection, and two roots that do not nest have none |
+| `--out <path>` | refused, exit 2 | one run writes one output |
+| `compile --names <file>` | refused, exit 2 | already so since 2026-10-08 |
+| `debug --port <n>` | refused, exit 2 | a session has one editor |
+| `debug --break N,N` | **accumulates** | a breakpoint set is a set; two lists name a bigger one (it used to drop the first list) |
+| `debug --stop-at-entry`, `--no-stop-at-entry` | honoured wherever they stand; the two together are refused, exit 2 | `--stop-at-entry --break 9` used to lose the entry stop that `--break 9 --stop-at-entry` kept -- an answer that depended on order. With neither, entry is implied exactly when no `--break` was given |
+| `--no-console`, `--gui`, `compile --check`, `pack --no-console` | accepted, idempotent | a switch said twice says the same thing |
+
+**No output may name an input**, and none is opened before every input has been
+read. `phosphor run job.bas --out job.bas` created the output -- truncating it --
+before the source was read, so the program ran as an empty one (exit 0 on
+Linux) and was gone. The question is now asked of every output the host takes,
+against every input the same command reads: run's `--out` against the program;
+`compile`'s `.pbc` against the source and the `--names` file; `pack`'s
+executable against the `.pbc` and against the `phosphor` binary it copies as the
+stub (on Linux, rename(2) would replace the running interpreter with a packed
+application that ignores its command line). The test is the debugger's
+`SameSourceFile`: the expanded spelling, compared as the platform's filesystem
+compares names, and then the file's identity (volume and file index on Windows,
+device and inode on Unix), which is what a hard link or a symlink needs. An
+output that does not exist yet cannot be an input. And `run` now reads the
+program -- a `.pbc` included -- into memory before it opens the output at all,
+so the order itself is safe even where the check could not see.
+
 ## What reaches the wire (2026-10-09)
 
 The first adversarial round against a third machine found five ways a request

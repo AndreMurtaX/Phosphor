@@ -324,9 +324,26 @@ one-second request eleven. And **an answer that broke off is no answer, however 
 broke off**: a body short of its `Content-Length`, a chunked body before its last
 chunk, or headers cut by the close answer status `0`, no body and `http_error()`
 `5`, even when the peer simply closed. (A body with neither a length nor chunking
-ends at the close and is complete.) `4` and `5` are told apart by what failed — a
-read that timed out under the deadline is `4`; a reset, even a moment before the
-deadline, is `5`.
+ends at the close, and is complete when that close is a clean one — over https,
+a `close_notify` first. A TLS stream that just stops is what RFC 9112 §9.8 calls an
+*incomplete close*: it cannot be told from a body cut short by anyone on the path,
+so it answers `5`.) `4` and `5` are told apart by what failed — a read that timed
+out under the deadline is `4`; a reset, even a moment before the deadline, is `5`.
+
+All of that is held by a **generated** sweep, `tests/http_sweep.py`, which the
+package runners run: four response shapes, cut at every structural point (inside
+the status line, inside a header, before the blank line, after it, inside the
+body or a chunk, whole), each ended by a clean close, a reset, silence, and over
+https an abrupt close — and each of those twice: under the run's deadline, as a
+budgeted host runs it, and with no deadline and the client's own response
+timeout, as the console host runs a script. 356 cases, each verdict derived from
+RFC 9112 and the bytes the case sends, never from a run. It found four defects
+the hand-written tests had not: a close-delimited body ended by an abrupt TLS
+close was accepted; a response cut *inside* a header line held the request until
+the deadline (FPC's header loop never saw the empty line it waits for), and
+without a deadline it waited the response timeout twice; and on Linux, a
+close-delimited https body cut by the response timeout came back complete,
+because FPC reports that timeout as a clean close.
 
 The tests are `tests/packages/03_http.bas` (a real loopback server the runner
 stands up), `tests/packages/04_https.bas` (a self-signed TLS server, proving both

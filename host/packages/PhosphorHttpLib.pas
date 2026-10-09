@@ -160,7 +160,11 @@ var
   HttpTlsWithhold: THttpTlsWithhold = nil;
   { TEST SEAM: when above 0, a request runs as if the run's budget had this many
     milliseconds left, so a test host with no TimeoutMs can watch the deadline
-    bound a peer that trickles (tests/packages/21_http_hosts.bas). }
+    bound a peer that trickles (tests/packages/21_http_hosts.bas). BELOW 0, a
+    request runs with NO deadline at all, whatever the budget -- as it does under
+    a host that installs none, which is the console host running a script. A
+    budgeted test runner could not otherwise reach that path, and the generated
+    sweep (tests/http_sweep.py) found the defect that lived only there. }
   HttpDeadlineMs: Integer = 0;
 
 { Whether a host is written as an address, and which family -- what decides the
@@ -226,6 +230,23 @@ threadvar
     size -- so `HTTP/1.1 200 OK`, `Content-Length: 5` and a close answered a 200
     with 4096 bytes of whatever that memory held (2026-10-08, fourth pass). }
   gHeadersCut: Boolean;
+  { THE TLS STREAM ENDED WITHOUT A close_notify -- a bare FIN or a reset under the
+    TLS layer. RFC 9112 9.8 calls that an "incomplete close": a body whose length
+    was known is still whole, but a body that ends AT the close cannot be told
+    from one cut short by anybody on the path -- the TLS truncation attack. The
+    generated sweep (tests/http_sweep.py) found such a close-delimited body
+    accepted as complete, error 0 (2026-10-08). }
+  gTlsAbrupt: Boolean;
+  { THE CLIENT WHOSE HEADERS ARE BEING READ, nil otherwise. FPC's header loop
+    ends on an EMPTY line, and a stream that ended in the middle of one never
+    produces it: FillBuffer leaves its 4096-byte buffer behind on end-of-stream
+    (see gHeadersCut), the next line is read out of that, it is not empty, the
+    loop reads again, meets the end again -- and spins until the deadline, so a
+    TLS response cut inside `Transfer-Encoding` answered 4 at the deadline where
+    a reset is 5 at once. Whether it spun depended on what that memory held: the
+    same cut over plain HTTP happened to stop. The generated sweep found it
+    (tests/http_sweep.py, 2026-10-08). SawEndOfStream terminates the parse. }
+  gHeaderClient: TFPCustomHTTPClient;
 
 type
   { Raised from a read once the run's time is gone. Not an ESocketError, so the
@@ -286,7 +307,10 @@ begin
       end-of-stream during it means the last chunk never came. }
     Exit(not gSawEOF);
   cl := Trim(TFPHTTPClient.GetHeader(AClient.ResponseHeaders, 'Content-Length'));
-  if cl = '' then Exit;
+  if cl = '' then
+    { Neither a length nor chunking: the body ends at the close, and only a
+      CLEAN close ends it -- see gTlsAbrupt. }
+    Exit(not gTlsAbrupt);
   want := StrToInt64Def(cl, -1);
   { EXACTLY: a body LONGER than it said is no more the body than a shorter one. }
   if want >= 0 then Result := ASize = want;
@@ -351,11 +375,19 @@ begin
   {$ENDIF}
 end;
 
+{ A read answered end-of-stream. Inside the headers that ends the parse --
+  see gHeaderClient; the cut itself is gHeadersCut's to report. }
+procedure SawEndOfStream;
+begin
+  gSawEOF := True;
+  if gHeaderClient <> nil then gHeaderClient.Terminate();
+end;
+
 { After a plain read: end-of-stream is recorded, and a timeout under the
   deadline's own arming is the deadline's. }
 procedure NoteRead(AResult, AError: Integer);
 begin
-  if AResult = 0 then gSawEOF := True;
+  if AResult = 0 then SawEndOfStream();
   if (AResult < 0) and gArmedByDeadline and
      {$IFDEF WINDOWS}(AError = 10060){$ELSE}((AError = ESysEAGAIN) or (AError = ESysEWOULDBLOCK)){$ENDIF} then
     gDeadlineTimedOut := True;
@@ -413,6 +445,7 @@ type
     Client: TObject;     // the TPinnedClient this request belongs to
     Link: T6Link;        // m6: set for an IPv6 request, nil for IPv4
     PeerName: String;    // the NAME a pinned connect is for; '' = the socket's host
+    Ended: Boolean;      // a read answered end-of-stream; see Recv
     destructor Destroy; override;
     function Connect: Boolean; override;
     function PeerHost: String;
@@ -658,6 +691,7 @@ type
                         peername: PPAnsiChar): cint; cdecl;
   TCheckIPAsc = function(x: PX509; address: PAnsiChar; flags: cuint): cint; cdecl;
   TX509Free = procedure(x: PX509); cdecl;
+  TGetShutdown = function(ssl: PSSL): cint; cdecl;
 
 var
   gTlsBound: Boolean = False;
@@ -665,6 +699,8 @@ var
   gCheckHost: TCheckHost = nil;
   gCheckIPAsc: TCheckIPAsc = nil;
   gX509Free: TX509Free = nil;
+  gGetShutdown: TGetShutdown = nil;
+  gShutdownBound: Boolean = False;
 
 { Bind the four names once, from the libraries FPC loaded for the handshake that is
   calling us. See the unit header for why FPC's own binding cannot be used. }
@@ -684,6 +720,27 @@ begin
   gCheckHost := TCheckHost(TlsSym(SSLUtilHandle, 'X509_check_host'));
   gCheckIPAsc := TCheckIPAsc(TlsSym(SSLUtilHandle, 'X509_check_ip_asc'));
   gX509Free := TX509Free(TlsSym(SSLUtilHandle, 'X509_free'));
+end;
+
+{ Did the peer's close_notify arrive? FPC's handler cannot say: with a read
+  timeout set it answers an OpenSSL WANT_READ -- nothing yet -- as ZERO_RETURN,
+  the clean close, and clears its last error, so a peer gone SILENT reads exactly
+  like one that closed properly. A close-delimited https body cut by the client's
+  own response timeout came back complete, error 0 -- under a host with no
+  budget, which is the console host running a script (the generated sweep,
+  2026-10-08). OpenSSL records the close_notify it really received; ask it. A
+  missing symbol is a doubt, and a doubt is not a clean close. Bound on its own,
+  NOT through BindTlsNames: that one consults the withhold seam once, and a read
+  that bound it first would fix the four names before a test installed it. }
+function ReceivedCloseNotify(ASsl: PSSL): Boolean;
+begin
+  if not gShutdownBound then
+  begin
+    gShutdownBound := True;
+    gGetShutdown := TGetShutdown(GetProcedureAddress(SSLLibHandle, 'SSL_get_shutdown'));
+  end;
+  if not Assigned(gGetShutdown) or (ASsl = nil) then Exit(False);
+  Result := (gGetShutdown(ASsl) and SSL_RECEIVED_SHUTDOWN) <> 0;
 end;
 
 { Does the peer certificate of ASsl name AHost? A dotted quad is matched against the
@@ -945,12 +1002,20 @@ begin
       e := AHandler.SSL.GetError(Result);
       if e = SSL_ERROR_ZERO_RETURN then
       begin
-        if ARead then gSawEOF := True;
+        if ARead then SawEndOfStream();
         Exit(0);
       end;
       if (e <> SSL_ERROR_WANT_READ) and (e <> SSL_ERROR_WANT_WRITE) then
       begin
-        if ARead and (Result = 0) then gSawEOF := True;   // the peer just closed
+        { Anything but a clean close_notify (handled above) ends the stream
+          ABRUPTLY. Answered as end-of-stream, as FPC's own reader would -- the
+          completeness check then decides what that end means. }
+        if ARead then
+        begin
+          SawEndOfStream();
+          gTlsAbrupt := True;
+          Result := 0;
+        end;
         Exit;
       end;
       left := Int64(gDeadline) - Int64(GetTickCount64());
@@ -970,11 +1035,28 @@ end;
 function THostCheckedHandler.Recv(const Buffer; Count: Integer): Integer;
 var fd: TSocket;
 begin
+  { AN ENDED STREAM STAYS ENDED. FPC goes on to read the body once even after
+    the header parse was stopped (see gHeaderClient), and with a response
+    timeout and no deadline that read waited the whole timeout a second time --
+    a request bounded at one second took two (the generated sweep, 2026-10-08). }
+  if Ended then Exit(0);
   CheckDeadline();
   if Link <> nil then fd := Link.Fd else fd := Socket.Handle;
-  if gDeadline <> 0 then Exit(TlsIO(Self, fd, True, Buffer, Count));
+  if gDeadline <> 0 then
+  begin
+    Result := TlsIO(Self, fd, True, Buffer, Count);
+    if Result <= 0 then Ended := True;
+    Exit;
+  end;
   Result := inherited Recv(Buffer, Count);
-  if Result = 0 then gSawEOF := True;
+  if Result <= 0 then
+  begin
+    Ended := True;
+    SawEndOfStream();
+    if (SSLLastError <> SSL_ERROR_NONE) or not ReceivedCloseNotify(SSL.SSL) then
+      gTlsAbrupt := True;                // not a close_notify -- see ReceivedCloseNotify
+    if Result < 0 then Result := 0;
+  end;
 end;
 
 function THostCheckedHandler.Send(const Buffer; Count: Integer): Integer;
@@ -989,7 +1071,12 @@ end;
   header parse made went through a handler, which records end-of-stream. }
 function TPinnedClient.ReadResponseHeaders: Integer;
 begin
-  Result := inherited ReadResponseHeaders();
+  gHeaderClient := Self;
+  try
+    Result := inherited ReadResponseHeaders();
+  finally
+    gHeaderClient := nil;
+  end;
   if gSawEOF then gHeadersCut := True;
 end;
 
@@ -1330,6 +1417,7 @@ var
       gIOMs := c.IOTimeout;
       gSawEOF := False;
       gHeadersCut := False;
+      gTlsAbrupt := False;
       gDeadlineTimedOut := False;
       gArmedByDeadline := False;
       { THE CONNECT WAIT IS WHOLE SECONDS. The RTL's connect timeout is a select()
@@ -1577,7 +1665,12 @@ begin
   hops := 0;
   remaining := BudgetRemainingMs();
   byBudget := remaining > 0;
-  if (HttpDeadlineMs > 0) and ((remaining <= 0) or (remaining > HttpDeadlineMs)) then
+  if HttpDeadlineMs < 0 then
+  begin
+    remaining := 0;             // the test's seam: run as an unbudgeted host does
+    byBudget := False;
+  end
+  else if (HttpDeadlineMs > 0) and ((remaining <= 0) or (remaining > HttpDeadlineMs)) then
   begin
     remaining := HttpDeadlineMs;
     byBudget := False;          // the test's seam set this deadline, not the run

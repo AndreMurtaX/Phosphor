@@ -84,6 +84,20 @@ for name in $manifest; do
   fi
 done
 
+# THE GENERATED HTTP SWEEP -- see the block of the same name in test-packages.ps1.
+# Needs Python (a FAILURE without it) and the OpenSSL runtime (a SKIP without it).
+PY="$(command -v python3 || command -v python || true)"
+"$httpexe" --openssl-check >/dev/null 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "SKIP  http sweep  (OpenSSL runtime not available)"
+elif [ -z "$PY" ]; then
+  echo "FAIL  http sweep: no python interpreter found"; allok=1
+else
+  "$PY" "$root/tests/http_sweep.py" "$httpexe" </dev/null; rc=$?
+  [ "$rc" -eq 0 ] || { echo "  (http_sweep.py exit $rc)"; allok=1; }
+fi
+
 echo
 if [ "$allok" -eq 0 ]; then echo "PACKAGES OK"; else echo "PACKAGES FAILED"; fi
 exit "$allok"

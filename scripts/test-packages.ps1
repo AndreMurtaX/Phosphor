@@ -124,6 +124,33 @@ foreach ($name in $manifest) {
     }
 }
 
+# THE GENERATED HTTP SWEEP (tests/http_sweep.py, 2026-10-08): every response
+# shape, cut at every structural point, ended every way, over plain HTTP and TLS,
+# each verdict derived from RFC 9112 and the bytes the case sends -- never from a
+# run. Four adversarial rounds found one instance of "an answer that did not
+# arrive whole, handed back as if it had" per round; this crosses the axes
+# instead. It stands its own peers, so it needs Python (a FAILURE without it,
+# as with the gates) and the OpenSSL runtime (a SKIP without it, as https).
+$py = (Get-Command python -ErrorAction SilentlyContinue)
+if (-not $py) { $py = (Get-Command python3 -ErrorAction SilentlyContinue) }
+& $httpExe '--openssl-check' *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'SKIP  http sweep  (OpenSSL runtime not available)' -ForegroundColor Yellow
+} elseif (-not $py) {
+    Write-Host 'FAIL  http sweep: no python interpreter found' -ForegroundColor Red
+    $allOk = $false
+} else {
+    $sout = & $py.Source (Join-Path $root 'tests\http_sweep.py') $httpExe 2>&1
+    $scode = $LASTEXITCODE
+    if ($scode -eq 0) {
+        $sout | ForEach-Object { Write-Host $_ -ForegroundColor Green }
+    } else {
+        $sout | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        Write-Host ("  (http_sweep.py exit {0})" -f $scode) -ForegroundColor Red
+        $allOk = $false
+    }
+}
+
 Write-Host ''
 if ($allOk) { Write-Host 'PACKAGES OK' -ForegroundColor Green; exit 0 }
 else { Write-Host 'PACKAGES FAILED' -ForegroundColor Red; exit 1 }

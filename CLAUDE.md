@@ -189,7 +189,10 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
     because the user asked what the five background tasks in his sidebar were. Use
     `pgrep -f "[s]cripts/test-suite.sh"` (the bracket makes the pattern not match its
     own text), or `pgrep -x`, or ask for something that is not a process at all -- a
-    sentinel file the runner touches when it finishes.
+    sentinel file the runner touches when it finishes. **Prefer the sentinel**: on
+    2026-10-08 `pgrep -f "[c]lockwatch"` still never ended, because the `bash -c`
+    running the loop had also STARTED `python3 /tmp/clockwatch.py` -- the bracket
+    stops a pattern matching itself, not matching the command line of its parent.
     The evidence was on screen hours earlier: a `pgrep -af` run that day printed
     `bash -c pgrep -af "test-suite.sh|phosphortest|fpc"` as one of its own hits, and
     it was read past. **A process listing that includes the listing is telling you

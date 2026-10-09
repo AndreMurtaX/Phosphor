@@ -1525,6 +1525,75 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-08 · the generated HTTP sweep: the axes crossed instead of
+  sampled, and four defects the hand-written tests had walked past.** Four
+  rounds that day had each found ONE instance of the same class -- an answer
+  that did not arrive whole, handed back as if it had -- because each
+  reviewer thought of one more case. `tests/http_sweep.py` stops thinking of
+  cases: four response shapes x every structural cut point x every end (FIN,
+  reset, silence, and over TLS an abrupt close) x plain and TLS x the two
+  paths a host takes (under the run's deadline; with no deadline and the
+  client's own response timeout) -- 356 cases, each verdict derived from RFC
+  9112 applied to the bytes the case was BUILT with. The package runners run
+  it, on both OSes.
+  - **The reference was wrong first, and the sweep said so.** The first draft
+    called a close-delimited body cut after the headers "incomplete" whatever
+    the end; RFC 9112 6.3 says a clean FIN completes it, with whatever arrived.
+    Every disagreement is a question to BOTH sides: read the RFC before the
+    code, and fix whichever is wrong.
+  - **The peer was wrong second.** Python's `wrap_socket` detaches the plain
+    socket, so closing it closed nothing: the "reset" and "abrupt" ends were a
+    connection lingering until its thread was collected, which the client
+    rightly answered as silence. Measure a fixture's own ends before believing
+    its verdicts.
+  - **An abrupt TLS close completed a close-delimited body** -- error 0, the
+    truncation attack RFC 9112 9.8 names. Now 5.
+  - **A cut INSIDE a header line spun until the deadline.** FPC's header loop
+    stops on an empty line; on end-of-stream FillBuffer leaves its 4096-byte
+    buffer behind, the next "line" is read out of that garbage, it is not
+    empty, and the loop reads again forever. Whether it spun depended on what
+    the memory held: plain HTTP happened to stop, TLS mostly did not, and one
+    case passed in one run and failed in the next. With no deadline it would
+    never have ended. End-of-stream inside the headers now stops the parse.
+    **A defect that hides behind uninitialised memory passes a hand-picked
+    test by luck; a sweep meets it because it asks at every point.**
+  - **And then FPC read the body anyway**, once, after the stopped parse --
+    which over TLS with a response timeout waited that timeout a second time.
+    A handler that has seen end-of-stream now answers it without reading.
+  - **The second mode exists because the first could not see the console
+    host.** Every test runner installs a budget, so every request it makes
+    has a deadline and reads through the library's own loop. `phosphor`
+    running a script installs none, and reads through FPC's handlers -- a
+    path no test had ever taken. The `http_test_deadline(-1)` seam reaches it.
+  - **One fix was proven on ONE machine only, and that is the point of two.**
+    FPC answers an OpenSSL WANT_READ as a clean close when a read timeout is
+    set. On Windows a timed-out read is WSAETIMEDOUT, which OpenSSL reports
+    as SYSCALL, so the conversion never happens and the mutant that removes
+    the fix SURVIVES there. On Linux the timeout is EAGAIN, which OpenSSL
+    reports as WANT_READ, FPC calls it a close_notify, and a close-delimited
+    https body cut by the client's timeout came back complete. The fix asks
+    OpenSSL whether a close_notify really arrived (SSL_get_shutdown). **A
+    mutant that survives on one OS is not a dead test until the other OS has
+    been asked.** It was asked: on the VM the same mutant answered error 0
+    with 7 of 20 bytes.
+  - **A timing bound flaked on Linux, and the machine was the cause -- which
+    took two wrong hypotheses to establish.** Verdicts were all right; one
+    run in two, a few silent cases took 2 to 5 s, some under a ONE-second
+    deadline. The peer was cleared first (every request arrived within 4 ms
+    of the accept), then the clock (wall and monotonic never diverged) --
+    and that second probe was blind by construction, because a frozen VM
+    stops neither clock relative to the other. Measuring GAPS settled it: a
+    process sleeping 10 ms woke 2633 ms later, fourteen stalls over 200 ms in
+    seven minutes. A case whose verdict was right but late now runs once
+    more and is judged on that run, and the PASS line counts them; the
+    double timeout above took two seconds on every run, and still fails.
+    **Ask what a probe can see before believing its silence.**
+  - **The pgrep trap in a new spelling.** `pgrep -f "[c]lockwatch"` -- the
+    bracket form CLAUDE.md prescribes -- still matched forever, because the
+    `bash -c` that ran it carried `python3 /tmp/clockwatch.py` on its own
+    command line. The bracket stops a pattern matching ITSELF, not matching
+    its parent. Wait on a sentinel file instead.
+
 - **2026-10-08 · a fourth pass, over the third (c7c4c49): seven findings, all
   fixed -- and the bound the day kept chasing finally sits at every wait.**
   Two reviewers. The HTTP deadline had been fixed, by turns, at the address,

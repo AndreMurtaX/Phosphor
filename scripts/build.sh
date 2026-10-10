@@ -61,7 +61,7 @@ for d in $roots; do
   [ -d "$d/gtk2" ] && { lcl="$d"; break; }
 done
 if [ -z "$lcl" ]; then
-  echo "LCL gtk2 units not found (install lazarus/lcl-gtk2, or set \$LAZARUSDIR)"
+  echo "LCL gtk2 units not found (install Lazarus as docs/building.md describes, or set \$LAZARUSDIR)"
   echo "looked in:"
   for d in $roots; do echo "  $d"; done
   exit 1

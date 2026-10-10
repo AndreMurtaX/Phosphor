@@ -80,8 +80,8 @@ section says so because the README told Linux readers for months that a native
 
 | | what to install | where the build looks |
 | --- | --- | --- |
-| **Linux** | `sudo apt install lazarus lcl-gtk2` (or your distribution's equivalent) | `/usr/share/lazarus/*`, `/usr/lib/lazarus/*`, `~/lazarus` — it needs the `gtk2` units under one of them |
-| **Windows** | the Lazarus installer | `C:\lazarus`; installed elsewhere, pass `-Lazarus <dir>` to `scripts\build.ps1` |
+| **Linux** | Lazarus 4.8 from the official `.deb` packages (`fpc-laz`, `fpc-src`, `lazarus-project`) plus `libgtk2.0-dev` — the exact files and their SHA-256 are in [docs/building.md](docs/building.md#linux-ubuntu--debian-family). The distribution's own `lazarus lcl-gtk2` packages are found too, but no build has been measured against them | `$LAZARUSDIR` first, then `/usr/share/lazarus/*`, `/usr/lib/lazarus/*`, `/opt/lazarus`, `~/lazarus` — it needs the `gtk2` units under one of them |
+| **Windows** | the Lazarus 4.8 installer, `lazarus-4.8-fpc-3.2.2-win64.exe` | `C:\lazarus`; installed elsewhere, pass `-Lazarus <dir>` to `scripts\build.ps1` |
 
 Both build scripts name the missing piece if it is not there, so a wrong guess
 costs one run and not an afternoon.

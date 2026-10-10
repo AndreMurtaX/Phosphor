@@ -263,9 +263,11 @@ Two supported ways to get a Linux binary, in order of preference:
   is not**, and this paragraph claimed otherwise until 2026-09-18: `phosphor` is
   one binary that is also the GUI host, so it links the LCL and the build needs
   **Lazarus with the gtk2 LCL units**, not a native `fpc` alone. On Debian and
-  Ubuntu that is `sudo apt install lazarus lcl-gtk2`; `scripts/build.sh` searches
-  `/usr/share/lazarus/*`, `/usr/lib/lazarus/*` and `~/lazarus` for them and says
-  which package is missing if it finds none.
+  Ubuntu the measured route is the official Lazarus 4.8 `.deb` packages plus
+  `libgtk2.0-dev`, step by step in [building.md](building.md); the
+  distribution's own `lazarus lcl-gtk2` is unmeasured. `scripts/build.sh`
+  searches `$LAZARUSDIR`, `/usr/share/lazarus/*`, `/usr/lib/lazarus/*`,
+  `/opt/lazarus` and `~/lazarus` for them and says so if it finds none.
 
   The host is otherwise portable: it guards the Windows console API with
   `{$IFDEF WINDOWS}` and falls back to raw UTF-8 bytes on Unix. Run, from a

@@ -1525,6 +1525,43 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-09 · round 4, and a new stopping rule.** Twenty survivors, six
+  killed; four of the survivors HIGH. Rounds 1-4 found 13, 21, 14, 20: not
+  converging, because each round's fixes are new surface and whole classes keep
+  turning up. The owner replaced "two rounds come back empty" with: **two
+  consecutive rounds with zero HIGH survivors in the areas this channel can
+  attack, plus one real project built on Phosphor.** Medium and low findings are
+  still fixed; they do not reset the count. After round 4 the streak is 0.
+  - **Areas this channel cannot attack, now three:** the sandbox (rounds 2-3),
+    the regex guard (round 3) and, this round, the debug protocol with HTTP --
+    each attacker was stopped by a safety classifier before running anything.
+    And a fourth kind of work it cannot do: this round's GUI fixer was stopped
+    while building deliberately malformed images, so **two image findings stay
+    OPEN** -- a GIF frame larger than its logical screen is decoded whole and
+    charged as the small screen (HIGH), and a JPEG whose frame header sits past
+    the first 4096 bytes skips the size pre-check. Both are the class "the
+    pre-check reads a different copy of the size than the decoder allocates";
+    they need fixtures built outside this channel.
+  - **A C library called with the VM's FPU traps live.** The VM leaves
+    invalid-op unmasked (FPC's process default; EnterFPU only ever ADDS masks),
+    so valid SQL -- sqrt(-1), 1e999 -- raised inside sqlite3.dll. The unwind
+    skipped SQLite's cleanup: the statement journal stayed open while autocommit
+    said none, three later inserts answered 1 and were never written, and
+    sqlite_close answered 1 while SQLite said BUSY. Every SQLite entry point now
+    runs masked and restores the VM's exact state; every prepare finalizes in a
+    finally; close asks. **Every C library is a place a Pascal exception must
+    not cross** -- OpenSSL and the GUI host's LCL/GDI/GTK are the same question,
+    not yet asked.
+  - **32-bit cursors over 64-bit strings.** formatdatetime$ wrote out of bounds
+    past 2^31 bytes of output and len() answered 1 for a 2^31-byte string.
+  - **The GUI's documented setters reached the LCL unclamped**: a spinedit
+    width of 32768..65535 killed the host on a shown form. Ranges are now
+    settled before the widgetset sees them, for every control and property.
+  - **Smaller:** config glued an unreachable header to the section above;
+    temppath$ answered "" with TEMP and TMP unset; color() read radix text
+    through FPC's TryStrToInt64 (a minus gave a positive colour); JSON read -0 as
+    +0; an engine freed after a one-shot Run kept its script's handles.
+
 - **2026-10-09 · round 3 of "until two come back empty": fourteen distinct
   findings, two of them crashes, and a third Windows that found three more.**
   Five attackers aimed at the code rounds 1 and 2 had added, plus GUI and JSON

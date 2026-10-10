@@ -1015,7 +1015,10 @@ function build_contact_panel(k, t@) local p$, g@, gb@
   field@(p$ + ".k.other_social", t@, 438, 258, 210, "Other social media")
   lbl@(t@, 8, 304, "Birthday (dd/mm)")
   keep@(p$ + ".k.birthday", maskedit@(t@))
-  maskedit_mask@(w@(p$ + ".k.birthday"), "00/00;1;_")
+  rem A bare "/" in a mask is the system's DATE SEPARATOR, not a slash: it is
+  rem "-" on a Linux in the C locale and "." in German. "\/" is a literal
+  rem slash (written "\\/" because a BASIC string escapes the backslash).
+  maskedit_mask@(w@(p$ + ".k.birthday"), "00\\/00;1;_")
   control_bounds@(w@(p$ + ".k.birthday"), 8, 321, 70, 24)
   keep@(p$ + ".k.primary", checkbox@(t@))
   checkbox_caption@(w@(p$ + ".k.primary"), "Primary contact")

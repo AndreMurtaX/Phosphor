@@ -30,6 +30,16 @@ test_case("more/mask edit")
 me@ = maskedit@(f@)
 maskedit_mask@(me@, "00/00/0000")
 assert_eq(maskedit_mask$(me@), "00/00/0000", "mask round trip")
+rem A bare "/" in a mask is NOT a slash: lcl/maskedit.pp maps it
+rem (cMask_DateSeparator) to DefaultFormatSettings.DateSeparator, which is
+rem "-" on a Linux in the C locale -- so "14/03" came back "14-  " there and
+rem "14/03" on a Portuguese Windows. A backslash (cMask_Literal) makes the
+rem next character literal, and that answer is the same on every system.
+maskedit_mask@(me@, "00\\/00;1;_")
+maskedit_text@(me@, "14/03")
+assert_eq(maskedit_text$(me@), "14/03", "an escaped slash is a slash on every system")
+maskedit_text@(me@, "")
+assert_eq(maskedit_text$(me@), "  /  ", "and an empty value keeps it, the blanks shown as spaces")
 
 test_case("more/toggle box")
 tg@ = togglebox@(f@)

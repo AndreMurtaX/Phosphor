@@ -1549,6 +1549,15 @@ the sweep above. Verify before fixing, as with everything on this page.
     of 75 the first time it ran, which proves nothing, so four mutants were run:
     cascade removed, the one-primary-contact rule broken, the last-administrator
     guard off, any password accepted -- each failed the checks that name it.
+  - **And the second machine caught what the first could not.** 75/75 on Windows,
+    74/75 on Linux: the birthday field's mask `"00/00"` came back `14-  `. In
+    lcl/maskedit.pp a `/` is `cMask_DateSeparator` -- the LOCALE's date
+    separator, `-` in WSL's C locale, `/` on a Portuguese Windows -- and
+    `docs/libraries/gui-edit.md` said "anything else a literal", with a worked
+    example that would show dashes on Linux. `\/` is a slash everywhere; the doc
+    now lists every special mask character from the source, and
+    `tests/gui/11_more_input.bas` pins the escaped form, which answers the same
+    on both systems.
   - **Looking is a different check.** The self-test cannot see that a grid's
     columns came out a third of their width -- a form that has not been shown has
     not laid out, so `control_width` answered the LCL's default. A screenshot did,

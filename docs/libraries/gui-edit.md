@@ -92,7 +92,7 @@ is watching re-enters itself.
 | `maskedit@(parent@) → handle` | a new box that enforces a shape as the user types; handle `0` on a bad parent |
 | `maskedit_text@(me@, s$) → handle` | sets the content **through** the mask. Give it the value already punctuated the way the mask shows it — the mask matches on its own literals, and a segment whose literal it cannot find comes back blank rather than shifted |
 | `maskedit_text$(me@) → str` | the content **including** the mask's literal characters — `"01/01/2026"`, not `"01012026"` — unless the mask carries the LCL's `;0` "do not save literals" flag. `""` for a bad handle |
-| `maskedit_mask@(me@, s$) → handle` | sets the mask. `0` a required digit, `9` an optional one, `L`/`A` letters, `C` any character, anything else a literal; an optional `;save;blank` tail (as in `"00/00/0000;0;_"`) says whether the literals are part of the text and what an unfilled position looks like. An empty mask turns the control back into a plain edit |
+| `maskedit_mask@(me@, s$) → handle` | sets the mask. `0` a required digit, `9` an optional one, `#` a digit or a sign, `L`/`l` a letter (required/optional), `A`/`a` a letter or digit, `C`/`c` any character, `H`/`h` a hex digit, `B`/`b` a binary one, `[abc]` one of a set; `\` makes the next character a literal, and other characters are literals. **`/` and `:` are not**: they stand for the system's date and time separators, so the same `"00/00"` showed `14/03` on a Windows set to Portuguese and `14-  ` on a Linux in the C locale (measured 2026-10-10), and on a system whose date separator is `.` it shows a dot. Write `"00\\/00"` (the BASIC string for `00\/00`) for a slash that is a slash everywhere. An optional `;save;blank` tail (as in `"00\\/00\\/0000;0;_"`) says whether the literals are part of the text and what an unfilled position looks like. An empty mask turns the control back into a plain edit. The rules are lcl/maskedit.pp's `cMask_*` constants |
 | `maskedit_mask$(me@) → str` | exactly the string that was set, tail and all — not the parsed mask |
 
 ## A worked example
@@ -126,7 +126,7 @@ floatspinedit_value@(price@, 9.95)
 
 due@ = maskedit@(f@)
 control_bounds@(due@, 110, 124, 130, 26)
-maskedit_mask@(due@, "00/00/0000")
+maskedit_mask@(due@, "00\\/00\\/0000")  rem "\/" is a slash; a bare "/" is the locale's
 maskedit_text@(due@, "01/01/2026")      rem punctuated the way the mask shows it
 
 log@ = memo@(f@)

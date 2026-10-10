@@ -3,10 +3,18 @@
 # gtk2 widgetset and runs it over the phase-2 GUI oracle files, byte-comparing
 # each summary to its golden. The Unix counterpart of scripts/test-gui.ps1.
 #
-# gtk2 needs an X display. Over SSH there is none, so this reaches the logged-in
-# session's live XWayland display (DISPLAY=:0 + the mutter auth cookie). If no
-# usable display is found the GUI files are SKIPPED with a message rather than
-# failing -- the engine/console suites (test-suite.sh) do not need one.
+# gtk2 needs an X display, and this runner gives itself ONE OF ITS OWN: when
+# xvfb-run is installed the whole script re-runs under `xvfb-run -a`, the rule
+# block X of scripts/test.sh already states -- a display of its own makes the run
+# the same on a headless box and on one with somebody logged in. On the live
+# desktop a SHOWN form's focus depends on what the person at it has in the
+# foreground: on 2026-10-10 tests/gui/24_wave4.bas failed 1 run in 3 on WSLg
+# ("and has it once focused -- expected 1, got 0"). Only without xvfb-run does it
+# fall back to the live display -- DISPLAY as given, else the logged-in session's
+# XWayland (DISPLAY=:0 + the mutter auth cookie). If no usable display is found
+# the GUI files are SKIPPED with a message rather than failing -- the
+# engine/console suites (test-suite.sh) do not need one.
+# scripts/test-gui.ps1 has no such question: the win32 widgetset needs no display.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +26,14 @@ root="$(dirname "$here")"
 # prove mode, and now says so.
 . "$here/lib/runner.sh"
 runner_args "test-gui.sh" noprove "$@"
+
+# A display of its own, before anything is built (see the header). The marker
+# stops a second re-exec; an outer xvfb-run (CI wraps this script in one) is not
+# trusted to be private, and -a picks a free server number, so nesting is safe.
+if [ -z "${PHOSPHOR_GUI_XVFB:-}" ] && command -v xvfb-run > /dev/null 2>&1; then
+  export PHOSPHOR_GUI_XVFB=1
+  exec xvfb-run -a bash "${BASH_SOURCE[0]}" "$@"
+fi
 
 FPC="${FPC:-$(command -v fpc || true)}"
 [ -n "$FPC" ] || { echo "fpc not found on PATH (set FPC=/path/to/fpc)"; exit 1; }
@@ -32,7 +48,8 @@ done
 [ -n "$lcl" ] || { echo "LCL gtk2 units not found (install lazarus/lcl-gtk2)"; exit 1; }
 lazroot="${lcl%/lcl/units/*}"   # strip '/lcl/units/<cpu>-linux' -> .../lazarus/<ver>
 
-# headless display: keep an existing one, else the live session's XWayland
+# Under xvfb-run DISPLAY is Xvfb's. Without it (the fallback): keep an existing
+# one, else the live session's XWayland.
 if [ -z "${DISPLAY:-}" ]; then
   export DISPLAY=:0
   xa="$(ls /run/user/"$(id -u)"/.mutter-Xwaylandauth.* 2>/dev/null | head -1 || true)"
@@ -49,7 +66,8 @@ strict_build "phosphorguitest" "$FPC" -Mobjfpc -Scghi -O2 -vewn -Tlinux -dLCL -d
   -Fu"$root/engine" -Fu"$root/engine/libs" -Fu"$root/tests" -Fu"$root/host/gui/libs" \
   -FU"$units" -FE"$bin" -o"$exe" "$root/host/gui/phosphorguitest.lpr"
 [ -x "$exe" ] || { echo "phosphorguitest did not build"; exit 1; }
-echo "gui runner built: $exe (DISPLAY=${DISPLAY:-none})"; echo
+if [ -n "${PHOSPHOR_GUI_XVFB:-}" ]; then via="xvfb-run"; else via="live display: no xvfb-run"; fi
+echo "gui runner built: $exe (DISPLAY=${DISPLAY:-none}, $via)"; echo
 
 # --- and the Lazarus DEMO, which is an LCL application like any embedder's ----
 # probe_demo in the main suite runs the demo's LOGIC -- its decisions live in a
@@ -135,9 +153,9 @@ fi
 # session is reachable. Unix is the platform that can produce BOTH answers, so
 # both are checked here -- and the no-session one is produced deliberately, by
 # taking the session away for one command, rather than by hoping the machine
-# running the suite happens not to have one. (This script exports DISPLAY=:0 near
-# the top so the GUI files can reach the live session, which means asking "is
-# DISPLAY empty?" here would always answer no.)
+# running the suite happens not to have one. (By here DISPLAY is always set --
+# Xvfb's, or :0 exported near the top as the fallback -- so asking "is DISPLAY
+# empty?" here would always answer no.)
 echo
 console="$bin/phosphor"
 hm="$gui/hostmode"

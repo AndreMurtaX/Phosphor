@@ -9,7 +9,9 @@
   engine may not) and registers the GUI packages under host/gui/libs; the tests
   build controls and fire events entirely headless -- no window is shown and the
   message loop is never entered -- so the run is byte-exact just like phase 1.
-  On Windows the win32 widgetset needs no display at all.
+  On Windows the win32 widgetset needs no display at all. Its bash twin
+  re-runs itself under xvfb-run, because a live X desktop's focus belongs to
+  whoever is using it; there is no such question here.
 #>
 # [CmdletBinding()] WAS HERE AND IS DELIBERATELY GONE. It does refuse an unknown
 # named parameter, but with PowerShell's own wording and EXIT 1 -- the same code a

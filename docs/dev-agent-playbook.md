@@ -1525,6 +1525,21 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · `scripts/test-gui.sh` runs under a display of its own.** On the
+  WSL clone it failed 1 run in 3 at `tests/gui/24_wave4.bas` ("and has it once
+  focused -- expected 1, got 0"): with `DISPLAY=:0` (WSLg) it drew on the live
+  desktop, where a SHOWN form's focus belongs to whatever the person at it has in
+  the foreground. Block X of `scripts/test.sh` already stated the rule -- under
+  `xvfb-run`, never the live desktop -- and this runner was the one place that
+  broke it. It now re-execs itself under `xvfb-run -a` whenever that is installed
+  (a marker variable stops a second re-exec; an outer `xvfb-run`, as in CI, is not
+  trusted to be private and nesting is safe with `-a`), and falls back to the live
+  display, then to SKIP, only without it. The flake did NOT reproduce on demand
+  the same afternoon -- 3/3 suite runs and 30/30 runs of the file alone, live --
+  because its cause is a person, not the code; so the proof is the mechanism (the
+  build line now names `xvfb-run` or the fallback) and repeated green runs, not a
+  repro. **A test whose outcome depends on who is at the machine is not
+  byte-exact, whatever its golden says**: the display is part of the fixture.
 - **2026-10-10 · a program gets its own command line.** The contact manager
   found it and the owner asked for it: `phosphor app.bas x` was refused, and
   `paramstr$`/`paramcount` read the INTERPRETER's argv (the `.bas` as argument

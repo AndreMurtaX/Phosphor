@@ -280,7 +280,7 @@ Two supported ways to get a Linux binary, in order of preference:
   bash scripts/test-classic.sh   # the standard-BASIC command set + the REPL
   bash scripts/test-packages.sh  # the opt-in host packages
   bash scripts/test-examples.sh  # every example in examples/manifest.txt
-  bash scripts/test-gui.sh       # the GUI host (needs a display, or xvfb)
+  bash scripts/test-gui.sh       # the GUI host (under its own xvfb-run when installed)
   ```
 
   **All seven, not five.** The list here was short by two for a while, so a Linux

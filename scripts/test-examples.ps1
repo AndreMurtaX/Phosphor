@@ -11,7 +11,7 @@
   unable to reach its own last line (`x$ = crt_done()`, a number into a string).
   Both were found by a human typing the command. That is not a test strategy.
 
-  Three modes, because the examples are not all the same kind of program:
+  Four modes, because the examples are not all the same kind of program:
 
     run      -- run it with stdin closed, compare stdout+stderr to <name>.expected
     input    -- the same, with <name>.in piped in (a recorded session)
@@ -19,6 +19,11 @@
                 compiler is host-agnostic and needs no display, so "it still
                 compiles" is what CAN be checked, and it is checked rather than
                 skipped in silence.
+    selftest -- a windowed program that tests ITSELF when PHOSPHOR_SELFTEST=1
+                is in its environment: it builds its windows without showing
+                them, drives them, prints passed/failed and returns; compared
+                like "run". A program that prints "SKIP: why" first (a runtime
+                library missing) is reported as a SKIP.
 
   Every run is SANDBOXED to the checkout (--sandbox), so an example that writes
   files cannot write them anywhere else.
@@ -128,6 +133,13 @@ foreach ($e in $entries) {
         cmd /c "`"$exe`" --sandbox `"$root`" run `"$bas`" > `"$out`" 2>&1 < `"$inFile`""
     } elseif ($e.mode -eq 'run') {
         cmd /c "`"$exe`" --sandbox `"$root`" run `"$bas`" > `"$out`" 2>&1 < NUL"
+    } elseif ($e.mode -eq 'selftest') {
+        $env:PHOSPHOR_SELFTEST = '1'
+        try {
+            cmd /c "`"$exe`" --sandbox `"$root`" run `"$bas`" > `"$out`" 2>&1 < NUL"
+        } finally {
+            Remove-Item Env:PHOSPHOR_SELFTEST -ErrorAction SilentlyContinue
+        }
     } else {
         Write-Host ("FAIL  {0}  unknown mode '{1}'" -f $e.name, $e.mode) -ForegroundColor Red
         $allOk = $false
@@ -136,6 +148,12 @@ foreach ($e in $entries) {
     $code = $LASTEXITCODE
 
     $actual = [IO.File]::ReadAllBytes($out)
+    if ($e.mode -eq 'selftest' -and $actual.Length -ge 5 -and
+        [Text.Encoding]::ASCII.GetString($actual, 0, 5) -eq 'SKIP:') {
+        $why = ([Text.Encoding]::UTF8.GetString($actual) -split "`r?`n")[0].Substring(6)
+        Write-Host ("SKIP  {0}  ({1})" -f $e.name, $why) -ForegroundColor Yellow
+        continue
+    }
     $want = [IO.File]::ReadAllBytes($gold)
     if ($ProveFailure -and $e.name -eq $entries[0].name -and $want.Length -gt 0) {
         $want = $want.Clone(); $want[0] = [byte](($want[0] + 1) % 256)

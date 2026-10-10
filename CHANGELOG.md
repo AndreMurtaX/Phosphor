@@ -9,9 +9,18 @@
   format (600 000 rounds by default), plus `crypto_equal?`, a comparison whose
   timing does not depend on where two strings differ.
 - **A string grid can be a record list**: `stringgrid_row` / `stringgrid_col`
-  read the cursor, `stringgrid_cursor@` moves it, and `stringgrid_onselect@`
-  calls a handler when it moves. And **a double click** on any control:
+  read the cursor, `stringgrid_cursor@` moves it, `stringgrid_onselect@`
+  calls a handler when it moves, and `stringgrid_colwidth@` sizes one column.
+  And **a double click** on any control:
   `control_ondblclick@`, with `control_dblclick@` to deliver one from code.
+- **A real application among the examples**:
+  [examples/contact_manager.bas](examples/contact_manager.bas) keeps suppliers,
+  customers, their contacts (social media, WhatsApp, the product lines they
+  serve) and the history of what was said to them in SQLite, behind a login with
+  users, roles and hashed passwords. `PHOSPHOR_CONTACTS_DEMO=1` opens it on
+  sample data. It tests itself: with `PHOSPHOR_SELFTEST=1` it builds its windows
+  without showing them and drives them, and `test-examples` runs it that way on
+  both systems (a new `selftest` mode, under `xvfb-run` on Linux).
 
 ## 0.1.0 -- 2026-10-10
 

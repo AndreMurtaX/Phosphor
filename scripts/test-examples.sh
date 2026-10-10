@@ -14,6 +14,13 @@
 #   input    the same, with <name>.in piped in (a recorded session)
 #   compile  compile only -- it opens a window and waits, and the compiler is
 #            host-agnostic so this is what CAN be checked without a display
+#   selftest a windowed program that tests ITSELF when PHOSPHOR_SELFTEST=1 is in
+#            its environment: it builds its windows without showing them,
+#            drives them, prints passed/failed and returns, and that output is
+#            compared like "run". Its windows need a display, so it runs under
+#            xvfb-run (never the live desktop, the reason test.sh gives); with
+#            neither xvfb-run nor a DISPLAY it is a SKIP, and a program that
+#            prints "SKIP: why" first (a runtime library missing) is one too.
 #
 # Every run is sandboxed to the checkout, so an example that writes files cannot
 # write them anywhere else.  --prove-failure corrupts one golden to show the
@@ -90,10 +97,24 @@ for n in $names; do
     "$exe" --sandbox "$root" run "$bas" > "$out" 2>&1 < "$examples/$n.in"
   elif [ "$mode" = "run" ]; then
     "$exe" --sandbox "$root" run "$bas" > "$out" 2>&1 < /dev/null
+  elif [ "$mode" = "selftest" ]; then
+    if command -v xvfb-run > /dev/null 2>&1; then
+      PHOSPHOR_SELFTEST=1 xvfb-run -a "$exe" --sandbox "$root" run "$bas" > "$out" 2>&1 < /dev/null
+    elif [ -n "${DISPLAY:-}" ]; then
+      PHOSPHOR_SELFTEST=1 "$exe" --sandbox "$root" run "$bas" > "$out" 2>&1 < /dev/null
+    else
+      echo "SKIP  $n  (a self-testing window program needs xvfb-run or a DISPLAY)"
+      continue
+    fi
   else
     echo "FAIL  $n  unknown mode '$mode'"; allok=1; continue
   fi
   code=$?
+
+  if [ "$mode" = "selftest" ] && [ "$(head -c 5 "$out")" = "SKIP:" ]; then
+    echo "SKIP  $n  ($(head -1 "$out" | cut -c7-))"
+    continue
+  fi
 
   want="$gold"
   if [ "$prove" -eq 1 ] && [ "$i" -eq 1 ]; then

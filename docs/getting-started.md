@@ -90,5 +90,9 @@ ceiling unless a host that embeds Phosphor sets one (see
   SQLite, HTTP, zip, regex, GUI, and more.
 - [embedding.md](embedding.md) -- linking the engine into your own Free Pascal
   program, with the execution ceilings a host can set.
-- `examples/` in the archive -- runnable programs, including a GUI one
-  (`gui_demo.bas`, which opens a window and waits for you to close it).
+- `examples/` in the archive -- runnable programs, including two windowed ones
+  that wait for you to close them: `gui_demo.bas`, and `contact_manager.bas`, a
+  whole application -- suppliers, customers, their contacts and the history of
+  what was said to them, in SQLite, behind a login. Run it with
+  `phosphor examples/contact_manager.bas`; it needs the SQLite runtime
+  (`sqlite3.dll` beside `phosphor.exe` on Windows, `libsqlite3` on Linux).

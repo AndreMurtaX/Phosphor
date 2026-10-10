@@ -1525,6 +1525,37 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · the real project: `examples/contact_manager.bas`.** The owner
+  asked for a contact manager for suppliers and customers with logins, built on
+  SQLite and the GUI library, as an example of the language. Writing it is what
+  the readiness criterion meant by "a real project", and it found five gaps a
+  test suite had not:
+  - **No hash at all** -- the crypto library (entry below).
+  - **A grid could not say which row was picked**, and nothing could take a
+    double click: `stringgrid_row`/`col`/`cursor@`/`onselect@`,
+    `control_ondblclick@`/`control_dblclick@`. And **every column had one width**:
+    `ColWidths` is an indexed property the bridge cannot reach, hence
+    `stringgrid_colwidth@`.
+  - **A program cannot receive arguments**: `phosphor run app.bas --x` is refused
+    as an unexpected argument, and `paramstr$` reads the interpreter's own command
+    line. NOT FIXED here; the app takes its switches from the environment
+    (`PHOSPHOR_SELFTEST`, `PHOSPHOR_CONTACTS_DB`, `PHOSPHOR_CONTACTS_DEMO`).
+  - **No modal forms** -- the password window disables the main one instead.
+  - **A windowed program could only be COMPILED by test-examples.** The app tests
+    itself instead: with `PHOSPHOR_SELFTEST=1` it builds every window without
+    showing one, drives them with `button_click@`, `stringgrid_cursor@`,
+    `menuitem_click@` and `control_dblclick@`, routes its message and confirm
+    boxes through one function the test answers, and checks SQLite. It passed 75
+    of 75 the first time it ran, which proves nothing, so four mutants were run:
+    cascade removed, the one-primary-contact rule broken, the last-administrator
+    guard off, any password accepted -- each failed the checks that name it.
+  - **Looking is a different check.** The self-test cannot see that a grid's
+    columns came out a third of their width -- a form that has not been shown has
+    not laid out, so `control_width` answered the LCL's default. A screenshot did,
+    taken with PrintWindow on the app's own window only. PowerShell trap on the
+    way: passing `$null` to a .NET `string` parameter passes `""`, so
+    `FindWindow($null, title)` finds nothing; `[NullString]::Value` is the null.
+
 - **2026-10-10 · the crypto library, for the real project.** The owner's real
   project (a contact manager with logins) needed password storage, and the engine
   had no hash at all: FPC 3.2.2's `hash` package stops at SHA-1. `engine/libs/

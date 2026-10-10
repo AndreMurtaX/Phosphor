@@ -1249,7 +1249,7 @@ if adgot="$(printf 'c\n' | "$exe" debug "$adp" d1 -- --d2 2>/dev/null)"; then ad
 # 61 EF BF BD. They used to arrive raw.
 if adgot="$("$exe" "$adp" $'\xff\xfe' $'a\xc3' < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 0 ] && [ "$(printf '%s' "$adgot" | sed -n 5p | tr -d '\r' | tr 'A-F' 'a-f')" = "61efbfbd" ] && \
-  [ "$(printf '%s' "$adgot" | sed -n 3p | tr -d '\r' | od -An -tx1 | tr -d ' \n')" = "efbfbdefbfbd" ] || ad_fail "bytes that are not UTF-8: exit $adcode, got '$adgot'"
+  [ "$(printf '%s' "$adgot" | sed -n 3p | tr -d '\r\n' | od -An -tx1 | tr -d ' \n')" = "efbfbdefbfbd" ] || ad_fail "bytes that are not UTF-8: exit $adcode, got '$adgot'"
 # an empty file name is refused, not skipped
 if adgot="$("$exe" "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "an empty file name: exit $adcode, got '$adgot'"

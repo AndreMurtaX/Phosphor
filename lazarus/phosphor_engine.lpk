@@ -26,7 +26,7 @@
     <Description Value="Phosphor BASIC -- an embeddable BASIC interpreter. The ENGINE only: no LCL, no console, no filesystem host. Add it to a project, create a TPhosphorEngine, point OnOutput somewhere and run a script. See ../../docs/embedding.md."/>
     <License Value="MIT"/>
     <Version Major="0" Minor="1"/>
-    <Files Count="29">
+    <Files Count="30">
       <Item1>
         <Filename Value="../engine/PhosphorBudget.pas"/>
         <UnitName Value="PhosphorBudget"/>
@@ -143,6 +143,10 @@
         <Filename Value="../engine/libs/PhosphorSysLib.pas"/>
         <UnitName Value="PhosphorSysLib"/>
       </Item29>
+      <Item30>
+        <Filename Value="../engine/libs/PhosphorCryptoLib.pas"/>
+        <UnitName Value="PhosphorCryptoLib"/>
+      </Item30>
     </Files>
     <RequiredPkgs Count="1">
       <Item1>

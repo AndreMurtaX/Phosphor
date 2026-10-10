@@ -496,6 +496,14 @@ ALLOWED = {
         'the needles are this unit''s library names, against one query',
     'PhosphorRagLib.pas:TPhosphorRag.AnalyzeQuery':
         'the needles are fixed markers, against one query',
+    'PhosphorCryptoLib.pas:Sha256Update':
+        'N is the length of a buffer already in memory -- a string being hashed, a '
+        '64-byte pad or a 32-byte digest -- so the loop is linear in bytes that '
+        'exist; the PBKDF2 loop that calls it a count-driven number of times '
+        'charges the budget itself',
+    'PhosphorCryptoLib.pas:ParseRecord':
+        'the needle is the one-character field separator and the loop stops at '
+        'three fields: one linear scan of a record already in memory',
 
     # ---- A HELPER WHOSE CALLER ASKS, named because taint does not cross a call --
     # These now appear only because a routine's numeric parameters are tainted

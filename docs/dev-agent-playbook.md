@@ -1525,6 +1525,31 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · the crypto library, for the real project.** The owner's real
+  project (a contact manager with logins) needed password storage, and the engine
+  had no hash at all: FPC 3.2.2's `hash` package stops at SHA-1. `engine/libs/
+  PhosphorCryptoLib.pas` adds SHA-256 (written out), SHA-1/MD5 (the RTL's),
+  HMAC-SHA256, PBKDF2-HMAC-SHA256 and a Django-format password record. It sits in
+  the ENGINE because it is pure computation; the one thing it needs from the OS, a
+  salt, comes through `CreateGUID` -- the RTL's portable door, already used by
+  `guidfilename$` -- so the boundary holds. Three things worth keeping:
+  - **The expected values came from the standards, checked against a second
+    implementation before they were written** (FIPS 180-2, RFC 3174, 1321, 4231,
+    7914; Python's hashlib), plus a 490-input differential sweep. Both mutations
+    were seen caught: one SHA-256 round constant changed fails `96_crypto` on the
+    RFC vectors, and the budget charge removed lets PBKDF2 run past 20 s where
+    the ceiling stops it in 110 ms.
+  - **A record from a database names its own cost**, so `password_verify?` is a
+    count-driven loop over DATA; every PBKDF2 loop charges the budget as it goes,
+    and `probe_limits` pins that the step and time ceilings both stop it.
+  - **`probe_limits` is SLOW, not hung, and I killed it once thinking otherwise.**
+    Its corpus sweep compiles every line-prefix of every `.bas` in five corpora,
+    which is quadratic in a file's length, and `tests/suite/85_datetime_round2.bas`
+    has 3964 lines: the probe takes five to twelve minutes on this machine and
+    prints nothing until it ends. Before calling it a hang, look for a probe that
+    is CPU-bound and still progressing -- an instrumented copy printing each file
+    it reaches answered it in four minutes.
+
 - **2026-10-09 · round 4, and a new stopping rule.** Twenty survivors, six
   killed; four of the survivors HIGH. Rounds 1-4 found 13, 21, 14, 20: not
   converging, because each round's fixes are new surface and whole classes keep

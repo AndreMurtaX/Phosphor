@@ -58,15 +58,15 @@ headings came to match neither. Every heading now gives **both**, in this order:
   holds: `mid$` occupies two of them, one per arity, and `dict_set@` four, one per
   value kind it stores.
 
-Across the seventeen engine libraries and the six packages that is **715 names /
-828 registry entries**. `scripts/coverage.py` prints the names column per library
-from the same source, and it gates the 715 where README states it. The entries
+Across the eighteen engine libraries and the six packages that is **723 names /
+837 registry entries**. `scripts/coverage.py` prints the names column per library
+from the same source, and it gates the 723 where README states it. The entries
 column has no gate: it is counted off the `Reg.Add`/`Reg.AddHost` lines, which is how
 four of the headings below were found to be wrong under *either* reading.
 
 ### Engine built-ins vs opt-in packages
 
-The **engine built-ins are always present** — the seventeen libraries below register
+The **engine built-ins are always present** — the eighteen libraries below register
 themselves when a `TPhosphorEngine` is created, so any host (the console
 `phosphor`, the embedding host, the test runner) has them.
 
@@ -973,6 +973,23 @@ index is a handle; a fabricated/stale handle is refused (`rag_error` reports it)
 | `rag_funccount(r@) → num` | number of distinct indexed function names |
 | `rag_summary$(r@) → str` | a human-readable index summary |
 | `rag_error() → num` | the last RAG error code (0 clear; 1 after a bad handle) |
+
+## Crypto — digests, HMAC, PBKDF2, passwords (8 names / 9 registry entries)
+
+Digests of a string's bytes as lowercase hex, a keyed MAC, the PBKDF2 key
+derivation, and a Django-compatible salted password record with its constant-time
+check. The full page is [libraries/crypto.md](libraries/crypto.md).
+
+| function | description |
+| --- | --- |
+| `sha256$(s$) → str` | SHA-256 (FIPS 180-4), 64 hex digits |
+| `sha1$(s$) → str` | SHA-1, 40 hex digits — for matching published checksums only |
+| `md5$(s$) → str` | MD5, 32 hex digits — for matching published checksums only |
+| `hmac_sha256$(key$, msg$) → str` | HMAC-SHA256 (RFC 2104), 64 hex digits |
+| `pbkdf2_sha256$(password$, salt$, iterations, bytes) → str` | PBKDF2-HMAC-SHA256 (RFC 8018), `bytes` (1–1024) of key in hex; a bad count raises |
+| `password_hash$(password$) → str`<br>`password_hash$(password$, iterations) → str` | a salted `pbkdf2_sha256$cost$salt$hash` record (default cost 600 000) |
+| `password_verify?(password$, record$) → bool` | `true` when the password matches the record; a damaged record is `false` |
+| `crypto_equal?(a$, b$) → bool` | byte equality in time that depends only on the lengths |
 
 ---
 

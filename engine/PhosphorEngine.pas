@@ -29,7 +29,7 @@ uses
   PhosphorJsonLib, PhosphorDateTimeLib, PhosphorRegexLib, PhosphorIoLib, PhosphorBufferLib,
   PhosphorConfigLib,
   PhosphorSysLib, PhosphorPlatformLib, PhosphorCallLib, PhosphorErrLib, PhosphorHostLib,
-  PhosphorRagLib;
+  PhosphorRagLib, PhosphorCryptoLib;
 
 const
   PhosphorVersion = '0.1.0';
@@ -381,6 +381,7 @@ begin
   RegisterErrFuncs(FRegistry);
   RegisterHostFuncs(FRegistry);
   RegisterRagFuncs(FRegistry);
+  RegisterCryptoFuncs(FRegistry);
   FOnOutput := nil;
   FOnInput := nil;
   FOnBreakpoint := nil;

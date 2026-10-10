@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **A crypto library** in the engine, always available
+  ([docs/libraries/crypto.md](docs/libraries/crypto.md)): `sha256$`, `sha1$`,
+  `md5$`, `hmac_sha256$`, `pbkdf2_sha256$`, and `password_hash$` /
+  `password_verify?` for storing passwords as salted PBKDF2 records in Django's
+  format (600 000 rounds by default), plus `crypto_equal?`, a comparison whose
+  timing does not depend on where two strings differ.
+
 ## 0.1.0 -- 2026-10-10
 
 The first release: an embeddable BASIC interpreter in Free Pascal 3.2.2, for

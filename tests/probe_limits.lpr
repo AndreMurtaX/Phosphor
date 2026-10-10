@@ -33,6 +33,7 @@ var
   Ok: Integer = 0;
   Failed: Integer = 0;
   ProveFail: Boolean = False;
+  CryptoStart: QWord = 0;
 
 procedure Report(Pass: Boolean; const Name: String);
 begin
@@ -1476,6 +1477,30 @@ begin
   // which reaches opCall as an ordinary library error. See LimitInsideCallfunc.
   Check('ON ERROR cannot escape a limit crossed inside callfunc',
         LimitInsideCallfunc, 0, 0, 0, True);
+
+  { --- the crypto library's cost is the script's to name ---------------------
+    PBKDF2 runs the iteration count it is given inside ONE opCall, and
+    password_verify? runs the count a stored record names -- data, not code.
+    Two billion iterations is about twenty minutes here; each ceiling must stop
+    it, and the clock one must stop it near its own limit, not at the end. }
+  CryptoStart := GetTickCount64();
+  Check('a step ceiling stops pbkdf2_sha256$',
+        'k$ = pbkdf2_sha256$("pw", "salt", 2000000000, 32)' + LF,
+        100000, 0, 0, True);
+  Check('a time ceiling stops pbkdf2_sha256$',
+        'k$ = pbkdf2_sha256$("pw", "salt", 2000000000, 32)' + LF,
+        0, 0, 100, True);
+  Check('a time ceiling stops a record that names its own cost',
+        'ok? = password_verify?("pw", "pbkdf2_sha256$2000000000$salt$' +
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")' + LF,
+        0, 0, 100, True);
+  Report(GetTickCount64() - CryptoStart < 10000,
+         'the three crypto ceilings stopped within seconds, not minutes');
+  // ...and the documented default fits inside the budget embedding.md prescribes.
+  Check('password_hash$ at its default cost fits MaxSteps = 1000000',
+        'r$ = password_hash$("pw")' + LF +
+        'if password_verify?("pw", r$) = false then x = 1 / 0' + LF,
+        1000000, 0, 0, False);
 
   { --- a fault in the interpreter; see the section above --------------------- }
 

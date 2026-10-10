@@ -86,6 +86,10 @@ section says so because the README told Linux readers for months that a native
 Both build scripts name the missing piece if it is not there, so a wrong guess
 costs one run and not an afternoon.
 
+**A step-by-step tutorial** -- from a bare Windows or Ubuntu machine to both
+`phosphor` and the PhosphorIDE editor built and tested, with the exact packages
+and checksums the measured builds used -- is [docs/building.md](docs/building.md).
+
 **Python 3, for the ten source gates.** Building needs none. But
 `scripts/test-suite` **fails** without an interpreter rather than skipping the
 gates — deliberately, because a skipped check reads as a pass — so a machine with
@@ -253,6 +257,8 @@ window; to embed the engine in your own Pascal program, see
 
 ## Documentation for contributors
 
+- [docs/building.md](docs/building.md) — building and testing Phosphor and
+  PhosphorIDE from source, on Windows and Linux.
 - [docs/architecture.md](docs/architecture.md) — the library/host seam, the boundary
   check, the UTF-8 policy, the Linux build.
 - [docs/decisions.md](docs/decisions.md) — the frozen language decisions (five value

@@ -593,6 +593,28 @@ begin
   SynthMouse(c, True, MouseBtn(ArgOrd(A[1])), ModsOf(A[4].Str),
              ArgOrd32(A[2]), ArgOrd32(A[3]));
 end;
+{ A double click, delivered the way the LCL delivers one: TControl.DblClick is the
+  method a real double click ends in, and it fires OnDblClick. A grid overrides it
+  (and may open its in-place editor first), which is why this calls the method
+  rather than the handler. }
+function f_do_dblclick(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
+  try
+    TControlAccess(c).DblClick;
+  except
+    on Ex: Exception do SynthFault(c, Ex);
+  end;
+end;
+function f_on_dblclick(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TControl, c) then
+    TControlAccess(c).OnDblClick := GuiNotifyHandler(AVM, c, 'ondblclick', A[1].Str, A[0].Hnd);
+end;
 function f_do_mousemove(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent;
 begin
@@ -1009,6 +1031,7 @@ begin
   Reg.Add('control_mouseup@:@nnn$',      @f_do_mouseup);
   Reg.Add('control_mousemove@:@nn$',     @f_do_mousemove);
   Reg.Add('control_mousewheel:@nnn$',    @f_do_mousewheel);
+  Reg.Add('control_dblclick@:@',         @f_do_dblclick);
   // the key and mouse events, on any control that can carry them
   Reg.AddHost('control_onkeydown@:@$',    @f_on_keydown);
   Reg.AddHost('control_onkeyup@:@$',      @f_on_keyup);
@@ -1017,6 +1040,7 @@ begin
   Reg.AddHost('control_onmouseup@:@$',    @f_on_mouseup);
   Reg.AddHost('control_onmousemove@:@$',  @f_on_mousemove);
   Reg.AddHost('control_onmousewheel@:@$', @f_on_mousewheel);
+  Reg.AddHost('control_ondblclick@:@$',   @f_on_dblclick);
   // the generic property bridge
   Reg.Add('control_set@:@$n', @f_prop_set);
   Reg.Add('control_set@:@$$', @f_prop_set);

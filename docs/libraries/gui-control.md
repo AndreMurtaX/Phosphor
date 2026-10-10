@@ -1,6 +1,6 @@
 # gui-control — the members every visual control shares
 
-`host/gui/libs/PhosphorControlLib.pas` · 77 functions · GUI package (the `phosphor`
+`host/gui/libs/PhosphorControlLib.pas` · 79 functions · GUI package (the `phosphor`
 host registers the seventeen GUI packages when a graphical session is reachable —
 always on Windows, a `DISPLAY` or `WAYLAND_DISPLAY` on Unix)
 
@@ -133,6 +133,7 @@ never raised into the middle of the widgetset.
 | `control_onmouseup@(c@, fn$) → handle` | the same signature on the release |
 | `control_onmousemove@(c@, fn$) → handle` | called as `(sender@, x%, y%, mods$)` — position without a button |
 | `control_onmousewheel@(c@, fn$) → handle` | called as `(sender@, delta%, x%, y%, mods$)`. Only an **explicit boolean `true`** from the handler consumes the event; a handler that answers a number, or falls off its end, leaves it unconsumed |
+| `control_ondblclick@(c@, fn$) → handle` | called as `(sender@)` on a double click. `OnDblClick` lives on `TControl`, so any control can carry it — the usual use is a list or a grid row that opens the record it shows |
 
 ### Synthesising an event
 
@@ -148,6 +149,7 @@ That is what makes the whole event surface testable headless.
 | `control_mousedown@(c@, button, x, y, mods$) → handle` | the control, after its mouse-down handler has run at `x`,`y`. A grid and a tree view try to take the focus on a mouse-down; on a form that is not shown that focus is the same deliberate no-op as `control_setfocus@`, not an error, and the handler still runs exactly once. Anything else the control raises is recorded as `gui_error() = 1`, here and in the other synthesisers |
 | `control_mouseup@(c@, button, x, y, mods$) → handle` | the same for the release |
 | `control_mousemove@(c@, x, y, mods$) → handle` | the control, after a move to `x`,`y` |
+| `control_dblclick@(c@) → handle` | the control, after its double-click handler has run. It calls the control's own `DblClick`, the method a real double click ends in, so a control that does something of its own there (a grid may open its cell editor) does that too |
 | `control_mousewheel(c@, delta, x, y, mods$) → num` | **not a handle** — `1` if the wheel was consumed, `0` if it was not, which is the handler's own decision read straight back out of one call. A positive `delta` is one way, a negative one the other; `0` when there is no handler, or the handle is bad |
 
 ### The generic property bridge

@@ -8,6 +8,10 @@
   `password_verify?` for storing passwords as salted PBKDF2 records in Django's
   format (600 000 rounds by default), plus `crypto_equal?`, a comparison whose
   timing does not depend on where two strings differ.
+- **A string grid can be a record list**: `stringgrid_row` / `stringgrid_col`
+  read the cursor, `stringgrid_cursor@` moves it, and `stringgrid_onselect@`
+  calls a handler when it moves. And **a double click** on any control:
+  `control_ondblclick@`, with `control_dblclick@` to deliver one from code.
 
 ## 0.1.0 -- 2026-10-10
 

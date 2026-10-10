@@ -7,6 +7,8 @@
     stringgrid_colcount@/()   stringgrid_rowcount@/()   stringgrid_fixedrows@/()
     stringgrid_cell@(g@, col, row, s$)   stringgrid_cell$(g@, col, row)
     stringgrid_clear@(g@)
+    stringgrid_row(g@)  stringgrid_col(g@)  stringgrid_cursor@(g@, col, row)
+    stringgrid_onselect@(g@, handler$)       the cursor moved: handler(sender@)
 
   Columns and rows are 1-BASED (Phosphor's convention): cell (g, 1, 1) is the
   top-left, i.e. TStringGrid.Cells[0, 0]. Geometry comes from PhosphorControlLib.
@@ -240,6 +242,34 @@ begin
      ValStr(StateStr(aState))]);
 end;
 
+type
+  { OnSelection hands over the new cell as two integers, (Sender, aCol, aRow), so
+    it is not a TNotifyEvent and the shared bridge cannot be assigned to it
+    directly. This adapter can: it holds the TNotifyEvent GuiNotifyHandler built
+    -- the same bridge every (sender@) handler in the GUI goes through, faults and
+    frees included -- and calls it. The handler reads the cell back with
+    stringgrid_row/stringgrid_col, which is one shape for every change event. }
+  TSelectBridge = class(TComponent)
+  public
+    Notify: TNotifyEvent;
+    procedure Fire(Sender: TObject; aCol, aRow: Integer);
+  end;
+
+procedure TSelectBridge.Fire(Sender: TObject; aCol, aRow: Integer);
+begin
+  if Assigned(Notify) then Notify(Sender);
+end;
+
+function SelectBridgeOf(AGrid: TComponent): TSelectBridge;
+var i: Integer;
+begin
+  for i := 0 to AGrid.ComponentCount - 1 do
+    if AGrid.Components[i] is TSelectBridge then
+      Exit(TSelectBridge(AGrid.Components[i]));
+  Result := TSelectBridge.Create(AGrid);
+end;
+
+
 { The bridge serving AGrid, created on demand -- one per grid. }
 function DrawBridgeOf(AGrid: TComponent): TDrawCellBridge;
 var i: Integer;
@@ -398,6 +428,40 @@ end;
 function f_clear(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) then TStringGrid(c).Clean; Result := A[0]; end;
 
+{ The cursor of a string grid, base-1 -- the row a person picked. 0 for a bad
+  handle. }
+function f_sg_col_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).Col + 1); end;
+function f_sg_row_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).Row + 1); end;
+{ The same door as drawgrid_cursor@: the position is handed to the grid, which
+  keeps the cursor inside its scrollable cells. Moving it fires OnSelection
+  (SetRow -> MoveExtend -> MoveSelection), as a person's click would. }
+function f_sg_setcursor(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TStringGrid, c) then
+  begin
+    TStringGrid(c).Col := ArgI32(A[1]) - 1;
+    TStringGrid(c).Row := ArgI32(A[2]) - 1;
+  end; end;
+function f_sg_onselect(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; ev: TNotifyEvent; b: TSelectBridge;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TStringGrid, c) then Exit;
+  ev := GuiNotifyHandler(AVM, c, 'onselect', A[1].Str, A[0].Hnd);
+  if ev = nil then
+  begin
+    TStringGrid(c).OnSelection := nil;   // an empty name unwires, as everywhere else
+    Exit;
+  end;
+  b := SelectBridgeOf(c);
+  b.Notify := ev;
+  TStringGrid(c).OnSelection := @b.Fire;
+end;
+
 procedure RegisterGridFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('drawgrid@:@',            @f_drawgrid);
@@ -417,6 +481,10 @@ begin
   Reg.Add('stringgrid_cell@:@nn$', @f_cell_set);
   Reg.Add('stringgrid_cell$:@nn', @f_cell_get);
   Reg.Add('stringgrid_clear@:@', @f_clear);
+  Reg.Add('stringgrid_col:@', @f_sg_col_get);
+  Reg.Add('stringgrid_row:@', @f_sg_row_get);
+  Reg.Add('stringgrid_cursor@:@nn', @f_sg_setcursor);
+  Reg.AddHost('stringgrid_onselect@:@$', @f_sg_onselect);
 end;
 
 initialization

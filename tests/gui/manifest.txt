@@ -31,3 +31,4 @@
 27_free_in_handler
 28_setter_ranges
 29_shown_form
+30_grid_select

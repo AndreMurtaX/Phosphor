@@ -323,7 +323,7 @@ end;
   marked in use, so a handler's control_free of it is refused, like a closing
   form's. It is not shown afterwards, and it can be shown modally again. }
 type
-  TFormAccess = class(TCustomForm);   // DoClose is protected
+  TFormAccess = class(TForm);   // DoClose is protected; derived from TForm, the type it casts
 
   { Between the messages of a real modal session: free what was queued inside
     it (GuiFlushFreesSince's reasoning). }

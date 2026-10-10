@@ -199,6 +199,12 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
     2026-10-08 `pgrep -f "[c]lockwatch"` still never ended, because the `bash -c`
     running the loop had also STARTED `python3 /tmp/clockwatch.py` -- the bracket
     stops a pattern matching itself, not matching the command line of its parent.
+    **And every wait needs a deadline of its own.** On 2026-10-09 a fixer agent
+    left four `until [ -s n1.json ]; do sleep 15; done` loops waiting for a file
+    its sweep never wrote (the sweep had hit its own time limit); they ran for
+    nine hours, one bash pair each, until the owner asked what the long-running
+    tasks were. A sentinel that may never appear is the same trap as a pattern
+    that always matches: bound the loop (`for i in $(seq 240)`, or `timeout`).
     The evidence was on screen hours earlier: a `pgrep -af` run that day printed
     `bash -c pgrep -af "test-suite.sh|phosphortest|fpc"` as one of its own hits, and
     it was read past. **A process listing that includes the listing is telling you

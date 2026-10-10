@@ -193,18 +193,20 @@ assert_eq(gui_error(), 1, "and the bridge refuses the same position")
 assert_eq(control_left(b@), 32767, "keeping the old one")
 on error goto trapped
 
-test_case("ranges/a size is at most 32767")
+test_case("ranges/a size is at most 32000")
+rem 32000 is GTK2's MaxSize (gtk2proc.inc), below win32's limit, so one
+rem ceiling holds on both OSes (2026-10-09; it was 32767).
 x@ = control_bounds@(b@, 10, 20, 40, 30)
 gui_clearerror()
-x@ = control_width@(b@, 32767)
+x@ = control_width@(b@, 32000)
 on error goto 0
-assert_eq(gui_error(), 0, "32767 wide is accepted")
-assert_eq(control_width(b@), 32767, "and applied")
+assert_eq(gui_error(), 0, "32000 wide is accepted")
+assert_eq(control_width(b@), 32000, "and applied")
 on error goto trapped
-x@ = control_width@(b@, 32768)
+x@ = control_width@(b@, 32001)
 on error goto 0
-assert_eq(gui_error(), 1, "32768 wide is refused")
-assert_eq(control_width(b@), 32767, "and the width is unchanged")
+assert_eq(gui_error(), 1, "32001 wide is refused")
+assert_eq(control_width(b@), 32000, "and the width is unchanged")
 on error goto trapped
 gui_clearerror()
 x@ = control_set@(b@, "Height", 40000)
@@ -225,7 +227,7 @@ assert_eq(gui_error(), 1, "a gap past it is refused")
 assert_eq(control_spacing(b@), 0, "and none was set")
 on error goto trapped
 gui_clearerror()
-x@ = form_width@(f@, 32768)
+x@ = form_width@(f@, 32001)
 on error goto 0
 assert_eq(gui_error(), 1, "a form is held to it as well")
 assert_eq(form_width(f@), 400, "and kept its width")

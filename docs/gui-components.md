@@ -236,11 +236,11 @@ The single exception is the form being closed, from its own `form_onclose@` /
   phase-1 contract and the reference's `02_handles` behaviour, already honoured.
   **And a value the widgetset cannot hold is refused before the LCL sees it**, on a
   shown form as on a hidden one: a position outside `-32768..32767` and a size past
-  32767 are `gui_error` 1 (a shown window raised for both, after storing them, and
+  32000 are `gui_error` 1 (a shown window raised for both, after storing them, and
   a spin edit wider than ~32780 px ended the process from inside its window
   procedure); every control a handle is made for carries a `ConstrainedResize`
   hook that holds whatever the LCL sizes for itself — an autosized caption, an
-  alignment — to the same 32767; and a write the layout still refuses is undone.
+  alignment — to the same 32000; and a write the layout still refuses is undone.
   Synthesised events on a form that was never shown treat the focus a grid or a
   tree view asks for as the same no-op `control_setfocus@` is. Round 4 of
   2026-10-09 found every one of those raising; `tests/gui/28_setter_ranges.bas` and

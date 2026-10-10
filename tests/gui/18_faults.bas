@@ -112,11 +112,14 @@ assert_eq(control_width(b@), 40, "and the control kept the width it had")
 on error goto trapped
 
 test_case("faults/a size at the ceiling is still accepted")
+rem The ceiling is 32000, GTK2's own MaxSize (gtk2proc.inc) and below
+rem win32's limit -- one number on both OSes (2026-10-09; it was 32767,
+rem which a shown Linux form could not realize).
 gui_clearerror()
-control_width@(b@, 32767)
+control_width@(b@, 32000)
 on error goto 0
-assert_eq(gui_error(), 0, "32767 is inside the limit")
-assert_eq(control_width(b@), 32767, "and was applied")
+assert_eq(gui_error(), 0, "32000 is inside the limit")
+assert_eq(control_width(b@), 32000, "and was applied")
 on error goto trapped
 control_width@(b@, 40)
 

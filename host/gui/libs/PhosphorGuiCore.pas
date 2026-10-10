@@ -161,10 +161,17 @@ const
     about 32780 pixels on win32: control_width@(spin@, 32768..65535) made
     TWinControl.WMSize see bounds that never converge and raise from INSIDE the
     window procedure, where Application.HandleException ended the process -- no
-    error trap could see it. So the one ceiling is now 32767: a legal SmallInt
-    coordinate, a legal Word size, and a size every control kind realizes.
+    error trap could see it. So the one ceiling became 32767: a legal SmallInt
+    coordinate, a legal Word size, and a size every control kind realizes --
+    ON WIN32. GTK2 does not: its SetWidgetSizeAndPosition caps a widget at
+    MaxSize = 32000 (lcl/interfaces/gtk2/gtk2proc.inc, "some limit to spot
+    endless loops and bad values"), so a 32767-wide checkbox on a shown Linux
+    form was realized 32000 wide, WMSize saw bounds that never converge, and
+    the host died of an unhandled ELayoutException -- the first Linux run of
+    tests/gui/29_shown_form.bas, the same day. The ceiling is the SMALLER of the
+    two widgetsets' limits, one number on both OSes: 32000.
     GuiMinPos / GuiMaxPos are the coordinate range beside it. }
-  GuiMaxExtent = 32767;
+  GuiMaxExtent = 32000;
   GuiMinPos = -32768;
   GuiMaxPos = 32767;
 

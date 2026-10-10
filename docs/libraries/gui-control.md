@@ -46,7 +46,7 @@ given one changes nothing and answers that same handle back.
 
 ### Geometry
 
-**A position is a 16-bit signed number and a size is at most 32767**, on a hidden
+**A position is a 16-bit signed number and a size is at most 32000** (the smaller of the two widgetsets' limits: GTK2 caps a widget at 32000), on a hidden
 form and a shown one alike. Past either, the setter records `gui_error() = 1` and
 the control keeps the bounds it had — nothing is raised. The reason is the window:
 once a form is shown the LCL raises for a left or top outside `-32768..32767` and
@@ -54,7 +54,7 @@ a width or height outside `0..65535` (after storing the value, so the window wen
 on raising), and a spin edit cannot be realized wider than about 32780 pixels on
 win32 at all — `control_width@(spin@, 40000)` used to end the process from inside
 the window procedure, past any error trap. A size the control works out for itself
-(an autosized caption, an alignment) is held to the same 32767, and a resize the
+(an autosized caption, an alignment) is held to the same 32000, and a resize the
 layout still refuses is undone and recorded as `gui_error() = 1`.
 
 | function | what it answers |
@@ -65,7 +65,7 @@ layout still refuses is undone and recorded as `gui_error() = 1`.
 | `control_height(c@) → num`<br>`control_height@(c@, h) → handle` | the height, likewise |
 | `control_align(c@) → num`<br>`control_align@(c@, a) → handle` | the `TAlign` ordinal: `0` none, `1` top, `2` bottom, `3` left, `4` right, `5` client, `6` custom. A number outside `0..6` leaves the alignment alone — and, unlike the bridge, records nothing, so pass a constant you trust |
 | `control_move@(c@, x, y) → handle` | left and top in one call; both are refused if either is out of range |
-| `control_size@(c@, w, h) → handle` | width and height in one call; both are refused if either is past 32767 |
+| `control_size@(c@, w, h) → handle` | width and height in one call; both are refused if either is past 32000 |
 | `control_bounds@(c@, x, y, w, h) → handle` | all four at once through `SetBounds`, so the control never passes through an intermediate rectangle on its way. All four are refused if any is out of range |
 
 ### State and appearance
@@ -111,8 +111,8 @@ Each of these writes into the control's own `Font`; the pair round-trips.
 | `control_anchors$(c@) → str`<br>`control_anchors@(c@, ids$) → handle` | the anchor set as an identifier list without brackets — `"akLeft,akRight"` — which is exactly the text the setter takes, so the pair round-trips. On a control with no published `Anchors`: `""` / no write, and `gui_error() = 3` |
 | `control_tabstop(c@) → num`<br>`control_tabstop@(c@, on) → handle` | whether Tab reaches this control, `1`/`0`. Windowed controls only: on a label the getter answers `0` and **both** halves record `gui_error() = 1` |
 | `control_taborder(c@) → num`<br>`control_taborder@(c@, n) → handle` | its 0-based position in the parent's tab chain. Windowed controls only, as above |
-| `control_spacing(c@) → num`<br>`control_spacing@(c@, px) → handle` | `BorderSpacing.Around` — one gap for all four edges. `BorderSpacing` is a class-typed sub-object, which is precisely why the bridge refuses it and this named helper exists. A gap outside `-32767..32767` is refused with `gui_error() = 1` |
-| `control_minwidth(c@) → num`<br>`control_minwidth@(c@, px) → handle` | `Constraints.MinWidth`; `0` is the LCL's "no constraint". A negative value is `0`; a value past 32767 is refused with `gui_error() = 1`, as for the other three. `0` still reads back as `0` — the host's own 32767 ceiling is applied beside the constraint, not written into it |
+| `control_spacing(c@) → num`<br>`control_spacing@(c@, px) → handle` | `BorderSpacing.Around` — one gap for all four edges. `BorderSpacing` is a class-typed sub-object, which is precisely why the bridge refuses it and this named helper exists. A gap outside `-32000..32000` is refused with `gui_error() = 1` |
+| `control_minwidth(c@) → num`<br>`control_minwidth@(c@, px) → handle` | `Constraints.MinWidth`; `0` is the LCL's "no constraint". A negative value is `0`; a value past 32000 is refused with `gui_error() = 1`, as for the other three. `0` still reads back as `0` — the host's own 32000 ceiling is applied beside the constraint, not written into it |
 | `control_maxwidth(c@) → num`<br>`control_maxwidth@(c@, px) → handle` | `Constraints.MaxWidth`, likewise |
 | `control_minheight(c@) → num`<br>`control_minheight@(c@, px) → handle` | `Constraints.MinHeight`, likewise |
 | `control_maxheight(c@) → num`<br>`control_maxheight@(c@, px) → handle` | `Constraints.MaxHeight`, likewise |

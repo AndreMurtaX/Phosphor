@@ -1,4 +1,4 @@
-Phosphor BASIC 0.0.1 -- REPL. Variables and functions persist across lines.
+Phosphor BASIC 0.1.0 -- REPL. Variables and functions persist across lines.
 Type a multi-line block and it waits for the terminator. Ctrl+Z then Enter to quit.
 phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor> phosphor>      ...>      ...> phosphor>      ...> phosphor> phosphor> the variable survived: 5
 phosphor> and so did the function: 42

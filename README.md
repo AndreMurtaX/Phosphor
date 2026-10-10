@@ -7,6 +7,11 @@ The spiritual successor to Plan9Basic (Delphi/FireMonkey, now frozen). **Not a
 port:** several language decisions change on purpose — see
 [docs/decisions.md](docs/decisions.md).
 
+**To use it rather than build it:** download a release from the repository's
+Releases page and start with [docs/getting-started.md](docs/getting-started.md).
+What changed in each version, and the limits to know before running a script
+you did not write, are in [CHANGELOG.md](CHANGELOG.md).
+
 ## Status — the whole oracle corpus, and where this language stops
 
 Phosphor runs Plan9Basic's **test oracle**, byte-exact green on Windows *and*

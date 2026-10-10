@@ -1,0 +1,176 @@
+# THE RELEASE (2026-10-10, 0.1.0). Pushing a tag vX.Y.Z builds the phosphor
+# binary on Linux and Windows with the same toolchain the ci workflow uses,
+# packages each with the user documentation and the examples, and publishes a
+# GitHub pre-release with the archives and their SHA-256.
+#
+# Three refusals, each because a release is the one artefact people run without
+# reading the tree:
+#   - the tagged commit must already have a SUCCESSFUL run of the ci workflow:
+#     this workflow builds, it does not test, so it may only package what the
+#     suites have already judged;
+#   - the tag must name the version compiled into the binary
+#     (PhosphorVersion in engine/PhosphorEngine.pas) -- a v0.1.0 archive whose
+#     phosphor --version says 0.0.1 is refused;
+#   - each binary runs a program before it is packaged.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: the tag names the compiled-in version
+        id: v
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          src="$(sed -n "s/^ *PhosphorVersion = '\([^']*\)';.*/\1/p" engine/PhosphorEngine.pas)"
+          echo "tag $tag, source $src"
+          [ -n "$src" ] && [ "$tag" = "$src" ] || { echo "FAIL  tag v$tag does not name PhosphorVersion $src"; exit 1; }
+          echo "version=$src" >> "$GITHUB_OUTPUT"
+      - name: the tagged commit already passed ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ok="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+                --json status,conclusion -q '[.[] | select(.status=="completed" and .conclusion=="success")] | length')"
+          echo "successful ci runs for $GITHUB_SHA: $ok"
+          [ "$ok" -ge 1 ] || { echo "FAIL  no successful ci run for this commit -- push it, let ci pass, then tag"; exit 1; }
+
+  linux:
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain -- Lazarus 4.8 and FPC 3.2.2 (as in ci.yml)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q libgtk2.0-dev libx11-dev
+          base='https://sourceforge.net/projects/lazarus/files/Lazarus%20Linux%20amd64%20DEB/Lazarus%204.8'
+          mkdir -p "$RUNNER_TEMP/debs"; cd "$RUNNER_TEMP/debs"
+          for f in fpc-laz_3.2.2-210709_amd64.deb fpc-src_3.2.2-210709_amd64.deb lazarus-project_4.8.0-0_amd64.deb; do
+            curl -fsSL --retry 5 --retry-delay 10 -o "$f" "$base/$f/download"
+          done
+          printf '%s\n' \
+            '92000f2b831184e153aab0c910f8ae9240450e5c6d76dc189cf53116ee501d83  fpc-laz_3.2.2-210709_amd64.deb' \
+            '8c9e145d8056754a9ca39ce3e52e982b8e4816124984c5f542f2a874e721ad53  fpc-src_3.2.2-210709_amd64.deb' \
+            '401742cefb01ad99a628188034bf728fb5360d641ed2be5f91fb0ee183a301cd  lazarus-project_4.8.0-0_amd64.deb' \
+            > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          sudo apt-get install -y -q ./fpc-laz_3.2.2-210709_amd64.deb ./fpc-src_3.2.2-210709_amd64.deb ./lazarus-project_4.8.0-0_amd64.deb
+      - name: build, and run a program with it
+        run: |
+          set -euo pipefail
+          bash scripts/build.sh
+          v="$(bin/phosphor --version < /dev/null)"
+          echo "$v"
+          [[ "$v" == *"${{ needs.gate.outputs.version }}"* ]] || { echo "FAIL  binary says: $v"; exit 1; }
+          printf 'println "ok " + str$(1 + 1)\n' > "$RUNNER_TEMP/smoke.bas"
+          out="$(bin/phosphor "$RUNNER_TEMP/smoke.bas" < /dev/null)"
+          [ "$out" = "ok 2" ] || { echo "FAIL  smoke said: $out"; exit 1; }
+      - name: package
+        run: |
+          set -euo pipefail
+          d="phosphor-${{ needs.gate.outputs.version }}-linux-x86_64"
+          mkdir -p "$d/docs"
+          cp bin/phosphor LICENSE README.md CHANGELOG.md "$d/"
+          cp docs/getting-started.md docs/language-reference.md docs/function-reference.md \
+             docs/embedding.md docs/debugging.md "$d/docs/"
+          cp -r docs/libraries "$d/docs/libraries"
+          cp -r examples "$d/examples"
+          tar -czf "$d.tar.gz" "$d"
+          sha256sum "$d.tar.gz" > "$d.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: phosphor-*-linux-x86_64.tar.gz*
+
+  windows:
+    needs: gate
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain -- Lazarus 4.8 and FPC 3.2.2 (as in ci.yml)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://sourceforge.net/projects/lazarus/files/Lazarus%20Windows%2064%20bits/Lazarus%204.8/lazarus-4.8-fpc-3.2.2-win64.exe/download'
+          $exe = Join-Path $env:RUNNER_TEMP 'lazarus-4.8-fpc-3.2.2-win64.exe'
+          curl.exe -fsSL --retry 5 --retry-delay 10 -o $exe $url
+          $md5 = (Get-FileHash -Algorithm MD5 $exe).Hash.ToLower()
+          if ($md5 -ne 'eb7e75999b6370d4ef9bba1ac407d6c9') { throw "lazarus installer MD5 $md5 is not the published one" }
+          Start-Process -Wait -FilePath $exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\lazarus'
+      - name: SQLite for the archive -- the DLL sqlite.org publishes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlite.zip'
+          curl.exe -fsSL --retry 5 --retry-delay 10 -o $zip 'https://www.sqlite.org/2026/sqlite-dll-win-x64-3540000.zip'
+          $sha3 = python -c "import hashlib,sys; print(hashlib.sha3_256(open(sys.argv[1],'rb').read()).hexdigest())" $zip
+          if ($sha3 -ne 'f5fb500c73a3afd89976386bb8e4fdc8b5b65c052e187fb1ada1f5de034cd45b') { throw "sqlite zip SHA3-256 $sha3 is not the published one" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sqlite')
+      - name: build, and run a program with it
+        shell: pwsh
+        run: |
+          powershell -NoProfile -File scripts\build.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $v = cmd /c "bin\phosphor.exe --version < NUL"
+          Write-Host $v
+          if ($v -notlike "*${{ needs.gate.outputs.version }}*") { throw "binary says: $v" }
+          $smoke = Join-Path $env:RUNNER_TEMP 'smoke.bas'
+          [IO.File]::WriteAllText($smoke, "println ""ok "" + str`$(1 + 1)`n")
+          $out = (cmd /c "bin\phosphor.exe `"$smoke`" < NUL").Trim()
+          if ($out -ne 'ok 2') { throw "smoke said: $out" }
+      - name: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $d = "phosphor-${{ needs.gate.outputs.version }}-windows-x86_64"
+          New-Item -ItemType Directory -Force "$d\docs" | Out-Null
+          Copy-Item bin\phosphor.exe, LICENSE, README.md, CHANGELOG.md $d
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'sqlite\sqlite3.dll') $d
+          Copy-Item docs\getting-started.md, docs\language-reference.md, docs\function-reference.md, docs\embedding.md, docs\debugging.md "$d\docs"
+          Copy-Item docs\libraries "$d\docs\libraries" -Recurse
+          Copy-Item examples "$d\examples" -Recurse
+          Compress-Archive -Path $d -DestinationPath "$d.zip"
+          $h = (Get-FileHash -Algorithm SHA256 "$d.zip").Hash.ToLower()
+          Set-Content -Path "$d.zip.sha256" -Value "$h  $d.zip" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: phosphor-*-windows-x86_64.zip*
+
+  publish:
+    needs: [gate, linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: the notes are this version's changelog section
+        run: |
+          set -euo pipefail
+          v="${{ needs.gate.outputs.version }}"
+          awk -v v="$v" '$0 ~ "^## "v" " {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "FAIL  CHANGELOG.md has no section for $v"; exit 1; }
+      - name: publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "Phosphor BASIC ${{ needs.gate.outputs.version }}" --notes-file notes.md --prerelease

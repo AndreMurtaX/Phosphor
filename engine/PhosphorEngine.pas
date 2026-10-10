@@ -32,7 +32,7 @@ uses
   PhosphorRagLib;
 
 const
-  PhosphorVersion = '0.0.1';
+  PhosphorVersion = '0.1.0';
 
 type
   EPhosphorInternal = class(Exception);

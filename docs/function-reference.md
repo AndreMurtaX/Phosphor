@@ -157,7 +157,7 @@ in-place edits. Character operations count **Unicode codepoints, not bytes**.
 
 | function | description |
 | --- | --- |
-| `replacestr$(s$, from$, to$) → str` | replace every `from$` with `to$` (case-sensitive) |
+| `replacestr$(s$, from$, to$) → str` | replace every `from$` with `to$` (case-sensitive); a text or an answer of 2147483647 bytes or more is a catchable overflow |
 | `replacetext$(s$, from$, to$) → str` | replace every `from$` with `to$` (case-insensitive) |
 | `insert$(s$, ins$, pos) → str` | insert `ins$` before the 1-based `pos` |
 | `delete$(s$, pos, count) → str` | remove `count` characters starting at `pos` |
@@ -521,7 +521,7 @@ are the library's own. String rendering/parsing is fixed **ISO 8601**
 | `date$() → str` | today as `yyyy-mm-dd` |
 | `time$() → str` | now, time only |
 | `datetime$() → str` | now, date and time |
-| `formatdatetime$(fmt$, d) → str` | format `d` with an explicit pattern (pinned ISO text, English names, `AM`/`PM`); refuses a number outside 0001-01-01..9999-12-31 |
+| `formatdatetime$(fmt$, d) → str` | format `d` with an explicit pattern (pinned ISO text, English names, `AM`/`PM`); an empty pattern is the ISO date `yyyy-mm-dd`; refuses a number outside 0001-01-01..9999-12-31 |
 | `strtodate(s$) → num` | parse exactly `yyyy-mm-dd` (error otherwise -- nothing is completed by a guess) |
 | `strtotime(s$) → num` | parse exactly `hh:nn` or `hh:nn:ss` (error otherwise) |
 | `strtodatetime(s$) → num` | parse `yyyy-mm-dd`, `yyyy-mm-dd hh:nn` or `yyyy-mm-dd hh:nn:ss` (error otherwise) |

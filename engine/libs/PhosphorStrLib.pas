@@ -35,33 +35,119 @@ var
   (PhosphorVM) mean characters too, and each had grown its own byte-based
   version that split UTF-8 sequences. One table, one definition of where a
   character starts, three callers -- see the header over Utf8Starts. }
-function CpStarts(const S: String): TInt64DynArray; inline;
-begin
-  Result := Utf8Starts(S);
-end;
+{ AND EVERY COUNT IS AN Int64, EVERY BYTE POSITION A SizeInt (2026-10-09, round
+  4). A String's length is a SizeInt; an Integer cursor wraps past 2^31 bytes and
+  an Integer `for` bound is TRUNCATED, so len() of a two-gigabyte string answered
+  1 and left$(s$, 4) answered all of it. Arguments that name a position or a count
+  in a string are read with ArgI64: ArgI32 clamps at 2^31 - 1, which is a wrong
+  answer for character 2^31 + 1 of a string that has one.
 
-function CpLen(const S: String): Integer; inline;
+  The walkers (Utf8Advance, Utf8SuffixStart) replace the table these helpers used
+  to build -- one Int64 per input BYTE, so mid$ of a two-gigabyte string asked for
+  sixteen more. They read exactly the boundaries the table records. }
+function CpLen(const S: String): Int64; inline;
 begin
   Result := Utf8Len(S);
 end;
 
-function CpAt(const S: String; AOneBased: Integer): String;
-var st: TInt64DynArray;
+{ The byte position at which codepoint ACp (base 1) begins; Length(S)+1 when
+  the string has fewer characters than that. ACp <= 1 is byte 1. }
+function CpToByte(const S: String; ACp: Int64): SizeInt;
 begin
-  Result := '';
-  st := CpStarts(S);
-  if (AOneBased >= 1) and (AOneBased <= Length(st) - 1) then
-    Result := Copy(S, st[AOneBased - 1], st[AOneBased] - st[AOneBased - 1]);
+  if ACp <= 1 then Exit(1);
+  Result := Utf8Advance(S, 1, ACp - 1);
 end;
 
-function CpLeft(const S: String; ACount: Integer): String; inline;
+function CpAt(const S: String; AOneBased: Int64): String;
+var a: SizeInt;
+begin
+  Result := '';
+  if AOneBased < 1 then Exit;
+  a := CpToByte(S, AOneBased);
+  if a > Length(S) then Exit;
+  Result := Copy(S, a, Utf8Advance(S, a, 1) - a);
+end;
+
+function CpLeft(const S: String; ACount: Int64): String; inline;
 begin
   Result := Utf8Left(S, ACount);
 end;
 
-function CpRight(const S: String; ACount: Integer): String; inline;
+function CpRight(const S: String; ACount: Int64): String; inline;
 begin
   Result := Utf8Right(S, ACount);
+end;
+
+{ A string past the longest one this build can hold: the error a builder answers
+  rather than hand SetLength a length that wrapped. }
+function TooLong(const AFn: String): TPhosphorError;
+begin
+  Result := MakeError(peRuntime, AFn + ': the answer would be past the longest ' +
+                      'string this build can hold (' + IntToStr(High(SizeInt)) + ' bytes)');
+end;
+
+{ The byte length of ACount copies of a piece APieceLen bytes long, or -1 when
+  that is past High(SizeInt) -- asked BEFORE multiplying, so the product cannot
+  wrap into a small length that SetLength would then honour while the fill loop
+  writes the true number of copies past its end. }
+function RunBytes(ACount, APieceLen: Int64): Int64;
+begin
+  if (ACount <= 0) or (APieceLen <= 0) then Exit(0);
+  if ACount > High(SizeInt) div APieceLen then Exit(-1);
+  Result := ACount * APieceLen;
+end;
+
+{ ACount copies of S in R, sized once: False with E set when the answer would
+  be past the longest string (RunBytes, asked before multiplying) or the budget
+  refuses it (RULE 1: the size is fixed by the arguments). StrUtils' DupeString,
+  which this replaces, takes an Integer count. }
+function RunOf(const AFn, S: String; ACount: Int64; out R: String;
+               out E: TPhosphorError): Boolean;
+var i, sl, total: Int64;
+begin
+  R := '';
+  E := NoError();
+  sl := Length(S);
+  total := RunBytes(ACount, sl);
+  if total < 0 then begin E := TooLong(AFn); Exit(False); end;
+  if not BudgetAllows(total) then begin E := BudgetRefusal(AFn); Exit(False); end;
+  Result := True;
+  if total = 0 then Exit;
+  SetLength(R, total);
+  if sl = 1 then
+    FillChar(R[1], total, Byte(S[1]))
+  else
+    for i := 0 to ACount - 1 do Move(S[1], R[i * sl + 1], sl);
+end;
+
+{ ASCII case and the whitespace trim, written here because the RTL's are 32-bit
+  inside: SysUtils.InternalChangeCase (ucase$/lcase$) and Trim/TrimLeft/TrimRight
+  keep the length in an Integer (rtl/objpas/sysutils/sysstr.inc, read), so past
+  2^31 bytes the bound truncates and the string comes back unconverted or
+  trimmed to nothing. Same rules as the RTL's: a..z/A..Z by 32, and every byte
+  #0..' ' is whitespace. }
+function AsciiCase(const S: String; AUpper: Boolean): String;
+var i: SizeInt; c: Char;
+begin
+  Result := S;
+  for i := 1 to Length(Result) do
+  begin
+    c := Result[i];
+    if AUpper and (c >= 'a') and (c <= 'z') then Result[i] := Chr(Ord(c) - 32)
+    else if (not AUpper) and (c >= 'A') and (c <= 'Z') then Result[i] := Chr(Ord(c) + 32);
+  end;
+end;
+
+function ByteTrim(const S: String; ALeft, ARight: Boolean): String;
+var a, b: SizeInt;
+begin
+  a := 1;
+  b := Length(S);
+  if ARight then
+    while (b > 0) and (S[b] <= ' ') do Dec(b);
+  if ALeft then
+    while (a <= b) and (S[a] <= ' ') do Inc(a);
+  Result := Copy(S, a, b - a + 1);
 end;
 
 { QUADRATIC APPEND, charged. `Result := Result + Copy(...)` in a loop is not an
@@ -71,20 +157,28 @@ end;
   it is RULE 1 -- priced once, refused whole, never truncated half way. False here
   means the budget said no; the caller turns that into the peLimit. }
 function CpReverse(const S: String; out AAllowed: Boolean): String;
-var st: TInt64DynArray; i, n: Integer;
+var p, q, o: SizeInt;
 begin
   Result := '';
   AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
   if not AAllowed then Exit;
-  st := CpStarts(S);
-  n := Length(st) - 1;
-  for i := n downto 1 do
-    Result := Result + Copy(S, st[i - 1], st[i] - st[i - 1]);
+  { Sized once and filled from the back, a character at a time: the same spans
+    the old table gave, without the table or the append. }
+  SetLength(Result, Length(S));
+  p := 1;
+  o := Length(S) + 1;
+  while p <= Length(S) do
+  begin
+    q := Utf8Advance(S, p, 1);
+    Dec(o, q - p);
+    Move(S[p], Result[o], q - p);
+    p := q;
+  end;
 end;
 
 // --- string splitting -------------------------------------------------------
 function SplitBy(const S, Sep: String): TStringArray;
-var start, i, n: Integer;
+var start, i, n: SizeInt;
 begin
   Result := nil;
   SetLength(Result, 0);
@@ -104,11 +198,11 @@ begin
     i := PosEx(Sep, S, start);
   end;
   SetLength(Result, n + 1);
-  Result[n] := Copy(S, start, MaxInt);
+  Result[n] := Copy(S, start, Length(S) - start + 1);   // MaxInt is a count, not "the end"
 end;
 
 function SplitLines(const S: String): TStringArray;
-var i: Integer;
+var i: SizeInt;
 begin
   Result := SplitBy(S, #10);
   for i := 0 to High(Result) do
@@ -120,21 +214,21 @@ end;
 function s0(const Args: array of TValue): String; begin Result := Args[0].Str; end;
 
 function f_ucase(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(UpperCase(s0(A))); end;
+begin E := NoError(); Result := ValStr(AsciiCase(s0(A), True)); end;
 function f_lcase(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(LowerCase(s0(A))); end;
+begin E := NoError(); Result := ValStr(AsciiCase(s0(A), False)); end;
 function f_len(const A: array of TValue; out E: TPhosphorError): TValue;
 begin E := NoError(); Result := ValInt(CpLen(s0(A))); end;
 function f_left(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpLeft(s0(A), ArgI32(A[1]))); end;
+begin E := NoError(); Result := ValStr(CpLeft(s0(A), ArgI64(A[1]))); end;
 function f_right(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpRight(s0(A), ArgI32(A[1]))); end;
+begin E := NoError(); Result := ValStr(CpRight(s0(A), ArgI64(A[1]))); end;
 function f_trim(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(Trim(s0(A))); end;
+begin E := NoError(); Result := ValStr(ByteTrim(s0(A), True, True)); end;
 function f_ltrim(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(TrimLeft(s0(A))); end;
+begin E := NoError(); Result := ValStr(ByteTrim(s0(A), True, False)); end;
 function f_rtrim(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(TrimRight(s0(A))); end;
+begin E := NoError(); Result := ValStr(ByteTrim(s0(A), False, True)); end;
 function f_reverse(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: String; ok: Boolean;
 begin
@@ -146,25 +240,21 @@ end;
 
 // mid$(s, start[, len]) -- 1-based, by codepoint. Without len, to the end.
 function f_mid(const A: array of TValue; out E: TPhosphorError): TValue;
-var st: TInt64DynArray; startCp, cnt, lastEx, n: Integer;
+var startCp, cnt: Int64; pa, pb: SizeInt;
 begin
   E := NoError();
-  st := CpStarts(s0(A));
-  n := Length(st) - 1;
-  startCp := ArgI32(A[1]);
-  if High(A) >= 2 then cnt := ArgI32(A[2]) else cnt := n;
+  startCp := ArgI64(A[1]);
+  if High(A) >= 2 then cnt := ArgI64(A[2]) else cnt := High(Int64);
   if startCp < 1 then startCp := 1;
-  if cnt < 0 then cnt := 0;
-  if startCp > n then Exit(ValStr(''));
-  // Clamp the COUNT before adding it. Saturating arguments stop the conversion from
-  // raising, but `startCp + cnt` is still Integer arithmetic: mid$("hello", 1,
-  // 2147483647) wrapped the sum to -2147483648, sailed past the `> n + 1` guard
-  // below, and indexed the codepoint table at a negative offset -- an access
-  // violation. No count beyond the string's length can mean anything anyway.
-  if cnt > n then cnt := n;
-  lastEx := startCp + cnt;                 // one past the last codepoint
-  if lastEx > n + 1 then lastEx := n + 1;
-  Result := ValStr(Copy(s0(A), st[startCp - 1], st[lastEx - 1] - st[startCp - 1]));
+  if cnt <= 0 then Exit(ValStr(''));
+  // No sum of start and count is formed: mid$("hello", 1, 2147483647) once
+  // wrapped `startCp + cnt` to -2147483648 and indexed a table at a negative
+  // offset. The walk from the start byte is bounded by the string, and a count
+  // past its end only stops at the end.
+  pa := CpToByte(s0(A), startCp);
+  if pa > Length(s0(A)) then Exit(ValStr(''));
+  pb := Utf8Advance(s0(A), pa, cnt);
+  Result := ValStr(Copy(s0(A), pa, pb - pa));
 end;
 
 { THE DECODER ON THE OTHER SIDE OF Utf8Char's SURROGATE GAP (2026-10-09). The
@@ -313,7 +403,7 @@ begin E := NoError(); Result := ValStr(IntToStr(A[0].Int)); end;
   (1) THE LOOP. space$ and string$ produce the same shape of answer and only
   space$ was fast: it calls StringOfChar once, while string$ and mulstring$
   appended one piece at a time. An append reallocates, so building n characters
-  cost O(n^2) work -- string$(1e18) becomes string$(2147483647) under ArgI32's
+  cost O(n^2) work -- string$(1e18) became string$(2147483647) under ArgI32's
   saturating clamp and then ran for HOURS, with no ceiling able to look at it,
   because the whole loop lives inside one opCall. Both now size the answer once
   and fill it, which is what StringOfChar was already doing for their sibling:
@@ -325,69 +415,36 @@ begin E := NoError(); Result := ValStr(IntToStr(A[0].Int)); end;
   front rather than started. With no budget installed BudgetAllows answers True
   on its first line and these behave as they always did, only faster. }
 function f_space(const A: array of TValue; out E: TPhosphorError): TValue;
-var n: Integer;
+var n: Int64;
 begin
   E := NoError();
-  n := ArgI32(A[0]); if n < 0 then n := 0;
+  n := ArgI64(A[0]); if n < 0 then n := 0;
+  if RunBytes(n, 1) < 0 then begin E := TooLong('space$'); Exit(ValStr('')); end;
   if not BudgetAllows(n) then begin E := BudgetRefusal('space$'); Exit(ValStr('')); end;
   Result := ValStr(StringOfChar(' ', n));
 end;
 function f_string(const A: array of TValue; out E: TPhosphorError): TValue;
-var n, i, cl: Integer; total: Int64; ch, r: String;
+var n: Int64; ch, r: String;
 begin
   E := NoError();
-  n := ArgI32(A[0]); if n < 0 then n := 0;
+  n := ArgI64(A[0]); if n < 0 then n := 0;
   ch := Utf8Char(ArgI32(A[1]));   // the character's full UTF-8 encoding
-  cl := Length(ch);
-  total := Int64(n) * cl;
-  { SIZING ONCE MEANS THE SIZE HAS TO FIT. n saturates at High(Integer) and a
-    codepoint is up to four bytes, so the product reaches 8.6e9 -- a perfectly
-    good Int64 and NOT a good SizeInt on a 32-bit build, where SetLength would
-    take the wrapped value and hand back a block the string header still claims
-    is huge. That is the dim@ defect exactly, and it costs nothing to not have.
-
-    Compiled only where it can be true: on 64-bit High(SizeInt) is High(Int64),
-    the comparison is constant-false, and -vewn refuses the unreachable branch
-    that results. There an over-large allocation still fails the honest way, with
-    EOutOfMemory reported through the VM's net. }
-  {$IFDEF CPU32}
-  if total > High(SizeInt) then
-  begin
-    E := MakeError(peRuntime, 'string$: ' + IntToStr(total) +
-                   ' bytes is past the longest string this build can hold');
-    Exit(ValStr(''));
-  end;
-  {$ENDIF}
-  if not BudgetAllows(total) then begin E := BudgetRefusal('string$'); Exit(ValStr('')); end;
-  r := '';
-  SetLength(r, total);
-  if total > 0 then
-    if cl = 1 then
-      FillChar(r[1], total, Byte(ch[1]))
-    else
-      for i := 0 to n - 1 do Move(ch[1], r[Int64(i) * cl + 1], cl);
+  { SIZING ONCE MEANS THE SIZE HAS TO FIT. The count is read whole (ArgI64: a
+    quantity, not an index -- ArgI32 answered string$(3e9, 65) with 2^31 - 1
+    bytes and no word), and a codepoint is up to four bytes, so the product is
+    asked of RunBytes before it is formed: past High(SizeInt) it would wrap, and
+    SetLength would take the wrapped value while the fill wrote every copy --
+    the dim@ defect exactly. On a 32-bit build that bound is 2 GiB; on 64-bit an
+    over-large allocation still fails the honest way, with EOutOfMemory reported
+    through the VM's net. RunOf asks both that and the budget. }
+  if not RunOf('string$', ch, n, r, E) then Exit(ValStr(''));
   Result := ValStr(r);
 end;
 function f_mulstring(const A: array of TValue; out E: TPhosphorError): TValue;
-var n, i, sl: Integer; total: Int64; s, r: String;
+var n: Int64; r: String;
 begin
-  E := NoError();
-  n := ArgI32(A[1]); if n < 0 then n := 0;
-  s := s0(A); sl := Length(s);
-  total := Int64(n) * sl;
-  {$IFDEF CPU32}                        // the same SizeInt ceiling as string$
-  if total > High(SizeInt) then
-  begin
-    E := MakeError(peRuntime, 'mulstring$: ' + IntToStr(total) +
-                   ' bytes is past the longest string this build can hold');
-    Exit(ValStr(''));
-  end;
-  {$ENDIF}
-  if not BudgetAllows(total) then begin E := BudgetRefusal('mulstring$'); Exit(ValStr('')); end;
-  r := '';
-  SetLength(r, total);
-  if total > 0 then
-    for i := 0 to n - 1 do Move(s[1], r[Int64(i) * sl + 1], sl);
+  n := ArgI64(A[1]); if n < 0 then n := 0;
+  if not RunOf('mulstring$', s0(A), n, r, E) then Exit(ValStr(''));   // as string$
   Result := ValStr(r);
 end;
 
@@ -504,12 +561,19 @@ end;
   SetLength is handed a nonsense length. That is a size the budget must not be
   the only thing standing in front of, because an unbudgeted host has no budget:
   it is refused as a catchable overflow whether or not a ceiling is installed. }
+{ AND THE TEXT HAS TO FIT IT TOO (2026-10-09, round 4). The same routine keeps
+  its search cursor in an Integer -- `P := Pos(OldPat, Srch, P)` and
+  `inc(P, PatLength)` -- so a text of 2^31 bytes or more wraps the cursor and
+  the replace stops (or copies) at the wrong place, whatever the result's size.
+  A text at or past High(Integer) is refused the same way; AOut is then the
+  text's own length, the larger of the two sizes the routine cannot address. }
 function ReplaceFitsRtl(const AHay, ANeedle, ANew: String; out AOut: Int64): Boolean;
 var hits, delta: Int64;
 begin
   AOut := Length(AHay);
   Result := True;
   if ANeedle = '' then Exit;
+  if AOut >= High(Integer) then Exit(False);
   hits := Int64(Length(AHay)) div Int64(Length(ANeedle));
   delta := Int64(Length(ANew)) - Int64(Length(ANeedle));
   if delta <= 0 then Exit;
@@ -563,7 +627,7 @@ function FoldText(const S: String; out AAllowed: Boolean): String; forward;
 { One codepoint forward from a byte position in a well-formed UTF-8 string:
   step off the lead byte, then over its continuation bytes. Bounded by
   Length(S), which is already in memory. }
-function NextCp(const S: String; APos: Integer): Integer;
+function NextCp(const S: String; APos: SizeInt): SizeInt;
 begin
   Result := APos + 1;
   while (Result <= Length(S)) and ((Ord(S[Result]) and $C0) = $80) do Inc(Result);
@@ -585,8 +649,8 @@ end;
 
   CpWalk: how many codepoints S holds, counted no further than ALimit, and in
   AEnd the byte position one past them. }
-procedure CpWalk(const S: String; ALimit: Integer; out ACount, AEnd: Integer);
-var p, n: Integer;
+procedure CpWalk(const S: String; ALimit: Int64; out ACount: Int64; out AEnd: SizeInt);
+var p: SizeInt; n: Int64;
 begin
   { The LOOP is bounded by the string, and the limit only cuts it shorter: that
     is why the limit is tested inside and not in the `while`. Written the other
@@ -609,19 +673,9 @@ end;
 { CpSuffixStart: the byte position at which the last ACount codepoints of S
   begin -- the backward twin, so endstext costs the needle and not the text.
   Answers 1 when S is shorter than ACount characters. }
-function CpSuffixStart(const S: String; ACount: Integer): Integer;
-var n, p: Integer;
+function CpSuffixStart(const S: String; ACount: Int64): SizeInt;
 begin
-  p := Length(S) + 1;
-  n := 0;
-  while p > 1 do                     // bounded by the string; see CpWalk
-  begin
-    if n >= ACount then Break;
-    Dec(p);
-    while (p > 1) and ((Ord(S[p]) and $C0) = $80) do Dec(p);
-    Inc(n);
-  end;
-  Result := p;
+  Result := Utf8SuffixStart(S, ACount);    // bounded by the string; see CpWalk
 end;
 
 function DoReplace(const A: array of TValue; const AFn: String; AIgnoreCase: Boolean;
@@ -630,7 +684,7 @@ var
   outlen: Int64;
   hay, needle, fh, fn, r: String;
   ok, ok2: Boolean;
-  fp, target, fcur, hcur, seg: Integer;
+  fp, target, fcur, hcur, seg: SizeInt;
 begin
   E := NoError();
   hay := s0(A); needle := A[1].Str;
@@ -651,8 +705,8 @@ begin
   end;
   if not ReplaceFitsRtl(fh, fn, A[2].Str, outlen) then
   begin
-    E := MakeError(peIntOverflow, AFn + ': the result would be ' + IntToStr(outlen) +
-         ' bytes, past the ' + IntToStr(High(Integer)) +
+    E := MakeError(peIntOverflow, AFn + ': the text or the result would be ' +
+         IntToStr(outlen) + ' bytes, past the ' + IntToStr(High(Integer)) +
          ' this replace can address');
     Exit(ValStr(''));
   end;
@@ -686,7 +740,7 @@ function f_replacetext(const A: array of TValue; out E: TPhosphorError): TValue;
 begin Result := DoReplace(A, 'replacetext$', True, E); end;
 
 function f_countstr(const A: array of TValue; out E: TPhosphorError): TValue;
-var sub: String; c, p: Integer;
+var sub: String; c: Int64; p: SizeInt;
 begin
   E := NoError(); sub := A[1].Str; c := 0;
   if not BudgetAllows(SearchCost(s0(A), sub)) then
@@ -724,7 +778,7 @@ begin E := NoError(); t := s0(A); x := A[1].Str;
   to fewer than k and simply is not equal. See CpWalk for the measurement that
   made the bound necessary. }
 function f_startstext(const A: array of TValue; out E: TPhosphorError): TValue;
-var t, ft, fx: String; k, n, e2: Integer; ok, ok2: Boolean;
+var t, ft, fx: String; k, n: Int64; e2: SizeInt; ok, ok2: Boolean;
 begin
   E := NoError();
   t := s0(A);
@@ -736,7 +790,7 @@ begin
   Result := ValInt(Ord(ft = fx));
 end;
 function f_endstext(const A: array of TValue; out E: TPhosphorError): TValue;
-var t, ft, fx: String; k, st: Integer; ok, ok2: Boolean;
+var t, ft, fx: String; k: Int64; st: SizeInt; ok, ok2: Boolean;
 begin
   E := NoError();
   t := s0(A);
@@ -768,7 +822,7 @@ begin
   Result := ValInt(Ord(r.Ok and IsFiniteD(r.Value)));
 end;
 function f_isalpha(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer; ok: Boolean;
+var s: String; i: SizeInt; ok: Boolean;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
   for i := 1 to Length(s) do
@@ -783,14 +837,14 @@ begin
 end;
 
 function f_word(const A: array of TValue; out E: TPhosphorError): TValue;
-var parts: TStringArray; idx: Integer;
+var parts: TStringArray; idx: Int64;
 begin
   E := NoError(); Result := ValStr('');
   // SplitBy is a PosEx loop: the same naive product as instr, once per piece.
   if not BudgetAllows(SearchCost(s0(A), A[2].Str)) then
   begin E := BudgetRefusal('word$'); Exit(ValStr('')); end;
   parts := SplitBy(s0(A), A[2].Str);
-  idx := ArgI32(A[1]);   // 1-based
+  idx := ArgI64(A[1]);   // 1-based
   if (idx >= 1) and (idx <= Length(parts)) then Result := ValStr(parts[idx - 1]);
 end;
 function f_wordcount(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -805,25 +859,22 @@ end;
 { Byte offset -> codepoint position, both 1-based. A byte inside a multi-byte
   character answers the position of the character containing it. 0 stays 0, which
   is how every search here says "absent". }
-function ByteToCp(const S: String; AByte: Integer): Integer;
-var st: TInt64DynArray; i: Integer;
+function ByteToCp(const S: String; AByte: SizeInt): Int64;
+var i: SizeInt;
 begin
   if AByte <= 0 then Exit(0);
-  st := CpStarts(S);
-  for i := 0 to High(st) - 1 do
-    if (st[i] <= AByte) and (AByte < st[i + 1]) then Exit(i + 1);
-  Result := Length(st);   // past the end: the sentinel position
+  if AByte > Length(S) then Exit(Utf8Len(S) + 1);   // past the end: one past the last
+  Result := 1;                  // byte 1 begins the first character, whatever it is
+  i := 2;
+  while i <= Length(S) do       // bounded by the string; AByte only cuts it short
+  begin
+    if i > AByte then Break;
+    if (Ord(S[i]) and $C0) <> $80 then Inc(Result);
+    Inc(i);
+  end;
 end;
 
-{ Codepoint position -> byte offset, 1-based, clamped to the string. }
-function CpToByte(const S: String; ACp: Integer): Integer;
-var st: TInt64DynArray;
-begin
-  if ACp <= 1 then Exit(1);
-  st := CpStarts(S);
-  if ACp > Length(st) then Exit(Length(S) + 1);
-  Result := st[ACp - 1];
-end;
+{ Codepoint position -> byte offset is CpToByte, at the top of this unit. }
 
 function f_instr2(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
@@ -833,12 +884,12 @@ begin
   Result := ValInt(ByteToCp(s0(A), Pos(A[1].Str, s0(A))));
 end;
 function f_instr3(const A: array of TValue; out E: TPhosphorError): TValue;
-var start: Integer;
+var start: Int64;
 begin
   E := NoError();
   if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
   begin E := BudgetRefusal('instr'); Exit(ValInt(0)); end;
-  start := ArgI32(A[2]); if start < 1 then start := 1;
+  start := ArgI64(A[2]); if start < 1 then start := 1;
   // The start is a CODEPOINT position, like every other index in the language, so
   // it is translated into a byte offset for the search and the answer translated
   // back. Both halves have to move together or the two would disagree.
@@ -846,7 +897,7 @@ begin
     PosEx(A[1].Str, s0(A), CpToByte(s0(A), start))));
 end;
 function f_instrrev(const A: array of TValue; out E: TPhosphorError): TValue;
-var t, sub: String; p, last: Integer;
+var t, sub: String; p, last: SizeInt;
 begin
   E := NoError(); t := s0(A); sub := A[1].Str; last := 0;
   if not BudgetAllows(SearchCost(t, sub)) then
@@ -861,13 +912,13 @@ end;
 
 // helpers behind the s$[n] / s$[[n]] index sugar
 function f_strchar(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpAt(s0(A), ArgI32(A[1]))); end;
+begin E := NoError(); Result := ValStr(CpAt(s0(A), ArgI64(A[1]))); end;
 function f_strline(const A: array of TValue; out E: TPhosphorError): TValue;
-var lines: TStringArray; idx: Integer;
+var lines: TStringArray; idx: Int64;
 begin
   E := NoError(); Result := ValStr('');
   lines := SplitLines(s0(A));
-  idx := ArgI32(A[1]);   // 1-based
+  idx := ArgI64(A[1]);   // 1-based
   if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
 end;
 
@@ -895,28 +946,29 @@ end;
   empty answer, a write past the end has no answer at all, and doing nothing in
   silence is what was wrong before. `on error` sees it like any other fault. }
 function f_strsetchar(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; st: TInt64DynArray; idx, n: Integer;
+var s: String; idx: Int64; pa, pb: SizeInt;
 begin
   E := NoError();
   s := s0(A);
   Result := ValStr(s);
-  st := CpStarts(s);
-  n := Length(st) - 1;          // CpStarts carries a trailing sentinel
-  idx := ArgI32(A[1]);          // 1-based
-  if (idx < 1) or (idx > n) then
+  idx := ArgI64(A[1]);          // 1-based
+  if idx >= 1 then pa := CpToByte(s, idx) else pa := Length(s) + 1;
+  if pa > Length(s) then
   begin
-    E := MakeError(peRuntime, 'a string index write: character ' + IntToStr(idx) +
-         ' is outside 1..' + IntToStr(n));
+    { The value the program wrote, not a narrowed one (ValToStr). }
+    E := MakeError(peRuntime, 'a string index write: character ' + ValToStr(A[1]) +
+         ' is outside 1..' + IntToStr(CpLen(s)));
     Exit;
   end;
-  Result := ValStr(Copy(s, 1, st[idx - 1] - 1) + A[2].Str +
-                   Copy(s, st[idx], Length(s)));
+  pb := Utf8Advance(s, pa, 1);
+  Result := ValStr(Copy(s, 1, pa - 1) + A[2].Str + Copy(s, pb, Length(s) - pb + 1));
 end;
 
 function f_strsetline(const A: array of TValue; out E: TPhosphorError): TValue;
 var
   src: String;
-  want, n, lineStart, lineEnd, i: Integer;
+  want, n: Int64;
+  lineStart, lineEnd, i: SizeInt;
 begin
   E := NoError();
   src := s0(A);
@@ -936,7 +988,7 @@ begin
     lineEnd is the offset of the terminator that ENDS this line, or Length+1 for
     the last line, so a trailing CR is carried along with its LF and a file that
     ends without a newline stays that way. }
-  want := ArgI32(A[1]);          // 1-based
+  want := ArgI64(A[1]);          // 1-based
   n := 1;
   lineStart := 1;
   lineEnd := Length(src) + 1;
@@ -950,7 +1002,7 @@ begin
       end;
   if (want < 1) or (n < want) then
   begin
-    E := MakeError(peRuntime, 'a string index write: line ' + IntToStr(want) +
+    E := MakeError(peRuntime, 'a string index write: line ' + ValToStr(A[1]) +
          ' is outside 1..' + IntToStr(n));
     Exit;
   end;
@@ -1011,7 +1063,7 @@ end;
   appends (UTF8Decode never produces more UTF-16 units than input bytes), so the
   price is fixed before the loop starts. }
 function Utf8CaseU(const S: String; AUpper: Boolean; out AAllowed: Boolean): String;
-var u: UnicodeString; i, n: Integer; hi, lo: Word;
+var u: UnicodeString; i, n: SizeInt; hi, lo: Word;
 begin
   Result := '';
   AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
@@ -1059,7 +1111,7 @@ begin
   Result := Utf8UpperU(S, AAllowed);
 end;
 
-function SignI(c: Integer): Integer; inline;
+function SignI(c: Int64): Integer; inline;
 begin if c < 0 then Result := -1 else if c > 0 then Result := 1 else Result := 0; end;
 
 { proper$ and swapcase$ are BYTE-wise ASCII case operations -- alcase$/aucase$ are
@@ -1072,7 +1124,7 @@ begin if c < 0 then Result := -1 else if c > 0 then Result := 1 else Result := 0
   which is both the correct behaviour and, structurally, the reason the bug cannot
   come back here: there is no concatenation left to get wrong. }
 function f_proper(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: String; i: Integer; atStart: Boolean; c: Char;
+var r: String; i: SizeInt; atStart: Boolean; c: Char;
 begin
   E := NoError(); r := s0(A); atStart := True;
   for i := 1 to Length(r) do
@@ -1092,7 +1144,7 @@ begin
 end;
 
 function f_swapcase(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: String; i: Integer; c: Char;
+var r: String; i: SizeInt; c: Char;
 begin
   E := NoError(); r := s0(A);
   for i := 1 to Length(r) do
@@ -1127,38 +1179,38 @@ end;
   as string$, and the same RULE 1 answer. The PAD is charged, not the whole
   result: the caller's own string was already in memory before the call. }
 function f_ltab(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; w, n: Integer;
+var s: String; w, n: Int64;
 begin
-  E := NoError(); s := Trim(s0(A)); w := ArgI32(A[1]); n := CpLen(s);
+  E := NoError(); s := ByteTrim(s0(A), True, True); w := ArgI64(A[1]); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
+  if RunBytes(w - n, 1) < 0 then begin E := TooLong('ltab$'); Exit(ValStr('')); end;
   if not BudgetAllows(w - n) then begin E := BudgetRefusal('ltab$'); Exit(ValStr('')); end;
   Result := ValStr(StringOfChar(' ', w - n) + s);
 end;
 function f_rtab(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; w, n: Integer;
+var s: String; w, n: Int64;
 begin
-  E := NoError(); s := Trim(s0(A)); w := ArgI32(A[1]); n := CpLen(s);
+  E := NoError(); s := ByteTrim(s0(A), True, True); w := ArgI64(A[1]); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
+  if RunBytes(w - n, 1) < 0 then begin E := TooLong('rtab$'); Exit(ValStr('')); end;
   if not BudgetAllows(w - n) then begin E := BudgetRefusal('rtab$'); Exit(ValStr('')); end;
   Result := ValStr(s + StringOfChar(' ', w - n));
 end;
 function f_lfill(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, f: String; w, n: Integer;
+var s, f, r: String; w, n: Int64;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
-  if not BudgetAllows(Int64(w - n) * Length(f)) then
-  begin E := BudgetRefusal('lfill$'); Exit(ValStr('')); end;
-  Result := ValStr(DupeString(f, w - n) + s);
+  if not RunOf('lfill$', f, w - n, r, E) then Exit(ValStr(''));
+  Result := ValStr(r + s);
 end;
 function f_rfill(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, f: String; w, n: Integer;
+var s, f, r: String; w, n: Int64;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
-  if not BudgetAllows(Int64(w - n) * Length(f)) then
-  begin E := BudgetRefusal('rfill$'); Exit(ValStr('')); end;
-  Result := ValStr(s + DupeString(f, w - n));
+  if not RunOf('rfill$', f, w - n, r, E) then Exit(ValStr(''));
+  Result := ValStr(s + r);
 end;
 { center$ COMPARES BEFORE IT SUBTRACTS, like its four siblings. It used to compute
   `pad := w - CpLen(s)` first, in 32 bits, from a width ArgI32 saturates to
@@ -1167,36 +1219,39 @@ end;
   host refused a call that owed the string back unchanged (ledger d18; pinned in
   scripts/probe_budget.lpr). Once w > CpLen(s) >= 0, the subtraction cannot wrap. }
 function f_center2(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; w, pad, l: Integer;
+var s: String; w, pad, l: Int64;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]);
+  E := NoError(); s := s0(A); w := ArgI64(A[1]);
   if w <= CpLen(s) then Exit(ValStr(s));
   pad := w - CpLen(s);
+  if RunBytes(pad, 1) < 0 then begin E := TooLong('center$'); Exit(ValStr('')); end;
   if not BudgetAllows(pad) then begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
   l := pad div 2;
   Result := ValStr(StringOfChar(' ', l) + s + StringOfChar(' ', pad - l));
 end;
 function f_center3(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, f: String; w, pad, l: Integer;
+var s, f, r1, r2: String; w, pad, l: Int64;
 begin
-  E := NoError(); s := s0(A); w := ArgI32(A[1]); f := Utf8Char(ArgI32(A[2]));
+  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2]));
   if w <= CpLen(s) then Exit(ValStr(s));   // compare before subtracting: see f_center2
   pad := w - CpLen(s);
-  if not BudgetAllows(Int64(pad) * Length(f)) then
-  begin E := BudgetRefusal('center$'); Exit(ValStr('')); end;
+  if RunBytes(pad, Length(f)) < 0 then begin E := TooLong('center$'); Exit(ValStr('')); end;
   l := pad div 2;
-  Result := ValStr(DupeString(f, l) + s + DupeString(f, pad - l));
+  { The two runs are charged by RunOf, together exactly pad * Length(f). }
+  if not RunOf('center$', f, l, r1, E) then Exit(ValStr(''));
+  if not RunOf('center$', f, pad - l, r2, E) then Exit(ValStr(''));
+  Result := ValStr(r1 + s + r2);
 end;
 
 function f_isdigits(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer; ok: Boolean;
+var s: String; i: SizeInt; ok: Boolean;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
   for i := 1 to Length(s) do if not ((s[i] >= '0') and (s[i] <= '9')) then ok := False;
   Result := ValInt(Ord(ok));
 end;
 function f_isalnum(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer; ok: Boolean; c: Char;
+var s: String; i: SizeInt; ok: Boolean; c: Char;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
   for i := 1 to Length(s) do
@@ -1207,14 +1262,14 @@ begin
   Result := ValInt(Ord(ok));
 end;
 function f_isspace(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer; ok: Boolean;
+var s: String; i: SizeInt; ok: Boolean;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
   for i := 1 to Length(s) do if not (s[i] in [' ', #9, #10, #11, #12, #13]) then ok := False;
   Result := ValInt(Ord(ok));
 end;
 function f_islower(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer; hasLow, hasUp: Boolean; c: Char;
+var s: String; i: SizeInt; hasLow, hasUp: Boolean; c: Char;
 begin
   E := NoError(); s := s0(A); hasLow := False; hasUp := False;
   for i := 1 to Length(s) do
@@ -1226,7 +1281,7 @@ begin
   Result := ValInt(Ord(hasLow and not hasUp));
 end;
 function f_isupper(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer; hasLow, hasUp: Boolean; c: Char;
+var s: String; i: SizeInt; hasLow, hasUp: Boolean; c: Char;
 begin
   E := NoError(); s := s0(A); hasLow := False; hasUp := False;
   for i := 1 to Length(s) do
@@ -1267,7 +1322,7 @@ begin E := NoError(); Result := ValInt(SignI(CompareStr(s0(A), A[1].Str))); end;
   Without the bound, strcmpi(32-MB string, "x") folded 32 MB to answer a question
   the first character settles: 28 s against 0.057 s, measured. }
 function f_strcmpi(const A: array of TValue; out E: TPhosphorError): TValue;
-var sa, sb, fa, fb: String; lim, ka, kb, k, ea, eb, c: Integer; ok, ok2: Boolean;
+var sa, sb, fa, fb: String; lim, ka, kb, k, c, kc: Int64; ea, eb: SizeInt; ok, ok2: Boolean;
 begin
   E := NoError();
   sa := s0(A); sb := A[1].Str;
@@ -1275,8 +1330,8 @@ begin
   CpWalk(sa, lim, ka, ea);
   CpWalk(sb, lim, kb, eb);
   if ka < kb then k := ka else k := kb;
-  CpWalk(sa, k, c, ea);
-  CpWalk(sb, k, c, eb);
+  CpWalk(sa, k, kc, ea);
+  CpWalk(sb, k, kc, eb);
   fa := FoldText(Copy(sa, 1, ea - 1), ok);
   fb := FoldText(Copy(sb, 1, eb - 1), ok2);
   if not (ok and ok2) then begin E := BudgetRefusal('strcmpi'); Exit(ValInt(0)); end;
@@ -1286,9 +1341,9 @@ begin
 end;
 
 function f_insert(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, ins: String; pos, n: Integer;
+var s, ins: String; pos, n: Int64;
 begin
-  E := NoError(); s := s0(A); ins := A[1].Str; pos := ArgI32(A[2]); n := CpLen(s);
+  E := NoError(); s := s0(A); ins := A[1].Str; pos := ArgI64(A[2]); n := CpLen(s);
   if pos < 1 then pos := 1;
   if pos > n + 1 then pos := n + 1;
   Result := ValStr(CpLeft(s, pos - 1) + ins + CpRight(s, n - (pos - 1)));
@@ -1305,9 +1360,9 @@ end;
   anything, so both are clamped to what the string can hold before they are used,
   and the subtraction that follows is then bounded by n on every term. }
 function f_delete(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; pos, cnt, n, rem: Integer;
+var s: String; pos, cnt, n, rem: Int64;
 begin
-  E := NoError(); s := s0(A); pos := ArgI32(A[1]); cnt := ArgI32(A[2]); n := CpLen(s);
+  E := NoError(); s := s0(A); pos := ArgI64(A[1]); cnt := ArgI64(A[2]); n := CpLen(s);
   if pos < 1 then pos := 1;
   if pos > n + 1 then pos := n + 1;
   if cnt < 0 then cnt := 0;
@@ -1316,9 +1371,9 @@ begin
   Result := ValStr(CpLeft(s, pos - 1) + CpRight(s, rem));
 end;
 function f_stuffstring(const A: array of TValue; out E: TPhosphorError): TValue;
-var s, repl: String; start, len, n, rem: Integer;
+var s, repl: String; start, len, n, rem: Int64;
 begin
-  E := NoError(); s := s0(A); start := ArgI32(A[1]); len := ArgI32(A[2]); repl := A[3].Str; n := CpLen(s);
+  E := NoError(); s := s0(A); start := ArgI64(A[1]); len := ArgI64(A[2]); repl := A[3].Str; n := CpLen(s);
   if start < 1 then start := 1;
   if start > n + 1 then start := n + 1;
   if len < 0 then len := 0;
@@ -1328,11 +1383,11 @@ begin
 end;
 
 function f_line(const A: array of TValue; out E: TPhosphorError): TValue;
-var lines: TStringArray; idx: Integer;
+var lines: TStringArray; idx: Int64;
 begin
   E := NoError(); Result := ValStr('');
   lines := SplitLines(s0(A));
-  idx := ArgI32(A[1]);   // 1-based
+  idx := ArgI64(A[1]);   // 1-based
   if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
 end;
 
@@ -1365,14 +1420,14 @@ begin
 end;
 
 function f_byteat(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i: Integer;
+var s: String; i: Int64;
 begin
   E := NoError();
   Result := ValInt(0);
   s := A[0].Str;
-  i := ArgI32(A[1]);
+  i := ArgI64(A[1]);
   if (i < 1) or (i > Length(s)) then
-    E := MakeError(peRuntime, 'byteat: byte ' + IntToStr(i) +
+    E := MakeError(peRuntime, 'byteat: byte ' + ValToStr(A[1]) +
          ' is outside 1..' + IntToStr(Length(s)))
   else
     Result := ValInt(Ord(s[i]));
@@ -1386,7 +1441,7 @@ begin
   v := ArgI32(A[0]);
   if (v < 0) or (v > 255) then
   begin
-    E := MakeError(peRuntime, 'bytestr$: ' + IntToStr(v) + ' is not a byte value (0..255)');
+    E := MakeError(peRuntime, 'bytestr$: ' + ValToStr(A[0]) + ' is not a byte value (0..255)');
     Exit;
   end;
   // An indexed write into a RawByteString stores the raw byte; building it by
@@ -1397,12 +1452,12 @@ begin
 end;
 
 function f_bytemid(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; i, n, avail: Integer;
+var s: String; i, n, avail: Int64;
 begin
   E := NoError();
   s := A[0].Str;
-  i := ArgI32(A[1]);
-  n := ArgI32(A[2]);
+  i := ArgI64(A[1]);
+  n := ArgI64(A[2]);
   if i < 1 then i := 1;
   if (n <= 0) or (i > Length(s)) then begin Result := ValStr(''); Exit; end;
   avail := Length(s) - i + 1;

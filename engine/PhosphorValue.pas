@@ -310,11 +310,18 @@ function TrimNumberSpace(const S: String): String;
 { Byte index (1-based) of the start of each codepoint, plus a sentinel at
   Length(S)+1, so codepoint k spans Result[k] .. Result[k+1]-1. Every byte of S
   belongs to exactly one span, which is the invariant the slicers rely on:
-  Utf8Left(S,k) + Utf8Right(S, Utf8Len(S)-k) is S for every k. }
+  Utf8Left(S,k) + Utf8Right(S, Utf8Len(S)-k) is S for every k. The slicers
+  WALK those same boundaries rather than build the table (one Int64 per byte):
+  Utf8Advance answers the byte position ACount codepoints on from AFrom (a
+  boundary), or Length(S)+1 if the string ends first; Utf8SuffixStart the byte
+  position at which the last ACount codepoints begin, or 1. Counts are Int64 and
+  positions SizeInt, so a string past 2 GiB is measured and cut whole. }
 function Utf8Starts(const S: String): TInt64DynArray;
-function Utf8Len(const S: String): Integer;
-function Utf8Left(const S: String; ACount: Integer): String;
-function Utf8Right(const S: String; ACount: Integer): String;
+function Utf8Advance(const S: String; AFrom: SizeInt; ACount: Int64): SizeInt;
+function Utf8SuffixStart(const S: String; ACount: Int64): SizeInt;
+function Utf8Len(const S: String): Int64;
+function Utf8Left(const S: String; ACount: Int64): String;
+function Utf8Right(const S: String; ACount: Int64): String;
 { The UTF-8 encoding of one codepoint, CLAMPED TO THE ENCODABLE RANGE at both
   ends, and a surrogate (U+D800..U+DFFF, which UTF-8 may not encode) answered as
   U+FFFD. Used by chr$, string$ and the pad family, so a character above U+007F
@@ -1450,7 +1457,7 @@ end;
   table it always did. The change is reachable ONLY from a string whose first
   byte is $80..$BF. }
 function Utf8Starts(const S: String): TInt64DynArray;
-var i, n: Integer;
+var i, n: SizeInt;
 begin
   Result := nil;
   SetLength(Result, Length(S) + 2);
@@ -1482,10 +1489,19 @@ end;
   and the same measurement is 190 MB and three times faster. Verified byte for
   byte across all 138 .bas files under tests/.
 
-  Utf8Left and Utf8Right still build the table, because they need the offsets. }
-function Utf8Len(const S: String): Integer;
+  EVERY COUNT AND CURSOR IN THIS LAYER IS 64-BIT (2026-10-09, round 4). A
+  String's length is a SizeInt, and an Integer loop variable TRUNCATES the
+  bound: `for i := 2 to Length(S)` over a string of 2^31 bytes ran from 2 to
+  -2^31, not at all, and len() answered 1. Utf8Left and Utf8Right stored
+  `Length(st) - 1` in an Integer, which wrapped, so `ACount >= n` held and
+  left$(s$, 4) handed back all two gigabytes; and Utf8Right cut "to the end"
+  with Copy(S, p, MaxInt), which is a COUNT of 2^31 - 1 bytes, not the end.
+  Counts are Int64 and byte positions SizeInt now, here and in every caller
+  (PhosphorStrLib's codepoint family); no string a program can hold makes one
+  of them wrap. }
+function Utf8Len(const S: String): Int64;
 var
-  i: Integer;
+  i: SizeInt;
 begin
   Result := 0;
   if Length(S) = 0 then Exit;
@@ -1495,24 +1511,55 @@ begin
       Inc(Result);
 end;
 
-function Utf8Left(const S: String; ACount: Integer): String;
-var st: TInt64DynArray; n: Integer;
+{ THE SLICERS WALK; THEY NO LONGER TABULATE (2026-10-09, round 4). Utf8Left and
+  Utf8Right built Utf8Starts -- one Int64 per input BYTE -- to read one offset out
+  of it, so left$(s$, 4) on a two-gigabyte string asked for sixteen more
+  gigabytes. A walk reads the same boundaries the table records (byte 1, then
+  every byte that is not a continuation byte), as far as the count reaches and
+  no further, and allocates nothing. Both loops are bounded by the string; the
+  count only cuts them shorter (see CpWalk in PhosphorStrLib for why that is
+  written inside the loop). }
+function Utf8Advance(const S: String; AFrom: SizeInt; ACount: Int64): SizeInt;
+var n: Int64; len: SizeInt;
 begin
-  st := Utf8Starts(S);
-  n := Length(st) - 1;
-  if ACount < 0 then ACount := 0;
-  if ACount >= n then Exit(S);
-  Result := Copy(S, 1, st[ACount] - 1);
+  Result := AFrom;
+  len := Length(S);
+  n := 0;
+  while Result <= len do
+  begin
+    if n >= ACount then Break;
+    Inc(Result);
+    while (Result <= len) and ((Ord(S[Result]) and $C0) = $80) do Inc(Result);
+    Inc(n);
+  end;
 end;
 
-function Utf8Right(const S: String; ACount: Integer): String;
-var st: TInt64DynArray; n: Integer;
+function Utf8SuffixStart(const S: String; ACount: Int64): SizeInt;
+var n: Int64;
 begin
-  st := Utf8Starts(S);
-  n := Length(st) - 1;
-  if ACount < 0 then ACount := 0;
-  if ACount >= n then Exit(S);
-  Result := Copy(S, st[n - ACount], MaxInt);
+  Result := Length(S) + 1;
+  n := 0;
+  while Result > 1 do
+  begin
+    if n >= ACount then Break;
+    Dec(Result);
+    while (Result > 1) and ((Ord(S[Result]) and $C0) = $80) do Dec(Result);
+    Inc(n);
+  end;
+end;
+
+function Utf8Left(const S: String; ACount: Int64): String;
+begin
+  if ACount <= 0 then Exit('');
+  Result := Copy(S, 1, Utf8Advance(S, 1, ACount) - 1);
+end;
+
+function Utf8Right(const S: String; ACount: Int64): String;
+var p: SizeInt;
+begin
+  if ACount <= 0 then Exit('');
+  p := Utf8SuffixStart(S, ACount);
+  Result := Copy(S, p, Length(S) - p + 1);
 end;
 
 { THE TOP GUARD IS THE MIRROR OF THE BOTTOM ONE, and it was missing.
@@ -1727,7 +1774,7 @@ end;
 function ValSub(const A, B: TValue; out R: TValue): TPhosphorError;
 var
   n: Int64;
-  k, cn: Integer;
+  k, cn: Int64;
   d: Double;
 begin
   try

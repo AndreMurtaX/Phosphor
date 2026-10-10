@@ -28,6 +28,21 @@ family: `byteat` and `bytestr$` raise a catchable runtime error when asked for a
 byte outside the string or a value outside `0..255`, because there is no honest
 number to answer with. `bytemid$` clamps like everything else.
 
+**A string may be longer than 2 GiB, and every function here measures it
+whole.** Positions, counts and widths are read as 64-bit integers, so
+`mid$(s$, 2147483649, 1)` is character 2^31 + 1 of a string that has one, and
+`len` of a 2147483648-byte ASCII string is `2147483648`. (Until 2026-10-09,
+round 4, a 32-bit counter answered `1` there, `left$(s$, 4)` answered the whole
+string, `trim$` answered `""`, `ucase$` changed nothing, and an index past 2^31
+was clamped to 2147483647 — a wrong character, silently.) Two refusals remain,
+both catchable: a builder — `string$`, `mulstring$`, `space$` and the pad
+functions — whose answer would be past the longest string the build can hold
+(`string$: the answer would be past the longest string this build can hold`),
+asked before anything is allocated; and `replacestr$`/`replacetext$` on a text
+or a result of 2147483647 bytes or more, which the runtime's replace cannot
+address. A refusal that names an index or a byte value names it **as the program
+wrote it**: `byteat("abc", 1e10)` says `byte 10000000000 is outside 1..3`.
+
 Two things commonly surprise a caller. `ucase$`/`lcase$` know only ASCII `a`–`z`
 (`ucase$("café")` is `"CAFé"`); the Unicode-aware pair is `aucase$`/`alcase$`, and
 the *ignoring case* family under *Search and compare* folds by that same rule.
@@ -70,7 +85,7 @@ And `hex$`/`bin$`/`oct$` are **sign-and-magnitude**, not two's complement:
 | `ltrim$(s$) → str` | without leading whitespace |
 | `rtrim$(s$) → str` | without trailing whitespace |
 | `space$(n) → str` | `n` spaces; `n <= 0` answers `""` |
-| `string$(n, code) → str` | `n` copies of the character with codepoint `code`, each fully UTF-8 encoded; `n <= 0` answers `""` |
+| `string$(n, code) → str` | `n` copies of the character with codepoint `code`, each fully UTF-8 encoded; `n <= 0` answers `""`. `n` is read whole — `string$(3e9, 65)` is three billion bytes, not 2^31 - 1 — and an answer past the longest string the build can hold is refused before anything is allocated |
 | `mulstring$(s$, n) → str` | `s$` repeated `n` times; `n <= 0` answers `""` |
 | `ltab$(s$, width) → str` | `s$` **trimmed** then right-justified in `width` with spaces. Already at or past `width`: returned as is, never cut |
 | `rtab$(s$, width) → str` | `s$` trimmed then left-justified in `width`. Same no-truncation rule |
@@ -112,12 +127,14 @@ folding only: an accented letter still differs from its unaccented one, and
 
 ### Replace and edit
 
-All positions are base-1 codepoint positions and all four clamp; none of them
-can fail.
+All positions are base-1 codepoint positions and all four clamp. The edits
+cannot fail; the two replaces refuse a text or an answer of 2147483647 bytes or
+more (see the size rule at the top), and every search is priced against the
+host's execution budget.
 
 | function | what it answers |
 | --- | --- |
-| `replacestr$(s$, from$, to$) → str` | `s$` with **every** `from$` replaced by `to$`, case-sensitive. No match answers `s$` unchanged |
+| `replacestr$(s$, from$, to$) → str` | `s$` with **every** `from$` replaced by `to$`, case-sensitive. No match answers `s$` unchanged. A `s$` or an answer of 2147483647 bytes or more is a catchable overflow, because the runtime's replace keeps its cursor in 32 bits (an empty `from$` still answers `s$`) |
 | `replacetext$(s$, from$, to$) → str` | the same, ignoring case when matching — by the one rule stated under *Search and compare* |
 | `insert$(s$, ins$, pos) → str` | `s$` with `ins$` inserted before `pos`. `pos` clamps to `1..len+1`, so a position past the end appends rather than erroring |
 | `delete$(s$, pos, count) → str` | `s$` with `count` characters removed from `pos`. A `count` of `0`, or a `pos` past the end, answers `s$` unchanged, and a `delete$` never returns a longer string than it was given — however large `pos` and `count` are |

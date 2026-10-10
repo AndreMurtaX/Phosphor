@@ -62,8 +62,6 @@ implementation
 
 function D0(const A: array of TValue): TDateTime; begin Result := AsDouble(A[0]); end;
 function D1(const A: array of TValue): TDateTime; begin Result := AsDouble(A[1]); end;
-function I0(const A: array of TValue): Integer; begin Result := ArgI32(A[0]); end;
-function I1(const A: array of TValue): Integer; begin Result := ArgI32(A[1]); end;
 
 const
   TwoTo52 = 4503599627370496.0;
@@ -319,21 +317,33 @@ begin E := NoError(); Result := ValInt(Ord(IsInLeapYear(C0(A)))); end;
 { A year or a month that came from the program, checked before it reaches
   DateUtils. DaysInAMonth(2024, 13) indexed the RTL's month table OUT OF BOUNDS and
   returned 65450 as a clean success; WeeksInAYear(0) raised EConvertError with the
-  RTL's own words. Both are now the library's error, with the value in it. }
-function YearOk(const AFn: String; Y: Integer; out E: TPhosphorError): Boolean;
+  RTL's own words. Both are now the library's error, with the value in it.
+
+  THE VALUE IN IT IS THE ONE THE PROGRAM PASSED (2026-10-09, round 4). Each guard
+  is handed the ARGUMENT and narrows it itself, into the Integer it answers in
+  AOut; the refusal spells the argument (ValToStr), never the narrowed number.
+  ArgI32 SATURATES, so daysinamonth(1e10, 2) used to say "2147483647 is not a
+  year" and daysinayear(-1e300) "-2147483648 is not a year" -- true of a number
+  the program never wrote. The verdict is unchanged: an out-of-range value
+  saturates to a value that is still out of range. }
+function YearOk(const AFn: String; const V: TValue; out AOut: Integer;
+                out E: TPhosphorError): Boolean;
 begin
-  Result := (Y >= 1) and (Y <= 9999);
+  AOut := ArgI32(V);
+  Result := (AOut >= 1) and (AOut <= 9999);
   if not Result then
-    E := MakeError(peRuntime, AFn + ': ' + IntToStr(Y) + ' is not a year in 1..9999')
+    E := MakeError(peRuntime, AFn + ': ' + ValToStr(V) + ' is not a year in 1..9999')
   else
     E := NoError();
 end;
 
-function MonthOk(const AFn: String; M: Integer; out E: TPhosphorError): Boolean;
+function MonthOk(const AFn: String; const V: TValue; out AOut: Integer;
+                 out E: TPhosphorError): Boolean;
 begin
-  Result := (M >= 1) and (M <= 12);
+  AOut := ArgI32(V);
+  Result := (AOut >= 1) and (AOut <= 12);
   if not Result then
-    E := MakeError(peRuntime, AFn + ': ' + IntToStr(M) + ' is not a month in 1..12')
+    E := MakeError(peRuntime, AFn + ': ' + ValToStr(V) + ' is not a month in 1..12')
   else
     E := NoError();
 end;
@@ -341,13 +351,15 @@ end;
 { The day, checked against the length of THAT month in THAT year, so 2023-02-29 is
   refused and 2024-02-29 is not. Call it only after YearOk and MonthOk have passed:
   DaysInAMonth is the same RTL table that answered 65450 for month 13. }
-function DayOk(const AFn: String; Y, M, D: Integer; out E: TPhosphorError): Boolean;
+function DayOk(const AFn: String; Y, M: Integer; const V: TValue; out AOut: Integer;
+               out E: TPhosphorError): Boolean;
 var last: Integer;
 begin
+  AOut := ArgI32(V);
   last := DaysInAMonth(Y, M);
-  Result := (D >= 1) and (D <= last);
+  Result := (AOut >= 1) and (AOut <= last);
   if not Result then
-    E := MakeError(peRuntime, AFn + ': ' + IntToStr(D) + ' is not a day in ' +
+    E := MakeError(peRuntime, AFn + ': ' + ValToStr(V) + ' is not a day in ' +
                    IntToStr(Y) + '-' + Format('%.2d', [M]) + ', which has ' +
                    IntToStr(last))
   else
@@ -355,10 +367,11 @@ begin
 end;
 
 function t_daysinayear(const A: array of TValue; out E: TPhosphorError): TValue;
+var y: Integer;
 begin
   Result := ValInt(0);
-  if not YearOk('daysinayear', I0(A), E) then Exit;
-  Result := ValInt(DaysInAYear(I0(A)));
+  if not YearOk('daysinayear', A[0], y, E) then Exit;
+  Result := ValInt(DaysInAYear(y));
 end;
 function t_daysinmonth(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
@@ -367,11 +380,12 @@ begin
   Result := ValInt(DaysInMonth(C0(A)));
 end;
 function t_daysinamonth(const A: array of TValue; out E: TPhosphorError): TValue;
+var y, m: Integer;
 begin
   Result := ValInt(0);
-  if not YearOk('daysinamonth', I0(A), E) then Exit;
-  if not MonthOk('daysinamonth', I1(A), E) then Exit;
-  Result := ValInt(DaysInAMonth(I0(A), I1(A)));
+  if not YearOk('daysinamonth', A[0], y, E) then Exit;
+  if not MonthOk('daysinamonth', A[1], m, E) then Exit;
+  Result := ValInt(DaysInAMonth(y, m));
 end;
 
 // --- time-of-day ------------------------------------------------------------
@@ -458,10 +472,11 @@ begin
   Result := ValInt(WeekOfTheMonth(C0(A)));
 end;
 function t_weeksinayear(const A: array of TValue; out E: TPhosphorError): TValue;
+var y: Integer;
 begin
   Result := ValInt(0);
-  if not YearOk('weeksinayear', I0(A), E) then Exit;
-  Result := ValInt(WeeksInAYear(I0(A)));
+  if not YearOk('weeksinayear', A[0], y, E) then Exit;
+  Result := ValInt(WeeksInAYear(y));
 end;
 
 // --- construction -----------------------------------------------------------
@@ -484,10 +499,9 @@ function t_encodedate(const A: array of TValue; out E: TPhosphorError): TValue;
 var y, m, d: Integer; r: TDateTime;
 begin
   Result := ValInt(0);
-  y := I0(A); m := I1(A); d := ArgI32(A[2]);
-  if not YearOk('encodedate', y, E) then Exit;
-  if not MonthOk('encodedate', m, E) then Exit;
-  if not DayOk('encodedate', y, m, d, E) then Exit;
+  if not YearOk('encodedate', A[0], y, E) then Exit;
+  if not MonthOk('encodedate', A[1], m, E) then Exit;
+  if not DayOk('encodedate', y, m, A[2], d, E) then Exit;
   { Cannot fail once the three checks above pass -- but a guard that depends on
     that reasoning staying true is worth its two lines. }
   if not TryEncodeDate(Word(y), Word(m), Word(d), r) then
@@ -882,9 +896,13 @@ type
   TDTParts = record
     Year, Month, Day, Dow, Hour, Minute, Second, MSec: Integer;
   end;
+  { The answer being built. N is a SizeInt -- see Render for what an Integer
+    did -- and Counting makes the same walk measure instead of write; Refused
+    says the budget stopped the count. }
   TFmtOut = record
     S: String;
-    N: Integer;
+    N: SizeInt;
+    Counting, Refused: Boolean;
   end;
 
 { The parts a pattern can name. ADate says whether D is a calendar date (the
@@ -907,15 +925,27 @@ begin
   end;
 end;
 
-{ Appended in place, the buffer doubling, so a long pattern costs its length
-  and not its square. }
+{ Appended in place, so a long pattern costs its length and not its square. On
+  the counting pass only N moves, and each piece is charged to the budget as it
+  is counted (RULE 2: the size is not known until the walk has run), so a
+  budgeted host waits no longer than its ceiling for a refusal. On the writing
+  pass the buffer was sized by the count, and the growth below is a guard that
+  should never run -- it keeps the write inside the string even if the two
+  passes ever disagreed. }
 procedure Put(var O: TFmtOut; const T: String);
 begin
   if T = '' then Exit;
+  if O.Counting then
+  begin
+    Inc(O.N, Length(T));
+    if not BudgetCharge(Int64(Length(T)) * BudgetUnitsPerAppendedByte) then
+      O.Refused := True;
+    Exit;
+  end;
   if O.N + Length(T) > Length(O.S) then
     SetLength(O.S, 2 * Length(O.S) + Length(T) + 16);
   Move(T[1], O.S[O.N + 1], Length(T));
-  O.N := O.N + Length(T);
+  Inc(O.N, Length(T));
 end;
 
 { V in decimal, zero-padded on the left to AWidth (0: no padding) -- StoreInt.
@@ -930,7 +960,7 @@ end;
 
 { Does P at position I begin with AWord, ignoring case? (StrLIComp over a
   NUL-terminated pattern: a shorter tail never matches.) }
-function HeadIs(const P: String; I: Integer; const AWord: String): Boolean;
+function HeadIs(const P: String; I: SizeInt; const AWord: String): Boolean;
 var k: Integer;
 begin
   Result := I + Length(AWord) - 1 <= Length(P);
@@ -942,7 +972,7 @@ end;
 { An unquoted A/P, AMPM or AM/PM anywhere in P switches every h of P to the
   12-hour clock -- the RTL's pre-scan, quote for quote. }
 function HasClock12(const P: String): Boolean;
-var i: Integer; quote: Char;
+var i: SizeInt; quote: Char;
 begin
   Result := False;
   i := 1;
@@ -964,7 +994,8 @@ end;
 procedure FormatInto(var O: TFmtOut; const P: String; const T: TDTParts;
                      ANesting: Integer; ATimeFlag: Boolean);
 var
-  i, j, cnt, h: Integer;
+  i, j, cnt: SizeInt;       // positions in a pattern, which may pass 2^31 bytes
+  h: Integer;
   tok, last: Char;
   clock12: Boolean;
 begin
@@ -972,7 +1003,7 @@ begin
   clock12 := HasClock12(P);
   last := ' ';
   i := 1;
-  while i <= Length(P) do
+  while (i <= Length(P)) and not O.Refused do
   begin
     tok := UpCase(P[i]);
     cnt := 1;
@@ -1074,21 +1105,46 @@ begin
   end;
 end;
 
-{ The text of P over T. The walk is linear in P and writes at most twenty bytes
-  for each byte of it (a lone "c" is nineteen), and the bytes written are
-  charged to the budget as every other string this size is built. }
+{ The text of P over T. The walk is linear in P and writes at most nineteen
+  bytes for each byte of it (a lone "c" or "f").
+
+  MEASURED, THEN PRICED, THEN WRITTEN (2026-10-09, round 4). The answer used to
+  be appended into a doubling buffer whose write cursor was an Integer: past
+  2^31 bytes the cursor wrapped NEGATIVE, the capacity test `N + Length(T) >
+  Length(S)` turned false, and Move wrote about 2 GiB BEFORE the buffer -- "cf"
+  doubled 26 times (134217728 bytes, an answer of 2550136832) was an access
+  violation, and only luck made it fault rather than corrupt. The cursor is a
+  SizeInt now, and the walk runs twice: once counting -- Put moves N, writes
+  nothing, and charges the budget piece by piece, so a refusal comes before a
+  byte of the answer is allocated and the walk stops at the ceiling -- then, the
+  size known exactly, the string is sized once and the same walk writes into
+  it. It used to be built in a doubling buffer (up to twice the answer) and
+  charged only after it was whole. The price of the count is a second walk:
+  the 2550136832-byte answer above takes about two minutes instead of one.
+
+  AN EMPTY PATTERN IS THE ISO DATE, yyyy-mm-dd, as date-time.md says and as
+  datetostr$ writes (round 4). It was 'c', the RTL's choice, which adds the time
+  unless the moment is an exact midnight -- so the shape of the answer depended
+  on the data. }
 function Render(const AWho, P: String; const T: TDTParts; out E: TPhosphorError): TValue;
-var o: TFmtOut;
+var o: TFmtOut; pat: String;
 begin
+  if P = '' then pat := FmtDate else pat := P;
   o.S := '';
   o.N := 0;
-  if P = '' then FormatInto(o, 'C', T, 0, False) else FormatInto(o, P, T, 0, False);
-  SetLength(o.S, o.N);
-  if not BudgetCharge(Int64(o.N) * BudgetUnitsPerAppendedByte) then
+  o.Counting := True;
+  o.Refused := False;
+  FormatInto(o, pat, T, 0, False);
+  if o.Refused then
   begin
     E := BudgetRefusal(AWho);
     Exit(ValStr(''));
   end;
+  SetLength(o.S, o.N);
+  o.N := 0;
+  o.Counting := False;
+  FormatInto(o, pat, T, 0, False);
+  SetLength(o.S, o.N);
   E := NoError();
   Result := ValStr(o.S);
 end;
@@ -1188,10 +1244,12 @@ end;
 
 { hh:nn or hh:nn:ss, and nothing else, from S[P] to the end. }
 function TimeFrom(const S: String; P: Integer; out T: TDateTime): Boolean;
-var len, h, n, sec: Integer;
+var len: SizeInt; h, n, sec: Integer;
 begin
   Result := False;
   T := 0;
+  { A SizeInt (round 4): in an Integer, a text of 2^32 + 5 bytes measured 5 and
+    its first five bytes were read as the whole time. }
   len := Length(S) - P + 1;
   if (len <> 5) and (len <> 8) then Exit;
   if not DigitsAt(S, P, 2, h) or (S[P + 2] <> ':') then Exit;

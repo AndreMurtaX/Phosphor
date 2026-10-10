@@ -256,7 +256,8 @@ window; to embed the engine in your own Pascal program, see
   `gui_demo.bas`, …). The largest is
   [`contact_manager.bas`](examples/contact_manager.bas): a desktop application for
   suppliers, customers and their contacts, kept in SQLite behind a login with
-  hashed passwords, in one file of BASIC — and it tests itself.
+  hashed passwords, in one file of BASIC — and it tests itself. Its tour, with
+  screenshots, is [docs/contact-manager.md](docs/contact-manager.md).
 
 ## Documentation for contributors
 

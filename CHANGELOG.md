@@ -20,7 +20,8 @@
   users, roles and hashed passwords. `PHOSPHOR_CONTACTS_DEMO=1` opens it on
   sample data. It tests itself: with `PHOSPHOR_SELFTEST=1` it builds its windows
   without showing them and drives them, and `test-examples` runs it that way on
-  both systems (a new `selftest` mode, under `xvfb-run` on Linux).
+  both systems (a new `selftest` mode, under `xvfb-run` on Linux). Its tour is
+  [docs/contact-manager.md](docs/contact-manager.md).
 
 ## 0.1.0 -- 2026-10-10
 

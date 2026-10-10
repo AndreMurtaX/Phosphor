@@ -631,7 +631,7 @@ function update_status() local s$, r$
   s$ = "Signed in as " + user_name$ + " (" + r$ + ")   |   "
   s$ = s$ + str$(scalar_s("SELECT count(*) FROM companies WHERE kind = ?1", "supplier")) + " suppliers, "
   s$ = s$ + str$(scalar_s("SELECT count(*) FROM companies WHERE kind = ?1", "customer")) + " customers, "
-  s$ = s$ + str$(sqlite_scalar(db@, "SELECT count(*) FROM contacts")) + " contacts   |   " + dbpath$
+  s$ = s$ + str$(sqlite_scalar(db@, "SELECT count(*) FROM contacts")) + " contacts   |   " + extractfilename$(dbpath$)
   status(s$)
   return 0
 endfunction

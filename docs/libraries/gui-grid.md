@@ -1,6 +1,6 @@
 # gui-grid — two grids: one that keeps your strings, one that calls you back to paint
 
-`host/gui/libs/PhosphorGridLib.pas` · 28 functions · GUI package (the `phosphor`
+`host/gui/libs/PhosphorGridLib.pas` · 30 functions · GUI package (the `phosphor`
 host registers it wherever a graphical session is reachable — always on Windows,
 a `DISPLAY` or `WAYLAND_DISPLAY` elsewhere; where there is none these names are
 simply not registered)
@@ -57,6 +57,7 @@ grid that has been unwired really does stop.
 | `stringgrid_clear@(g@) → handle` | empty every cell, header cells included, and answer the grid. The geometry — counts and fixed rows — is untouched; a refused handle changes nothing and records `gui_error()` 1 |
 | `stringgrid_row(g@) → num` · `stringgrid_col(g@) → num` | where the cursor is, base-1 — the row a person clicked or moved to with the keys. `0` for a handle that is not a string grid. A new grid has the LCL's one fixed row **and one fixed column**, so its cursor starts on row 2, column 2; `control_set@(g@, "FixedCols", 0)` makes the first column an ordinary one |
 | `stringgrid_cursor@(g@, col, row) → handle` | move the cursor there, base-1, and answer the grid. Like `drawgrid_cursor@`, the position is handed to the grid, which **keeps the cursor inside its scrollable cells**: a fixed row or column, or a cell past the end, lands on the nearest cell that can hold it (measured: asking for the header row of a grid with one fixed row lands on row 2; asking for 9, 9 in a 3×5 grid lands on 3, 5). It fires `stringgrid_onselect@`'s handler, once for each of the column and the row that actually changed |
+| `stringgrid_colwidth@(g@, col, px) → handle` · `stringgrid_colwidth(g@, col) → num` | one column's width in pixels, base-1. `ColWidths` is an indexed property, which `control_set@` cannot reach — it names a property, not an element of one — so this is the only way to give columns different widths (`"DefaultColWidth"` sets them all). A column outside the grid, or a width outside `0`..`32000` (the ceiling every size in the GUI is held to), changes nothing and records `gui_error()` 1; the getter answers `0` for a column outside the grid, with the same error |
 | `stringgrid_onselect@(g@, fn$) → handle` | call the handler named by `fn$`, as `(sender@)`, when the cursor moves to another cell — by a click, by the arrow keys, or by `stringgrid_cursor@`. The handler reads the new cell with `stringgrid_row(sender@)` and `stringgrid_col(sender@)`. `""` unwires it. With `control_set@(g@, "Options", "goFixedVertLine,goFixedHorzLine,goVertLine,goHorzLine,goRowSelect")` the whole row highlights, which is what a record list wants |
 
 ### The draw grid — the program paints the cells

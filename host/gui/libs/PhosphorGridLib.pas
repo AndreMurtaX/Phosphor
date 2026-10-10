@@ -9,6 +9,7 @@
     stringgrid_clear@(g@)
     stringgrid_row(g@)  stringgrid_col(g@)  stringgrid_cursor@(g@, col, row)
     stringgrid_onselect@(g@, handler$)       the cursor moved: handler(sender@)
+    stringgrid_colwidth@(g@, col, px)  stringgrid_colwidth(g@, col)
 
   Columns and rows are 1-BASED (Phosphor's convention): cell (g, 1, 1) is the
   top-left, i.e. TStringGrid.Cells[0, 0]. Geometry comes from PhosphorControlLib.
@@ -446,6 +447,39 @@ var c: TComponent; begin E := NoError; Result := A[0];
     TStringGrid(c).Col := ArgI32(A[1]) - 1;
     TStringGrid(c).Row := ArgI32(A[2]) - 1;
   end; end;
+{ One column's width in pixels, base-1. ColWidths is an INDEXED property, which
+  the property bridge cannot reach -- control_set@ names a property, not an
+  element of one -- so a grid could only ever have one width for every column
+  (DefaultColWidth). A column outside the grid, or a width outside 0..GuiMaxExtent
+  (the ceiling every other size in the GUI is held to), changes nothing and
+  records gui_error 1. }
+function f_sg_colwidth_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; col, px: Integer;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TStringGrid, c) then Exit;
+  col := ArgI32(A[1]) - 1;
+  px := ArgI32(A[2]);
+  if (col < 0) or (col >= TStringGrid(c).ColCount) or (px < 0) or (px > GuiMaxExtent) then
+  begin
+    GGuiError := 1;
+    Exit;
+  end;
+  TStringGrid(c).ColWidths[col] := px;
+end;
+function f_sg_colwidth_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; col: Integer;
+begin
+  E := NoError; Result := ValInt(0);
+  if not GuiResolve(A[0].Hnd, TStringGrid, c) then Exit;
+  col := ArgI32(A[1]) - 1;
+  if (col < 0) or (col >= TStringGrid(c).ColCount) then
+  begin
+    GGuiError := 1;
+    Exit;
+  end;
+  Result := ValInt(TStringGrid(c).ColWidths[col]);
+end;
 function f_sg_onselect(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; ev: TNotifyEvent; b: TSelectBridge;
 begin
@@ -485,6 +519,8 @@ begin
   Reg.Add('stringgrid_row:@', @f_sg_row_get);
   Reg.Add('stringgrid_cursor@:@nn', @f_sg_setcursor);
   Reg.AddHost('stringgrid_onselect@:@$', @f_sg_onselect);
+  Reg.Add('stringgrid_colwidth@:@nn', @f_sg_colwidth_set);
+  Reg.Add('stringgrid_colwidth:@n', @f_sg_colwidth_get);
 end;
 
 initialization

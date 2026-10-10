@@ -65,6 +65,8 @@ type
     FMaxOutputBytes: Int64;
     FTimeoutMs: Int64;
     FContainFaults: Boolean;
+    FProgramPath: String;
+    FProgramArgs: TStringArray;
     FVM: TPhosphorVM;       // the live VM in the prepared (embedding) mode
     { THE VM THAT IS RUNNING RIGHT NOW, or nil between runs. Every door that
       executes BASIC already wraps exactly that region in BudgetBegin/BudgetEnd,
@@ -302,6 +304,15 @@ type
       rather ask before calling. Prepare a script again to start over. }
     property Halted: Boolean read GetHalted;
     property SandboxRoot: String read GetSandboxRoot write SetSandboxRootProp;
+    { THE PROGRAM'S COMMAND LINE: what paramstr$(0) answers (the program's path --
+      a .bas, a .pbc, or the packed executable) and what paramstr$(1..n) and
+      paramcount() answer (the arguments the program was given). Set them before
+      Run; every run, prepared session and REPL line reads them. A host that sets
+      neither gives the program no arguments and an empty paramstr$(0) -- never
+      the HOST's own command line, which belongs to the application embedding the
+      engine and means nothing to a script. }
+    property ProgramPath: String read FProgramPath write FProgramPath;
+    property ProgramArgs: TStringArray read FProgramArgs write FProgramArgs;
     { LOOKING AT A PREPARED SCRIPT'S STATE -- the VM and the program Prepare built,
       or nil when nothing is prepared. Read-only; see TPhosphorVM's Dbg* block for
       what the VM will answer and when.
@@ -602,6 +613,8 @@ begin
   AVM.MaxMemoryBytes := FMaxMemoryBytes;
   AVM.MaxHandles := FMaxHandles;
   AVM.ContainFaults := FContainFaults;
+  AVM.ProgramPath := FProgramPath;
+  AVM.ProgramArgs := Copy(FProgramArgs);
 end;
 
 function TPhosphorEngine.Run(const ASource: String): Integer;

@@ -9,7 +9,8 @@ rem
 rem   phosphor examples/contact_manager.bas
 rem
 rem The database is phosphor-contacts.db in your Documents folder, or the
-rem file PHOSPHOR_CONTACTS_DB names; File > Open database... picks another
+rem file named on the command line (phosphor contact_manager.bas my.db), or
+rem the one PHOSPHOR_CONTACTS_DB names; File > Open database... picks another
 rem one. The first run asks for an administrator account and offers to
 rem load sample data. PHOSPHOR_CONTACTS_DEMO=1 skips all of that: a
 rem throw-away database with the samples, signed in as "demo".
@@ -91,6 +92,8 @@ endif
 
 if environ$("PHOSPHOR_CONTACTS_DEMO") = "1" then
   start_demo()
+elseif paramcount() >= 1 then
+  open_database(paramstr$(1))
 elseif environ$("PHOSPHOR_CONTACTS_DB") <> "" then
   open_database(environ$("PHOSPHOR_CONTACTS_DB"))
 else

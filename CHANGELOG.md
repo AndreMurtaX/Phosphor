@@ -23,6 +23,19 @@
   both systems (a new `selftest` mode, under `xvfb-run` on Linux). Its tour is
   [docs/contact-manager.md](docs/contact-manager.md).
 
+### Changed
+
+- **A program gets its own command line.** Everything after the file is the
+  program's: `phosphor app.bas a "b c"` gives it `paramcount()` 2,
+  `paramstr$(1)` and `paramstr$(2)`, and `paramstr$(0)` is now **the program's
+  path** -- before, both functions read the interpreter's own command line, and
+  `phosphor` refused any argument after the file. A word starting with `-` that
+  is not one of `phosphor`'s options is refused unless it follows `--`. A packed
+  executable now passes its whole command line to its program instead of
+  ignoring it, and `phosphor debug` passes on what follows the file. An embedding
+  host sets `ProgramPath` and `ProgramArgs`; a host that sets neither gives the
+  script no arguments.
+
 ## 0.1.0 -- 2026-10-10
 
 The first release: an embeddable BASIC interpreter in Free Pascal 3.2.2, for

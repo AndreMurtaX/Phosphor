@@ -1625,7 +1625,66 @@ $okAC = ($acCode -eq 0) -and ($acGot -eq '61efbfbd62')
 if ($okAC) { Write-Host 'PASS  AC:environ$ answers U+FFFD for what is not a character' -ForegroundColor Green }
 else { Write-Host ("FAIL  AC:environ$ of an unpaired surrogate: exit {0}, want 61efbfbd62, got {1}" -f $acCode, $acGot) -ForegroundColor Red }
 
+# --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
+# The twin of block AD in scripts/test.sh, whose comment carries the reason.
+# Until 2026-10-10 a program could be given no arguments at all. Expected
+# values are the arguments this block passes, in order, and cafe-acute's UTF-8
+# (63 61 66 c3 a9) -- written out here, not taken from a run.
+$okAD = $true
+$adDir = Join-Path $tmp 'ad'
+New-Item -ItemType Directory -Force $adDir | Out-Null
+$adp = Join-Path $adDir 'args.bas'
+[IO.File]::WriteAllText($adp, ('println str$(paramcount())' + "`n" + 'for i = 0 to paramcount()' + "`n" +
+    '  println paramstr$(i)' + "`n" + 'next' + "`n" + 'println hex_encode$(paramstr$(paramcount()))' + "`n"), $utf8)
+$adOut = Join-Path $adDir 'ad.stdout'
+# Read as UTF-8, which is what the program writes: Read-Text goes through
+# Get-Content, which Windows PowerShell 5.1 decodes in the ANSI code page.
+function Read-AD([string] $path) {
+    if (-not (Test-Path $path)) { return '' }
+    return ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) -replace "`r", '').TrimEnd("`n")
+}
+function Invoke-AD([string] $line) {
+    cmd /c "$line < NUL > `"$adOut`" 2>&1"
+    $script:adCode = $LASTEXITCODE
+    return (Read-AD $adOut)
+}
+function Want-AD([string[]] $lines) { return ($lines -join "`n") }
+$cafe = 'caf' + [char]0xE9
+$adGot = Invoke-AD "`"$exe`" `"$adp`" one `"two words`" $cafe"
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('3', $adp, 'one', 'two words', $cafe, '636166c3a9')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:three arguments: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adGot = Invoke-AD "`"$exe`" run `"$adp`" run"
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('1', $adp, 'run', '72756e')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:'run' after the file: got '{0}'" -f $adGot) -ForegroundColor Red }
+$adFile = Join-Path $adDir 'ad.out'
+if (Test-Path $adFile) { [IO.File]::Delete($adFile) }
+$adGot = Invoke-AD "`"$exe`" `"$adp`" a --out `"$adFile`" b"
+$adFileText = Read-AD $adFile
+if (-not ($adCode -eq 0 -and $adGot -eq '' -and $adFileText -eq (Want-AD @('2', $adp, 'a', 'b', '62')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:--out after the file: exit {0}, stdout '{1}', file '{2}'" -f $adCode, $adGot, $adFileText) -ForegroundColor Red }
+$adGot = Invoke-AD "`"$exe`" `"$adp`" -- --sandbox -5"
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, '--sandbox', '-5', '2d35')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:after --: got '{0}'" -f $adGot) -ForegroundColor Red }
+$adGot = Invoke-AD "`"$exe`" `"$adp`" --sandbx cage"
+if (-not ($adCode -eq 2 -and $adGot.Contains('unknown option --sandbx') -and $adGot.Contains('put it after --') -and -not $adGot.StartsWith('1'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:a misspelt option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adPbc = Join-Path $adDir 'args.pbc'
+$adApp = Join-Path $adDir 'argsapp.exe'
+& $exe compile $adp $adPbc | Out-Null
+& $exe pack $adPbc $adApp | Out-Null
+$adGot = Invoke-AD "`"$adApp`" --sandbox x"
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adApp, '--sandbox', 'x', '78')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:a packed application: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adIn = Join-Path $adDir 'debug.in'
+[IO.File]::WriteAllText($adIn, "c`n", $utf8)
+cmd /c "`"$exe`" debug `"$adp`" d1 -- --d2 < `"$adIn`" > `"$adOut`" 2> NUL"
+$adCode = $LASTEXITCODE
+$adGot = Read-AD $adOut
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, 'd1', '--d2', '2d2d6432')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:under the debugger: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+if ($okAD) { Write-Host 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused' -ForegroundColor Green }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD) { exit 0 } else { exit 1 }

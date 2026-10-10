@@ -728,10 +728,42 @@ end;
   report", which is right for the packed and REPL doors and WRONG for a file --
   so a default of '' would let a door that forgot the argument quietly report
   frames belonging to nothing. Required, and the omission is a compile error. }
+{ THE PROGRAM'S OWN COMMAND LINE, filled by the argument parser (or, in a packed
+  application, from this process's whole argv) and handed to every engine below
+  through BindHostSeams, so no door can forget it. paramstr$(0) answers
+  GProgramPath, paramstr$(1..n) GProgramArgs. }
+var
+  GProgramPath: String = '';
+  GProgramArgs: TStringArray = nil;
+
+procedure AddProgramArg(const AArg: String);
+begin
+  SetLength(GProgramArgs, Length(GProgramArgs) + 1);
+  GProgramArgs[High(GProgramArgs)] := AArg;
+end;
+
+{ AFTER THE FILE, A WORD IS THE PROGRAM'S -- BUT AN OPTION IS NOT GUESSED AT.
+  `phosphor app.bas report.csv 2026` hands the program two arguments. A token
+  that starts with "-" and is not one of this host's own options is REFUSED,
+  not passed on: `phosphor app.bas --sandbx cage` is a misspelt --sandbox, and
+  passing it to the program would run the script unconfined, at exit 0, with
+  nothing said -- the silent-flag defect this host has refused in every other
+  form (see --sandbox and --out). "--" ends this host's options: everything
+  after it is the program's, dashes and all. }
+procedure RefuseUnknownOption(const AWho, AArg, AFile: String);
+begin
+  Writeln(StdErr, AWho, ': unknown option ', AArg);
+  Writeln(StdErr, '  to pass it to the program, put it after --:');
+  Writeln(StdErr, '  phosphor ', AFile, ' -- ', AArg);
+  Halt(2);
+end;
+
 procedure BindHostSeams(AEng: TPhosphorEngine; AHost: TConsoleHost;
                         const ASourceName: String);
 begin
   AHost.SourceName := ASourceName;
+  AEng.ProgramPath := GProgramPath;
+  AEng.ProgramArgs := GProgramArgs;
   AEng.OnOutput := @AHost.Output;
   AEng.OnInput := @AHost.ReadLine;
   AEng.OnBreakpoint := @AHost.Breakpoint;
@@ -4871,10 +4903,16 @@ begin
   end;
 end;
 
-{ Run an embedded payload; a packed app ignores its CLI arguments. }
+{ Run an embedded payload. A packed application has no options of this host's to
+  parse -- its flags were baked in when it was packed -- so its WHOLE command line
+  is the program's: paramstr$(0) is the executable, paramstr$(1..n) what it was
+  started with. Until 2026-10-10 it ignored its command line entirely. }
 function RunEmbedded(APayload: TBytesStream): Integer;
-var host: TConsoleHost; eng: TPhosphorEngine; line: Integer;
+var host: TConsoleHost; eng: TPhosphorEngine; line, i: Integer;
 begin
+  GProgramPath := SelfExePath();
+  GProgramArgs := nil;
+  for i := 1 to ParamCount do AddProgramArg(ParamStr(i));
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
   BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
@@ -5313,18 +5351,26 @@ begin
         end;
         if not ParseBreakList(ParamStr(i), dbgLines, dbgCount) then Halt(2);
       end
+      else if (arg = '--') and (dbgPath <> '') then
+      begin
+        // the rest is the program's, whatever it looks like
+        Inc(i);
+        while i <= ParamCount do begin AddProgramArg(ParamStr(i)); Inc(i); end;
+        Break;
+      end
       else if (Length(arg) > 0) and (arg[1] = '-') then
       begin
+        if dbgPath <> '' then RefuseUnknownOption('phosphor debug', arg, dbgPath);
         Writeln(StdErr, 'phosphor debug: unknown option ', arg);
         Halt(2);
       end
       else if dbgPath = '' then
-        dbgPath := arg
-      else
       begin
-        Writeln(StdErr, 'phosphor debug: one file at a time, got ', arg);
-        Halt(2);
-      end;
+        dbgPath := arg;
+        GProgramPath := arg;
+      end
+      else
+        AddProgramArg(arg);   // after the file: the program's argument
       Inc(i);
     end;
     { An explicit entry flag says what it says. Without one, a --break means the
@@ -5336,7 +5382,7 @@ begin
     if dbgPath = '' then
     begin
       Writeln(StdErr, 'phosphor debug: which file?');
-      Writeln(StdErr, '  phosphor debug [--stop-at-entry] [--break N,N] <file.bas>');
+      Writeln(StdErr, '  phosphor debug [--stop-at-entry] [--break N,N] <file.bas> [args...]');
       Halt(2);
     end;
     if dbgPort > 0 then
@@ -5473,6 +5519,27 @@ begin
   while i <= ParamCount do
   begin
     arg := ParamStr(i);
+    { ONCE THE FILE IS NAMED, the rest of the line is the program's -- except
+      this host's own run options, which scripts already write after the file
+      (`phosphor run job.bas --out job.out`), and "--", which ends them. }
+    if filePath <> '' then
+    begin
+      if arg = '--' then
+      begin
+        Inc(i);
+        while i <= ParamCount do begin AddProgramArg(ParamStr(i)); Inc(i); end;
+        Break;
+      end;
+      if (arg <> '--out') and (arg <> '--sandbox') and (arg <> '--no-console') and
+         (arg <> '--gui') then
+      begin
+        if (Length(arg) > 0) and (arg[1] = '-') then
+          RefuseUnknownOption('phosphor', arg, filePath);
+        AddProgramArg(arg);
+        Inc(i);
+        Continue;
+      end;
+    end;
     if (arg = '--version') or (arg = '-v') then
     begin
       Writeln('Phosphor BASIC ', PhosphorVersion);
@@ -5480,8 +5547,13 @@ begin
     end
     else if (arg = '--help') or (arg = '-h') then
     begin
-      Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>]');
-      Writeln('       phosphor debug [--stop-at-entry] [--break N,N] <file.bas>');
+      Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>] [args...]');
+      Writeln('              everything after the file is the program''s: paramstr$(1..n)');
+      Writeln('              and paramcount() read it, paramstr$(0) is the file. An');
+      Writeln('              option of this host still works there; anything else that');
+      Writeln('              starts with "-" is refused unless it comes after --:');
+      Writeln('              phosphor app.bas -- --verbose');
+      Writeln('       phosphor debug [--stop-at-entry] [--break N,N] <file.bas> [args...]');
       Writeln('              --break may be repeated and the lines add up; with');
       Writeln('              --stop-at-entry it stops on line one as well');
       Writeln('              stop and step: s step into, n step over, o step out,');
@@ -5504,8 +5576,9 @@ begin
       Writeln('              one name:codes per line');
       Writeln('       phosphor pack [--no-console] <in.pbc> <out>   (standalone executable)');
       Writeln('              pack takes COMPILED bytecode: compile first, then pack');
-      Writeln('              --no-console is baked into the file: a packed program');
-      Writeln('              ignores its command line, so the choice travels with it');
+      Writeln('              --no-console is baked into the file: a packed program''s');
+      Writeln('              whole command line is its own arguments, so the choice');
+      Writeln('              travels with it');
       Writeln('       phosphor --no-console <file.bas>');
       Writeln('              hide the console window when this process owns one');
       Writeln('              (a terminal''s console is never touched); a packed');
@@ -5605,12 +5678,16 @@ begin
         Halt(2);
       end;
     end
-    else if filePath = '' then
-      filePath := arg
+    else if (Length(arg) > 0) and (arg[1] = '-') and (arg <> '-') then
+    begin
+      // before the file there is no program yet to give it to
+      Writeln(StdErr, 'phosphor: unknown option ', arg);
+      Halt(2);
+    end
     else
     begin
-      Writeln(StdErr, 'phosphor: unexpected argument: ', arg);
-      Halt(2);
+      filePath := arg;
+      GProgramPath := arg;
     end;
     Inc(i);
   end;

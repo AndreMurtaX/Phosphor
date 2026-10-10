@@ -1525,6 +1525,29 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · a program gets its own command line.** The contact manager
+  found it and the owner asked for it: `phosphor app.bas x` was refused, and
+  `paramstr$`/`paramcount` read the INTERPRETER's argv (the `.bas` as argument
+  1, `run` before it if typed). Now the engine carries `ProgramPath` and
+  `ProgramArgs`, copied into every VM by ConfigureVM, and the two functions read
+  those -- a host that sets none gives the script none, never its own argv.
+  The console host's rule, and why each part is there:
+  - everything after the file is the program's, `run` included;
+  - this host's run options still work after the file, because
+    `scripts/test.sh` already writes `run bp.bas --out p4.out`;
+  - any other word starting with `-` is REFUSED, not passed on: passing it on
+    would turn `--sandbx cage` into a silent unconfined run, the same class as
+    the empty `--sandbox ""` this host already refuses; `--` ends the options;
+  - a packed executable's whole command line is the program's (it has no
+    options left to parse), and `phosphor debug` passes on what follows the file.
+  Block AD of `scripts/test.{ps1,sh}` pins all of it and was seen failing with
+  the arguments left unbound. One trap on the way: the block's first draft read
+  the program's output with `Get-Content`, which Windows PowerShell 5.1 decodes
+  in the ANSI code page, so `café` failed a comparison its own hex line proved
+  right -- read a UTF-8 file with `[IO.File]::ReadAllText(path, UTF8)`. And
+  block W failed once in four runs during this work, untouched by it (it runs
+  `phosphor --diag` under `chcp`); it passed the other three.
+
 - **2026-10-10 · the real project: `examples/contact_manager.bas`.** The owner
   asked for a contact manager for suppliers and customers with logins, built on
   SQLite and the GUI library, as an example of the language. Writing it is what

@@ -847,8 +847,8 @@ on desktop by design.
 
 | function | description |
 | --- | --- |
-| `paramcount() → num` | number of command-line arguments |
-| `paramstr$(n) → str` | the `n`-th argument (0 is the program path) |
+| `paramcount() → num` | number of arguments the program was given (`phosphor app.bas a b` → 2) |
+| `paramstr$(n) → str` | the `n`-th argument; `0` is the program's own path; `""` out of range |
 | `dirseparator$() → str` | the path-component separator (`\` or `/`) |
 | `pathseparator$() → str` | the PATH list separator (`;` or `:`) |
 | `altseparator$() → str` | the alternate separator (`/` on Windows, else `""`) |

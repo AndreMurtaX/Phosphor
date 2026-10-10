@@ -686,6 +686,23 @@ eng.OnOutput := @host.Output;
 A scripting host that only calls functions may leave `OnOutput` unset; a value
 comes back from `CallFunction`, not through output.
 
+## The program's command line
+
+`paramstr$` and `paramcount()` answer what the host hands the engine, not the
+process's own command line — which belongs to your application and means nothing
+to a script:
+
+```pascal
+eng.ProgramPath := 'report.bas';                         // paramstr$(0)
+eng.ProgramArgs := TStringArray.Create('2026', 'final');  // paramstr$(1), (2)
+rc := eng.Run(source);
+```
+
+Set them before `Run`, `RunBytecode` or `Prepare`; every door reads them. Set
+neither and the script sees `paramcount() = 0` and an empty `paramstr$(0)`. The
+console host fills them from everything after the file on its command line, and a
+packed executable from its whole command line.
+
 ## Looking at a prepared script's state
 
 A prepared engine will tell you what its script's variables are **called**, not

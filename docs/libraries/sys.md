@@ -57,8 +57,22 @@ to run wide open, silently, at exit 0.
 
 | function | what it answers |
 | --- | --- |
-| `paramcount() → num` | how many arguments the **host process** was launched with, not counting the program name itself. This is the host's command line, not the script's: run under `bin/phosphor`, the `.bas` file is argument 1 and the console host accepts nothing after it |
-| `paramstr$(i) → str` | argument `i` as text. `0` is the executable's own path, `1`…`paramcount()` the arguments. `""` for any index out of range, negative included — never an error. The one place in this engine where index `0` is meaningful, because that is the OS convention it reports |
+| `paramcount() → num` | how many arguments **the program** was given. `phosphor report.bas 2026 "two words"` gives it two; a packed executable gets every word of its own command line. A host that embeds the engine decides (`ProgramArgs`, [embedding.md](../embedding.md#the-programs-command-line)) and gives none unless it says so — never its own command line, which belongs to the application and not to the script |
+| `paramstr$(i) → str` | argument `i` as text. `0` is **the program's path** — the `.bas` or `.pbc` as it was named on the command line, or the packed executable — and `1`…`paramcount()` its arguments, in UTF-8 on every system. `""` for any index out of range, negative included — never an error. The one place in this engine where index `0` is meaningful, because that is the convention it reports |
+
+Everything after the file on `phosphor`'s command line is the program's, with
+two exceptions that keep a typing mistake from being silent. `phosphor`'s own
+run options (`--out`, `--sandbox`, `--no-console`, `--gui`) still work there,
+and any other word that starts with `-` is **refused** (exit 2) rather than
+passed on, because `phosphor job.bas --sandbx cage` is a misspelt `--sandbox`
+and must not run the script unconfined. `--` ends `phosphor`'s options: what
+follows it is the program's, dashes and all.
+
+```
+phosphor report.bas 2026 "two words"      paramcount() = 2
+phosphor report.bas -- --verbose -5       paramcount() = 2: "--verbose", "-5"
+phosphor report.bas --verbose             refused: unknown option --verbose
+```
 
 ### Separators
 
@@ -178,6 +192,9 @@ rem answers 1 when it happened and 0 when it did not, and ioerror() says
 rem why: 3 for a failure, 5 for a refusal.
 
 println "arguments: " + str$(paramcount()) + ", program " + extractfilename$(paramstr$(0))
+for i = 1 to paramcount()
+  println "  " + str$(i) + ": " + paramstr$(i)
+next
 println "separators: dir '" + dirseparator$() + "'  path '" + pathseparator$() + "'  alt '" + altseparator$() + "'"
 println "sandbox root: '" + sandboxroot$() + "'"
 

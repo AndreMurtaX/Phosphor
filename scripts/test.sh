@@ -1205,4 +1205,45 @@ if [ "$accode" -eq 0 ] && [ "$ac1" = "[]" ] && [ "$ac2" = "61efbfbd62efbfbd63" ]
   echo 'PASS  AC:environ$ answers U+FFFD for what is not a character'
 else echo "FAIL  AC:environ\$ of bytes that are not UTF-8: exit $accode, want [] and 61efbfbd62efbfbd63, got '$ac1' / '$ac2'"; fail=1; fi
 
+# --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
+# Until 2026-10-10 a program could be given no arguments: the console host
+# refused anything after the file ("unexpected argument"), paramstr$ read the
+# interpreter's own argv, and a packed application ignored its command line.
+# Now everything after the file is the program's, paramstr$(0) is the file,
+# and a token starting with "-" that is not this host's own option is refused
+# unless it follows "--" -- a misspelt --sandbox must not run the script
+# unconfined. Expected values are written out here: the arguments this block
+# passes, in order, and cafe-acute's UTF-8 (63 61 66 c3 a9), not a run.
+okAD=0
+ad_fail() { echo "FAIL  AD:$1"; okAD=1; }
+printf '%s\n' 'println str$(paramcount())' 'for i = 0 to paramcount()' '  println paramstr$(i)' 'next' \
+  'println hex_encode$(paramstr$(paramcount()))' > "$tmpdir/args.bas"
+adp="$tmpdir/args.bas"
+if adgot="$("$exe" "$adp" one "two words" $'caf\xc3\xa9' < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+adwant="$(printf '%s\n' 3 "$adp" one 'two words' $'caf\xc3\xa9' 636166c3a9)"
+[ "$adcode" -eq 0 ] && [ "$adgot" = "$adwant" ] || ad_fail "three arguments: exit $adcode, got '$adgot'"
+# a word after the file that is also a verb is the program's
+if adgot="$("$exe" run "$adp" run < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 1 "$adp" run 72756e)" ] || ad_fail "'run' after the file: got '$adgot'"
+# this host's own option still works after the file, beside the program's words
+rm -f "$tmpdir/ad.out"
+if adgot="$("$exe" "$adp" a --out "$tmpdir/ad.out" b < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ -z "$adgot" ] && [ "$(cat "$tmpdir/ad.out" 2>/dev/null)" = "$(printf '%s\n' 2 "$adp" a b 62)" ] || ad_fail "--out after the file: exit $adcode, stdout '$adgot'"
+# "--" hands over the rest, dashes and all
+if adgot="$("$exe" "$adp" -- --sandbox -5 < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" --sandbox -5 2d35)" ] || ad_fail "after --: got '$adgot'"
+# an unknown option is refused, says how to pass it, and runs nothing
+if adgot="$("$exe" "$adp" --sandbx cage < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'unknown option --sandbx'* ]] && [[ "$adgot" == *'put it after --'* ]] && [[ "$adgot" != [0-9]* ]] || ad_fail "a misspelt option: exit $adcode, got '$adgot'"
+# a packed application's whole command line is the program's
+if "$exe" compile "$adp" "$tmpdir/args.pbc" > /dev/null 2>&1 && "$exe" pack "$tmpdir/args.pbc" "$tmpdir/argsapp" > /dev/null 2>&1; then
+  if adgot="$("$tmpdir/argsapp" --sandbox x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+  [ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$tmpdir/argsapp" --sandbox x 78)" ] || ad_fail "a packed application: exit $adcode, got '$adgot'"
+else ad_fail "could not compile and pack args.bas"; fi
+# the debugger passes them on too
+if adgot="$(printf 'c\n' | "$exe" debug "$adp" d1 -- --d2 2>/dev/null)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" d1 --d2 2d2d6432)" ] || ad_fail "under the debugger: exit $adcode, got '$adgot'"
+if [ "$okAD" -eq 0 ]; then echo 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused'
+else fail=1; fi
+
 exit "$fail"

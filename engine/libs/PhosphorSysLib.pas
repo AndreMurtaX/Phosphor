@@ -21,7 +21,7 @@ interface
 uses
   SysUtils,
   {$IFDEF WINDOWS} windirs, {$ENDIF}   // the RTL's wide special-folder reader
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox,
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox, PhosphorVM,
   PhosphorIoLib;   // IoGate: a refusal here is recorded in ioerror() too
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
@@ -344,10 +344,26 @@ const
      $C0C0C0, $0000FF, $00FF00, $00FFFF, $FF0000, $FF00FF, $FFFF00, $FFFFFF);
 
 // --- process arguments ------------------------------------------------------
-function t_paramcount(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(ParamCount); end;
-function t_paramstr(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(ParamStr(ArgI32(Args[0]))); end;
+{ The PROGRAM's command line, which the host hands the engine (ProgramPath and
+  ProgramArgs) -- not the process's. Until 2026-10-10 these read ParamCount and
+  ParamStr, so under `phosphor` the script saw the interpreter's own argv (the
+  .bas file as argument 1, `run` before it when it was typed) and could be given
+  nothing else: the console host refused any argument after the file. }
+function t_paramcount(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(Length(TPhosphorVM(AVM).ProgramArgs));
+end;
+function t_paramstr(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: Integer; vm: TPhosphorVM;
+begin
+  Err := NoError();
+  vm := TPhosphorVM(AVM);
+  n := ArgI32(Args[0]);
+  if n = 0 then Exit(ValStr(vm.ProgramPath));
+  if (n < 1) or (n > Length(vm.ProgramArgs)) then Exit(ValStr(''));
+  Result := ValStr(vm.ProgramArgs[n - 1]);
+end;
 
 // --- separators -------------------------------------------------------------
 function t_dirseparator(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -605,8 +621,8 @@ const
      'ringtonespath$', 'sharedringtonespath$');
 var i: Integer;
 begin
-  Reg.Add('paramcount:',       @t_paramcount);
-  Reg.Add('paramstr$:n',       @t_paramstr);
+  Reg.AddHost('paramcount:',   @t_paramcount);
+  Reg.AddHost('paramstr$:n',   @t_paramstr);
   Reg.Add('dirseparator$:',    @t_dirseparator);
   Reg.Add('pathseparator$:',   @t_pathseparator);
   Reg.Add('altseparator$:',    @t_altseparator);

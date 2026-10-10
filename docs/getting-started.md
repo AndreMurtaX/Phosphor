@@ -52,8 +52,17 @@ phosphor compile <in.bas> <out.pbc>   compile to portable bytecode
 phosphor <file.pbc>                   run compiled bytecode
 phosphor pack <in.pbc> <out>          a standalone executable, no Phosphor needed to run it
 phosphor debug <file.bas>             step through a program; see debugging.md
+phosphor <file.bas> one "two words"   give the program arguments: paramstr$(1), (2)
+phosphor <file.bas> -- --verbose      ...including ones that start with "-"
 phosphor --version | --help
 ```
+
+Everything after the file is the program's own: `paramcount()` says how many
+there are and `paramstr$(i)` reads them, with `paramstr$(0)` the program's path.
+`phosphor`'s own options still work after the file, and any other word starting
+with `-` is refused unless it follows `--`, so a misspelt `--sandbox` stops the
+run instead of being handed to the program. A packed executable's whole command
+line is its program's.
 
 The REPL waits for input: start it from a terminal you type into, and leave it
 with end-of-file -- Ctrl+Z then Enter on Windows, Ctrl+D on Linux.

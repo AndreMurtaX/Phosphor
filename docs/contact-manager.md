@@ -28,8 +28,9 @@ a few sample companies.
 
 ![The first run: create the administrator account](images/contact-manager-first-run.png)
  The data lives in `phosphor-contacts.db` in your
-Documents folder; **File > Open database...** opens another one, and so does the
-environment variable `PHOSPHOR_CONTACTS_DB`.
+Documents folder; **File > Open database...** opens another one, and so does
+naming it on the command line (`phosphor examples/contact_manager.bas my.db`)
+or in the environment variable `PHOSPHOR_CONTACTS_DB`.
 
 To look around without creating anything, start it with
 `PHOSPHOR_CONTACTS_DEMO=1`: it opens a throw-away database in the temp folder
@@ -160,7 +161,10 @@ A real program finds what a test suite written by the same people does not:
   Windows and `14-  ` on Linux: the LCL reads `/` as the system's date
   separator. [libraries/gui-edit.md](libraries/gui-edit.md) now says so; `\/`
   is a slash everywhere.
-- **Still open: a program cannot read command-line arguments** —
-  `phosphor run app.bas --x` is refused — which is why this one takes its
-  switches from the environment.
+- **A program could not read command-line arguments** — `phosphor run app.bas x`
+  was refused — which is why this one took its switches from the environment.
+  It can now (`paramstr$`, [libraries/sys.md](libraries/sys.md)), and the
+  database can be named on the command line; the self-test and the demo stay
+  environment switches, because `test-examples` sets them for a program it does
+  not otherwise configure.
 - **Still open: there are no modal forms.**

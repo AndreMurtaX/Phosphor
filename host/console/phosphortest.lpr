@@ -157,6 +157,9 @@ begin
   // working directory is the root -- every test writes under bin/ , which is
   // inside it -- so nothing a test names can resolve outside the checkout.
   eng.SandboxRoot := GetCurrentDir;
+  { The program's own path, as `phosphor` hands it over: paramstr$(0) is the
+    file under test, and it is given no arguments. }
+  eng.ProgramPath := path;
 
   try
     RegisterTestFuncs(eng.Registry);

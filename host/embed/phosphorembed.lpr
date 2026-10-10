@@ -173,6 +173,33 @@ begin
     eng.Free;   // Finish() frees the prepared VM and its handles
   end;
 
+  // 10. THE PROGRAM'S COMMAND LINE IS THE HOST'S TO GIVE. paramstr$/paramcount
+  //     answer ProgramPath and ProgramArgs -- never this host's own argv, which
+  //     belongs to the application and means nothing to the script. Set none and
+  //     the script has no arguments; set them and every door reads them.
+  sink.Text := '';
+  eng := TPhosphorEngine.Create();
+  try
+    eng.OnOutput := @sink.Take;
+    rc := eng.Run('println str$(paramcount()) + "|" + paramstr$(0) + "|" + paramstr$(1)' + #10);
+    Report((rc = 0) and (sink.Text = '0||' + #10),
+           'a host that sets no command line gives the script none -- not its own');
+    eng.ProgramPath := 'report.bas';
+    eng.ProgramArgs := TStringArray.Create('2026', 'two words');
+    sink.Text := '';
+    rc := eng.Run('println str$(paramcount()) + "|" + paramstr$(0) + "|" + paramstr$(2) + "|" + paramstr$(3)' + #10);
+    Report((rc = 0) and (sink.Text = '2|report.bas|two words|' + #10),
+           'Run reads ProgramPath and ProgramArgs, and an index past the end is ""');
+    sink.Text := '';
+    rc := eng.Prepare('function first$()' + #10 + '  return paramstr$(1)' + #10 + 'endfunction' + #10);
+    v := eng.CallFunction('first$', []);
+    Report((rc = 0) and (v.Kind = vkString) and (v.Str = '2026'),
+           'and so does a prepared session, called from the host');
+  finally
+    eng.Free;
+  end;
+  sink.Free;
+
   Writeln('ok: ', Ok);
   Writeln('fail: ', Failed);
   if Failed > 0 then Halt(1) else Halt(0);

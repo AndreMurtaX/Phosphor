@@ -621,6 +621,11 @@ type
       minted -- so it overshoots by at most what one call creates. See the
       engine property of the same name. }
     MaxHandles: Int64;
+    { THE PROGRAM'S OWN COMMAND LINE, which paramstr$/paramcount answer: the
+      program's path (paramstr$(0)) and its arguments (1..n). Copied from the
+      engine's properties of the same name; empty when the host set none. }
+    ProgramPath: String;
+    ProgramArgs: TStringArray;
     constructor Create;
     destructor Destroy; override;   // closes any file channels left open
     function Run(AProg: TProgram): Boolean;  // False on error (LastError/ErrorLine set)

@@ -133,6 +133,11 @@ on error goto trapped
 
 test_case("shown/a group item the widgetset cannot create is refused")
 rem On a fresh window, so this case does not lean on the ones above.
+rem WHETHER the item can be created is the widgetset's business: win32
+rem cannot make a radio button with a 100000-space caption, gtk2 can (the
+rem first Linux run, 2026-10-09). What is Phosphor's is that nothing
+rem raises and the answer and the group agree: refused means no item,
+rem accepted means one.
 f3@ = form@("group", 300, 200)
 rg@ = radiogroup@(f3@)
 f3@ = form_show@(f3@)
@@ -141,17 +146,18 @@ raised = 0
 gui_clearerror()
 x@ = radiogroup_add@(rg@, space$(100000))
 x = app_processmessages()
+big_err = gui_error()
 on error goto 0
 assert_eq(raised, 0, "radiogroup_add@ of 100000 spaces did not raise")
-assert_eq(gui_error(), 1, "it was refused")
-assert_eq(radiogroup_count(rg@), 0, "and the group holds no item")
+assert_true(big_err = 0 or big_err = 1, "it was accepted or refused, nothing else")
+assert_eq(radiogroup_count(rg@), 1 - big_err, "and the group holds an item exactly when it was accepted")
 on error goto trapped
 gui_clearerror()
 x@ = radiogroup_add@(rg@, "fine")
 x = app_processmessages()
 on error goto 0
 assert_eq(gui_error(), 0, "an ordinary item still goes in")
-assert_eq(radiogroup_count(rg@), 1, "as the only one")
+assert_eq(radiogroup_count(rg@), 2 - big_err, "after whatever the first one was")
 on error goto trapped
 
 raised = 0

@@ -5,7 +5,7 @@ program for the people a company buys from and sells to: suppliers and
 customers, the contacts at each one, the product lines those contacts serve,
 and a dated history of what was said to whom. It keeps everything in SQLite,
 behind a login with users, roles and hashed passwords, and it is one file of
-BASIC — about 1,500 lines, a third of them the self-test.
+BASIC — about 2,900 lines, a fifth of them the self-test.
 
 It is here for two reasons: to show what the language and its libraries add up
 to, and because writing it was this project's first real use. It found five
@@ -27,10 +27,17 @@ The first run asks you to create the administrator account and offers to load
 a few sample companies.
 
 ![The first run: create the administrator account](images/contact-manager-first-run.png)
- The data lives in `phosphor-contacts.db` in your
-Documents folder; **File > Open database...** opens another one, and so does
+
+The data lives in `phosphor-contacts.db` in your Documents folder — or in your
+home folder where there is no Documents folder, as on a Linux without
+`~/Documents`. **File > Open database...** opens another one, and so does
 naming it on the command line (`phosphor examples/contact_manager.bas my.db`)
-or in the environment variable `PHOSPHOR_CONTACTS_DB`.
+or in the environment variable `PHOSPHOR_CONTACTS_DB`. A file that cannot be
+used — not a database, in a folder that does not exist, made by a newer version
+of the program — is refused with the reason: at start-up the program then
+offers to pick another file or to end, and from **File > Open database...** it
+keeps the database you had open, and your session with it. A read-only
+database opens for looking: the sign-in says so, and every change is refused.
 
 To look around without creating anything, start it with
 `PHOSPHOR_CONTACTS_DEMO=1`: it opens a throw-away database in the temp folder
@@ -48,15 +55,16 @@ $env:PHOSPHOR_CONTACTS_DEMO = '1'; phosphor examples\contact_manager.bas
 
 | page | what is on it |
 | --- | --- |
-| **Suppliers**, **Customers** | a list you can search by name, tax id, city or the name of a contact, and filter by active state and by the product line a contact serves. The selected company's **Details** (address, tax id, category or segment, lead time or credit limit, payment terms, notes, active flag, who created and changed it), its **Contacts**, and the **History** of the selected contact. A double click on a company opens its contacts |
-| Contacts | name, job title, department, e-mail, phone, mobile, WhatsApp, LinkedIn, Instagram and other social media, birthday, notes, a primary-contact flag (one per company), and the product lines the contact serves |
-| History | dated entries per contact — a call, a meeting, an e-mail, a WhatsApp message, a visit — with a subject, notes and who wrote it |
+| **Suppliers**, **Customers** | a list you can search by name, tax id (with or without its punctuation), city or the name of a contact — ignoring case in any alphabet (`AÇO` finds `Aço`), and taking `%` and `_` as the characters they are — and filter by active state and by the product line a contact serves. The selected company's **Details** (address, tax id, category or segment, lead time or credit limit, payment terms, notes, active flag, who created and changed it), its **Contacts**, and the **History** of the selected contact. A double click on a company opens its contacts. For a Brazilian company the tax id must be a valid CNPJ — numeric or, since July 2026, alphanumeric — or CPF |
+| Contacts | name, job title, department, e-mail, phone, mobile, WhatsApp, LinkedIn, Instagram and other social media, birthday (a real day and month, `dd/mm`, or empty), notes, a primary-contact flag (one per company), and the product lines the contact serves |
+| History | dated entries per contact — a call, a meeting, an e-mail, a WhatsApp message, a visit — with a subject, notes and who wrote it. **Delete entry** acts on the entry you picked in the list, and its question names it |
 | **Product lines** | the lines your contacts serve, used by the contacts' check list and by the filters |
 | **Users** | administrators only: users, their role (administrator or operator), whether they may sign in, and their passwords |
 
 The **File** menu exports suppliers or customers to CSV (one row per contact,
-with the product lines it serves) and backs the database up; **Account**
-changes your own password and signs out.
+with the product lines it serves) and backs the database up — to any file but
+the open database itself, which it refuses; **Account** changes your own
+password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
 
@@ -75,19 +83,34 @@ program should never write, so a bug in the BASIC cannot corrupt it:
 - **`ON DELETE SET NULL`** on "who created this": deleting a user keeps their
   records.
 - **A partial unique index** — one tax id per kind of company, while many may
-  leave it blank: `CREATE UNIQUE INDEX ... ON companies(kind, tax_id) WHERE tax_id <> ''`.
-- **`COLLATE NOCASE`** on user names and product-line names, so `Olivia` and
-  `olivia` are the same user.
+  leave it blank: `CREATE UNIQUE INDEX ... ON companies(kind, tax_key) WHERE tax_key <> ''`.
+  `tax_key` is the id upper-cased with only its letters and digits kept, so
+  `11.444.777/0001-61` and `11444777000161` are one id.
+- **Unique keys that ignore case in any alphabet.** SQLite's `COLLATE NOCASE`
+  and `LIKE` fold the 26 ASCII letters only, which made `josé` and `JOSÉ` two
+  users. So each name that must be unique regardless of case is stored beside
+  a key lower-cased by BASIC's `alcase$`, which knows all of Unicode — user
+  names (`username_key`), product lines (`name_key`) — and the unique index is
+  on the key: `Olivia` and `olivia`, `José` and `josé` are the same user. The
+  search compares keys made the same way, with `LIKE ... ESCAPE '\'`.
 - **A transaction** around saving a contact, its primary flag and its product
   lines: all of it or none of it.
+- **A schema version**, kept in `PRAGMA user_version`. A database already at
+  the current version is not written to when it is opened — which is what lets
+  a read-only one open. An older one is upgraded inside one transaction that
+  also sets the new version: version 1 to 2 added the keys above, computed them
+  for the rows already there, and replaced the tax-id index. If those rows
+  already break the new rules — two users whose names differ only in case, one
+  tax id written two ways — the upgrade is refused with their names and the
+  file is left as it was.
 
 And **every value is bound**, never pasted into SQL — `?1`, `?2` and
 `sqlite_bindstr` / `sqlite_bindnum` — so a company called `O'Brien; DROP TABLE`
 is just a name:
 
 ```basic
-s@ = sqlite_prepare@(db@, "SELECT id, password, role, active FROM users WHERE username = ?1")
-sqlite_bindstr(s@, 1, u$)
+s@ = sqlite_prepare@(db@, "SELECT id, username, password, role, active FROM users WHERE username_key = ?1")
+sqlite_bindstr(s@, 1, alcase$(u$))
 if sqlite_step(s@) = 1 then rec$ = sqlite_gets$(s@, "password")
 sqlite_finalize(s@)
 ```
@@ -99,7 +122,11 @@ asks `password_verify?` whether a typed password matches it
 ([libraries/crypto.md](libraries/crypto.md)). An unknown user name and a wrong
 password get the same message, so the login does not tell a stranger which
 names exist. The last active administrator cannot be demoted, deactivated or
-deleted, so someone can always manage the users.
+deleted, so someone can always manage the users — a rule checked against the
+database at each change, because another copy of the program on the same file
+may have changed the users meanwhile. A change to your own account takes
+effect at once: demote yourself and the Users page goes; deactivate yourself
+and, after a confirmation, you are signed out.
 
 ### The windows
 
@@ -128,7 +155,7 @@ function on_company_save(sender@) local k
   k = control_tag(sender@)
   println "saving a record on page " + str$(k)
   return 0
-endfunction
+end function
 ```
 
 **Change my password** is a modal dialog: `form_showmodal` waits until it is
@@ -141,12 +168,19 @@ With `PHOSPHOR_SELFTEST=1` the program builds every window **without showing
 one**, and drives them as a person would — typing with `edit_text@`, clicking
 with `button_click@` and `menuitem_click@`, picking rows with
 `stringgrid_cursor@`, double-clicking with `control_dblclick@` — against a
-throw-away database, then checks what landed in SQLite: 75 checks, from the
-first-run administrator to a cascade delete, the CSV file and an operator who
-cannot see the Users page. Its message and confirmation boxes go through one
-function the test answers. `scripts/test-examples` runs it that way on Windows
-and on Linux (under `xvfb-run`), and the checks were each seen to fail with the
-rule they check broken on purpose.
+throw-away database, then checks what landed in SQLite: 133 checks, from the
+first-run administrator to a cascade delete, the whole CSV file, an operator
+who cannot see the Users page, the upgrade of a version-1 database and a
+refresh of 2,000 rows. Its message, confirmation and file boxes go through
+functions the test answers. `scripts/test-examples` runs it that way on Windows
+and on Linux (under `xvfb-run`).
+
+A check is only worth having if it can fail. An adversarial review found three
+that could not — the CSV check looked at one quoted name, the credit-limit check
+accepted any value, and the last-administrator check on deleting a user never
+reached the rule it named — so they were rewritten, and each of them, and each
+check added with the fixes of that review, was **seen to fail** in a copy of the
+program with its rule reverted.
 
 ## What writing it changed in Phosphor
 

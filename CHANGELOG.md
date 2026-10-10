@@ -27,6 +27,31 @@
   both systems (a new `selftest` mode, under `xvfb-run` on Linux). Its tour is
   [docs/contact-manager.md](docs/contact-manager.md).
 
+### Fixed (adversarial round 5, 2026-10-10)
+
+- `password_verify?` accepted wrong passwords when a record's hash was shorter
+  than 32 bytes, and accepted records Django refuses; only Django's canonical
+  record is a record now. PBKDF2 charges the salt and the password to the
+  execution budget, not only the rounds.
+- On Windows a program's arguments are split by Microsoft's rules
+  (`CommandLineToArgvW`): `\"` and a backslash before a closing quote no longer
+  mangle or merge arguments. Arguments that are not UTF-8 arrive as U+FFFD; an
+  empty file name is refused; `--` before the file and `-` after it work.
+- Modal forms: `END` in a handler ends the program even while a modal is up;
+  answering a modal no longer ends `app_run`; controls freed inside a modal are
+  released during it; a form parented inside another is refused. A timer's
+  handler is no longer re-entered while it waits (Windows did, Linux did not).
+  In the GUI test runner, a modal session now behaves as `ShowModal` does --
+  visible, `onclosequery` and `onclose` on an answer, a veto keeps it open for
+  the next queued function.
+- `stringgrid_row` / `stringgrid_col` answer 0 for a grid with no scrollable
+  cell, and a very negative cursor position lands on the first cell.
+- The contact manager: 14 defects, from an unopenable database leaving an
+  invisible process to tax ids bypassed by punctuation, the 2026 alphanumeric
+  CNPJ, non-ASCII case, quadratic list refreshes, and a backup onto the open
+  database; its database schema is now version 2, migrated in place. Its
+  self-test has 133 checks.
+
 ### Changed
 
 - **A program gets its own command line.** Everything after the file is the

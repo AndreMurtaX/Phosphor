@@ -86,13 +86,27 @@ dj$ = "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fz
 assert_true(password_verify?("Pässwörd", dj$) = true, "a record made by hashlib verifies")
 assert_true(password_verify?("Passwörd", dj$) = false, "and still refuses the wrong one")
 
+test_case("password_verify?/only Django's own record is a record")
+rem The hash fields below are Python's: hashlib.pbkdf2_hmac over the same
+rem password and salt, 1000 rounds, base64 -- the 32-byte one is dj$ above.
+rem Django re-encodes with dklen=32 and compares the whole record, so
+rem every one of these is refused there; they used to be accepted here,
+rem and the 16-byte one compared only 16 bytes.
+assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzA==") = false, "a hash cut to 16 bytes is refused, even with the right password")
+assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOFI") = false, "33 bytes is refused")
+assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOE") = false, "the base64 without its padding is refused")
+assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$01000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOE=") = false, "a count with a leading zero is refused")
+
 test_case("password_verify?/a damaged record is no match, not a fault")
 assert_true(password_verify?("pw", "") = false, "empty")
 assert_true(password_verify?("pw", "garbage") = false, "not a record")
 assert_true(password_verify?("pw", "pbkdf2_sha1$1000$s$AAAA") = false, "another algorithm")
 assert_true(password_verify?("pw", "pbkdf2_sha256$0$s$AAAA") = false, "zero rounds")
 assert_true(password_verify?("pw", "pbkdf2_sha256$-5$s$AAAA") = false, "a sign")
-assert_true(password_verify?("pw", "pbkdf2_sha256$99999999999$s$AAAA") = false, "a count past 2^31")
+assert_true(password_verify?("pw", "pbkdf2_sha256$99999999999$s$AAAA") = false, "eleven digits")
+rem A record of the right shape whose count is 2^31: it reaches the range
+rem check (ParseRecord's High(Integer) test) and nothing before it.
+assert_true(password_verify?("pw", "pbkdf2_sha256$2147483648$0123456789abcdef0123456789abcdef$umIjVO6Qwr9OcUfz/QIrPTKOrqwI5byN1h3U4PYdKQk=") = false, "a count of 2^31, the range check itself")
 assert_true(password_verify?("pw", "pbkdf2_sha256$10$$AAAA") = false, "no salt")
 assert_true(password_verify?("pw", "pbkdf2_sha256$10$s$") = false, "no hash")
 assert_true(password_verify?("pw", "pbkdf2_sha256$10$s$AAAA$x") = false, "a fifth field")

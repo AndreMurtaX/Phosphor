@@ -50,14 +50,44 @@ type
     modal session: it is handed the VM, the form and the form's handle, lets the
     program act inside the form (host/gui/phosphorguitest.lpr calls a BASIC
     function the test queued, which fills fields and clicks buttons), and answers
-    the result ShowModal would have. The form's ModalResult is 0 when it is called. }
+    the result ShowModal would have. The form's ModalResult is 0 when it is called.
+
+    ROUND BY ROUND (round 5, 2026-10-10). The first hook stood in for the whole
+    session and answered the result, so inside it the form was neither visible
+    nor modal, onclosequery and onclose never ran, a vetoed OK answered 1, and
+    form_close@ took the non-modal path. Now THIS unit runs the session and the
+    hook only acts: it is called once per round (ARound counts from 1) and
+    answers False when there is nobody left to act. Between rounds the session
+    does what TCustomForm.ShowModal does (lcl/include/customform.inc): the form
+    is visible and refuses a second modal, form_close@ answers mrCancel, a
+    non-zero result goes through CloseModal -- CloseQuery, then DoClose -- and a
+    veto sets it back to 0 so the NEXT round acts on a form still open. }
   TFormShowModalHook = function(AVM: TObject; AForm: TCustomForm;
-    AHandle: Int64): Integer;
+    AHandle: Int64; ARound: Integer): Boolean;
 
 var
   FormShowModalHook: TFormShowModalHook = nil;
 
 implementation
+
+var
+  { The forms in a hook-run modal session: what fsModal says for a real one. }
+  GHookModal: array of TCustomForm;
+
+function InHookModal(AForm: TObject): Boolean;
+var i: Integer;
+begin
+  for i := 0 to High(GHookModal) do
+    if GHookModal[i] = AForm then Exit(True);
+  Result := False;
+end;
+
+{ Is this form in a modal session, real or run by a hook? }
+function InModalSession(AForm: TObject): Boolean;
+begin
+  Result := (AForm is TCustomForm) and
+            ((fsModal in TCustomForm(AForm).FormState) or InHookModal(AForm));
+end;
 
 type
   { Terminates the message loop when a top-level form is closed, so closing the
@@ -100,7 +130,11 @@ begin
     and does not touch Application.Terminated -- and only when nothing else is
     still shown. The form being closed is excluded from the count because
     CloseAction has only just been set and it is still Visible here. }
-  if not GuiOtherFormShown(Sender) then
+  { ANSWERING A MODAL IS NOT CLOSING A WINDOW (round 5). CloseModal runs DoClose
+    on every answer -- OK as much as [X] -- and with no other form shown this
+    ended app_run the moment a tray- or timer-driven program's dialog was
+    answered. A modal session ends itself; the loop is not this form's to end. }
+  if (not GuiOtherFormShown(Sender)) and (not InModalSession(Sender)) then
     GuiLeaveLoop;
 end;
 
@@ -255,6 +289,13 @@ var c: TComponent;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TForm, c) then Exit;
+  { A form in a hook-run modal session closes the way a modal one does:
+    TCustomForm.Close sets mrCancel when fsModal is set, and nothing else. }
+  if InHookModal(c) then
+  begin
+    TForm(c).ModalResult := mrCancel;
+    Exit;
+  end;
   // THE FORM BELONGS TO THE LCL FOR THE LENGTH OF Close. Close runs OnCloseQuery
   // and OnClose, then goes on writing CloseAction and hiding the window; any BASIC
   // routine reached from inside that -- the close handlers themselves, or an
@@ -281,28 +322,119 @@ end;
   the EInvalidOperation ShowModal raises. The form stays alive while it is modal:
   marked in use, so a handler's control_free of it is refused, like a closing
   form's. It is not shown afterwards, and it can be shown modally again. }
+type
+  TFormAccess = class(TCustomForm);   // DoClose is protected
+
+  { Between the messages of a real modal session: free what was queued inside
+    it (GuiFlushFreesSince's reasoning). }
+  TModalIdle = class
+    Mark, Depth: Integer;
+    procedure Idle(Sender: TObject; var Done: Boolean);
+  end;
+
+procedure TModalIdle.Idle(Sender: TObject; var Done: Boolean);
+begin
+  GuiFlushFreesSince(Mark, Depth);
+end;
+
+{ What TCustomForm.CloseModal does with a non-zero ModalResult: ask CloseQuery,
+  then DoClose; a veto -- or an OnClose that answers caNone -- puts the result
+  back to 0 and the session goes on. }
+procedure EmulateCloseModal(F: TForm);
+var ca: TCloseAction;
+begin
+  ca := caNone;
+  if F.CloseQuery then
+  begin
+    ca := caHide;
+    TFormAccess(F).DoClose(ca);
+  end;
+  if ca = caNone then F.ModalResult := mrNone;
+end;
+
+procedure AddHookModal(F: TCustomForm);
+begin
+  SetLength(GHookModal, Length(GHookModal) + 1);
+  GHookModal[High(GHookModal)] := F;
+end;
+
+procedure RemoveHookModal(F: TCustomForm);
+var i, j: Integer;
+begin
+  for i := High(GHookModal) downto 0 do
+    if GHookModal[i] = F then
+    begin
+      for j := i to High(GHookModal) - 1 do GHookModal[j] := GHookModal[j + 1];
+      SetLength(GHookModal, Length(GHookModal) - 1);
+      Exit;
+    end;
+end;
+
 function f_form_showmodal(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; f: TForm; r: Integer;
+var
+  c: TComponent; f: TForm; r, round, mark, depth: Integer;
+  idle: TModalIdle;
 begin
   E := NoError; Result := ValInt(0);
   if not GuiResolve(A[0].Hnd, TForm, c) then Exit;
   f := TForm(c);
-  if f.Visible or (not f.Enabled) or (fsModal in f.FormState) then
+  { A form parented inside another is refused too (round 5): its buttons answer
+    the TOP form (TCustomButton.Click uses GetParentForm), so its session could
+    never end by its own buttons, and GTK complains it is not a window. }
+  if f.Visible or (not f.Enabled) or (fsModal in f.FormState) or
+     (f.Parent <> nil) or InHookModal(f) then
   begin
     GGuiError := 1;
     Exit;
   end;
   r := 0;
+  mark := GuiPendingMark();
+  depth := GuiDispatchDepth();
   GuiEnterCallback(c);
   try
     try
       if Assigned(FormShowModalHook) then
       begin
         f.ModalResult := mrNone;
-        r := FormShowModalHook(AVM, f, A[0].Hnd);
+        AddHookModal(f);
+        try
+          f.Visible := True;
+          round := 0;
+          while f.ModalResult = mrNone do
+          begin
+            Inc(round);
+            if not FormShowModalHook(AVM, f, A[0].Hnd, round) then
+            begin
+              f.ModalResult := mrCancel;   // nobody left to act: as if closed
+              Break;
+            end;
+            GuiFlushFreesSince(mark, depth);
+            if TPhosphorVM(AVM).Halted then
+            begin
+              if f.ModalResult = mrNone then f.ModalResult := mrCancel;
+              Break;
+            end;
+            if f.ModalResult <> mrNone then EmulateCloseModal(f);
+          end;
+          r := f.ModalResult;
+        finally
+          RemoveHookModal(f);
+          f.Visible := False;
+        end;
       end
       else
-        r := f.ShowModal;
+      begin
+        idle := TModalIdle.Create;
+        idle.Mark := mark;
+        idle.Depth := depth;
+        Application.AddOnIdleHandler(@idle.Idle, False);
+        try
+          r := f.ShowModal;
+        finally
+          Application.RemoveOnIdleHandler(@idle.Idle);
+          idle.Free;
+        end;
+      end;
     except
       on Ex: Exception do
       begin

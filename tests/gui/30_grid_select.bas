@@ -86,6 +86,30 @@ gui_clearerror()
 assert_eq(stringgrid_colwidth(g@, 0), 0, "column 0 does not exist: 0")
 assert_eq(gui_error(), 1, "and that is recorded")
 
+test_case("grid select/a grid with no scrollable row has no selected row")
+rem ROUND 5: with only a header row (RowCount = FixedRows) or no rows at
+rem all, the LCL still has a Row -- the header's, or one past the end --
+rem and that read like a record a person picked. 0 is no row.
+hg@ = stringgrid@(f@)
+stringgrid_colcount@(hg@, 2)
+stringgrid_rowcount@(hg@, 1)
+stringgrid_fixedrows@(hg@, 1)
+assert_eq(stringgrid_row(hg@), 0, "a header-only grid: row 0")
+stringgrid_fixedrows@(hg@, 0)
+stringgrid_rowcount@(hg@, 0)
+assert_eq(stringgrid_rowcount(hg@), 0, "the grid really has no rows")
+assert_eq(stringgrid_row(hg@), 0, "an empty grid: row 0")
+assert_eq(stringgrid_col(hg@), 0, "and column 0")
+
+test_case("grid select/a very negative position lands on the first cell")
+rem ROUND 5: ArgI32 saturates -3e9 to the lowest Integer and "- 1"
+rem wrapped it to the highest, which the grid clamped to its LAST cell.
+rem CheckLimits clamps anything below the scrollable area to its first
+rem cell: column 1 here (no fixed column), row 2 (one fixed row).
+stringgrid_cursor@(g@, -3000000000, -3000000000)
+assert_eq(stringgrid_col(g@), 1, "the first column")
+assert_eq(stringgrid_row(g@), 2, "the first data row")
+
 test_case("double click/on a grid and on a button")
 dbl = 0
 control_ondblclick@(g@, "on_dbl")

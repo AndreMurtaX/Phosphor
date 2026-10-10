@@ -496,6 +496,10 @@ ALLOWED = {
         'the needles are this unit''s library names, against one query',
     'PhosphorRagLib.pas:TPhosphorRag.AnalyzeQuery':
         'the needles are fixed markers, against one query',
+    'phosphor.lpr:ReadArgv':
+        'n is the number of words the OS split this process\'s own command line '
+        'into (CommandLineToArgvW) -- bounded by the command line, at most 32767 '
+        'characters on Windows -- read once before any script exists',
     'PhosphorCryptoLib.pas:Sha256Update':
         'N is the length of a buffer already in memory -- a string being hashed, a '
         '64-byte pad or a 32-byte digest -- so the loop is linear in bytes that '

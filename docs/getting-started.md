@@ -59,10 +59,15 @@ phosphor --version | --help
 
 Everything after the file is the program's own: `paramcount()` says how many
 there are and `paramstr$(i)` reads them, with `paramstr$(0)` the program's path.
-`phosphor`'s own options still work after the file, and any other word starting
-with `-` is refused unless it follows `--`, so a misspelt `--sandbox` stops the
-run instead of being handed to the program. A packed executable's whole command
-line is its program's.
+`phosphor`'s run options (`--out`, `--sandbox`, `--no-console`, `--gui`) still
+work after the file, and any other word starting with `-` is refused unless it
+follows `--`, so a misspelt `--sandbox` stops the run instead of being handed to
+the program; `-` alone is an ordinary word. `phosphor -- -name.bas` runs a file
+whose name starts with `-`. An empty file name is refused. On Windows the line is
+split by Microsoft's own rules (`\"` is a quote inside a quoted argument), which
+is what every launcher encodes for, and every argument reaches the program as
+UTF-8 -- bytes that are not, on Linux, arrive as U+FFFD. A packed executable's
+whole command line is its program's.
 
 The REPL waits for input: start it from a terminal you type into, and leave it
 with end-of-file -- Ctrl+Z then Enter on Windows, Ctrl+D on Linux.

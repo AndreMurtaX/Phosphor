@@ -1234,7 +1234,7 @@ if adgot="$("$exe" "$adp" -- --sandbox -5 < /dev/null 2>&1)"; then adcode=0; els
 [ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" --sandbox -5 2d35)" ] || ad_fail "after --: got '$adgot'"
 # an unknown option is refused, says how to pass it, and runs nothing
 if adgot="$("$exe" "$adp" --sandbx cage < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
-[ "$adcode" -eq 2 ] && [[ "$adgot" == *'unknown option --sandbx'* ]] && [[ "$adgot" == *'put it after --'* ]] && [[ "$adgot" != [0-9]* ]] || ad_fail "a misspelt option: exit $adcode, got '$adgot'"
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'unknown option --sandbx'* ]] && [[ "$adgot" == *'goes after --'* ]] && [[ "$adgot" != [0-9]* ]] || ad_fail "a misspelt option: exit $adcode, got '$adgot'"
 # a packed application's whole command line is the program's
 if "$exe" compile "$adp" "$tmpdir/args.pbc" > /dev/null 2>&1 && "$exe" pack "$tmpdir/args.pbc" "$tmpdir/argsapp" > /dev/null 2>&1; then
   if adgot="$("$tmpdir/argsapp" --sandbox x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
@@ -1243,6 +1243,19 @@ else ad_fail "could not compile and pack args.bas"; fi
 # the debugger passes them on too
 if adgot="$(printf 'c\n' | "$exe" debug "$adp" d1 -- --d2 2>/dev/null)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" d1 --d2 2d2d6432)" ] || ad_fail "under the debugger: exit $adcode, got '$adgot'"
+# ROUND 5 (2026-10-10): bytes the OS passes that are not UTF-8 reach the program
+# as U+FFFD, one per maximal ill-formed subpart -- the rule environ$ keeps
+# (block AC). Expected: FF FE -> EF BF BD EF BF BD; 'a', C3 (cut short) ->
+# 61 EF BF BD. They used to arrive raw.
+if adgot="$("$exe" "$adp" $'\xff\xfe' $'a\xc3' < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ "$(printf '%s' "$adgot" | sed -n 5p | tr -d '\r' | tr 'A-F' 'a-f')" = "61efbfbd" ] && \
+  [ "$(printf '%s' "$adgot" | sed -n 3p | tr -d '\r' | od -An -tx1 | tr -d ' \n')" = "efbfbdefbfbd" ] || ad_fail "bytes that are not UTF-8: exit $adcode, got '$adgot'"
+# an empty file name is refused, not skipped
+if adgot="$("$exe" "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "an empty file name: exit $adcode, got '$adgot'"
+# "--" before the file; "-" alone after it is a word
+if adgot="$("$exe" -- "$adp" - --x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" - --x 2d2d78)" ] || ad_fail "-- before the file, - after it: got '$adgot'"
 if [ "$okAD" -eq 0 ]; then echo 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused'
 else fail=1; fi
 
@@ -1286,6 +1299,95 @@ if command -v xvfb-run > /dev/null 2>&1; then
   else echo "FAIL  AE:a real modal form: exit $aecode, want '1 2 typed 0', got '$aegot'"; fail=1; fi
 else
   echo 'SKIP  AE:a real modal form (no xvfb-run on this machine)'
+fi
+
+# --- AF: A MODAL SESSION INSIDE A REAL MESSAGE LOOP ----------------------------
+# Three round-5 fixes (2026-10-10) that only a running loop can show:
+#  - a timer does not re-enter its own handler while that handler waits in
+#    form_showmodal (Windows dispatched WM_TIMER inside the modal loop and ran
+#    it again; GTK never did) -- expected 0 re-entries;
+#  - answering a modal is not closing the last window: with an onclose bound
+#    (so the closer is installed) and no other window shown, OK used to end
+#    app_run -- expected the loop to run on until t2 quits it ("full");
+#    expected 1 (OK) and onclose run once;
+#  - END in a handler while a modal is up ends the program: it used to leave
+#    the modal waiting for a person, forever. Expected "before" and an exit.
+printf '%s\n' 'dlg@ = form@("AF", 200, 100)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'button_modalresult@(ok@, 1)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'form_onclose@(dlg@, "on_close")' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'closes = 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'opened = 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'reentered = 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'inmodal = 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'r = -1' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'ticks2 = 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 't1@ = timer@()' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_interval@(t1@, 50)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_ontimer@(t1@, "on_t1")' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_enabled@(t1@, 1)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 't3@ = timer@()' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_interval@(t3@, 400)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_ontimer@(t3@, "on_t3")' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_enabled@(t3@, 1)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 't2@ = timer@()' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_interval@(t2@, 50)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_ontimer@(t2@, "on_t2")' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'timer_enabled@(t2@, 1)' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'full$ = "cut"' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'if ticks2 >= 40 then full$ = "full"' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'println str$(r) + " " + str$(reentered) + " " + str$(closes) + " " + full$' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'end' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'function on_t1(s@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  if inmodal = 1 then' >> "$tmpdir/afloop.bas"
+printf '%s\n' '    reentered = reentered + 1' >> "$tmpdir/afloop.bas"
+printf '%s\n' '    return 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  end if' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  if opened = 0 then' >> "$tmpdir/afloop.bas"
+printf '%s\n' '    opened = 1' >> "$tmpdir/afloop.bas"
+printf '%s\n' '    inmodal = 1' >> "$tmpdir/afloop.bas"
+printf '%s\n' '    r = form_showmodal(dlg@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' '    inmodal = 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  end if' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'end function' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'function on_t3(s@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  if inmodal = 1 then button_click@(ok@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'end function' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'function on_t2(s@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  ticks2 = ticks2 + 1' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  if ticks2 >= 40 and inmodal = 0 and opened = 1 then app_quit()' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'end function' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'function on_close(s@)' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  closes = closes + 1' >> "$tmpdir/afloop.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'end function' >> "$tmpdir/afloop.bas"
+printf '%s\n' 'dlg@ = form@("AF end", 200, 100)' >> "$tmpdir/afend.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/afend.bas"
+printf '%s\n' 'timer_interval@(t@, 200)' >> "$tmpdir/afend.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/afend.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/afend.bas"
+printf '%s\n' 'println "before"' >> "$tmpdir/afend.bas"
+printf '%s\n' 'r = form_showmodal(dlg@)' >> "$tmpdir/afend.bas"
+printf '%s\n' 'println "not reached"' >> "$tmpdir/afend.bas"
+printf '%s\n' 'end' >> "$tmpdir/afend.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/afend.bas"
+printf '%s\n' '  end' >> "$tmpdir/afend.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/afend.bas"
+printf '%s\n' 'end function' >> "$tmpdir/afend.bas"
+if command -v xvfb-run > /dev/null 2>&1; then
+  okAF=0
+  if afgot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/afloop.bas" < /dev/null 2>&1)"; then afcode=0; else afcode=$?; fi
+  [ "$afcode" -eq 0 ] && [ "$(printf '%s' "$afgot" | tr -d '\r')" = "1 0 1 full" ] || { echo "FAIL  AF:the modal in a loop: exit $afcode, want '1 0 1 full', got '$afgot'"; okAF=1; }
+  if afgot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/afend.bas" < /dev/null 2>&1)"; then afcode=0; else afcode=$?; fi
+  [ "$afcode" -eq 0 ] && [ "$(printf '%s' "$afgot" | tr -d '\r' | head -1)" = "before" ] && [[ "$afgot" != *'not reached'* ]] || { echo "FAIL  AF:END inside a modal: exit $afcode, got '$afgot'"; okAF=1; }
+  if [ "$okAF" -eq 0 ]; then echo 'PASS  AF:a modal in a real loop: no timer re-entry, OK does not end app_run, END ends the program'
+  else fail=1; fi
+else
+  echo 'SKIP  AF:a modal in a real loop (no xvfb-run on this machine)'
 fi
 
 exit "$fail"

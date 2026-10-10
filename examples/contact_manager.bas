@@ -8,12 +8,14 @@ rem from a desktop:
 rem
 rem   phosphor examples/contact_manager.bas
 rem
-rem The database is phosphor-contacts.db in your Documents folder, or the
-rem file named on the command line (phosphor contact_manager.bas my.db), or
-rem the one PHOSPHOR_CONTACTS_DB names; File > Open database... picks another
-rem one. The first run asks for an administrator account and offers to
-rem load sample data. PHOSPHOR_CONTACTS_DEMO=1 skips all of that: a
-rem throw-away database with the samples, signed in as "demo".
+rem The database is phosphor-contacts.db in your Documents folder (in your
+rem home folder when there is no Documents folder), or the file named on
+rem the command line (phosphor contact_manager.bas my.db), or the one
+rem PHOSPHOR_CONTACTS_DB names; File > Open database... picks another one.
+rem When that file cannot be opened it says why and offers to pick another
+rem file or to end. The first run asks for an administrator account and
+rem offers to load sample data. PHOSPHOR_CONTACTS_DEMO=1 skips all of that:
+rem a throw-away database with the samples, signed in as "demo".
 rem
 rem With PHOSPHOR_SELFTEST=1 in the environment it does something else:
 rem it builds every window WITHOUT showing one, drives them the way a
@@ -45,6 +47,10 @@ const COMPANY_COLS$ = "name,trade_name,tax_id,category,phone,email,website,extra
 const CONTACT_COLS$ = "name,job_title,department,email,phone,mobile,whatsapp,linkedin,instagram,other_social,birthday,notes"
 const INTERACTION_KINDS$ = "Call,Meeting,E-mail,WhatsApp,Visit,Other"
 
+rem The schema's version, kept in the database as PRAGMA user_version (see
+rem create_schema): 1 was the first, 2 added the normalized keys.
+const SCHEMA_VERSION = 2
+
 selftest? = false
 if environ$("PHOSPHOR_SELFTEST") = "1" then selftest? = true
 
@@ -53,9 +59,11 @@ rem     is a GLOBAL in Phosphor, which is exactly what these are) --------------
 db@ = sqlite_open@()
 sqlite_close(db@)
 dbpath$ = ""
+read_only? = false         rem the open database refused the sign-in's write
+schema_msg$ = ""           rem why create_schema failed, in words
 widgets@ = pdict@()        rem every control worth finding again, by name
-rowids@ = sdict@()         rem grid name -> "id,id,id" in row order
-current@ = dict@()         rem "s.company", "c.contact", "user", "line" -> id
+rowids@ = dict@()          rem per grid: its row <-> id maps, its column widths
+current@ = dict@()         rem "s.company", "c.contact", "s.history", "user", "line" -> id
 busy = 0                   rem > 0 while the program itself is filling controls
 user_id = 0
 user_name$ = ""
@@ -66,6 +74,8 @@ pw_cost = 600000           rem PBKDF2 rounds: password_hash$'s own default
 last_msg$ = ""             rem what the last message box said (self-test)
 answer? = true             rem what a confirmation answers (self-test)
 save_as$ = ""              rem what a save dialog answers (self-test)
+open_as$ = ""              rem what an open dialog answers, once (self-test)
+step_err$ = ""             rem what the last step_ok failed with
 passed = 0
 failed = 0
 
@@ -77,9 +87,9 @@ if sqlite_available() = 0 then
     println "SKIP: the SQLite runtime library is not installed"
   else
     msgbox("This program keeps its data in SQLite, and the SQLite runtime library was not found. Install it (sqlite3.dll on Windows, libsqlite3 on Linux) and start it again.", APP$)
-  endif
+  end if
   end
-endif
+end if
 
 build_login_form()
 build_main_form()
@@ -88,17 +98,23 @@ build_password_form()
 if selftest? = true then
   run_selftest()
   end
-endif
+end if
 
+opened = 0
 if environ$("PHOSPHOR_CONTACTS_DEMO") = "1" then
-  start_demo()
+  opened = start_demo()
 elseif paramcount() >= 1 then
-  open_database(paramstr$(1))
+  opened = open_database(paramstr$(1))
 elseif environ$("PHOSPHOR_CONTACTS_DB") <> "" then
-  open_database(environ$("PHOSPHOR_CONTACTS_DB"))
+  opened = open_database(environ$("PHOSPHOR_CONTACTS_DB"))
 else
-  open_database(documentspath$() + dirseparator$() + "phosphor-contacts.db")
-endif
+  opened = open_database(default_db_path$())
+end if
+rem app_run() with no window showing would never return: nothing on screen
+rem could close it. So a database that would not open is either replaced by
+rem one the person picks, or the program ends here.
+if opened <> 1 then opened = open_another()
+if opened <> 1 then end
 app_run()
 end
 
@@ -117,7 +133,7 @@ function nth$(list$, n) local i, p, rest$
   p = instr(rest$, ",")
   if p = 0 then return rest$
   return left$(rest$, p - 1)
-endfunction
+end function
 
 rem How many items a comma list holds.
 function count_items(list$) local n, i
@@ -127,83 +143,93 @@ function count_items(list$) local n, i
     if mid$(list$, i, 1) = "," then n = n + 1
   next
   return n
-endfunction
+end function
 
 function kind$(k)
   return nth$(KINDS$, k)
-endfunction
+end function
 
 rem 1 or 0 from a condition, for the setters that take a number.
 function flag(ok?)
   if ok? = true then return 1
   return 0
-endfunction
+end function
 
 rem "s" for suppliers, "c" for customers: the prefix of their widget names.
 function pre$(k)
   return left$(kind$(k), 1)
-endfunction
+end function
 
 function w@(key$)
   return pdict_get@(widgets@, key$)
-endfunction
+end function
 
 function keep@(key$, h@)
   pdict_set@(widgets@, key$, h@)
   return h@
-endfunction
+end function
 
 function cur(key$)
   return dict_getdef(current@, key$, 0)
-endfunction
+end function
 
 function set_cur(key$, id)
   dict_set@(current@, key$, id)
   return id
-endfunction
+end function
 
 rem --- dialogs, routed through one place so the self-test can answer them ---
 function say(msg$)
   last_msg$ = msg$
   if selftest? = false then msgbox(msg$, APP$)
   return 0
-endfunction
+end function
 
 function ask?(msg$)
   last_msg$ = msg$
   if selftest? = true then return answer?
   return msgbox_confirm(msg$) = 1
-endfunction
+end function
+
+rem An open dialog -- or, in the self-test, the path it was told to use,
+rem answered once: a loop that asks again gets "" (cancel) the second time.
+function choose_file$(filter$) local p$
+  if selftest? = false then return openfile$(filter$)
+  p$ = open_as$
+  open_as$ = ""
+  return p$
+end function
 
 function show(f@)
   if selftest? = false then form_show@(f@)
   return 0
-endfunction
+end function
 
 function hide(f@)
   if selftest? = false then form_close@(f@)
   return 0
-endfunction
+end function
 
 function status(msg$)
   statusbar_text@(w@("status"), msg$)
   return 0
-endfunction
+end function
 
 rem --- building blocks for the forms ------------------------------------------
 function lbl@(parent@, x, y, text$) local l@
   l@ = label@(parent@, text$)
   control_move@(l@, x, y)
   return l@
-endfunction
+end function
 
-rem A label with an edit under it, both kept: the edit as key$.
+rem A label with an edit under it, both kept: the edit as key$, the label
+rem as key$ + ".label".
 function field@(key$, parent@, x, y, wd, caption$) local e@
-  lbl@(parent@, x, y, caption$)
+  keep@(key$ + ".label", lbl@(parent@, x, y, caption$))
   e@ = edit@(parent@)
   control_bounds@(e@, x, y + 17, wd, 24)
   return keep@(key$, e@)
-endfunction
+end function
 
 function memo_field@(key$, parent@, x, y, wd, ht, caption$) local m@
   lbl@(parent@, x, y, caption$)
@@ -211,7 +237,7 @@ function memo_field@(key$, parent@, x, y, wd, ht, caption$) local m@
   control_bounds@(m@, x, y + 17, wd, ht)
   control_set@(m@, "ScrollBars", "ssAutoVertical")
   return keep@(key$, m@)
-endfunction
+end function
 
 function button_at@(key$, parent@, x, y, wd, caption$, handler$, tag) local b@
   b@ = button@(parent@)
@@ -220,7 +246,7 @@ function button_at@(key$, parent@, x, y, wd, caption$, handler$, tag) local b@
   control_tag@(b@, tag)
   button_onclick@(b@, handler$)
   return keep@(key$, b@)
-endfunction
+end function
 
 function pick_list@(key$, parent@, x, y, wd, caption$, items$) local c@, i
   if caption$ <> "" then lbl@(parent@, x, y, caption$)
@@ -232,7 +258,7 @@ function pick_list@(key$, parent@, x, y, wd, caption$, items$) local c@, i
   next
   if count_items(items$) > 0 then combo_itemindex@(c@, 1)
   return keep@(key$, c@)
-endfunction
+end function
 
 rem A string grid used as a record list: whole-row selection, one header
 rem row, no fixed column, the column titles given as a comma list, and
@@ -249,12 +275,12 @@ function record_grid@(key$, parent@, titles$, widths$, px, handler$, tag) local 
     stringgrid_cell@(g@, i, 1, nth$(titles$, i))
   next
   control_tag@(g@, tag)
-  sdict_set@(rowids@, key$, "")
+  rows_begin(key$)
   sdict_set@(rowids@, key$ + ".widths", widths$)
   sdict_set@(rowids@, key$ + ".px", str$(px))
   stringgrid_onselect@(g@, handler$)
   return keep@(key$, g@)
-endfunction
+end function
 
 rem Share the grid's width out between its columns by the proportions
 rem given as "w,w,w" when it was built.
@@ -271,53 +297,152 @@ function size_grid_columns(key$) local g@, total, i, n, ws$, sum
     stringgrid_colwidth@(g@, i, int(total * val(nth$(ws$, i)) / sum))
   next
   return 0
-endfunction
+end function
+
+rem Which record each row of a list shows, and which row shows a record:
+rem two dictionaries per list, "key.byrow" (row -> id) and "key.byid"
+rem (id -> row), so both questions cost the same at ten rows or ten
+rem thousand. They were one "id,id,id" string walked with nth$ until
+rem 2026-10-10 -- a walk per row looked up, which made a refresh of 2,000
+rem companies take seconds, on every keystroke in Search. A refresh frees
+rem both and starts again (rows_begin), then numbers its rows as it lists
+rem them (rows_add). Row 1 is the first DATA row, under the header.
+function rows_begin(key$)
+  if dict_haskey(rowids@, key$ + ".byrow") = 1 then
+    dict_free(dict_get@(rowids@, key$ + ".byrow"))
+    dict_free(dict_get@(rowids@, key$ + ".byid"))
+  end if
+  dict_set@(rowids@, key$ + ".byrow", dict@())
+  dict_set@(rowids@, key$ + ".byid", dict@())
+  return 0
+end function
+
+function rows_add(key$, row, id)
+  dict_set@(dict_get@(rowids@, key$ + ".byrow"), str$(row), id)
+  dict_set@(dict_get@(rowids@, key$ + ".byid"), str$(id), row)
+  return row
+end function
+
+rem The id on data row `row`; 0 when there is no such row.
+function row_id(key$, row)
+  return dict_getdef(dict_get@(rowids@, key$ + ".byrow"), str$(row), 0)
+end function
 
 rem The id of the record shown on the grid's current row; 0 when none.
-function grid_id(key$) local g@, row
-  g@ = w@(key$)
-  row = stringgrid_row(g@) - 1
+function grid_id(key$) local row
+  row = stringgrid_row(w@(key$)) - 1
   if row < 1 then return 0
-  return val(nth$(sdict_get$(rowids@, key$), row))
-endfunction
+  return row_id(key$, row)
+end function
 
-rem Put the cursor on the row showing record id (no event while busy).
-function grid_select(key$, id) local ids$, i, n
-  ids$ = sdict_get$(rowids@, key$)
-  n = count_items(ids$)
-  for i = 1 to n
-    if val(nth$(ids$, i)) = id then
-      stringgrid_cursor@(w@(key$), 1, i + 1)
-      return 1
-    endif
-  next
-  return 0
-endfunction
+rem Put the cursor on the row showing record id (no event while busy);
+rem 0 when the list does not show it.
+function grid_select(key$, id) local row
+  row = dict_getdef(dict_get@(rowids@, key$ + ".byid"), str$(id), 0)
+  if row = 0 then return 0
+  stringgrid_cursor@(w@(key$), 1, row + 1)
+  return 1
+end function
 
 rem ===============================================================
 rem  Database
 rem ===============================================================
 
-function open_database(path$) local ok
-  if sqlite_isopen(db@) = 1 then sqlite_close(db@)
-  db@ = sqlite_open@(path$)
-  if sqlite_isopen(db@) <> 1 then
+rem phosphor-contacts.db in the Documents folder -- or, where there is no
+rem such folder (a Linux without ~/Documents), in the home folder, and
+rem failing that in the current one. path_combine$ adds a separator only
+rem when the folder does not already end in one: documentspath$() does.
+function default_db_path$()
+  return db_path_in$(documentspath$())
+end function
+
+function db_path_in$(docs$) local d$
+  d$ = docs$
+  if dir_exists(d$) <> 1 then d$ = homepath$()
+  if dir_exists(d$) <> 1 then d$ = dir_getcurrent$()
+  return path_combine$(d$, "phosphor-contacts.db")
+end function
+
+rem Open path$ and make it this session's database, then show the login.
+rem The new file is opened and prepared BEFORE the old connection is let
+rem go: a file that is not a usable database leaves whatever was open --
+rem and whoever was signed in -- exactly as it was, and answers 0.
+function open_database(path$) local new@, why$
+  new@ = sqlite_open@(path$)
+  if sqlite_isopen(new@) <> 1 then
     say("Could not open the database " + path$ + ": " + sqlite_errormsg$())
     return 0
-  endif
-  dbpath$ = path$
-  ok = create_schema()
-  if ok <> 1 then
-    say("The database could not be prepared: " + sqlite_errormsg$())
+  end if
+  if create_schema(new@) <> 1 then
+    why$ = schema_msg$
+    sqlite_close(new@)
+    say("The database " + path$ + " could not be prepared: " + why$)
     return 0
-  endif
+  end if
+  if sqlite_isopen(db@) = 1 then sqlite_close(db@)
+  db@ = new@
+  dbpath$ = path$
+  read_only? = false
+  dict_clear@(current@)
   prepare_login()
   show(w@("login"))
   return 1
-endfunction
+end function
 
-function create_schema() local s$
-  if sqlite_exec(db@, "PRAGMA foreign_keys = ON") <> 1 then return 0
+rem The start-up could not open its database: offer to pick another file,
+rem as often as the person likes, or end. 1 once one is open and showing.
+function open_another() local p$
+  while ask?("Open another database file instead? No ends the program.") = true
+    p$ = choose_file$("SQLite database (*.db)|*.db|All files|*.*")
+    if p$ = "" then return 0
+    if open_database(p$) = 1 then return 1
+  end while
+  return 0
+end function
+
+rem Bring the database d@ to SCHEMA_VERSION; 1 when it is there. The version
+rem lives in PRAGMA user_version, and a database already at it is NOT
+rem WRITTEN TO: PRAGMA foreign_keys is a setting of the connection, not of
+rem the file, so a read-only database with the schema opens for reading.
+rem An older one is upgraded step by step inside ONE transaction that also
+rem sets the new version -- so an upgrade either happened completely or not
+rem at all, and running it again on the same file finds nothing to do. On
+rem failure schema_msg$ says why.
+function create_schema(d@) local v, ok
+  schema_msg$ = ""
+  step_err$ = ""
+  sqlite_clearerror()
+  if sqlite_exec(d@, "PRAGMA foreign_keys = ON") <> 1 then
+    schema_msg$ = sqlite_errormsg$()
+    return 0
+  end if
+  v = sqlite_scalar(d@, "PRAGMA user_version")
+  if sqlite_error() <> 0 then
+    schema_msg$ = sqlite_errormsg$()
+    return 0
+  end if
+  if v = SCHEMA_VERSION then return 1
+  if v > SCHEMA_VERSION then
+    schema_msg$ = "it was made by a newer version of this program (its schema is version " + str$(v) + ")."
+    return 0
+  end if
+  ok = sqlite_begin(d@)
+  if ok = 1 and v < 1 then ok = schema_v1(d@)
+  if ok = 1 and v < 2 then ok = migrate_v2(d@)
+  if ok = 1 then ok = sqlite_exec(d@, "PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  if ok = 1 then ok = sqlite_commit(d@)
+  if ok <> 1 then
+    if schema_msg$ = "" then schema_msg$ = step_err$
+    if schema_msg$ = "" then schema_msg$ = sqlite_errormsg$()
+    sqlite_rollback(d@)
+  end if
+  return ok
+end function
+
+rem Version 1, the first schema. A new database is built as version 1 and
+rem then upgraded like any other, so there is one way to reach the current
+rem schema, and the upgrade is exercised by every first run.
+function schema_v1(d@) local s$
   s$ = "CREATE TABLE IF NOT EXISTS users ("
   s$ = s$ + " id INTEGER PRIMARY KEY,"
   s$ = s$ + " username TEXT NOT NULL UNIQUE COLLATE NOCASE,"
@@ -345,7 +470,8 @@ function create_schema() local s$
   s$ = s$ + " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
   s$ = s$ + " updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,"
   s$ = s$ + " updated_at TEXT);"
-  rem One tax id per kind -- but many companies may leave it blank.
+  rem One tax id per kind -- but many companies may leave it blank. (Version
+  rem 2 replaces this index: it compared the text as typed.)
   s$ = s$ + "CREATE UNIQUE INDEX IF NOT EXISTS ux_companies_tax_id"
   s$ = s$ + " ON companies(kind, tax_id) WHERE tax_id <> '';"
   s$ = s$ + "CREATE INDEX IF NOT EXISTS ix_companies_name ON companies(kind, name COLLATE NOCASE);"
@@ -382,9 +508,148 @@ function create_schema() local s$
   s$ = s$ + " user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,"
   s$ = s$ + " created_at TEXT NOT NULL DEFAULT (datetime('now')));"
   s$ = s$ + "CREATE INDEX IF NOT EXISTS ix_interactions_contact ON interactions(contact_id, happened_on);"
-  s$ = s$ + "PRAGMA user_version = 1;"
-  return sqlite_exec(db@, s$)
-endfunction
+  return sqlite_exec(d@, s$)
+end function
+
+rem Version 2: the rules that compare text compare a KEY, computed here in
+rem BASIC and stored beside the text, because SQLite cannot compute it:
+rem   - COLLATE NOCASE and LIKE fold the 26 ASCII letters only, so "josé"
+rem     and "JOSÉ" were two users and a search for "AÇO" missed "Aço". A key
+rem     lower-cased with alcase$ (all of Unicode) is what user names, product
+rem     lines and the search now compare: username_key, name_key, search_key.
+rem   - the unique tax id compared the text as typed, so 11.444.777/0001-61
+rem     and 11444777000161 were two companies. tax_key is the id upper-cased
+rem     with only its letters and digits kept (tax_key$), and the partial
+rem     unique index is on (kind, tax_key).
+rem The columns are added only when missing, the keys are computed for the
+rem rows already there, and if those rows already break the new rules the
+rem upgrade is refused -- naming them -- instead of guessing which to keep.
+function migrate_v2(d@) local s$, dup$
+  if add_column(d@, "users", "username_key") <> 1 then return 0
+  if add_column(d@, "product_lines", "name_key") <> 1 then return 0
+  if add_column(d@, "companies", "tax_key") <> 1 then return 0
+  if add_column(d@, "companies", "search_key") <> 1 then return 0
+  if add_column(d@, "contacts", "name_key") <> 1 then return 0
+  if sqlite_exec(d@, "DROP INDEX IF EXISTS ux_companies_tax_id") <> 1 then return 0
+  if rekey_all(d@) <> 1 then return 0
+  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name, ' / ') FROM (SELECT username AS name FROM users WHERE username_key IN (SELECT username_key FROM users GROUP BY username_key HAVING count(*) > 1))")
+  if dup$ <> "" then
+    schema_msg$ = "these user names differ only in upper and lower case, and must be told apart first: " + dup$
+    return 0
+  end if
+  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name, ' / ') FROM (SELECT name FROM product_lines WHERE name_key IN (SELECT name_key FROM product_lines GROUP BY name_key HAVING count(*) > 1))")
+  if dup$ <> "" then
+    schema_msg$ = "these product lines differ only in upper and lower case, and must be told apart first: " + dup$
+    return 0
+  end if
+  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name || ' (' || tax_id || ')', ' / ') FROM (SELECT name, tax_id FROM companies c WHERE tax_key <> '' AND (SELECT count(*) FROM companies o WHERE o.kind = c.kind AND o.tax_key = c.tax_key) > 1)")
+  if dup$ <> "" then
+    schema_msg$ = "these companies have the same tax id written in different ways, and must be told apart first: " + dup$
+    return 0
+  end if
+  s$ = "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username_key ON users(username_key);"
+  s$ = s$ + "CREATE UNIQUE INDEX IF NOT EXISTS ux_product_lines_name_key ON product_lines(name_key);"
+  s$ = s$ + "CREATE UNIQUE INDEX IF NOT EXISTS ux_companies_tax_key ON companies(kind, tax_key) WHERE tax_key <> '';"
+  return sqlite_exec(d@, s$)
+end function
+
+rem Add a text column (default '') unless the table already has it.
+function add_column(d@, table$, col$) local s@, n
+  s@ = sqlite_prepare@(d@, "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2")
+  sqlite_bindstr(s@, 1, table$)
+  sqlite_bindstr(s@, 2, col$)
+  n = 0
+  if sqlite_step(s@) = 1 then n = sqlite_getnum(s@, 1)
+  sqlite_finalize(s@)
+  if n > 0 then return 1
+  return sqlite_exec(d@, "ALTER TABLE " + table$ + " ADD COLUMN " + col$ + " TEXT NOT NULL DEFAULT ''")
+end function
+
+rem Compute every stored key from the text beside it: the upgrade does it
+rem for the rows it finds, and the sample data, which is plain SQL, needs it
+rem too. Each table is read whole first and written after, so no row is
+rem updated under a statement still reading the table. 1 on success.
+function rekey_all(d@) local s@, u@, rows@, more@, i, id$, ok
+  ok = 1
+  rem users and product lines: one name, one key
+  rows@ = dict@()
+  s@ = sqlite_prepare@(d@, "SELECT id, username FROM users")
+  while sqlite_step(s@) = 1
+    dict_set@(rows@, sqlite_gets$(s@, "id"), alcase$(sqlite_gets$(s@, "username")))
+  end while
+  sqlite_finalize(s@)
+  ok = rekey_table(d@, rows@, "UPDATE users SET username_key = ?2 WHERE id = ?1")
+  dict_free(rows@)
+  rows@ = dict@()
+  s@ = sqlite_prepare@(d@, "SELECT id, name FROM product_lines")
+  while sqlite_step(s@) = 1
+    dict_set@(rows@, sqlite_gets$(s@, "id"), alcase$(sqlite_gets$(s@, "name")))
+  end while
+  sqlite_finalize(s@)
+  if ok = 1 then ok = rekey_table(d@, rows@, "UPDATE product_lines SET name_key = ?2 WHERE id = ?1")
+  dict_free(rows@)
+  rows@ = dict@()
+  s@ = sqlite_prepare@(d@, "SELECT id, name FROM contacts")
+  while sqlite_step(s@) = 1
+    dict_set@(rows@, sqlite_gets$(s@, "id"), alcase$(sqlite_gets$(s@, "name")))
+  end while
+  sqlite_finalize(s@)
+  if ok = 1 then ok = rekey_table(d@, rows@, "UPDATE contacts SET name_key = ?2 WHERE id = ?1")
+  dict_free(rows@)
+  rem companies: two keys each, the tax id's in rows@, the search's in more@
+  rows@ = dict@()
+  more@ = dict@()
+  s@ = sqlite_prepare@(d@, "SELECT id, name, trade_name, tax_id, city FROM companies")
+  while sqlite_step(s@) = 1
+    id$ = sqlite_gets$(s@, "id")
+    dict_set@(rows@, id$, tax_key$(sqlite_gets$(s@, "tax_id")))
+    dict_set@(more@, id$, search_key$(sqlite_gets$(s@, "name"), sqlite_gets$(s@, "trade_name"), sqlite_gets$(s@, "tax_id"), sqlite_gets$(s@, "city")))
+  end while
+  sqlite_finalize(s@)
+  for i = 1 to dict_count(rows@)
+    if ok = 1 then
+      id$ = dict_key$(rows@, i)
+      u@ = sqlite_prepare@(d@, "UPDATE companies SET tax_key = ?2, search_key = ?3 WHERE id = ?1")
+      sqlite_bindnum(u@, 1, val(id$))
+      sqlite_bindstr(u@, 2, dict_get$(rows@, id$))
+      sqlite_bindstr(u@, 3, dict_get$(more@, id$))
+      ok = step_ok(u@)
+    end if
+  next
+  dict_free(rows@)
+  dict_free(more@)
+  return ok
+end function
+
+rem Write each id -> key pair of rows@ with update$ (?1 the id, ?2 the key).
+function rekey_table(d@, rows@, update$) local u@, i, ok
+  ok = 1
+  for i = 1 to dict_count(rows@)
+    if ok = 1 then
+      u@ = sqlite_prepare@(d@, update$)
+      sqlite_bindnum(u@, 1, val(dict_key$(rows@, i)))
+      sqlite_bindstr(u@, 2, dict_get$(rows@, dict_key$(rows@, i)))
+      ok = step_ok(u@)
+    end if
+  next
+  return ok
+end function
+
+rem Step a statement that changes rows and finalize it: 1 on success. No
+rem message -- the caller decides what a failure means; step_err$ holds it,
+rem read before the finalize can say anything else.
+function step_ok(s@) local ok
+  sqlite_clearerror()
+  sqlite_step(s@)
+  ok = 1
+  step_err$ = ""
+  if sqlite_error() <> 0 then
+    ok = 0
+    step_err$ = sqlite_errormsg$()
+  end if
+  sqlite_finalize(s@)
+  return ok
+end function
 
 rem One number out of a query with one text parameter.
 function scalar_s(sql$, p$) local s@, v
@@ -394,7 +659,7 @@ function scalar_s(sql$, p$) local s@, v
   if sqlite_step(s@) = 1 then v = sqlite_getnum(s@, 1)
   sqlite_finalize(s@)
   return v
-endfunction
+end function
 
 rem One number out of a query with one numeric parameter.
 function scalar_n(sql$, p) local s@, v
@@ -404,7 +669,7 @@ function scalar_n(sql$, p) local s@, v
   if sqlite_step(s@) = 1 then v = sqlite_getnum(s@, 1)
   sqlite_finalize(s@)
   return v
-endfunction
+end function
 
 rem Run a prepared statement that changes rows; 1 on success, else the
 rem error is shown and 0 comes back. The statement is finalized here.
@@ -416,14 +681,17 @@ function finish(s@, what$) local ok
   if ok = 0 then say("Could not " + what$ + ": " + friendly_error$(sqlite_errormsg$()))
   sqlite_finalize(s@)
   return ok
-endfunction
+end function
 
+rem The version-1 column constraints (COLLATE NOCASE) are still in the
+rem tables, so a name can be refused by either the column or its key.
 function friendly_error$(msg$)
-  if instr(msg$, "UNIQUE constraint failed: companies.kind, companies.tax_id") > 0 then return "another company of this kind already has that tax id."
+  if instr(msg$, "UNIQUE constraint failed: companies.kind, companies.tax_key") > 0 then return "another company of this kind already has that tax id."
   if instr(msg$, "UNIQUE constraint failed: users.username") > 0 then return "that user name is taken."
   if instr(msg$, "UNIQUE constraint failed: product_lines.name") > 0 then return "a product line with that name already exists."
+  if instr(msg$, "attempt to write a readonly database") > 0 then return "this database is read-only; nothing can be changed in it."
   return msg$
-endfunction
+end function
 
 rem ===============================================================
 rem  Validation
@@ -436,41 +704,102 @@ function digits$(s$) local i, c$, out$
     if c$ >= "0" and c$ <= "9" then out$ = out$ + c$
   next
   return out$
-endfunction
+end function
 
-rem Brazil's CNPJ (14 digits) and CPF (11): both end in two check digits,
-rem each a weighted sum mod 11. Other countries' ids are not judged.
+function is_digit?(c$)
+  return c$ >= "0" and c$ <= "9"
+end function
+
+rem A tax id as the uniqueness rule compares it: upper-cased, with only its
+rem ASCII letters and digits kept -- "11.444.777/0001-61", "11444777000161"
+rem and "11 444 777 0001 61" are one id. (Tax ids are written in ASCII; a
+rem character outside it is dropped like punctuation.)
+function tax_key$(s$) local i, c$, u$, out$
+  u$ = ucase$(s$)
+  out$ = ""
+  for i = 1 to len(u$)
+    c$ = mid$(u$, i, 1)
+    if is_digit?(c$) = true or (c$ >= "A" and c$ <= "Z") then out$ = out$ + c$
+  next
+  return out$
+end function
+
+rem What the Search box is compared with: the company's name, trade name,
+rem tax id (as typed and as its key) and city, lower-cased with alcase$ --
+rem all of Unicode, where SQLite's LIKE folds only ASCII -- one per line,
+rem so a search cannot match across two of them.
+function search_key$(name$, trade$, tax$, city$) local nl$
+  nl$ = chr$(10)
+  return alcase$(name$ + nl$ + trade$ + nl$ + tax$ + nl$ + tax_key$(tax$) + nl$ + city$)
+end function
+
+rem A LIKE pattern finding s$ anywhere, with s$ taken LITERALLY: "%" and "_"
+rem are LIKE's wildcards, so they -- and "\", the escape character the
+rem query names with ESCAPE '\' -- are escaped first.
+function like_pattern$(s$) local t$
+  t$ = replacestr$(s$, "\\", "\\\\")
+  t$ = replacestr$(t$, "%", "\\%")
+  t$ = replacestr$(t$, "_", "\\_")
+  return "%" + t$ + "%"
+end function
+
+rem Brazil's CNPJ (14 characters) and CPF (11 digits) both end in two check
+rem digits, each a weighted sum mod 11. Since July 2026 a CNPJ may also be
+rem ALPHANUMERIC (Receita Federal, IN RFB 2.229/2024): its first 12
+rem characters are letters A-Z or digits, its last two still digits, and a
+rem character counts as its ASCII code minus 48 -- so a digit counts as
+rem itself and "A" as 17 -- under the same weights as before. Other
+rem countries' ids are not judged.
 function check_digit(d$, weights$) local i, sum, r
   sum = 0
   for i = 1 to count_items(weights$)
-    sum = sum + val(mid$(d$, i, 1)) * val(nth$(weights$, i))
+    sum = sum + (asc(mid$(d$, i, 1)) - 48) * val(nth$(weights$, i))
   next
   r = sum mod 11
   if r < 2 then return 0
   return 11 - r
-endfunction
+end function
 
-function brazil_id_ok?(s$) local d$
-  d$ = digits$(s$)
-  if d$ = "" then return false
-  if d$ = string$(len(d$), asc(left$(d$, 1))) then return false
-  if len(d$) = 14 then
-    if check_digit(d$, "5,4,3,2,9,8,7,6,5,4,3,2") <> val(mid$(d$, 13, 1)) then return false
-    if check_digit(d$, "6,5,4,3,2,9,8,7,6,5,4,3,2") <> val(mid$(d$, 14, 1)) then return false
+rem A Brazilian id may be typed with the dots, slash, hyphen and spaces of
+rem its printed form, and nothing else: "CNPJ 11.444.777/0001-61" or a
+rem stray "x" is not an id, even when the check digits inside it hold.
+function brazil_id_ok?(s$) local i, c$, k$
+  for i = 1 to len(s$)
+    c$ = mid$(s$, i, 1)
+    if is_digit?(c$) = false and instr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz./- ", c$) = 0 then return false
+  next
+  k$ = tax_key$(s$)
+  if len(k$) = 14 then
+    if is_digit?(mid$(k$, 13, 1)) = false or is_digit?(mid$(k$, 14, 1)) = false then return false
+    if k$ = string$(14, asc(left$(k$, 1))) then return false
+    if check_digit(k$, "5,4,3,2,9,8,7,6,5,4,3,2") <> val(mid$(k$, 13, 1)) then return false
+    if check_digit(k$, "6,5,4,3,2,9,8,7,6,5,4,3,2") <> val(mid$(k$, 14, 1)) then return false
     return true
-  endif
-  if len(d$) = 11 then
-    if check_digit(d$, "10,9,8,7,6,5,4,3,2") <> val(mid$(d$, 10, 1)) then return false
-    if check_digit(d$, "11,10,9,8,7,6,5,4,3,2") <> val(mid$(d$, 11, 1)) then return false
+  end if
+  if len(k$) = 11 then
+    if digits$(k$) <> k$ then return false
+    if k$ = string$(11, asc(left$(k$, 1))) then return false
+    if check_digit(k$, "10,9,8,7,6,5,4,3,2") <> val(mid$(k$, 10, 1)) then return false
+    if check_digit(k$, "11,10,9,8,7,6,5,4,3,2") <> val(mid$(k$, 11, 1)) then return false
     return true
-  endif
+  end if
   return false
-endfunction
+end function
+
+rem A birthday is a day and a month, "dd/mm", that some year has (29/02
+rem included) -- or nothing at all.
+function birthday_ok?(v$) local d, m
+  if regex_findpos("^[0-9][0-9]/[0-9][0-9]$", v$) <> 1 then return false
+  d = val(left$(v$, 2))
+  m = val(mid$(v$, 4, 2))
+  if m < 1 or m > 12 then return false
+  return d >= 1 and d <= val(nth$("31,29,31,30,31,30,31,31,30,31,30,31", m))
+end function
 
 function email_ok?(s$)
   if s$ = "" then return true
   return regex_findpos("^[^@ ]+@[^@ ]+[.][^@ ]+$", s$) = 1
-endfunction
+end function
 
 rem ===============================================================
 rem  Login
@@ -495,7 +824,7 @@ function build_login_form() local f@, p@, t@
   button_at@("login.go", f@, 234, 250, 120, "Sign in", "on_login", 0)
   control_set@(w@("login.go"), "Default", true)
   return 0
-endfunction
+end function
 
 rem Sign-in mode, or -- when the database has no user yet -- the form
 rem that creates the first administrator.
@@ -516,10 +845,10 @@ function prepare_login() local n
     label_caption@(w@("login.hint"), dbpath$)
     button_caption@(w@("login.go"), "Sign in")
     control_visible@(w@("login.confirm"), 0)
-  endif
+  end if
   control_setfocus@(w@("login.user"))
   return 0
-endfunction
+end function
 
 function on_login(sender@) local u$, p$, s@, rec$, id, ok?
   u$ = trim$(edit_text$(w@("login.user")))
@@ -529,21 +858,23 @@ function on_login(sender@) local u$, p$, s@, rec$, id, ok?
     if u$ = "" or len(p$) < 6 then
       label_caption@(w@("login.msg"), "Choose a user name and a password of 6 characters or more.")
       return 0
-    endif
+    end if
     if p$ <> edit_text$(w@("login.confirm")) then
       label_caption@(w@("login.msg"), "The two passwords are different.")
       return 0
-    endif
-    s@ = sqlite_prepare@(db@, "INSERT INTO users(username, full_name, password, role) VALUES (?1, ?2, ?3, 'admin')")
+    end if
+    s@ = sqlite_prepare@(db@, "INSERT INTO users(username, username_key, full_name, password, role) VALUES (?1, ?2, ?3, ?4, 'admin')")
     sqlite_bindstr(s@, 1, u$)
-    sqlite_bindstr(s@, 2, "Administrator")
-    sqlite_bindstr(s@, 3, password_hash$(p$, pw_cost))
+    sqlite_bindstr(s@, 2, alcase$(u$))
+    sqlite_bindstr(s@, 3, "Administrator")
+    sqlite_bindstr(s@, 4, password_hash$(p$, pw_cost))
     if finish(s@, "create the administrator") <> 1 then return 0
     if ask?("Load a few sample suppliers, customers and contacts to look around?") = true then seed_sample_data()
-  endif
-  rem Look the user up, then let the stored record decide.
-  s@ = sqlite_prepare@(db@, "SELECT id, password, role, active, full_name FROM users WHERE username = ?1")
-  sqlite_bindstr(s@, 1, u$)
+  end if
+  rem Look the user up by the name's key -- "José" finds "josé" -- then let
+  rem the stored record decide, and call the user by the STORED name.
+  s@ = sqlite_prepare@(db@, "SELECT id, username, password, role, active, full_name FROM users WHERE username_key = ?1")
+  sqlite_bindstr(s@, 1, alcase$(u$))
   id = 0
   ok? = false
   if sqlite_step(s@) = 1 then
@@ -552,9 +883,9 @@ function on_login(sender@) local u$, p$, s@, rec$, id, ok?
     if ok? = true then
       id = sqlite_getn(s@, "id")
       user_role$ = sqlite_gets$(s@, "role")
-      user_name$ = u$
-    endif
-  endif
+      user_name$ = sqlite_gets$(s@, "username")
+    end if
+  end if
   sqlite_finalize(s@)
   if ok? = false then
     rem The same words for an unknown name and a wrong password: the form
@@ -562,19 +893,29 @@ function on_login(sender@) local u$, p$, s@, rec$, id, ok?
     label_caption@(w@("login.msg"), "User name or password is wrong.")
     edit_text@(w@("login.pass"), "")
     return 0
-  endif
+  end if
   user_id = id
+  rem Recording the sign-in is the first write of a session, so it is where
+  rem a read-only database shows itself: say so once, and let the person
+  rem look around -- every later change is refused with the same words.
   s@ = sqlite_prepare@(db@, "UPDATE users SET last_login = datetime('now') WHERE id = ?1")
   sqlite_bindnum(s@, 1, id)
-  finish(s@, "record the sign-in")
+  if step_ok(s@) <> 1 then
+    if instr(step_err$, "readonly") > 0 then
+      read_only? = true
+      say("This database is read-only: you can look around, but nothing you change will be saved.")
+    else
+      say("Could not record the sign-in: " + step_err$)
+    end if
+  end if
   enter_main()
   return 0
-endfunction
+end function
 
 function on_login_close(sender@)
   if signing_out? = false and form_visible(w@("main")) = 0 then app_quit()
   return 0
-endfunction
+end function
 
 rem ===============================================================
 rem  Main window
@@ -587,8 +928,8 @@ function build_main_form() local f@, mm@, m@, pc@, k
 
   mm@ = mainmenu@(f@)
   m@ = menuitem@(mm@, "&File")
-  menuitem_onclick@(menuitem@(m@, "&Open database..."), "on_open_db")
-  menuitem_onclick@(menuitem@(m@, "&Back up database..."), "on_backup")
+  menuitem_onclick@(keep@("menu.open", menuitem@(m@, "&Open database...")), "on_open_db")
+  menuitem_onclick@(keep@("menu.backup", menuitem@(m@, "&Back up database...")), "on_backup")
   menuitem@(m@, "-")
   menuitem_onclick@(menuitem@(m@, "Export &suppliers to CSV..."), "on_export_suppliers")
   menuitem_onclick@(menuitem@(m@, "Export &customers to CSV..."), "on_export_customers")
@@ -610,11 +951,11 @@ function build_main_form() local f@, mm@, m@, pc@, k
   build_lines_page(keep@("lines.page", tabsheet@(pc@, "Product lines")))
   build_users_page(keep@("users.page", tabsheet@(pc@, "Users")))
   return 0
-endfunction
+end function
 
 function enter_main()
   busy = busy + 1
-  control_set@(w@("users.page"), "TabVisible", (user_role$ = "admin"))
+  show_users_page()
   rebuild_line_lists()
   refresh_companies(1)
   refresh_companies(2)
@@ -626,70 +967,114 @@ function enter_main()
   show(w@("main"))
   hide(w@("login"))
   return 0
-endfunction
+end function
+
+rem The Users page is for administrators: shown at sign-in, and again the
+rem moment an administrator's own role changes. A page that is hidden while
+rem it is the one showing would leave it on screen, so step off it first.
+function show_users_page()
+  if user_role$ <> "admin" and pagecontrol_pageindex(w@("pages")) = 4 then pagecontrol_pageindex@(w@("pages"), 1)
+  control_set@(w@("users.page"), "TabVisible", (user_role$ = "admin"))
+  return 0
+end function
 
 function update_status() local s$, r$
   r$ = "operator"
   if user_role$ = "admin" then r$ = "administrator"
+  if read_only? = true then r$ = r$ + ", read-only"
   s$ = "Signed in as " + user_name$ + " (" + r$ + ")   |   "
   s$ = s$ + str$(scalar_s("SELECT count(*) FROM companies WHERE kind = ?1", "supplier")) + " suppliers, "
   s$ = s$ + str$(scalar_s("SELECT count(*) FROM companies WHERE kind = ?1", "customer")) + " customers, "
   s$ = s$ + str$(sqlite_scalar(db@, "SELECT count(*) FROM contacts")) + " contacts   |   " + extractfilename$(dbpath$)
   status(s$)
   return 0
-endfunction
+end function
 
 function on_main_close(sender@)
   if signing_out? = false then app_quit()
   return 0
-endfunction
+end function
 
 function on_exit(sender@)
   app_quit()
   return 0
-endfunction
+end function
 
 function on_sign_out(sender@)
   signing_out? = true
-  user_id = 0
-  user_name$ = ""
-  user_role$ = ""
+  forget_user()
   prepare_login()
   show(w@("login"))
   hide(w@("main"))
   signing_out? = false
   return 0
-endfunction
+end function
+
+function forget_user()
+  user_id = 0
+  user_name$ = ""
+  user_role$ = ""
+  return 0
+end function
 
 function on_about(sender@)
   say(APP$ + chr$(10) + chr$(10) + "An example program for Phosphor BASIC " + "-- SQLite, the GUI library and password hashing in one file." + chr$(10) + "Database: " + dbpath$)
   return 0
-endfunction
+end function
 
+rem Switch to another database. open_database touches nothing until the new
+rem file has proved usable, so a refusal leaves this session where it was;
+rem only a switch ends the session, at the new file's login.
 function on_open_db(sender@) local p$
-  p$ = openfile$("SQLite database (*.db)|*.db|All files|*.*")
+  p$ = choose_file$("SQLite database (*.db)|*.db|All files|*.*")
   if p$ = "" then return 0
+  if open_database(p$) <> 1 then return 0
   signing_out? = true
-  open_database(p$)
+  forget_user()
   hide(w@("main"))
   signing_out? = false
   return 0
-endfunction
+end function
 
+rem Whether two paths name the same file, as far as their text can say: both
+rem made absolute, and compared ignoring case on Windows, whose file names
+rem do. (A link or a second name for the same file is not seen through.)
+function same_file?(a$, b$) local x$, y$
+  x$ = path_getfullpath$(a$)
+  y$ = path_getfullpath$(b$)
+  if os_name$() = "Windows" then
+    x$ = alcase$(x$)
+    y$ = alcase$(y$)
+  end if
+  return x$ = y$
+end function
+
+rem A backup is written by SQLite into a NEW file, so a file already at the
+rem target is deleted first, once the person agrees. Never the open database
+rem itself: Linux would unlink the live file -- the backup "succeeds" and
+rem every later save fails, read-only -- and Windows would refuse the delete.
+rem And a delete that fails is said, not ignored.
 function on_backup(sender@) local p$
   p$ = save_path$("phosphor-contacts-backup.db", "SQLite database (*.db)|*.db")
   if p$ = "" then return 0
+  if same_file?(p$, dbpath$) = true then
+    say("That is the database you have open. A backup has to go to another file.")
+    return 0
+  end if
   if file_exists(p$) = 1 then
     if ask?("Replace " + p$ + "?") = false then return 0
-    file_delete(p$)
-  endif
+    if file_delete(p$) <> 1 then
+      say("Could not replace " + p$ + ": it could not be deleted. Is it open in another program?")
+      return 0
+    end if
+  end if
   if sqlite_backup(db@, p$) = 1 then
     say("Backed up to " + p$)
   else
     say("The backup failed: " + sqlite_errormsg$())
-  endif
+  end if
   return 0
-endfunction
+end function
 
 rem A save dialog -- or, in the self-test, the path it was told to use.
 function save_path$(name$, filter$) local d@, p$
@@ -702,7 +1087,7 @@ function save_path$(name$, filter$) local d@, p$
   if dialog_execute(d@) = 1 then p$ = dialog_filename$(d@)
   control_free(d@)
   return p$
-endfunction
+end function
 
 rem ===============================================================
 rem  Suppliers and customers: one page builder for both kinds
@@ -748,7 +1133,7 @@ function build_company_page(k, page@) local p$, top@, left@, g@, dp@, t@, x, ext
   else
     cat$ = "Segment"
     extra$ = "Credit limit"
-  endif
+  end if
   field@(p$ + ".f.name", t@, 10, 8, 330, "Company name *")
   field@(p$ + ".f.trade_name", t@, 350, 8, 290, "Trade name")
   field@(p$ + ".f.tax_id", t@, 10, 56, 160, "Tax ID (CNPJ, EIN, VAT...)")
@@ -780,31 +1165,33 @@ function build_company_page(k, page@) local p$, top@, left@, g@, dp@, t@, x, ext
   t@ = keep@(p$ + ".tab.history", tabsheet@(dp@, "History"))
   build_history_panel(k, t@)
   return 0
-endfunction
+end function
 
 function by$(name$)
   if name$ = "" then return ""
   return " by " + name$
-endfunction
+end function
 
 function company_field@(k, col$)
   return w@(pre$(k) + ".f." + col$)
-endfunction
+end function
 
-function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, ids$, keep
+function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, keep, found
   p$ = pre$(k)
   g@ = w@(p$ + ".grid")
   keep = cur(p$ + ".company")
-  q$ = trim$(edit_text$(w@(p$ + ".search")))
-  if q$ <> "" then q$ = "%" + q$ + "%"
+  rem The search compares lower-cased keys (search_key$), taking what was
+  rem typed literally (like_pattern$).
+  q$ = alcase$(trim$(edit_text$(w@(p$ + ".search"))))
+  if q$ <> "" then q$ = like_pattern$(q$)
   st = combo_itemindex(w@(p$ + ".state"))
   line = 0
-  if combo_itemindex(w@(p$ + ".linefilter")) > 1 then line = val(nth$(sdict_get$(rowids@, "linefilter.ids"), combo_itemindex(w@(p$ + ".linefilter")) - 1))
+  if combo_itemindex(w@(p$ + ".linefilter")) > 1 then line = row_id("lines", combo_itemindex(w@(p$ + ".linefilter")) - 1)
   sql$ = "SELECT c.id, c.name, c.tax_id, c.city, c.state,"
   sql$ = sql$ + " (SELECT count(*) FROM contacts t WHERE t.company_id = c.id) AS n"
   sql$ = sql$ + " FROM companies c WHERE c.kind = ?1"
-  sql$ = sql$ + " AND (?2 = '' OR c.name LIKE ?2 OR c.trade_name LIKE ?2 OR c.tax_id LIKE ?2"
-  sql$ = sql$ + "      OR c.city LIKE ?2 OR EXISTS (SELECT 1 FROM contacts t WHERE t.company_id = c.id AND t.name LIKE ?2))"
+  sql$ = sql$ + " AND (?2 = '' OR c.search_key LIKE ?2 ESCAPE '\\'"
+  sql$ = sql$ + "      OR EXISTS (SELECT 1 FROM contacts t WHERE t.company_id = c.id AND t.name_key LIKE ?2 ESCAPE '\\'))"
   sql$ = sql$ + " AND (?3 = 3 OR c.active = (?3 = 1))"
   sql$ = sql$ + " AND (?4 = 0 OR EXISTS (SELECT 1 FROM contacts t JOIN contact_lines l ON l.contact_id = t.id"
   sql$ = sql$ + "      WHERE t.company_id = c.id AND l.line_id = ?4))"
@@ -817,7 +1204,7 @@ function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, ids$, kee
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
   n = 0
-  ids$ = ""
+  rows_begin(p$ + ".grid")
   while sqlite_step(s@) = 1
     n = n + 1
     stringgrid_rowcount@(g@, n + 1)
@@ -826,16 +1213,18 @@ function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, ids$, kee
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "city"))
     stringgrid_cell@(g@, 4, n + 1, sqlite_gets$(s@, "state"))
     stringgrid_cell@(g@, 5, n + 1, sqlite_gets$(s@, "n"))
-    if ids$ <> "" then ids$ = ids$ + ","
-    ids$ = ids$ + sqlite_gets$(s@, "id")
-  endwhile
+    rows_add(p$ + ".grid", n, sqlite_getn(s@, "id"))
+  end while
   sqlite_finalize(s@)
-  sdict_set@(rowids@, p$ + ".grid", ids$)
   size_grid_columns(p$ + ".grid")
   busy = busy - 1
   rem Keep showing the record that was open, if the filter still lists it.
+  rem (BASIC's "and" evaluates both sides, so the "if keep" is its own test:
+  rem with nothing to keep there is nothing to look for.)
   busy = busy + 1
-  if keep <> 0 and grid_select(p$ + ".grid", keep) = 1 then
+  found = 0
+  if keep <> 0 then found = grid_select(p$ + ".grid", keep)
+  if found = 1 then
     busy = busy - 1
     load_company(k, keep)
   elseif n > 0 then
@@ -845,15 +1234,15 @@ function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, ids$, kee
   else
     busy = busy - 1
     load_company(k, 0)
-  endif
+  end if
   return n
-endfunction
+end function
 
 function on_company_filter(sender@)
   if busy > 0 then return 0
   refresh_companies(control_tag(sender@))
   return 0
-endfunction
+end function
 
 function on_company_select(sender@) local k, id
   if busy > 0 then return 0
@@ -861,14 +1250,14 @@ function on_company_select(sender@) local k, id
   id = grid_id(pre$(k) + ".grid")
   if id <> cur(pre$(k) + ".company") then load_company(k, id)
   return 0
-endfunction
+end function
 
 rem A double click on a company opens its contacts.
 function on_company_dblclick(sender@) local k
   k = control_tag(sender@)
   if cur(pre$(k) + ".company") <> 0 then pagecontrol_pageindex@(w@(pre$(k) + ".detail"), 2)
   return 0
-endfunction
+end function
 
 function load_company(k, id) local p$, s@, i, col$, a$
   p$ = pre$(k)
@@ -880,7 +1269,7 @@ function load_company(k, id) local p$, s@, i, col$, a$
       memo_text@(company_field@(k, col$), "")
     else
       edit_text@(company_field@(k, col$), "")
-    endif
+    end if
   next
   checkbox_checked@(company_field@(k, "active"), 1)
   label_caption@(company_field@(k, "audit"), "New record")
@@ -894,22 +1283,22 @@ function load_company(k, id) local p$, s@, i, col$, a$
           memo_text@(company_field@(k, col$), sqlite_gets$(s@, col$))
         else
           edit_text@(company_field@(k, col$), sqlite_gets$(s@, col$))
-        endif
+        end if
       next
       checkbox_checked@(company_field@(k, "active"), sqlite_getn(s@, "active"))
       a$ = "Created " + sqlite_gets$(s@, "created_local") + by$(sqlite_gets$(s@, "created_name"))
       if sqlite_gets$(s@, "updated_local") <> "" then a$ = a$ + ";  changed " + sqlite_gets$(s@, "updated_local") + by$(sqlite_gets$(s@, "updated_name"))
       label_caption@(company_field@(k, "audit"), a$)
-    endif
+    end if
     sqlite_finalize(s@)
-  endif
+  end if
   control_enabled@(w@(p$ + ".delete"), flag(id <> 0))
   control_enabled@(w@(p$ + ".tab.contacts"), flag(id <> 0))
   control_enabled@(w@(p$ + ".tab.history"), flag(id <> 0))
   busy = busy - 1
   refresh_contacts(k)
   return 0
-endfunction
+end function
 
 function on_company_new(sender@) local k
   k = control_tag(sender@)
@@ -920,7 +1309,7 @@ function on_company_new(sender@) local k
   pagecontrol_pageindex@(w@(pre$(k) + ".detail"), 1)
   control_setfocus@(company_field@(k, "name"))
   return 0
-endfunction
+end function
 
 function on_company_save(sender@) local k, p$, id, s@, i, col$, v$, sql$, cols, country$, tax$
   k = control_tag(sender@)
@@ -929,33 +1318,36 @@ function on_company_save(sender@) local k, p$, id, s@, i, col$, v$, sql$, cols, 
   if trim$(edit_text$(company_field@(k, "name"))) = "" then
     say("The company needs a name.")
     return 0
-  endif
+  end if
   if email_ok?(trim$(edit_text$(company_field@(k, "email")))) = false then
     say("That e-mail address does not look right.")
     return 0
-  endif
+  end if
   country$ = lcase$(trim$(edit_text$(company_field@(k, "country"))))
   tax$ = trim$(edit_text$(company_field@(k, "tax_id")))
   if tax$ <> "" and (country$ = "brazil" or country$ = "brasil") then
     if brazil_id_ok?(tax$) = false then
-      say("That is not a valid CNPJ or CPF: its check digits do not match.")
+      say("That is not a valid CNPJ or CPF: it must be 14 characters (a CNPJ, letters allowed in the first 12) or 11 digits (a CPF), written with nothing but dots, a slash, hyphens and spaces between them, and its check digits must match.")
       return 0
-    endif
-  endif
+    end if
+  end if
+  rem The columns of the form, then active, then the two keys computed from
+  rem them (tax_key$, search_key$): ?3.. for the form, then cols+3.. .
   cols = count_items(COMPANY_COLS$)
   if id = 0 then
-    sql$ = "INSERT INTO companies(kind, created_by, " + COMPANY_COLS$ + ", active) VALUES (?1, ?2"
+    sql$ = "INSERT INTO companies(kind, created_by, " + COMPANY_COLS$ + ", active, tax_key, search_key) VALUES (?1, ?2"
     for i = 1 to cols
       sql$ = sql$ + ", ?" + str$(i + 2)
     next
-    sql$ = sql$ + ", ?" + str$(cols + 3) + ")"
+    sql$ = sql$ + ", ?" + str$(cols + 3) + ", ?" + str$(cols + 4) + ", ?" + str$(cols + 5) + ")"
   else
     sql$ = "UPDATE companies SET kind = ?1, updated_by = ?2, updated_at = datetime('now')"
     for i = 1 to cols
       sql$ = sql$ + ", " + nth$(COMPANY_COLS$, i) + " = ?" + str$(i + 2)
     next
-    sql$ = sql$ + ", active = ?" + str$(cols + 3) + " WHERE id = ?" + str$(cols + 4)
-  endif
+    sql$ = sql$ + ", active = ?" + str$(cols + 3) + ", tax_key = ?" + str$(cols + 4) + ", search_key = ?" + str$(cols + 5)
+    sql$ = sql$ + " WHERE id = ?" + str$(cols + 6)
+  end if
   s@ = sqlite_prepare@(db@, sql$)
   sqlite_bindstr(s@, 1, kind$(k))
   sqlite_bindnum(s@, 2, user_id)
@@ -965,18 +1357,20 @@ function on_company_save(sender@) local k, p$, id, s@, i, col$, v$, sql$, cols, 
       v$ = memo_text$(company_field@(k, col$))
     else
       v$ = trim$(edit_text$(company_field@(k, col$)))
-    endif
+    end if
     sqlite_bindstr(s@, i + 2, v$)
   next
   sqlite_bindnum(s@, cols + 3, checkbox_checked(company_field@(k, "active")))
-  if id <> 0 then sqlite_bindnum(s@, cols + 4, id)
+  sqlite_bindstr(s@, cols + 4, tax_key$(tax$))
+  sqlite_bindstr(s@, cols + 5, search_key$(trim$(edit_text$(company_field@(k, "name"))), trim$(edit_text$(company_field@(k, "trade_name"))), tax$, trim$(edit_text$(company_field@(k, "city")))))
+  if id <> 0 then sqlite_bindnum(s@, cols + 6, id)
   if finish(s@, "save the " + kind$(k)) <> 1 then return 0
   if id = 0 then set_cur(p$ + ".company", sqlite_lastid(db@))
   refresh_companies(k)
   update_status()
   status("Saved " + trim$(edit_text$(company_field@(k, "name"))) + ".")
   return 0
-endfunction
+end function
 
 function on_company_delete(sender@) local k, p$, id, n, name$, s@
   k = control_tag(sender@)
@@ -996,7 +1390,7 @@ function on_company_delete(sender@) local k, p$, id, n, name$, s@
   update_status()
   status("Deleted " + name$ + ".")
   return 0
-endfunction
+end function
 
 rem ===============================================================
 rem  Contacts of a company
@@ -1035,13 +1429,13 @@ function build_contact_panel(k, t@) local p$, g@, gb@
   button_at@(p$ + ".k.save", t@, 418, 418, 110, "Save contact", "on_contact_save", k)
   button_at@(p$ + ".k.delete", t@, 538, 418, 110, "Delete contact", "on_contact_delete", k)
   return 0
-endfunction
+end function
 
 function contact_field@(k, col$)
   return w@(pre$(k) + ".k." + col$)
-endfunction
+end function
 
-function refresh_contacts(k) local p$, g@, s@, n, n2, ids$, company, keep, prim$
+function refresh_contacts(k) local p$, g@, s@, n, n2, company, keep, prim$
   p$ = pre$(k)
   g@ = w@(p$ + ".cgrid")
   company = cur(p$ + ".company")
@@ -1049,7 +1443,7 @@ function refresh_contacts(k) local p$, g@, s@, n, n2, ids$, company, keep, prim$
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
   n = 0
-  ids$ = ""
+  rows_begin(p$ + ".cgrid")
   s@ = sqlite_prepare@(db@, "SELECT id, name, job_title, email, whatsapp, is_primary FROM contacts WHERE company_id = ?1 ORDER BY is_primary DESC, name COLLATE NOCASE")
   sqlite_bindnum(s@, 1, company)
   while sqlite_step(s@) = 1
@@ -1062,17 +1456,16 @@ function refresh_contacts(k) local p$, g@, s@, n, n2, ids$, company, keep, prim$
     prim$ = ""
     if sqlite_getn(s@, "is_primary") = 1 then prim$ = "yes"
     stringgrid_cell@(g@, 5, n + 1, prim$)
-    if ids$ <> "" then ids$ = ids$ + ","
-    ids$ = ids$ + sqlite_gets$(s@, "id")
-  endwhile
+    rows_add(p$ + ".cgrid", n, sqlite_getn(s@, "id"))
+  end while
   sqlite_finalize(s@)
-  sdict_set@(rowids@, p$ + ".cgrid", ids$)
   size_grid_columns(p$ + ".cgrid")
   busy = busy - 1
   busy = busy + 1
-  n2 = grid_select(p$ + ".cgrid", keep)
+  n2 = 0
+  if keep <> 0 then n2 = grid_select(p$ + ".cgrid", keep)
   busy = busy - 1
-  if keep <> 0 and n2 = 1 then
+  if n2 = 1 then
     load_contact(k, keep)
   elseif n > 0 then
     busy = busy + 1
@@ -1081,9 +1474,9 @@ function refresh_contacts(k) local p$, g@, s@, n, n2, ids$, company, keep, prim$
     load_contact(k, grid_id(p$ + ".cgrid"))
   else
     load_contact(k, 0)
-  endif
+  end if
   return n
-endfunction
+end function
 
 function on_contact_select(sender@) local k, id
   if busy > 0 then return 0
@@ -1091,7 +1484,7 @@ function on_contact_select(sender@) local k, id
   id = grid_id(pre$(k) + ".cgrid")
   if id <> cur(pre$(k) + ".contact") then load_contact(k, id)
   return 0
-endfunction
+end function
 
 function load_contact(k, id) local p$, s@, i, col$, cl@, lines$
   p$ = pre$(k)
@@ -1105,7 +1498,7 @@ function load_contact(k, id) local p$, s@, i, col$, cl@, lines$
       maskedit_text@(contact_field@(k, col$), "")
     else
       edit_text@(contact_field@(k, col$), "")
-    endif
+    end if
   next
   checkbox_checked@(contact_field@(k, "primary"), 0)
   lines$ = ""
@@ -1121,28 +1514,28 @@ function load_contact(k, id) local p$, s@, i, col$, cl@, lines$
           maskedit_text@(contact_field@(k, col$), sqlite_gets$(s@, col$))
         else
           edit_text@(contact_field@(k, col$), sqlite_gets$(s@, col$))
-        endif
+        end if
       next
       checkbox_checked@(contact_field@(k, "primary"), sqlite_getn(s@, "is_primary"))
-    endif
+    end if
     sqlite_finalize(s@)
     s@ = sqlite_prepare@(db@, "SELECT line_id FROM contact_lines WHERE contact_id = ?1")
     sqlite_bindnum(s@, 1, id)
     while sqlite_step(s@) = 1
       lines$ = lines$ + "," + sqlite_gets$(s@, "line_id") + ","
-    endwhile
+    end while
     sqlite_finalize(s@)
-  endif
+  end if
   rem Tick the product lines this contact serves.
   cl@ = w@(p$ + ".k.lines")
   for i = 1 to checklist_count(cl@)
-    checklist_checked@(cl@, i, flag(instr(lines$, "," + nth$(sdict_get$(rowids@, "lines.all"), i) + ",") > 0))
+    checklist_checked@(cl@, i, flag(instr(lines$, "," + str$(row_id("lines", i)) + ",") > 0))
   next
   control_enabled@(w@(p$ + ".k.delete"), flag(id <> 0))
   busy = busy - 1
   refresh_history(k)
   return 0
-endfunction
+end function
 
 function on_contact_new(sender@) local k
   k = control_tag(sender@)
@@ -1152,9 +1545,9 @@ function on_contact_new(sender@) local k
   load_contact(k, 0)
   control_setfocus@(contact_field@(k, "name"))
   return 0
-endfunction
+end function
 
-function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql$, cols, cl@, ok
+function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql$, cols, cl@, ok, bday$
   k = control_tag(sender@)
   p$ = pre$(k)
   id = cur(p$ + ".contact")
@@ -1163,28 +1556,38 @@ function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql
   if trim$(edit_text$(contact_field@(k, "name"))) = "" then
     say("The contact needs a name.")
     return 0
-  endif
+  end if
   if email_ok?(trim$(edit_text$(contact_field@(k, "email")))) = false then
     say("That e-mail address does not look right.")
     return 0
-  endif
+  end if
+  rem The mask makes the field read "  /  " when nothing is typed, and keeps
+  rem a half-typed "1 /  " as it is: empty is empty, anything else must be a
+  rem whole day of a month.
+  bday$ = maskedit_text$(contact_field@(k, "birthday"))
+  if trim$(replacestr$(replacestr$(bday$, "/", ""), "_", "")) = "" then
+    bday$ = ""
+  elseif birthday_ok?(bday$) = false then
+    say("The birthday must be a day and a month, dd/mm (such as 14/03), or left empty.")
+    return 0
+  end if
   cols = count_items(CONTACT_COLS$)
   rem The contact, its product lines and the one-primary rule change
-  rem together or not at all.
+  rem together or not at all. The name's key follows the form's columns.
   sqlite_begin(db@)
   if id = 0 then
-    sql$ = "INSERT INTO contacts(company_id, created_by, " + CONTACT_COLS$ + ", is_primary) VALUES (?1, ?2"
+    sql$ = "INSERT INTO contacts(company_id, created_by, " + CONTACT_COLS$ + ", is_primary, name_key) VALUES (?1, ?2"
     for i = 1 to cols
       sql$ = sql$ + ", ?" + str$(i + 2)
     next
-    sql$ = sql$ + ", ?" + str$(cols + 3) + ")"
+    sql$ = sql$ + ", ?" + str$(cols + 3) + ", ?" + str$(cols + 4) + ")"
   else
     sql$ = "UPDATE contacts SET company_id = ?1, updated_by = ?2, updated_at = datetime('now')"
     for i = 1 to cols
       sql$ = sql$ + ", " + nth$(CONTACT_COLS$, i) + " = ?" + str$(i + 2)
     next
-    sql$ = sql$ + ", is_primary = ?" + str$(cols + 3) + " WHERE id = ?" + str$(cols + 4)
-  endif
+    sql$ = sql$ + ", is_primary = ?" + str$(cols + 3) + ", name_key = ?" + str$(cols + 4) + " WHERE id = ?" + str$(cols + 5)
+  end if
   s@ = sqlite_prepare@(db@, sql$)
   sqlite_bindnum(s@, 1, company)
   sqlite_bindnum(s@, 2, user_id)
@@ -1193,15 +1596,15 @@ function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql
     if col$ = "notes" then
       v$ = memo_text$(contact_field@(k, col$))
     elseif col$ = "birthday" then
-      v$ = maskedit_text$(contact_field@(k, col$))
-      if digits$(v$) = "" then v$ = ""
+      v$ = bday$
     else
       v$ = trim$(edit_text$(contact_field@(k, col$)))
-    endif
+    end if
     sqlite_bindstr(s@, i + 2, v$)
   next
   sqlite_bindnum(s@, cols + 3, checkbox_checked(contact_field@(k, "primary")))
-  if id <> 0 then sqlite_bindnum(s@, cols + 4, id)
+  sqlite_bindstr(s@, cols + 4, alcase$(trim$(edit_text$(contact_field@(k, "name")))))
+  if id <> 0 then sqlite_bindnum(s@, cols + 5, id)
   ok = finish(s@, "save the contact")
   if ok = 1 and id = 0 then id = sqlite_lastid(db@)
   if ok = 1 and checkbox_checked(contact_field@(k, "primary")) = 1 then
@@ -1209,25 +1612,25 @@ function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql
     sqlite_bindnum(s@, 1, company)
     sqlite_bindnum(s@, 2, id)
     ok = finish(s@, "mark the primary contact")
-  endif
+  end if
   if ok = 1 then
     s@ = sqlite_prepare@(db@, "DELETE FROM contact_lines WHERE contact_id = ?1")
     sqlite_bindnum(s@, 1, id)
     ok = finish(s@, "update the product lines")
-  endif
+  end if
   cl@ = w@(p$ + ".k.lines")
   for i = 1 to checklist_count(cl@)
     if ok = 1 and checklist_checked(cl@, i) = 1 then
       s@ = sqlite_prepare@(db@, "INSERT INTO contact_lines(contact_id, line_id) VALUES (?1, ?2)")
       sqlite_bindnum(s@, 1, id)
-      sqlite_bindnum(s@, 2, val(nth$(sdict_get$(rowids@, "lines.all"), i)))
+      sqlite_bindnum(s@, 2, row_id("lines", i))
       ok = finish(s@, "update the product lines")
-    endif
+    end if
   next
   if ok <> 1 then
     sqlite_rollback(db@)
     return 0
-  endif
+  end if
   sqlite_commit(db@)
   set_cur(p$ + ".contact", id)
   refresh_contacts(k)
@@ -1235,7 +1638,7 @@ function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql
   update_status()
   status("Saved contact " + trim$(edit_text$(contact_field@(k, "name"))) + ".")
   return 0
-endfunction
+end function
 
 function on_contact_delete(sender@) local k, p$, id, s@, name$
   k = control_tag(sender@)
@@ -1252,7 +1655,7 @@ function on_contact_delete(sender@) local k, p$, id, s@, name$
   refresh_companies(k)
   update_status()
   return 0
-endfunction
+end function
 
 rem ===============================================================
 rem  History: what was said to whom, and when
@@ -1273,21 +1676,27 @@ function build_history_panel(k, t@) local p$, g@
   button_at@(p$ + ".h.add", t@, 418, 400, 110, "Add entry", "on_history_add", k)
   button_at@(p$ + ".h.delete", t@, 538, 400, 110, "Delete entry", "on_history_delete", k)
   return 0
-endfunction
+end function
 
-function refresh_history(k) local p$, g@, s@, n, ids$, contact
+rem The list's cursor lands on its first row by itself, while the form under
+rem it is cleared for a new entry -- so the cursor is not a choice anybody
+rem made. Delete acts only on the entry a person PICKED since the list was
+rem last filled: cur(p$ + ".history"), set by on_history_select and
+rem forgotten here.
+function refresh_history(k) local p$, g@, s@, n, contact
   p$ = pre$(k)
+  set_cur(p$ + ".history", 0)
   g@ = w@(p$ + ".hgrid")
   contact = cur(p$ + ".contact")
   if contact = 0 then
     label_caption@(w@(p$ + ".h.who"), "Pick a contact on the Contacts tab to see its history.")
   else
     label_caption@(w@(p$ + ".h.who"), "History with " + trim$(edit_text$(contact_field@(k, "name"))))
-  endif
+  end if
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
   n = 0
-  ids$ = ""
+  rows_begin(p$ + ".hgrid")
   s@ = sqlite_prepare@(db@, "SELECT i.id, i.happened_on, i.kind, i.subject, u.username FROM interactions i LEFT JOIN users u ON u.id = i.user_id WHERE i.contact_id = ?1 ORDER BY i.happened_on DESC, i.id DESC")
   sqlite_bindnum(s@, 1, contact)
   while sqlite_step(s@) = 1
@@ -1297,11 +1706,9 @@ function refresh_history(k) local p$, g@, s@, n, ids$, contact
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "kind"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "subject"))
     stringgrid_cell@(g@, 4, n + 1, sqlite_gets$(s@, "username"))
-    if ids$ <> "" then ids$ = ids$ + ","
-    ids$ = ids$ + sqlite_gets$(s@, "id")
-  endwhile
+    rows_add(p$ + ".hgrid", n, sqlite_getn(s@, "id"))
+  end while
   sqlite_finalize(s@)
-  sdict_set@(rowids@, p$ + ".hgrid", ids$)
   size_grid_columns(p$ + ".hgrid")
   calendar_date@(w@(p$ + ".h.date"), today())
   edit_text@(w@(p$ + ".h.subject"), "")
@@ -1311,12 +1718,13 @@ function refresh_history(k) local p$, g@, s@, n, ids$, contact
   control_enabled@(w@(p$ + ".h.delete"), flag(n > 0))
   busy = busy - 1
   return n
-endfunction
+end function
 
 function on_history_select(sender@) local k, s@, id
   if busy > 0 then return 0
   k = control_tag(sender@)
   id = grid_id(pre$(k) + ".hgrid")
+  set_cur(pre$(k) + ".history", id)
   if id = 0 then return 0
   s@ = sqlite_prepare@(db@, "SELECT * FROM interactions WHERE id = ?1")
   sqlite_bindnum(s@, 1, id)
@@ -1324,10 +1732,10 @@ function on_history_select(sender@) local k, s@, id
     calendar_date@(w@(pre$(k) + ".h.date"), strtodate(sqlite_gets$(s@, "happened_on")))
     edit_text@(w@(pre$(k) + ".h.subject"), sqlite_gets$(s@, "subject"))
     memo_text@(w@(pre$(k) + ".h.notes"), sqlite_gets$(s@, "notes"))
-  endif
+  end if
   sqlite_finalize(s@)
   return 0
-endfunction
+end function
 
 function on_history_add(sender@) local k, p$, s@, contact
   k = control_tag(sender@)
@@ -1337,7 +1745,7 @@ function on_history_add(sender@) local k, p$, s@, contact
   if trim$(edit_text$(w@(p$ + ".h.subject"))) = "" then
     say("Give the entry a subject.")
     return 0
-  endif
+  end if
   s@ = sqlite_prepare@(db@, "INSERT INTO interactions(contact_id, happened_on, kind, subject, notes, user_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
   sqlite_bindnum(s@, 1, contact)
   sqlite_bindstr(s@, 2, datetostr$(calendar_date(w@(p$ + ".h.date"))))
@@ -1348,19 +1756,29 @@ function on_history_add(sender@) local k, p$, s@, contact
   if finish(s@, "add the entry") <> 1 then return 0
   refresh_history(k)
   return 0
-endfunction
+end function
 
-function on_history_delete(sender@) local k, s@, id
+function on_history_delete(sender@) local k, s@, id, what$
   k = control_tag(sender@)
-  id = grid_id(pre$(k) + ".hgrid")
-  if id = 0 then return 0
-  if ask?("Delete this history entry?") = false then return 0
+  id = cur(pre$(k) + ".history")
+  if id = 0 then
+    say("Pick the entry to delete in the list first.")
+    return 0
+  end if
+  rem Name the entry in the question: its date and its subject.
+  what$ = ""
+  s@ = sqlite_prepare@(db@, "SELECT happened_on, subject FROM interactions WHERE id = ?1")
+  sqlite_bindnum(s@, 1, id)
+  if sqlite_step(s@) = 1 then what$ = sqlite_gets$(s@, "happened_on") + ", " + chr$(34) + sqlite_gets$(s@, "subject") + chr$(34)
+  sqlite_finalize(s@)
+  if what$ = "" then return 0
+  if ask?("Delete the history entry of " + what$ + "?") = false then return 0
   s@ = sqlite_prepare@(db@, "DELETE FROM interactions WHERE id = ?1")
   sqlite_bindnum(s@, 1, id)
   if finish(s@, "delete the entry") <> 1 then return 0
   refresh_history(k)
   return 0
-endfunction
+end function
 
 rem ===============================================================
 rem  Product lines
@@ -1375,33 +1793,32 @@ function build_lines_page(t@) local g@
   button_at@("l.save", t@, 657, 196, 105, "Save", "on_line_save", 0)
   button_at@("l.delete", t@, 769, 196, 105, "Delete", "on_line_delete", 0)
   return 0
-endfunction
+end function
 
-function refresh_lines() local g@, s@, n, n2, ids$, keep
+function refresh_lines() local g@, s@, n, n2, keep
   g@ = w@("lgrid")
   keep = cur("line")
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
   n = 0
-  ids$ = ""
-  s@ = sqlite_prepare@(db@, "SELECT p.id, p.name, p.description, (SELECT count(*) FROM contact_lines l WHERE l.line_id = p.id) AS n FROM product_lines p ORDER BY p.name COLLATE NOCASE")
+  rows_begin("lgrid")
+  s@ = sqlite_prepare@(db@, "SELECT p.id, p.name, p.description, (SELECT count(*) FROM contact_lines l WHERE l.line_id = p.id) AS n FROM product_lines p ORDER BY p.name_key")
   while sqlite_step(s@) = 1
     n = n + 1
     stringgrid_rowcount@(g@, n + 1)
     stringgrid_cell@(g@, 1, n + 1, sqlite_gets$(s@, "name"))
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "description"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "n"))
-    if ids$ <> "" then ids$ = ids$ + ","
-    ids$ = ids$ + sqlite_gets$(s@, "id")
-  endwhile
+    rows_add("lgrid", n, sqlite_getn(s@, "id"))
+  end while
   sqlite_finalize(s@)
-  sdict_set@(rowids@, "lgrid", ids$)
   size_grid_columns("lgrid")
   busy = busy - 1
   busy = busy + 1
-  n2 = grid_select("lgrid", keep)
+  n2 = 0
+  if keep <> 0 then n2 = grid_select("lgrid", keep)
   busy = busy - 1
-  if keep <> 0 and n2 = 1 then
+  if n2 = 1 then
     load_line(keep)
   elseif n > 0 then
     busy = busy + 1
@@ -1410,15 +1827,15 @@ function refresh_lines() local g@, s@, n, n2, ids$, keep
     load_line(grid_id("lgrid"))
   else
     load_line(0)
-  endif
+  end if
   return n
-endfunction
+end function
 
 function on_line_select(sender@)
   if busy > 0 then return 0
   load_line(grid_id("lgrid"))
   return 0
-endfunction
+end function
 
 function load_line(id) local s@
   set_cur("line", id)
@@ -1430,12 +1847,12 @@ function load_line(id) local s@
     if sqlite_step(s@) = 1 then
       edit_text@(w@("l.name"), sqlite_gets$(s@, "name"))
       memo_text@(w@("l.description"), sqlite_gets$(s@, "description"))
-    endif
+    end if
     sqlite_finalize(s@)
-  endif
+  end if
   control_enabled@(w@("l.delete"), flag(id <> 0))
   return 0
-endfunction
+end function
 
 function on_line_new(sender@)
   busy = busy + 1
@@ -1443,7 +1860,7 @@ function on_line_new(sender@)
   busy = busy - 1
   load_line(0)
   return 0
-endfunction
+end function
 
 function on_line_save(sender@) local id, s@, name$
   id = cur("line")
@@ -1451,21 +1868,22 @@ function on_line_save(sender@) local id, s@, name$
   if name$ = "" then
     say("The product line needs a name.")
     return 0
-  endif
+  end if
   if id = 0 then
-    s@ = sqlite_prepare@(db@, "INSERT INTO product_lines(name, description) VALUES (?1, ?2)")
+    s@ = sqlite_prepare@(db@, "INSERT INTO product_lines(name, description, name_key) VALUES (?1, ?2, ?3)")
   else
-    s@ = sqlite_prepare@(db@, "UPDATE product_lines SET name = ?1, description = ?2 WHERE id = ?3")
-    sqlite_bindnum(s@, 3, id)
-  endif
+    s@ = sqlite_prepare@(db@, "UPDATE product_lines SET name = ?1, description = ?2, name_key = ?3 WHERE id = ?4")
+    sqlite_bindnum(s@, 4, id)
+  end if
   sqlite_bindstr(s@, 1, name$)
   sqlite_bindstr(s@, 2, memo_text$(w@("l.description")))
+  sqlite_bindstr(s@, 3, alcase$(name$))
   if finish(s@, "save the product line") <> 1 then return 0
   if id = 0 then set_cur("line", sqlite_lastid(db@))
   refresh_lines()
   rebuild_line_lists()
   return 0
-endfunction
+end function
 
 function on_line_delete(sender@) local id, n, s@
   id = cur("line")
@@ -1479,53 +1897,46 @@ function on_line_delete(sender@) local id, n, s@
   refresh_lines()
   rebuild_line_lists()
   return 0
-endfunction
+end function
 
 rem The product lines appear in three more places: each kind's filter and
-rem each kind's contact check list. A check list has no clear, so it is
+rem each kind's contact check list, all in one order -- so item i of any of
+rem them is row i of the "lines" map (row_id("lines", i)), and the filter's
+rem item i + 1, under its "(any)". A check list has no clear, so it is
 rem freed and built again inside its group box.
-function rebuild_line_lists() local s@, k, p$, cl@, c@, names$, ids$, i, n
-  names$ = ""
-  ids$ = ""
-  n = 0
-  s@ = sqlite_prepare@(db@, "SELECT id, name FROM product_lines ORDER BY name COLLATE NOCASE")
-  while sqlite_step(s@) = 1
-    n = n + 1
-    if n > 1 then
-      names$ = names$ + ","
-      ids$ = ids$ + ","
-    endif
-    names$ = names$ + replacestr$(sqlite_gets$(s@, "name"), ",", " ")
-    ids$ = ids$ + sqlite_gets$(s@, "id")
-  endwhile
-  sqlite_finalize(s@)
-  sdict_set@(rowids@, "lines.all", ids$)
-  sdict_set@(rowids@, "linefilter.ids", ids$)
+function rebuild_line_lists() local s@, k, p$, cl@, c@, n, name$
+  rows_begin("lines")
+  s@ = sqlite_prepare@(db@, "SELECT id, name FROM product_lines ORDER BY name_key")
   busy = busy + 1
   for k = 1 to 2
     p$ = pre$(k)
     c@ = w@(p$ + ".linefilter")
     combo_clear@(c@)
     combo_add@(c@, "(any)")
-    for i = 1 to n
-      combo_add@(c@, nth$(names$, i))
-    next
-    combo_itemindex@(c@, 1)
     if dict_haskey(widgets@, p$ + ".k.lines") = 1 then control_free(w@(p$ + ".k.lines"))
     cl@ = checklistbox@(w@(p$ + ".k.linebox"))
     control_align@(cl@, 5)
-    for i = 1 to n
-      checklist_add@(cl@, nth$(names$, i))
-    next
+    rem The same statement, run again from the top for each kind.
+    sqlite_reset(s@)
+    n = 0
+    while sqlite_step(s@) = 1
+      n = n + 1
+      name$ = sqlite_gets$(s@, "name")
+      combo_add@(c@, name$)
+      checklist_add@(cl@, name$)
+      if k = 1 then rows_add("lines", n, sqlite_getn(s@, "id"))
+    end while
+    combo_itemindex@(c@, 1)
     keep@(p$ + ".k.lines", cl@)
   next
+  sqlite_finalize(s@)
   busy = busy - 1
   rem Put the ticks back for the contacts on screen.
   for k = 1 to 2
     if cur(pre$(k) + ".company") <> 0 then load_contact(k, cur(pre$(k) + ".contact"))
   next
   return n
-endfunction
+end function
 
 rem ===============================================================
 rem  Users (administrators only)
@@ -1551,16 +1962,16 @@ function build_users_page(t@) local g@
   button_at@("u.save", t@, 688, 290, 95, "Save", "on_user_save", 0)
   button_at@("u.delete", t@, 790, 290, 95, "Delete", "on_user_delete", 0)
   return 0
-endfunction
+end function
 
-function refresh_users() local g@, s@, n, n2, ids$, keep, a$
+function refresh_users() local g@, s@, n, n2, keep, a$
   g@ = w@("ugrid")
   keep = cur("user")
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
   n = 0
-  ids$ = ""
-  s@ = sqlite_prepare@(db@, "SELECT id, username, full_name, role, active, ifnull(datetime(last_login, 'localtime'), '') AS last FROM users ORDER BY username COLLATE NOCASE")
+  rows_begin("ugrid")
+  s@ = sqlite_prepare@(db@, "SELECT id, username, full_name, role, active, ifnull(datetime(last_login, 'localtime'), '') AS last FROM users ORDER BY username_key")
   while sqlite_step(s@) = 1
     n = n + 1
     stringgrid_rowcount@(g@, n + 1)
@@ -1571,17 +1982,16 @@ function refresh_users() local g@, s@, n, n2, ids$, keep, a$
     if sqlite_getn(s@, "active") = 1 then a$ = "yes"
     stringgrid_cell@(g@, 4, n + 1, a$)
     stringgrid_cell@(g@, 5, n + 1, sqlite_gets$(s@, "last"))
-    if ids$ <> "" then ids$ = ids$ + ","
-    ids$ = ids$ + sqlite_gets$(s@, "id")
-  endwhile
+    rows_add("ugrid", n, sqlite_getn(s@, "id"))
+  end while
   sqlite_finalize(s@)
-  sdict_set@(rowids@, "ugrid", ids$)
   size_grid_columns("ugrid")
   busy = busy - 1
   busy = busy + 1
-  n2 = grid_select("ugrid", keep)
+  n2 = 0
+  if keep <> 0 then n2 = grid_select("ugrid", keep)
   busy = busy - 1
-  if keep <> 0 and n2 = 1 then
+  if n2 = 1 then
     load_user(keep)
   elseif n > 0 then
     busy = busy + 1
@@ -1590,15 +2000,15 @@ function refresh_users() local g@, s@, n, n2, ids$, keep, a$
     load_user(grid_id("ugrid"))
   else
     load_user(0)
-  endif
+  end if
   return n
-endfunction
+end function
 
 function on_user_select(sender@)
   if busy > 0 then return 0
   load_user(grid_id("ugrid"))
   return 0
-endfunction
+end function
 
 function load_user(id) local s@
   set_cur("user", id)
@@ -1616,12 +2026,12 @@ function load_user(id) local s@
       edit_text@(w@("u.full_name"), sqlite_gets$(s@, "full_name"))
       if sqlite_gets$(s@, "role") = "admin" then combo_itemindex@(w@("u.role"), 2)
       checkbox_checked@(w@("u.active"), sqlite_getn(s@, "active"))
-    endif
+    end if
     sqlite_finalize(s@)
-  endif
+  end if
   control_enabled@(w@("u.delete"), flag(id <> 0 and id <> user_id))
   return 0
-endfunction
+end function
 
 function on_user_new(sender@)
   busy = busy + 1
@@ -1629,7 +2039,7 @@ function on_user_new(sender@)
   busy = busy - 1
   load_user(0)
   return 0
-endfunction
+end function
 
 rem How many active administrators there would be if user id had this
 rem role and this active flag -- the one rule users cannot break: someone
@@ -1638,9 +2048,10 @@ function admins_after(id, role$, active) local n
   n = scalar_n("SELECT count(*) FROM users WHERE role = 'admin' AND active = 1 AND id <> ?1", id)
   if role$ = "admin" and active = 1 then n = n + 1
   return n
-endfunction
+end function
 
 function on_user_save(sender@) local id, s@, u$, p$, role$, active
+  if user_role$ <> "admin" then return 0
   id = cur("user")
   u$ = trim$(edit_text$(w@("u.username")))
   p$ = edit_text$(w@("u.password"))
@@ -1649,52 +2060,73 @@ function on_user_save(sender@) local id, s@, u$, p$, role$, active
   if u$ = "" then
     say("The user needs a user name.")
     return 0
-  endif
+  end if
   if p$ <> edit_text$(w@("u.confirm")) then
     say("The two passwords are different.")
     return 0
-  endif
+  end if
   if id = 0 and len(p$) < 6 then
     say("A new user needs a password of 6 characters or more.")
     return 0
-  endif
+  end if
   if p$ <> "" and len(p$) < 6 then
     say("A password needs 6 characters or more.")
     return 0
-  endif
+  end if
   if admins_after(id, role$, active) = 0 then
     say("At least one active administrator must remain.")
     return 0
-  endif
+  end if
+  if id = user_id and active = 0 then
+    if ask?("You are deactivating your own account: you will be signed out now, and cannot sign in again until another administrator activates it. Go on?") = false then return 0
+  end if
   if id = 0 then
-    s@ = sqlite_prepare@(db@, "INSERT INTO users(username, full_name, role, active, password) VALUES (?1, ?2, ?3, ?4, ?5)")
+    s@ = sqlite_prepare@(db@, "INSERT INTO users(username, username_key, full_name, role, active, password) VALUES (?1, ?7, ?2, ?3, ?4, ?5)")
     sqlite_bindstr(s@, 5, password_hash$(p$, pw_cost))
   elseif p$ = "" then
-    s@ = sqlite_prepare@(db@, "UPDATE users SET username = ?1, full_name = ?2, role = ?3, active = ?4 WHERE id = ?6")
+    s@ = sqlite_prepare@(db@, "UPDATE users SET username = ?1, username_key = ?7, full_name = ?2, role = ?3, active = ?4 WHERE id = ?6")
     sqlite_bindnum(s@, 6, id)
   else
-    s@ = sqlite_prepare@(db@, "UPDATE users SET username = ?1, full_name = ?2, role = ?3, active = ?4, password = ?5 WHERE id = ?6")
+    s@ = sqlite_prepare@(db@, "UPDATE users SET username = ?1, username_key = ?7, full_name = ?2, role = ?3, active = ?4, password = ?5 WHERE id = ?6")
     sqlite_bindstr(s@, 5, password_hash$(p$, pw_cost))
     sqlite_bindnum(s@, 6, id)
-  endif
+  end if
   sqlite_bindstr(s@, 1, u$)
   sqlite_bindstr(s@, 2, trim$(edit_text$(w@("u.full_name"))))
   sqlite_bindstr(s@, 3, role$)
   sqlite_bindnum(s@, 4, active)
+  sqlite_bindstr(s@, 7, alcase$(u$))
   if finish(s@, "save the user") <> 1 then return 0
   if id = 0 then set_cur("user", sqlite_lastid(db@))
+  rem A change to your OWN account takes effect now, not at the next
+  rem sign-in: deactivated, you are signed out; demoted, the session is an
+  rem operator's from here on and the Users page goes away.
+  if id = user_id then
+    if active = 0 then
+      on_sign_out(sender@)
+      return 0
+    end if
+    user_name$ = u$
+    user_role$ = role$
+    show_users_page()
+  end if
   refresh_users()
   status("Saved user " + u$ + ".")
   return 0
-endfunction
+end function
 
+rem Delete a user. The last-administrator guard is not a formality: this
+rem session's own administrator may have been demoted or deactivated by
+rem ANOTHER program on the same database file, and then the user being
+rem deleted can be the last active administrator left.
 function on_user_delete(sender@) local id, s@
+  if user_role$ <> "admin" then return 0
   id = cur("user")
   if id = 0 or id = user_id then return 0
   if admins_after(id, "operator", 0) = 0 then
     say("At least one active administrator must remain.")
     return 0
-  endif
+  end if
   if ask?("Delete the user " + trim$(edit_text$(w@("u.username"))) + "? The records they created stay.") = false then return 0
   s@ = sqlite_prepare@(db@, "DELETE FROM users WHERE id = ?1")
   sqlite_bindnum(s@, 1, id)
@@ -1702,7 +2134,7 @@ function on_user_delete(sender@) local id, s@
   set_cur("user", 0)
   refresh_users()
   return 0
-endfunction
+end function
 
 rem ===============================================================
 rem  Change my password: a modal dialog. form_showmodal waits until
@@ -1728,7 +2160,7 @@ function build_password_form() local f@
   control_set@(w@("pw.cancel"), "Cancel", true)
   button_modalresult@(w@("pw.cancel"), 2)
   return 0
-endfunction
+end function
 
 function on_change_password(sender@)
   edit_text@(w@("pw.old"), "")
@@ -1740,9 +2172,9 @@ function on_change_password(sender@)
   rem would wait for a person, so only a real run shows it.
   if selftest? = false then
     if form_showmodal(w@("pw")) = 1 then status("Your password was changed.")
-  endif
+  end if
   return 0
-endfunction
+end function
 
 function on_password_ok(sender@) local s@, rec$, n$
   n$ = edit_text$(w@("pw.new"))
@@ -1754,15 +2186,15 @@ function on_password_ok(sender@) local s@, rec$, n$
   if password_verify?(edit_text$(w@("pw.old")), rec$) = false then
     label_caption@(w@("pw.msg"), "The current password is wrong.")
     return 0
-  endif
+  end if
   if len(n$) < 6 then
     label_caption@(w@("pw.msg"), "Use 6 characters or more.")
     return 0
-  endif
+  end if
   if n$ <> edit_text$(w@("pw.confirm")) then
     label_caption@(w@("pw.msg"), "The two new passwords are different.")
     return 0
-  endif
+  end if
   s@ = sqlite_prepare@(db@, "UPDATE users SET password = ?1 WHERE id = ?2")
   sqlite_bindstr(s@, 1, password_hash$(n$, pw_cost))
   sqlite_bindnum(s@, 2, user_id)
@@ -1771,12 +2203,12 @@ function on_password_ok(sender@) local s@, rec$, n$
   rem Answering the dialog with 1 ends its form_showmodal.
   form_modalresult@(w@("pw"), 1)
   return 0
-endfunction
+end function
 
 function on_password_cancel(sender@)
   rem The button's modal result (2) answers the dialog; nothing else to do.
   return 0
-endfunction
+end function
 
 rem ===============================================================
 rem  CSV export: one row per contact, with its company's columns
@@ -1784,22 +2216,22 @@ rem ===============================================================
 
 function csv$(v$)
   return chr$(34) + replacestr$(v$, chr$(34), chr$(34) + chr$(34)) + chr$(34)
-endfunction
+end function
 
 function on_export_suppliers(sender@)
   export_csv(1)
   return 0
-endfunction
+end function
 
 function on_export_customers(sender@)
   export_csv(2)
   return 0
-endfunction
+end function
 
 function on_export_button(sender@)
   export_csv(control_tag(sender@))
   return 0
-endfunction
+end function
 
 function export_csv(k) local p$, s@, out$, nl$, i, n, sql$, cols$, lines$
   p$ = save_path$(kind$(k) + "s.csv", "CSV file (*.csv)|*.csv")
@@ -1824,26 +2256,28 @@ function export_csv(k) local p$, s@, out$, nl$, i, n, sql$, cols$, lines$
       lines$ = lines$ + csv$(sqlite_gets$(s@, nth$(cols$, i)))
     next
     out$ = out$ + lines$ + nl$
-  endwhile
+  end while
   sqlite_finalize(s@)
   if file_writealltext(p$, out$) = 1 then
     status("Exported " + str$(n) + " row(s) to " + p$)
   else
     say("Could not write " + p$)
-  endif
+  end if
   return n
-endfunction
+end function
 
 rem ===============================================================
 rem  Sample data
 rem ===============================================================
 
 function seed_sample_data() local s$
-  s$ = "INSERT INTO product_lines(name, description) VALUES"
-  s$ = s$ + " ('Steel sheets', 'Cold and hot rolled sheets'),"
-  s$ = s$ + " ('Industrial paint', 'Epoxy and polyurethane coatings'),"
-  s$ = s$ + " ('Fasteners', 'Bolts, nuts and rivets'),"
-  s$ = s$ + " ('Packaging', 'Boxes, film and pallets');"
+  rem A product line's name key is unique, so each line is written with its
+  rem key already computed; the other keys can follow (rekey_all, below).
+  s$ = "INSERT INTO product_lines(name, name_key, description) VALUES"
+  s$ = s$ + " ('Steel sheets', " + sqlite_quote$(alcase$("Steel sheets")) + ", 'Cold and hot rolled sheets'),"
+  s$ = s$ + " ('Industrial paint', " + sqlite_quote$(alcase$("Industrial paint")) + ", 'Epoxy and polyurethane coatings'),"
+  s$ = s$ + " ('Fasteners', " + sqlite_quote$(alcase$("Fasteners")) + ", 'Bolts, nuts and rivets'),"
+  s$ = s$ + " ('Packaging', " + sqlite_quote$(alcase$("Packaging")) + ", 'Boxes, film and pallets');"
   s$ = s$ + "INSERT INTO companies(kind, name, trade_name, tax_id, category, phone, email, website, extra, payment_terms, city, state, country) VALUES"
   s$ = s$ + " ('supplier', 'Aço Forte Siderurgia Ltda.', 'Aço Forte', '11.222.333/0001-81', 'Steel', '+55 11 4000-1000', 'vendas@acoforte.example', 'acoforte.example', '15', '30/60 days', 'São Paulo', 'SP', 'Brazil'),"
   s$ = s$ + " ('supplier', 'Nordic Coatings AB', 'Nordic Coatings', 'SE556677889901', 'Paint', '+46 8 555 0100', 'sales@nordic.example', 'nordic.example', '30', 'Net 45', 'Stockholm', '', 'Sweden'),"
@@ -1865,9 +2299,15 @@ function seed_sample_data() local s$
   if sqlite_exec(db@, s$) <> 1 then
     say("The sample data could not be loaded: " + sqlite_errormsg$())
     return 0
-  endif
+  end if
+  rem Plain SQL cannot compute the keys the search and the unique rules
+  rem compare (they are BASIC's alcase$ and tax_key$), so they come after.
+  if rekey_all(db@) <> 1 then
+    say("The sample data could not be indexed: " + step_err$)
+    return 0
+  end if
   return 1
-endfunction
+end function
 
 rem The demonstration (PHOSPHOR_CONTACTS_DEMO=1): a throw-away database in
 rem the temp folder with the sample data, signed in as "demo" -- a way to
@@ -1876,7 +2316,7 @@ function start_demo() local path$, s@
   path$ = temppath$() + "phosphor-contacts-demo.db"
   if file_exists(path$) = 1 then file_delete(path$)
   if open_database(path$) <> 1 then return 0
-  s@ = sqlite_prepare@(db@, "INSERT INTO users(username, full_name, password, role) VALUES ('demo', 'Demo administrator', ?1, 'admin')")
+  s@ = sqlite_prepare@(db@, "INSERT INTO users(username, username_key, full_name, password, role) VALUES ('demo', 'demo', 'Demo administrator', ?1, 'admin')")
   sqlite_bindstr(s@, 1, password_hash$("demo123", pw_cost))
   if finish(s@, "create the demo user") <> 1 then return 0
   seed_sample_data()
@@ -1885,7 +2325,7 @@ function start_demo() local path$, s@
   edit_text@(w@("login.pass"), "demo123")
   button_click@(w@("login.go"))
   return 1
-endfunction
+end function
 
 rem ===============================================================
 rem  The self-test (PHOSPHOR_SELFTEST=1): every window is built and
@@ -1898,25 +2338,25 @@ function check(ok?, what$)
   else
     failed = failed + 1
     println "FAIL: " + what$
-  endif
+  end if
   return 0
-endfunction
+end function
 
 function type_into(key$, text$)
   edit_text@(w@(key$), text$)
   return 0
-endfunction
+end function
 
 function click(key$)
   button_click@(w@(key$))
   return 0
-endfunction
+end function
 
 function count_of(sql$)
   return sqlite_scalar(db@, sql$)
-endfunction
+end function
 
-function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
+function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, bob, bulk, t0, ms
   pw_cost = 1000
   path$ = temppath$() + "contact_manager_selftest.db"
   if file_exists(path$) = 1 then file_delete(path$)
@@ -1924,6 +2364,7 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   rem --- first run: the login form creates the administrator ---
   open_database(path$)
   check(first_run? = true, "a new database asks for an administrator")
+  check(sqlite_scalar(db@, "PRAGMA user_version") = 2, "it is built at schema version 2")
   check(button_caption$(w@("login.go")) = "Create", "and the button says so")
   type_into("login.user", "admin")
   type_into("login.pass", "secret1")
@@ -1941,6 +2382,8 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   check(instr(rec$, "secret1") = 0, "and not as text")
   check(user_name$ = "admin" and user_role$ = "admin", "and it is signed in")
   check(count_of("SELECT count(*) FROM companies") = 5, "the sample data was loaded")
+  rem 11.222.333/0001-81 with its punctuation taken out, by hand
+  check(count_of("SELECT count(*) FROM companies WHERE tax_key = '11222333000181'") = 1, "with its keys computed")
   check(control_get(w@("users.page"), "TabVisible") = 1, "an administrator sees the Users tab")
   check(instr(statusbar_text$(w@("status")), "3 suppliers, 2 customers, 6 contacts") > 0, "the status bar counts the records")
 
@@ -1959,6 +2402,20 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   check(stringgrid_rowcount(w@("s.grid")) = 2, "search finds a company by city")
   edit_text@(w@("s.search"), "Mariana")
   check(stringgrid_cell$(w@("s.grid"), 1, 2) = "Aço Forte Siderurgia Ltda.", "and by the name of a contact")
+  rem Case is ignored beyond ASCII: SQLite's LIKE alone folds A-Z only.
+  edit_text@(w@("s.search"), "AÇO")
+  check(stringgrid_rowcount(w@("s.grid")) = 2 and stringgrid_cell$(w@("s.grid"), 1, 2) = "Aço Forte Siderurgia Ltda.", "AÇO finds Aço: case is ignored beyond ASCII")
+  edit_text@(w@("s.search"), "SÃO PAULO")
+  check(stringgrid_rowcount(w@("s.grid")) = 2, "and SÃO PAULO finds São Paulo")
+  rem "%" and "_" are searched for, not LIKE's wildcards: no sample company
+  rem has either, while as wildcards "%" lists them all and "a_o" finds
+  rem Aço (a-ç-o) and Chicago (a-g-o).
+  edit_text@(w@("s.search"), "%")
+  check(stringgrid_rowcount(w@("s.grid")) = 1, "a % in the search is a percent sign, not a wildcard")
+  edit_text@(w@("s.search"), "a_o")
+  check(stringgrid_rowcount(w@("s.grid")) = 1, "and _ is an underscore")
+  edit_text@(w@("s.search"), "11222333")
+  check(stringgrid_rowcount(w@("s.grid")) = 2, "a tax id is found without its punctuation")
   edit_text@(w@("s.search"), "")
   choose("s.linefilter", 3)
   check(stringgrid_rowcount(w@("s.grid")) = 2, "the product-line filter keeps the one supplier serving Industrial paint")
@@ -1971,6 +2428,7 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   click("s.save")
   check(last_msg$ = "The company needs a name.", "a nameless company is refused")
   type_into("s.f.name", "Parafusos Brasil Ltda.")
+  type_into("s.f.trade_name", "Parafusos 100%")
   type_into("s.f.country", "Brazil")
   type_into("s.f.tax_id", "11.222.333/0001-82")
   click("s.save")
@@ -1988,13 +2446,35 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   check(stringgrid_rowcount(w@("s.grid")) = 5, "and is listed")
   check(scalar_n("SELECT count(*) FROM companies WHERE id = ?1 AND created_by = 1 AND city = 'Joinville'", id) = 1, "with its fields and who created it")
   check(edit_text$(w@("s.f.name")) = "Parafusos Brasil Ltda.", "and stays selected after the list is rebuilt")
+  edit_text@(w@("s.search"), "100%")
+  check(stringgrid_rowcount(w@("s.grid")) = 2 and stringgrid_cell$(w@("s.grid"), 1, 2) = "Parafusos Brasil Ltda.", "a search for 100% finds the name with 100% in it")
+  edit_text@(w@("s.search"), "")
 
-  rem --- the partial unique index: one tax id per kind ---
+  rem --- Brazilian tax ids. The alphanumeric CNPJ is the Receita Federal's
+  rem own example: with A = 17, B = 18, C = 19, D = 20, E = 21 the two
+  rem weighted sums are 459 and 424, so the check digits are 11 - 8 = 3
+  rem and 11 - 6 = 5. The CPF's digits: sums 295 and 347, so 2 and 5. The
+  rem CPF with an "A" (17) in it has check digits that hold by the same
+  rem arithmetic -- sums 315 and 381, so 4 and 4 -- and is refused only
+  rem because a CPF is digits. ---
+  check(brazil_id_ok?("12.ABC.345/01DE-35") = true, "an alphanumeric CNPJ is accepted")
+  check(brazil_id_ok?("12.ABC.345/01DE-36") = false, "and refused with a wrong check digit")
+  check(brazil_id_ok?("11.444.777/0001-61!") = false, "a character outside the printed form is refused, even with the digits right")
+  check(brazil_id_ok?("CNPJ 11.444.777/0001-61") = false, "and so are words around the number")
+  check(brazil_id_ok?("529.982.247-25") = true, "a CPF is accepted")
+  check(brazil_id_ok?("529.982.24A-44") = false, "and a CPF is digits only")
+  check(tax_key$("11.444.777/0001-61") = "11444777000161", "the tax key keeps the letters and digits")
+
+  rem --- the partial unique index: one tax id per kind, however written ---
   click("s.new")
   type_into("s.f.name", "Copycat Ltda.")
   type_into("s.f.tax_id", "11.444.777/0001-61")
   click("s.save")
   check(instr(last_msg$, "already has that tax id") > 0, "a duplicate tax id is refused with a plain message")
+  last_msg$ = ""
+  type_into("s.f.tax_id", "11444777000161")
+  click("s.save")
+  check(instr(last_msg$, "already has that tax id") > 0, "and so is the same id written without punctuation")
 
   rem --- edit the saved one ---
   grid_select("s.grid", id)
@@ -2008,9 +2488,22 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   type_into("s.k.name", "Rita Alves")
   type_into("s.k.whatsapp", "+55 47 99999-0001")
   type_into("s.k.instagram", "@rita.alves")
-  maskedit_text@(w@("s.k.birthday"), "14/03")
   checkbox_checked@(w@("s.k.primary"), 1)
   checklist_checked@(w@("s.k.lines"), 2, 1)
+  q$ = "The birthday must be a day and a month, dd/mm (such as 14/03), or left empty."
+  maskedit_text@(w@("s.k.birthday"), "99/99")
+  click("s.k.save")
+  check(last_msg$ = q$, "a birthday that is no day of the year is refused")
+  last_msg$ = ""
+  maskedit_text@(w@("s.k.birthday"), "1")
+  click("s.k.save")
+  check(last_msg$ = q$, "and so is a half-typed one")
+  last_msg$ = ""
+  maskedit_text@(w@("s.k.birthday"), "31/04")
+  click("s.k.save")
+  check(last_msg$ = q$, "and the 31st of April")
+  check(scalar_n("SELECT count(*) FROM contacts WHERE company_id = ?1", id) = 0, "and nothing was saved")
+  maskedit_text@(w@("s.k.birthday"), "14/03")
   click("s.k.save")
   n = scalar_n("SELECT count(*) FROM contacts WHERE company_id = ?1", id)
   check(n = 1, "the first contact was saved")
@@ -2022,6 +2515,7 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   click("s.k.save")
   check(count_of("SELECT count(*) FROM contacts WHERE name = 'Rita Alves' AND is_primary = 0") = 1, "a new primary contact takes the flag from the old one")
   check(stringgrid_cell$(w@("s.cgrid"), 1, 2) = "Jorge Prado", "and the primary contact is listed first")
+  check(count_of("SELECT count(*) FROM contacts WHERE name = 'Jorge Prado' AND birthday = ''") = 1, "an empty birthday is kept empty")
 
   rem --- history for the selected contact ---
   click("s.h.add")
@@ -2032,6 +2526,22 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   click("s.h.add")
   check(count_of("SELECT count(*) FROM interactions WHERE subject = 'Sent the catalogue' AND kind = 'WhatsApp' AND happened_on = '2026-10-01' AND user_id = 1") = 1, "the history entry is kept with its date, kind and author")
   check(stringgrid_rowcount(w@("s.hgrid")) = 2, "and listed")
+  calendar_date@(w@("s.h.date"), strtodate("2026-10-02"))
+  type_into("s.h.subject", "Called back")
+  click("s.h.add")
+  rem The list now shows "Called back" (the newer) on its first row, where
+  rem the cursor lands -- but nobody picked it.
+  answer? = true
+  click("s.h.delete")
+  check(last_msg$ = "Pick the entry to delete in the list first.", "Delete with no entry picked says so")
+  check(count_of("SELECT count(*) FROM interactions WHERE subject IN ('Sent the catalogue', 'Called back')") = 2, "and deletes nothing")
+  stringgrid_cursor@(w@("s.hgrid"), 1, 3)
+  answer? = false
+  click("s.h.delete")
+  check(last_msg$ = "Delete the history entry of 2026-10-01, " + chr$(34) + "Sent the catalogue" + chr$(34) + "?", "the confirmation names the picked entry")
+  answer? = true
+  click("s.h.delete")
+  check(count_of("SELECT count(*) FROM interactions WHERE subject = 'Sent the catalogue'") = 0 and count_of("SELECT count(*) FROM interactions WHERE subject = 'Called back'") = 1, "and Yes deletes that one, not the first row")
 
   rem --- a double click on a company opens its contacts ---
   pagecontrol_pageindex@(w@("s.detail"), 1)
@@ -2046,16 +2556,18 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   click("s.delete")
   check(scalar_n("SELECT count(*) FROM companies WHERE id = ?1", id) = 0, "answering Yes deletes it")
   check(count_of("SELECT count(*) FROM contacts WHERE name IN ('Rita Alves', 'Jorge Prado')") = 0, "its contacts went with it (ON DELETE CASCADE)")
-  check(count_of("SELECT count(*) FROM interactions WHERE subject = 'Sent the catalogue'") = 0, "and their history")
+  check(count_of("SELECT count(*) FROM interactions WHERE subject = 'Called back'") = 0, "and their history")
 
-  rem --- customers use the same code with their own widgets ---
+  rem --- customers use the same code with their own widgets; the first
+  rem listed is Metalúrgica Horizonte, whose sample credit limit is 250000 ---
   check(stringgrid_rowcount(w@("c.grid")) = 3, "two customers listed")
-  check(edit_text$(w@("c.f.extra")) <> "" , "the customer form shows the credit limit")
+  check(edit_text$(w@("c.f.extra")) = "250000", "the customer form shows the credit limit")
+  check(label_caption$(w@("c.f.extra.label")) = "Credit limit", "under its own caption")
 
   rem --- product lines ---
   pagecontrol_pageindex@(w@("pages"), 3)
   click("l.new")
-  type_into("l.name", "Fasteners")
+  type_into("l.name", "fasteners")
   click("l.save")
   check(instr(last_msg$, "already exists") > 0, "product line names are unique, case-insensitively")
   type_into("l.name", "Hydraulics")
@@ -2069,8 +2581,18 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   click("l.delete")
   check(count_of("SELECT count(*) FROM product_lines WHERE name = 'Steel sheets'") = 0, "a product line can be deleted")
   check(count_of("SELECT count(*) FROM contacts") = 6, "and its contacts stay")
+  click("l.new")
+  type_into("l.name", "Aço inox")
+  click("l.save")
+  last_msg$ = ""
+  click("l.new")
+  type_into("l.name", "AÇO INOX")
+  click("l.save")
+  check(instr(last_msg$, "already exists") > 0, "and beyond ASCII: AÇO INOX is Aço inox")
 
-  rem --- CSV export ---
+  rem --- CSV export: the whole file, as the sample data says it must be --
+  rem every value quoted, one row per contact, the customers by name, and
+  rem Carlos Menezes left serving Fasteners alone (Steel sheets is gone) ---
   csvpath$ = temppath$() + "contact_manager_selftest.csv"
   if file_exists(csvpath$) = 1 then file_delete(csvpath$)
   save_as$ = csvpath$
@@ -2078,8 +2600,86 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   check(n = 2, "the customer export writes one row per contact")
   text$ = file_readalltext$(csvpath$)
   check(left$(text$, 22) = "company,trade_name,tax", "under a header row")
-  check(instr(text$, chr$(34) + "Metalúrgica Horizonte S.A." + chr$(34)) > 0, "with every value quoted")
+  nl$ = chr$(13) + chr$(10)
+  q$ = chr$(34)
+  rec$ = "company,trade_name,tax_id,category,phone,email,city,state,country,contact,job_title,contact_email,contact_phone,whatsapp,product_lines" + nl$
+  rec$ = rec$ + q$ + "Metalúrgica Horizonte S.A." + q$ + "," + q$ + "Horizonte" + q$ + "," + q$ + q$ + "," + q$ + "Machinery" + q$ + "," + q$ + "+55 31 3333-2000" + q$ + "," + q$ + "compras@horizonte.example" + q$ + "," + q$ + "Belo Horizonte" + q$ + "," + q$ + "MG" + q$ + "," + q$ + "Brazil" + q$ + ","
+  rec$ = rec$ + q$ + "Carlos Menezes" + q$ + "," + q$ + "Purchasing" + q$ + "," + q$ + "carlos@horizonte.example" + q$ + "," + q$ + "+55 31 3333-2010" + q$ + "," + q$ + "+55 31 99999-2010" + q$ + "," + q$ + "Fasteners" + q$ + nl$
+  rec$ = rec$ + q$ + "Pacific Boxworks Inc." + q$ + "," + q$ + "Boxworks" + q$ + "," + q$ + "94-1234567" + q$ + "," + q$ + "Packaging" + q$ + "," + q$ + "+1 415 555 0142" + q$ + "," + q$ + "ap@boxworks.example" + q$ + "," + q$ + "San Francisco" + q$ + "," + q$ + "CA" + q$ + "," + q$ + "USA" + q$ + ","
+  rec$ = rec$ + q$ + "Amy Chen" + q$ + "," + q$ + "Procurement lead" + q$ + "," + q$ + "amy@boxworks.example" + q$ + "," + q$ + "+1 415 555 0143" + q$ + "," + q$ + "+1 415 555 0144" + q$ + "," + q$ + "Packaging" + q$ + nl$
+  check(text$ = rec$, "with every value of every row quoted")
   file_delete(csvpath$)
+
+  rem --- File > Open database: a file that is not a database changes
+  rem nothing; a usable one is switched to, at its own login ---
+  bad$ = temppath$() + "contact_manager_selftest_bad.db"
+  file_writealltext(bad$, "this is not a SQLite database")
+  open_as$ = bad$
+  menuitem_click@(w@("menu.open"))
+  check(instr(last_msg$, "could not be prepared") > 0 and dbpath$ = path$, "File > Open refuses a file that is not a database")
+  check(user_id = 1 and count_of("SELECT count(*) FROM companies") = 5, "and keeps the database and the session it had")
+  path2$ = temppath$() + "contact_manager_selftest2.db"
+  if file_exists(path2$) = 1 then file_delete(path2$)
+  open_as$ = path2$
+  menuitem_click@(w@("menu.open"))
+  check(dbpath$ = path2$ and user_id = 0 and first_run? = true, "a usable file is switched to, at its own login")
+  open_as$ = path$
+  menuitem_click@(w@("menu.open"))
+  file_delete(path2$)
+  type_into("login.user", "admin")
+  type_into("login.pass", "secret1")
+  click("login.go")
+
+  rem --- a start-up whose database would not open: pick another, or end ---
+  answer? = true
+  open_as$ = bad$
+  check(open_another() = 0 and dbpath$ = path$, "after a refused pick, a cancelled one ends the start-up")
+  answer? = false
+  check(open_another() = 0, "and so does No")
+  answer? = true
+  open_as$ = path$
+  check(open_another() = 1 and first_run? = false, "a usable pick opens it")
+  file_delete(bad$)
+  type_into("login.user", "admin")
+  type_into("login.pass", "secret1")
+  click("login.go")
+  rem documentspath$() ends in a separator, and adding another doubled it
+  check(instr(default_db_path$(), dirseparator$() + dirseparator$()) = 0 and extractfilename$(default_db_path$()) = "phosphor-contacts.db", "the default database path has no doubled separator")
+  check(db_path_in$(temppath$() + "no-such-folder") = path_combine$(homepath$(), "phosphor-contacts.db"), "and is in the home folder when there is no Documents folder")
+
+  rem --- back up: never onto the open database, and a failed delete is said ---
+  q$ = "That is the database you have open. A backup has to go to another file."
+  save_as$ = path$
+  menuitem_click@(w@("menu.backup"))
+  check(last_msg$ = q$, "a backup onto the open database is refused")
+  rem The same file under another case is the same file on Windows only;
+  rem elsewhere it is another file, and the backup is written there.
+  other$ = extractfilepath$(path$) + ucase$(extractfilename$(path$))
+  save_as$ = other$
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  check((last_msg$ = q$) = (os_name$() = "Windows"), "on Windows the open database is also seen under another case")
+  if os_name$() <> "Windows" then file_delete(other$)
+  bk$ = temppath$() + "contact_manager_selftest_backup.db"
+  if file_exists(bk$) = 1 then file_delete(bk$)
+  save_as$ = bk$
+  menuitem_click@(w@("menu.backup"))
+  check(last_msg$ = "Backed up to " + bk$ and file_exists(bk$) = 1, "a backup to another file is written")
+  rem Windows will not delete a file another connection holds open; Linux
+  rem will, and the backup then goes ahead.
+  held@ = sqlite_open@(bk$)
+  sqlite_scalar(held@, "SELECT count(*) FROM companies")
+  answer? = true
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  if os_name$() = "Windows" then
+    q$ = "Could not replace " + bk$ + ": it could not be deleted. Is it open in another program?"
+  else
+    q$ = "Backed up to " + bk$
+  end if
+  check(last_msg$ = q$, "a target that cannot be deleted is reported, not ignored")
+  sqlite_close(held@)
+  file_delete(bk$)
 
   rem --- users: an operator, the last-administrator rule ---
   pagecontrol_pageindex@(w@("pages"), 4)
@@ -2094,11 +2694,24 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   type_into("u.confirm", "olivia-pw")
   click("u.save")
   check(count_of("SELECT count(*) FROM users WHERE username = 'olivia' AND role = 'operator'") = 1, "an operator is created")
+  click("u.new")
+  type_into("u.username", "josé")
+  type_into("u.password", "jose-pw1")
+  type_into("u.confirm", "jose-pw1")
+  click("u.save")
+  click("u.new")
+  type_into("u.username", "JOSÉ")
+  type_into("u.password", "jose-pw2")
+  type_into("u.confirm", "jose-pw2")
+  click("u.save")
+  check(count_of("SELECT count(*) FROM users WHERE username = 'josé'") = 1 and instr(last_msg$, "user name is taken") > 0, "a user name beyond ASCII is created, and JOSÉ is the same name")
+  rem A row is loaded when the cursor MOVES onto it, so step off and back.
+  grid_select("ugrid", scalar_s("SELECT id FROM users WHERE username = ?1", "olivia"))
   grid_select("ugrid", 1)
   combo_itemindex@(w@("u.role"), 1)
   click("u.save")
   check(last_msg$ = "At least one active administrator must remain.", "the last administrator cannot be demoted")
-  check(control_enabled(w@("u.delete")) = 0, "nor deleted: you cannot delete yourself")
+  check(control_enabled(w@("u.delete")) = 0, "your own account has no Delete")
   type_into("u.username", "OLIVIA")
   combo_itemindex@(w@("u.role"), 2)
   click("u.save")
@@ -2116,9 +2729,51 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   check(form_modalresult(w@("pw")) = 1, "the dialog is answered 1 once the password is changed")
   check(password_verify?("secret9", sqlite_scalar$(db@, "SELECT password FROM users WHERE id = 1")) = true, "the new password is the one kept")
 
-  rem --- sign out, and an operator signs in ---
+  rem --- a second administrator, and the guard on deleting one. This
+  rem session's administrator can only delete ANOTHER user, so the guard
+  rem fires when another program has demoted this one meanwhile: then bob
+  rem is the last active administrator left ---
+  click("u.new")
+  type_into("u.username", "bob")
+  type_into("u.password", "bob-pw-1")
+  type_into("u.confirm", "bob-pw-1")
+  combo_itemindex@(w@("u.role"), 2)
+  click("u.save")
+  bob = scalar_s("SELECT id FROM users WHERE username = ?1 AND role = 'admin'", "bob")
+  sqlite_exec(db@, "UPDATE users SET role = 'operator' WHERE id = 1")
+  grid_select("ugrid", bob)
+  answer? = true
+  last_msg$ = ""
+  click("u.delete")
+  check(bob > 0 and last_msg$ = "At least one active administrator must remain." and scalar_n("SELECT count(*) FROM users WHERE id = ?1", bob) = 1, "nor can the last active administrator be deleted")
+  sqlite_exec(db@, "UPDATE users SET role = 'admin' WHERE id = 1")
+
+  rem --- your own account: a change takes effect at once ---
+  grid_select("ugrid", 1)
+  combo_itemindex@(w@("u.role"), 1)
+  click("u.save")
+  check(user_role$ = "operator" and control_get(w@("users.page"), "TabVisible") = 0, "demoting yourself makes the session an operator's, without the Users tab")
+  check(count_of("SELECT count(*) FROM users WHERE id = 1 AND role = 'operator'") = 1, "and is saved")
   menuitem_click@(w@("menu.signout"))
-  check(user_id = 0, "signing out forgets the user")
+  type_into("login.user", "bob")
+  type_into("login.pass", "bob-pw-1")
+  click("login.go")
+  check(user_name$ = "bob" and user_role$ = "admin", "the other administrator signs in")
+  pagecontrol_pageindex@(w@("pages"), 4)
+  grid_select("ugrid", bob)
+  grid_select("ugrid", 1)
+  combo_itemindex@(w@("u.role"), 2)
+  click("u.save")
+  grid_select("ugrid", bob)
+  checkbox_checked@(w@("u.active"), 0)
+  answer? = false
+  click("u.save")
+  check(user_id = bob and scalar_n("SELECT count(*) FROM users WHERE id = ?1 AND active = 1", bob) = 1, "deactivating yourself asks first, and No changes nothing")
+  answer? = true
+  click("u.save")
+  check(user_id = 0 and scalar_n("SELECT count(*) FROM users WHERE id = ?1 AND active = 0", bob) = 1, "and Yes saves it and signs you out")
+
+  rem --- an operator signs in ---
   type_into("login.user", "olivia")
   type_into("login.pass", "wrong-password")
   click("login.go")
@@ -2131,9 +2786,15 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   type_into("login.user", "Olivia")
   type_into("login.pass", "olivia-pw")
   click("login.go")
-  check(user_name$ = "Olivia" and user_role$ = "operator", "the operator signs in, user name in any case")
+  check(user_name$ = "olivia" and user_role$ = "operator", "the operator signs in, user name in any case, called by the stored name")
+  check(instr(statusbar_text$(w@("status")), "Signed in as olivia (operator)") > 0, "and the status bar says so")
   check(control_get(w@("users.page"), "TabVisible") = 0, "and does not see the Users tab")
   check(count_of("SELECT count(*) FROM users WHERE username = 'olivia' AND last_login IS NOT NULL") = 1, "the sign-in is recorded")
+  menuitem_click@(w@("menu.signout"))
+  type_into("login.user", "JOSÉ")
+  type_into("login.pass", "jose-pw1")
+  click("login.go")
+  check(user_name$ = "josé", "JOSÉ signs in as josé")
 
   rem --- an inactive user cannot sign in ---
   sqlite_exec(db@, "UPDATE users SET active = 0 WHERE username = 'olivia'")
@@ -2143,18 +2804,73 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   click("login.go")
   check(user_id = 0, "an inactive user cannot sign in")
 
-  rem --- the database survives a reopen ---
+  rem --- a long list. A refresh used to look its rows up by walking an
+  rem "id,id,id" string, which took seconds at 2,000 rows (17 s measured)
+  rem against a tenth of a second for the query and the grid together; a
+  rem refresh now is linear in its rows, so 3 s is a bound with room on a
+  rem slow machine and none for the old walk ---
+  sqlite_exec(db@, "INSERT INTO companies(kind, name, search_key) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) SELECT 'supplier', 'Bulk ' || printf('%04d', i), 'bulk ' || printf('%04d', i) FROM n")
+  set_cur("s.company", 0)
+  t0 = now()
+  n = refresh_companies(1)
+  ms = millisecondsbetween(now(), t0)
+  check(n = 2003 and ms < 3000, "2,000 more suppliers are listed in under 3 s")
+  bulk = scalar_s("SELECT id FROM companies WHERE name = ?1", "Bulk 1500")
+  check(grid_select("s.grid", bulk) = 1 and edit_text$(w@("s.f.name")) = "Bulk 1500", "and one of them is found by its id")
+  t0 = now()
+  refresh_companies(1)
+  ms = millisecondsbetween(now(), t0)
+  check(ms < 3000 and edit_text$(w@("s.f.name")) = "Bulk 1500", "a refresh keeps it selected, as fast")
+  sqlite_exec(db@, "DELETE FROM companies WHERE name LIKE 'Bulk %'")
+
+  rem --- the schema upgrade, version 1 to 2, on a database built the way
+  rem version 1 built it ---
+  path3$ = temppath$() + "contact_manager_selftest_v1.db"
+  if file_exists(path3$) = 1 then file_delete(path3$)
+  v@ = sqlite_open@(path3$)
+  schema_v1(v@)
+  sqlite_exec(v@, "PRAGMA user_version = 1; INSERT INTO users(username, password, role) VALUES ('Ana', 'x', 'admin'); INSERT INTO companies(kind, name, tax_id, city) VALUES ('supplier', 'Old Steel', '11.444.777/0001-61', 'Curitiba'), ('customer', 'Old Buyer', '11444777000161', ''); INSERT INTO product_lines(name) VALUES ('Ação')")
+  sqlite_close(v@)
+  check(open_database(path3$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 2, "a version-1 database is upgraded to version 2")
+  check(count_of("SELECT count(*) FROM users WHERE username_key = 'ana'") = 1 and count_of("SELECT count(*) FROM companies WHERE tax_key = '11444777000161'") = 2 and count_of("SELECT count(*) FROM product_lines WHERE name_key = 'ação'") = 1, "with the keys of the rows it had")
+  check(count_of("SELECT count(*) FROM sqlite_master WHERE name = 'ux_companies_tax_id'") = 0 and count_of("SELECT count(*) FROM sqlite_master WHERE name = 'ux_companies_tax_key'") = 1, "and the tax-id index replaced by the key's")
+  sqlite_begin(db@)
+  check(migrate_v2(db@) = 1, "the upgrade's steps can run again and find nothing to do")
+  sqlite_rollback(db@)
+  rem Two suppliers with one id, written two ways: version 1 let them in.
+  path4$ = temppath$() + "contact_manager_selftest_v1b.db"
+  if file_exists(path4$) = 1 then file_delete(path4$)
+  v@ = sqlite_open@(path4$)
+  schema_v1(v@)
+  sqlite_exec(v@, "PRAGMA user_version = 1; INSERT INTO companies(kind, name, tax_id) VALUES ('supplier', 'First', '11.444.777/0001-61'), ('supplier', 'Second', '11444777000161')")
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "same tax id written in different ways") > 0 and instr(last_msg$, "Second (11444777000161)") > 0, "an upgrade the old rows would break is refused, naming them")
+  v@ = sqlite_open@(path4$)
+  check(sqlite_scalar(v@, "PRAGMA user_version") = 1 and sqlite_scalar(v@, "SELECT count(*) FROM pragma_table_info('companies') WHERE name = 'tax_key'") = 0, "and the database is left as it was")
+  sqlite_close(v@)
   sqlite_close(db@)
+  file_delete(path3$)
+  file_delete(path4$)
+
+  rem --- the database survives a reopen, and opens read-only too ---
   open_database(path$)
   check(first_run? = false, "a database with users asks to sign in, not to create one")
   check(count_of("SELECT count(*) FROM companies") = 5, "and everything is still there")
+  rem query_only makes this connection refuse every write the way a
+  rem read-only file does ("attempt to write a readonly database").
+  sqlite_exec(db@, "PRAGMA query_only = ON")
+  check(create_schema(db@) = 1, "a database at the current version is prepared without a write")
+  type_into("login.user", "admin")
+  type_into("login.pass", "secret9")
+  click("login.go")
+  check(user_id = 1 and read_only? = true and instr(last_msg$, "read-only") > 0, "a read-only database signs in for reading, and says so")
   sqlite_close(db@)
   file_delete(path$)
 
   println "passed: " + str$(passed)
   println "failed: " + str$(failed)
   return 0
-endfunction
+end function
 
 rem A person picking a filter: combo_itemindex@ does not fire the change
 rem event (only a person's choice does), so the handler the event would
@@ -2163,4 +2879,4 @@ function choose(key$, index)
   combo_itemindex@(w@(key$), index)
   on_company_filter(w@(key$))
   return 0
-endfunction
+end function

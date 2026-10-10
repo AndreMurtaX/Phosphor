@@ -85,8 +85,56 @@ function f_start(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Enabled := True; Result := A[0]; end;
 function f_stop(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).Enabled := False; Result := A[0]; end;
+{ A TICK DOES NOT RE-ENTER ITS OWN HANDLER (round 5, 2026-10-10). A handler that
+  waits -- in form_showmodal, a message box, app_processmessages -- runs a message
+  loop, and on Windows the timer's WM_TIMER is dispatched inside it, so the same
+  handler started again while its first run was suspended: a "reminder" timer that
+  opens a modal each tick stacked modals without bound. GTK's timeout source does
+  not recurse, so on Linux the same program saw no tick at all until the handler
+  returned. The guard makes Windows answer as Linux does: a tick that arrives while
+  this timer's handler is running is dropped. Other timers still fire. }
+type
+  TTimerGuard = class(TComponent)
+  public
+    Notify: TNotifyEvent;
+    Busy: Boolean;
+    procedure Fire(Sender: TObject);
+  end;
+
+procedure TTimerGuard.Fire(Sender: TObject);
+begin
+  if Busy or not Assigned(Notify) then Exit;
+  Busy := True;
+  try
+    Notify(Sender);
+  finally
+    Busy := False;
+  end;
+end;
+
+function TimerGuardOf(ATimer: TComponent): TTimerGuard;
+var i: Integer;
+begin
+  for i := 0 to ATimer.ComponentCount - 1 do
+    if ATimer.Components[i] is TTimerGuard then Exit(TTimerGuard(ATimer.Components[i]));
+  Result := TTimerGuard.Create(ATimer);
+end;
+
 function f_ontimer(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0]; if GuiResolve(A[0].Hnd, TCustomTimer, c) then TCustomTimer(c).OnTimer := GuiNotifyHandler(AVM, c, 'ontimer', A[1].Str, A[0].Hnd); end;
+var c: TComponent; ev: TNotifyEvent; g: TTimerGuard;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TCustomTimer, c) then Exit;
+  ev := GuiNotifyHandler(AVM, c, 'ontimer', A[1].Str, A[0].Hnd);
+  if ev = nil then
+  begin
+    TCustomTimer(c).OnTimer := nil;   // an empty name unwires, as everywhere else
+    Exit;
+  end;
+  g := TimerGuardOf(c);
+  g.Notify := ev;
+  TCustomTimer(c).OnTimer := @g.Fire;
+end;
 
 procedure RegisterTimerFuncs(Reg: TPhosphorRegistry);
 begin

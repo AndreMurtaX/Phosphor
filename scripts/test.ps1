@@ -1666,7 +1666,7 @@ $adGot = Invoke-AD "`"$exe`" `"$adp`" -- --sandbox -5"
 if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, '--sandbox', '-5', '2d35')))) {
     $okAD = $false; Write-Host ("FAIL  AD:after --: got '{0}'" -f $adGot) -ForegroundColor Red }
 $adGot = Invoke-AD "`"$exe`" `"$adp`" --sandbx cage"
-if (-not ($adCode -eq 2 -and $adGot.Contains('unknown option --sandbx') -and $adGot.Contains('put it after --') -and -not $adGot.StartsWith('1'))) {
+if (-not ($adCode -eq 2 -and $adGot.Contains('unknown option --sandbx') -and $adGot.Contains('goes after --') -and -not $adGot.StartsWith('1'))) {
     $okAD = $false; Write-Host ("FAIL  AD:a misspelt option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
 $adPbc = Join-Path $adDir 'args.pbc'
 $adApp = Join-Path $adDir 'argsapp.exe'
@@ -1682,6 +1682,32 @@ $adCode = $LASTEXITCODE
 $adGot = Read-AD $adOut
 if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, 'd1', '--d2', '2d2d6432')))) {
     $okAD = $false; Write-Host ("FAIL  AD:under the debugger: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+# ROUND 5 (2026-10-10). The command line Windows hands a process is ONE string,
+# and the launchers that build it (Python's subprocess, .NET, Go, Rust, MSYS)
+# encode for Microsoft's rules: \" is a quote, 2n backslashes before a quote
+# are n. This line is written into a .cmd file verbatim, so nothing between
+# here and the process re-quotes it. Expected, by those rules (the
+# CommandLineToArgvW documentation): three arguments, 'say "hi"', 'C:\My Dir\'
+# (ONE trailing backslash) and 'tail'. FPC's ParamStr gave 'say \hi\' and a
+# doubled backslash.
+$adCmd = Join-Path $adDir 'split.cmd'
+[IO.File]::WriteAllText($adCmd, ('@"' + $exe + '" "' + $adp + '" "say \"hi\"" "C:\My Dir\\" tail' + "`r`n"), [Text.Encoding]::ASCII)
+$adGot = Invoke-AD "`"$adCmd`""
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('3', $adp, 'say "hi"', 'C:\My Dir\', 'tail', '7461696c')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:Microsoft's argv rules: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+# an empty file name is refused, not skipped (it made the NEXT word the program)
+$adGot = Invoke-AD "`"$exe`" `"`" `"$adp`""
+if (-not ($adCode -eq 2 -and $adGot.Contains('file name is empty'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:an empty file name: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+# "--" before the file: the next word is the file, the rest the program's;
+# and "-" alone after the file is a word, not an option
+$adGot = Invoke-AD "`"$exe`" -- `"$adp`" - --x"
+if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, '-', '--x', '2d2d78')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:-- before the file, - after it: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+# the refusal no longer composes a command to copy (it proposed the unconfined run)
+$adGot = Invoke-AD "`"$exe`" `"$adp`" --sandbx cage"
+if (-not ($adCode -eq 2 -and -not $adGot.Contains('-- --sandbx'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:the refusal's hint: got '{0}'" -f $adGot) -ForegroundColor Red }
 if ($okAD) { Write-Host 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused' -ForegroundColor Green }
 
 # --- AE: A REAL MODAL FORM ------------------------------------------------------
@@ -1705,7 +1731,40 @@ $okAE = $aeEnded -and ($aeP.ExitCode -eq 0) -and ($aeGot -eq '1 2 typed 0')
 if ($okAE) { Write-Host 'PASS  AE:a real modal form waits, runs its handlers inside, and answers 1 for OK and 2 for a close' -ForegroundColor Green }
 else { Write-Host ("FAIL  AE:a real modal form: ended={0} exit={1}, want '1 2 typed 0', got '{2}'" -f $aeEnded, $aeP.ExitCode, $aeGot) -ForegroundColor Red }
 
+# --- AF: A MODAL SESSION INSIDE A REAL MESSAGE LOOP ----------------------------
+# Three round-5 fixes (2026-10-10) that only a running loop can show:
+#  - a timer does not re-enter its own handler while that handler waits in
+#    form_showmodal (Windows dispatched WM_TIMER inside the modal loop and ran
+#    it again; GTK never did) -- expected 0 re-entries;
+#  - answering a modal is not closing the last window: with an onclose bound
+#    (so the closer is installed) and no other window shown, OK used to end
+#    app_run -- expected the loop to run on until t2 quits it ("full");
+#    expected 1 (OK) and onclose run once;
+#  - END in a handler while a modal is up ends the program: it used to leave
+#    the modal waiting for a person, forever. Expected "before" and an exit.
+$afDir = Join-Path $tmp 'af'
+New-Item -ItemType Directory -Force $afDir | Out-Null
+function Invoke-AF([string] $name, [string[]] $lines) {
+    $bas = Join-Path $afDir ($name + '.bas')
+    [IO.File]::WriteAllText($bas, (($lines -join "`n") + "`n"), $utf8)
+    $out = Join-Path $afDir ($name + '.out')
+    $p = Start-Process -FilePath $exe -ArgumentList "`"$bas`"" -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError (Join-Path $afDir ($name + '.err'))
+    $null = $p.Handle
+    $ended = $p.WaitForExit(60000)
+    if (-not $ended) { $p.Kill() }
+    $p.WaitForExit()
+    return @($ended, $p.ExitCode, ([IO.File]::ReadAllText($out) -replace "`r", '').TrimEnd("`n"))
+}
+$okAF = $true
+$af = Invoke-AF 'afloop' @('dlg@ = form@("AF", 200, 100)', 'ok@ = button@(dlg@)', 'button_modalresult@(ok@, 1)', 'form_onclose@(dlg@, "on_close")', 'closes = 0', 'opened = 0', 'reentered = 0', 'inmodal = 0', 'r = -1', 'ticks2 = 0', 't1@ = timer@()', 'timer_interval@(t1@, 50)', 'timer_ontimer@(t1@, "on_t1")', 'timer_enabled@(t1@, 1)', 't3@ = timer@()', 'timer_interval@(t3@, 400)', 'timer_ontimer@(t3@, "on_t3")', 'timer_enabled@(t3@, 1)', 't2@ = timer@()', 'timer_interval@(t2@, 50)', 'timer_ontimer@(t2@, "on_t2")', 'timer_enabled@(t2@, 1)', 'app_run()', 'full$ = "cut"', 'if ticks2 >= 40 then full$ = "full"', 'println str$(r) + " " + str$(reentered) + " " + str$(closes) + " " + full$', 'end', 'function on_t1(s@)', '  if inmodal = 1 then', '    reentered = reentered + 1', '    return 0', '  end if', '  if opened = 0 then', '    opened = 1', '    inmodal = 1', '    r = form_showmodal(dlg@)', '    inmodal = 0', '  end if', '  return 0', 'end function', 'function on_t3(s@)', '  if inmodal = 1 then button_click@(ok@)', '  return 0', 'end function', 'function on_t2(s@)', '  ticks2 = ticks2 + 1', '  if ticks2 >= 40 and inmodal = 0 and opened = 1 then app_quit()', '  return 0', 'end function', 'function on_close(s@)', '  closes = closes + 1', '  return 0', 'end function')
+if (-not ($af[0] -and $af[1] -eq 0 -and $af[2] -eq '1 0 1 full')) {
+    $okAF = $false; Write-Host ("FAIL  AF:the modal in a loop: ended={0} exit={1}, want '1 0 1 full', got '{2}'" -f $af[0], $af[1], $af[2]) -ForegroundColor Red }
+$af = Invoke-AF 'afend' @('dlg@ = form@("AF end", 200, 100)', 't@ = timer@()', 'timer_interval@(t@, 200)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 'println "before"', 'r = form_showmodal(dlg@)', 'println "not reached"', 'end', 'function on_t(s@)', '  end', '  return 0', 'end function')
+if (-not ($af[0] -and $af[1] -eq 0 -and $af[2] -eq 'before')) {
+    $okAF = $false; Write-Host ("FAIL  AF:END inside a modal: ended={0} exit={1}, got '{2}'" -f $af[0], $af[1], $af[2]) -ForegroundColor Red }
+if ($okAF) { Write-Host 'PASS  AF:a modal in a real loop: no timer re-entry, OK does not end app_run, END ends the program' -ForegroundColor Green }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF) { exit 0 } else { exit 1 }

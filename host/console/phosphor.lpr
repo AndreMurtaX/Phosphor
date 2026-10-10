@@ -736,6 +736,64 @@ var
   GProgramPath: String = '';
   GProgramArgs: TStringArray = nil;
 
+{ THE COMMAND LINE, SPLIT THE WAY IT WAS WRITTEN (round 5, 2026-10-10).
+  On Windows a process receives ONE string, and every launcher that builds it --
+  Python's subprocess, .NET's ArgumentList, Go, Rust, MSYS bash -- encodes for
+  the Microsoft rules: \" is a literal quote, and 2n backslashes before a quote
+  stand for n. FPC's ParamStr (rtl/win/syswin.inc setup_arguments, which LazUTF8
+  copies) knows only the quote toggle, so `"C:\My Dir\\" tail` arrived with a
+  doubled backslash and `"say \"hi\""` as `say \hi\`, and seven arguments
+  could arrive as three -- at exit 0, while Linux got them right. Windows' own
+  splitter, CommandLineToArgvW, is the definition those launchers encode for,
+  so it is asked. Elsewhere the kernel hands over an argv already split. }
+var
+  GArgv: array of String;
+  GArgvRead: Boolean = False;
+
+{$IFDEF WINDOWS}
+function CommandLineToArgvW(lpCmdLine: PWideChar; out pNumArgs: Integer): PPWideChar;
+  stdcall; external 'shell32.dll';
+{$ENDIF}
+
+procedure ReadArgv;
+var
+  i: Integer;
+{$IFDEF WINDOWS}
+  n: Integer;
+  a: PPWideChar;
+{$ENDIF}
+begin
+  if GArgvRead then Exit;
+  GArgvRead := True;
+{$IFDEF WINDOWS}
+  a := CommandLineToArgvW(GetCommandLineW(), n);
+  if a <> nil then
+  begin
+    SetLength(GArgv, n);
+    for i := 0 to n - 1 do GArgv[i] := UTF8Encode(UnicodeString(a[i]));
+    LocalFree(HLOCAL(a));
+    Exit;
+  end;
+{$ENDIF}
+  SetLength(GArgv, ParamCount + 1);
+  for i := 0 to ParamCount do GArgv[i] := ParamStr(i);
+end;
+
+{ How many words follow the executable, and the I-th of them: ParamCount and
+  ParamStr, split by the rule above. }
+function ArgCount: Integer;
+begin
+  ReadArgv();
+  Result := Length(GArgv) - 1;
+end;
+
+function ArgStr(I: Integer): String;
+begin
+  ReadArgv();
+  if (I < 0) or (I >= Length(GArgv)) then Exit('');
+  Result := GArgv[I];
+end;
+
 procedure AddProgramArg(const AArg: String);
 begin
   SetLength(GProgramArgs, Length(GProgramArgs) + 1);
@@ -752,9 +810,14 @@ end;
   after it is the program's, dashes and all. }
 procedure RefuseUnknownOption(const AWho, AArg, AFile: String);
 begin
-  Writeln(StdErr, AWho, ': unknown option ', AArg);
-  Writeln(StdErr, '  to pass it to the program, put it after --:');
-  Writeln(StdErr, '  phosphor ', AFile, ' -- ', AArg);
+  { No command is composed for the reader to copy (round 5): the one this used to
+    print dropped the debug verb, the other options and the option's value, and
+    for a misspelt --sandbox it was exactly the unconfined run the refusal is
+    there to prevent. It names the options there are, and says how a word that
+    starts with "-" reaches the program. }
+  Writeln(StdErr, AWho, ': unknown option ', AArg, ' after ', AFile);
+  Writeln(StdErr, '  after the file, phosphor reads only --out, --sandbox, --no-console and --gui;');
+  Writeln(StdErr, '  a word meant for the program that starts with "-" goes after --');
   Halt(2);
 end;
 
@@ -4912,7 +4975,7 @@ var host: TConsoleHost; eng: TPhosphorEngine; line, i: Integer;
 begin
   GProgramPath := SelfExePath();
   GProgramArgs := nil;
-  for i := 1 to ParamCount do AddProgramArg(ParamStr(i));
+  for i := 1 to ArgCount() do AddProgramArg(ArgStr(i));
   host := TConsoleHost.Create('');
   eng := TPhosphorEngine.Create();
   BindSandbox(eng);   // '' = unbounded; a root that will not bind is fatal
@@ -5285,16 +5348,16 @@ begin
   // `phosphor debug [--port N] [--stop-at-entry] [--break N,N] <file.bas>`
   // With --port it speaks the Phosphor Debug Protocol to an editor listening on
   // loopback; without it, the terminal debugger below.
-  if (ParamCount >= 1) and (ParamStr(1) = 'debug') then
+  if (ArgCount() >= 1) and (ArgStr(1) = 'debug') then
   begin
     dbgPort := 0;
     dbgCount := 0;
     dbgEntrySaid := 0;
     dbgPath := '';
     i := 2;
-    while i <= ParamCount do
+    while i <= ArgCount() do
     begin
-      arg := ParamStr(i);
+      arg := ArgStr(i);
       { ONE VALUE PER FLAG, AND NO FLAG LOSES TO ANOTHER BY POSITION (round 2,
         2026-10-09). A second --break used to REPLACE the first list, a second
         --port the first port, and `--stop-at-entry --break 9` dropped the
@@ -5324,7 +5387,7 @@ begin
       else if arg = '--port' then
       begin
         Inc(i);
-        if i > ParamCount then
+        if i > ArgCount() then
         begin
           Writeln(StdErr, 'phosphor debug: --port needs a port number');
           Halt(2);
@@ -5334,30 +5397,32 @@ begin
           Writeln(StdErr, 'phosphor debug: --port is given twice; a session has one editor');
           Halt(2);
         end;
-        Val(ParamStr(i), dbgPort, dbgErr);
+        Val(ArgStr(i), dbgPort, dbgErr);
         if (dbgErr <> 0) or (dbgPort < 1) or (dbgPort > 65535) then
         begin
-          Writeln(StdErr, 'phosphor debug: --port wants 1..65535, got ', ParamStr(i));
+          Writeln(StdErr, 'phosphor debug: --port wants 1..65535, got ', ArgStr(i));
           Halt(2);
         end;
       end
       else if arg = '--break' then
       begin
         Inc(i);
-        if i > ParamCount then
+        if i > ArgCount() then
         begin
           Writeln(StdErr, 'phosphor debug: --break needs one or more line numbers');
           Halt(2);
         end;
-        if not ParseBreakList(ParamStr(i), dbgLines, dbgCount) then Halt(2);
+        if not ParseBreakList(ArgStr(i), dbgLines, dbgCount) then Halt(2);
       end
       else if (arg = '--') and (dbgPath <> '') then
       begin
         // the rest is the program's, whatever it looks like
         Inc(i);
-        while i <= ParamCount do begin AddProgramArg(ParamStr(i)); Inc(i); end;
+        while i <= ArgCount() do begin AddProgramArg(ArgStr(i)); Inc(i); end;
         Break;
       end
+      else if (dbgPath <> '') and (arg = '-') then
+        AddProgramArg(arg)
       else if (Length(arg) > 0) and (arg[1] = '-') then
       begin
         if dbgPath <> '' then RefuseUnknownOption('phosphor debug', arg, dbgPath);
@@ -5366,6 +5431,11 @@ begin
       end
       else if dbgPath = '' then
       begin
+        if arg = '' then
+        begin
+          Writeln(StdErr, 'phosphor debug: the program''s file name is empty');
+          Halt(2);
+        end;
         dbgPath := arg;
         GProgramPath := arg;
       end
@@ -5393,7 +5463,7 @@ begin
 
   // `phosphor compile [--check [--names <file>]] <in.bas> <out.pbc>` -- compile
   // to bytecode and stop.
-  if (ParamCount >= 1) and (ParamStr(1) = 'compile') then
+  if (ArgCount() >= 1) and (ArgStr(1) = 'compile') then
   begin
     packFlags := 0;   // reused as "--check was given"
     packArgs := 0;
@@ -5402,9 +5472,9 @@ begin
     namesPath := '';
     wantNames := False;
     namesGiven := False;
-    for i := 2 to ParamCount do
+    for i := 2 to ArgCount() do
     begin
-      arg := ParamStr(i);
+      arg := ArgStr(i);
       if wantNames then
       begin
         { REFUSED, NOT IGNORED (2026-10-08, third pass): `--names ""` used to be
@@ -5470,15 +5540,15 @@ begin
   // `phosphor pack [--no-console] <in.bas> <out.exe>` -- make a standalone
   // executable and stop. The flag is BAKED IN because a packed application ignores
   // its command line by design: the choice has to travel with the file.
-  if (ParamCount >= 1) and (ParamStr(1) = 'pack') then
+  if (ArgCount() >= 1) and (ArgStr(1) = 'pack') then
   begin
     packFlags := 0;
     packArgs := 0;
     packIn := '';
     packOut := '';
-    for i := 2 to ParamCount do
+    for i := 2 to ArgCount() do
     begin
-      arg := ParamStr(i);
+      arg := ArgStr(i);
       if arg = '--no-console' then
         packFlags := packFlags or PACK_FLAG_NOCONSOLE
       else
@@ -5516,9 +5586,9 @@ begin
   sandboxSeen := False;
   outSeen := False;
   i := 1;
-  while i <= ParamCount do
+  while i <= ArgCount() do
   begin
-    arg := ParamStr(i);
+    arg := ArgStr(i);
     { ONCE THE FILE IS NAMED, the rest of the line is the program's -- except
       this host's own run options, which scripts already write after the file
       (`phosphor run job.bas --out job.out`), and "--", which ends them. }
@@ -5527,18 +5597,41 @@ begin
       if arg = '--' then
       begin
         Inc(i);
-        while i <= ParamCount do begin AddProgramArg(ParamStr(i)); Inc(i); end;
+        while i <= ArgCount() do begin AddProgramArg(ArgStr(i)); Inc(i); end;
         Break;
       end;
       if (arg <> '--out') and (arg <> '--sandbox') and (arg <> '--no-console') and
          (arg <> '--gui') then
       begin
-        if (Length(arg) > 0) and (arg[1] = '-') then
+        // "-" alone is a word (the usual name for standard input), not an option
+        if (Length(arg) > 1) and (arg[1] = '-') then
           RefuseUnknownOption('phosphor', arg, filePath);
         AddProgramArg(arg);
         Inc(i);
         Continue;
       end;
+    end
+    else if arg = '--' then
+    begin
+      { BEFORE THE FILE, "--" ends this host's options too: the next word is the
+        file, whatever it starts with (`phosphor -- -x.bas`), and every word after
+        it is the program's. }
+      Inc(i);
+      if i > ArgCount() then
+      begin
+        Writeln(StdErr, 'phosphor: -- needs the program''s file after it');
+        Halt(2);
+      end;
+      if ArgStr(i) = '' then
+      begin
+        Writeln(StdErr, 'phosphor: the program''s file name is empty');
+        Halt(2);
+      end;
+      filePath := ArgStr(i);
+      GProgramPath := filePath;
+      Inc(i);
+      while i <= ArgCount() do begin AddProgramArg(ArgStr(i)); Inc(i); end;
+      Break;
     end;
     if (arg = '--version') or (arg = '-v') then
     begin
@@ -5549,10 +5642,11 @@ begin
     begin
       Writeln('usage: phosphor [run] <file.bas|file.pbc> [--out <path>] [args...]');
       Writeln('              everything after the file is the program''s: paramstr$(1..n)');
-      Writeln('              and paramcount() read it, paramstr$(0) is the file. An');
-      Writeln('              option of this host still works there; anything else that');
-      Writeln('              starts with "-" is refused unless it comes after --:');
-      Writeln('              phosphor app.bas -- --verbose');
+      Writeln('              and paramcount() read it, paramstr$(0) is the file. The run');
+      Writeln('              options --out, --sandbox, --no-console and --gui still work');
+      Writeln('              there; any other word that starts with "-" is refused unless');
+      Writeln('              it comes after --: phosphor app.bas -- --verbose');
+      Writeln('              (and phosphor -- -name.bas runs a file named like an option)');
       Writeln('       phosphor debug [--stop-at-entry] [--break N,N] <file.bas> [args...]');
       Writeln('              --break may be repeated and the lines add up; with');
       Writeln('              --stop-at-entry it stops on line one as well');
@@ -5614,13 +5708,14 @@ begin
       // launched from Explorer never flashes a console. It is a flag rather than
       // a default because a console is where PRINT goes, and a developer
       // debugging a windowed program wants it: the default keeps it.
-      // A PACKED application ignores its command line, so a program that wants
-      // this baked in calls crt_hideconsole() itself -- the same one rule.
+      // A PACKED application hands its whole command line to its program and
+      // reads none of these options, so a program that wants this baked in calls
+      // crt_hideconsole() itself -- the same one rule.
       GHideConsole := True
     else if arg = '--sandbox' then
     begin
       Inc(i);
-      if i > ParamCount then
+      if i > ArgCount() then
       begin
         Writeln(StdErr, 'phosphor: --sandbox needs a directory');
         Halt(2);
@@ -5638,7 +5733,7 @@ begin
         Halt(2);
       end;
       sandboxSeen := True;
-      GSandboxDir := ParamStr(i);
+      GSandboxDir := ArgStr(i);
       { RECORDED HERE, where the flag is actually seen. Whatever ParamStr gives
         back -- a directory, whitespace, or the empty string an unset shell
         variable expands to -- the operator asked to be confined, and BindSandbox
@@ -5648,7 +5743,7 @@ begin
     else if arg = '--out' then
     begin
       Inc(i);
-      if i > ParamCount then
+      if i > ArgCount() then
       begin
         Writeln(StdErr, 'phosphor: --out needs a path');
         Halt(2);
@@ -5661,7 +5756,7 @@ begin
         Halt(2);
       end;
       outSeen := True;
-      outPath := ParamStr(i);
+      outPath := ArgStr(i);
       { THE SAME SHAPE AS --sandbox ABOVE, ONE BRANCH DOWN, and it had the same
         hole: TConsoleHost.Create guards with `if AOutPath <> ''`, so '' is the
         encoding for "no --out was asked for" as well as what `--out "$LOG"`
@@ -5682,6 +5777,16 @@ begin
     begin
       // before the file there is no program yet to give it to
       Writeln(StdErr, 'phosphor: unknown option ', arg);
+      Writeln(StdErr, '  a file whose name starts with "-" goes after --: phosphor -- ', arg);
+      Halt(2);
+    end
+    else if arg = '' then
+    begin
+      { AN EMPTY FILE NAME IS REFUSED (round 5), as `--out ""` is: it is what an
+        unset shell variable expands to, and skipping it made the NEXT word the
+        program -- `phosphor "$APP" data.bas` ran data.bas -- or, alone, opened a
+        REPL that waits forever. }
+      Writeln(StdErr, 'phosphor: the program''s file name is empty');
       Halt(2);
     end
     else

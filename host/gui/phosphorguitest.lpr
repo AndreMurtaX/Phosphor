@@ -364,23 +364,26 @@ var
   GModalUnqueued: Integer = 0;
   GModalLeftOpen: Integer = 0;
 
-function TestShowModal(AVM: TObject; AForm: TCustomForm; AHandle: Int64): Integer;
+{ One round of a person's actions inside a modal form: the next queued
+  function, called with the form. PhosphorFormLib runs the session -- visible,
+  modal, CloseQuery and OnClose on an answer, a veto that keeps it open -- and
+  calls this again while the form is unanswered; each call takes the next
+  function, as a person tries again. With nothing queued: on the first round
+  the form was shown with nothing to act in it, on a later one it was left open
+  -- each counted, and the session answers 2. }
+function TestShowModal(AVM: TObject; AForm: TCustomForm; AHandle: Int64;
+  ARound: Integer): Boolean;
 var fn: String;
 begin
   if GModalHead >= Length(GModalFns) then
   begin
-    Inc(GModalUnqueued);
-    Exit(mrCancel);
+    if ARound = 1 then Inc(GModalUnqueued) else Inc(GModalLeftOpen);
+    Exit(False);
   end;
   fn := GModalFns[GModalHead];
   Inc(GModalHead);
   GuiCallBack(TPhosphorVM(AVM), fn, [ValHandle(AHandle)]);
-  Result := AForm.ModalResult;
-  if Result = mrNone then
-  begin
-    Inc(GModalLeftOpen);
-    Result := mrCancel;
-  end;
+  Result := True;
 end;
 
 { gui_test_modal(fn$) -- run fn$(form@) inside the next modal form; answers how

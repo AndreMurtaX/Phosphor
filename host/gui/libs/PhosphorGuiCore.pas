@@ -683,6 +683,26 @@ function GuiOtherFormShown(AExcept: TObject): Boolean;
 
 procedure GuiLeaveLoop;
 
+{ A MODAL SESSION'S OWN FREES (round 5, 2026-10-10). GuiFlushFrees runs only at
+  dispatch depth 0, and a modal opened from a handler never returns there until
+  it closes -- so every control a handler freed inside a long-lived dialog stayed
+  in memory, and charged to the GUI's ledger, until the dialog ended. A modal
+  session takes a MARK when it starts and, between its messages, frees what was
+  queued after the mark -- only that, and only when no handler is running inside
+  it, which is the same reasoning as GuiFlushFrees one level down: what was queued
+  before the session may be something the frame that opened it still stands on. }
+function GuiPendingMark: Integer;
+function GuiDispatchDepth: Integer;
+procedure GuiFlushFreesSince(AMark, ADepth: Integer);
+
+{ END IN A HANDLER ENDS EVERY MODAL SESSION TOO (round 5). GuiLeaveLoop sets the
+  flag app_run's loop reads, and LCL's ShowModal loop reads only ModalResult and
+  Application.Terminated -- so a program that said END while a modal form was up
+  waited for a person forever, its handlers refused by the halted VM. Each form
+  in a modal session is answered mrCancel, exactly what [X] would do. A modal
+  session run by a test hook asks the VM itself after every round. }
+procedure GuiEndModals;
+
 procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
 
 { BEFORE A TREE NODE OR A LIST ITEM IS FREED: every handle naming it -- and, for a
@@ -956,6 +976,36 @@ begin
   GPending[High(GPending)] := RegisterHandle(p);
 end;
 
+function GuiPendingMark: Integer;
+begin
+  Result := Length(GPending);
+end;
+
+function GuiDispatchDepth: Integer;
+begin
+  Result := GDispatchDepth;
+end;
+
+procedure GuiFlushFreesSince(AMark, ADepth: Integer);
+var
+  list: array of Int64;
+  i: Integer;
+begin
+  if (GDispatchDepth > ADepth) or (AMark < 0) or (Length(GPending) <= AMark) then Exit;
+  list := Copy(GPending, AMark, Length(GPending) - AMark);
+  SetLength(GPending, AMark);   // off the list first, as GuiFlushFrees does
+  for i := 0 to High(list) do
+    FreeHandle(list[i]);
+end;
+
+procedure GuiEndModals;
+var i: Integer;
+begin
+  for i := Screen.CustomFormCount - 1 downto 0 do
+    if fsModal in Screen.CustomForms[i].FormState then
+      Screen.CustomForms[i].ModalResult := mrCancel;
+end;
+
 procedure GuiFlushFrees;
 var
   list: array of Int64;
@@ -1033,7 +1083,10 @@ begin
     Leaving the message loop is exactly what has to happen here; ending the
     process is what happens next, on its own. }
   if AVM.Halted then
+  begin
     GuiLeaveLoop;
+    GuiEndModals;
+  end;
 end;
 
 function TGuiEventBridge.Call(const AArgs: array of TValue): TValue;

@@ -220,8 +220,8 @@ host IS known now check:
 console, which is where `PRINT` goes — useful while developing, unwanted in something
 you hand to someone. `phosphor --no-console <file.bas>` releases it at startup;
 `phosphor pack --no-console <in.pbc> <out>` **bakes the choice into the executable**,
-which is what a packed application needs because it ignores its command line by
-design; and `crt_hideconsole()` does the same from inside a program that decides for
+which is what a packed application needs because its whole command line belongs to
+its program, which reads no `phosphor` options; and `crt_hideconsole()` does the same from inside a program that decides for
 itself. Both refuse to touch a console **shared with a terminal**:
 run from a shell, they answer 0 and change nothing, because that window is the user's.
 Printing after releasing is safe — output that was a console goes to the null device,

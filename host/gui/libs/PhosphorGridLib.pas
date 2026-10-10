@@ -364,6 +364,18 @@ var c: TComponent; begin E := NoError; Result := A[0];
 function f_dg_fixedcols_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).FixedCols); end;
+{ A program's base-1 position as the grid's base-0 index, without the overflow:
+  ArgI32 saturates -3e9 to Low(Integer), and "- 1" wrapped that to High(Integer),
+  which the grid clamps to its LAST cell (round 5). Anything below the first
+  index becomes -1, which the grid clamps to the first scrollable one. }
+function GridIndex(const V: TValue): Integer;
+var n: Int64;
+begin
+  n := Int64(ArgI32(V)) - 1;
+  if n < -1 then n := -1;
+  Result := Integer(n);
+end;
+
 { Which cell has the cursor, base-1, so a handler can tell what it is drawing. }
 function f_dg_col_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
@@ -375,8 +387,8 @@ function f_dg_setcursor(const A: array of TValue; out E: TPhosphorError): TValue
 var c: TComponent; begin E := NoError; Result := A[0];
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then
   begin
-    TDrawGrid(c).Col := ArgI32(A[1]) - 1;
-    TDrawGrid(c).Row := ArgI32(A[2]) - 1;
+    TDrawGrid(c).Col := GridIndex(A[1]);
+    TDrawGrid(c).Row := GridIndex(A[2]);
   end; end;
 
 function f_grid(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -431,12 +443,21 @@ var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TStringGrid, c) t
 
 { The cursor of a string grid, base-1 -- the row a person picked. 0 for a bad
   handle. }
+{ 0 when the grid has no scrollable cell at all -- only a header, or nothing: the LCL still answers a Row then, the header's or one past the end,
+  which read like a record a person picked (round 5). }
 function f_sg_col_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
-  if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).Col + 1); end;
+  if GuiResolve(A[0].Hnd, TStringGrid, c) then
+    if (TStringGrid(c).ColCount > TStringGrid(c).FixedCols) and
+       (TStringGrid(c).RowCount > TStringGrid(c).FixedRows) then
+      Result := ValInt(TStringGrid(c).Col + 1); end;
 function f_sg_row_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
-  if GuiResolve(A[0].Hnd, TStringGrid, c) then Result := ValInt(TStringGrid(c).Row + 1); end;
+  if GuiResolve(A[0].Hnd, TStringGrid, c) then
+    if (TStringGrid(c).RowCount > TStringGrid(c).FixedRows) and
+       (TStringGrid(c).ColCount > TStringGrid(c).FixedCols) then
+      Result := ValInt(TStringGrid(c).Row + 1); end;
+
 { The same door as drawgrid_cursor@: the position is handed to the grid, which
   keeps the cursor inside its scrollable cells. Moving it fires OnSelection
   (SetRow -> MoveExtend -> MoveSelection), as a person's click would. }
@@ -444,8 +465,8 @@ function f_sg_setcursor(const A: array of TValue; out E: TPhosphorError): TValue
 var c: TComponent; begin E := NoError; Result := A[0];
   if GuiResolve(A[0].Hnd, TStringGrid, c) then
   begin
-    TStringGrid(c).Col := ArgI32(A[1]) - 1;
-    TStringGrid(c).Row := ArgI32(A[2]) - 1;
+    TStringGrid(c).Col := GridIndex(A[1]);
+    TStringGrid(c).Row := GridIndex(A[2]);
   end; end;
 { One column's width in pixels, base-1. ColWidths is an INDEXED property, which
   the property bridge cannot reach -- control_set@ names a property, not an

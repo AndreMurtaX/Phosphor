@@ -76,7 +76,7 @@ takes does not reveal how much of a guess was right.
 | `pbkdf2_sha256$(password$, salt$, iterations, bytes) → str` | PBKDF2-HMAC-SHA256 (RFC 8018) — the raw key derivation, `bytes` long, in hex (`2 * bytes` digits). `iterations` must be a whole number from 1 to 2147483647 and `bytes` one from 1 to 1024; anything else **raises**. Each 32 bytes of output costs the full iteration count again |
 | `password_hash$(password$) → str` | a new password record at the default cost of 600 000 rounds, with a fresh salt |
 | `password_hash$(password$, iterations) → str` | the same at the cost you choose, 1 to 2147483647; anything else raises. A low cost is for tests, not for storage |
-| `password_verify?(password$, record$) → bool` | `true` when `password$` is the password the record was made from. A record that is not one — empty, another algorithm, a missing field, a cost of 0 or past 2147483647, a hash that is not base64 — answers `false` and raises nothing: for a damaged record the honest answer to "is this the password?" is no |
+| `password_verify?(password$, record$) → bool` | `true` when `password$` is the password the record was made from. Only the record Django writes is a record: the cost in plain decimal with no leading zero, from 1 to 2147483647, a non-empty salt, and the hash as standard padded base64 of **exactly 32 bytes**, spelled exactly as encoding them spells it. Anything else — empty, another algorithm, a missing field, a short or long or unpadded hash — answers `false` and raises nothing: for a damaged record the honest answer to "is this the password?" is no. (Until round 5 a hash cut to one byte compared one byte, and said yes to one wrong password in 256) |
 | `crypto_equal?(a$, b$) → bool` | `true` when the two strings hold the same bytes. Its running time depends only on the lengths, never on where the first difference is — which a `=` that stops at the first mismatching byte leaks to someone timing many attempts. NUL is an ordinary byte |
 
 ## A worked example
@@ -108,7 +108,9 @@ println sha256$(body$)
   record is data — it may have come from a database someone else could write.
   Every PBKDF2 loop charges the [execution budget](../embedding.md) as it runs,
   so a host that set `MaxSteps` or `TimeoutMs` stops a record naming two billion
-  rounds within its own limit. With no budget installed, such a record takes as
+  rounds within its own limit — and the bytes are charged too, not only the
+  rounds: every 32 bytes of key hash the whole salt again, so a large salt is
+  asked for before it is hashed and refused when the budget cannot pay for it. With no budget installed, such a record takes as
   long as it says it will. The default cost fits comfortably inside the budget
   `embedding.md` prescribes (`MaxSteps = 1000000`) — twice, hash and verify.
 - **Why SHA-256 is written out in the engine.** Free Pascal 3.2.2's `hash`

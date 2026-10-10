@@ -846,7 +846,7 @@ against every input the same command reads: run's `--out` against the program;
 `compile`'s `.pbc` against the source and the `--names` file; `pack`'s
 executable against the `.pbc` and against the `phosphor` binary it copies as the
 stub (on Linux, rename(2) would replace the running interpreter with a packed
-application that ignores its command line). The test is the debugger's
+application, whose command line belongs to its program and not to `phosphor`). The test is the debugger's
 `SameSourceFile`: the expanded spelling, compared as the platform's filesystem
 compares names, and then the file's identity (volume and file index on Windows,
 device and inode on Unix), which is what a hard link or a symlink needs. An

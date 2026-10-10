@@ -1525,6 +1525,37 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · round 5: 34 survivors, 3 HIGH; the streak stays at 0.** Four
+  investigators on today's new surfaces (arguments, crypto, modal forms and the
+  grid, the contact manager), one skeptic per finding; 35 findings, 1 killed.
+  The three HIGH, each now pinned by a test seen failing on the old code:
+  - **Windows split a program's arguments by FPC's rules, not Microsoft's.**
+    `ParamStr` (rtl/win/syswin.inc, copied by LazUTF8) knows only the quote
+    toggle, so `\"` and a backslash before a closing quote mangled and MERGED
+    arguments, at exit 0, while Linux was right. The host now asks
+    `CommandLineToArgvW`, the definition every launcher encodes for. Lesson: I
+    tested arguments by typing them in bash and PowerShell, both of which
+    re-quote; the defect lives in what a launcher BUILDS. Test through a line
+    written verbatim (block AD's .cmd file) or through the launcher itself.
+  - **`password_verify?` compared only as many bytes as the stored hash had.**
+    A record cut to one byte said yes to one wrong password in 256. "Django's
+    format" was a claim about the WRITER; the reader has to hold every record to
+    it too, which means exactly 32 bytes and the canonical spelling.
+  - **PBKDF2 charged the rounds and not the bytes**, so a large salt over 32
+    blocks ran ~9x past TimeoutMs. A cost model that counts one dimension of the
+    work is a budget hole in the other -- check-budget cannot see this, because
+    the routine DOES call Budget*.
+  The GUI findings were mostly the test hook being less faithful than the thing
+  it stands in for: it ran a function and read the result, so onclosequery,
+  onclose, the veto, form_close@ and "already modal" were all untested under it.
+  The fix moved the session into PhosphorFormLib and made the hook act one round
+  at a time, so the runner exercises the same code a real run does. And one was
+  mine: `bin\phosphorguitest.exe` was left built from a MUTATED source after a
+  mutation test (I restored the file and did not rebuild); the runners rebuild,
+  so only a direct run of the binary was wrong -- rebuild after restoring, every
+  time. The contact manager's 14 were fixed by an agent with 44 reverted-fix
+  copies, every one failing at least one check.
+
 - **2026-10-10 · modal forms.** `form_showmodal(f@)` (AddHost), `form_modalresult@`
   / `form_modalresult` and `button_modalresult@` / `button_modalresult`. The
   design followed the dialogs': a modal blocks, so it goes through a hook a host

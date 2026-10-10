@@ -16,6 +16,14 @@ rem     and an ordinary button's is mrNone, so it leaves the form open;
 rem   - TCustomForm.ShowModal refuses a form that is already visible or
 rem     not enabled (RaiseShowModalImpossible, include/customform.inc);
 rem     the library answers that as every GUI refusal: 0, gui_error 1.
+rem   - ROUND 5 (2026-10-10): inside its session a modal form is VISIBLE
+rem     and modal (ShowModal: Include(fsModal); Show), so a second
+rem     form_showmodal of it is refused; TCustomForm.Close on a modal form
+rem     sets mrCancel (2); a non-zero result goes through CloseModal --
+rem     CloseQuery, then DoClose -- and a veto sets it back to 0, so the
+rem     form stays open for the next round (the next queued function, as a
+rem     person tries again). A form parented inside another is refused:
+rem     its buttons would answer the top form (GetParentForm).
 rem ---------------------------------------------------------------
 
 main@ = form@("main", 300, 200)
@@ -74,6 +82,41 @@ assert_eq(form_showmodal(dlg@), 1, "it answered normally")
 assert_eq(freed, 0, "control_free of it, from inside, answered 0")
 assert_eq(freeerr, 1, "and recorded gui_error 1")
 
+test_case("modal/inside its session the form is visible and already modal")
+gui_test_modal("look_inside")
+assert_eq(form_showmodal(dlg@), 1, "it answered 1")
+assert_eq(seenvisible, 1, "inside, form_visible answered 1")
+assert_eq(again, 0, "a second form_showmodal of it answered 0")
+assert_eq(againerr, 1, "and recorded gui_error 1")
+assert_eq(form_visible(dlg@), 0, "and it is hidden when the session ends")
+
+test_case("modal/form_close@ on a modal form answers 2")
+gui_test_modal("close_it")
+assert_eq(form_showmodal(dlg@), 2, "closing it answered 2 (mrCancel)")
+
+test_case("modal/onclosequery can veto an answer, and the next round goes on")
+vdlg@ = form@("Validating", 200, 100)
+vok@ = button@(vdlg@)
+button_modalresult@(vok@, 1)
+form_onclosequery@(vdlg@, "may_close?")
+form_onclose@(vdlg@, "on_vclose")
+allow? = false
+queries = 0
+closes = 0
+gui_test_modal("press_vok")
+gui_test_modal("allow_and_press_vok")
+assert_eq(form_showmodal(vdlg@), 1, "the second OK answered 1")
+assert_eq(queries, 2, "onclosequery was asked twice: once vetoing, once allowing")
+assert_eq(closes, 1, "onclose ran once, for the answer that closed it")
+assert_eq(afterveto, 0, "after the veto the result was back to 0")
+
+test_case("modal/a form inside another form is refused")
+inner@ = form@("Inner", 100, 60)
+control_parent@(inner@, main@)
+gui_clearerror()
+assert_eq(form_showmodal(inner@), 0, "a parented form answers 0")
+assert_eq(gui_error(), 1, "and records gui_error 1")
+
 test_case("modal/a form the LCL cannot make modal is refused, not raised")
 form_show@(main@)
 gui_clearerror()
@@ -126,6 +169,42 @@ endfunction
 
 function press_yes(f@)
   button_click@(yes@)
+  return 0
+endfunction
+
+function look_inside(f@)
+  seenvisible = form_visible(f@)
+  gui_clearerror()
+  again = form_showmodal(f@)
+  againerr = gui_error()
+  button_click@(ok@)
+  return 0
+endfunction
+
+function close_it(f@)
+  form_close@(f@)
+  return 0
+endfunction
+
+function may_close?(f@)
+  queries = queries + 1
+  return allow?
+endfunction
+
+function on_vclose(f@)
+  closes = closes + 1
+  return 0
+endfunction
+
+function press_vok(f@)
+  button_click@(vok@)
+  return 0
+endfunction
+
+function allow_and_press_vok(f@)
+  afterveto = form_modalresult(f@)
+  allow? = true
+  button_click@(vok@)
   return 0
 endfunction
 

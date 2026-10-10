@@ -1494,8 +1494,19 @@ begin
         'ok? = password_verify?("pw", "pbkdf2_sha256$2000000000$salt$' +
         'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")' + LF,
         0, 0, 100, True);
+  { THE SALT IS WORK TOO (round 5): each of the 32 blocks of a 1024-byte key
+    hashes the whole salt again, at ONE round -- so the rounds charge almost
+    nothing and an uncharged 4 MB salt ran the derivation ~9x past the clock. }
+  Check('a time ceiling stops pbkdf2_sha256$ over a large salt',
+        'k$ = pbkdf2_sha256$("pw", string$(4000000, 97), 1, 1024)' + LF,
+        0, 0, 100, True);
+  { 400000 steps = 102.4M units: enough to BUILD the salt (string$ charges
+    12 per byte, 48M), not enough to hash it 32 times (4M each). }
+  Check('a step ceiling refuses salt hashing past what is left',
+        'k$ = pbkdf2_sha256$("pw", string$(4000000, 97), 1, 1024)' + LF,
+        400000, 0, 0, True);
   Report(GetTickCount64() - CryptoStart < 10000,
-         'the three crypto ceilings stopped within seconds, not minutes');
+         'the crypto ceilings stopped within seconds, not minutes');
   // ...and the documented default fits inside the budget embedding.md prescribes.
   Check('password_hash$ at its default cost fits MaxSteps = 1000000',
         'r$ = password_hash$("pw")' + LF +

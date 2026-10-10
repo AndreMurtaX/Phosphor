@@ -360,9 +360,12 @@ begin
   Err := NoError();
   vm := TPhosphorVM(AVM);
   n := ArgI32(Args[0]);
-  if n = 0 then Exit(ValStr(vm.ProgramPath));
+  { UTF-8 on every system, by the rule environ$ keeps (round 5): Linux hands a
+    process raw bytes, and what is not a well-formed character comes back as
+    U+FFFD, one per maximal ill-formed subpart. }
+  if n = 0 then Exit(ValStr(Utf8Scrub(vm.ProgramPath)));
   if (n < 1) or (n > Length(vm.ProgramArgs)) then Exit(ValStr(''));
-  Result := ValStr(vm.ProgramArgs[n - 1]);
+  Result := ValStr(Utf8Scrub(vm.ProgramArgs[n - 1]));
 end;
 
 // --- separators -------------------------------------------------------------

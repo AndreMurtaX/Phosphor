@@ -307,9 +307,18 @@ begin
   Result := False;
   Key := '';
   blocks := (ABytes + 31) div 32;
+  { THE BYTES ARE WORK TOO, not only the rounds (round 5, 2026-10-10). Each
+    block hashes the whole salt once more, and the password is hashed once if it
+    is longer than a block -- and both are the caller's, or a stored record's.
+    They used to be charged nothing, so a megabyte salt over 32 blocks ran ~9x
+    past TimeoutMs before the first charge read the clock. Asked BEFORE the work,
+    one byte one unit (UnitsPerBlock per 64-byte block), so an oversized request
+    is refused rather than run. }
+  if not BudgetAllows(Length(Password)) then Exit;
   HmacPrepare(Password, k);
   for blk := 1 to blocks do
   begin
+    if not BudgetAllows(Int64(Length(Salt)) + 4) then Exit;
     first := Salt + Chr(Byte(blk shr 24)) + Chr(Byte(blk shr 16)) +
              Chr(Byte(blk shr 8)) + Chr(Byte(blk));
     HmacDigest(k, PByte(Pointer(first)), Length(first), u);
@@ -411,8 +420,19 @@ begin
 end;
 
 { Split a record into its four fields. False for anything that is not exactly
-  algorithm$iterations$salt$hash with a known algorithm, a positive count in
-  range, a non-empty salt and a hash that decodes. }
+  the record Django writes: algorithm$iterations$salt$hash, the count in plain
+  decimal with no leading zero, from 1 to 2147483647, a non-empty salt, and the
+  hash as standard padded base64 of exactly 32 bytes -- the field must be what
+  encoding those 32 bytes gives back, character for character.
+
+  ROUND 5 (2026-10-10). Any hash from 1 to 1024 bytes was accepted, and verify
+  derived and compared only that many bytes: a record whose hash had been cut to
+  one byte said yes to one wrong password in 256. Django re-encodes with
+  dklen=32 and compares the whole record, so a short hash never matches there,
+  and neither does a count written "01000" or a hash missing its "=". A record
+  that Django would refuse is refused here too, which is what "Django's format"
+  promises -- and a hash longer than 32 bytes no longer multiplies the cost the
+  record names by its number of blocks. }
 function ParseRecord(const Rec: String; out Iter: Int64; out Salt: String;
                      out Hash: RawByteString): Boolean;
 var
@@ -436,19 +456,21 @@ begin
   if Pos('$', rest) > 0 then Exit;
   parts[3] := rest;
   if parts[0] <> PasswordAlgorithm then Exit;
-  if (parts[1] = '') or (Length(parts[1]) > 10) then Exit;
+  if (parts[1] = '') or (Length(parts[1]) > 10) or (parts[1][1] = '0') then Exit;
   for i := 1 to Length(parts[1]) do
     if not (parts[1][i] in ['0'..'9']) then Exit;
   Val(parts[1], Iter, code);
   if (code <> 0) or (Iter < 1) or (Iter > High(Integer)) then Exit;
   if parts[2] = '' then Exit;
   Salt := parts[2];
+  if Length(parts[3]) <> 44 then Exit;     // 32 bytes, padded: 44 characters
   try
     Hash := DecodeStringBase64(parts[3], True);
   except
     Exit;
   end;
-  if (Length(Hash) < 1) or (Length(Hash) > MaxDerivedBytes) then Exit;
+  if Length(Hash) <> 32 then Exit;
+  if EncodeStringBase64(Hash) <> parts[3] then Exit;   // the canonical spelling only
   Result := True;
 end;
 
@@ -543,7 +565,7 @@ begin
   { A record that does not parse is simply not a match: the caller asked "is
     this the password", and for a damaged record the answer is no. }
   if not ParseRecord(Args[1].Str, iter, salt, want) then Exit;
-  if not Pbkdf2Sha256(Args[0].Str, salt, iter, Length(want), got) then
+  if not Pbkdf2Sha256(Args[0].Str, salt, iter, 32, got) then
   begin
     Err := BudgetRefusal('password_verify?');
     Exit;

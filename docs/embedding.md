@@ -643,9 +643,11 @@ outside all four of them.
   and no ceiling closes them. The GUI calls that touch a *file* ask the gate like
   everything else; opening a window is not a file.
 
-- **The machine around the script.** `environ$`, `paramstr$` and
-  `dir_getcurrent$` answer for the host's environment, command line and working
-  directory whether a root is set or not — reading them is not writing. The
+- **The machine around the script.** `environ$` and `dir_getcurrent$` answer for
+  the host's environment and working directory whether a root is set or not —
+  reading them is not writing. `paramstr$` answers the program's command line,
+  which is what the host put in `ProgramPath` and `ProgramArgs`
+  ([below](#the-programs-command-line)), never the host's own. The
   working directory matters twice over, because it is what a relative path is
   resolved against before it is judged.
 

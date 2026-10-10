@@ -1684,7 +1684,28 @@ if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, 'd1', '--d2', '2d2
     $okAD = $false; Write-Host ("FAIL  AD:under the debugger: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
 if ($okAD) { Write-Host 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused' -ForegroundColor Green }
 
+# --- AE: A REAL MODAL FORM ------------------------------------------------------
+# The twin of block AE in scripts/test.sh, whose comment carries the reason:
+# phosphor's own ShowModal, a real window and nested loop, answered from inside
+# it by a timer. Expected from the LCL: OK (button_modalresult@ 1) answers 1,
+# form_close@ on a modal form answers 2 (mrCancel), the typed text survives,
+# and the form is not left shown.
+$aeDir = Join-Path $tmp 'ae'
+New-Item -ItemType Directory -Force $aeDir | Out-Null
+$aeBas = Join-Path $aeDir 'modal.bas'
+[IO.File]::WriteAllText($aeBas, ((@('dlg@ = form@("Modal probe", 260, 120)', 'nm@ = edit@(dlg@)', 'ok@ = button@(dlg@)', 'button_modalresult@(ok@, 1)', 't@ = timer@()', 'timer_interval@(t@, 200)', 'timer_ontimer@(t@, "on_tick")', 'timer_enabled@(t@, 1)', 'mode = 1', 'r1 = form_showmodal(dlg@)', 'mode = 2', 'r2 = form_showmodal(dlg@)', 'timer_enabled@(t@, 0)', 'println str$(r1) + " " + str$(r2) + " " + edit_text$(nm@) + " " + str$(form_visible(dlg@))', 'end', 'function on_tick(s@)', '  if mode = 1 then', '    edit_text@(nm@, "typed")', '    button_click@(ok@)', '  else', '    form_close@(dlg@)', '  endif', '  return 0', 'endfunction') -join "`n") + "`n"), $utf8)
+$aeOut = Join-Path $aeDir 'modal.out'
+$aeP = Start-Process -FilePath $exe -ArgumentList "`"$aeBas`"" -PassThru -NoNewWindow -RedirectStandardOutput $aeOut -RedirectStandardError (Join-Path $aeDir 'modal.err')
+$null = $aeP.Handle
+$aeEnded = $aeP.WaitForExit(60000)
+if (-not $aeEnded) { $aeP.Kill() }
+$aeP.WaitForExit()
+$aeGot = ([IO.File]::ReadAllText($aeOut) -replace "`r", '').TrimEnd("`n")
+$okAE = $aeEnded -and ($aeP.ExitCode -eq 0) -and ($aeGot -eq '1 2 typed 0')
+if ($okAE) { Write-Host 'PASS  AE:a real modal form waits, runs its handlers inside, and answers 1 for OK and 2 for a close' -ForegroundColor Green }
+else { Write-Host ("FAIL  AE:a real modal form: ended={0} exit={1}, want '1 2 typed 0', got '{2}'" -f $aeEnded, $aeP.ExitCode, $aeGot) -ForegroundColor Red }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE) { exit 0 } else { exit 1 }

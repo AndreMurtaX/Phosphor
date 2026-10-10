@@ -134,7 +134,10 @@ fi
 # --- the ledger: a forgotten modal answer or a handler fault fails the run -----
 # The twin of the block in test-gui.ps1, which says why.
 timeout 60 "$exe" "$gui/ledger/forgot.bas" > "$out" 2> "$err"; lcode=$?
-if [ "$lcode" -eq 1 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 4')" ] &&
+if [ "$lcode" -eq 1 ] && [ "$(cat "$out")" = "$(printf 'passed: 1\nfailed: 7')" ] &&
+   grep -qF -- "modal form: 1 shown with no gui_test_modal function queued" "$err" &&
+   grep -qF -- "modal form: 1 gui_test_modal function(s) never used" "$err" &&
+   grep -qF -- "modal form: 1 left unanswered by its gui_test_modal function" "$err" &&
    grep -qF -- "modal: 1 dialog(s) asked with no answer queued" "$err" &&
    grep -qF -- "modal: 1 queued answer(s) never used" "$err" &&
    grep -qF -- "modal: 1 answer(s) taken by a different kind" "$err" &&

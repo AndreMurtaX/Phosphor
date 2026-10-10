@@ -17,6 +17,8 @@
     form_show@(f@)          -- realizes the window (interactive host)
     form_close@(f@)         form_visible(f@)
     form_onclose@(f@, name$)  form_onclosequery@(f@, "name?")
+    form_showmodal(f@)        -- shows it MODALLY: waits, answers its result
+    form_modalresult@(f@, n)  form_modalresult(f@)
 
   THE @ ON form_show@ IS PART OF THE NAME. This block advertised it as form_show
   for a while, from before the suffix rule settled that a built-in's return type is
@@ -38,6 +40,22 @@ uses
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorVM, PhosphorGuiCore;
 
 procedure RegisterFormFuncs(Reg: TPhosphorRegistry);
+
+type
+  { THE MODAL SEAM, for a host that must not wait. ShowModal runs a message loop
+    until the form's ModalResult is set -- by a button whose ModalResult is set,
+    by form_modalresult@, or by closing it -- and a headless test run that let it
+    would wait forever, exactly the reason PhosphorDialogLib's three hooks exist.
+    nil (the default) shows the form for real. A hook stands in for the WHOLE
+    modal session: it is handed the VM, the form and the form's handle, lets the
+    program act inside the form (host/gui/phosphorguitest.lpr calls a BASIC
+    function the test queued, which fills fields and clicks buttons), and answers
+    the result ShowModal would have. The form's ModalResult is 0 when it is called. }
+  TFormShowModalHook = function(AVM: TObject; AForm: TCustomForm;
+    AHandle: Int64): Integer;
+
+var
+  FormShowModalHook: TFormShowModalHook = nil;
 
 implementation
 
@@ -253,6 +271,67 @@ begin
   end;
 end;
 
+{ SHOW IT MODALLY: the program waits here, inside this call, until the form is
+  answered -- and the event handlers of the form's own controls run meanwhile, so
+  a dialog built from a form behaves as one does anywhere else. Answers the
+  ModalResult (the LCL's mr* values: 1 OK, 2 Cancel, 6 Yes, 7 No, ...); closing it
+  with [X] or form_close@ answers 2, which is what TCustomForm.Close sets on a
+  modal form. A form the LCL cannot make modal -- one already shown, disabled, or
+  already modal -- is refused as every GUI refusal is: 0 and gui_error 1, never
+  the EInvalidOperation ShowModal raises. The form stays alive while it is modal:
+  marked in use, so a handler's control_free of it is refused, like a closing
+  form's. It is not shown afterwards, and it can be shown modally again. }
+function f_form_showmodal(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent; f: TForm; r: Integer;
+begin
+  E := NoError; Result := ValInt(0);
+  if not GuiResolve(A[0].Hnd, TForm, c) then Exit;
+  f := TForm(c);
+  if f.Visible or (not f.Enabled) or (fsModal in f.FormState) then
+  begin
+    GGuiError := 1;
+    Exit;
+  end;
+  r := 0;
+  GuiEnterCallback(c);
+  try
+    try
+      if Assigned(FormShowModalHook) then
+      begin
+        f.ModalResult := mrNone;
+        r := FormShowModalHook(AVM, f, A[0].Hnd);
+      end
+      else
+        r := f.ShowModal;
+    except
+      on Ex: Exception do
+      begin
+        GGuiError := 1;
+        r := 0;
+      end;
+    end;
+  finally
+    GuiLeaveCallback(c);
+  end;
+  Result := ValInt(r);
+end;
+
+{ Answer a modal form: setting a non-zero result ends its modal session with that
+  value. On a form that is not modal it is only stored, which is what lets the
+  same OK handler serve a form shown either way. }
+function f_form_modalresult_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TForm, c) then TForm(c).ModalResult := ArgI32(A[1]);
+end;
+function f_form_modalresult_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TForm, c) then Result := ValInt(TForm(c).ModalResult);
+end;
+
 { True while the form is still visible: what a program reads after asking it to
   close, to see whether an OnCloseQuery handler vetoed. }
 function f_form_visible(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -278,6 +357,9 @@ begin
   Reg.Add('form_visible:@',   @f_form_visible);
   Reg.AddHost('form_onclose@:@$',      @f_form_onclose);
   Reg.AddHost('form_onclosequery@:@$', @f_form_onclosequery);
+  Reg.AddHost('form_showmodal:@', @f_form_showmodal);
+  Reg.Add('form_modalresult@:@n', @f_form_modalresult_set);
+  Reg.Add('form_modalresult:@',   @f_form_modalresult_get);
 end;
 
 end.

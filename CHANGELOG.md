@@ -13,6 +13,10 @@
   calls a handler when it moves, and `stringgrid_colwidth@` sizes one column.
   And **a double click** on any control:
   `control_ondblclick@`, with `control_dblclick@` to deliver one from code.
+- **Modal forms**: `form_showmodal(f@)` shows a form as a dialog and answers
+  its result once a button with `button_modalresult@` is pressed, a handler
+  calls `form_modalresult@`, or the form is closed (`2`). In the GUI test
+  runner a modal form is acted in by a function queued with `gui_test_modal`.
 - **A real application among the examples**:
   [examples/contact_manager.bas](examples/contact_manager.bas) keeps suppliers,
   customers, their contacts (social media, WhatsApp, the product lines they

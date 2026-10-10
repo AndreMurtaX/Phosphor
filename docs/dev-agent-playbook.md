@@ -1525,6 +1525,26 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · modal forms.** `form_showmodal(f@)` (AddHost), `form_modalresult@`
+  / `form_modalresult` and `button_modalresult@` / `button_modalresult`. The
+  design followed the dialogs': a modal blocks, so it goes through a hook a host
+  can answer -- `FormShowModalHook`, nil = the real ShowModal. What differs is
+  that a modal FORM is not a question with an answer but a place the program
+  works in, so the guitest hook runs a BASIC function queued with
+  `gui_test_modal(fn$)` INSIDE the form and answers the form's ModalResult when
+  it returns; its three ways to be wrong (nothing queued, a function never used,
+  one that left the form unanswered) joined the ledger, and
+  `tests/gui/ledger/forgot.bas` now provokes 7 failures, pinned in both runners.
+  The refusals come from reading `RaiseShowModalImpossible` (visible, disabled,
+  already modal) and are answered before the LCL can raise. Two proofs, because
+  the hook is not the real thing: `31_modal_form.bas` (23, seen failing with
+  the hook bypassed) and block AE of `scripts/test.{ps1,sh}` -- phosphor's own
+  ShowModal, a real nested loop, answered by a TIMER from inside it, which is
+  the hand a run with nobody at it has; it checks OK answers 1 and that
+  form_close@ on a really-modal form answers 2 (TCustomForm.Close sets mrCancel
+  only when fsModal is set, which the hook cannot fake). The contact manager's
+  password window is now a real modal dialog.
+
 - **2026-10-10 · `scripts/test-gui.sh` runs under a display of its own.** On the
   WSL clone it failed 1 run in 3 at `tests/gui/24_wave4.bas` ("and has it once
   focused -- expected 1, got 0"): with `DISPLAY=:0` (WSLg) it drew on the live

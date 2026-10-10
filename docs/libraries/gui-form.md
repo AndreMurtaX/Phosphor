@@ -1,6 +1,6 @@
-# gui-form — the window, and the two events that end it
+# gui-form — the window, the two events that end it, and the modal dialog
 
-`host/gui/libs/PhosphorFormLib.pas` · 12 functions · GUI package (the `phosphor`
+`host/gui/libs/PhosphorFormLib.pas` · 15 functions · GUI package (the `phosphor`
 host registers it only where a graphical session is reachable — always on Windows,
 `DISPLAY` or `WAYLAND_DISPLAY` on Unix. Where there is none, `form@()` is an
 ordinary catchable *no function form@* error and every non-GUI library still works)
@@ -57,7 +57,39 @@ it, with no window manager anywhere in the picture.
 | `form_close@(f@) → handle` | ask the form to close, along exactly the path the X button takes: `form_onclosequery@` first, then `form_onclose@`, then hide. Answers `f@` whether the close happened or was vetoed — ask `form_visible` which it was. Bad handle: nothing is asked |
 | `form_visible(f@) → num` | `1` while the form is still up, `0` once it has closed — and `0`, indistinguishably, for a handle that is not a live form |
 | `form_onclose@(f@, name$) → handle` | bind the BASIC routine named by `name$` to run when the form actually closes; it is called with one argument, `sender@`, the form's own handle. `""` unbinds it *and still leaves the terminator installed*, so the window keeps ending the program. Answers `f@`; a non-form handle sets `gui_error()` and binds nothing |
+| `form_showmodal(f@) → num` | show the form **modally**: the program waits inside this call — while the form's own buttons, edits and handlers keep working — until the form is answered, and then answers its result. A button with `button_modalresult@` set answers its value when pressed; `form_modalresult@` answers one from code; closing the form with **[X]** or `form_close@` answers `2`. The values are the LCL's: `1` OK, `2` Cancel, `3` Abort, `4` Retry, `5` Ignore, `6` Yes, `7` No. The form is hidden afterwards and can be shown modally again. It is held alive while it is modal (a `control_free` of it from a handler is refused with `gui_error()` 1). A form already shown, a disabled one, one that is already modal, or a handle that is not a form answers `0` with `gui_error()` 1 — never the exception the LCL raises. Called from an event handler it nests, as a dialog does; called before `app_run()` it runs its own loop, so a login window can come first |
+| `form_modalresult@(f@, n) → handle` | answer the modal form with `n`: a non-zero value ends its `form_showmodal` with that result. On a form that is not modal it is only stored, so one OK handler can serve a form shown either way. Answers `f@` |
+| `form_modalresult(f@) → num` | the result the form was last answered with — `0` until then, and on a bad handle |
 | `form_onclosequery@(f@, name$) → handle` | bind a routine that is asked *whether* the form may close; it takes the same single `sender@` argument. **Only an explicit boolean `false` vetoes** — so the routine's name must carry `?` (and the bound string must carry it too, the suffix being part of the name), because a handler that answers anything else, or falls off its end, cannot make a window impossible to close. `""` unbinds it entirely. Answers `f@` |
+
+### A dialog of your own
+
+```basic
+dlg@ = form@("Rename", 300, 130)
+name@ = edit@(dlg@)
+control_bounds@(name@, 12, 12, 270, 24)
+ok@ = button@(dlg@)
+button_caption@(ok@, "OK")
+control_bounds@(ok@, 120, 60, 75, 28)
+button_modalresult@(ok@, 1)            rem pressing OK answers 1
+cancel@ = button@(dlg@)
+button_caption@(cancel@, "Cancel")
+control_bounds@(cancel@, 205, 60, 75, 28)
+button_modalresult@(cancel@, 2)
+
+edit_text@(name@, "draft.txt")
+if form_showmodal(dlg@) = 1 then println "renamed to " + edit_text$(name@)
+```
+
+**In a test**, a modal form is never shown: `tests/gui`'s runner installs
+`FormShowModalHook` (exported by `PhosphorFormLib`, `nil` by default, which shows
+the form for real) and a test queues, with `gui_test_modal(fn$)`, a function that
+runs **inside** the next modal form with its handle — typing and pressing buttons as
+a person would. The form's result when it returns is what `form_showmodal`
+answers. A modal form shown with nothing queued, a function never used, or one
+that leaves its form unanswered fails the file. `tests/gui/31_modal_form.bas` is
+the example; block AE of `scripts/test.{ps1,sh}` shows a real one, answered by a
+timer from inside its loop.
 
 ## A worked example
 

@@ -135,6 +135,23 @@ var c: TComponent; begin Err := NoError; if GuiResolve(Args[0].Hnd, TSpeedButton
 function f_sb_onclick(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TComponent; begin Err := NoError; Result := Args[0]; if GuiResolve(Args[0].Hnd, TSpeedButton, c) then TSpeedButton(c).OnClick := GuiNotifyHandler(AVM, c, 'onclick', Args[1].Str, Args[0].Hnd); end;
 
+{ What pressing the button answers to a MODAL form it is on: TCustomButton.Click
+  sets the parent form's ModalResult to this value, which ends the form's modal
+  session (form_showmodal). 0 (mrNone, the default) leaves the form open, so an
+  ordinary button is unaffected. A bit button takes it too. }
+function f_button_modalresult_set(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TCustomButton, c) then TCustomButton(c).ModalResult := ArgI32(A[1]);
+end;
+function f_button_modalresult_get(const A: array of TValue; out E: TPhosphorError): TValue;
+var c: TComponent;
+begin
+  E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TCustomButton, c) then Result := ValInt(TCustomButton(c).ModalResult);
+end;
+
 procedure RegisterButtonFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('button@:@', @f_button);
@@ -142,6 +159,8 @@ begin
   Reg.Add('button_caption$:@',  @f_button_caption_get);
   Reg.Add('button_click@:@',     @f_button_click);
   Reg.AddHost('button_onclick@:@$', @f_button_onclick);
+  Reg.Add('button_modalresult@:@n', @f_button_modalresult_set);
+  Reg.Add('button_modalresult:@',   @f_button_modalresult_get);
 
   Reg.Add('bitbtn@:@', @f_bitbtn);
   Reg.Add('bitbtn_caption@:@$', @f_bb_caption_set); Reg.Add('bitbtn_caption$:@', @f_bb_caption_get);

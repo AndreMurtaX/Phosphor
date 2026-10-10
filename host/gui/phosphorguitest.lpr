@@ -29,7 +29,7 @@ uses
   Interfaces,   // the LCL widgetset (win32 / gtk2), selected at build time
   Forms, Clipbrd, LCLType, ExtCtrls, StdCtrls, ComCtrls, Controls, Dialogs, System.UITypes,
   SysUtils, Classes,
-  PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib,
+  PhosphorEngine, PhosphorValue, PhosphorErrors, PhosphorTestLib, PhosphorVM,
   PhosphorGuiCore, PhosphorControlLib, PhosphorFormLib, PhosphorButtonLib,
   PhosphorLabelLib, PhosphorEditLib, PhosphorChoiceLib,
   PhosphorContainerLib, PhosphorRangeLib, PhosphorMenuLib, PhosphorTimerLib,
@@ -346,6 +346,53 @@ begin
   Inc(GAnsHead);
 end;
 
+{ THE MODAL FORMS, ACTED IN (2026-10-10). A modal FORM is not a question with an
+  answer: the program works inside it -- fills its fields, presses its buttons --
+  while form_showmodal waits. So this runner installs PhosphorFormLib's
+  FormShowModalHook, and a test queues, with gui_test_modal(fn$), the name of a
+  BASIC function to run INSIDE the next modal form: it is called with the form's
+  handle, does what a person would, and the form's ModalResult when it returns is
+  what form_showmodal answers -- 1 when it clicked a button whose
+  button_modalresult@ is 1, the value it gave form_modalresult@, and so on. Like
+  the dialogs: a modal form with nothing queued is not shown, it is cancelled (2)
+  and counted, and a function left in the queue fails the file; so does one that
+  returned with the form still unanswered (ModalResult 0), which a person could
+  not have left that way -- it is counted, and answered 2. Test only. }
+var
+  GModalFns: array of String;
+  GModalHead: Integer = 0;
+  GModalUnqueued: Integer = 0;
+  GModalLeftOpen: Integer = 0;
+
+function TestShowModal(AVM: TObject; AForm: TCustomForm; AHandle: Int64): Integer;
+var fn: String;
+begin
+  if GModalHead >= Length(GModalFns) then
+  begin
+    Inc(GModalUnqueued);
+    Exit(mrCancel);
+  end;
+  fn := GModalFns[GModalHead];
+  Inc(GModalHead);
+  GuiCallBack(TPhosphorVM(AVM), fn, [ValHandle(AHandle)]);
+  Result := AForm.ModalResult;
+  if Result = mrNone then
+  begin
+    Inc(GModalLeftOpen);
+    Result := mrCancel;
+  end;
+end;
+
+{ gui_test_modal(fn$) -- run fn$(form@) inside the next modal form; answers how
+  many are queued. }
+function f_gui_test_modal(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  SetLength(GModalFns, Length(GModalFns) + 1);
+  GModalFns[High(GModalFns)] := Args[0].Str;
+  Result := ValInt(Length(GModalFns) - GModalHead);
+end;
+
 { THE LEDGER, read when a file ends: a modal asked with no answer queued, an
   answer nothing used, or an answer taken by the wrong kind of modal FAILS the
   run. The runner said a forgotten answer "fails on the count", and nothing read
@@ -374,6 +421,21 @@ begin
   begin
     Inc(AssertsFailed);
     Failures.Add(Format('modal: %d answer(s) taken by a different kind of dialog', [GMisrouted]));
+  end;
+  if GModalUnqueued > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('modal form: %d shown with no gui_test_modal function queued', [GModalUnqueued]));
+  end;
+  if Length(GModalFns) - GModalHead > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('modal form: %d gui_test_modal function(s) never used', [Length(GModalFns) - GModalHead]));
+  end;
+  if GModalLeftOpen > 0 then
+  begin
+    Inc(AssertsFailed);
+    Failures.Add(Format('modal form: %d left unanswered by its gui_test_modal function', [GModalLeftOpen]));
   end;
 end;
 
@@ -683,6 +745,7 @@ begin
     RegisterMiscFuncs(eng.Registry);
     eng.Registry.Add('gui_test_fire:@$', @f_gui_test_fire);   // test only; see above
     eng.Registry.Add('gui_test_answer:n$', @f_gui_test_answer);      // test only: the modals
+    eng.Registry.Add('gui_test_modal:$', @f_gui_test_modal);         // test only: modal forms
     eng.Registry.Add('gui_test_answer:n$$', @f_gui_test_answer_kind);
     eng.Registry.Add('gui_test_selection:@', @f_gui_test_selection);
     eng.Registry.Add('gui_test_acknowledge:', @f_gui_test_acknowledge);
@@ -691,6 +754,7 @@ begin
     eng.Registry.Add('gui_test_asked:', @f_gui_test_asked);
     eng.Registry.Add('gui_test_unanswered:', @f_gui_test_unanswered);
     DialogExecuteHook := @TestExecute;   // no dialog is ever shown in a test
+    FormShowModalHook := @TestShowModal;  // ...and no modal form either
     DialogMessageHook := @TestMessage;
     DialogInputHook := @TestInput;
     ResetTestState();

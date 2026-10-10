@@ -169,7 +169,7 @@ together still do not bound.
 
 **One binary, and it decides at startup.** `phosphor` links the LCL and asks a
 single question when it starts: is a graphical session reachable? If it is, it brings
-the widgetset up and registers the 434 LCL GUI functions alongside everything else; if
+the widgetset up and registers the 439 LCL GUI functions alongside everything else; if
 it is not, it registers none of them and is a plain console interpreter. A GUI program
 therefore needs no flag and no second file, and a `.bas` that never opens a window runs
 identically on a desktop, over a pipe, in CI and on a headless server.
@@ -194,7 +194,7 @@ a standalone GUI application — the stub is this same complete binary.
 **A function name is resolved when the program runs, not when it compiles** — and
 that is what makes a `.pbc` portable. Which functions exist is a *host's* decision:
 `phosphor` registers all 729 names counted above — it links every package — the
-package test runner adds the assertion library, and the GUI runner adds 434 more, as
+package test runner adds the assertion library, and the GUI runner adds 439 more, as
 does `phosphor` itself wherever a graphical session is reachable. No GUI name
 collides with a library name, so that is 1141 in one process. The compiler has no
 registry at all and cannot know which names will exist; the VM asks whichever host

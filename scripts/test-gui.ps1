@@ -210,14 +210,19 @@ if (-not $lEnded) { $lp.Kill() }
 $lp.WaitForExit()
 $lText = [IO.File]::ReadAllText($lOut)
 $lWhy = [IO.File]::ReadAllText($lErr)
-$okL = $lEnded -and ($lp.ExitCode -eq 1) -and ($lText -eq "passed: 1`nfailed: 4`n") -and
+$okL = $lEnded -and ($lp.ExitCode -eq 1) -and ($lText -eq "passed: 1`nfailed: 7`n") -and
+       ($lWhy -like '*modal form: 1 shown with no gui_test_modal function queued*') -and
+       ($lWhy -like '*modal form: 1 gui_test_modal function(s) never used*') -and
+       ($lWhy -like '*modal form: 1 left unanswered by its gui_test_modal function*') -and
        ($lWhy -like '*modal: 1 dialog(s) asked with no answer queued*') -and
        ($lWhy -like '*modal: 1 queued answer(s) never used*') -and
        ($lWhy -like '*modal: 1 answer(s) taken by a different kind*') -and
        ($lWhy -like '*handler: 1 event handler fault(s) no test acknowledged*on_fault*')
 # THE COUNTS ARE PINNED, each derived from forgot.bas's own lines: one msgbox
 # with nothing queued, one answer an input named and a msgbox took, one answer
-# never asked for, and two faults of which the file acknowledges one. Unpinned,
+# never asked for, and two faults of which the file acknowledges one -- and,
+# for modal forms, one shown with nothing queued, one function that left its
+# form unanswered, and one queued and never used: 4 + 3 = 7. Unpinned,
 # a gui_test_handler_faults() that never cleared the count still printed the
 # reason ("2 event handler fault(s)") and passed this block (2026-10-08, second
 # adversarial round).

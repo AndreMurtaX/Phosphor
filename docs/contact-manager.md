@@ -131,8 +131,9 @@ function on_company_save(sender@) local k
 endfunction
 ```
 
-Phosphor has no modal forms, so **Change my password** disables the main window
-while its own is open and enables it again when it closes.
+**Change my password** is a modal dialog: `form_showmodal` waits until it is
+answered, its **Change** button answers `1` with `form_modalresult@` once the
+new password is saved, and **Cancel** answers `2` through `button_modalresult@`.
 
 ### It tests itself
 
@@ -167,4 +168,6 @@ A real program finds what a test suite written by the same people does not:
   database can be named on the command line; the self-test and the demo stay
   environment switches, because `test-examples` sets them for a program it does
   not otherwise configure.
-- **Still open: there are no modal forms.**
+- **There were no modal forms**, so the password window first disabled the main
+  one by hand. `form_showmodal`, `form_modalresult@` and `button_modalresult@`
+  came from it.

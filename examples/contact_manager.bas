@@ -1705,15 +1705,15 @@ function on_user_delete(sender@) local id, s@
 endfunction
 
 rem ===============================================================
-rem  Change my password: a small window that keeps the main one
-rem  disabled while it is open (Phosphor has no modal forms of its own)
+rem  Change my password: a modal dialog. form_showmodal waits until
+rem  the dialog is answered -- Change answers 1 when the new password
+rem  was saved, Cancel (a button_modalresult@ of 2) or [X] answers 2.
 rem ===============================================================
 
 function build_password_form() local f@
   f@ = keep@("pw", form@(APP$ + " - change password", 340, 260))
   control_set@(f@, "Position", "poScreenCenter")
   control_set@(f@, "BorderStyle", "bsDialog")
-  form_onclose@(f@, "on_password_close")
   field@("pw.old", f@, 20, 12, 300, "Current password")
   control_set@(w@("pw.old"), "PasswordChar", 42)
   field@("pw.new", f@, 20, 60, 300, "New password")
@@ -1726,6 +1726,7 @@ function build_password_form() local f@
   control_set@(w@("pw.ok"), "Default", true)
   button_at@("pw.cancel", f@, 215, 200, 105, "Cancel", "on_password_cancel", 0)
   control_set@(w@("pw.cancel"), "Cancel", true)
+  button_modalresult@(w@("pw.cancel"), 2)
   return 0
 endfunction
 
@@ -1734,8 +1735,12 @@ function on_change_password(sender@)
   edit_text@(w@("pw.new"), "")
   edit_text@(w@("pw.confirm"), "")
   label_caption@(w@("pw.msg"), "")
-  control_enabled@(w@("main"), 0)
-  show(w@("pw"))
+  form_modalresult@(w@("pw"), 0)
+  rem The self-test drives the dialog's buttons itself, and form_showmodal
+  rem would wait for a person, so only a real run shows it.
+  if selftest? = false then
+    if form_showmodal(w@("pw")) = 1 then status("Your password was changed.")
+  endif
   return 0
 endfunction
 
@@ -1763,24 +1768,13 @@ function on_password_ok(sender@) local s@, rec$, n$
   sqlite_bindnum(s@, 2, user_id)
   if finish(s@, "change the password") <> 1 then return 0
   label_caption@(w@("pw.msg"), "")
-  close_password_form()
-  status("Your password was changed.")
+  rem Answering the dialog with 1 ends its form_showmodal.
+  form_modalresult@(w@("pw"), 1)
   return 0
 endfunction
 
 function on_password_cancel(sender@)
-  close_password_form()
-  return 0
-endfunction
-
-function close_password_form()
-  control_enabled@(w@("main"), 1)
-  hide(w@("pw"))
-  return 0
-endfunction
-
-function on_password_close(sender@)
-  control_enabled@(w@("main"), 1)
+  rem The button's modal result (2) answers the dialog; nothing else to do.
   return 0
 endfunction
 
@@ -2119,7 +2113,7 @@ function run_selftest() local path$, id, s@, n, rec$, csvpath$, text$
   check(label_caption$(w@("pw.msg")) = "The current password is wrong.", "changing a password asks for the current one")
   type_into("pw.old", "secret1")
   click("pw.ok")
-  check(control_enabled(w@("main")) = 1, "the main window is usable again after the change")
+  check(form_modalresult(w@("pw")) = 1, "the dialog is answered 1 once the password is changed")
   check(password_verify?("secret9", sqlite_scalar$(db@, "SELECT password FROM users WHERE id = 1")) = true, "the new password is the one kept")
 
   rem --- sign out, and an operator signs in ---

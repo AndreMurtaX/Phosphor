@@ -1246,4 +1246,46 @@ if adgot="$(printf 'c\n' | "$exe" debug "$adp" d1 -- --d2 2>/dev/null)"; then ad
 if [ "$okAD" -eq 0 ]; then echo 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused'
 else fail=1; fi
 
+# --- AE: A REAL MODAL FORM ------------------------------------------------------
+# tests/gui/31_modal_form.bas drives modal forms through the runner's hook, which
+# never shows one. This is the other half: phosphor's own ShowModal, a real
+# window and a real nested message loop, answered from INSIDE that loop by a
+# timer -- the only hand a run with nobody at it has. Expected, from the LCL:
+# OK's button_modalresult@ of 1 answers 1; form_close@ on a modal form sets
+# mrCancel, 2 (TCustomForm.Close, include/customform.inc); what the handler
+# typed is still in the form; and it is not left shown (0). Under xvfb-run, never
+# the live desktop, for the reason block X gives.
+printf '%s\n' 'dlg@ = form@("Modal probe", 260, 120)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'nm@ = edit@(dlg@)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'button_modalresult@(ok@, 1)' >> "$tmpdir/modal.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/modal.bas"
+printf '%s\n' 'timer_interval@(t@, 200)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_tick")' >> "$tmpdir/modal.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'mode = 1' >> "$tmpdir/modal.bas"
+printf '%s\n' 'r1 = form_showmodal(dlg@)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'mode = 2' >> "$tmpdir/modal.bas"
+printf '%s\n' 'r2 = form_showmodal(dlg@)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'timer_enabled@(t@, 0)' >> "$tmpdir/modal.bas"
+printf '%s\n' 'println str$(r1) + " " + str$(r2) + " " + edit_text$(nm@) + " " + str$(form_visible(dlg@))' >> "$tmpdir/modal.bas"
+printf '%s\n' 'end' >> "$tmpdir/modal.bas"
+printf '%s\n' 'function on_tick(s@)' >> "$tmpdir/modal.bas"
+printf '%s\n' '  if mode = 1 then' >> "$tmpdir/modal.bas"
+printf '%s\n' '    edit_text@(nm@, "typed")' >> "$tmpdir/modal.bas"
+printf '%s\n' '    button_click@(ok@)' >> "$tmpdir/modal.bas"
+printf '%s\n' '  else' >> "$tmpdir/modal.bas"
+printf '%s\n' '    form_close@(dlg@)' >> "$tmpdir/modal.bas"
+printf '%s\n' '  endif' >> "$tmpdir/modal.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/modal.bas"
+printf '%s\n' 'endfunction' >> "$tmpdir/modal.bas"
+if command -v xvfb-run > /dev/null 2>&1; then
+  if aegot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/modal.bas" < /dev/null 2>&1)"; then aecode=0; else aecode=$?; fi
+  if [ "$aecode" -eq 0 ] && [ "$(printf '%s' "$aegot" | tr -d '\r')" = "1 2 typed 0" ]; then
+    echo 'PASS  AE:a real modal form waits, runs its handlers inside, and answers 1 for OK and 2 for a close'
+  else echo "FAIL  AE:a real modal form: exit $aecode, want '1 2 typed 0', got '$aegot'"; fail=1; fi
+else
+  echo 'SKIP  AE:a real modal form (no xvfb-run on this machine)'
+fi
+
 exit "$fail"

@@ -1,6 +1,6 @@
 # gui-button — push, bitmap and speed buttons, and the click that reaches BASIC
 
-`host/gui/libs/PhosphorButtonLib.pas` · 18 functions · a GUI package, registered by
+`host/gui/libs/PhosphorButtonLib.pas` · 20 functions · a GUI package, registered by
 `phosphor` when a graphical session is reachable
 
 ## What it is for
@@ -54,6 +54,7 @@ as `gui_error()` = `2`.
 | `button_caption@(b@, s$) → handle` | sets the text and answers `b@`, so the next call can take it. On a handle that is not a button it changes nothing, still answers the handle, and records `1` — the return value is never a success flag |
 | `button_caption$(b@) → str` | the text. `""` both for a button whose caption is empty and for a handle that is not a button; `gui_error()` is what tells the two apart |
 | `button_click@(b@) → handle` | fires `OnClick` synchronously, right now, with no window shown and no message loop — the headless way to prove an event reaches its handler. With nothing bound, nothing happens and nothing is recorded. On a wrong handle nothing fires and `gui_error()` is `1`. Answers the button, like every other `@` in this library |
+| `button_modalresult@(b@, n) → handle` · `button_modalresult(b@) → num` | what pressing the button answers to the **modal** form it is on: the LCL's button click sets its form's result to `n`, which ends `form_showmodal` ([gui-form](gui-form.md)) — `1` for OK, `2` for Cancel. `0`, the default, leaves the form open, so an ordinary button is unaffected; on a form that is not modal the value is only stored. A bit button takes it too. A handle that is not a button: unchanged, `0`, `gui_error()` 1 |
 | `button_onclick@(b@, name$) → handle` | binds the click to the BASIC function `name$` and answers `b@`. `""` unwires it; binding again replaces the previous handler. A name that is not a function is accepted here and fails at the **first click**, as `gui_error()` `2` |
 
 ### Bitmap button — `TBitBtn`

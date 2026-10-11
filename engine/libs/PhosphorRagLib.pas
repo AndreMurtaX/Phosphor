@@ -120,6 +120,10 @@ type
     { Every function name of every document: what a pass over the index's
       names costs, for the callers that price one. }
     function FunctionTotal: Int64;
+    function TagTotal: Int64;
+    { The analysis of AQuery, asked of the budget before it is made: True =
+      charged, go ahead. Every door that analyses a query asks this. }
+    function AnalysisAllowed(const AQuery: String): Boolean;
     function RetrieveList(const AQuery: String; AMaxTokens: Integer): TRagResultArr;
     function GetDocument(const AId: String; out AFound: Boolean): String;
     function FindByFunctions(const AFuncs: String): TRagResultArr;
@@ -262,10 +266,13 @@ begin
 end;
 
 // Split "a, b, c" (or "[a, b, c]") into trimmed, non-empty parts.
+{ THE SLOTS GROW GEOMETRICALLY HERE TOO (round 8), as SplitChars' do. AddStr's
+  SetLength(n + 1) reallocates the array once per piece, and rag_tags$ hands
+  this a string the script chose; so does a document's header. }
 function SplitCSV(const S: String): TStrArr;
-var i, start: Integer; part, clean: String;
+var i, start: Integer; part, clean: String; b: TStrBuild;
 begin
-  Result := nil;
+  b := Default(TStrBuild);
   clean := Trim(S);
   if (clean <> '') and (clean[1] = '[') then clean := Copy(clean, 2, MaxInt);
   if (clean <> '') and (clean[Length(clean)] = ']') then clean := Copy(clean, 1, Length(clean) - 1);
@@ -274,9 +281,10 @@ begin
     if (i > Length(clean)) or (clean[i] = ',') then
     begin
       part := Trim(Copy(clean, start, i - start));
-      if part <> '' then AddStr(Result, part);
+      if part <> '' then SbAdd(b, part);
       start := i + 1;
     end;
+  Result := SbDone(b);
 end;
 
 // Split on any of the given single-char delimiters, dropping empties.
@@ -297,37 +305,66 @@ end;
 
 // Split into lines on LF, tolerating CRLF (a trailing CR is dropped).
 function SplitLinesLF(const S: String): TStrArr;
-var i, start: Integer; part: String;
+var i, start: Integer; part: String; b: TStrBuild;
 begin
-  Result := nil;
+  b := Default(TStrBuild);
   start := 1;
   for i := 1 to Length(S) + 1 do
     if (i > Length(S)) or (S[i] = #10) then
     begin
       part := Copy(S, start, i - start);
       if (part <> '') and (part[Length(part)] = #13) then SetLength(part, Length(part) - 1);
-      AddStr(Result, part);
+      SbAdd(b, part);
       start := i + 1;
     end;
+  Result := SbDone(b);
 end;
 
-function ReadFileText(const APath: String): String;
-var fs: TFileStream; len: Int64;
+{ CHARGED FOR WHAT IT READ (round 8). A rebuild read every document whole and a
+  retrieval read each one it picked, and neither charged a byte: a gigabyte
+  document in the folder was a gigabyte read inside one opCall, priced as one
+  step. The read is charged the moment it is made (a copy of the file, and the
+  scans and copies made of it afterwards -- the header split, the body after
+  it -- at COPY each); False = the budget is spent, and nothing read is handed
+  on. A missing or unreadable file reads as '' and costs nothing.
+
+  AND THE OPEN IS ITS OWN COST: the sweep (tests/probe_limits.lpr --prices)
+  measured a rebuild of 200 small documents at 78 us a document -- the sandbox
+  check, the open, the stat and the close -- against the one step (2 us) it was
+  charged. RagUnitsPerOpen is that open, on the clock scale. }
+const
+  RagUnitsPerOpen = 10240;   // 80 us * BudgetUnitsPerMsOfWork / 1000
+
+function ReadFileText(const APath: String; out AText: String): Boolean;
+var fs: TFileStream; len: Int64; opened: Boolean;
 begin
-  Result := '';
+  AText := '';
+  Result := True;
   if not SandboxAllows(APath, puRead) then Exit;
   if not FileExists(APath) then Exit;
+  opened := False;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+    opened := True;
     try
       len := fs.Size;
-      SetLength(Result, len);
-      if len > 0 then fs.ReadBuffer(Result[1], len);
+      SetLength(AText, len);
+      if len > 0 then fs.ReadBuffer(AText[1], len);
     finally
       fs.Free;
     end;
   except
-    Result := '';
+    AText := '';
+  end;
+  if opened and not BudgetCharge(RagUnitsPerOpen) then
+  begin
+    AText := '';
+    Exit(False);
+  end;
+  if not BudgetLinearAfter(Length(AText), 3 * BudgetMilliCopy) then
+  begin
+    AText := '';
+    Result := False;
   end;
 end;
 
@@ -360,13 +397,16 @@ begin
 end;
 
 // Parse the YAML-style front-matter of one markdown file into a document.
-function ParseHeader(const AFullPath: String): TRagDoc;
+{ ARefused: the budget stopped the read or the header's lines (each a few
+  trims, a lower-case and a compare, charged per line once they are counted). }
+function ParseHeader(const AFullPath: String; out ARefused: Boolean): TRagDoc;
 var content, header, line, key, value: String; lines: TStrArr;
     endMarker, colon, i: Integer;
 begin
   Result := Default(TRagDoc);
   Result.FullPath := AFullPath;
-  content := ReadFileText(AFullPath);
+  ARefused := not ReadFileText(AFullPath, content);
+  if ARefused then Exit;
   Result.SizeBytes := Length(content);
   Result.TokenEstimate := Result.SizeBytes div RAG_CHARS_PER_TOKEN;
 
@@ -384,6 +424,11 @@ begin
   if endMarker <= 0 then Exit;
   header := Copy(content, 4, endMarker - 4);
   lines := SplitLinesLF(header);
+  if not BudgetLinearAfter(Length(lines), 3 * BudgetMilliPiece) then
+  begin
+    ARefused := True;
+    Exit;
+  end;
 
   for i := 0 to High(lines) do
   begin
@@ -413,29 +458,47 @@ end;
 { A REBUILD READS EVERY .md IN A FOLDER AND PARSES ITS HEADER, inside one opCall,
   so a folder with a hundred thousand documents is a hundred thousand file opens
   that no execution ceiling in the VM can look at. RULE 2: charge per document.
-  FSpent says the index is PARTIAL, so rag_rebuild@ can report the peLimit rather
-  than hand back a silently short index. }
+  FSpent says the rebuild was refused, so rag_rebuild@ can report the peLimit.
+
+  AND A REFUSED REBUILD LEAVES THE INDEX AS IT WAS (round 8). The old index was
+  emptied first and the new one grown in place, so a refusal half way through
+  left half an index behind a call that reported a refusal. It is built aside
+  -- growing geometrically, not by one slot a document -- and swapped in only
+  when every document has been read and paid for. Each document is charged a
+  step for its open, and its bytes and header lines as they are read
+  (ReadFileText, ParseHeader). The folder's path is priced once, before the
+  walk: it is the script's, and the walk names it in every file it opens. }
 procedure TPhosphorRag.Rebuild;
-var sr: TSearchRec; base: String; doc: TRagDoc;
+var sr: TSearchRec; base: String; doc: TRagDoc; docs: array of TRagDoc; n: Integer;
+    refused: Boolean;
 begin
   FSpent := False;
-  SetLength(FDocs, 0);
-  if not SandboxAllows(FBasePath, puRead) then Exit;
-  if not DirectoryExists(FBasePath) then Exit;   // an empty/missing folder = no docs, not a fault
-  base := IncludeTrailingPathDelimiter(FBasePath);
-  if FindFirst(base + '*.md', faAnyFile, sr) = 0 then
+  if not BudgetLinear(Length(FBasePath), BudgetMilliOs) then begin FSpent := True; Exit; end;
+  docs := nil;
+  n := 0;
+  if SandboxAllows(FBasePath, puRead) and DirectoryExists(FBasePath) then
   begin
-    repeat
-      // A document costs a file open and a header parse: one step each.
-      if not BudgetCharge(BudgetUnitsPerStep) then begin FSpent := True; Break; end;
-      if (sr.Attr and faDirectory) <> 0 then Continue;
-      doc := ParseHeader(base + sr.Name);
-      if doc.Id = '' then Continue;
-      SetLength(FDocs, Length(FDocs) + 1);
-      FDocs[High(FDocs)] := doc;
-    until FindNext(sr) <> 0;
-    FindClose(sr);
+    base := IncludeTrailingPathDelimiter(FBasePath);
+    if FindFirst(base + '*.md', faAnyFile, sr) = 0 then
+    begin
+      repeat
+        // A document costs a file open and a header parse: one step each.
+        if not BudgetCharge(BudgetUnitsPerStep) then begin FSpent := True; Break; end;
+        if (sr.Attr and faDirectory) <> 0 then Continue;
+        doc := ParseHeader(base + sr.Name, refused);
+        if refused then begin FSpent := True; Break; end;
+        if doc.Id = '' then Continue;
+        if n >= Length(docs) then SetLength(docs, n * 2 + 16);
+        docs[n] := doc;
+        Inc(n);
+      until FindNext(sr) <> 0;
+      FindClose(sr);
+    end;
   end;
+  // An empty or missing folder is an empty index, not a fault.
+  if FSpent then Exit;
+  SetLength(docs, n);
+  FDocs := docs;
 end;
 
 function TPhosphorRag.DocumentCount: Integer;
@@ -449,6 +512,13 @@ var i: Integer;
 begin
   Result := 0;
   for i := 0 to High(FDocs) do Result := Result + Length(FDocs[i].Functions);
+end;
+
+function TPhosphorRag.TagTotal: Int64;
+var i: Integer;
+begin
+  Result := 0;
+  for i := 0 to High(FDocs) do Result := Result + Length(FDocs[i].Tags);
 end;
 
 function TPhosphorRag.FunctionCount: Integer;
@@ -475,7 +545,12 @@ function TPhosphorRag.LoadContent(ADocIdx: Integer): String;
 var raw: String; endMarker: Integer;
 begin
   if FDocs[ADocIdx].ContentLoaded then Exit(FDocs[ADocIdx].Content);
-  raw := ReadFileText(FDocs[ADocIdx].FullPath);
+  // A refused read is not cached: the next call reads (and pays) again.
+  if not ReadFileText(FDocs[ADocIdx].FullPath, raw) then
+  begin
+    FSpent := True;
+    Exit('');
+  end;
   if Copy(raw, 1, 3) = '---' then
   begin
     endMarker := PosEx('---', raw, 4);
@@ -759,7 +834,18 @@ function TPhosphorRag.ScoreDocument(ADocIdx: Integer; const AAn: TRagAnalysis): 
 var doc: TRagDoc; score: Double; tagHits, titleHits, funcHits, idHits, i, j: Integer;
     normTag, lowId, lowTitle, kw, lfn, ldf, stripped: String;
 begin
-  if not BudgetCharge(BudgetUnitsPerStep) then FSpent := True;
+  { A STEP A DOCUMENT WAS THE PRICE OF A FIXED QUERY (round 8). The signals below
+    compare every keyword with every tag, the title and the id, and every
+    function name of the query with every function of the document -- a few
+    lower-cases and a substring test each -- so a long query against a document
+    with many tags was the product, charged as one step. Charged as the product. }
+  if not BudgetLinear(Int64(Length(AAn.Keywords)) * (Length(FDocs[ADocIdx].Tags) + 2) +
+                      Int64(Length(AAn.FunctionNames)) * Length(FDocs[ADocIdx].Functions) + 1,
+                      2 * BudgetMilliNameItem) then
+  begin
+    FSpent := True;
+    Exit(0);
+  end;
   doc := FDocs[ADocIdx];
   score := 0;
   lowId := LowerCase(doc.Id);
@@ -885,6 +971,32 @@ begin
   end;
 end;
 
+{ PRICED BY THE QUERY AND THE INDEX (round 7), now that the analysis is linear:
+  a pass per query byte (measured, RagAnalyzeMilliPerByte), a substring test of
+  every library document's id against the query (DetectLibraryHints), and every
+  indexed function name lowered into a set once.
+
+  Measured after the dedup was made linear (-O2, no ceilings, three calls of a
+  query of n distinct words "w1 w2 ..."): n = 5000, 10000, 20000, 40000 cost
+  7.0, 6.5, 5.8, 5.5 us per query BYTE -- linear, and dominated by DetectIntent,
+  which scores every keyword against some 200 intent words. It was priced at the
+  densest such query, 9.5 us a byte; round 8's sweep measured a query of
+  ordinary words ("Hello World 42", 4 MB) at 2.3 us a byte, and 9.5 charged it
+  4.1 times over. Priced at 7.8 us (1000000 milli), between the two shapes.
+
+  AND rag_retrieve$ ANALYSES THE SAME QUERY THE SAME WAY, and asked nothing for
+  it (round 8: a 4 MB query cost 9.2 s, charged 0). Every door that analyses a
+  query asks here. }
+const
+  RagAnalyzeMilliPerByte = 1000000;
+
+function TPhosphorRag.AnalysisAllowed(const AQuery: String): Boolean;
+begin
+  Result := BudgetLinear(Length(AQuery), RagAnalyzeMilliPerByte) and
+            BudgetLinear(Int64(Length(AQuery)) * Length(FDocs), BudgetMilliScan) and
+            BudgetLinear(FunctionTotal, BudgetMilliNameItem);
+end;
+
 // Core retrieval: score, sort, fit to budget, load & truncate content.
 function TPhosphorRag.RetrieveList(const AQuery: String; AMaxTokens: Integer): TRagResultArr;
 var an: TRagAnalysis; budget, i, j, tokensUsed, docTokens, remaining, sel: Integer;
@@ -896,6 +1008,7 @@ begin
   FSpent := False;              // this retrieval's own verdict, not the last one's
   if AMaxTokens <= 0 then AMaxTokens := FMaxTokens;
   budget := AMaxTokens;
+  if not AnalysisAllowed(AQuery) then begin FSpent := True; Exit; end;
   an := AnalyzeQuery(AQuery);
 
   // Phase 1: score every document, keep those above the relevance floor.
@@ -903,6 +1016,7 @@ begin
   for i := 0 to High(FDocs) do
   begin
     td := ScoreDocument(i, an);
+    if FSpent then Exit(nil);     // refused: no half-scored answer
     if td >= RAG_MIN_RELEVANCE then
     begin
       SetLength(scoreIdx, Length(scoreIdx) + 1);
@@ -976,6 +1090,7 @@ end;
 function TPhosphorRag.GetDocument(const AId: String; out AFound: Boolean): String;
 var idx: Integer;
 begin
+  FSpent := False;           // LoadContent's read may set it; the caller reports
   idx := IndexOfId(AId);
   AFound := idx >= 0;
   if AFound then Result := LoadContent(idx)
@@ -984,66 +1099,107 @@ end;
 
 function TPhosphorRag.FindByFunctions(const AFuncs: String): TRagResultArr;
 var names: TStrArr; picked: array of Integer; k, i, j: Integer; res: TRagResult;
+    seen: array of Boolean; np: Integer;
+  { A document is picked once. This scanned every document picked so far, on
+    every match -- picked squared (round 8); a flag per document answers it. }
   function AlreadyPicked(AIdx: Integer): Boolean;
-  var m: Integer;
   begin
-    for m := 0 to High(picked) do if picked[m] = AIdx then Exit(True);
-    Result := False;
+    Result := seen[AIdx];
+  end;
+  procedure Pick(AIdx: Integer);
+  begin
+    seen[AIdx] := True;
+    if np >= Length(picked) then SetLength(picked, np * 2 + 16);
+    picked[np] := AIdx;
+    Inc(np);
   end;
 begin
   Result := nil;
-  SetLength(picked, 0);
+  FSpent := False;
+  picked := nil;
+  np := 0;
+  seen := nil;
+  SetLength(seen, Length(FDocs));
+  { PRICED BY WHAT IT COMPARES (round 8): it asked nothing at all. The split of
+    the script's list is charged for its bytes and the names it made; then
+    every name is compared with every indexed function -- two lower-cases and
+    a compare each -- and that product is asked for before the first. }
+  if not BudgetLinear(Length(AFuncs), BudgetMilliCopy) then begin FSpent := True; Exit; end;
   names := SplitChars(AFuncs, [',', ' ']);
+  if not (BudgetLinearAfter(Length(names), 2 * BudgetMilliPiece) and
+          BudgetLinear(Int64(Length(names)) * FunctionTotal, 2 * BudgetMilliNameItem)) then
+  begin
+    FSpent := True;
+    Exit;
+  end;
   for k := 0 to High(names) do
     for i := 0 to High(FDocs) do
       for j := 0 to High(FDocs[i].Functions) do
         if (LowerCase(FDocs[i].Functions[j]) = LowerCase(names[k])) and not AlreadyPicked(i) then
-        begin
-          SetLength(picked, Length(picked) + 1); picked[High(picked)] := i;
-        end;
-  for k := 0 to High(picked) do
+          Pick(i);
+  SetLength(Result, np);
+  for k := 0 to np - 1 do
   begin
     res := Default(TRagResult);
     res.DocIdx := picked[k];
     res.Score := 5.0;
     res.Content := LoadContent(picked[k]);
+    if FSpent then Exit(nil);
     res.Tokens := EstimateTokens(res.Content);
-    SetLength(Result, Length(Result) + 1);
-    Result[High(Result)] := res;
+    Result[k] := res;
   end;
 end;
 
 function TPhosphorRag.FindByTags(const ATags: String): TRagResultArr;
 var tags: TStrArr; picked: array of Integer; k, i, j: Integer; nt: String; res: TRagResult;
+    seen: array of Boolean; np: Integer;
+  { A document is picked once. This scanned every document picked so far, on
+    every match -- picked squared (round 8); a flag per document answers it. }
   function AlreadyPicked(AIdx: Integer): Boolean;
-  var m: Integer;
   begin
-    for m := 0 to High(picked) do if picked[m] = AIdx then Exit(True);
-    Result := False;
+    Result := seen[AIdx];
+  end;
+  procedure Pick(AIdx: Integer);
+  begin
+    seen[AIdx] := True;
+    if np >= Length(picked) then SetLength(picked, np * 2 + 16);
+    picked[np] := AIdx;
+    Inc(np);
   end;
 begin
   Result := nil;
-  SetLength(picked, 0);
+  FSpent := False;
+  picked := nil;
+  np := 0;
+  seen := nil;
+  SetLength(seen, Length(FDocs));
+  // Priced as FindByFunctions is: the split, then the product it compares.
+  if not BudgetLinear(Length(ATags), BudgetMilliCopy) then begin FSpent := True; Exit; end;
   tags := SplitCSV(ATags);
+  if not (BudgetLinearAfter(Length(tags), 4 * BudgetMilliPiece) and
+          BudgetLinear(Int64(Length(tags)) * TagTotal, 2 * BudgetMilliNameItem)) then
+  begin
+    FSpent := True;
+    Exit;
+  end;
   for k := 0 to High(tags) do
   begin
     nt := NormalizeTag(tags[k]);
     for i := 0 to High(FDocs) do
       for j := 0 to High(FDocs[i].Tags) do
         if (NormalizeTag(FDocs[i].Tags[j]) = nt) and not AlreadyPicked(i) then
-        begin
-          SetLength(picked, Length(picked) + 1); picked[High(picked)] := i;
-        end;
+          Pick(i);
   end;
-  for k := 0 to High(picked) do
+  SetLength(Result, np);
+  for k := 0 to np - 1 do
   begin
     res := Default(TRagResult);
     res.DocIdx := picked[k];
     res.Score := 3.0;
     res.Content := LoadContent(picked[k]);
+    if FSpent then Exit(nil);
     res.Tokens := EstimateTokens(res.Content);
-    SetLength(Result, Length(Result) + 1);
-    Result[High(Result)] := res;
+    Result[k] := res;
   end;
 end;
 
@@ -1286,6 +1442,7 @@ begin
             BudgetLinearOk('rag_doc$', Length(r.FDocs), BudgetMilliNameItem, Err)) then
       Exit(ValStr(''));
     Result := ValStr(r.GetDocument(Args[1].Str, found));
+    if r.FSpent then begin Err := BudgetRefusal('rag_doc$'); Result := ValStr(''); end;
   end
   else Result := ValStr('Error: invalid RAG handle');
 end;
@@ -1314,19 +1471,7 @@ begin
   else Result := ValStr('');
 end;
 
-{ PRICED BY THE QUERY AND THE INDEX (round 7), now that the analysis is linear:
-  a pass per query byte (measured, RagAnalyzeMilliPerByte), a substring test of
-  every library document's id against the query (DetectLibraryHints), and every
-  indexed function name lowered into a set once. }
-const
-  { Measured after the dedup was made linear (-O2, no ceilings, three calls of
-    a query of n distinct words "w1 w2 ..."): n = 5000, 10000, 20000, 40000 cost
-    7.0, 6.5, 5.8, 5.5 us per query BYTE -- linear, and dominated by DetectIntent,
-    which scores every keyword against some 200 intent words. The densest query
-    of distinct words packs one word into four bytes ("aa1 "), where the same
-    37 us a word is 9.25 us a byte: priced at 9.5 us, 1216000 milli-units. }
-  RagAnalyzeMilliPerByte = 1216000;
-
+{ PRICED BY THE QUERY AND THE INDEX: TPhosphorRag.AnalysisAllowed. }
 function t_rag_analyze(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag; q: String;
 begin
@@ -1334,9 +1479,7 @@ begin
   Result := ValStr('');
   if not AsRag(Args[0], r) then Exit;
   q := Args[1].Str;
-  if not (BudgetLinearOk('rag_analyze$', Length(q), RagAnalyzeMilliPerByte, Err) and
-          BudgetLinearOk('rag_analyze$', Int64(Length(q)) * Length(r.FDocs), BudgetMilliScan, Err) and
-          BudgetLinearOk('rag_analyze$', r.FunctionTotal, BudgetMilliNameItem, Err)) then Exit;
+  if not r.AnalysisAllowed(q) then begin Err := BudgetRefusal('rag_analyze$'); Exit; end;
   Result := ValStr(r.AnalyzeJson(q, Err));
   if IsError(Err) then Result := ValStr('');
 end;

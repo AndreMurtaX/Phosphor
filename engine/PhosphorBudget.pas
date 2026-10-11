@@ -274,18 +274,69 @@ const
     above: that one guards a quadratic and errs towards allowing; these guard
     passes whose whole cost is the price, so a price under the work is an
     overrun by exactly the shortfall. Over-charging costs little -- a legitimate
-    ucase$ of 3 MB is 0.2% of the documented allowance. *)
+    ucase$ of 3 MB is 0.2% of the documented allowance.
+
+    ROUND 8: THE TABLE IS HELD TO A MEASUREMENT, AND THE MEASUREMENT IS IN THE
+    TREE. Three functions charged from it had never been in it --
+    strings_delimitedtext$ cost 25-32 times its price, path_hasvalidfilenamechars
+    2.7 times, changefileext$ 2.2 -- and three families were charged at a rate
+    that was never theirs: the searches at one UNIT a byte (7.8 ns, 20-44 times
+    over), the splits at TEXT whatever the text's density (11-13 times over on
+    50-byte lines, so two loads of a 60 MB file were refused at 12% of the
+    allowance's real work), line$ the whole text for a walk that stops at its
+    line (800 times over). tests/probe_limits.lpr --prices now sets every
+    priced family's charge beside its wall time on megabyte arguments, and the
+    BOUND is: charged at least HALF of the cost on the measuring machine (an
+    overrun past a ceiling is at most 2x here, under 3x on hardware 50%
+    slower), at most FOUR times it (work charged at a quarter of the allowance
+    is never refused). The families round 8 added, each measured there:
+
+      ns/elt   function            family
+      2.0      instr, every byte a } a first-byte hit: the call that compares
+               first-byte hit      }   SEARCHHIT  2.0 ns ->  256
+      0.375    instr, 1000-byte    } a needle byte compared (CompareByte)
+               needle              }   SEARCHBYTE 0.375  ->   48
+      7.0      countstr, a match   } one PosEx re-entry per match, charged after
+                                       SEARCHCALL 7.0 ns ->  896
+     34        strings_text, dense } a piece split off a text: its string and
+     38        delimitedtext$      }   its slot     PIECE 34 ns  -> 4352
+      0.2      buffer_slice$,      } one Move into a fresh string, no walk
+      0.2      path_combine$       }   MOVE      0.375 ns ->   48
+      5.2      reverse$            } a walk with a Move per character
+                                       CHAR      5.5 ns  ->  704 (not yet
+                                       applied: see CpReverse)
+
+    and a search's own scan of its haystack is the RTL's IndexByte, BLOCK, not
+    SCAN. TEXT is left in the table and no longer used: a split counts its
+    pieces (a SCAN pass, charged before it is made) and is asked PIECE a piece
+    and COPY a byte.
+
+    TWO KINDS OF PRICE, STATED SO NOBODY "FIXES" ONE INTO THE OTHER. These are
+    TIME prices. A one-unit-a-byte charge on an ALLOCATION an argument sizes --
+    string$, space$, mulstring$, buffer_new@, a list's capacity, the bytes a
+    replacement adds to replacestr$, a separator multiplied by a join -- is a
+    SIZE guard: it refuses string$(1e18) before a byte is committed on a host
+    that set only one ceiling, and it is 8x a fresh byte's time on purpose. And
+    work whose cost the DATA decides tenfold -- deflate (gzip_compress$,
+    zip_compress, zip_close) -- is asked for the cheapest input's price up front
+    and then charged the wall time it took, as the HTTP package charges a wait. *)
   BudgetMilliBlock = 16;
   BudgetMilliScan = 80;
   BudgetMilliCopy = 128;
   BudgetMilliRewrite = 216;
   BudgetMilliNumber = 432;
-  BudgetMilliEncode = 408;
+  BudgetMilliEncode = 640;
   BudgetMilliOs = 1064;
   BudgetMilliItem = 1152;
   BudgetMilliNameItem = 4096;
   BudgetMilliText = 2080;
   BudgetMilliNode = 6720;
+  BudgetMilliSearchHit = 256;
+  BudgetMilliSearchByte = 48;
+  BudgetMilliSearchCall = 896;
+  BudgetMilliChar = 704;
+  BudgetMilliPiece = 4352;
+  BudgetMilliMove = 48;
 
 { Install the ceilings for one run. Both 0 = inert (see the header). Nests: an
   inner Begin/End pair leaves the outer one's ceilings in place. }
@@ -339,6 +390,12 @@ function BudgetSleep(AMs: Int64): Boolean;
 { Has the run's budget latched shut? Cheap; for a caller that must ask after the
   fact rather than before. }
 function BudgetSpent: Boolean;
+
+{ The units charged so far in this run (0 when no budget is installed). For a
+  MEASUREMENT, never a decision: tests/probe_limits.lpr --prices sets the price
+  of a call beside what the call actually costs, which is how the BudgetMilli*
+  table below is held to "measured" rather than to "written down once". }
+function BudgetUsed: Int64;
 
 { Milliseconds left on the run's clock; 0 when the host set no time ceiling. Never
   negative and never zero while time remains, so a caller can hand it straight to
@@ -444,9 +501,27 @@ function BudgetMeterEnd(var M: TBudgetMeter): Boolean;
   so without that a loop of refused searches would buy unbounded free scans of a
   large string. And with NO budget installed the price is never read, so it is
   not computed: the answer is 0 and no scan happens, leaving an unbudgeted host
-  exactly as fast as it was before this unit existed. }
+  exactly as fast as it was before this unit existed.
+
+  PRICED ON THE CLOCK SCALE SINCE ROUND 8. Every term above was ONE UNIT a byte,
+  which is 7.8 ns of work, while a first-byte scan costs a fraction of one: the
+  price sweep (tests/probe_limits.lpr --prices) measured instr, instrrev,
+  countstr and replacestr$ over 4 MB at 21 to 44 times what they cost, so a
+  program that searched a few megabytes a few hundred times was refused at a
+  twentieth of its allowance. The model keeps its shape and its terms are
+  priced by the BudgetMilliSearch* constants: a byte scanned, a first-byte hit
+  (the call to the comparison), and a needle byte compared. AHits, where it is
+  asked for, is the number of first-byte hits -- an upper bound on the matches,
+  which is what a replace sizes its answer by. }
 function BudgetSearchCost(const AHay, ANeedle: String;
                           ACaseless: Boolean = False): Int64;
+function BudgetSearchCostHits(const AHay, ANeedle: String; ACaseless: Boolean;
+                              out AHits: Int64): Int64;
+
+{ ACount elements at AMilliEach milli-units, in units, rounded up and saturating:
+  the conversion BudgetLinear uses, for a caller that adds several terms before
+  asking once. }
+function BudgetMilliUnits(ACount, AMilliEach: Int64): Int64;
 
 { RULE 3. Is APattern's worst case bounded work? False = it contains a
   construct that can backtrack exponentially, or one too large for the judge to
@@ -529,6 +604,12 @@ begin
   if (B > 0) and (A > High(Int64) - B) then Result := High(Int64)
   else if (B < 0) and (A < Low(Int64) - B) then Result := Low(Int64)
   else Result := A + B;
+end;
+
+function SatMulI(const A, B: Int64): Int64;
+begin
+  if (A <= 0) or (B <= 0) then Exit(0);
+  if A > High(Int64) div B then Result := High(Int64) else Result := A * B;
 end;
 
 function OutOfTime: Boolean;
@@ -680,27 +761,6 @@ begin
     if UpCase(AHay[i]) = want then Inc(Result);
 end;
 
-function BudgetSearchCost(const AHay, ANeedle: String;
-                          ACaseless: Boolean = False): Int64;
-begin
-  // No budget: nothing will read this, so do not pay for a scan to produce it.
-  if not GActive then Exit(0);
-  if (ANeedle = '') or (Length(ANeedle) > Length(AHay)) then
-    Exit(Int64(Length(AHay)));
-  // The counting pass, charged before it is made -- see the header.
-  if not BudgetCharge(Int64(Length(AHay))) then Exit(High(Int64));
-  Result := Int64(Length(AHay)) +
-            FirstByteHits(AHay, ANeedle[1], ACaseless,
-                          Length(AHay) - Length(ANeedle) + 1) *
-            Int64(Length(ANeedle));
-end;
-
-function BudgetAppend(ALen: Int64): Boolean;
-begin
-  if ALen < 0 then ALen := 0;
-  Result := BudgetCharge(ALen div BudgetBytesCopiedPerUnit);
-end;
-
 { Milli-units to units, rounded UP, and saturating: a count that came from a
   script can be large enough that the product would wrap back under the ceiling. }
 function MilliToUnits(ACount, AMilliEach: Int64): Int64;
@@ -708,6 +768,44 @@ begin
   if (ACount <= 0) or (AMilliEach <= 0) then Exit(0);
   if ACount > (High(Int64) - 999) div AMilliEach then Exit(High(Int64));
   Result := (ACount * AMilliEach + 999) div 1000;
+end;
+
+function BudgetMilliUnits(ACount, AMilliEach: Int64): Int64;
+begin
+  Result := MilliToUnits(ACount, AMilliEach);
+end;
+
+function BudgetSearchCostHits(const AHay, ANeedle: String; ACaseless: Boolean;
+                              out AHits: Int64): Int64;
+begin
+  AHits := 0;
+  // No budget: nothing will read this, so do not pay for a scan to produce it.
+  if not GActive then Exit(0);
+  { A caseless caller folds both sides through FoldText, which charges the fold
+    itself; ACaseless here only widens which bytes count as a first-byte hit. }
+  if (ANeedle = '') or (Length(ANeedle) > Length(AHay)) then
+    Exit(MilliToUnits(Length(AHay), BudgetMilliScan));
+  // The counting pass, charged before it is made -- see the header.
+  if not BudgetCharge(MilliToUnits(Length(AHay), BudgetMilliScan)) then Exit(High(Int64));
+  AHits := FirstByteHits(AHay, ANeedle[1], ACaseless, Length(AHay) - Length(ANeedle) + 1);
+  { The search's own pass is the RTL's first-byte scan (IndexByte): a BLOCK
+    rate, not the SCAN rate of a Pascal byte loop like the count above. }
+  Result := AddSat(AddSat(MilliToUnits(Length(AHay), BudgetMilliBlock),
+                          MilliToUnits(AHits, BudgetMilliSearchHit)),
+                   MilliToUnits(SatMulI(AHits, Length(ANeedle)), BudgetMilliSearchByte));
+end;
+
+function BudgetSearchCost(const AHay, ANeedle: String;
+                          ACaseless: Boolean = False): Int64;
+var hits: Int64;
+begin
+  Result := BudgetSearchCostHits(AHay, ANeedle, ACaseless, hits);
+end;
+
+function BudgetAppend(ALen: Int64): Boolean;
+begin
+  if ALen < 0 then ALen := 0;
+  Result := BudgetCharge(ALen div BudgetBytesCopiedPerUnit);
 end;
 
 function BudgetLinear(ACount, AMilliEach: Int64): Boolean;
@@ -765,6 +863,11 @@ end;
 function BudgetSpent: Boolean;
 begin
   Result := GActive and GSpent;
+end;
+
+function BudgetUsed: Int64;
+begin
+  if GActive then Result := GUnits else Result := 0;
 end;
 
 function BudgetRemainingMs: Int64;

@@ -44,7 +44,7 @@ only, never its subfolders.
 | function | what it answers |
 | --- | --- |
 | `rag@(basepath$) → handle` | a new, empty index over that folder. Always a handle, even for a folder that does not exist — nothing is read yet, so nothing can fail yet |
-| `rag_rebuild@(idx@) → handle` | scans `basepath$` for top-level `*.md`, parses each header, and replaces whatever was indexed before; answers **the same handle back**, so calls chain. A missing, denied or empty folder leaves zero documents and no error. A bad handle is handed straight back unread, with `rag_error()` at `1` |
+| `rag_rebuild@(idx@) → handle` | scans `basepath$` for top-level `*.md`, parses each header, and replaces whatever was indexed before; answers **the same handle back**, so calls chain. A missing, denied or empty folder leaves zero documents and no error. A bad handle is handed straight back unread, with `rag_error()` at `1`. Under a host's execution budget each document is charged for its open and its bytes, and a rebuild the budget refuses is a catchable limit error that leaves the **previous** index in place |
 | `rag_free(idx@) → num` | releases the index and its cached document text: `1` when it did, `0` when the handle was not a live index (already freed, or fabricated) — and `rag_error()` is `1` in that case |
 | `rag_count(idx@) → num` | how many documents the last rebuild indexed. `0` before any rebuild, `0` for an empty folder, `0` for a bad handle — `rag_error()` separates the last case from the first two |
 | `rag_funccount(idx@) → num` | how many distinct function names, compared case-insensitively, the indexed headers declare between them. `0` when no header names any, and `0` for a bad handle |

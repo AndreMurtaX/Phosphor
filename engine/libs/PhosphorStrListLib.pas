@@ -71,13 +71,14 @@ type
     function TextStr: String;                            // honours LineBreak/TrailingLineBreak
     procedure SetCommaText(const S: String);
     function CommaTextStr: String;
-    function GetDelimitedText: String;                   // honours Delimiter/QuoteChar
+    function GetDelimitedText(out AText: String): Boolean; // honours Delimiter/QuoteChar; False = refused
     procedure SetDelimitedText(const S: String);
+    function FieldBound(const S: String): Int64;         // at least the fields S splits into
     function IndexOf(const S: String): Integer;          // 0-based, -1 absent
     function Find(const S: String): Integer;             // binary search; needs a sorted list
-    function IndexOfName(const AName: String): Integer;  // 0-based, -1 absent
-    function ValueOf(const AName: String): String;
-    procedure SetValue(const AName, AValue: String);
+    function IndexOfName(const AName: String; out AIdx: Integer): Boolean; // AIdx 0-based, -1 absent; False = refused
+    function ValueOf(const AName: String; out AValue: String): Boolean;   // False = refused
+    function SetValue(const AName, AValue: String): Boolean;             // False = refused, list unchanged
     function NameAt(AZero: Integer): String;
     function ValueAt(AZero: Integer): String;
     procedure SetValueAt(AZero: Integer; const AValue: String);
@@ -232,15 +233,23 @@ end;
   still CHARGED per comparison (RULE 2), because n log n over an arbitrarily long
   list is still not O(1), and a sort that gives up must say so rather than hand
   back a half-ordered list: Sort answers False and t_strings_sort reports it. }
+{ AND A SORT THE BUDGET STOPS LEAVES THE LIST AS IT WAS (round 8). Each pass
+  used to be copied back into Items as it finished, so a refusal half way left a
+  permutation that was neither the input nor its sort -- and t_strings_sorted
+  had already set the flag. The passes now alternate between two private copies
+  (swapping the arrays is O(1)) and the result is written back only when the
+  last comparison has been paid for. }
 function TPhosphorStringList.Sort: Boolean;
 var
-  buf: array of String;
+  src, dst, tmp: array of String;
   width, lo, mid, hi, i, j, k: Integer;
   charged: Int64;
 begin
   Result := True;
   if Count < 2 then Exit;
-  SetLength(buf, Count);
+  SetLength(src, Count);
+  for i := 0 to Count - 1 do src[i] := Items[i];
+  SetLength(dst, Count);
   charged := 0;
   width := 1;
   while width < Count do
@@ -257,10 +266,10 @@ begin
       begin
         // <= keeps it STABLE: an equal left element goes first, exactly as the
         // insertion sort's `> 0` test did.
-        if (j >= hi) or ((i < mid) and (CompareStr(Items[i], Items[j]) <= 0)) then
-        begin buf[k] := Items[i]; Inc(i); end
+        if (j >= hi) or ((i < mid) and (CompareStr(src[i], src[j]) <= 0)) then
+        begin dst[k] := src[i]; Inc(i); end
         else
-        begin buf[k] := Items[j]; Inc(j); end;
+        begin dst[k] := src[j]; Inc(j); end;
         Inc(k);
         Inc(charged);
         if charged >= BudgetClockEvery then
@@ -272,11 +281,12 @@ begin
       lo := hi;
       if hi >= Count then Break;
     end;
-    for i := 0 to Count - 1 do Items[i] := buf[i];
+    tmp := src; src := dst; dst := tmp;
     if width > Count div 2 then Break;
     width := width * 2;
   end;
-  if charged > 0 then Result := BudgetCharge(charged);
+  if (charged > 0) and not BudgetCharge(charged) then Exit(False);
+  for i := 0 to Count - 1 do Items[i] := src[i];
 end;
 
 procedure TPhosphorStringList.SetText(const S: String);
@@ -343,7 +353,15 @@ begin
     total := total + Length(Items[i]);
     if (i < Count - 1) or ATrailing then total := total + Length(ASep);
   end;
-  if not BudgetAllows(total) then Exit(False);
+  { ASKED ON THE CLOCK SCALE (round 8): a step per item and a scan's worth per
+    byte moved. It was one unit a byte -- the allocation rate -- and the round-8
+    sweep measured a list of 50-byte lines at 13 times its cost. The separator is
+    the one part that is not already in the list: n items times a long
+    separator are bytes no argument holds, so every separator byte past the
+    first is charged as an allocation, one unit each, as RunOf charges a run. }
+  if not BudgetAllows(BudgetMilliUnits(Count, 2 * BudgetMilliItem) +
+                      BudgetMilliUnits(total, BudgetMilliScan) +
+                      Int64(Count) * (Length(ASep) - Ord(Length(ASep) > 0))) then Exit(False);
   SetLength(AText, total);
   at := 1;
   for i := 0 to Count - 1 do
@@ -387,48 +405,71 @@ end;
 { Join with Delimiter, quoting a field (with QuoteChar, doubling embedded quotes)
   when it is empty, holds the delimiter or a quote, or -- unless StrictDelimiter
   -- holds whitespace. This is the render half of TStrings.DelimitedText. }
-function TPhosphorStringList.GetDelimitedText: String;
-var i: Integer; f: String;
-
-  function NeedsQuote(const s: String): Boolean;
-  var j: Integer;
-  begin
-    if s = '' then Exit(True);
-    for j := 1 to Length(s) do
-      if (s[j] = Delimiter) or (s[j] = QuoteChar) or
-         ((not StrictDelimiter) and (s[j] <= ' ')) then
-        Exit(True);
-    Result := False;
-  end;
-
+{ MEASURED, THEN SIZED ONCE (round 8). This appended each field to the answer,
+  through a StringReplace that allocated a fresh copy of it, and charged
+  ITEM + bytes * REWRITE -- about 19 ns a field -- for about 475 ns of work:
+  under MaxSteps 1000000 alone a loop of it ran 36 s on Windows and 71 s on
+  Linux before the step budget stopped it. Now it is JoinInto's shape: one scan
+  of each field says whether it needs quotes and how many quotes it doubles
+  (charged per field and per byte as it goes), the answer's size is then known
+  and asked for whole (RULE 1), and every byte is moved once. The bytes are the
+  ones the append wrote. }
+function TPhosphorStringList.GetDelimitedText(out AText: String): Boolean;
 var
-  dl, q: String;
+  i, j, at: Integer;
+  total, quotes: Int64;
+  need: array of Boolean;
   m: TBudgetMeter;
+  s: String;
 begin
-  // Delimiter and QuoteChar are Chars, and every use of them here -- appended, and
-  // handed to StringReplace -- converted them through this unit's code page, so a
-  // non-ASCII delimiter came out as '?' and the delimitedtext round trip broke.
-  // Taken as one-character STRINGS once, they travel as bytes.
-  dl := StringOfChar(Delimiter, 1);
-  q := StringOfChar(QuoteChar, 1);
-  Result := '';
+  AText := '';
+  Result := True;
+  if Count <= 0 then Exit;
+  SetLength(need, Count);
+  total := Count - 1;                 // the delimiters between fields
   BudgetMeterStart(m);
   for i := 0 to Count - 1 do
   begin
-    { Each field is scanned for a character that needs quoting, maybe rewritten
-      with its quotes doubled, and appended. Charged as it goes; a spent budget
-      stops the render, and the caller reports it (BudgetSpent). }
-    if m.On and not BudgetMeterAdd(m, BudgetMilliItem +
-                                      Int64(Length(Items[i])) * BudgetMilliRewrite) then
-      Exit('');
-    if i > 0 then Result := Result + dl;
-    f := Items[i];
-    if NeedsQuote(f) then
-      Result := Result + q + StringReplace(f, q, q + q, [rfReplaceAll]) + q
-    else
-      Result := Result + f;
+    s := Items[i];
+    if m.On and not BudgetMeterAdd(m, BudgetMilliPiece + Int64(Length(s)) * BudgetMilliScan) then
+      Exit(False);
+    quotes := 0;
+    need[i] := s = '';
+    for j := 1 to Length(s) do
+    begin
+      if s[j] = QuoteChar then Inc(quotes);
+      if (s[j] = Delimiter) or (s[j] = QuoteChar) or
+         ((not StrictDelimiter) and (s[j] <= ' ')) then
+        need[i] := True;
+    end;
+    total := total + Length(s);
+    if need[i] then total := total + 2 + quotes;
   end;
-  if not BudgetMeterEnd(m) then Result := '';
+  if not BudgetMeterEnd(m) then Exit(False);
+  if not BudgetLinear(total, BudgetMilliCopy) then Exit(False);
+  // Delimiter and QuoteChar are Chars, written here as single BYTES of the
+  // answer -- never concatenated through this unit's code page, which turned a
+  // non-ASCII delimiter into '?' and broke the round trip.
+  SetLength(AText, total);
+  at := 1;
+  for i := 0 to Count - 1 do
+  begin
+    if i > 0 then begin AText[at] := Delimiter; Inc(at); end;
+    s := Items[i];
+    if not need[i] then
+    begin
+      if Length(s) > 0 then Move(s[1], AText[at], Length(s));
+      Inc(at, Length(s));
+      Continue;
+    end;
+    AText[at] := QuoteChar; Inc(at);
+    for j := 1 to Length(s) do
+    begin
+      AText[at] := s[j]; Inc(at);
+      if s[j] = QuoteChar then begin AText[at] := QuoteChar; Inc(at); end;
+    end;
+    AText[at] := QuoteChar; Inc(at);
+  end;
 end;
 
 { Parse S into fields on Delimiter, honouring QuoteChar (with doubled quotes as an
@@ -440,9 +481,32 @@ end;
   string of two million fields took 19484 ms (N=1000000: 4797 ms), while its
   commatext sibling took 94. Now ONE buffer, as long as the input (no field can
   be longer), is allocated once and each field is COPIED out of it at its own
-  length -- linear, and the bytes are exactly the ones the old code kept. }
+  length -- linear.
+
+  AND IT LOST FIELDS, SILENTLY, BEFORE AND AFTER ROUND 7 (round 8). After a
+  field and the blanks behind it, anything that was not the delimiter ended the
+  WHOLE parse: "ab,c d,e,f" answered 2 -- [ab] [c] -- and d, e and f were
+  dropped with no error; "x"y,z answered [x] and lost y,z. A line like
+  `John Smith,42,NY` came back one field long with a plausible count. The rule
+  is now TStrings.DelimitedText's own, read from FPC 3.2.2
+  (rtl/objpas/classes/stringl.inc, DoSetDelimitedText, which paraphrases the
+  Delphi help): "Strings must be separated by Delimiter characters or spaces"
+  -- unless StrictDelimiter, a blank between two fields SEPARATES them, and so
+  does the end of a quoted field. Every byte of the input lands in some field
+  or is a separator. Two deliberate differences from the RTL, both about not
+  losing a field: a delimiter that is itself a blank (a tab, a space) is not
+  swallowed as one, so "a<TAB><TAB>b" keeps its empty middle field; and
+  whitespace alone is no fields, as in the RTL, while a lone delimiter is two
+  empty ones. tests/suite/99_delimitedtext.bas derives each answer from that
+  rule. }
 procedure TPhosphorStringList.SetDelimitedText(const S: String);
-var i, n, fk: Integer; field: String; fb: RawByteString;
+var i, j, n, fk: Integer; fb: RawByteString; first: Boolean;
+
+  function Blank(C: Char): Boolean; inline;
+  begin
+    Result := (not StrictDelimiter) and (C <= ' ') and (C <> Delimiter);
+  end;
+
 begin
   Clear();
   n := Length(S);
@@ -452,13 +516,21 @@ begin
   // byte >= 128 through the UTF-8 codepage and lands it as '?' -- this splitter
   // corrupted high bytes while its commatext sibling, which uses Copy, did not.
   SetLength(fb, n);
-  while True do
+  first := True;
+  while i <= n do
   begin
-    if not StrictDelimiter then
-      while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
-    fk := 0;
-    if (i <= n) and (S[i] = QuoteChar) then
+    // The separator that ended the last field, if it was the delimiter.
+    if (not first) and (S[i] = Delimiter) then Inc(i);
+    while (i <= n) and Blank(S[i]) do Inc(i);
+    if i > n then
     begin
+      // Nothing after a delimiter is one empty field; nothing at all is none.
+      if not first then Add('');
+      Break;
+    end;
+    if (S[i] = QuoteChar) and (QuoteChar <> #0) then
+    begin
+      fk := 0;
       Inc(i);
       while i <= n do
       begin
@@ -470,17 +542,30 @@ begin
         end
         else begin Inc(fk); fb[fk] := S[i]; Inc(i); end;
       end;
+      Add(Copy(fb, 1, fk));
     end
     else
-      while (i <= n) and (S[i] <> Delimiter) and
-            (StrictDelimiter or (S[i] > ' ')) do
-      begin Inc(fk); fb[fk] := S[i]; Inc(i); end;
-    field := Copy(fb, 1, fk);
-    if not StrictDelimiter then
-      while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
-    Add(field);
-    if (i <= n) and (S[i] = Delimiter) then Inc(i) else Break;
+    begin
+      j := i;
+      while (j <= n) and (S[j] <> Delimiter) and
+            (StrictDelimiter or (S[j] > ' ')) do Inc(j);
+      Add(Copy(S, i, j - i));
+      i := j;
+    end;
+    while (i <= n) and Blank(S[i]) do Inc(i);
+    first := False;
   end;
+end;
+
+{ Every field SetDelimitedText makes ends at a delimiter, a quote, a blank
+  (unless strict) or the end of the text, so those bytes plus one bound them. }
+function TPhosphorStringList.FieldBound(const S: String): Int64;
+var i: SizeInt;
+begin
+  Result := 1;
+  for i := 1 to Length(S) do
+    if (S[i] = Delimiter) or (S[i] = QuoteChar) or
+       ((not StrictDelimiter) and (S[i] <= ' ')) then Inc(Result);
 end;
 
 function TPhosphorStringList.IndexOf(const S: String): Integer;
@@ -524,9 +609,14 @@ end;
   separator, or the whole line when it has none -- and its name copied out and
   compared, so a line costs what it holds, not a constant. 200 lookups in a list
   of two million lines ran 12735 ms under a 2000 ms ceiling. }
-function TPhosphorStringList.IndexOfName(const AName: String): Integer;
+{ AIdx is -1 when the name is absent. False = the meter refused, and then AIdx
+  means nothing: "absent" and "I stopped looking" are different answers, and
+  SetValue read the second as the first -- a refused strings_values APPENDED a
+  second line for a key that was already there (round 8). }
+function TPhosphorStringList.IndexOfName(const AName: String; out AIdx: Integer): Boolean;
 var i, p: Integer; m: TBudgetMeter;
 begin
+  AIdx := -1;
   BudgetMeterStart(m);
   for i := 0 to Count - 1 do
   begin
@@ -535,39 +625,42 @@ begin
     begin
       if p > 0 then
       begin
-        if not BudgetMeterAdd(m, BudgetMilliNameItem + Int64(p) * BudgetMilliCopy) then Exit(-1);
+        if not BudgetMeterAdd(m, BudgetMilliNameItem + Int64(p) * BudgetMilliCopy) then Exit(False);
       end
       else if not BudgetMeterAdd(m, BudgetMilliNameItem + Int64(Length(Items[i])) * BudgetMilliScan) then
-        Exit(-1);
+        Exit(False);
     end;
     if (p > 0) and (Copy(Items[i], 1, p - 1) = AName) then
     begin
-      BudgetMeterEnd(m);
-      Exit(i);
+      AIdx := i;
+      Break;
     end;
   end;
-  BudgetMeterEnd(m);
-  Result := -1;
+  Result := BudgetMeterEnd(m);
 end;
 
-function TPhosphorStringList.ValueOf(const AName: String): String;
+function TPhosphorStringList.ValueOf(const AName: String; out AValue: String): Boolean;
 var idx, p: Integer;
 begin
-  Result := '';
-  idx := IndexOfName(AName);
-  if idx < 0 then Exit;
+  AValue := '';
+  if not IndexOfName(AName, idx) then Exit(False);
+  if idx < 0 then Exit(True);
   // The value is copied out of the line IndexOfName stopped at.
-  if not BudgetLinearAfter(Length(Items[idx]), BudgetMilliCopy) then Exit;
+  if not BudgetLinearAfter(Length(Items[idx]), BudgetMilliCopy) then Exit(False);
   p := Pos(NameValueSeparator, Items[idx]);
-  Result := Copy(Items[idx], p + 1, MaxInt);
+  AValue := Copy(Items[idx], p + 1, MaxInt);
+  Result := True;
 end;
 
-procedure TPhosphorStringList.SetValue(const AName, AValue: String);
+{ False = refused, and the list is exactly as it was: the search is finished
+  (and paid for) before anything is written. }
+function TPhosphorStringList.SetValue(const AName, AValue: String): Boolean;
 var idx: Integer;
 begin
-  idx := IndexOfName(AName);
+  if not IndexOfName(AName, idx) then Exit(False);
   if idx >= 0 then Items[idx] := AName + NameValueSeparator + AValue
   else Add(AName + NameValueSeparator + AValue);
+  Result := True;
 end;
 
 function TPhosphorStringList.NameAt(AZero: Integer): String;
@@ -670,21 +763,29 @@ begin
   if Length(S) > 0 then Result := S[1] else Result := ADefault;
 end;
 
-{ Bytes a save would write: an optional UTF-8 BOM before the rendered text. }
-function RenderForSave(L: TPhosphorStringList): String;
+{ Bytes a save would write: an optional UTF-8 BOM before the rendered text.
+  False = the join was refused (and AText is '', which must never be written as
+  though it were the list). The BOM is a second copy of the text, charged. }
+function RenderForSave(L: TPhosphorStringList; out AText: String): Boolean;
 begin
-  Result := L.TextStr();
-  if L.WriteBOM then Result := Utf8Bom + Result;
+  Result := L.JoinInto(L.LineBreak, L.TrailingLineBreak, AText);
+  if not Result then Exit;
+  if L.WriteBOM then
+  begin
+    if not BudgetLinear(Length(AText), BudgetMilliCopy) then begin AText := ''; Exit(False); end;
+    AText := Utf8Bom + AText;
+  end;
 end;
 
 { Set a list from a text blob, dropping a leading UTF-8 BOM a save may have put
-  there. Returns the line count. }
+  there. Returns the line count. The copy past the BOM is the one a load's COPY
+  price already pays for. }
 function LoadFromText(L: TPhosphorStringList; const AText: String): Integer;
-var s: String;
 begin
-  s := AText;
-  if (Length(s) >= 3) and (Copy(s, 1, 3) = Utf8Bom) then Delete(s, 1, 3);
-  L.SetText(s);
+  if (Length(AText) >= 3) and (Copy(AText, 1, 3) = Utf8Bom) then
+    L.SetText(Copy(AText, 4, MaxInt))
+  else
+    L.SetText(AText);
   Result := L.Count;
 end;
 
@@ -731,13 +832,20 @@ begin
   if GetList(Args[0], l, Err) then Result := ValInt(l.Count);
 end;
 
+{ A REFUSAL IS AddIndexed's OWN -1, NOT THE LATCH (round 8). These asked
+  BudgetSpent() AFTER the add, which is also true when an EARLIER call spent the
+  budget -- so on an unsorted list, whose add is O(1) and consults nothing, the
+  item went in and the call then reported a refusal: count 1 -> 2, err 7. A
+  program that retried got duplicates. The sorted add is metered and answers -1
+  with the list unchanged; nothing else refuses. }
 function t_strings_add(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; at: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValInt(l.AddIndexed(Args[1].Str) + 1);   // 1-based index the item took
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_add'); Result := ValInt(0); end;
+  at := l.AddIndexed(Args[1].Str);
+  if at < 0 then begin Err := BudgetRefusal('strings_add'); Exit; end;
+  Result := ValInt(at + 1);                          // 1-based index the item took
 end;
 
 function t_strings_append(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -745,8 +853,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.AddIndexed(Args[1].Str);
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_append'); Exit; end;
+  if l.AddIndexed(Args[1].Str) < 0 then begin Err := BudgetRefusal('strings_append'); Exit; end;
   Result := ValInt(l.Count);
 end;
 
@@ -909,13 +1016,35 @@ begin
 end;
 
 // --- text (get/set) ---------------------------------------------------------
+{ A SPLIT IS PRICED BY THE PIECES IT MAKES (round 8). The TEXT price charged
+  every byte as though the text were as dense as a text can be -- one item per
+  two bytes -- so a file of 50-byte lines was charged about twelve times its
+  cost, and two loads of a 60 MB file were refused at 12% of the allowance's
+  real work (the pre-round-7 engine ran them in 453 ms). The pieces are now
+  COUNTED, by a pass charged as the scan it is before it is made, and the split
+  is asked for what it does: a string per piece, and every byte copied once. A
+  dense text still costs what a dense text costs. }
+function PiecesOf(const S: String; C: Char): Int64;
+var i: SizeInt;
+begin
+  Result := 1;
+  for i := 1 to Length(S) do
+    if S[i] = C then Inc(Result);
+end;
+
+function SplitOk(const AWho, S: String; APieces: Int64; var Err: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearOk(AWho, APieces, BudgetMilliPiece, Err) and
+            BudgetLinearOk(AWho, Length(S), BudgetMilliCopy, Err);
+end;
+
 function t_strings_text(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  // RULE 1: the split is linear in the text, at its densest one item per byte.
-  if not BudgetLinearOk('strings_text', Length(Args[1].Str), BudgetMilliText, Err) then Exit;
+  if not (BudgetLinearOk('strings_text', Length(Args[1].Str), BudgetMilliScan, Err) and
+          SplitOk('strings_text', Args[1].Str, PiecesOf(Args[1].Str, #10), Err)) then Exit;
   l.SetText(Args[1].Str);
   Result := ValInt(l.Count);
 end;
@@ -938,7 +1067,8 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not BudgetLinearOk('strings_commatext', Length(Args[1].Str), BudgetMilliText, Err) then Exit;
+  if not (BudgetLinearOk('strings_commatext', Length(Args[1].Str), BudgetMilliScan, Err) and
+          SplitOk('strings_commatext', Args[1].Str, PiecesOf(Args[1].Str, ','), Err)) then Exit;
   l.SetCommaText(Args[1].Str);
   Result := ValInt(l.Count);
 end;
@@ -959,20 +1089,24 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if not BudgetLinearOk('strings_delimitedtext', Length(Args[1].Str), BudgetMilliText, Err) then
+  { A field ends at a delimiter, at a quote and -- unless strict -- at a blank,
+    so those bytes, plus one, bound the fields. }
+  if not (BudgetLinearOk('strings_delimitedtext', Length(Args[1].Str), BudgetMilliScan, Err) and
+          SplitOk('strings_delimitedtext', Args[1].Str, l.FieldBound(Args[1].Str), Err)) then
     Exit;
   l.SetDelimitedText(Args[1].Str);
   Result := ValInt(l.Count);
 end;
 
 function t_strings_delimitedtext_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; t: String;
 begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
-  Result := ValStr(l.GetDelimitedText());
   // An empty answer must not be how a refusal looks (see strings_text$).
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_delimitedtext$'); Result := ValStr(''); end;
+  if not l.GetDelimitedText(t) then
+  begin Err := BudgetRefusal('strings_delimitedtext$'); Exit; end;
+  Result := ValStr(t);
 end;
 
 function t_strings_delimiter_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1028,11 +1162,12 @@ end;
 
 // --- name/value machinery ---------------------------------------------------
 function t_strings_values_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; v: String;
 begin
   Result := ValStr('');
-  if GetList(Args[0], l, Err) then Result := ValStr(l.ValueOf(Args[1].Str));
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_values$'); Result := ValStr(''); end;
+  if not GetList(Args[0], l, Err) then Exit;
+  if not l.ValueOf(Args[1].Str, v) then begin Err := BudgetRefusal('strings_values$'); Exit; end;
+  Result := ValStr(v);
 end;
 
 function t_strings_values_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1043,8 +1178,8 @@ begin
   // The line it writes is a copy of the name and the value.
   if not BudgetLinearOk('strings_values', Length(Args[1].Str) + Length(Args[2].Str),
                         BudgetMilliCopy, Err) then Exit;
-  l.SetValue(Args[1].Str, Args[2].Str);
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_values'); Exit; end;
+  if not l.SetValue(Args[1].Str, Args[2].Str) then
+  begin Err := BudgetRefusal('strings_values'); Exit; end;
   Result := ValInt(1);
 end;
 
@@ -1099,8 +1234,8 @@ var l: TPhosphorStringList; i: Integer;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  i := l.IndexOfName(Args[1].Str);
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_indexofname'); Exit; end;
+  if not l.IndexOfName(Args[1].Str, i) then
+  begin Err := BudgetRefusal('strings_indexofname'); Exit; end;
   if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);
 end;
 
@@ -1172,11 +1307,12 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  l.Sorted := AsDouble(Args[1]) <> 0;
   // Enabling it orders whatever is already there -- and that sort is charged
-  // like any other, so this spelling is not a way round the ceiling either.
-  if l.Sorted and (not l.Sort()) then
+  // like any other, so this spelling is not a way round the ceiling either. The
+  // flag is set only once the sort has succeeded: a refused call changes nothing.
+  if (AsDouble(Args[1]) <> 0) and (not l.Sort()) then
   begin Err := BudgetRefusal('strings_sorted'); Exit; end;
+  l.Sorted := AsDouble(Args[1]) <> 0;
   Result := ValInt(1);
 end;
 
@@ -1317,10 +1453,11 @@ end;
 
 // --- files (return the LINE COUNT, per the reference pages) ------------------
 function t_strings_savetofile(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList;
+var l: TPhosphorStringList; t: String;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
+  if not RenderForSave(l, t) then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   { THE WRITE'S ANSWER IS THE ANSWER. This discarded SaveTextToFile's Boolean and
     returned the line count whatever happened, so a write the sandbox refused, or
@@ -1329,20 +1466,24 @@ begin
     0 when nothing was written, which is what file_writealltext answers for the
     same refusal; an empty list also answers 0, exactly as strings_loadfromfile's
     0 means "no lines" from whichever cause. }
-  if SaveTextToFile(Args[1].Str, RenderForSave(l)) then
+  if SaveTextToFile(Args[1].Str, t) then
     Result := ValInt(l.Count);
 end;
 
+{ A REFUSED LOAD CHANGES NOTHING (round 8). The encoding was written before the
+  read was priced, so a load the budget refused still renamed the list's
+  encoding. It is set with the lines, once the split has been paid for. }
 function t_strings_loadfromfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var l: TPhosphorStringList; s: String;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   LoadTextFromFile(Args[1].Str, s);
   { The read is charged for what it read, before the split is asked for. }
   if not BudgetLinearAfterOk('strings_loadfromfile', Length(s), BudgetMilliCopy, Err) then Exit;
-  if not BudgetLinearOk('strings_loadfromfile', Length(s), BudgetMilliText, Err) then Exit;
+  if not (BudgetLinearOk('strings_loadfromfile', Length(s), BudgetMilliScan, Err) and
+          SplitOk('strings_loadfromfile', s, PiecesOf(s, #10), Err)) then Exit;
+  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   Result := ValInt(LoadFromText(l, s));
 end;
 
@@ -1353,19 +1494,25 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not GetBytes(Args[1], b, Err) then Exit;
+  if not (BudgetLinearOk('strings_loadfromstream', Length(b.Data), BudgetMilliScan, Err) and
+          SplitOk('strings_loadfromstream', b.Data, PiecesOf(b.Data, #10), Err)) then Exit;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
-  if not BudgetLinearOk('strings_loadfromstream', Length(b.Data), BudgetMilliText, Err) then Exit;
   Result := ValInt(LoadFromText(l, b.Data));
 end;
 
+{ A REFUSED SAVE WRITES NOTHING (round 8). RenderForSave answered '' when the
+  join was refused, and the stream's bytes were then REPLACED by that empty
+  text -- a buffer emptied by a call that reported success, and a file
+  truncated the same way through strings_savetofile. }
 function t_strings_savetostream(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var l: TPhosphorStringList; b: TPhosphorBytes;
+var l: TPhosphorStringList; b: TPhosphorBytes; t: String;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not GetBytes(Args[1], b, Err) then Exit;
+  if not RenderForSave(l, t) then begin Err := BudgetRefusal('strings_savetostream'); Exit; end;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
-  b.Data := RenderForSave(l);
+  b.Data := t;
   Result := ValInt(l.Count);
 end;
 

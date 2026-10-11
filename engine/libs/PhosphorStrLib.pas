@@ -155,7 +155,19 @@ end;
   unbudgeted, reverse$ of a 160 MB string took 50750 ms under a 2000 ms ceiling
   and reported success. The cost is fixed by Length(S) before the loop starts, so
   it is RULE 1 -- priced once, refused whole, never truncated half way. False here
-  means the budget said no; the caller turns that into the peLimit. }
+  means the budget said no; the caller turns that into the peLimit.
+
+  The append went when the answer began to be sized once (below), and its PRICE
+  stayed: twelve units a byte, the quadratic-append rate, for a walk that now
+  costs about 5 ns a byte -- 18 times over when the round-8 price sweep
+  measured it (tests/probe_limits.lpr --prices). The measured price is
+  BudgetMilliChar. It is NOT applied yet, and that is a recorded exception,
+  not an oversight: scripts/probe_budget.lpr pins "reverse$ refuses the same"
+  -- reverse$ of 40 MB refused under the prescribed pair -- an expectation
+  written while the routine was quadratic, and 40 MB now costs about 210 ms.
+  That probe lies outside the round-8 budget fixer's files; the price moves
+  to BudgetMilliChar with the probe's size (to something whose measured cost
+  really is past the allowance), in one change. }
 function CpReverse(const S: String; out AAllowed: Boolean): String;
 var p, q, o: SizeInt;
 begin
@@ -326,23 +338,47 @@ begin
     Exit(ValStr(''));
   Result := ValStr(Copy(s, p, Length(s) - p + 1));
 end;
+{ THE TRIMS, CHARGED FOR WHAT THEY READ AND MOVE (round 8). Priced as a COPY of
+  the whole text -- the rate of a copy that walks code points -- a trim of a
+  text with no blanks at its ends cost a fifth of that: it reads a byte at each
+  end and Moves the rest. The blanks it walked are charged at the scan rate and
+  what it keeps at the Move rate, once the walk has said which is which. }
+function TrimCharged(const AFn, S: String; ALeft, ARight: Boolean;
+                     out R: String; var E: TPhosphorError): Boolean;
+var a, b: SizeInt;
+begin
+  R := '';
+  a := 1;
+  b := Length(S);
+  if ARight then
+    while (b > 0) and (S[b] <= ' ') do Dec(b);
+  if ALeft then
+    while (a <= b) and (S[a] <= ' ') do Inc(a);
+  Result := BudgetLinearAfterOk(AFn, Int64(Length(S) - b) + (a - 1) + 1, BudgetMilliScan, E) and
+            BudgetLinearAfterOk(AFn, b - a + 1, BudgetMilliMove, E);
+  if Result then R := Copy(S, a, b - a + 1);
+end;
+
 function f_trim(const A: array of TValue; out E: TPhosphorError): TValue;
+var r: String;
 begin
   E := NoError();
-  if not BudgetLinearOk('trim$', Length(s0(A)), BudgetMilliCopy, E) then Exit(ValStr(''));
-  Result := ValStr(ByteTrim(s0(A), True, True));
+  if not TrimCharged('trim$', s0(A), True, True, r, E) then Exit(ValStr(''));
+  Result := ValStr(r);
 end;
 function f_ltrim(const A: array of TValue; out E: TPhosphorError): TValue;
+var r: String;
 begin
   E := NoError();
-  if not BudgetLinearOk('ltrim$', Length(s0(A)), BudgetMilliCopy, E) then Exit(ValStr(''));
-  Result := ValStr(ByteTrim(s0(A), True, False));
+  if not TrimCharged('ltrim$', s0(A), True, False, r, E) then Exit(ValStr(''));
+  Result := ValStr(r);
 end;
 function f_rtrim(const A: array of TValue; out E: TPhosphorError): TValue;
+var r: String;
 begin
   E := NoError();
-  if not BudgetLinearOk('rtrim$', Length(s0(A)), BudgetMilliCopy, E) then Exit(ValStr(''));
-  Result := ValStr(ByteTrim(s0(A), False, True));
+  if not TrimCharged('rtrim$', s0(A), False, True, r, E) then Exit(ValStr(''));
+  Result := ValStr(r);
 end;
 function f_reverse(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: String; ok: Boolean;
@@ -668,20 +704,33 @@ end;
 
 { Worst-case work for replacing every ANeedle in AHay by ANew: the searches, plus
   the largest answer that can come out of it. }
+{ ON THE CLOCK SCALE SINCE ROUND 8, like the search. The answer used to be
+  priced at one unit a byte of the LARGEST answer the arguments allow
+  (Length(hay) div Length(needle) matches), which is 7.8 ns a byte: a replace
+  with nothing to replace was charged 22 times what it cost. Now: the search
+  (which already counts the first-byte hits, an upper bound on the matches),
+  each hit's splice, the answer copied once -- sized by those hits, not by the
+  worst case -- and, ONLY when the replacement is longer than the needle, the
+  bytes it adds charged as an allocation at one unit each: those are bytes no
+  argument holds, which is what a size guard is for (RunOf charges mulstring$'s
+  the same way). }
 function ReplaceCost(const AHay, ANeedle, ANew: String;
                      ACaseless: Boolean = False): Int64;
-var hits, grow, outlen: Int64;
+var hits, grow, outlen, extra: Int64;
 begin
-  Result := SearchCost(AHay, ANeedle, ACaseless);
+  Result := BudgetSearchCostHits(AHay, ANeedle, ACaseless, hits);
   if ANeedle = '' then Exit;                       // the RTL answers AHay unchanged
-  hits := Int64(Length(AHay)) div Int64(Length(ANeedle));
+  if Result = High(Int64) then Exit;
   grow := Int64(Length(ANew)) - Int64(Length(ANeedle));
   if grow < 0 then grow := 0;
   if (grow > 0) and (hits > (High(Int64) - Int64(Length(AHay))) div grow) then
-    outlen := High(Int64)
-  else
-    outlen := Int64(Length(AHay)) + hits * grow;
-  if outlen > Result then Result := outlen;
+    Exit(High(Int64));
+  extra := hits * grow;
+  outlen := Int64(Length(AHay)) + extra;
+  Result := Result + BudgetMilliUnits(hits, BudgetMilliItem) +
+            BudgetMilliUnits(outlen, BudgetMilliCopy);
+  if extra > High(Int64) - Result then Exit(High(Int64));
+  Result := Result + extra;
 end;
 
 { AND THE ANSWER HAS TO FIT A 32-BIT COUNTER. The RTL sizes the result with
@@ -904,6 +953,10 @@ begin
     p := PosEx(sub, s0(A), 1);
     while p > 0 do begin Inc(c); p := PosEx(sub, s0(A), p + Length(sub)); end;
   end;
+  { One PosEx call per match, each a few nanoseconds of entry before it scans:
+    the search price above cannot know the matches, so they are charged as they
+    were counted (round 8: every byte a match ran at 2.7 times its charge). }
+  if not BudgetLinearAfterOk('countstr', c, BudgetMilliSearchCall, E) then Exit(ValInt(0));
   Result := ValInt(c);
 end;
 function f_containsstr(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -1012,26 +1065,48 @@ begin
   if s0(A) = '' then Result := ValInt(0) else Result := ValInt(LineCount(s0(A)));
 end;
 
+{ SplitBy is a PosEx loop -- the same naive search as instr, once per piece --
+  and a string allocated per piece. Priced by the search, which counts the
+  first-byte hits of the separator (at least as many as there are pieces), and
+  then by those pieces and the bytes copied into them. It was priced at TEXT,
+  per byte of the text at the densest a text can be split (one piece per two
+  bytes), which charged a list of 50-byte words 12 times what it cost (round 8);
+  the pieces are now COUNTED instead of assumed. }
+function SplitPriceOk(const AFn, S, ASep: String; var E: TPhosphorError): Boolean;
+var units: Int64;
+begin
+  units := BudgetSearchCost(S, ASep);
+  if units < High(Int64) div 2 then units := units + BudgetMilliUnits(Length(S), BudgetMilliCopy);
+  Result := BudgetAllows(units);
+  if not Result then E := BudgetRefusal(AFn);
+end;
+
+{ ...and the pieces, which only the split can count (a first-byte hit of the
+  separator need not be a separator), charged the moment it has made them. }
+function SplitMadeOk(const AFn: String; const AParts: TStringArray;
+                     var E: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearAfterOk(AFn, Length(AParts), 2 * BudgetMilliPiece, E);
+end;
+
 function f_word(const A: array of TValue; out E: TPhosphorError): TValue;
 var parts: TStringArray; idx: Int64;
 begin
   E := NoError(); Result := ValStr('');
-  // SplitBy is a PosEx loop: the same naive product as instr, once per piece.
-  if not BudgetAllows(SearchCost(s0(A), A[2].Str)) then
-  begin E := BudgetRefusal('word$'); Exit(ValStr('')); end;
-  // ...and a string allocated per piece, at most one per byte of the text.
-  if not BudgetLinearOk('word$', Length(s0(A)), BudgetMilliText, E) then Exit(ValStr(''));
+  if not SplitPriceOk('word$', s0(A), A[2].Str, E) then Exit(ValStr(''));
   parts := SplitBy(s0(A), A[2].Str);
+  if not SplitMadeOk('word$', parts, E) then Exit(ValStr(''));
   idx := ArgI64(A[1]);   // 1-based
   if (idx >= 1) and (idx <= Length(parts)) then Result := ValStr(parts[idx - 1]);
 end;
 function f_wordcount(const A: array of TValue; out E: TPhosphorError): TValue;
+var parts: TStringArray;
 begin
   E := NoError();
-  if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
-  begin E := BudgetRefusal('wordcount'); Exit(ValInt(0)); end;
-  if not BudgetLinearOk('wordcount', Length(s0(A)), BudgetMilliText, E) then Exit(ValInt(0));
-  Result := ValInt(Length(SplitBy(s0(A), A[1].Str)));
+  if not SplitPriceOk('wordcount', s0(A), A[1].Str, E) then Exit(ValInt(0));
+  parts := SplitBy(s0(A), A[1].Str);
+  if not SplitMadeOk('wordcount', parts, E) then Exit(ValInt(0));
+  Result := ValInt(Length(parts));
 end;
 
 // instr family: 1-based position, 0 when absent.
@@ -1103,15 +1178,30 @@ begin
   Result := ValStr(Copy(s0(A), pa, pb - pa));
 end;
 
-{ One line of the text by index, as SplitLines would have answered it. }
+{ One line of the text by index, as SplitLines would have answered it.
+
+  CHARGED FOR THE BYTES THE WALK READ (round 8), the rule this unit's header
+  states and f_strchar follows. It charged the WHOLE text up front, so a loop of
+  line$(b$, 1) over a 20 MB text -- 12 bytes read a call -- was refused after
+  160 calls, each charged 12.5 ms for 0.015 ms of work. LineSpan stops at the
+  line's own terminator; a line that is not there reads the whole text, and is
+  charged that. }
 function LineOf(const AFn: String; const S: String; AIndex: Int64;
                 var E: TPhosphorError): String;
-var a, b: SizeInt;
+var a, b: SizeInt; found: Boolean;
 begin
   Result := '';
-  if not BudgetLinearOk(AFn, Length(S), BudgetMilliScan, E) then Exit;
-  if not LineSpan(S, AIndex, a, b) then Exit;
-  if not BudgetLinearOk(AFn, b - a, BudgetMilliCopy, E) then Exit;
+  found := LineSpan(S, AIndex, a, b);
+  if found then
+  begin
+    if not BudgetLinearAfterOk(AFn, b, BudgetMilliScan, E) then Exit;
+  end
+  else
+  begin
+    if AIndex >= 1 then BudgetLinearAfterOk(AFn, Length(S), BudgetMilliScan, E);
+    Exit;
+  end;
+  if not BudgetLinearAfterOk(AFn, b - a, BudgetMilliCopy, E) then Exit;
   Result := Copy(S, a, b - a);
 end;
 
@@ -1175,8 +1265,11 @@ begin
   E := NoError();
   src := s0(A);
   Result := ValStr(src);
-  if not BudgetAllows(Length(src)) then
-  begin E := BudgetRefusal('a string index write'); Exit; end;
+  { A walk to the line and an answer that is a copy of the text with the new
+    line in it. It was asked as ONE UNIT a byte -- 7.8 ns, the allocation rate --
+    for about 1 ns of work (round 8, measured 7.8 times over). }
+  if not BudgetLinearOk('a string index write', Length(src), BudgetMilliScan + BudgetMilliCopy, E) or
+     not BudgetLinearOk('a string index write', Length(A[2].Str), BudgetMilliCopy, E) then Exit;
 
   { THE LINE'S BYTE RANGE, FOUND BY ONE WALK, and then spliced. The first version
     of this split the document, replaced one element and concatenated every line
@@ -1754,7 +1847,7 @@ begin
   if (n <= 0) or (i > Length(s)) then begin Result := ValStr(''); Exit; end;
   avail := Length(s) - i + 1;
   if n > avail then n := avail;
-  if not BudgetLinearOk('bytemid$', n, BudgetMilliCopy, E) then Exit(ValStr(''));
+  if not BudgetLinearOk('bytemid$', n, BudgetMilliMove, E) then Exit(ValStr(''));
   Result := ValStr(Copy(s, i, n));   // Copy is byte-indexed: the run comes over verbatim
 end;
 

@@ -513,22 +513,63 @@ ran nine to thirty-six times past `TimeoutMs` and answered `rc = 0`. Every such
 pass is now **priced by what it reads**, at a rate measured on the budget's
 clock scale (a unit is 1/128000 of a millisecond of work): a byte scan costs
 0.625 ns a byte, a copy 1 ns, a case rewrite 1.7 ns, a number parse 3.4 ns, an
-OS call over a path 8.3 ns (a file operation's path of 4096 bytes or less is
-the price of its system call and is not asked about, so `file_exists` still
-answers after a script has spent its budget), a list item compared 9 ns, a JSON
-node copied 60 ns
-— the table, and how each figure was measured, is in
-`engine/PhosphorBudget.pas`. A pass whose length the arguments fix is asked
-**before** it runs and refused whole; a walk that a count cuts short (`left$`,
-`mid$` — a malformed string can make one character fifty megabytes long) is
-charged for what it read before the copy that follows; a walk whose cost each
-step decides (a list search, a dictionary probe) is metered as it goes. So the
-loop above now stops at the ceiling with `ucase$: that would take ... units of
-work`, and a legitimate call — `ucase$` of three megabytes, a JSON document of a
-few hundred kilobytes — spends a fraction of a percent of the allowance and runs
-exactly as before. Two quadratics went with it: `strings_delimitedtext` and
-`rag_analyze$` are linear now, and `funcexists?` no longer costs (registry size ×
-name length).
+OS call over a path 8.3 ns, a list item compared 9 ns, a piece split off a text
+34 ns, a JSON value parsed 600 ns and a JSON node copied 60 ns — the table, and
+how each figure was measured, is in `engine/PhosphorBudget.pas`. A file
+operation's path is priced at the door at 1.7 ns a byte (and one of 4096 bytes
+or less is the price of its system call and is not asked about, so
+`file_exists` still answers after a script has spent its budget). A pass whose
+length the arguments fix is asked **before** it runs and refused whole; a walk
+that a count cuts short (`left$`, `mid$`, `line$`, `s$[n]` — a malformed string
+can make one character fifty megabytes long) is charged for what it read before
+the copy that follows; a walk whose cost each step decides (a list search, a
+dictionary probe) is metered as it goes. So the loop above now stops at the
+ceiling with `ucase$: that would take ... units of work`. Two quadratics went
+with it: `strings_delimitedtext` and `rag_analyze$` are linear now, and
+`funcexists?` no longer costs (registry size × name length).
+
+**The prices are held to a measurement, and the measurement is in the tree.**
+`probe_limits --prices` (the suite runners build it from
+`tests/probe_limits.lpr`) runs every
+priced family on megabyte arguments under a budget too large to refuse, and
+prints what each call was charged beside the wall time it took. The bound the
+prices are held to is stated there: a call is charged **at least half** of what
+it costs on the measuring machine (so a host is never past its ceiling by more
+than twice that, and by less than three times on hardware 50% slower) and **at
+most four times** it (so work charged at a quarter of the allowance is never
+refused). Round 8 found the first version of the table outside that bound in
+both directions — `strings_delimitedtext$` at 1/30 of its cost, the searches
+(`instr`, `countstr`, `replacestr$`, `buffer_indexof`) at 20–44 times it, the
+splits at 11–13 times it on ordinary line lengths (two loads of a 60 MB file
+were refused at 12% of the allowance's real work), `line$(big$, 1)` at 800
+times it — and fixed each where it was wrong: searches on the clock scale,
+splits priced by the pieces they make, `line$` by the line it walks to. So a
+legitimate call — `ucase$` of three megabytes (0.25% of the allowance), two
+loads of a 60 MB file of 50-byte lines (20%), a 300 KB JSON array of 150000
+numbers (about 5%: a value costs 600 ns to parse, and that is what it is
+charged) — runs exactly as before. Two prices are deliberately NOT a
+measurement of time, and say so: an **allocation** sized by an argument
+(`string$`, `space$`, `mulstring$`, `buffer_new@`, a list's capacity, the bytes
+a replacement adds to a `replacestr$`) costs one unit a byte, because its job
+is to refuse `string$(1e18)` before a byte is committed on a host that set only
+one ceiling; and `gzip_compress$`, `zip_compress` and `zip_close`, whose deflate
+costs ten times more on random bytes than on a log file, are asked for the
+cheapest input's price before they start and then charged the wall time they
+actually took. `reverse$` is still charged its old quadratic-append price
+(about 18 times its cost) for one recorded reason: a probe outside this change
+pins a refusal of 40 MB that the measured price would allow.
+
+**A refused call changes nothing.** A function that answers with a `peLimit`
+leaves its container exactly as it found it: a list mutator that is refused
+adds, sets, sorts and loads nothing (a refused `strings_values` used to append a
+duplicate key, and a refused sort left half its passes written back); a refused
+`json_merge@` merges no member, and a refused `json_removeat@`, `json_remove@` or
+replacing `json_set*@` removes nothing; a refused `cfg_*@` setter or deletion
+puts the config back, a refused `cfg_reload@` keeps every key the program held,
+a refused `rag_rebuild@` keeps the old index, and a refused
+`strings_savetofile` / `strings_savetostream` writes nothing. And an operation
+that consults nothing is not refused because an EARLIER call spent the budget:
+`strings_add` on an unsorted list (O(1)) adds after the latch, once.
 
 **A refused render is an error, never an empty answer.** `json_value$`,
 `json_gets$`, `json_items$`, `json_paths$`, `rag_analyze$` and
@@ -538,10 +579,11 @@ catchable `peLimit` the function's siblings raise, naming the function.
 
 What is still outside: the work inside an RTL container this engine does not
 own — `TMemIniFile`'s section and key search behind the `cfg_*` functions,
-fpjson's own member table — is not priced per entry, only per byte of what the
-script hands in; and a pass is priced at a rate measured on one machine, so a
-host on hardware several times slower gets the same refusal points and a longer
-wall-clock run to reach them.
+fpjson's own member lookup — is not priced per entry, only per byte of what the
+script hands in (fpjson's member DELETE, which rehashes the object, is priced
+per member since round 8); and a pass is priced at a rate measured on one
+machine, so a host on hardware several times slower gets the same refusal
+points and a longer wall-clock run to reach them.
 
 The rule is kept honest by `scripts/check-budget.py`, one of the source gates,
 which asks two questions: a loop or an allocation over a script-supplied COUNT
@@ -549,8 +591,15 @@ must consult the budget or be listed as exempt with a reason; and every
 registered function whose work grows with a script-supplied string or container
 must consult it in its own body — a helper that asks for some other part of the
 work does not answer for the pass beside it — or the walker must be exempt with
-the reason one call of it is O(1). Prose rots; this project has learned that
-three times.
+the reason one call of it is O(1). Since round 8 a consultation answers only for
+the work BESIDE it: a charge inside a loop prices that loop, not the case-fold
+of the whole name made before it (`path_matchespattern` passed the gate that
+way and ran 45 s under a 2 s ceiling); a concatenation of a script's string
+(`path_combine$`) and a shift of a container it holds (`json_removeat@`) are
+passes too; and a helper's string parameter counts as the script's only where
+some caller hands it the script's data, so `MakeError(AFn + ': ...')` is not a
+pass and does not need an exemption to say so. Prose rots; this project has
+learned that three times.
 
 Three of those bound how **long** a script runs and the fourth bounds how much
 **heap** it adds; `SandboxRoot`, below, bounds **where** it writes. None of them

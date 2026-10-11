@@ -357,7 +357,8 @@ begin
   p := ArgI64(A[1]);
   n := ArgI64(A[2]);
   if not CheckRange('buffer_slice$', Length(b.Data), p, n, E) then Exit;
-  if not BudgetLinearOk('buffer_slice$', n, BudgetMilliCopy, E) then Exit;
+  // One Move into a fresh string: MOVE, not COPY -- there is no walk (round 8).
+  if not BudgetLinearOk('buffer_slice$', n, BudgetMilliMove, E) then Exit;
   Result := ValStr(Copy(b.Data, Integer(p), Integer(n)));   // Copy, never concatenation
 end;
 
@@ -411,9 +412,16 @@ end;
   refused ("296910300 units of work and only 255010000 are left") for work that
   costs nothing. One model, one place, or one door gets fixed and the other does
   not. }
+{ ...plus, since round 8, what THIS search does at a first-byte hit that Pos does
+  not: it leaves IndexByte and calls CompareByte, two calls a hit, measured at
+  6 ns a hit against the model's 2 -- the extra 4 ns are charged here. }
 function SearchUnits(const AHay, ANeedle: String): Int64;
+const BufferMilliPerHit = 512;
+var hits: Int64;
 begin
-  Result := BudgetSearchCost(AHay, ANeedle);
+  Result := BudgetSearchCostHits(AHay, ANeedle, False, hits);
+  if Result < High(Int64) div 2 then
+    Result := Result + BudgetMilliUnits(hits, BufferMilliPerHit);
 end;
 
 { ONE BODY FOR BOTH FORMS (ledger d45). There used to be two: the two-argument
@@ -431,10 +439,17 @@ end;
   each bounded by a Length, which check-budget.py read as linear; its rule for a
   hand-rolled nested search now reads the product, and finds it in this routine
   beside the question that prices it. A helper the callers had to remember to
-  guard is the shape this defect had. }
+  guard is the shape this defect had.
+
+  AND THE SEARCH IS NOW THE RTL'S SHAPE, not merely priced as though it were
+  (round 8): IndexByte to the next first-byte hit, CompareByte there. The
+  byte-by-byte Pascal loops it replaces cost three to eight times what the
+  model charges a Pos, which priced on the clock scale was an under-charge. The
+  answer is the same position: the first at or after AFrom where the whole
+  needle matches. }
 function BufferIndexOf(const A: array of TValue; AFrom: Integer;
                        out E: TPhosphorError): TValue;
-var b: TPhosphorBytes; hay, needle: String; i, j, last: Integer; ok: Boolean;
+var b: TPhosphorBytes; hay, needle: String; i, last: Integer; k: SizeInt;
 begin
   Result := ValInt(0);
   if not GetBuf('buffer_indexof', A[0], b, E) then Exit;
@@ -445,12 +460,14 @@ begin
   if needle = '' then Exit;          // an empty pattern matches nothing, not everything
   last := Length(hay) - Length(needle) + 1;
   if AFrom < 1 then AFrom := 1;
-  for i := AFrom to last do
+  i := AFrom;
+  while i <= last do
   begin
-    ok := True;
-    for j := 1 to Length(needle) do
-      if hay[i + j - 1] <> needle[j] then begin ok := False; Break; end;
-    if ok then Exit(ValInt(i));
+    k := IndexByte(hay[i], last - i + 1, Byte(needle[1]));
+    if k < 0 then Exit;
+    i := i + Integer(k);
+    if CompareByte(hay[i], needle[1], Length(needle)) = 0 then Exit(ValInt(i));
+    Inc(i);
   end;
 end;
 

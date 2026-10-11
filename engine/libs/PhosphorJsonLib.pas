@@ -327,17 +327,6 @@ begin
   end;
 end;
 
-{ How many path segments a json_*_path spelling names, so a node reached through
-  one gets the level it actually sits at rather than its parent's plus one. }
-function JsonPathSegments(const APath: String): Integer;
-var
-  i: Integer;
-begin
-  Result := 1;
-  for i := 1 to Length(APath) do
-    if APath[i] = '.' then Inc(Result);
-end;
-
 const
   STALE_MSG = 'this json handle is stale: it was freed, the value it borrowed was ' +
               'replaced or removed, or it was never a handle';
@@ -500,14 +489,27 @@ const
 
     A parse cannot know its node count before it parses, so it COUNTS: one pass
     over the text for the characters that open a value -- a comma, a colon, an
-    opening bracket or brace -- a count that can only over-estimate (a string
-    holding a comma counts it), and
-    the pass is itself charged before it is made, as BudgetSearchCost's is. }
+    opening bracket or brace OUTSIDE a string (round 8: inside one they counted
+    too, and a 1 MB CSV carried in one member was charged as 500000 values) --
+    and the pass is itself charged before it is made, as BudgetSearchCost's is.
+
+    ROUND 8, re-measured by tests/probe_limits.lpr --prices: a 4 MB string
+    parses at about 15 ns a byte (the scans before fpjson, and fpjson's own
+    string building), so the 4 ns a byte under-charged a document of long
+    strings 3 times; a byte is now 15 ns (1920). A rendered byte measured under
+    2 ns against the unit (7.8 ns) BufAdd charged it, so it is metered at 2.5 ns
+    (JsonRenderMilliPerByte). An array's Delete moves the pointers after the
+    element (0.4-1.5 ns each, JsonShiftMilliPerItem); an object's Delete moves
+    its members and REHASHES all of them (fcl-base contnrs.pp), 2.6 ns a member
+    measured (JsonRehashMilliPerMember). }
   JsonCloneMilliPerNode = 7680;
   JsonParseMilliPerNode = 76800;
-  JsonParseMilliPerByte = 512;
+  JsonParseMilliPerByte = 1920;
   JsonRenderUnitsPerNode = 24;
+  JsonRenderMilliPerByte = 320;
   JsonKeyMilli = 15616;
+  JsonShiftMilliPerItem = 128;
+  JsonRehashMilliPerMember = 384;
 
 { Charge a deep copy of N, node by node, BEFORE it is made. }
 function CloneMetered(N: TJSONData; var M: TBudgetMeter): Boolean;
@@ -536,13 +538,39 @@ begin
   Result := N.Clone;
 end;
 
-{ An upper bound on the values a parse of AText makes: see the table above. }
+{ An upper bound on the values a parse of AText makes: see the table above.
+
+  NOT COUNTING WHAT IS INSIDE A STRING (round 8). Every comma, colon and bracket
+  counted, and a string holding them is one value: a 1 MB document carrying a
+  CSV in one member counted 500001 values and was charged 38.4M units a parse --
+  15% of the allowance, 20 times its cost -- and was refused on its seventh
+  parse, which ran before round 7. A string is now skipped from its opening
+  quote to the closing one, a backslash taking the byte after it with it, which
+  is the JSON grammar's own rule (RFC 8259, section 7). An unterminated string
+  runs to the end of the text and counts nothing more -- the parse then fails,
+  and was charged at most what it read. }
 function JsonValueOpeners(const AText: String): Int64;
-var i: SizeInt;
+var i, n: SizeInt;
 begin
   Result := 1;
-  for i := 1 to Length(AText) do
-    if AText[i] in [',', ':', '[', '{'] then Inc(Result);
+  n := Length(AText);
+  i := 1;
+  while i <= n do
+  begin
+    case AText[i] of
+      ',', ':', '[', '{': Inc(Result);
+      '"':
+        begin
+          Inc(i);
+          while (i <= n) and (AText[i] <> '"') do
+          begin
+            if AText[i] = '\' then Inc(i);
+            Inc(i);
+          end;
+        end;
+    end;
+    Inc(i);
+  end;
 end;
 
 { THE VIEWS OF A DYING SUBTREE DIE WITH IT (2026-10-08, second adversarial round).
@@ -673,13 +701,17 @@ end;
   Extract-then-Add renames a member and preserves the tree's shape exactly, and
   t_json_keys builds a fresh array of plain strings, which is depth two. Neither
   can be handed a node a script chose. }
-function SetMember(O: TJSONObject; ALevel: Integer; const K: String;
-  V: TJSONData; out Err: TPhosphorError): Boolean;
+{ APaid: the caller has already charged the name's scan and a replacement's
+  rehash -- json_merge@, which prices every member before it grafts the first,
+  so that no graft half way through can be refused. Every other door passes
+  False and is priced here. }
+function SetMemberCore(O: TJSONObject; ALevel: Integer; const K: String;
+  V: TJSONData; APaid: Boolean; out Err: TPhosphorError): Boolean;
 var idx: Integer;
 begin
   Err := NoError();
   // StoredNameLength reads the whole name before the 255-byte cap can refuse it.
-  if not BudgetLinearOk('json member name', Length(K), BudgetMilliScan, Err) then
+  if (not APaid) and not BudgetLinearOk('json member name', Length(K), BudgetMilliScan, Err) then
   begin
     V.Free;
     Exit(False);
@@ -700,11 +732,27 @@ begin
   idx := O.IndexOfName(K);
   if idx >= 0 then
   begin
+    { REPLACING A MEMBER IS A DELETE, and an object's Delete moves every member
+      after it and rehashes them all (fcl-base contnrs.pp, TFPHashList.Delete:
+      a Move, then ReHash). Priced before anything is touched (round 8), so a
+      refusal leaves the object as it was. }
+    if (not APaid) and
+       not BudgetLinearOk('json member replace', O.Count, JsonRehashMilliPerMember, Err) then
+    begin
+      V.Free;
+      Exit(False);
+    end;
     InvalidateBorrowed(O.Items[idx]);
     O.Delete(idx);
   end;
   O.Add(K, V);
   Result := True;
+end;
+
+function SetMember(O: TJSONObject; ALevel: Integer; const K: String;
+  V: TJSONData; out Err: TPhosphorError): Boolean;
+begin
+  Result := SetMemberCore(O, ALevel, K, V, False, Err);
 end;
 
 { The array half of the same gate. }
@@ -889,6 +937,10 @@ type
     Len: SizeInt;
     Spent: Boolean;
     Wild: Boolean;    // a number in the tree has no JSON text -- see JsonWrite
+    { The bytes, METERED at JsonRenderMilliPerByte (round 8). Each byte was one
+      unit -- 7.8 ns -- for a move that costs under two: the round-8 sweep
+      measured json_value$ of a 4 MB string at 4.3 times its cost. }
+    M: TBudgetMeter;
   end;
 
   { Why a render can stop short. jtrBudget and jtrWild are BOTH refusals, and
@@ -902,13 +954,15 @@ begin
   B.Len := 0;
   B.Spent := False;
   B.Wild := False;
+  BudgetMeterStart(B.M);
 end;
 
 procedure BufAdd(var B: TJsonBuf; const S: String);
 var need, grow: SizeInt;
 begin
   if (S = '') or B.Spent or B.Wild then Exit;
-  if not BudgetCharge(Length(S)) then begin B.Spent := True; Exit; end;
+  if B.M.On and not BudgetMeterAdd(B.M, Int64(Length(S)) * JsonRenderMilliPerByte) then
+  begin B.Spent := True; Exit; end;
   need := B.Len + Length(S);
   if need > Length(B.Data) then
   begin
@@ -1067,6 +1121,7 @@ var b: TJsonBuf;
 begin
   BufInit(b);
   JsonWrite(b, N, APretty, AIndent, ALevel);
+  if (not b.Spent) and (not b.Wild) and not BudgetMeterEnd(b.M) then b.Spent := True;
   AText := '';
   if b.Wild then Result := jtrWild
   else if b.Spent then Result := jtrBudget
@@ -2567,6 +2622,8 @@ begin
   idx := MemberIndex(o, Args[1].Str);
   if idx >= 0 then
   begin
+    // A Move of the members after it and a rehash of every member (round 8).
+    if not BudgetLinearOk('json_remove@', o.Count, JsonRehashMilliPerMember, Err) then Exit;
     InvalidateBorrowed(o.Items[idx]);
     o.Delete(idx);
   end;
@@ -2716,22 +2773,26 @@ begin
 end;
 
 // --- dotted path ------------------------------------------------------------
-{ A path is split at every '.' and each segment looked up: linear in the path,
-  at the price of text split into items. }
-function PathOk(const AWho, APath: String; var Err: TPhosphorError): Boolean;
-begin
-  Result := BudgetLinearOk(AWho, Length(APath), BudgetMilliText, Err);
-end;
-
-function NavPath(Root: TJSONData; const Path: String; out Node: TJSONData): Boolean;
+{ A path is split at every '.' and each segment looked up -- and the walk STOPS
+  at the first segment that is not there. AReadBytes and ASegs say how far it
+  got; a path found whole has ASegs segments, which is how far below the root
+  json_path@ registers the node it borrows (JsonPathSegments counted them in a
+  second pass over the path until round 8). }
+function NavPath(Root: TJSONData; const Path: String; out Node: TJSONData;
+                 out AReadBytes, ASegs: Int64): Boolean;
 var start, i, plen: Integer; part: String; cur: TJSONData;
 begin
+  Node := nil;
   cur := Root;
   plen := Length(Path);
   start := 1;
+  AReadBytes := 0;
+  ASegs := 0;
   for i := 1 to plen + 1 do
     if (i > plen) or (Path[i] = '.') then
     begin
+      AReadBytes := i;
+      Inc(ASegs);
       part := Copy(Path, start, i - start);
       if not (cur is TJSONObject) then Exit(False);
       { FindMember, not fpjson's Find: the same lookup every other reader makes,
@@ -2744,22 +2805,40 @@ begin
   Node := cur;
   Result := True;
 end;
+
+{ THE PATH IS CHARGED FOR THE WALK IT MADE (round 8). It was priced at TEXT --
+  every byte as if split into a piece of its own -- before the walk, which
+  charged a 4 MB path that the walk gave up on at its first segment 24 times
+  what it cost. Now: what the walk read, copied segment by segment, and one
+  member lookup per segment it reached, charged the moment the walk is done
+  (RULE 2, the left$ rule) and before anything is answered. The walk cannot
+  reach more segments than the tree is deep. False = refused, Err set. }
+function PathWalk(const AWho: String; Root: TJSONData; const Path: String;
+                  out Node: TJSONData; out AFound: Boolean; out ASegs: Int64;
+                  var Err: TPhosphorError): Boolean;
+var readBytes, segs: Int64;
+begin
+  AFound := NavPath(Root, Path, Node, readBytes, segs);
+  ASegs := segs;
+  Result := BudgetLinearAfterOk(AWho, readBytes, BudgetMilliCopy, Err) and
+            BudgetLinearAfterOk(AWho, segs, BudgetMilliNameItem, Err);
+end;
 function t_json_paths(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var root, n: TJSONData;
+var root, n: TJSONData; found: Boolean; segs: Int64;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], root, Err) then Exit;
-  if not PathOk('json_paths$', Args[1].Str, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := ValStr(StrVal(n, 'json_paths$', Err))
+  if not PathWalk('json_paths$', root, Args[1].Str, n, found, segs, Err) then Exit;
+  if found then Result := ValStr(StrVal(n, 'json_paths$', Err))
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_pathn(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var root, n: TJSONData;
+var root, n: TJSONData; found: Boolean; segs: Int64;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
-  if not PathOk('json_pathn', Args[1].Str, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := NumVal(n, 'json_pathn', Err)
+  if not PathWalk('json_pathn', root, Args[1].Str, n, found, segs, Err) then Exit;
+  if found then Result := NumVal(n, 'json_pathn', Err)
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 
@@ -2913,6 +2992,12 @@ begin
   z := ArgI32(Args[1]) - 1;
   if (z >= 0) and (z < a.Count) then
   begin
+    { TFPList.Delete moves every pointer after z down one (round 8: unpriced,
+      50000 removals from the front of a million-element array ran 22219 ms
+      under MaxSteps 1000000 alone and reported success). Asked before the
+      delete, so a refusal leaves the array whole. }
+    if not BudgetLinearOk('json_removeat@', Int64(a.Count) - z - 1, JsonShiftMilliPerItem, Err) then
+      Exit;
     InvalidateBorrowed(a.Items[z]);
     a.Delete(z);
   end;
@@ -2952,26 +3037,27 @@ end;
 
 // --- paths: boolean, a handle -----------------------------------------------
 function t_json_pathb(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var root, n: TJSONData;
+var root, n: TJSONData; found: Boolean; segs: Int64;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
-  if not PathOk('json_pathb', Args[1].Str, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) and (n.JSONType = jtBoolean) then
+  if not PathWalk('json_pathb', root, Args[1].Str, n, found, segs, Err) then Exit;
+  if found and (n.JSONType = jtBoolean) then
     Result := ValInt(Ord(n.AsBoolean));
 end;
 function t_json_path(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var root, n: TJSONData;
+var root, n: TJSONData; found: Boolean; segs: Int64;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
-  if not PathOk('json_path@', Args[1].Str, Err) then Exit;
-  if not NavPath(root, Args[1].Str, n) then
+  // A path that was walked whole: its segment count is the walk's.
+  if not PathWalk('json_path@', root, Args[1].Str, n, found, segs, Err) then Exit;
+  if not found then
   begin
     Err := MakeError(peRuntime, 'no such json path');
     Exit;
   end;
-  Result := RegJson(n, False, JsonLevelOf(Args[0]) + JsonPathSegments(Args[1].Str),
+  Result := RegJson(n, False, JsonLevelOf(Args[0]) + Integer(segs),
                     JsonDocOf(Args[0]));   // borrowed
 end;
 
@@ -3008,7 +3094,8 @@ end;
   inside the source, and the two being the same object. NodeContains, which the
   borrow machinery already uses, answers both questions. }
 function t_json_merge(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var t, s: TJSONObject; i: Integer; m: TBudgetMeter; inside: Boolean; c: TJSONData;
+var t, s: TJSONObject; i, k: Integer; m: TBudgetMeter; inside: Boolean;
+    clones: array of TJSONData;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], t, Err) then Exit;
@@ -3023,12 +3110,44 @@ begin
       'are the same value');
     Exit;
   end;
+  { A REFUSED MERGE MERGES NOTHING (round 8). Each member was priced, cloned and
+    grafted in turn, so a budget that ran out on the tenth member left the
+    first nine merged and reported a refusal. Every clone, every name and every
+    replacement's rehash is now priced as ONE ask before the first graft; with
+    that paid the grafts below cannot be refused by the budget, and a graft too
+    deep for the target is found before any member is written. }
+  for i := 0 to s.Count - 1 do
+    if StoredNameLength(s.Names[i]) > JSON_MAX_NAME then
+    begin
+      Err := MakeError(peRuntime, Format(
+        'a json member name is at most %d bytes, and this one is %d',
+        [JSON_MAX_NAME, StoredNameLength(s.Names[i])]));
+      Exit;
+    end;
+  BudgetMeterStart(m);
   for i := 0 to s.Count - 1 do
   begin
-    c := PricedClone('json_merge@', s.Items[i], Err);
-    if c = nil then Exit;
-    if not SetMember(t, JsonLevelOf(Args[0]), s.Names[i], c, Err) then Exit;
+    if m.On and not (CloneMetered(s.Items[i], m) and
+                     BudgetMeterAdd(m, Int64(Length(s.Names[i])) * BudgetMilliScan) and
+                     ((MemberIndex(t, s.Names[i]) < 0) or
+                      BudgetMeterAdd(m, Int64(t.Count + i) * JsonRehashMilliPerMember))) then
+    begin Err := BudgetRefusal('json_merge@'); Exit; end;
   end;
+  if not BudgetMeterEnd(m) then begin Err := BudgetRefusal('json_merge@'); Exit; end;
+  clones := nil;
+  SetLength(clones, s.Count);
+  for i := 0 to s.Count - 1 do clones[i] := s.Items[i].Clone;
+  for i := 0 to s.Count - 1 do
+    if GraftTooDeep(JsonLevelOf(Args[0]), clones[i], Err) then
+    begin
+      for k := 0 to High(clones) do clones[k].Free;
+      Exit;
+    end;
+  { Nothing below can refuse: the budget was asked for all of it, the names fit
+    and no graft is too deep. SetMemberCore frees a node it refuses, and frees
+    nothing it keeps. }
+  for i := 0 to s.Count - 1 do
+    SetMemberCore(t, JsonLevelOf(Args[0]), s.Names[i], clones[i], True, Err);
   Result := Args[0];
 end;
 

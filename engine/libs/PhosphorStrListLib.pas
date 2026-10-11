@@ -821,11 +821,14 @@ begin
   except Result := False; end;
 end;
 
-function LoadTextFromFile(const APath: String; out AText: String): Boolean;
+function LoadTextFromFile(const AFn, APath: String; out AText: String;
+                          var Err: TPhosphorError): Boolean;
 var fs: TFileStream; len: Int64;
 begin
   AText := ''; Result := False;
-  if not IoGate(APath, puRead) then Exit;
+  // A path the budget priced out is the door's peLimit (round 9), written here
+  // now that the helper holds the door's error.
+  if not (IoGate(APath, puRead) or GateRefused(AFn, Err)) then Exit;
   if not FileExists(APath) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
@@ -833,9 +836,15 @@ begin
       len := fs.Size;
       { ASKED BEFORE THE ALLOCATION, as ReadAllBytes asks: the door charged the
         read only after it had been made, so a file of any size was committed
-        to memory first (round 9). A claim: this helper holds no error, and
-        the door's next consultation reports the latch. }
-      if not BudgetClaim(len) then Exit;
+        to memory first (round 9).
+        AN OVERSIZED FILE IS AN ARGUMENT REFUSED, NOT A SPENT RUN (round 10).
+        Round 9 CLAIMED this size, which latches, because the helper held no
+        error to write into: a 300 MB load was refused and then the program's
+        next left$("abc", 2) died too, blamed on left$ for 300000000 units it
+        never asked for. file_readalltext$ refuses the same file and the run
+        goes on. So the helper holds the door's error now, and the refusal is
+        written here, in the statement that asks, and does not latch. }
+      if not BudgetAllows(len) then begin Err := BudgetRefusal(AFn); Exit; end;
       SetLength(AText, len);
       if len > 0 then fs.ReadBuffer(AText[1], len);
     finally fs.Free; end;
@@ -1482,7 +1491,6 @@ begin
   if not RenderForSave(l, t) then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
   // A spent budget writes nothing and renames nothing (round 9).
   if BudgetSpent() then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
-  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   { THE WRITE'S ANSWER IS THE ANSWER. This discarded SaveTextToFile's Boolean and
     returned the line count whatever happened, so a write the sandbox refused, or
     one into a directory that does not exist, reported every line as written --
@@ -1496,6 +1504,13 @@ begin
     it; this door asked BudgetSpent, which a path refusal never sets, and
     answered 0 with ioerror() 3. scripts/check-budget.py found it. }
   if not (SaveTextToFile(Args[1].Str, t) or GateRefused('strings_savetofile', Err)) then Exit;
+  { THE ENCODING IS RENAMED BY A SAVE THAT HAPPENED, never before it (round
+    10). It was set above the write, so a path the budget priced out --
+    refused, peLimit, nothing written -- still left strings_encoding$ naming
+    the encoding of a save that never was: round 8's fix of the same defect in
+    strings_loadfromfile, missed at its twin. A write that failed renames
+    nothing either: the list was not saved in anything. }
+  if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   Result := ValInt(l.Count);
 end;
 
@@ -1509,12 +1524,10 @@ begin
   if not GetList(Args[0], l, Err) then Exit;
   { A path the budget priced out is this call's peLimit (round 9): the load
     used to go on with '' and answer 0 lines, a refusal read as an empty file.
+    So is a file too large for what is left (round 10), and neither latches.
     Any other failure keeps that answer, as it always had. }
-  if not LoadTextFromFile(Args[1].Str, s) then
-  begin
-    GateRefused('strings_loadfromfile', Err);
+  if not LoadTextFromFile('strings_loadfromfile', Args[1].Str, s, Err) then
     if IsError(Err) then Exit;
-  end;
   { The read is charged for what it read, before the split is asked for. }
   if not BudgetLinearAfterOk('strings_loadfromfile', Length(s), BudgetMilliCopy, Err) then Exit;
   if not (BudgetLinearOk('strings_loadfromfile', Length(s), BudgetMilliScan, Err) and

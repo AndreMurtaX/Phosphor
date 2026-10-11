@@ -175,7 +175,13 @@ end;
   through BudgetCharge, which latches the run and sets no GWalkSpent -- so a
   file_copy refused there answered 0 as a failure, ioerror 3, while the same
   refusal one helper over (ReadAllBytes) was the peLimit it is. Every charge
-  below a door either sets the flag or latches the budget; this asks both. }
+  below a door either sets the flag or latches the budget; this asks both.
+  Round 10 asks a copy for its whole price up front, without latching, so
+  CopyFileBytes no longer latches at all -- the latch is still asked here,
+  because a walk that a latch stopped is a refusal whichever helper charged,
+  and scripts/check-budget.py now settles a latch only by a reporter that
+  READS it: with this line cut to `GWalkSpent` alone the gate reports every
+  door that walks (round 10: it used to stay green). }
 function WalkRefused(const AFn: String; out Err: TPhosphorError): Boolean;
 begin
   Result := GWalkSpent or BudgetSpent();
@@ -187,7 +193,10 @@ begin
 end;
 
 // --- raw whole-file text (no BOM, no newline translation) -------------------
-function WriteAllBytes(const APath, AContent: String): Boolean;
+{ APaid: the write's units were already asked for, with the read that produced
+  AContent (CopyFileBytes). Required, never defaulted -- a default of True would
+  be an unpriced write that nobody chose. }
+function WriteAllBytesAs(const APath, AContent: String; APaid: Boolean): Boolean;
 var fs: TFileStream;
 begin
   Result := False;
@@ -196,7 +205,7 @@ begin
   if not IoGate(APath, puWrite) then Exit;
   // One byte written is one unit, like one byte read: a file_writealltext$ of a
   // gigabyte is a gigabyte of work inside one opCall whichever way it flows.
-  if not BudgetAllows(Length(AContent)) then
+  if (not APaid) and not BudgetAllows(Length(AContent)) then
   begin
     GWalkSpent := True;
     Exit;
@@ -214,6 +223,11 @@ begin
   end;
 end;
 
+function WriteAllBytes(const APath, AContent: String): Boolean;
+begin
+  Result := WriteAllBytesAs(APath, AContent, False);
+end;
+
 { A WHOLE FILE IS A SIZE THE ARGUMENTS DO NOT NAME -- BUT THE FILESYSTEM DOES.
 
   file_readalltext$ of a twelve-gigabyte file finished in 1437 ms having
@@ -225,8 +239,13 @@ end;
   allocate -- and one byte of file is one unit, the same unit as everywhere else.
 
   It is asked HERE and not at each caller for the same reason SandboxAllows is:
-  a t_ function added later inherits the guard by calling this. }
-function ReadAllBytes(const APath: String; out AContent: String): Boolean;
+  a t_ function added later inherits the guard by calling this.
+
+  ATimes: how many units each byte read costs the caller -- 1 for a read, 2 for
+  a COPY, which writes every byte back out and asks for both halves here, in one
+  question, before a byte is committed (round 10; see CopyFileBytes). }
+function ReadAllBytesTimes(const APath: String; out AContent: String;
+                           ATimes: Int64): Boolean;
 var fs: TFileStream; len: Int64;
 begin
   AContent := '';
@@ -237,11 +256,14 @@ begin
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
       len := fs.Size;
-      if not BudgetAllows(len) then
+      if (len > 0) and (ATimes > 1) and (len > High(Int64) div ATimes) then
+        len := High(Int64) div ATimes;           // saturates: refused below
+      if not BudgetAllows(len * ATimes) then
       begin
         GWalkSpent := True;
         Exit;
       end;
+      len := fs.Size;
       SetLength(AContent, len);
       if len > 0 then fs.ReadBuffer(AContent[1], len);
     finally
@@ -251,6 +273,11 @@ begin
   except
     Result := False;
   end;
+end;
+
+function ReadAllBytes(const APath: String; out AContent: String): Boolean;
+begin
+  Result := ReadAllBytesTimes(APath, AContent, 1);
 end;
 
 function t_file_writealltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -604,11 +631,21 @@ begin
 end;
 
 // --- byte-copy and tree helpers ---------------------------------------------
+{ A COPY IS ASKED FOR WHOLE, ONCE, BEFORE IT STARTS (round 10). It was three
+  questions about one file: the read asked len without latching, then the copy
+  CHARGED len -- which latches -- and then the write asked len again. So a
+  file_copy cost three times its size, and whether a refusal spent the run
+  depended on the size the wrong way round: a file larger than what was left
+  was refused and the run went on, one between a half and all of it was read,
+  then latched the run, and one between a third and a half was refused at the
+  write and the run went on (under the documented ceilings, 128 to 256 MB
+  latched). A copy is a read and a write of the same bytes: 2 units a byte,
+  asked as one RULE 1 question, refused without latching, and recorded in
+  GWalkSpent like every other refusal below a door here. }
 function CopyFileBytes(const ASrc, ADst: String): Boolean;
 var s: String;
 begin
-  // ReadAllBytes charges the read; the write is the same bytes back out.
-  Result := ReadAllBytes(ASrc, s) and BudgetCharge(Length(s)) and WriteAllBytes(ADst, s);
+  Result := ReadAllBytesTimes(ASrc, s, 2) and WriteAllBytesAs(ADst, s, True);
   if GWalkSpent then Result := False;
 end;
 procedure DeleteTree(const ADir: String);
@@ -886,6 +923,146 @@ begin
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, '')));
   if WalkRefused('file_createempty', Err) then Result := ValInt(0);
 end;
+{$IFDEF WINDOWS}
+{ WHAT A FILE IS NOW, on Windows (round 10) -- for file_getsize and the
+  file_get*time doors. Declared from kernel32, as PhosphorSysLib declares its
+  own, because the engine boundary keeps the 'windows' unit out. }
+type
+  TIoFileTime = record
+    Lo, Hi: LongWord;
+  end;
+  { WIN32_FILE_ATTRIBUTE_DATA: 4 + 3*8 + 4 + 4 = 36 bytes, no padding. }
+  TIoAttrData = record
+    Attr: LongWord;
+    Created, Accessed, Written: TIoFileTime;
+    SizeHi, SizeLo: LongWord;
+  end;
+  { BY_HANDLE_FILE_INFORMATION: 4 + 3*8 + 6*4 = 52 bytes, no padding. }
+  TIoHandleInfo = record
+    Attr: LongWord;
+    Created, Accessed, Written: TIoFileTime;
+    Serial, SizeHi, SizeLo, Links, IndexHi, IndexLo: LongWord;
+  end;
+
+function IoGetFileAttributesExW(AName: PWideChar; ALevel: LongInt; AData: Pointer): LongBool;
+  stdcall; external 'kernel32.dll' name 'GetFileAttributesExW';
+function IoCreateFileW(AName: PWideChar; AAccess, AShare: LongWord; ASecurity: Pointer;
+  ADisposition, AFlags: LongWord; ATemplate: THandle): THandle;
+  stdcall; external 'kernel32.dll' name 'CreateFileW';
+function IoCloseHandle(AHandle: THandle): LongBool;
+  stdcall; external 'kernel32.dll' name 'CloseHandle';
+function IoGetFileType(AHandle: THandle): LongWord;
+  stdcall; external 'kernel32.dll' name 'GetFileType';
+function IoGetFileInformationByHandle(AHandle: THandle; AInfo: Pointer): LongBool;
+  stdcall; external 'kernel32.dll' name 'GetFileInformationByHandle';
+function IoFileTimeToLocalFileTime(AUtc, ALocal: Pointer): LongBool;
+  stdcall; external 'kernel32.dll' name 'FileTimeToLocalFileTime';
+function IoFileTimeToDosDateTime(AFileTime: Pointer; ADate, ATime: Pointer): LongBool;
+  stdcall; external 'kernel32.dll' name 'FileTimeToDosDateTime';
+function IoGetLastError: LongWord;
+  stdcall; external 'kernel32.dll' name 'GetLastError';
+
+const
+  IO_ATTR_DIRECTORY = $10;
+  IO_ATTR_REPARSE = $400;
+  IO_SHARE_ALL = 7;                 // FILE_SHARE_READ or _WRITE or _DELETE
+  IO_OPEN_EXISTING = 3;
+  IO_BACKUP_SEMANTICS = $02000000;  // lets the handle name a directory, so it can be told apart
+  IO_TYPE_DISK = 1;
+  IO_SHARING_VIOLATION = 32;
+
+{ THE DIRECTORY ENTRY IS NOT THE FILE, ON WINDOWS. Round 9 moved file_getsize
+  to FindFirst -- FindFirstFileW, which answers from the directory entry -- to
+  stop it OPENING a file to read one number (a FIFO blocked that open on
+  Linux, and a locked file refused it). On Linux that is a stat, the inode,
+  and current. On Windows it is NOT, measured on this build:
+
+    a file being written through another handle   file_getsize 0, the file 142000
+    after an append through that handle            142000, the file 142005
+    a hard link, after an append through the other 12345, the file 12350
+    a symbolic link to a 12345-byte file           0 (the LINK's entry)
+
+  -- a wrong number, on Windows only, and 0 cannot be told from an empty or a
+  missing file. GetFileAttributesExW is the same directory entry (the symlink
+  is 0 there too). The current answer comes from a HANDLE, and a handle opened
+  with NO access rights -- only the attributes can be read through it -- is
+  refused by no sharing mode (a file another handle holds with share 0 is
+  answered) and reads no data, and Windows has no FIFO in a directory to block
+  on: a named pipe lives in \\.\pipe\, where the attribute query below fails
+  first, and an open of a busy one fails at once (ERROR_PIPE_BUSY), it does
+  not wait.
+
+  The attribute query goes first, without following anything, and settles
+  "nothing there", "a directory" and every device name (NUL, CON: no
+  attributes) without an open. Only then is the handle opened, FOLLOWING a
+  link as a read would, and only a disk file that is not a directory is a
+  regular file. A file the attribute query is itself refused for -- a paging
+  file the system holds -- keeps the directory entry, the best that exists.
+
+  ONE OPEN THIS STILL MAKES, said rather than implied: a symbolic link whose
+  target is a named pipe is followed to the pipe, and that open connects to
+  the pipe's server (measured: the server then sees a client come and go).
+  Nothing blocks and nothing is read; telling a link's target apart before
+  opening it would mean reading its reparse data, which is more machinery than
+  a size query should carry, for a link someone made on purpose. }
+function WinFileNow(const APath: String; out ASize: Int64; out AWritten: TIoFileTime;
+                    out AHeld: Boolean): Boolean;
+var
+  w: UnicodeString;
+  d: TIoAttrData;
+  h: THandle;
+  info: TIoHandleInfo;
+begin
+  Result := False;
+  ASize := 0;
+  AWritten.Lo := 0;
+  AWritten.Hi := 0;
+  AHeld := False;
+  w := UnicodeString(APath);       // the conversion the RTL's own path calls make
+  if w = '' then Exit;
+  FillChar(d, SizeOf(d), 0);
+  if not IoGetFileAttributesExW(PWideChar(w), 0, @d) then
+  begin
+    // Held so closely that even its attributes are refused: the CALLER asks
+    // the directory entry, through the gate it has already passed.
+    AHeld := IoGetLastError() = IO_SHARING_VIOLATION;
+    Exit;
+  end;
+  if (d.Attr and IO_ATTR_DIRECTORY) <> 0 then Exit;
+  h := IoCreateFileW(PWideChar(w), 0, IO_SHARE_ALL, nil, IO_OPEN_EXISTING,
+                     IO_BACKUP_SEMANTICS, 0);
+  if h = THandle(-1) then
+  begin
+    if (d.Attr and IO_ATTR_REPARSE) <> 0 then Exit;   // a link that leads nowhere
+    ASize := Int64(d.SizeHi) shl 32 or d.SizeLo;
+    AWritten := d.Written;
+    Exit(True);
+  end;
+  try
+    if IoGetFileType(h) <> IO_TYPE_DISK then Exit;
+    FillChar(info, SizeOf(info), 0);
+    if not IoGetFileInformationByHandle(h, @info) then Exit;
+    if (info.Attr and IO_ATTR_DIRECTORY) <> 0 then Exit;
+    ASize := Int64(info.SizeHi) shl 32 or info.SizeLo;
+    AWritten := info.Written;
+    Result := True;
+  finally
+    IoCloseHandle(h);
+  end;
+end;
+
+{ FileAge's own conversion (rtl/win/sysutils.pp WinToDosTime): local time, then
+  the DOS date FileDateToDateTime reads. -1 when Windows cannot convert it. }
+function WinDosAge(const AWritten: TIoFileTime): LongInt;
+var lft: TIoFileTime; dd, dt: Word;
+begin
+  Result := -1;
+  if IoFileTimeToLocalFileTime(@AWritten, @lft) and
+     IoFileTimeToDosDateTime(@lft, @dd, @dt) then
+    Result := LongInt((LongWord(dd) shl 16) or dt);
+end;
+{$ENDIF}
+
 { A SIZE IS ASKED OF THE DIRECTORY, NEVER BY OPENING THE FILE (round 9).
 
   This opened the path -- TFileStream.Create, open(O_RDONLY) -- to read one
@@ -904,8 +1081,29 @@ end;
 
   A name holding a wildcard is matched EXACTLY: FindFirst would read 'a*b' as a
   pattern, and the first file it happened to match is not the one asked about.
-  Windows names cannot hold one; a Linux name can. }
+  Windows names cannot hold one; a Linux name can.
+
+  ON WINDOWS THE DIRECTORY ENTRY IS STALE, AND THE ANSWER IS THE FILE'S (round
+  10): see WinFileNow above. Linux keeps the stat, which is the file's. }
 function t_file_getsize(const Args: array of TValue; out Err: TPhosphorError): TValue;
+{$IFDEF WINDOWS}
+var size: Int64; written: TIoFileTime; held: Boolean; sr: TSearchRec;
+begin
+  Err := NoError(); Result := ValInt(0);
+  if not (IoGateAt(Args[0].Str, puRead, BudgetMilliOs) or
+          GateRefused('file_getsize', Err)) then Exit;
+  if WinFileNow(Args[0].Str, size, written, held) then Exit(ValInt(size));
+  { A file held so that even its attributes are refused (a paging file the
+    system holds) keeps the directory entry, the best answer there is. ONE
+    entry: a name with a wildcard never gets here -- the attribute query fails
+    on it with ERROR_INVALID_NAME, not a sharing violation. }
+  if held and (FindFirst(Args[0].Str, faAnyFile, sr) = 0) then
+  begin
+    if (sr.Attr and faDirectory) = 0 then Result := ValInt(sr.Size);
+    FindClose(sr);
+  end;
+end;
+{$ELSE}
 var sr: TSearchRec; want: String; exact: Boolean;
 begin
   Err := NoError(); Result := ValInt(0);
@@ -935,6 +1133,7 @@ begin
     FindClose(sr);
   end;
 end;
+{$ENDIF}
 function t_file_appendalltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
 begin
@@ -982,12 +1181,22 @@ begin
   FileSetDate(Args[0].Str, DateTimeToFileDate(AsDouble(Args[1])));
   Result := ValInt(1);
 end;
+{ FileAge is FindFirstFileW on Windows -- the directory entry, the same stale
+  copy file_getsize read: a symbolic link answered the LINK's own time where a
+  read of it reads the target, and Linux (a stat) answers the target's. So on
+  Windows the time is the file's, from the handle WinFileNow opens (round 10). }
 function t_file_gettime(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var age: LongInt;
+var age: LongInt; {$IFDEF WINDOWS} size: Int64; written: TIoFileTime; held: Boolean; {$ENDIF}
 begin
   Err := NoError();
   if not (IoGate(Args[0].Str, puRead) or GateRefused('file_gettime', Err)) then begin Result := ValInt(0); Exit; end;
+  {$IFDEF WINDOWS}
+  if WinFileNow(Args[0].Str, size, written, held) then age := WinDosAge(written)
+  else if held then age := FileAge(Args[0].Str)    // the entry, as file_getsize keeps it
+  else age := -1;
+  {$ELSE}
   age := FileAge(Args[0].Str);
+  {$ENDIF}
   if age > 0 then Result := ValDouble(FileDateToDateTime(age)) else Result := ValInt(0);
 end;
 function DirTimeKey(AKind: Char; const APath: String): String;

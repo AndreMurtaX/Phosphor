@@ -2184,8 +2184,13 @@ def ref_reports(text, reporters):
 
 
 def ref_calls(body, names):
-    """[(pos, name)] of calls `name(` to any of names, outside the header."""
-    hdr = body.find(')')
+    """[(pos, name)] of calls `name(` to any of names, outside the header.
+    The header ends at its parameter list's `)` -- or, for a routine with NO
+    parameters (`function WalkStep: Boolean;`), at its first `;`. It used to
+    end at the first `)` in the body either way, which for WalkStep was the
+    `)` of `BudgetCharge(..)`: the one charge in it was never seen (round 10)."""
+    m = PARAMLIST.match(body)
+    hdr = m.end() - 1 if m else body.find(';')
     out = []
     if not names:
         return out
@@ -2249,6 +2254,22 @@ def ref_ask_verdict(body, toks, pos, reporters, accountable):
     return 'refused without latching, and the statement that sees it writes no refusal'
 
 
+def ref_latch_refusal(text):
+    """Is a refusal written in text by something that can have seen a LATCH?
+    Any written BudgetRefusal counts -- `if o.Refused then E := BudgetRefusal`
+    reads a unit's own record of a charge -- EXCEPT one whose `if` reads only a
+    refusal FLAG: GWalkSpent / GPathPriced / FSpent are set by a refusal that
+    did not latch, and a latch never sets them (round 10, the mirror of the
+    flag rule round 9 wrote: a latch is not a flag either)."""
+    flagged = set()
+    for m in REF_FLAG_READ.finditer(text):
+        cond = text[m.start():m.start() + re.search(r'\bthen\b', m.group(0)).start()]
+        if not re.search(r'\bBudgetSpent\s*\(', cond):
+            flagged.add(m.start() + m.group(0).rfind('BudgetRefusal'))
+    return any(m.start() not in flagged
+               for m in re.finditer(r'\bBudgetRefusal\s*\(', text))
+
+
 def ref_settled(body, toks, pos, reporters, strict=False):
     """Is the latching call at pos reported -- in its own statement, or by
     something after it that asks the latch: BudgetSpent, a reporter, or a later
@@ -2279,7 +2300,7 @@ def ref_settled(body, toks, pos, reporters, strict=False):
     if strict:
         if REF_FLAG_READ.search(after):
             return True
-    elif re.search(r'\bBudgetRefusal\s*\(', after):
+    elif ref_latch_refusal(after):
         return True
     if any(re.search(r'\b' + re.escape(r) + r'\s*\(', after) for r in reporters):
         return True
@@ -2424,6 +2445,32 @@ def refusal_scan(dirs, allowed, whole=None):
     # path is a reporter of its own charge, and sees nothing of the path.
     flag_word = re.compile(r'\b(?:' + '|'.join(REF_FLAGS) + r')\b')
     flag_reporters = set(shortof[k] for k in rep if flag_word.search(bodies[k]))
+    # ...and the reporters that READ THE LATCH (round 10): the only ones that
+    # settle a refusal a latch recorded. A reporter is any routine that writes
+    # a refusal; WalkRefused cut to `Result := GWalkSpent` still writes one, so
+    # it still counted as settling CopyTree's latched walk -- and the round-9 fix
+    # it carried could be removed with this gate green. A reporter sees a latch
+    # when it asks BudgetSpent, or makes a consultation that answers False on a
+    # latched budget and reports in that statement, or hands its error to a
+    # reporter that does -- to a fixed point, as `rep` is built.
+    def sees_latch(k):
+        body = bodies[k]
+        if re.search(r'\bBudgetSpent\s*\(', body):
+            return True
+        return any(ref_reported_at(body, toks[k], p, reporters)
+                   for p, _ in ref_calls(body, REF_SEES))
+    latch_rep = set(k for k in rep if sees_latch(k))
+    changed = True
+    while changed:
+        changed = False
+        names = set(shortof[k] for k in latch_rep)
+        for k in rep - latch_rep:
+            if any(c in latch_rep for c in calls[k]) and ref_calls(bodies[k], names):
+                latch_rep.add(k)
+                changed = True
+    # BudgetLinearOk / BudgetLinearAfterOk are reporters of their own and see a
+    # latch (a latched budget refuses any count, and they write the refusal).
+    latch_reporters = set(shortof[k] for k in latch_rep) | set(REF_OK)
     holes = {}
     used = set()
     flagged = {}
@@ -2445,17 +2492,31 @@ def refusal_scan(dirs, allowed, whole=None):
 
     def unsettled(key, latching):
         """[(name, strict)] of the refusals in key's body nothing settles.
-        latching maps a helper to True when what it hands on is a FLAG."""
+        latching maps a helper to the kinds it hands on: True a FLAG, False a
+        latch."""
         body = bodies[key]
-        cands = [(p, n, False) for p, n in ref_calls(body, REF_LATCH)] + \
-            [(p, shortof[k], latching[k]) for p, k in sites[key]
-             if k in latching and k != key] + \
+        # A latch whose own statement ALSO records it in a refusal flag
+        # (`if not BudgetCharge(..) then begin FSpent := True; ...`) is handed on
+        # as that flag: a reader of the flag sees it, as a reader of the latch
+        # would. One that does not is the latch alone, and only a reader of the
+        # latch settles it (round 10).
+        def flags_it(p):
+            a, b = ref_statement(toks[key], ref_index(toks[key], p))
+            return bool(REF_FLAG_SET.search(ref_text(body, toks[key], a, b + 1)))
+        cands = [(p, n, flags_it(p)) for p, n in ref_calls(body, REF_LATCH)] + \
+            [(p, shortof[k], s) for p, k in sites[key]
+             if k in latching and k != key for s in latching[k]] + \
             [(p, n, True) for p, n in flagged.get(key, [])]
         return sorted(set((n, s) for p, n, s in cands
                           if not ref_settled(body, toks[key], p,
-                                             flag_reporters if s else reporters, s)))
+                                             flag_reporters if s else latch_reporters, s)))
     # LATCH: the helpers that hand the duty on, to a fixed point over the calls.
-    # A helper that hands on a flag is STRICT, and stays strict.
+    # Each maps to the KINDS it hands on -- True for a flag, False for a latch
+    # -- and a helper can hand on both. Round 9 kept one Boolean, "strict, and
+    # stays strict", so CopyTree, which hands on IoGate's flag AND WalkStep's
+    # latch, was recorded as a flag alone: its latch was then settled by
+    # WalkRefused reading GWalkSpent, and WalkRefused could stop asking
+    # BudgetSpent with this gate green (round 10).
     latching = {}
     changed = True
     while changed:
@@ -2469,9 +2530,9 @@ def refusal_scan(dirs, allowed, whole=None):
             if key in whole:
                 used.add(key)
                 continue
-            strict = any(s for _, s in bad) or latching.get(key, False)
-            if key not in latching or latching[key] != strict:
-                latching[key] = strict
+            kinds = frozenset(s for _, s in bad) | latching.get(key, frozenset())
+            if latching.get(key) != kinds:
+                latching[key] = kinds
                 changed = True
     for key in accountable:
         bad = unsettled(key, latching)
@@ -2586,6 +2647,35 @@ def narrowing():
     print('narrowing sweep: no unreviewed 32-bit narrowing in %d directories'
           % len(SCAN_DIRS))
     return 0
+
+
+#: --prove's round-10 planting: CopyTree's shape -- a helper that hands on a
+#: path refused into a FLAG and a walk step that LATCHES -- and the door that
+#: reports through one reporter.
+_R10_WALK = ('var GWalkSpent: Boolean;\n'
+             'function Gate(const P: String): Boolean;\n'
+             'begin\n'
+             '  Result := True;\n'
+             '  if not BudgetLinear(Length(P), BudgetMilliOs) then\n'
+             '  begin GWalkSpent := True; Exit(False); end;\n'
+             'end;\n'
+             'function Step: Boolean;\n'
+             'begin\n'
+             '  Result := BudgetCharge(256);\n'
+             'end;\n'
+             'function Walk(const P: String): Boolean;\n'
+             'begin\n'
+             '  Result := False;\n'
+             '  if not Gate(P) then Exit;\n'
+             '  if not Step() then Exit;\n'
+             '  Result := True;\n'
+             'end;\n')
+_R10_DOOR = ('function f_walk(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  Result := ValInt(Ord(Walk(A[0].Str)));\n'
+             '  if Refused(\'walk\', E) then Result := ValInt(0);\n'
+             'end;\n')
 
 
 def prove():
@@ -3073,6 +3163,51 @@ def prove():
              '  E := NoError();\n'
              '  if not (Gate(A[0].Str) or Refused(\'save\', E)) then Exit(ValInt(0));\n'
              '  Result := ValInt(1);\n'
+             'end;\n',
+             None, None),
+            # ROUND 10: A LATCH IS NOT A FLAG EITHER. WalkRefused cut to read
+            # GWalkSpent alone stayed green: any reporter settled a latch, and a
+            # helper handing on a flag AND a latch was recorded as the flag.
+            ('a latch settled by a reporter that reads only a flag (WalkRefused)',
+             _R10_WALK + 'function Refused(const F: String; out E: TPhosphorError): Boolean;\n'
+             'begin\n'
+             '  Result := GWalkSpent;\n'
+             '  if Result then E := BudgetRefusal(F);\n'
+             'end;\n' + _R10_DOOR,
+             'PhosphorPlantedLib.pas:f_walk', 'latched by Walk'),
+            ('... repaired: the reporter asks the latch as well',
+             _R10_WALK + 'function Refused(const F: String; out E: TPhosphorError): Boolean;\n'
+             'begin\n'
+             '  Result := GWalkSpent or BudgetSpent();\n'
+             '  if Result then E := BudgetRefusal(F);\n'
+             'end;\n' + _R10_DOOR,
+             None, None),
+            ('a latch reported only behind a flag read in the door',
+             'var GWalkSpent: Boolean;\n'
+             'function Row(N: Integer): String;\n'
+             'begin\n'
+             '  if not BudgetLinearAfter(N, BudgetMilliMove) then Exit(\'\');\n'
+             '  Result := \'x\';\n'
+             'end;\n'
+             'function f_row(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  Result := ValStr(Row(ArgI32(A[0])));\n'
+             '  if GWalkSpent then E := BudgetRefusal(\'row\');\n'
+             'end;\n',
+             'PhosphorPlantedLib.pas:f_row', 'latched by Row'),
+            ('... repaired: the same if asks the latch',
+             'var GWalkSpent: Boolean;\n'
+             'function Row(N: Integer): String;\n'
+             'begin\n'
+             '  if not BudgetLinearAfter(N, BudgetMilliMove) then Exit(\'\');\n'
+             '  Result := \'x\';\n'
+             'end;\n'
+             'function f_row(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  Result := ValStr(Row(ArgI32(A[0])));\n'
+             '  if GWalkSpent or BudgetSpent() then E := BudgetRefusal(\'row\');\n'
              'end;\n',
              None, None),
         ]

@@ -611,6 +611,22 @@ whose only answer was a Boolean -- a list's join, a config's save, a PBKDF2
 derivation, an archive's entry count, a rag query's analysis -- now latches the
 run when it is refused, so the call after it is refused too.
 
+**A latch names the call that spent the run, and an argument's size never
+latches (round 10).** That list is the whole of it. Round 9 had also latched
+on a file too large for `strings_loadfromfile` and an archive too large for
+`unzip_extract` / `zip_extractall`, which a program can simply retry smaller:
+those are refused like `file_readalltext$` again, and the run goes on. A
+`file_copy` (and each file a `dir_copy` copies) is asked for its whole price,
+two units a byte, before a byte is read: it used to be asked three questions,
+one of which latched, so a file between half and all of what was left spent
+the run while a larger one did not. And when a latch from that list refuses
+the calls after it, they no longer repeat the first refusal's words as their
+own -- `string$: that would take 4000000 units of work`, for a `string$(10)`.
+The call that latched is told what it asked for; every later one is told
+`the run's budget was spent by an earlier strings_text$, refused because ...`.
+A charge's latch was always worded for the run (`the run has spent its step
+budget of N inside library calls`) and is unchanged.
+
 **A refused render is an error, never an empty answer.** `json_value$`,
 `json_gets$`, `json_items$`, `json_paths$`, `rag_analyze$` and
 `rag_retrieve_json$` render JSON text; until 2026-10-11 a render the budget

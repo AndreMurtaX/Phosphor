@@ -473,7 +473,18 @@ function BudgetLinearAfterOk(const AWhat: String; ACount, AMilliEach: Int64;
   its caller asks is the one that answers. A flag keeps RULE 1: an oversized
   path or file is refused and the run goes on. scripts/check-budget.py's
   refusal gate holds the rule, and settles a flagged refusal only by a reader
-  of the flag -- BudgetSpent cannot see one. }
+  of the flag -- BudgetSpent cannot see one.
+
+  NEVER FOR THE SIZE OF AN ARGUMENT (round 10). A claim spends the run, so it
+  is RULE 1 broken for anything a program can simply ask again smaller: a
+  file's size, an archive's declared size. Round 9 claimed both
+  (strings_loadfromfile, unzip_extract, zip_extractall) and a refused
+  load then took the program's next string$(10) with it. Those helpers hold
+  their door's error now and write the refusal where they ask. What is left
+  claimed is the list docs/embedding.md gives -- a list's join, a config's
+  save, a PBKDF2 derivation, an archive's entry count, a rag query's analysis
+  -- and a latch a claim sets is reported by BudgetRefusal to its own door as
+  the request it refused, and to every later door as "spent by" that door. }
 function BudgetClaim(AUnits: Int64): Boolean;
 function BudgetClaimLinear(ACount, AMilliEach: Int64): Boolean;
 
@@ -581,6 +592,17 @@ var
   GStart: QWord = 0;
   GSpent: Boolean = False;
   GWhy: String = '';
+  { WHO SPENT THE RUN, when a CLAIM did (round 10). A claim latches with GWhy
+    still describing ONE request -- "that would take 4000000 units of work and
+    only 2559990 are left" -- and every later refusal is the latch's, so
+    BudgetRefusal handed that sentence to each of them: string$(10, 66) died
+    "string$: that would take 4000000 units", blamed for a size it never
+    asked. GClaimed is set by the claim that latched; GSpentBy is the BASIC
+    name of the first door that reported it, which is that claim's own door
+    (every door reports its latch before its answer leaves --
+    scripts/check-budget.py holds that), and every later refusal names it. }
+  GClaimed: Boolean = False;
+  GSpentBy: String = '';
 
 // --- installation ------------------------------------------------------------
 procedure BudgetBegin(AMaxSteps, ATimeoutMs: Int64);
@@ -596,6 +618,8 @@ begin
   GNextClock := BudgetClockEvery;
   GStart := GetTickCount64();
   GSpent := False;
+  GClaimed := False;
+  GSpentBy := '';
   GWhy := '';
 end;
 
@@ -608,6 +632,8 @@ begin
   GTimeoutMs := 0;
   GUnits := 0;
   GSpent := False;
+  GClaimed := False;
+  GSpentBy := '';
   GWhy := '';
 end;
 
@@ -764,6 +790,15 @@ var
 begin
   why := GWhy;
   if why = '' then why := 'the run''s execution budget is spent';
+  { A claim's latch: its own door is told what it asked; every later refusal is
+    told who spent the run. (A charge's latch already says so in words true for
+    every later call -- "the run has spent its step budget of N".) }
+  if GActive and GSpent and GClaimed then
+  begin
+    if GSpentBy = '' then GSpentBy := AWhat
+    else why := 'the run''s budget was spent by an earlier ' + GSpentBy +
+                ', refused because ' + why;
+  end;
   Result := MakeError(peLimit, AWhat + ': ' + why);
 end;
 
@@ -870,9 +905,16 @@ end;
 function BudgetClaim(AUnits: Int64): Boolean;
 begin
   if not GActive then Exit(True);
+  if GSpent then Exit(False);
   Result := BudgetAllows(AUnits);
-  // BudgetAllows left GWhy saying what was refused; latching keeps it.
-  if not Result then GSpent := True;
+  // BudgetAllows left GWhy saying what was refused; latching keeps it, and
+  // BudgetRefusal names the door that reported it to every later refusal.
+  if not Result then
+  begin
+    GSpent := True;
+    GClaimed := True;
+    GSpentBy := '';
+  end;
 end;
 
 function BudgetClaimLinear(ACount, AMilliEach: Int64): Boolean;

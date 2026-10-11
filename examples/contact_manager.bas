@@ -54,8 +54,9 @@ const SCHEMA_VERSION = 3
 rem What PRAGMA application_id holds in a file this program made: "PhCM" as
 rem a 32-bit number. Versions 1 and 2 set none; see db_owner$.
 const APP_ID = 1349010253
-rem Why a backup is not written under a name SQLite keeps beside a database.
-const JOURNAL_NAME_MSG$ = "A name ending in -journal, -wal or -shm is where SQLite keeps a database's unfinished work: a backup there would be cut short by the open database, or taken for the unfinished work of the file beside it. Back up to another name."
+rem Why no database -- opened, or written as a backup -- goes under a name
+rem SQLite keeps beside a database.
+const JOURNAL_NAME_MSG$ = "A name ending in -journal, -wal or -shm is where SQLite keeps a database's unfinished work: a database there would be cut short by the one it sits beside, or taken for that one's unfinished work and deleted. Use another name."
 
 selftest? = false
 if environ$("PHOSPHOR_SELFTEST") = "1" then selftest? = true
@@ -86,6 +87,8 @@ probe_err$ = ""            rem why is_open_db could not tell (backup)
 hdr_version = 0            rem what file_header$ read: user_version,
 hdr_app = 0                rem   application_id,
 hdr_err$ = ""              rem   and why it could not read the file
+name_err$ = ""             rem why sqlite_name$ could not answer
+name_safe? = false         rem this SQLite names a file without reading it
 fold_map@ = sdict@()       rem fold$'s table: character -> its case folding
 fold_probe@ = sdict@()     rem what fold$ looks for before walking a string
 passed = 0
@@ -102,6 +105,12 @@ if sqlite_available() = 0 then
   end if
   end
 end if
+rem Before 3.39.0, PRAGMA database_list -- how sqlite_name$ asks SQLite
+rem for a file's name -- reads the file to answer, and reading it is what
+rem rolls a hot journal back into it (SQLite's tool/mkpragmatab.tcl gives
+rem the pragma the NeedSchema flag up to 3.38.x and not from 3.39.0). An
+rem older library is still used, without that question: see may_open_db.
+name_safe? = version_at_least?(sqlite_version$(), "3.39.0")
 
 fold_init()
 randomize()
@@ -476,15 +485,29 @@ rem SQLite follows a symbolic link to its target (os_unix.c,
 rem unixFullPathname), so the journal it rolls back into a file reached
 rem through a link is the one beside the TARGET; and on Windows it drops a
 rem trailing dot or space (GetFullPathNameW), so "x.db." is x.db, with
-rem x.db-journal. Opening CREATES a file that is not there -- through a
-rem link that points at nothing, at the link's target -- so this is asked
-rem only of a file that exists, or of one about to be created anyway. ""
-rem when SQLite cannot open it, with sqlite_errormsg$() saying why.
+rem x.db-journal. (Windows does NOT follow a link here: its full name of a
+rem link is the link's own -- which is why name_refusal$ asks the folder
+rem about a link that leads to no file.) Opening CREATES a file that is
+rem not there -- through a link that points at nothing, at the link's
+rem target -- so this is asked only of a file that exists, or of one about
+rem to be created anyway. And only a SQLite of 3.39.0 or later is asked
+rem about a file that exists: an older one READS the file to answer
+rem (name_safe?), which is the very thing this is asked to come before.
+rem "" when it cannot be asked, or SQLite cannot open it, with name_err$
+rem saying why.
 function sqlite_name$(p$) local d@, s@, f$
   f$ = ""
+  name_err$ = ""
+  if name_safe? = false and file_exists(p$) = 1 then
+    name_err$ = "SQLite " + sqlite_version$() + " reads a file to name it; 3.39.0 or later does not"
+    return ""
+  end if
   sqlite_clearerror()
   d@ = sqlite_open@(p$)
-  if sqlite_isopen(d@) <> 1 then return ""
+  if sqlite_isopen(d@) <> 1 then
+    name_err$ = sqlite_errormsg$()
+    return ""
+  end if
   s@ = sqlite_prepare@(d@, "PRAGMA database_list")
   while sqlite_step(s@) = 1
     if sqlite_gets$(s@, "name") = "main" then f$ = sqlite_gets$(s@, "file")
@@ -492,6 +515,67 @@ function sqlite_name$(p$) local d@, s@, f$
   sqlite_finalize(s@)
   sqlite_close(d@)
   return f$
+end function
+
+rem Whether the version v$ ("3.45.3") is min$ or later, compared part by
+rem part as numbers: "3.9.2" is older than "3.39.0", which a comparison of
+rem the two strings would answer the other way round.
+function version_at_least?(v$, min$) local i, a, b
+  for i = 1 to 3
+    a = val(word$(v$, i, "."))
+    b = val(word$(min$, i, "."))
+    if a <> b then return a > b
+  next
+  return true
+end function
+
+rem Why the name p$ must not be handed to SQLite as a database's at all;
+rem "" when it may be. Three kinds of name, each a door past the checks
+rem that judge a file by its name:
+rem  - one SQLite does not read as a path: "" and ":memory:" are databases
+rem    with no file, and one beginning "file:" is a URI wherever the library
+rem    was built to read URIs (Ubuntu's libsqlite3 is; the sqlite.org DLL
+rem    is not). SQLite would open the file the URI names, which nothing
+rem    here has looked at -- and roll a journal beside it back at the first
+rem    query. Refused on every system, so the two do not differ;
+rem  - one SQLite keeps beside a database (journal_name?);
+rem  - one the folder LISTS that is no file: a folder, or a symbolic link
+rem    that leads to no file. SQLite would create the file it leads to,
+rem    wherever that is -- and on Windows SQLite does not say where (its
+rem    full name of a link is the link's own), so a link onto a journal's
+rem    name passes every check made by name. (On Linux the folder does not
+rem    list such a link here; there sqlite_name$ follows it.)
+function name_refusal$(p$) local n$
+  n$ = alcase$(p$)
+  if n$ = "" or n$ = ":memory:" or left$(n$, 5) = "file:" then return "SQLite does not read that as the name of a file -- a name beginning with file: is a URI, and :memory: or no name at all is a database with no file. Give the file's path."
+  if journal_name?(p$) = true then return JOURNAL_NAME_MSG$
+  if file_exists(p$) <> 1 and listed?(p$) = true then return "Something is at " + p$ + " that is not a file: a folder, or a link that leads to no file. Use the name of a file, or one that is not there yet."
+  return ""
+end function
+
+rem Whether the folder of p$ lists an entry by p$'s name -- compared as
+rem Windows compares names there: in any case, and without the trailing
+rem dots and spaces it drops.
+function listed?(p$) local f$, n$, all$, i, e$
+  f$ = path_getfullpath$(p$)
+  n$ = path_getfilename$(f$)
+  if os_name$() = "Windows" then
+    while right$(n$, 1) = "." or right$(n$, 1) = " "
+      n$ = left$(n$, len(n$) - 1)
+    end while
+    n$ = alcase$(n$)
+  end if
+  if n$ = "" then return false
+  rem The name itself is the pattern: its * and ? match it too, and every
+  rem entry listed is compared again as a name.
+  all$ = dir_getentries$(path_getdirectoryname$(f$), n$)
+  if all$ = "" then return false
+  for i = 1 to wordcount(all$, chr$(10))
+    e$ = word$(all$, i, chr$(10))
+    if os_name$() = "Windows" then e$ = alcase$(e$)
+    if e$ = n$ then return true
+  next
+  return false
 end function
 
 rem The name of a file beside p$ -- p$ as SQLite names it, sqlite_name$ --
@@ -508,6 +592,15 @@ rem    finished with in PERSIST mode, which commits by zeroing the header
 rem    (sqlite.org/fileformat.html, 3.0), and SQLite leaves it alone;
 rem  - NAME-wal holding anything: SQLite reads it as part of the file.
 rem A journal that cannot be read is counted as one SQLite would act on.
+rem ONE PART OF SQLite's DECISION IS NOT MADE HERE: hasHotJournal first
+rem asks whether another connection holds a RESERVED lock on the file, and
+rem a journal whose writer is still at work is not hot -- SQLite leaves it.
+rem That lock cannot be asked from here without SQLite reading the file
+rem (and reading it rolls the journal back when there is no such writer),
+rem so a journal found here belongs either to a program changing the file
+rem right now or to one that stopped in the middle, and judge_copy says so
+rem in those words. (A log, likewise: NAME-wal is there while any program
+rem has the file open, and after one that stopped.)
 function unfinished$(p$) local j$, h$
   j$ = p$ + "-journal"
   if file_getsize(j$) > 0 then
@@ -549,15 +642,28 @@ rem its journal, byte for byte as it was.
 rem The work looked for is the work SQLite will find: beside the file as
 rem SQLite names it (sqlite_name$), which through a symbolic link on Linux
 rem or a trailing dot on Windows is another name than p$ -- judged by p$,
-rem the journal SQLite rolls back was never looked at. (A name that is not
-rem there is not asked, since asking creates it; SQLite deletes whatever
-rem lies beside a file of no pages, and the judge, which would find it
-rem new, has nothing to refuse.) And a header that is not a database's
-rem does not decide alone while such work lies beside it: a page 1 torn by
-rem a power cut is what a rollback journal exists to put back
-rem (atomiccommit.html), so that file too is judged on a copy.
+rem the journal SQLite rolls back was never looked at. A name that is not
+rem there is asked too, though asking creates the file: opening it would
+rem create it the next moment anyway, and through a link that points at
+rem nothing the file created is the link's TARGET -- a journal's name, it
+rem may be, which is refused and the empty file taken away again. (SQLite
+rem deletes whatever lies beside a file of no pages, and the judge, which
+rem would find it new, has nothing to refuse.) And a header that is not a
+rem database's does not decide alone while such work lies beside it: a
+rem page 1 torn by a power cut is what a rollback journal exists to put
+rem back (atomiccommit.html), so that file too is judged on a copy.
+rem WITH A SQLite OLDER THAN 3.39.0 (name_safe?) the name of a file that
+rem is there cannot be asked without SQLite reading the file, and so
+rem acting on the work beside it. Then the work looked for is the work
+rem beside p$ as given, and a marked-by-nobody file with none there is
+rem judged on a copy of its own bytes all the same: whatever SQLite might
+rem find beside it under another name, the file is opened only once its
+rem contents are this program's. What an older library loses is the name
+rem of a journal found elsewhere in the refusal, and a torn page 1 put back
+rem through a link (it is refused as no database).
 function may_open_db(p$) local h$, j$, q$
-  schema_msg$ = ""
+  schema_msg$ = name_refusal$(p$)
+  if schema_msg$ <> "" then return 0
   h$ = file_header$(p$)
   if h$ = "unread" then
     schema_msg$ = "it could not be read (" + hdr_err$ + ")."
@@ -570,15 +676,23 @@ function may_open_db(p$) local h$, j$, q$
       return 0
     end if
   end if
-  q$ = p$
-  if h$ <> "missing" then
+  if h$ = "missing" or name_safe? = true then
     q$ = sqlite_name$(p$)
     if q$ = "" then
-      schema_msg$ = "SQLite could not open it (" + sqlite_errormsg$() + ")."
+      schema_msg$ = "SQLite could not open it (" + name_err$ + ")."
       return 0
     end if
+    if journal_name?(q$) = true then
+      if h$ = "missing" and file_getsize(q$) = 0 then file_delete(q$)
+      schema_msg$ = "that name leads to " + q$ + ". " + JOURNAL_NAME_MSG$
+      return 0
+    end if
+    j$ = unfinished$(q$)
+  else
+    q$ = p$
+    j$ = unfinished$(p$)
+    if j$ = "" and h$ = "db" then return judge_copy(p$, "")
   end if
-  j$ = unfinished$(q$)
   if j$ = "" then
     if h$ <> "notdb" then return 1
     schema_msg$ = "it is not a SQLite database."
@@ -611,56 +725,77 @@ rem copy the file and what lies beside it, let SQLite open the COPY and do
 rem what it does (roll a hot journal back, apply a log, drop a journal
 rem beside an empty file, or one that does not begin as a journal does),
 rem and ask db_owner$ whose file the result is. 1 when it is this
-rem program's or new; else 0 with schema_msg$ saying why -- and saying
-rem that a program stopped in the middle of a change only when j$ shows
-rem one: a log, or a journal that begins as a journal does, beside a file
-rem with pages.
-function judge_copy(p$, j$) local c$, c@, v, app, ok, why$, pre$
+rem program's or new; else 0 with schema_msg$ saying why -- and speaking
+rem of a change in the middle only when j$ shows one: a log, or a journal
+rem that begins as a journal does, beside a file with pages. Even then it
+rem does not say the program STOPPED: the program may be at work on the
+rem file right now (unfinished$ cannot ask its lock), and a person told
+rem it crashed might "recover" a live journal.
+rem With j$ "" -- an older SQLite, whose name for the file could not be
+rem asked (may_open_db) -- the file's own bytes alone are judged on the
+rem copy, and the refusal is the owner check's.
+function judge_copy(p$, j$) local c$, c@, v, app, ok, why$, pre$, own$
   c$ = check_copy$()
-  if right$(j$, 4) = "-wal" then
-    pre$ = "a program stopped in the middle of changing it and left " + j$ + " beside it, which SQLite would write into it"
+  if j$ = "" then
+    pre$ = ""
+  elseif right$(j$, 4) = "-wal" then
+    pre$ = j$ + " lies beside it: the log of a program that has the file open now, or of one that stopped before writing its changes into the file; SQLite would write them into it"
   elseif file_getsize(p$) <= 0 then
     pre$ = j$ + " lies beside it, which SQLite would delete"
   elseif journal_magic?(j$) = true then
-    pre$ = "a program stopped in the middle of changing it and left " + j$ + " beside it, which SQLite would roll back into it"
+    pre$ = j$ + " lies beside it: the journal of a program changing the file right now, or of one that stopped in the middle of a change; if it stopped, SQLite would roll that change back into the file"
   else
     pre$ = j$ + " lies beside it, which does not begin as a journal does and which SQLite would delete"
   end if
-  if drop_check_copy() <> 1 then
-    schema_msg$ = pre$ + "; the copy it is checked on first (" + c$ + ") could not be cleared."
-    return 0
-  end if
-  notice("Checking a database that a program left unfinished...")
-  ok = 1
-  if file_exists(p$) = 1 then ok = file_copy(p$, c$)
-  if ok = 1 and file_exists(p$ + "-journal") = 1 then ok = file_copy(p$ + "-journal", c$ + "-journal")
-  if ok = 1 and file_exists(p$ + "-wal") = 1 then ok = file_copy(p$ + "-wal", c$ + "-wal")
   why$ = ""
-  if ok <> 1 then
-    why$ = "; it could not be copied to " + c$ + " to be checked first."
+  own$ = ""
+  if drop_check_copy() <> 1 then
+    why$ = "the copy it is checked on first (" + c$ + ") could not be cleared."
   else
-    sqlite_clearerror()
-    c@ = sqlite_open@(c$)
-    if sqlite_isopen(c@) <> 1 then
-      why$ = "; the copy it is checked on first could not be opened (" + sqlite_errormsg$() + ")."
-    else
-      v = sqlite_scalar(c@, "PRAGMA user_version")
-      if sqlite_error() = 0 then app = sqlite_scalar(c@, "PRAGMA application_id")
-      if sqlite_error() <> 0 then
-        why$ = "; on a copy, SQLite could not do that (" + sqlite_errormsg$() + ")."
-      elseif db_owner$(c@, v, app) = "" then
-        why$ = " -- and once it has, " + schema_msg$
-      end if
-      sqlite_close(c@)
+    notice("Checking a database before it is opened...")
+    ok = 1
+    if file_exists(p$) = 1 then ok = file_copy(p$, c$)
+    rem A journal or a log is copied only when it holds bytes: SQLite acts
+    rem on no empty one, and a FIFO under a journal's name -- which blocks
+    rem whoever opens it, forever -- has no size: file_getsize answering it
+    rem from the file system (round 9) never opens it, and so neither does
+    rem this, nor unfinished$, which reads a journal only when it has bytes.
+    if j$ <> "" then
+      if ok = 1 and file_getsize(p$ + "-journal") > 0 then ok = file_copy(p$ + "-journal", c$ + "-journal")
+      if ok = 1 and file_getsize(p$ + "-wal") > 0 then ok = file_copy(p$ + "-wal", c$ + "-wal")
     end if
+    if ok <> 1 then
+      why$ = "it could not be copied to " + c$ + " to be checked first."
+    else
+      sqlite_clearerror()
+      c@ = sqlite_open@(c$)
+      if sqlite_isopen(c@) <> 1 then
+        why$ = "the copy it is checked on first could not be opened (" + sqlite_errormsg$() + ")."
+      else
+        v = sqlite_scalar(c@, "PRAGMA user_version")
+        if sqlite_error() = 0 then app = sqlite_scalar(c@, "PRAGMA application_id")
+        if sqlite_error() <> 0 then
+          why$ = "on a copy, SQLite could not read it (" + sqlite_errormsg$() + ")."
+        elseif db_owner$(c@, v, app) = "" then
+          own$ = schema_msg$
+        end if
+        sqlite_close(c@)
+      end if
+    end if
+    drop_check_copy()
+    notice("")
   end if
-  drop_check_copy()
-  notice("")
-  if why$ = "" then
+  if why$ = "" and own$ = "" then
     schema_msg$ = ""
     return 1
   end if
-  schema_msg$ = pre$ + why$ + " The file and " + j$ + " are left as they are."
+  if j$ = "" then
+    schema_msg$ = why$ + own$
+  elseif own$ <> "" then
+    schema_msg$ = pre$ + " -- and once it has, " + own$ + " The file and " + j$ + " are left as they are."
+  else
+    schema_msg$ = pre$ + "; " + why$ + " The file and " + j$ + " are left as they are."
+  end if
   return 0
 end function
 
@@ -1872,16 +2007,19 @@ rem PROVEN it another file -- a name spelled like the open database is
 rem refused before that, and "cannot tell" is refused too. A delete that
 rem fails is said, not ignored, and "Backed up" is said only once the copy
 rem has been read back (backup_landed). Before all of it, a name SQLite
-rem keeps beside a database (journal_name?) is refused -- and so, before
-rem the backup is written, is a name SQLite resolves to one. A file replaced
+rem must not be handed is refused (name_refusal$: a URI, a name SQLite keeps
+rem beside a database, something listed there that is no file) -- and so,
+rem before the backup is written, is a name SQLite resolves to a journal's.
+rem A file replaced
 rem with a journal of its own still beside it is safe: SQLite deletes a
 rem journal it finds beside an EMPTY database, which is what the backup
 rem starts from.
-function on_backup(sender@) local p$, q$, same
+function on_backup(sender@) local p$, q$, same, why$
   p$ = save_path$("phosphor-contacts-backup.db", "SQLite database (*.db)|*.db")
   if p$ = "" then return 0
-  if journal_name?(p$) = true then
-    say(JOURNAL_NAME_MSG$)
+  why$ = name_refusal$(p$)
+  if why$ <> "" then
+    say(why$)
     return 0
   end if
   if same_spelling?(p$, dbpath$) = true then
@@ -1906,8 +2044,10 @@ function on_backup(sender@) local p$, q$, same
   end if
   rem The checks above judge p$. A symbolic link that points at nothing is
   rem no file, so they let it by -- and SQLite would write the backup
-  rem through it, to wherever it points, onto a journal's name for one. So
-  rem the name the backup will be WRITTEN under is asked of SQLite, which
+  rem through it, to wherever it points, onto a journal's name for one. On
+  rem Windows the folder lists such a link, and name_refusal$ refused it
+  rem above; on Linux it does not, and SQLite follows the link: so the
+  rem name the backup will be WRITTEN under is asked of SQLite, which
   rem creates the empty file the backup is about to fill; a journal's name
   rem is refused, and that empty file taken away again.
   q$ = sqlite_name$(p$)
@@ -3261,7 +3401,7 @@ function count_of(sql$)
   return sqlite_scalar(db@, sql$)
 end function
 
-function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, scratch$, kind, blind?, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, r@, bob, bulk, t0, ms, t1, t2, i, alias$, z$, named$
+function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, scratch$, kind, blind?, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, r@, bob, bulk, t0, ms, t1, t2, i, alias$, z$, named$, keep?
   pw_cost = 1000
   path$ = temppath$() + "contact_manager_selftest.db"
   if file_exists(path$) = 1 then file_delete(path$)
@@ -3660,13 +3800,16 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   rem with a trailing dot, which Windows drops. Beside the name as given
   rem there is no journal at all; the one SQLite would roll back is
   rem other$-journal, and it is the one judged. One pair of checks on each
-  rem system, each with the spelling that system has. ONE EXCEPTION, said
-  rem rather than hidden: under --sandbox -- the example runners use one --
+  rem system, each with the spelling that system has. TWO EXCEPTIONS, said
+  rem rather than hidden. Under --sandbox -- the example runners use one --
   rem the SQLite package opens no file through a link at all, so on Linux
   rem there the pair asks that refusal instead, which holds with or without
   rem the judging by SQLite's name; that judging is proved on Linux by the
-  rem same pair run without a sandbox (PHOSPHOR_SELFTEST=1 phosphor run
-  rem examples/contact_manager.bas), and on Windows by every run.
+  rem same pair run without a sandbox, which block AI of scripts/test.sh
+  rem does, and on Windows by every run. And a SQLite older than 3.39.0 is
+  rem not asked the name at all (sqlite_name$): there the pair asks that
+  rem the file's own bytes were judged instead -- the same count of checks
+  rem on every library, so one golden serves them all.
   q$ = file_readalltext$(other$ + "-journal")
   if os_name$() = "Windows" then
     alias$ = spelling$(other$, 2)
@@ -3676,14 +3819,110 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   end if
   n = flag(alias$ <> "" and file_exists(alias$) = 1 and file_exists(alias$ + "-journal") = 0)
   named$ = sqlite_name$(alias$)
-  if named$ = "" and os_name$() <> "Windows" and instr(sqlite_errormsg$(), "outside the sandbox root") > 0 then
+  if name_safe? = false then
+    check(n = 1 and named$ = "" and instr(name_err$, "3.39.0") > 0, "a file can be reached by a name with no journal beside it, and this SQLite is not asked the name it gives it")
+    check(open_database(alias$) = 0 and instr(last_msg$, "other tables (ledger)") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "another program's file reached that way is judged by its own bytes on a copy, refused, and left with its journal byte for byte")
+  elseif named$ = "" and os_name$() <> "Windows" and instr(name_err$, "outside the sandbox root") > 0 then
     check(n = 1, "a file can be reached through a link with no journal beside it")
     check(open_database(alias$) = 0 and instr(last_msg$, "outside the sandbox root") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "under a sandbox SQLite opens nothing through a link, and the file and its journal are left byte for byte")
   else
     check(n = 1 and named$ = sqlite_name$(other$), "a file can be reached by a name that has no journal beside it, though SQLite finds one")
     check(open_database(alias$) = 0 and instr(last_msg$, sqlite_name$(other$) + "-journal") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "another program's file reached that way is judged by the journal SQLite would roll back, refused, and left with it byte for byte")
   end if
+  rem An older SQLite (before 3.39.0) READS a file to answer the question
+  rem sqlite_name$ asks, and reading it rolls a hot journal back -- so with
+  rem one, the program must not ask. Every library is made to show that
+  rem here, by pretending its age: the version is compared as numbers, the
+  rem name of a file that is there is not asked, and another program's
+  rem file is still refused and left byte for byte, by the journal beside
+  rem the name given or, reached by another name, by its own bytes judged
+  rem on a copy.
+  keep? = name_safe?
+  name_safe? = false
+  check(version_at_least?("3.39.0", "3.39.0") = true and version_at_least?("3.38.5", "3.39.0") = false and version_at_least?("3.9.2", "3.39.0") = false and version_at_least?("3.100.0", "3.39.0") = true and version_at_least?("4.0", "3.39.0") = true, "a SQLite version is compared part by part, as numbers")
+  check(sqlite_name$(other$) = "" and instr(name_err$, sqlite_version$() + " reads a file to name it") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "an older SQLite is not asked the name of a file that is there")
+  check(open_database(other$) = 0 and instr(last_msg$, other$ + "-journal lies beside it") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$ and dbpath$ = path$, "with an older SQLite, another program's file with a hot journal is still refused, naming the journal, and left byte for byte")
+  check(open_database(alias$) = 0 and instr(last_msg$, "other tables (ledger)") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "and reached by another name, it is judged by its own bytes on a copy, refused, and left with its journal")
+  name_safe? = keep?
   if os_name$() <> "Windows" then close #8
+  rem A name SQLite reads as a URI -- wherever the library reads URIs, as
+  rem Ubuntu's does -- names a file nothing has looked at, and ":memory:"
+  rem and "" name none: each is refused before SQLite is handed it, on every
+  rem system, at both doors.
+  check(open_database("file:" + other$) = 0 and instr(last_msg$, "is a URI") > 0 and open_database(":memory:") = 0 and open_database("") = 0 and dbpath$ = path$ and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "a name SQLite reads as a URI, or as no file at all, is not opened, and the file a URI names is left with its journal")
+  save_as$ = "file:" + bk$
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  check(instr(last_msg$, "is a URI") > 0 and file_exists(bk$) = 0, "and no backup is written to one")
+  rem A name the folder lists that is no file -- a folder here; on Windows
+  rem also a symbolic link that leads to no file, which SQLite would write
+  rem through without saying where -- is refused.
+  z$ = temppath$() + "contact_manager_selftest_dir.db"
+  if dir_exists(z$) = 0 then dir_create(z$)
+  save_as$ = z$
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  n = flag(left$(last_msg$, 16 + len(z$)) = "Something is at " + z$)
+  check(n = 1 and open_database(z$) = 0 and instr(last_msg$, "Something is at " + z$) > 0 and dir_exists(z$) = 1 and dbpath$ = path$, "a name that is listed but is no file is neither backed up to nor opened")
+  dir_delete(z$)
+  rem A journal whose program is still AT WORK on the file: SQLite would
+  rem leave it (pager.c, hasHotJournal, asks the writer's lock first), and
+  rem the program cannot ask that lock -- so it refuses the file, and does
+  rem not say the program stopped. Here the writer is another connection,
+  rem in the middle of a transaction whose pages have spilled into the file;
+  rem it commits afterwards.
+  z$ = temppath$() + "contact_manager_selftest_live.db"
+  if file_exists(z$) = 1 then file_delete(z$)
+  v@ = sqlite_open@(z$)
+  sqlite_exec(v@, "CREATE TABLE ledger (x); INSERT INTO ledger WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) SELECT i FROM n")
+  hot_begin(v@)
+  sqlite_exec(v@, "UPDATE ledger SET x = x + 1000000")
+  n = flag(file_getsize(z$ + "-journal") > 0 and journal_magic?(z$ + "-journal") = true)
+  check(n = 1 and open_database(z$) = 0 and instr(last_msg$, "the journal of a program changing the file right now, or of one that stopped in the middle of a change") > 0 and instr(last_msg$, "a program stopped") = 0 and sqlite_commit(v@) = 1 and sqlite_scalar(v@, "SELECT min(x) FROM ledger") = 1000001, "a journal whose program may still be at work is not called a crash, and that program commits afterwards")
+  sqlite_close(v@)
+  file_delete(z$)
+  rem Real symbolic links, which a BASIC program cannot make: with
+  rem PHOSPHOR_SELFTEST_LINKS naming a folder that holds tojournal.db ->
+  rem other.db-journal and tohot.db -> hot.db, neither leading to a file
+  rem yet, three checks more run. Block AI of scripts/test.ps1 and
+  rem scripts/test.sh makes the links and runs this without a sandbox, on
+  rem each system, and expects the golden's count and these three.
+  z$ = environ$("PHOSPHOR_SELFTEST_LINKS")
+  if z$ <> "" then
+    alias$ = path_combine$(z$, "tojournal.db")
+    q$ = path_combine$(z$, "other.db-journal")
+    rem Windows lists the link and its SQLite names it by its own name;
+    rem Linux does not list it, and its SQLite follows it.
+    if os_name$() = "Windows" then
+      named$ = "Something is at " + alias$
+    else
+      rem (either door: "That name..." from a backup, "that name..." from an open)
+      named$ = "hat name leads to " + q$
+    end if
+    save_as$ = alias$
+    answer? = true
+    last_msg$ = ""
+    menuitem_click@(w@("menu.backup"))
+    check(instr(last_msg$, named$) > 0 and file_exists(q$) = 0, "a backup through a link that leads to a journal's name is refused, and nothing is written there")
+    check(open_database(alias$) = 0 and instr(last_msg$, named$) > 0 and file_exists(q$) = 0 and dbpath$ = path$, "and so is opening a database there")
+    alias$ = path_combine$(z$, "tohot.db")
+    q$ = path_combine$(z$, "hot.db")
+    make_hot_db(q$)
+    text$ = file_readalltext$(q$)
+    named$ = file_readalltext$(q$ + "-journal")
+    rem On Linux the journal judged is the one beside the link's target, as
+    rem SQLite's own; on Windows SQLite builds it from the link's name and
+    rem would never roll hot.db-journal back, and the file is refused for
+    rem its tables -- as it is by an older SQLite on Linux.
+    if os_name$() = "Windows" or name_safe? = false then
+      n = flag(open_database(alias$) = 0 and instr(last_msg$, "other tables (ledger)") > 0)
+    else
+      n = flag(open_database(alias$) = 0 and instr(last_msg$, q$ + "-journal lies beside it") > 0)
+    end if
+    check(n = 1 and file_readalltext$(q$) = text$ and file_readalltext$(q$ + "-journal") = named$ and dbpath$ = path$, "another program's file reached through a real link is refused, and it and its journal are left byte for byte")
+    file_delete(q$ + "-journal")
+    file_delete(q$)
+  end if
   save_as$ = other$
   answer? = false
   last_msg$ = ""

@@ -2166,7 +2166,57 @@ if (-not ($ah[0] -eq 0 -and $ah[1].Count -ge 2 -and $ah[1][0] -eq $ah[1][1] -and
 if ($okAH2) { Write-Host 'PASS  AH:cfg_path$ names the application from its wide name, and never another application' -ForegroundColor Green }
 $okAH = $okAH -and $okAH2
 
+# --- AI: ROUND 9, THE CONTACT MANAGER THROUGH REAL SYMBOLIC LINKS ---------------
+# The twin of block AI in scripts/test.sh, whose comment carries the reason. A
+# BASIC program cannot make a link; this block makes two that lead to no file
+# yet -- tojournal.db -> other.db-journal and tohot.db -> hot.db -- and runs
+# examples/contact_manager.bas's self-test WITHOUT a sandbox, with
+# PHOSPHOR_SELFTEST_LINKS naming their folder. Round 9 measured the defect it
+# pins on Windows: a backup to tojournal.db said "Backed up" and was written into
+# other.db-journal (SQLite's full name of a link is the link's own), where the
+# next open of other.db deleted it. Expected: every check passes, and the count
+# is the golden's plus the three checks the self-test runs only when that
+# variable is set. mklink makes a file link without elevation where Developer
+# Mode is on, as on this machine; where it cannot, the block FAILS, saying so --
+# a link check that quietly did not run is the defect class this block exists for.
+$aiDir = Join-Path $tmp 'ai'
+New-Item -ItemType Directory -Force $aiDir | Out-Null
+$aiTemp = Join-Path $aiDir 'temp'
+New-Item -ItemType Directory -Force $aiTemp | Out-Null
+cmd /c "mklink `"$aiDir\tojournal.db`" `"$aiDir\other.db-journal`" > nul 2>&1"
+cmd /c "mklink `"$aiDir\tohot.db`" `"$aiDir\hot.db`" > nul 2>&1"
+$aiLinks = @(Get-ChildItem $aiDir | Where-Object { $_.LinkType -eq 'SymbolicLink' }).Count
+$aiGolden = ([IO.File]::ReadAllText((Join-Path $root 'examples\contact_manager.expected')) -replace "`r", '').Trim()
+$aiWant = ''
+if ($aiGolden -match '^passed: (\d+)\nfailed: 0$') { $aiWant = "passed: $([int]$Matches[1] + 3)`nfailed: 0" }
+$okAI = $false
+if ($aiLinks -ne 2) {
+    Write-Host ("FAIL  AI:the contact manager through real links: mklink made {0} of 2 symbolic links in {1}" -f $aiLinks, $aiDir) -ForegroundColor Red
+} elseif ($aiWant -eq '') {
+    Write-Host ("FAIL  AI:examples\contact_manager.expected is not 'passed: N / failed: 0': '{0}'" -f $aiGolden) -ForegroundColor Red
+} else {
+    $aiSave = @($env:TEMP, $env:TMP, $env:PHOSPHOR_SELFTEST, $env:PHOSPHOR_SELFTEST_LINKS)
+    $env:TEMP = $aiTemp; $env:TMP = $aiTemp; $env:PHOSPHOR_SELFTEST = '1'; $env:PHOSPHOR_SELFTEST_LINKS = $aiDir
+    $aiIn = Join-Path $aiDir 'empty.in'
+    [IO.File]::WriteAllText($aiIn, '')
+    $aiOut = Join-Path $aiDir 'cm.out'
+    $aiP = Start-Process -FilePath $exe -ArgumentList 'run', "`"$(Join-Path $root 'examples\contact_manager.bas')`"" -PassThru -NoNewWindow `
+           -RedirectStandardOutput $aiOut -RedirectStandardError (Join-Path $aiDir 'cm.err') -RedirectStandardInput $aiIn
+    $null = $aiP.Handle
+    $aiEnded = $aiP.WaitForExit(300000)
+    if (-not $aiEnded) { $aiP.Kill() }
+    $aiP.WaitForExit()
+    $env:TEMP = $aiSave[0]; $env:TMP = $aiSave[1]; $env:PHOSPHOR_SELFTEST = $aiSave[2]; $env:PHOSPHOR_SELFTEST_LINKS = $aiSave[3]
+    $aiGot = ([IO.File]::ReadAllText($aiOut) -replace "`r", '').Trim()
+    $okAI = $aiEnded -and ($aiP.ExitCode -eq 0) -and ($aiGot -eq $aiWant)
+    if ($okAI) { Write-Host 'PASS  AI:the contact manager refuses a backup or a database through a real link onto a journal, and judges a file reached through one' -ForegroundColor Green }
+    else {
+        Write-Host ("FAIL  AI:the contact manager through real links: ended={0} exit={1}, want '{2}'" -f $aiEnded, $aiP.ExitCode, ($aiWant -replace "`n", ' / ')) -ForegroundColor Red
+        $aiGot -split "`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }
+    }
+}
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF -and $okAG -and $okAH) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF -and $okAG -and $okAH -and $okAI) { exit 0 } else { exit 1 }

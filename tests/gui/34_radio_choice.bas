@@ -73,8 +73,12 @@ rem "some widgetsets like gtk* do not allow to uncheck a radio button").
 rem So the unchecked state is "00" on Windows and d2 stays the choice,
 rem "01", on Linux (docs/libraries/gui-choice.md). Either way what
 rem matters here holds: showing the form again changes nothing.
+rem The OS is asked with os_name$(), whose answers are fixed strings
+rem (PhosphorPlatformLib: "Windows", "Linux"). os_platform$() is FPC's
+rem target-OS string, and comparing it with "linux" never matched on
+rem Linux: the first version of this case asserted "00" there.
 none$ = "00"
-if os_platform$() = "linux" then
+if os_name$() = "Linux" then
   none$ = "01"
 end if
 radio_checked@(d2@, 0)

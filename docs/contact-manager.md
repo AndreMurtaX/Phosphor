@@ -132,19 +132,21 @@ program should never write, so a bug in the BASIC cannot corrupt it:
   (CaseFolding.txt) makes them `σ` and `ss`. The program's `fold$` is `alcase$`
   followed by a table of the 505 characters where the two differ, derived
   from Unicode 15's folding and checked against Python's `str.casefold` for
-  every code point. Three differ: the noncharacters U+FFFE and U+FFFF, which
-  `alcase$` turns into `?`, and — on purpose — the Turkish dotted capital `İ`
-  (U+0130). Full folding makes it `i` followed by a combining dot; `fold$`
+  every code point. One differs, on purpose: the Turkish dotted capital `İ`
+  (U+0130). (Until `alcase$` stopped answering `?` for them on 2026-10-10,
+  the noncharacters U+FFFE and U+FFFF differed too.) Full folding makes it `i` followed by a combining dot; `fold$`
   makes it a plain `i`, because a key is for matching, and caseless matching
   drops the dot as Unicode's identifier matching drops marks. With the dot
   kept, a user `İLKER` could not sign in typing `ilker` or `ILKER`, and
   `istanbul` did not find `İSTANBUL TİCARET`. The stored keys depend on
-  `alcase$`, which turns a byte that is not valid UTF-8 into `?` — and the
+  `alcase$`, which leaves a byte that is not valid UTF-8 as it is — and the
   text that reaches it is not always valid UTF-8: an edit control keeps
   whatever bytes it is given, and an upgrade keys the
   text an older file already holds, which another tool may have written. So
   a change in how `alcase$` treats such bytes would change those keys, and
-  would need a schema version of its own.
+  would need a schema version of its own. (It changed once already, from `?`
+  to the byte itself, before version 3 shipped: every version-3 key is made
+  the new way.)
 - **A transaction** around saving a contact, its primary flag and its product
   lines: all of it or none of it.
 - **A schema version**, kept in `PRAGMA user_version`, and since version 3

@@ -444,6 +444,10 @@ end;
   to add an expectation for it. }
 procedure CheckNoPhantomLinesInCorpus;
 const
+  { See the stride, below: every line of the first and last EdgeCuts of a long
+    file, and about MiddleCuts cuts between. }
+  EdgeCuts = 100;
+  MiddleCuts = 150;
   Dirs: array[0..4] of String = ('tests/suite', 'tests/classic', 'tests/negative',
                                  'examples', 'tests/packages');
 var
@@ -462,7 +466,9 @@ var
   prog2: TProgram;
   intruded, realTok: Integer;
   worstReal: String;
+  stride, skipped: Integer;
 begin
+  skipped := 0;
   root := IncludeTrailingPathDelimiter(
             ExpandFileName(ExtractFilePath(ParamStr(0)) + '..'));
   files := TStringList.Create();
@@ -504,8 +510,28 @@ begin
         line a diagnostic names when the input runs out, so feeding the two
         operating systems different bytes is the one thing that would make the
         answer differ between them for a reason that is not the engine's. }
+      { A CUT AT EVERY LINE IS QUADRATIC IN THE FILE (round-6 review). Each
+        cut compiles the whole prefix, twice, so a file of n lines costs about
+        n * n / 2 compiled lines: tests/suite/85_datetime_round2.bas, 3964 of
+        them, took 667 s of this probe on Windows by itself, which is most of
+        why the Windows CI job ran for half an hour. A file up to EdgeCuts * 2
+        lines is still cut at every line. A longer one is cut at every line of
+        its first and last EdgeCuts -- where a block opens and where the input
+        runs out -- and at an even stride between, so the cuts still cover
+        the whole file; the cuts left out are counted and printed, never
+        dropped in silence. }
+      if src.Count > 2 * EdgeCuts then
+        stride := (src.Count - 2 * EdgeCuts) div MiddleCuts + 1
+      else
+        stride := 1;
       for cut := 1 to src.Count do
       begin
+        if (stride > 1) and (cut > EdgeCuts) and (cut <= src.Count - EdgeCuts) and
+           ((cut - EdgeCuts) mod stride <> 0) then
+        begin
+          Inc(skipped);
+          Continue;
+        end;
         text := '';
         for i := 0 to cut - 1 do
         begin
@@ -595,6 +621,7 @@ begin
         end;
       end;
     end;
+    Writeln('sweep: ', skipped, ' of the corpus''s cuts left out by the stride over long files');
     { The refusals have to be real ones, or "no phantom" means "nothing refused". }
     Report(runs > 1000, 'and the sweep actually reached ' + IntToStr(runs) +
            ' refused compiles to judge');

@@ -1041,9 +1041,9 @@ rem names, and ß, where folding answers "ss", so STRASSE and straße were two.
 rem fold$ is alcase$ and then a table of the characters where the two part,
 rem derived from Unicode 15's casefold over every code point -- Python's
 rem str.casefold was the oracle, and fold$ was checked against it for all
-rem 1,112,062 characters. Three differ, two of them because alcase$ turns
-rem the noncharacters U+FFFE and U+FFFF into "?". The third is chosen:
-rem U+0130, the dotted capital I of Turkish, folds to a plain "i" here,
+rem 1,112,062 characters. One differs, and it is chosen (the noncharacters
+rem U+FFFE and U+FFFF differed too, until alcase$ stopped turning them into
+rem "?" on 2026-10-10): U+0130, the dotted capital I of Turkish, folds to a plain "i" here,
 rem where full folding answers "i" + U+0307 (a combining dot). Folding is
 rem for MATCHING, and a match should drop the dot the way Unicode's
 rem caseless identifier matching drops marks -- with the dot kept, İLKER
@@ -1051,8 +1051,8 @@ rem could not sign in typing ilker or ILKER, and istanbul did not find
 rem İSTANBUL. (Version 2's keys, from alcase$, already said "i".) It is
 rem replaced before alcase$, which would answer the same "i" on its own
 rem today; this way the rule is written here and not left to alcase$. The
-rem keys depend on alcase$ all the same: it turns a byte that is not valid
-rem UTF-8 into "?", and a change to that would change the keys of such text.
+rem keys depend on alcase$ all the same: it leaves a byte that is not valid
+rem UTF-8 as it is, and a change to that would change the keys of such text.
 rem A string alcase$ answers in ASCII has nothing in the table, and
 rem neither has one without any of the table's probes (fold_init): those
 rem cost an alcase$ and a few instr calls. Only a string that may hold a

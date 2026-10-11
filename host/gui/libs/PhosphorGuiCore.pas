@@ -95,6 +95,13 @@ type
       objects by creation -- which is what a modal session asks before it frees
       anything (GuiFlushFreesSince). }
     Born: Int64;
+    { FOUND BY ITS OBJECT (round 9): this handle's registry id, and the object
+      it was registered for -- the key of the object-to-handle index, kept
+      apart from Control because Control is nil'd when the object dies and the
+      index entry must still be found to be removed. Set by GuiRegister only;
+      0 and nil for a deferred free, which no reader looks up by object. }
+    Id: Int64;
+    IdxKey: Pointer;
     { Arm the death notice, when the wrapped object is able to send one. }
     procedure Watch;
     procedure Notification(AComponent: TComponent; Operation: TOperation); override;
@@ -102,6 +109,21 @@ type
   end;
 
   TGuiHandle = class(TGuiRef)
+  public
+    { A MOVE OF THIS CONTROL THAT HAS NOT LANDED (round 9; see GuiMoveControl).
+      MoveTo: the parents asked for, by registry id, oldest first, each named
+      once (asking for one again moves it to the end); 0 is "top level". The
+      control goes to the LAST one still alive: a move into a parent freed
+      before it lands does not happen, and the one asked before it counts
+      again. MoveSeq: non-zero while a move is pending -- the stamp of this
+      handle's latest place in the landing queue. TabWanted/TabSet and
+      ZWanted (1 front, 2 back): settings relative to the NEW parent, asked
+      while the move was pending, applied when it lands. }
+    MoveTo: array of Int64;
+    MoveSeq: Int64;
+    TabWanted: Integer;
+    TabSet: Boolean;
+    ZWanted: Integer;
   end;
 
   { Carries one bound event back into BASIC. Owned by the control it serves; one
@@ -692,7 +714,9 @@ function GuiOtherFormShown(AExcept: TObject): Boolean;
   asks (round 7, 2026-10-11): a form, VISIBLE, not in a modal session, and
   TOP-LEVEL. A form placed inside another (control_parent@) is a control of that
   window, not a window: counting it kept app_run running, with nothing on
-  screen, after the window it was embedded in was closed. }
+  screen, after the window it was embedded in was closed. Top-level in the
+  PROGRAM'S view (GuiEffectiveParent, round 9): a move it asked for counts
+  whether or not it has landed, as in every other reader. }
 function GuiIsShownWindow(AObj: TObject): Boolean;
 
 procedure GuiLeaveLoop;
@@ -720,56 +744,104 @@ procedure GuiLeaveLoop;
 procedure GuiWindowLeaving(AObj: TObject);
 procedure GuiLastWindowClosed;
 
-{ A FORM WHOSE HOST IS FREED IS HIDDEN, NOT LEFT A WINDOW NOBODY CAN SEE
-  (round 8, 2026-10-11). A form owns itself, so freeing the window or panel it
-  is embedded in does not free it: TWinControl.Destroy destroys the host's
-  window (the embedded one goes with it) and then only UNPARENTS its children
-  -- "controls are freed by the owner" (wincontrol.inc). That left a form
-  Visible, top-level and with no window on screen: GuiIsShownWindow counted it,
-  so app_run never ended, and form_visible answered 1 for it. Call with the
-  object about to be freed, BEFORE it goes: every form the free leaves without
-  a parent -- one whose (effective, see GuiEffectiveParent) parent dies with
-  AObj while the form itself does not -- is hidden first, which is what it is
-  once the free lands. form_show@ makes it a window of its own again. }
-procedure GuiHideOrphanedForms(AObj: TObject);
+{ A FORM WHOSE HOST IS FREED BECOMES A HIDDEN TOP-LEVEL FORM (round 8; round
+  9, 2026-10-11). A form owns itself, so freeing the window or panel it is
+  embedded in does not free it: TWinControl.Destroy destroys the host's window
+  (the embedded one goes with it) and then only UNPARENTS its children --
+  "controls are freed by the owner" (wincontrol.inc). Left to that, the form
+  was Visible, top-level and with no window on screen: GuiIsShownWindow counted
+  it, app_run never ended, and form_visible answered 1.
 
-{ RE-PARENTING WHILE A HANDLER RUNS IS DEFERRED (round 8, 2026-10-11) -- the
-  re-parent door of the class round 7 closed for frees. The LCL walks a
-  parent's control list by index with its bound read ONCE and calls the
-  program from inside the walk: TRadioButton.ApplyChanges (radiobutton.inc),
-  with no window handle yet, unchecks each sibling of a radio being checked,
-  and a sibling's onchange runs BASIC. Moving a control OUT of that list
-  inside the handler shortened it under the loop: "List index (2) out of
-  bounds", raised into the program at the radio_checked@ that started the
-  walk. Which frames are walking which list cannot be listed (round 7's
-  lesson), so a move asked for while any handler runs lands when the dispatch
-  has unwound: at the next GUI function at depth 0, or once the message loop
-  has dispatched a message -- before any deferred free, in the order asked.
+  Call it when control_free is asked -- inside a handler AFTER GuiFreeLater, so
+  the handles of what dies are already dead and a move into the dying tree no
+  longer counts. Every form placed in a container that dies with AObj, while
+  the form itself does not, and whose pending move (if any) does not take it to
+  a living parent first, is HIDDEN and MOVED TO THE TOP LEVEL -- through
+  GuiMoveControl, so it lands at once unless a walk may stand on the list it
+  leaves. Round 8 only hid it, at request time, and left it inside the dying
+  host until the free: form_show@ in the same handler re-showed it INSIDE that
+  host, the free then unparented it, and the round-8 state was back (round 9).
+  Now form_show@ shows a top-level form, as the documentation promised. And a
+  form whose pending move went INTO the dying tree is not touched: that move
+  does not land, so it stays where it is (round 8 hid such a form, the only
+  window on screen, without asking app_run, and the loop never ended).
 
-  OTHER MUTATIONS OF A PARENT'S LIST, AND WHY THEY ARE NOT DEFERRED: a free
-  is deferred already (GuiFreeLater). Making a control under a parent APPENDS
-  it (TWinControl.Insert inserts at ControlCount), past a bound that was read
-  before, so no walk ever reads it and none is cut short. Bring-to-front and
-  send-to-back REORDER the list and keep its length, so they cannot index out
-  of it either.
+  The forms are found by walking what the free DESTROYS -- the components AObj
+  owns, and the controls each dying container holds -- never the live handles:
+  round 8 walked every live handle on every free of a windowed control, so
+  freeing N buttons in a program holding H handles cost N*H (round 9). }
+procedure GuiReleaseOrphanedForms(AObj: TObject);
 
-  Inside a modal session a move lands between the session's messages unless a
-  handler running UNDER the session belongs to the window of the control's old
-  parent or of its new one: only those windows' lists can be under a walk
-  there, since a walk reaches BASIC through an event of a control in the
-  window it walks. A dialog rearranging its own controls is therefore not
-  held up until it closes. The window is taken when each handler starts
-  (GuiCallBack), so nothing running is ever dereferenced to ask.
+{ WHERE A MOVE LANDS, AND WHEN (round 8; rebuilt in round 9, 2026-10-11).
+
+  THE WALKS. The LCL walks a parent's control list by index with its bound
+  read once, and calls the program from inside the walk. Measured in the
+  source: TRadioButton.ApplyChanges (radiobutton.inc; no window handle yet)
+  and ClearSiblingRadioButtons (win32callback.inc; with one) uncheck each
+  sibling of a radio being checked, and a sibling's onchange runs BASIC;
+  TWinControl.PaintControls (wincontrol.inc) reads Count once and paints each
+  graphic child, and a paintbox's onpaint runs BASIC. Moving a control OUT of a
+  walked list shortened it under the loop: "List index (2) out of bounds",
+  raised into the program (round 8).
+
+  WHICH LISTS A WALK CAN BE ON. Every one of those walks reaches BASIC through
+  an event of a control IN the list it walks -- the sibling, the painted child
+  -- or beneath one (a nested realign). The events this package raises are a
+  closed set (click, change, key, mouse, paint, cell drawn, close, tick), and
+  none is raised from a walk of some other control's list. So while handlers
+  run, the lists that can be under a walk are those of each running handler's
+  SENDER and of its ancestors. A move takes the control out of its current
+  parent's list, and re-creates the windows of the control and everything
+  under it; so a move is BLOCKED exactly when the control, or the parent it
+  would leave, is a running sender or an ancestor of one. A move into a list
+  is never blocked: it APPENDS (TWinControl.Insert inserts at ControlCount),
+  past a bound a walk read before, as making a control does.
+
+  An unblocked move LANDS AT ONCE, as at depth 0, whatever is running. Round
+  8 deferred every move asked inside any handler, and the program's view (what
+  it asked) and the LCL's (what had landed) then disagreed for the rest of the
+  handler: a form made visible after a deferred embed was a top-level window
+  until the move landed, and its landing ended a tray program's app_run; the
+  only window, moved into a host freed in the same handler, was hidden and
+  app_run never asked; a tab order set after the move was lost; a control moved
+  into a dialog by the click that opens it was not there while the dialog was
+  up. A tray program's timer has no control sender, and a button's click
+  blocks only the lists of the button's own ancestors.
+
+  A blocked move WAITS, on the control's handle (MoveTo), and so does every
+  later move of that control, so a control's moves land in the order asked. It
+  lands at the next GUI function at depth 0, once the message loop has
+  dispatched a message, or -- inside a modal session -- between the session's
+  messages as soon as nothing running under the session blocks it. A move that
+  waited lands after moves of other controls asked later that did not.
+
+  THE PROGRAM'S VIEW IS THE TRUTH. While a move waits, every reader in this
+  package answers with the parent asked for (GuiEffectiveParent): the
+  last-window question (GuiIsShownWindow), the forms a free leaves without a
+  host, form_showmodal's refusal, the cycle check, control_taborder. A window
+  on screen moved into another stops being a window when the move is ASKED,
+  and asks app_run then (GuiWindowLeaving); the landing asks nothing. A move
+  into a control freed before it lands does not happen, and the move of that
+  control asked before it counts again.
+
+  BOUNDED: a control's waiting moves name each parent once, so a handler that
+  moves two controls back and forth holds two entries, not one per pass; the
+  landing queue is compacted as it grows; and a move costs a walk up each
+  running sender's chain plus the cycle check, never a scan of what waits.
 
   The caller has resolved both handles and refused a cycle (GuiWouldCycle,
-  pending moves counted) and a modal form; both are asked again when a
-  deferred move lands, and a refusal then records gui_error 1. A move whose
-  control or parent the program freed meanwhile does not land. }
+  pending moves counted) and a modal form; both are asked again when a waiting
+  move lands, and a refusal then records gui_error 1. AParentId 0 with AParent
+  nil moves the control to the top level (GuiReleaseOrphanedForms only). }
 procedure GuiMoveControl(AChildId, AParentId: Int64; AChild: TControl;
   AParent: TWinControl);
-{ The parent AObj will have once every pending move has landed: the latest
-  move of it whose new parent is still alive, else its parent now. }
+{ The parent AObj has in the program's view: the last parent a waiting move of
+  it asks for that is still alive (nil for the top level), else its parent now. }
 function GuiEffectiveParent(AObj: TObject): TWinControl;
+{ The handle of AObj when a move of it is waiting, else nil: what a setter
+  relative to the new parent (control_taborder@, control_bringtofront@,
+  control_sendtoback@) records instead of applying to the old one. }
+function GuiMovePending(AObj: TObject): TGuiHandle;
 { Would placing AChild in AParent make AChild its own ancestor? APending walks
   the parents pending moves will give, which is the state a deferred move
   lands into. }
@@ -830,6 +902,126 @@ implementation
 uses
   ComCtrls,   // TTreeNode / TListItem: what a non-component handle can wrap
   Menus;      // TMenuItem: a menu item dies with the item above it, not its owner
+
+// --- the object -> handle index (see TGuiRef.Id) ----------------------------
+{ ONE HANDLE PER OBJECT, FOUND BY THE OBJECT (round 9). Every GuiRegister is a
+  constructor's, so an object has at most one TGuiHandle, and a reader that
+  holds the object -- a parent met walking up a chain, a form met walking a
+  dying tree -- asks this index for it in constant time instead of scanning the
+  live handles. Open addressing over a power-of-two table, deleted by backward
+  shift so every probe chain stays whole.
+
+  An entry is trusted only after it is CHECKED: the id must still name a
+  TGuiHandle whose Control is that very object (HandleOf). An object that dies
+  leaves its entry behind until its handle is destroyed, and its address may
+  be reused meanwhile; the check refuses such an entry, and a reused address
+  that is registered again simply overwrites it. }
+type
+  TGuiIdxSlot = record
+    Key: Pointer;
+    Id: Int64;
+  end;
+
+var
+  GIdx: array of TGuiIdxSlot;
+  GIdxCount: Integer = 0;
+
+{$push}{$Q-}{$R-}
+function IdxHome(AKey: Pointer; AMask: Integer): Integer;
+begin
+  // Objects are 16-byte aligned: drop the dead low bits, then spread the rest.
+  Result := Integer(((PtrUInt(AKey) shr 4) * PtrUInt(2654435761)) and PtrUInt(AMask));
+end;
+{$pop}
+
+procedure IdxPlace(AKey: Pointer; AId: Int64);
+var i, m: Integer;
+begin
+  m := High(GIdx);
+  i := IdxHome(AKey, m);
+  while (GIdx[i].Key <> nil) and (GIdx[i].Key <> AKey) do i := (i + 1) and m;
+  if GIdx[i].Key = nil then Inc(GIdxCount);
+  GIdx[i].Key := AKey;
+  GIdx[i].Id := AId;
+end;
+
+procedure IdxPut(AKey: Pointer; AId: Int64);
+var
+  old: array of TGuiIdxSlot;
+  i: Integer;
+begin
+  if (Length(GIdx) = 0) or ((GIdxCount + 1) * 2 > Length(GIdx)) then
+  begin
+    old := GIdx;
+    GIdx := nil;
+    if Length(old) = 0 then SetLength(GIdx, 64) else SetLength(GIdx, Length(old) * 2);
+    GIdxCount := 0;
+    for i := 0 to High(old) do
+      if old[i].Key <> nil then IdxPlace(old[i].Key, old[i].Id);
+  end;
+  IdxPlace(AKey, AId);
+end;
+
+function IdxFind(AKey: Pointer): Int64;
+var i, m: Integer;
+begin
+  Result := 0;
+  if (GIdxCount = 0) or (Length(GIdx) = 0) then Exit;
+  m := High(GIdx);
+  i := IdxHome(AKey, m);
+  while GIdx[i].Key <> nil do
+  begin
+    if GIdx[i].Key = AKey then Exit(GIdx[i].Id);
+    i := (i + 1) and m;
+  end;
+end;
+
+{ Remove AKey only while it still maps to AId: a reused address registered
+  again belongs to the new object's handle, not to the one being destroyed. }
+procedure IdxRemove(AKey: Pointer; AId: Int64);
+var i, j, m, home: Integer;
+begin
+  { Length too, not only the count: a handle the registry destroys after this
+    unit's globals are finalized finds the table already gone. }
+  if (GIdxCount = 0) or (Length(GIdx) = 0) or (AKey = nil) then Exit;
+  m := High(GIdx);
+  i := IdxHome(AKey, m);
+  while (GIdx[i].Key <> nil) and (GIdx[i].Key <> AKey) do i := (i + 1) and m;
+  if (GIdx[i].Key <> AKey) or (GIdx[i].Id <> AId) then Exit;
+  GIdx[i].Key := nil;
+  Dec(GIdxCount);
+  j := i;
+  while True do
+  begin
+    j := (j + 1) and m;
+    if GIdx[j].Key = nil then Break;
+    home := IdxHome(GIdx[j].Key, m);
+    { Slot j may move back into the hole at i unless its home lies cyclically
+      in (i, j] -- then a probe from home never passes i. }
+    if ((i < j) and ((home <= i) or (home > j))) or
+       ((i > j) and (home <= i) and (home > j)) then
+    begin
+      GIdx[i] := GIdx[j];
+      GIdx[j].Key := nil;
+      i := j;
+    end;
+  end;
+end;
+
+{ The live handle of AObj, or nil. }
+function HandleOf(AObj: TObject): TGuiHandle;
+var
+  id: Int64;
+  o: TObject;
+begin
+  Result := nil;
+  if AObj = nil then Exit;
+  id := IdxFind(AObj);
+  if id = 0 then Exit;
+  o := HandleObj(id);
+  if (o is TGuiHandle) and (TGuiHandle(o).Control = AObj) then
+    Result := TGuiHandle(o);
+end;
 
 procedure TGuiRef.Watch;
 begin
@@ -902,6 +1094,9 @@ begin
   // from mattering.
   c := Control;
   Control := nil;
+  // Out of the object index (a no-op for a deferred free, which is not in it).
+  IdxRemove(IdxKey, Id);
+  IdxKey := nil;
   // Watched, not `c is TComponent`: a non-component handle (a TTreeNode, a
   // TListItem) may already have died with its container, and testing its class
   // would dereference it. Where Watched is true and the control has died, the
@@ -982,14 +1177,10 @@ var
   { The registry ids of the deferred frees, in the order they were asked for. }
   GPending: array of Int64;
   { The sender of each handler now running, outermost first; nil where the
-    callback had none. Read only by identity, never dereferenced: a deferred
-    free keeps every one of them alive until the stack is empty. }
+    callback had none. Alive while its handler runs -- a deferred free keeps
+    every one of them alive until the stack is empty -- so MoveBlocked may
+    walk up from it. }
   GSenders: array of TObject;
-  { The WINDOW of each sender above, in the same slots: the top of its parent
-    chain, taken when its handler started (the sender is live then), or nil
-    for a sender that is not a control. Like GSenders, only ever compared by
-    identity -- see GuiMoveControl. }
-  GSenderTops: array of TObject;
   { The last serial GuiRegister stamped (TGuiRef.Born). }
   GBirths: Int64 = 0;
 
@@ -1092,17 +1283,21 @@ begin
   GPending[High(GPending)] := RegisterHandle(p);
 end;
 
-// --- moves deferred until the dispatch unwinds (see GuiMoveControl) ----------
+// --- moves that wait for a walk to finish (see GuiMoveControl) -------------
 type
-  { A move by registry ids, never by pointer: an id is never issued twice
-    (PhosphorHandles), so a control or parent freed meanwhile resolves to
-    nothing and the move does not land, with nothing dangling. }
-  TGuiPendingMove = record
-    Child, Parent: Int64;
+  { One place in the landing queue: a handle by registry id, never by pointer
+    (an id is never issued twice, so a handle freed meanwhile resolves to
+    nothing), and the stamp it had when queued -- a control moved again is
+    queued again, and only its latest place is the live one. }
+  TGuiQueued = record
+    Id, Seq: Int64;
   end;
 
 var
-  GMoves: array of TGuiPendingMove;
+  GQueue: array of TGuiQueued;
+  GQueueLen: Integer = 0;
+  GCompactAt: Integer = 64;
+  GMoveStamp: Int64 = 0;
 
 { The live object a program's handle names, if it is an AClass; else nil. }
 function LiveObj(AId: Int64; AClass: TClass): TObject;
@@ -1115,27 +1310,74 @@ begin
     Result := TGuiHandle(o).Control;
 end;
 
-{ The top of AControl's parent chain: the window it is part of. }
-function TopOf(AControl: TControl): TControl;
+procedure ClearMove(AHandle: TGuiHandle);
 begin
-  Result := AControl;
-  while (Result <> nil) and (Result.Parent <> nil) do Result := Result.Parent;
+  AHandle.MoveTo := nil;
+  AHandle.MoveSeq := 0;
+  AHandle.TabSet := False;
+  AHandle.TabWanted := 0;
+  AHandle.ZWanted := 0;
+end;
+
+{ Where AHandle's waiting moves take its control: True with the last parent
+  asked for that is still alive (nil for the top level), False when none is.
+  A dead parent never comes back -- its id is never issued again -- so it is
+  dropped for good, and this costs one step per parent ever dropped. }
+function ResolveTarget(AHandle: TGuiHandle; out AParent: TWinControl): Boolean;
+var t: Int64;
+begin
+  AParent := nil;
+  while Length(AHandle.MoveTo) > 0 do
+  begin
+    t := AHandle.MoveTo[High(AHandle.MoveTo)];
+    if t = 0 then Exit(True);
+    AParent := TWinControl(LiveObj(t, TWinControl));
+    if AParent <> nil then Exit(True);
+    SetLength(AHandle.MoveTo, Length(AHandle.MoveTo) - 1);
+  end;
+  Result := False;
+end;
+
+{ Could a walk be standing on the list AChild would leave? See GuiMoveControl:
+  AChild, or its parent, is a running handler's sender or an ancestor of one.
+  The senders are live (a deferred free keeps each one alive while its handler
+  runs) and so is every parent of a live control, so the chains read here are
+  live. }
+function MoveBlocked(AChild: TControl): Boolean;
+var
+  i: Integer;
+  w: TControl;
+  par: TWinControl;
+begin
+  par := AChild.Parent;
+  for i := 0 to High(GSenders) do
+    if GSenders[i] is TControl then
+    begin
+      w := TControl(GSenders[i]);
+      while w <> nil do
+      begin
+        if (w = AChild) or ((par <> nil) and (w = par)) then Exit(True);
+        w := w.Parent;
+      end;
+    end;
+  Result := False;
+end;
+
+function GuiMovePending(AObj: TObject): TGuiHandle;
+begin
+  Result := nil;
+  if GQueueLen = 0 then Exit;   // nothing waits: no lookup at all
+  Result := HandleOf(AObj);
+  if (Result <> nil) and (Result.MoveSeq = 0) then Result := nil;
 end;
 
 function GuiEffectiveParent(AObj: TObject): TWinControl;
-var
-  i: Integer;
+var h: TGuiHandle;
 begin
   Result := nil;
   if not (AObj is TControl) then Exit;
-  { Latest first, and a move into a parent that has died is skipped: it will
-    not land, so an earlier one is what the control ends up with. }
-  for i := High(GMoves) downto 0 do
-    if LiveObj(GMoves[i].Child, TControl) = AObj then
-    begin
-      Result := TWinControl(LiveObj(GMoves[i].Parent, TWinControl));
-      if Result <> nil then Exit;
-    end;
+  h := GuiMovePending(AObj);
+  if (h <> nil) and ResolveTarget(h, Result) then Exit;
   Result := TControl(AObj).Parent;
 end;
 
@@ -1163,13 +1405,11 @@ begin
   Result := False;
 end;
 
-{ The move itself, at a moment no LCL walk of the program's stands on. A form
-  that was a window on screen stops being one: it asks app_run, as a close
-  does (GuiWindowLeaving) -- moving the only window into a form that was never
-  shown left nothing on screen and app_run running. }
+{ The move itself, at a moment no walk can stand on the list it leaves. It asks
+  app_run nothing: a window that stops being one asked when the move was asked
+  (GuiMoveControl), which is when the program's view changed. }
 procedure DoMove(AChild: TControl; AParent: TWinControl);
 begin
-  GuiWindowLeaving(AChild);
   try
     AChild.Parent := AParent;
   except
@@ -1179,111 +1419,242 @@ begin
   end;
 end;
 
+{ What the program set relative to the new parent while the move waited. }
+procedure ApplyAfterMove(AChild: TControl; ATabSet: Boolean; ATab, AZ: Integer);
+begin
+  try
+    if AZ = 1 then AChild.BringToFront
+    else if AZ = 2 then AChild.SendToBack;
+    if ATabSet and (AChild is TWinControl) then TWinControl(AChild).TabOrder := ATab;
+  except
+    on Exception do GGuiError := 1;
+  end;
+end;
+
+{ Keep only the queue's live places, in order: the queue grows by one place
+  per waiting request, and this keeps it within twice what is waiting. }
+procedure CompactQueue;
+var
+  i, n: Integer;
+  o: TObject;
+begin
+  n := 0;
+  for i := 0 to GQueueLen - 1 do
+  begin
+    o := HandleObj(GQueue[i].Id);
+    if (o is TGuiHandle) and (TGuiHandle(o).MoveSeq = GQueue[i].Seq) then
+    begin
+      GQueue[n] := GQueue[i];
+      Inc(n);
+    end;
+  end;
+  GQueueLen := n;
+  GCompactAt := 2 * n + 64;
+end;
+
+procedure Enqueue(AHandle: TGuiHandle; AId: Int64);
+begin
+  if GQueueLen >= GCompactAt then CompactQueue;
+  Inc(GMoveStamp);
+  AHandle.MoveSeq := GMoveStamp;
+  if GQueueLen >= Length(GQueue) then SetLength(GQueue, 2 * GQueueLen + 16);
+  GQueue[GQueueLen].Id := AId;
+  GQueue[GQueueLen].Seq := GMoveStamp;
+  Inc(GQueueLen);
+end;
+
 procedure GuiMoveControl(AChildId, AParentId: Int64; AChild: TControl;
   AParent: TWinControl);
+var
+  h: TGuiHandle;
+  o: TObject;
+  i, j: Integer;
 begin
-  if GDispatchDepth = 0 then
+  { A window on screen placed inside another stops being a window NOW, in the
+    program's view, landed or not: asked here, before the move is recorded. }
+  if AParent <> nil then GuiWindowLeaving(AChild);
+  o := HandleObj(AChildId);
+  if o is TGuiHandle then h := TGuiHandle(o) else h := nil;
+  if ((h = nil) or (h.MoveSeq = 0)) and not MoveBlocked(AChild) then
   begin
     DoMove(AChild, AParent);
     Exit;
   end;
-  { The same control moved again at once replaces its own move: it is the
-    last one queued, so nothing after it depended on it, and a handler that
-    moves one control in a loop holds one entry, not one per pass. }
-  if (Length(GMoves) > 0) and (GMoves[High(GMoves)].Child = AChildId) then
-  begin
-    GMoves[High(GMoves)].Parent := AParentId;
-    Exit;
-  end;
-  SetLength(GMoves, Length(GMoves) + 1);
-  GMoves[High(GMoves)].Child := AChildId;
-  GMoves[High(GMoves)].Parent := AParentId;
+  if h = nil then Exit;   // every caller passes the child's live handle
+  // Each parent once, the latest last (see TGuiHandle.MoveTo).
+  for i := 0 to High(h.MoveTo) do
+    if h.MoveTo[i] = AParentId then
+    begin
+      for j := i to High(h.MoveTo) - 1 do h.MoveTo[j] := h.MoveTo[j + 1];
+      SetLength(h.MoveTo, Length(h.MoveTo) - 1);
+      Break;
+    end;
+  SetLength(h.MoveTo, Length(h.MoveTo) + 1);
+  h.MoveTo[High(h.MoveTo)] := AParentId;
+  Enqueue(h, AChildId);
 end;
 
-{ Inside a modal session: is a handler running under it from the window of
-  AChild's old parent or of its new one? Compared by identity only. }
-function MoveHeld(AChild: TControl; AParent: TWinControl): Boolean;
-var
-  i: Integer;
-  oldTop, newTop: TObject;
-begin
-  oldTop := nil;
-  if AChild.Parent <> nil then oldTop := TopOf(AChild.Parent);
-  newTop := TopOf(AParent);
-  for i := 0 to High(GSenderTops) do
-    if (GSenderTops[i] <> nil) and
-       ((GSenderTops[i] = oldTop) or (GSenderTops[i] = newTop)) then
-      Exit(True);
-  Result := False;
-end;
-
-{ Land the pending moves, in the order asked. AInSession: stop at the first
-  one a handler under the session may stand on -- the rest wait, in order,
-  since a later move was judged against the state the earlier ones make. }
+{ Land the waiting moves, each control's at its latest place in the queue.
+  AInSession: a move still blocked by a handler running under the session
+  waits on, ahead of anything queued while this ran. }
 procedure LandMoves(AInSession: Boolean);
 var
-  list, rest: array of TGuiPendingMove;
-  i, j: Integer;
+  q, kept, rest: array of TGuiQueued;
+  n, nk, nr, i: Integer;
+  o: TObject;
+  h: TGuiHandle;
   c: TControl;
   p: TWinControl;
+  has, tabSet: Boolean;
+  tab, z: Integer;
 begin
-  if Length(GMoves) = 0 then Exit;
-  // Off the list first: a move can fire a handler that asks for another.
-  list := GMoves;
-  GMoves := nil;
-  i := 0;
-  while i <= High(list) do
+  if GQueueLen = 0 then Exit;
+  // Off the queue first: a landing can fire a handler that asks for another.
+  q := GQueue;
+  n := GQueueLen;
+  GQueue := nil;
+  GQueueLen := 0;
+  GCompactAt := 64;
+  kept := nil;
+  nk := 0;
+  for i := 0 to n - 1 do
   begin
-    c := TControl(LiveObj(list[i].Child, TControl));
-    p := TWinControl(LiveObj(list[i].Parent, TWinControl));
-    if (c <> nil) and (p <> nil) then
+    o := HandleObj(q[i].Id);
+    if not (o is TGuiHandle) then Continue;          // the control was freed
+    h := TGuiHandle(o);
+    if h.MoveSeq <> q[i].Seq then Continue;          // an older place of it
+    if not (h.Control is TControl) then begin ClearMove(h); Continue; end;
+    c := TControl(h.Control);
+    if AInSession and MoveBlocked(c) then
     begin
-      if AInSession and MoveHeld(c, p) then Break;
+      SetLength(kept, nk + 1);
+      kept[nk] := q[i];
+      Inc(nk);
+      Continue;
+    end;
+    has := ResolveTarget(h, p);
+    tabSet := h.TabSet;
+    tab := h.TabWanted;
+    z := h.ZWanted;
+    ClearMove(h);
+    if has and (p <> c.Parent) then
+    begin
       if ((c is TCustomForm) and (fsModal in TCustomForm(c).FormState)) or
-         GuiWouldCycle(c, p, False) then
+         ((p <> nil) and GuiWouldCycle(c, p, False)) then
         GGuiError := 1   // what was asked can no longer be done
       else
         DoMove(c, p);
     end;
-    Inc(i);
+    ApplyAfterMove(c, tabSet, tab, z);
   end;
-  if i > High(list) then Exit;
-  // What waits goes back AHEAD of anything a landed move queued meanwhile.
-  rest := GMoves;
-  SetLength(GMoves, Length(list) - i + Length(rest));
-  for j := i to High(list) do GMoves[j - i] := list[j];
-  for j := 0 to High(rest) do GMoves[Length(list) - i + j] := rest[j];
+  if nk = 0 then Exit;
+  // What waits goes back AHEAD of anything a landing queued meanwhile.
+  rest := GQueue;
+  nr := GQueueLen;
+  GQueue := nil;
+  SetLength(GQueue, nk + nr + 16);
+  for i := 0 to nk - 1 do GQueue[i] := kept[i];
+  for i := 0 to nr - 1 do GQueue[nk + i] := rest[i];
+  GQueueLen := nk + nr;
+  GCompactAt := 2 * GQueueLen + 64;
 end;
 
-procedure GuiHideOrphanedForms(AObj: TObject);
+type
+  TGuiFormList = array of TCustomForm;
+
+{ The forms a free of AObj leaves without a host: each form held by a container
+  that dies with AObj, the form itself not dying. Walks what the free destroys
+  -- the components AObj owns, all the way down, and the controls each dying
+  container holds -- with a stack of its own, never the live handles. }
+function OrphanFormsOf(AObj: TComponent): TGuiFormList;
 var
-  id: Int64;
+  stack: array of TComponent;
+  sp, i, n: Integer;
+  comp: TComponent;
+  c: TControl;
+begin
+  Result := nil;
+  n := 0;
+  SetLength(stack, 16);
+  stack[0] := AObj;
+  sp := 1;
+  while sp > 0 do
+  begin
+    Dec(sp);
+    comp := stack[sp];
+    if comp is TWinControl then
+      for i := 0 to TWinControl(comp).ControlCount - 1 do
+      begin
+        c := TWinControl(comp).Controls[i];
+        if (c is TCustomForm) and not DiesWith(c, AObj) then
+        begin
+          SetLength(Result, n + 1);
+          Result[n] := TCustomForm(c);
+          Inc(n);
+        end;
+      end;
+    for i := 0 to comp.ComponentCount - 1 do
+    begin
+      if sp >= Length(stack) then SetLength(stack, 2 * Length(stack));
+      stack[sp] := comp.Components[i];
+      Inc(sp);
+    end;
+  end;
+end;
+
+procedure GuiReleaseOrphanedForms(AObj: TObject);
+var
+  list: TGuiFormList;
   i: Integer;
-  o: TObject;
   f: TCustomForm;
+  h: TGuiHandle;
   p: TWinControl;
 begin
-  if not (AObj is TWinControl) then Exit;   // only a container has children
-  id := FirstLiveHandle();
-  for i := 1 to LiveHandleCount() do
+  if not (AObj is TWinControl) then Exit;   // only a container holds a form
+  list := OrphanFormsOf(TComponent(AObj));
+  for i := 0 to High(list) do
   begin
-    if id = 0 then Break;
-    o := HandleObj(id);
-    { Every non-nil Control is live (the registry's invariant), so asking its
-      class reads a live object. }
-    if (o is TGuiHandle) and (TGuiHandle(o).Control is TCustomForm) and
-       (TGuiHandle(o).Control <> AObj) then
-    begin
-      f := TCustomForm(TGuiHandle(o).Control);
-      p := GuiEffectiveParent(f);
-      if (p <> nil) and DiesWith(p, AObj) and not DiesWith(f, AObj) then
-        try
-          f.Visible := False;
-        except
-          on Exception do ;   // hiding is housekeeping; the free goes on
-        end;
+    f := list[i];
+    h := HandleOf(f);
+    { A waiting move that takes it to a living parent, or to the top level,
+      lands before the free does: then it is not left without a host. }
+    if (h <> nil) and (h.MoveSeq <> 0) and ResolveTarget(h, p) then Continue;
+    try
+      f.Visible := False;
+    except
+      on Exception do ;   // hiding is housekeeping; the free goes on
     end;
-    id := NextLiveHandle(id);
+    if h <> nil then
+      GuiMoveControl(h.Id, 0, f, nil)
+    else if not MoveBlocked(f) then
+      DoMove(f, nil);
+  end;
+end;
+
+{ AT THE FREE ITSELF, after every move that could land has landed (round 9).
+  GuiReleaseOrphanedForms judged each form when the free was ASKED, and left
+  alone one whose waiting move takes it to a living parent; if that parent is
+  freed too before the move lands, the move does not happen and the form is
+  still held by the host dying now -- an orphan nobody released. It is
+  released here, as the rule says: hidden, and a top-level form, rather than
+  left Visible with no window by TWinControl.Destroy. Nothing stands on the
+  list it leaves: at depth 0 nothing runs, and what a modal session frees was
+  born inside it, which no frame below the session can be walking. }
+procedure SettleOrphansAtFree(AObj: TObject);
+var
+  list: TGuiFormList;
+  i: Integer;
+begin
+  if not (AObj is TWinControl) then Exit;
+  list := OrphanFormsOf(TComponent(AObj));
+  for i := 0 to High(list) do
+  begin
+    try
+      list[i].Visible := False;
+    except
+      on Exception do ;   // hiding is housekeeping; the free goes on
+    end;
+    DoMove(list[i], nil);
   end;
 end;
 
@@ -1329,7 +1700,10 @@ begin
       kept[High(kept)] := list[i];
     end
     else
+    begin
+      if o is TGuiRef then SettleOrphansAtFree(TGuiRef(o).Control);
       FreeHandle(list[i]);
+    end;
   end;
   { Put back AHEAD of anything a destructor above queued meanwhile, in the
     order they were asked for. }
@@ -1354,6 +1728,7 @@ procedure GuiFlushFrees;
 var
   list: array of Int64;
   i: Integer;
+  o: TObject;
 begin
   if GDispatchDepth > 0 then Exit;
   { The deferred moves land FIRST, in the order asked: one into a parent the
@@ -1366,7 +1741,11 @@ begin
   list := GPending;
   GPending := nil;
   for i := 0 to High(list) do
+  begin
+    o := HandleObj(list[i]);
+    if o is TGuiRef then SettleOrphansAtFree(TGuiRef(o).Control);
     FreeHandle(list[i]);   // a no-op for an id ResetHandles already took
+  end;
 end;
 
 { An event of a control whose handle is dead does not reach BASIC: the program
@@ -1406,21 +1785,15 @@ begin
   // the slot is popped in the finally, so the stack is exactly the senders of
   // the handlers now running, outermost first.
   SetLength(GSenders, GDispatchDepth);
-  SetLength(GSenderTops, GDispatchDepth);
   if (Length(AArgs) > 0) and (AArgs[0].Kind = vkHandle) then
     GSenders[GDispatchDepth - 1] := TGuiHandle(HandleObj(AArgs[0].Hnd)).Control
   else
     GSenders[GDispatchDepth - 1] := nil;
-  if GSenders[GDispatchDepth - 1] is TControl then
-    GSenderTops[GDispatchDepth - 1] := TopOf(TControl(GSenders[GDispatchDepth - 1]))
-  else
-    GSenderTops[GDispatchDepth - 1] := nil;
   try
     Result := AVM.CallUserFunc(handler, AArgs, err);
   finally
     Dec(GDispatchDepth);
     SetLength(GSenders, GDispatchDepth);
-    SetLength(GSenderTops, GDispatchDepth);
   end;
   if IsError(err) then
   begin
@@ -2155,6 +2528,9 @@ begin
   h.Watch;                       // tell me when you die
   GuiCapSizes(AObj);             // and never grow past what a window can hold
   Result := RegisterHandle(h);
+  h.Id := Result;                // found by its object from now on (HandleOf)
+  h.IdxKey := AObj;
+  IdxPut(AObj, Result);
 end;
 
 function GuiResolveObj(AId: Int64; AClass: TClass; out AObj: TObject): Boolean;
@@ -2309,7 +2685,7 @@ end;
 function GuiIsShownWindow(AObj: TObject): Boolean;
 begin
   Result := (AObj is TForm) and TForm(AObj).Visible and
-            (TForm(AObj).Parent = nil) and
+            (GuiEffectiveParent(AObj) = nil) and
             not (fsModal in TForm(AObj).FormState);
 end;
 

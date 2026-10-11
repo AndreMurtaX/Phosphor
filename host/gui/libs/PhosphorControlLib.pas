@@ -284,10 +284,26 @@ var c: TControl; x, y, w, h: Integer; begin E := NoError;
     if GuiPosOk(x, y) and GuiExtentOk(w, h) then SafeSetBounds(c, x, y, w, h);
   end;
   Result := A[0]; end;
+// THE ORDER IN THE PARENT A WAITING MOVE IS TAKING IT TO (round 9). While a move
+// of the control waits (GuiMoveControl), a reorder applied now would reorder the
+// OLD parent's list and be undone when the move lands, so it is recorded on the
+// handle and applied after the landing -- the program's view, as everywhere.
 function f_bringtofront(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.BringToFront; Result := A[0]; end;
+var c: TControl; h: TGuiHandle; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then
+  begin
+    h := GuiMovePending(c);
+    if h <> nil then h.ZWanted := 1 else c.BringToFront;
+  end;
+  Result := A[0]; end;
 function f_sendtoback(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.SendToBack; Result := A[0]; end;
+var c: TControl; h: TGuiHandle; begin E := NoError;
+  if Ctl(A[0].Hnd, c) then
+  begin
+    h := GuiMovePending(c);
+    if h <> nil then h.ZWanted := 2 else c.SendToBack;
+  end;
+  Result := A[0]; end;
 function f_invalidate(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TControl; begin E := NoError; if Ctl(A[0].Hnd, c) then c.Invalidate; Result := A[0]; end;
 function f_setfocus(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -349,11 +365,6 @@ begin
   // 7): ask app_run the last-window question, as the closer does. Asked now,
   // while the form is alive to be asked; app_run reads it after every handler
   // has returned and after GuiFlushFrees, when this handle is already gone.
-  // AND A FORM EMBEDDED IN WHAT IS FREED IS LEFT WITHOUT A PARENT -- a form owns
-  // itself, so it outlives its host -- and with no window (round 8): it is hidden
-  // first, or it counted as a window on screen that nobody could see or close, and
-  // app_run never ended. See GuiHideOrphanedForms.
-  GuiHideOrphanedForms(h.Control);
   GuiWindowLeaving(h.Control);
   // INSIDE A HANDLER, THE LCL MAY BE STANDING ON IT -- or on the form that owns
   // it, or on anything else it touches on the way out of the event; which one
@@ -364,12 +375,22 @@ begin
   // bitmap is not deferred -- no LCL frame stands on one, and it is the object a
   // handler is likeliest to make and free in a loop, which deferral would let
   // pile up past the GUI budget. See GuiFreeLater (PhosphorGuiCore).
+  // AND A FORM EMBEDDED IN WHAT IS FREED IS LEFT WITHOUT A PARENT -- a form owns
+  // itself, so it outlives its host -- and with no window (round 8): it is hidden
+  // and made a top-level form, or it counted as a window on screen that nobody
+  // could see or close, and app_run never ended. Inside a handler that is judged
+  // AFTER GuiFreeLater, when the handles of everything that dies are dead: a move
+  // the program asked into the dying tree then no longer counts, as it never
+  // lands (round 9). See GuiReleaseOrphanedForms.
   if GuiInDispatch() and (h.Watched or (h.Holder <> nil)) then
   begin
+    obj := h.Control;
     GuiFreeLater(h);
+    GuiReleaseOrphanedForms(obj);
     FreeHandle(A[0].Hnd);
     Exit(ValInt(1));
   end;
+  GuiReleaseOrphanedForms(h.Control);   // at depth 0 nothing waits: as it is now
   if (not h.Owns) and (h.Control <> nil) then
   begin
     obj := h.Control;
@@ -678,11 +699,12 @@ begin
   // one the moves still pending will make (round 8): two moves asked in one handler
   // can each be fine alone and a cycle together.
   if GuiWouldCycle(c, TWinControl(pc), True) then begin GGuiError := 1; Exit; end;
-  // INSIDE A HANDLER THE MOVE IS DEFERRED (round 8): the LCL may be walking the
-  // list it would take the control out of -- a radio's sibling walk ended in "list
-  // index out of bounds", raised into the program. See GuiMoveControl, which also
-  // asks app_run about a window that stops being one, and records an LCL refusal
-  // (the package's rule: a bad request is RECORDED, never raised).
+  // A MOVE A WALK MAY STAND ON WAITS (round 8; round 9 narrowed it to the lists
+  // that can be under one): a radio's sibling walk ended in "list index out of
+  // bounds", raised into the program, when a sibling's onchange moved a control
+  // out of the list. See GuiMoveControl, which also asks app_run about a window
+  // that stops being one, and records an LCL refusal (the package's rule: a bad
+  // request is RECORDED, never raised).
   GuiMoveControl(A[0].Hnd, A[1].Hnd, TControl(c), TWinControl(pc));
 end;
 
@@ -722,12 +744,51 @@ var c: TComponent; begin E := NoError; Result := ValInt(0);
 function f_tabstop_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
   if GuiResolve(A[0].Hnd, TWinControl, c) then TWinControl(c).TabStop := ArgOrd(A[1]) <> 0; end;
+{ THE TAB ORDER IN THE PARENT A WAITING MOVE IS TAKING IT TO (round 9). Set
+  while a move of the control waits, the position went into the OLD parent's
+  chain and the landing then appended the control to the new one: a handler
+  that moved an edit and made it first in its new panel read 0 back and found
+  it last afterwards. It is recorded instead and applied when the move lands,
+  and read back as the LCL will place it there: the end of the new parent's
+  chain (TWinControl.Insert appends to FTabList), or the position asked,
+  clamped to that chain as UpdateTabOrder clamps it. }
+function PendingTabOrder(c: TWinControl; h: TGuiHandle): Integer;
+var
+  lp: TWinControl;
+  i, n: Integer;
+begin
+  lp := GuiEffectiveParent(c);
+  if (lp = nil) or (lp = c.Parent) then Exit(c.TabOrder);
+  n := 0;   // the new parent's chain before it arrives: its windowed children
+  for i := 0 to lp.ControlCount - 1 do
+    if lp.Controls[i] is TWinControl then Inc(n);
+  if h.TabSet and (h.TabWanted >= 0) and (h.TabWanted < n) then
+    Result := h.TabWanted
+  else
+    Result := n;
+end;
 function f_taborder_get(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := ValInt(0);
-  if GuiResolve(A[0].Hnd, TWinControl, c) then Result := ValInt(TWinControl(c).TabOrder); end;
+var c: TComponent; h: TGuiHandle; begin E := NoError; Result := ValInt(0);
+  if GuiResolve(A[0].Hnd, TWinControl, c) then
+  begin
+    h := GuiMovePending(c);
+    if h <> nil then Result := ValInt(PendingTabOrder(TWinControl(c), h))
+    else Result := ValInt(TWinControl(c).TabOrder);
+  end; end;
 function f_taborder_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; Result := A[0];
-  if GuiResolve(A[0].Hnd, TWinControl, c) then TWinControl(c).TabOrder := ArgOrdIn(A[1], Low(TTabOrder), High(TTabOrder)); end;
+var c: TComponent; h: TGuiHandle; v: Integer; begin E := NoError; Result := A[0];
+  if GuiResolve(A[0].Hnd, TWinControl, c) then
+  begin
+    v := ArgOrdIn(A[1], Low(TTabOrder), High(TTabOrder));
+    h := GuiMovePending(c);
+    if h <> nil then
+    begin
+      h.TabWanted := v;
+      h.TabSet := True;
+    end
+    else
+      TWinControl(c).TabOrder := v;
+  end; end;
 
 // BorderSpacing and Constraints are class-typed sub-objects, which is exactly why
 // the property bridge refuses them. The plan claimed both were exposed; these are

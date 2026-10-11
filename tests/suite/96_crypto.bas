@@ -96,6 +96,13 @@ assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0
 assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOFI") = false, "33 bytes is refused")
 assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOE") = false, "the base64 without its padding is refused")
 assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$01000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOE=") = false, "a count with a leading zero is refused")
+rem ROUND 6: the same 32 bytes spelled another way. The 43rd base64
+rem character carries 6 bits of which only the top 4 are data (32 bytes
+rem = 256 bits = 42 characters and 4 bits), so "E" (000100) and "F"
+rem (000101) decode alike -- Python's base64 agrees. Django compares the
+rem whole record as text, so this spelling is not its record; only the
+rem canonical re-encoding check refuses it here.
+assert_true(password_verify?("Pässwörd", "pbkdf2_sha256$1000$0123456789abcdef0123456789abcdef$fKvpGQPgU9Wt13upSc4fzCYYv13WKDTG8raoAwVtEOF=") = false, "a non-canonical spelling of the right 32 bytes is refused")
 
 test_case("password_verify?/a damaged record is no match, not a fault")
 assert_true(password_verify?("pw", "") = false, "empty")

@@ -93,7 +93,9 @@ uses
   PhosphorCrtLib, PhosphorBase64Lib, PhosphorZipLib, PhosphorGzipLib,
   PhosphorHttpLib, PhosphorSqliteLib,
   // the standard files, the same in every thread
-  PhosphorStdIO;
+  PhosphorStdIO,
+  // WideToUtf8 / HasUnpairedSurrogate: UTF-16 from the OS, a bad surrogate kept visible
+  PhosphorSysLib;
 
 var
   { --no-console: hide the console window at startup, when this process owns one.
@@ -498,7 +500,7 @@ begin
     end;
     while (Length(w) > 0) and ((w[Length(w)] = #10) or (w[Length(w)] = #13)) do
       SetLength(w, Length(w) - 1);
-    ALine := UTF8Encode(w);           // UTF-16 -> UTF-8 bytes for the engine
+    ALine := WideToUtf8(w);           // UTF-16 -> UTF-8; an unpaired surrogate is U+FFFD
     if hadEOF and (Length(ALine) = 0) then
       Exit(False);
     Exit(True);
@@ -748,6 +750,7 @@ var
   so it is asked. Elsewhere the kernel hands over an argv already split. }
 var
   GArgv: array of String;
+  GArgvBad: array of Boolean;   // the word held an unpaired surrogate (Windows)
   GArgvRead: Boolean = False;
 
 {$IFDEF WINDOWS}
@@ -769,14 +772,43 @@ begin
   a := CommandLineToArgvW(GetCommandLineW(), n);
   if a <> nil then
   begin
+    { WideToUtf8, not UTF8Encode (round 6): FPC's encoder DROPS an unpaired
+      surrogate, so job<U+D800>.bas ran job.bas, and --out log<U+D800>.txt
+      truncated log.txt. A program's argument keeps its U+FFFD; a word this host
+      would use as a PATH is refused instead (RefuseBadWord), because no file is
+      named by a character that is not one. }
     SetLength(GArgv, n);
-    for i := 0 to n - 1 do GArgv[i] := UTF8Encode(UnicodeString(a[i]));
+    SetLength(GArgvBad, n);
+    for i := 0 to n - 1 do
+    begin
+      GArgv[i] := WideToUtf8(UnicodeString(a[i]));
+      GArgvBad[i] := HasUnpairedSurrogate(UnicodeString(a[i]));
+    end;
     LocalFree(HLOCAL(a));
     Exit;
   end;
 {$ENDIF}
   SetLength(GArgv, ParamCount + 1);
-  for i := 0 to ParamCount do GArgv[i] := ParamStr(i);
+  SetLength(GArgvBad, ParamCount + 1);
+  for i := 0 to ParamCount do
+  begin
+    GArgv[i] := ParamStr(i);
+    GArgvBad[i] := False;   // bytes: the kernel opens what it was given
+  end;
+end;
+
+{ A word this host is about to use as a path must be the word that was written.
+  On Windows one holding an unpaired surrogate cannot be: it reads as U+FFFD,
+  which names a different file, or none. Refused, exit 2, as an empty name is. }
+procedure RefuseBadWord(I: Integer; const AWhat: String);
+begin
+  ReadArgv();
+  if (I >= 0) and (I < Length(GArgvBad)) and GArgvBad[I] then
+  begin
+    Writeln(StdErr, 'phosphor: ', AWhat, ' holds a character that is not valid Unicode');
+    Writeln(StdErr, '  (an unpaired UTF-16 surrogate), so it cannot name a file');
+    Halt(2);
+  end;
 end;
 
 { How many words follow the executable, and the I-th of them: ParamCount and
@@ -809,14 +841,19 @@ end;
   form (see --sandbox and --out). "--" ends this host's options: everything
   after it is the program's, dashes and all. }
 procedure RefuseUnknownOption(const AWho, AArg, AFile: String);
+var reads: String;
 begin
+  if AWho = 'phosphor debug' then
+    reads := '--break, --port, --stop-at-entry and --no-stop-at-entry'
+  else
+    reads := '--out, --sandbox, --no-console and --gui';
   { No command is composed for the reader to copy (round 5): the one this used to
     print dropped the debug verb, the other options and the option's value, and
     for a misspelt --sandbox it was exactly the unconfined run the refusal is
     there to prevent. It names the options there are, and says how a word that
     starts with "-" reaches the program. }
   Writeln(StdErr, AWho, ': unknown option ', AArg, ' after ', AFile);
-  Writeln(StdErr, '  after the file, phosphor reads only --out, --sandbox, --no-console and --gui;');
+  Writeln(StdErr, '  after the file, ', AWho, ' reads only ', reads, ';');
   Writeln(StdErr, '  a word meant for the program that starts with "-" goes after --');
   Halt(2);
 end;
@@ -4514,7 +4551,10 @@ begin
   n := GetModuleFileNameW(0, @buf[0], Length(buf));
   SetLength(ws, n);
   if n > 0 then Move(buf[0], ws[1], n * SizeOf(WideChar));
-  Result := UTF8Encode(ws);
+  { WideToUtf8, not UTF8Encode, which drops an unpaired surrogate (round 6): an
+    application named app<U+D800>.exe read app.exe's payload. With U+FFFD the name
+    opens nothing, and the payload reader says it cannot open its own file. }
+  Result := WideToUtf8(ws);
 end;
 {$ELSE}
 begin
@@ -5423,6 +5463,20 @@ begin
       end
       else if (dbgPath <> '') and (arg = '-') then
         AddProgramArg(arg)
+      else if (arg = '--') and (dbgPath = '') then
+      begin
+        { BEFORE THE FILE, "--" names it whatever it starts with, as in a run
+          (round 6: debug had no route to a file named like an option). }
+        Inc(i);
+        if (i > ArgCount()) or (ArgStr(i) = '') then
+        begin
+          Writeln(StdErr, 'phosphor debug: -- needs the program''s file after it');
+          Halt(2);
+        end;
+        RefuseBadWord(i, 'the program''s file name');
+        dbgPath := ArgStr(i);
+        GProgramPath := dbgPath;
+      end
       else if (Length(arg) > 0) and (arg[1] = '-') then
       begin
         if dbgPath <> '' then RefuseUnknownOption('phosphor debug', arg, dbgPath);
@@ -5436,6 +5490,7 @@ begin
           Writeln(StdErr, 'phosphor debug: the program''s file name is empty');
           Halt(2);
         end;
+        RefuseBadWord(i, 'the program''s file name');
         dbgPath := arg;
         GProgramPath := arg;
       end
@@ -5490,6 +5545,7 @@ begin
           Writeln(StdErr, 'phosphor: compile: --names needs a file, and was given an empty name');
           Halt(2);
         end;
+        RefuseBadWord(i, 'the --names file');
         namesPath := arg;
         namesGiven := True;
         wantNames := False;
@@ -5501,6 +5557,7 @@ begin
       else
       begin
         Inc(packArgs);
+        if packArgs <= 2 then RefuseBadWord(i, 'a file name');
         if packArgs = 1 then packIn := arg
         else if packArgs = 2 then packOut := arg
         else
@@ -5554,6 +5611,7 @@ begin
       else
       begin
         Inc(packArgs);
+        if packArgs <= 2 then RefuseBadWord(i, 'a file name');
         if packArgs = 1 then packIn := arg
         else if packArgs = 2 then packOut := arg
         else
@@ -5627,6 +5685,7 @@ begin
         Writeln(StdErr, 'phosphor: the program''s file name is empty');
         Halt(2);
       end;
+      RefuseBadWord(i, 'the program''s file name');
       filePath := ArgStr(i);
       GProgramPath := filePath;
       Inc(i);
@@ -5733,6 +5792,7 @@ begin
         Halt(2);
       end;
       sandboxSeen := True;
+      RefuseBadWord(i, 'the --sandbox directory');
       GSandboxDir := ArgStr(i);
       { RECORDED HERE, where the flag is actually seen. Whatever ParamStr gives
         back -- a directory, whitespace, or the empty string an unset shell
@@ -5756,6 +5816,7 @@ begin
         Halt(2);
       end;
       outSeen := True;
+      RefuseBadWord(i, 'the --out path');
       outPath := ArgStr(i);
       { THE SAME SHAPE AS --sandbox ABOVE, ONE BRANCH DOWN, and it had the same
         hole: TConsoleHost.Create guards with `if AOutPath <> ''`, so '' is the
@@ -5791,6 +5852,7 @@ begin
     end
     else
     begin
+      RefuseBadWord(i, 'the program''s file name');
       filePath := arg;
       GProgramPath := arg;
     end;

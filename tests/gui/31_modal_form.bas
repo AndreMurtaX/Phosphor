@@ -117,6 +117,36 @@ gui_clearerror()
 assert_eq(form_showmodal(inner@), 0, "a parented form answers 0")
 assert_eq(gui_error(), 1, "and records gui_error 1")
 
+test_case("modal/the session is modal to LCL code too (round 6)")
+rem lcl/include/bitbtn.inc: SetKind(bkClose) gives the button the modal
+rem result mrClose (11), and TCustomBitBtn.Click calls Form.Close only
+rem when the form is NOT fsModal -- on a modal form it answers 11. The
+rem hook used to leave fsModal clear, so the button closed the form the
+rem non-modal way and the session went on unanswered.
+cdlg@ = form@("With a Close button", 200, 100)
+cb@ = bitbtn@(cdlg@)
+control_set@(cb@, "Kind", "bkClose")
+gui_test_modal("press_close_kind")
+assert_eq(form_showmodal(cdlg@), 11, "a bkClose bit button answers 11 (mrClose)")
+
+test_case("modal/a form in its session cannot be re-parented (round 6)")
+gui_test_modal("reparent_then_ok")
+assert_eq(form_showmodal(dlg@), 1, "OK still answers the dialog itself")
+assert_eq(reparenterr, 1, "control_parent@ of the modal form was refused (gui_error 1)")
+
+test_case("modal/frees inside a session are released between rounds (round 6)")
+rem Each round makes a 2 x 200000 grid (31.6 MB of the 1024 MB the GUI
+rem allows for surfaces) and frees it. Released between rounds, one is
+rem alive at a time; held until the session ends, the 33rd is refused.
+rem 40 rounds, the last one presses OK.
+madeok = 0
+for i = 1 to 39
+  gui_test_modal("make_and_free")
+next
+gui_test_modal("make_free_ok")
+assert_eq(form_showmodal(dlg@), 1, "the session ended with OK")
+assert_eq(madeok, 40, "all 40 grids were made: each freed one was released")
+
 test_case("modal/a form the LCL cannot make modal is refused, not raised")
 form_show@(main@)
 gui_clearerror()
@@ -205,6 +235,35 @@ function allow_and_press_vok(f@)
   afterveto = form_modalresult(f@)
   allow? = true
   button_click@(vok@)
+  return 0
+endfunction
+
+function press_close_kind(f@)
+  bitbtn_click@(cb@)
+  return 0
+endfunction
+
+function reparent_then_ok(f@)
+  gui_clearerror()
+  control_parent@(f@, main@)
+  reparenterr = gui_error()
+  button_click@(ok@)
+  return 0
+endfunction
+
+function make_and_free(f@) local g@
+  gui_clearerror()
+  g@ = stringgrid@(f@)
+  stringgrid_colcount@(g@, 2)
+  stringgrid_rowcount@(g@, 200000)
+  if gui_error() = 0 and stringgrid_rowcount(g@) = 200000 then madeok = madeok + 1
+  control_free(g@)
+  return 0
+endfunction
+
+function make_free_ok(f@)
+  make_and_free(f@)
+  button_click@(ok@)
   return 0
 endfunction
 

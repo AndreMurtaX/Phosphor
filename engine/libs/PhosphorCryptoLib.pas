@@ -69,9 +69,17 @@ const
     nothing a program stores needs more than a few blocks, and every block costs
     the full iteration count again. }
   MaxDerivedBytes = 1024;
-  { Budget units per SHA-256 compression: a 64-byte block, on the byte scale the
-    other libraries charge. }
-  UnitsPerBlock = 64;
+  { Budget units per SHA-256 compression, PRICED BY THE CLOCK (round 6,
+    2026-10-10). The budget's two ceilings must buy one allowance --
+    PhosphorBudget: MaxSteps 1000000 and TimeoutMs 2000 are both 256M units, at
+    BudgetUnitsPerMsOfWork = 128000 units per ms of work. A PBKDF2 iteration (two
+    compressions) measured 0.57 us on Windows and Linux alike, 0.285 us per
+    compression: 0.285 * 128 = 36 units. It was 64, which made a step-ceilinged
+    host pay ~1.8x what the clock would, and refused a second verify of a
+    Django-cost record (1000000 rounds) that finished in 1.2 s under TimeoutMs.
+    Bytes hashed outside the rounds -- the salt in every block, a long password --
+    are charged at the same price per 64-byte block. }
+  UnitsPerBlock = 36;
   { How many PBKDF2 iterations run between two charges. }
   ChargeEvery = 1024;
 
@@ -312,13 +320,13 @@ begin
     is longer than a block -- and both are the caller's, or a stored record's.
     They used to be charged nothing, so a megabyte salt over 32 blocks ran ~9x
     past TimeoutMs before the first charge read the clock. Asked BEFORE the work,
-    one byte one unit (UnitsPerBlock per 64-byte block), so an oversized request
+    UnitsPerBlock per 64-byte block, so an oversized request
     is refused rather than run. }
-  if not BudgetAllows(Length(Password)) then Exit;
+  if not BudgetAllows((Int64(Length(Password)) div 64 + 1) * UnitsPerBlock) then Exit;
   HmacPrepare(Password, k);
   for blk := 1 to blocks do
   begin
-    if not BudgetAllows(Int64(Length(Salt)) + 4) then Exit;
+    if not BudgetAllows(((Int64(Length(Salt)) + 4) div 64 + 1) * UnitsPerBlock) then Exit;
     first := Salt + Chr(Byte(blk shr 24)) + Chr(Byte(blk shr 16)) +
              Chr(Byte(blk shr 8)) + Chr(Byte(blk));
     HmacDigest(k, PByte(Pointer(first)), Length(first), u);

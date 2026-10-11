@@ -63,7 +63,9 @@ there are and `paramstr$(i)` reads them, with `paramstr$(0)` the program's path.
 work after the file, and any other word starting with `-` is refused unless it
 follows `--`, so a misspelt `--sandbox` stops the run instead of being handed to
 the program; `-` alone is an ordinary word. `phosphor -- -name.bas` runs a file
-whose name starts with `-`. An empty file name is refused. On Windows the line is
+whose name starts with `-`. An empty file name is refused, and so, on Windows, is
+a file name holding a character that is not valid Unicode (an unpaired UTF-16
+surrogate): it would name a different file. On Windows the line is
 split by Microsoft's own rules (`\"` is a quote inside a quoted argument), which
 is what every launcher encodes for, and every argument reaches the program as
 UTF-8 -- bytes that are not, on Linux, arrive as U+FFFD. A packed executable's

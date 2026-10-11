@@ -110,7 +110,11 @@ println sha256$(body$)
   so a host that set `MaxSteps` or `TimeoutMs` stops a record naming two billion
   rounds within its own limit — and the bytes are charged too, not only the
   rounds: every 32 bytes of key hash the whole salt again, so a large salt is
-  asked for before it is hashed and refused when the budget cannot pay for it. With no budget installed, such a record takes as
+  asked for before it is hashed and refused when the budget cannot pay for it.
+  A round is priced by the clock (36 units per SHA-256 compression, so the step
+  ceiling and the time ceiling buy the same work): under the pair `embedding.md`
+  prescribes, two verifications of a record at Django 5.2's default cost of
+  1 000 000 rounds both fit. With no budget installed, such a record takes as
   long as it says it will. The default cost fits comfortably inside the budget
   `embedding.md` prescribes (`MaxSteps = 1000000`) — twice, hash and verify.
 - **Why SHA-256 is written out in the engine.** Free Pascal 3.2.2's `hash`

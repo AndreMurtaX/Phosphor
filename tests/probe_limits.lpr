@@ -66,6 +66,29 @@ begin
   end;
 end;
 
+{ A limit, and the one named: the run must end with peLimit AND its message
+  must contain AFragment -- a limit for a different reason, or at a different
+  time, is not the one the check is about (round 6). }
+procedure CheckMsg(const AName, ASource: String; ASteps, ATimeoutMs: Int64;
+  const AFragment: String);
+var
+  eng: TPhosphorEngine;
+  rc: Integer;
+begin
+  eng := TPhosphorEngine.Create();
+  try
+    eng.MaxSteps := ASteps;
+    eng.TimeoutMs := ATimeoutMs;
+    rc := eng.Run(ASource);
+    Report((rc <> 0) and (eng.LastError.Code = peLimit) and
+           (Pos(AFragment, eng.LastError.Message) > 0),
+           AName + ' (expected a limit naming "' + AFragment + '", got "' +
+           eng.LastError.Message + '")');
+  finally
+    eng.Free;
+  end;
+end;
+
 type
   { TWO HOST SEAMS, because two of this ceiling's failure modes can only be
     reached through one. TFreeingSink drops the host's own ballast the first time
@@ -1497,14 +1520,33 @@ begin
   { THE SALT IS WORK TOO (round 5): each of the 32 blocks of a 1024-byte key
     hashes the whole salt again, at ONE round -- so the rounds charge almost
     nothing and an uncharged 4 MB salt ran the derivation ~9x past the clock. }
-  Check('a time ceiling stops pbkdf2_sha256$ over a large salt',
+  { ROUND 6: the time ceiling must stop it BEFORE the work, by the salt's
+    charge -- a refusal that came 7x late, after the derivation, passed the
+    first version of this check, which asked only whether a limit happened.
+    So the MESSAGE is asked: the salt's up-front refusal says "that would
+    take", the clock's after-the-fact one says "spent its time limit". }
+  CheckMsg('a time ceiling refuses a large salt before hashing it',
         'k$ = pbkdf2_sha256$("pw", string$(4000000, 97), 1, 1024)' + LF,
-        0, 0, 100, True);
-  { 400000 steps = 102.4M units: enough to BUILD the salt (string$ charges
-    12 per byte, 48M), not enough to hash it 32 times (4M each). }
+        0, 100, 'pbkdf2_sha256$: that would take');
+  { 200000 steps = 51.2M units. string$ charges one unit per byte
+    (PhosphorStrLib's RunOf: BudgetAllows(total)), so building the salt costs
+    4M and leaves 47.2M; each of the 32 blocks hashes 4000004 bytes, 62501
+    compressions at UnitsPerBlock = 36, 2.25M -- 72M in all. Refused around
+    the 21st block; the old code charged nothing for the salt and finished. }
   Check('a step ceiling refuses salt hashing past what is left',
         'k$ = pbkdf2_sha256$("pw", string$(4000000, 97), 1, 1024)' + LF,
-        400000, 0, 0, True);
+        200000, 0, 0, True);
+  { ROUND 6: the two ceilings buy one allowance. Under the pair embedding.md
+    prescribes, two verifications of a record at Django 5.2's default cost
+    (1000000 rounds, about 1.2 s) must both run -- the step ceiling refused the
+    second one, after doing its work, while TimeoutMs alone let both finish.
+    The record is Python's: hashlib.pbkdf2_hmac('sha256', b'pw',
+    b'saltsaltsalt', 1000000, 32), base64. }
+  Check('two verifications at Django''s default cost fit MaxSteps = 1000000',
+        'r$ = "pbkdf2_sha256$1000000$saltsaltsalt$bFRD7M/RDtmj3WYL25AnrV5IwE7YUQyQ4h1XGcXRuDw="' + LF +
+        'if password_verify?("pw", r$) = false then x = 1 / 0' + LF +
+        'if password_verify?("pw", r$) = false then x = 1 / 0' + LF,
+        1000000, 0, 0, False);
   Report(GetTickCount64() - CryptoStart < 10000,
          'the crypto ceilings stopped within seconds, not minutes');
   // ...and the documented default fits inside the budget embedding.md prescribes.

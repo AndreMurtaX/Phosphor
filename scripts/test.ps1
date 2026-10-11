@@ -1708,6 +1708,38 @@ if (-not ($adCode -eq 0 -and $adGot -eq (Want-AD @('2', $adp, '-', '--x', '2d2d7
 $adGot = Invoke-AD "`"$exe`" `"$adp`" --sandbx cage"
 if (-not ($adCode -eq 2 -and -not $adGot.Contains('-- --sandbx'))) {
     $okAD = $false; Write-Host ("FAIL  AD:the refusal's hint: got '{0}'" -f $adGot) -ForegroundColor Red }
+# ROUND 6 (2026-10-10). An unpaired UTF-16 surrogate on the Windows command line:
+# FPC's UTF8Encode DROPPED it, so job<D800>.bas ran job.bas and --out
+# log<D800>.txt truncated log.txt. Expected now: as an argument it is U+FFFD
+# (the rule environ$ keeps: 61 EF BF BD 62); as a path it is refused, exit 2.
+# Start-Process hands the string to CreateProcessW as it is, surrogate and all.
+$adSur = [string][char]0xD800
+$adRep = 'a' + [string][char]0xFFFD + 'b'
+$adProc = Start-Process -FilePath $exe -ArgumentList ("`"$adp`" a" + $adSur + "b") -PassThru -NoNewWindow `
+         -RedirectStandardOutput $adOut -RedirectStandardError (Join-Path $adDir 'sur.err')
+$null = $adProc.Handle; $null = $adProc.WaitForExit(30000)
+$adGot = Read-AD $adOut
+if (-not ($adProc.ExitCode -eq 0 -and $adGot -eq (Want-AD @('1', $adp, $adRep, '61efbfbd62')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:an unpaired surrogate as an argument: exit {0}, got '{1}'" -f $adProc.ExitCode, $adGot) -ForegroundColor Red }
+$adKeep = Join-Path $adDir 'keep.txt'
+[IO.File]::WriteAllText($adKeep, 'PRECIOUS', $utf8)
+$adProc = Start-Process -FilePath $exe -ArgumentList ("`"$adp`" --out `"" + (Join-Path $adDir ('keep' + $adSur + '.txt')) + "`"") -PassThru -NoNewWindow `
+         -RedirectStandardOutput $adOut -RedirectStandardError (Join-Path $adDir 'sur2.err')
+$null = $adProc.Handle; $null = $adProc.WaitForExit(30000)
+$adErr = Read-AD (Join-Path $adDir 'sur2.err')
+if (-not ($adProc.ExitCode -eq 2 -and $adErr.Contains('not valid Unicode') -and (Read-AD $adKeep) -eq 'PRECIOUS')) {
+    $okAD = $false; Write-Host ("FAIL  AD:an unpaired surrogate in --out: exit {0}, keep.txt '{1}', stderr '{2}'" -f $adProc.ExitCode, (Read-AD $adKeep), $adErr) -ForegroundColor Red }
+# an empty name after "--", and under debug, is refused too (a REPL otherwise)
+$adGot = Invoke-AD "`"$exe`" -- `"`" `"$adp`""
+if (-not ($adCode -eq 2 -and $adGot.Contains('file name is empty'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:-- followed by an empty name: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adGot = Invoke-AD "`"$exe`" debug `"`" `"$adp`""
+if (-not ($adCode -eq 2 -and $adGot.Contains('file name is empty'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:debug with an empty name: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+# debug's refusal names debug's options, not run's
+$adGot = Invoke-AD "`"$exe`" debug `"$adp`" --out x"
+if (-not ($adCode -eq 2 -and $adGot.Contains('--break') -and -not $adGot.Contains('reads only --out'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:debug's refusal: got '{0}'" -f $adGot) -ForegroundColor Red }
 if ($okAD) { Write-Host 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused' -ForegroundColor Green }
 
 # --- AE: A REAL MODAL FORM ------------------------------------------------------
@@ -1764,7 +1796,40 @@ if (-not ($af[0] -and $af[1] -eq 0 -and $af[2] -eq 'before')) {
     $okAF = $false; Write-Host ("FAIL  AF:END inside a modal: ended={0} exit={1}, got '{2}'" -f $af[0], $af[1], $af[2]) -ForegroundColor Red }
 if ($okAF) { Write-Host 'PASS  AF:a modal in a real loop: no timer re-entry, OK does not end app_run, END ends the program' -ForegroundColor Green }
 
+# --- AG: ROUND 6, THE MODAL SESSION AGAIN, IN A REAL LOOP ---------------------
+#  - a timer whose tick opened a modal is freed from INSIDE it, and the main
+#    window is closed from inside it too; then the dialog is answered. The
+#    in-modal flush used to free the timer under its own handler's frames (heap
+#    corruption; the fault report read the handler's name from freed memory),
+#    and a modal dialog counted as a window keeping app_run alive. Expected: the
+#    handler's fault after the modal names on_t, app_run ends ("ended"), and no
+#    watchdog line;
+#  - END inside a modal whose form has onclosequery and onclose: the close
+#    asked both on the halted session and reported each refusal as a handler
+#    fault. Expected: "before", exit 0, and no "carries on" on stderr.
+$agDir = Join-Path $tmp 'ag'
+New-Item -ItemType Directory -Force $agDir | Out-Null
+function Invoke-AG([string] $name, [string[]] $lines) {
+    $bas = Join-Path $agDir ($name + '.bas')
+    [IO.File]::WriteAllText($bas, (($lines -join "`n") + "`n"), $utf8)
+    $out = Join-Path $agDir ($name + '.out'); $err = Join-Path $agDir ($name + '.err')
+    $agProc = Start-Process -FilePath $exe -ArgumentList "`"$bas`"" -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+    $null = $agProc.Handle
+    $ended = $agProc.WaitForExit(60000)
+    if (-not $ended) { $agProc.Kill() }
+    $agProc.WaitForExit()
+    return @($ended, $agProc.ExitCode, ([IO.File]::ReadAllText($out) -replace "`r", '').TrimEnd("`n"), [IO.File]::ReadAllText($err))
+}
+$okAG = $true
+$ag = Invoke-AG 'ag' @('main@ = form@("AG", 200, 100)', 'dlg@ = form@("AG dialog", 200, 100)', 'ok@ = button@(dlg@)', 'button_modalresult@(ok@, 1)', 'opened = 0', 't@ = timer@()', 'timer_interval@(t@, 50)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 't3@ = timer@()', 'timer_interval@(t3@, 300)', 'timer_ontimer@(t3@, "on_t3")', 'timer_enabled@(t3@, 1)', 'tw@ = timer@()', 'timer_interval@(tw@, 8000)', 'timer_ontimer@(tw@, "on_watchdog")', 'timer_enabled@(tw@, 1)', 'form_show@(main@)', 'app_run()', 'println "ended"', 'end', 'function on_t(s@)', '  if opened = 1 then return 0', '  opened = 1', '  r = form_showmodal(dlg@)', '  zero = 0', '  x = 1 / zero', '  return 0', 'end function', 'function on_t3(s@)', '  if form_visible(dlg@) = 0 then return 0', '  control_free(t@)', '  form_close@(main@)', '  button_click@(ok@)', '  return 0', 'end function', 'function on_watchdog(s@)', '  println "watchdog: app_run still running with no window"', '  app_quit()', '  return 0', 'end function')
+if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq 'ended' -and $ag[3].Contains('in the event handler on_t;'))) {
+    $okAG = $false; Write-Host ("FAIL  AG:the sender freed inside its modal: ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
+$ag = Invoke-AG 'agend' @('dlg@ = form@("AG end", 200, 100)', 'form_onclosequery@(dlg@, "q?")', 'form_onclose@(dlg@, "c")', 't@ = timer@()', 'timer_interval@(t@, 200)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 'println "before"', 'r = form_showmodal(dlg@)', 'end', 'function on_t(s@)', '  end', '  return 0', 'end function', 'function q?(s@)', '  return true', 'end function', 'function c(s@)', '  return 0', 'end function')
+if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq 'before' -and -not $ag[3].Contains('carries on'))) {
+    $okAG = $false; Write-Host ("FAIL  AG:END inside a modal with close handlers: ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
+if ($okAG) { Write-Host 'PASS  AG:a modal session frees nothing its opener stands on, ends with the last window, and END reports no fault' -ForegroundColor Green }
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF -and $okAG) { exit 0 } else { exit 1 }

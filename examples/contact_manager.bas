@@ -48,8 +48,12 @@ const CONTACT_COLS$ = "name,job_title,department,email,phone,mobile,whatsapp,lin
 const INTERACTION_KINDS$ = "Call,Meeting,E-mail,WhatsApp,Visit,Other"
 
 rem The schema's version, kept in the database as PRAGMA user_version (see
-rem create_schema): 1 was the first, 2 added the normalized keys.
-const SCHEMA_VERSION = 2
+rem create_schema): 1 was the first, 2 added the normalized keys, 3 made
+rem them case FOLDED (fold$) and marked the file as this program's.
+const SCHEMA_VERSION = 3
+rem What PRAGMA application_id holds in a file this program made: "PhCM" as
+rem a 32-bit number. Versions 1 and 2 set none; see db_owner$.
+const APP_ID = 1349010253
 
 selftest? = false
 if environ$("PHOSPHOR_SELFTEST") = "1" then selftest? = true
@@ -76,6 +80,9 @@ answer? = true             rem what a confirmation answers (self-test)
 save_as$ = ""              rem what a save dialog answers (self-test)
 open_as$ = ""              rem what an open dialog answers, once (self-test)
 step_err$ = ""             rem what the last step_ok failed with
+probe_err$ = ""            rem why is_open_db could not tell (backup)
+fold_map@ = sdict@()       rem fold$'s table: character -> its case folding
+fold_probe@ = sdict@()     rem what fold$ looks for before walking a string
 passed = 0
 failed = 0
 
@@ -91,9 +98,12 @@ if sqlite_available() = 0 then
   end
 end if
 
+fold_init()
+randomize()
 build_login_form()
 build_main_form()
 build_password_form()
+build_notice_form()
 
 if selftest? = true then
   run_selftest()
@@ -400,15 +410,51 @@ function open_another() local p$
   return 0
 end function
 
+rem A small window that says what a long step is doing -- an upgrade of a
+rem large database runs at start-up, before any other window shows, and
+rem without it the program looks hung. notice("") puts it away. While it
+rem shows, the main window takes no clicks: an upgrade is one transaction,
+rem and nothing else may run in the middle of it.
+function build_notice_form() local f@
+  f@ = keep@("notice", form@(APP$, 420, 90))
+  control_set@(f@, "Position", "poScreenCenter")
+  control_set@(f@, "BorderStyle", "bsDialog")
+  keep@("notice.text", lbl@(f@, 20, 30, ""))
+  return 0
+end function
+
+function notice(msg$)
+  if selftest? = true then return 0
+  if msg$ = "" then
+    form_close@(w@("notice"))
+    control_enabled@(w@("main"), 1)
+  else
+    control_enabled@(w@("main"), 0)
+    label_caption@(w@("notice.text"), msg$)
+    form_show@(w@("notice"))
+    app_processmessages()
+  end if
+  return 0
+end function
+
+rem Called every few thousand rows of an upgrade: lets the notice repaint,
+rem so the system does not mark the program "not responding".
+function upgrade_progress()
+  if selftest? = false then app_processmessages()
+  return 0
+end function
+
 rem Bring the database d@ to SCHEMA_VERSION; 1 when it is there. The version
 rem lives in PRAGMA user_version, and a database already at it is NOT
 rem WRITTEN TO: PRAGMA foreign_keys is a setting of the connection, not of
 rem the file, so a read-only database with the schema opens for reading.
-rem An older one is upgraded step by step inside ONE transaction that also
-rem sets the new version -- so an upgrade either happened completely or not
-rem at all, and running it again on the same file finds nothing to do. On
-rem failure schema_msg$ says why.
-function create_schema(d@) local v, ok
+rem Nothing is written either before db_owner$ has said the file is this
+rem program's, or empty: another program's database is refused, not given
+rem our tables. An older one of ours is upgraded step by step inside ONE
+rem transaction that also sets the new version -- so an upgrade either
+rem happened completely or not at all, and running it again on the same
+rem file finds nothing to do. On failure schema_msg$ says why.
+function create_schema(d@) local v, ok, app
   schema_msg$ = ""
   step_err$ = ""
   sqlite_clearerror()
@@ -417,25 +463,92 @@ function create_schema(d@) local v, ok
     return 0
   end if
   v = sqlite_scalar(d@, "PRAGMA user_version")
+  if sqlite_error() = 0 then app = sqlite_scalar(d@, "PRAGMA application_id")
   if sqlite_error() <> 0 then
     schema_msg$ = sqlite_errormsg$()
     return 0
   end if
+  if db_owner$(d@, v, app) = "" then return 0
   if v = SCHEMA_VERSION then return 1
   if v > SCHEMA_VERSION then
     schema_msg$ = "it was made by a newer version of this program (its schema is version " + str$(v) + ")."
     return 0
   end if
+  rem An upgrade reads and rewrites every row: say so while it runs.
+  if v >= 1 then notice("Upgrading the database to this version of the program...")
   ok = sqlite_begin(d@)
-  if ok = 1 and v < 1 then ok = schema_v1(d@)
-  if ok = 1 and v < 2 then ok = migrate_v2(d@)
-  if ok = 1 then ok = sqlite_exec(d@, "PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  if ok = 1 then ok = upgrade(d@, v)
+  if ok = 1 then ok = sqlite_exec(d@, "PRAGMA application_id = " + str$(APP_ID) + "; PRAGMA user_version = " + str$(SCHEMA_VERSION))
   if ok = 1 then ok = sqlite_commit(d@)
   if ok <> 1 then
     if schema_msg$ = "" then schema_msg$ = step_err$
     if schema_msg$ = "" then schema_msg$ = sqlite_errormsg$()
     sqlite_rollback(d@)
+    rem A file of an older version is opened by upgrading it, and an upgrade
+    rem writes. The program reads keys computed by the CURRENT rule, so it
+    rem cannot look at the old file as it is -- it would answer some
+    rem sign-ins and searches wrongly -- and says what would work instead.
+    if v >= 1 and instr(schema_msg$, "readonly") > 0 then
+      schema_msg$ = "it was made by an earlier version of this program (schema version " + str$(v) + "), and opening it means upgrading it, which writes to it -- but the file is read-only. Open a writable copy of it instead: the copy is upgraded, and this file is left as it is."
+    end if
   end if
+  notice("")
+  return ok
+end function
+
+rem Whose file this is, before anything is written into it: "ours" or
+rem "new" (no table at all, no version, no owner -- what sqlite_open@
+rem makes of a name that was not there), else "" with schema_msg$ saying
+rem why. Version 3 marks its files with PRAGMA application_id; versions 1
+rem and 2 set none, so a file of theirs is known by its version AND by
+rem having every column version 1 built -- the columns are read from a
+rem version-1 schema built in memory, not from a list kept by hand.
+function db_owner$(d@, v, app) local m@, s@, missing$, n
+  if app = APP_ID then return "ours"
+  if app <> 0 then
+    schema_msg$ = "it belongs to another program (its application id is " + str$(app) + "), not to " + APP$ + "."
+    return ""
+  end if
+  n = sqlite_scalar(d@, "SELECT count(*) FROM sqlite_master")
+  if n = 0 and v = 0 then return "new"
+  missing$ = "?"
+  if v = 1 or v = 2 then
+    missing$ = ""
+    m@ = sqlite_open@()
+    schema_v1(m@)
+    s@ = sqlite_prepare@(m@, "SELECT m.name AS t, p.name AS c FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table'")
+    while sqlite_step(s@) = 1
+      if missing$ = "" then
+        if has_column(d@, sqlite_gets$(s@, "t"), sqlite_gets$(s@, "c")) = 0 then missing$ = sqlite_gets$(s@, "t") + "." + sqlite_gets$(s@, "c")
+      end if
+    end while
+    sqlite_finalize(s@)
+    sqlite_close(m@)
+  end if
+  if missing$ = "" then return "ours"
+  schema_msg$ = "it is not a " + APP$ + " database -- it holds other tables (" + sqlite_scalar$(d@, "SELECT group_concat(name, ', ') FROM (SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name LIMIT 6)") + ") -- and this program does not write into another program's file."
+  return ""
+end function
+
+rem 1 when table$ has a column col$.
+function has_column(d@, table$, col$) local s@, n
+  s@ = sqlite_prepare@(d@, "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2")
+  sqlite_bindstr(s@, 1, table$)
+  sqlite_bindstr(s@, 2, col$)
+  n = 0
+  if sqlite_step(s@) = 1 then n = sqlite_getnum(s@, 1)
+  sqlite_finalize(s@)
+  return flag(n > 0)
+end function
+
+rem The steps from version v to SCHEMA_VERSION, inside the caller's
+rem transaction; then the keys, computed ONCE for whichever steps ran.
+function upgrade(d@, v) local ok
+  ok = 1
+  if v < 1 then ok = schema_v1(d@)
+  if ok = 1 and v < 2 then ok = migrate_v2(d@)
+  if ok = 1 and v < 3 then ok = migrate_v3(d@)
+  if ok = 1 then ok = rekey_and_check(d@)
   return ok
 end function
 
@@ -511,40 +624,71 @@ function schema_v1(d@) local s$
   return sqlite_exec(d@, s$)
 end function
 
-rem Version 2: the rules that compare text compare a KEY, computed here in
-rem BASIC and stored beside the text, because SQLite cannot compute it:
+rem Version 2: the rules that compare text compare a KEY, computed in BASIC
+rem and stored beside the text, because SQLite cannot compute it:
 rem   - COLLATE NOCASE and LIKE fold the 26 ASCII letters only, so "josé"
 rem     and "JOSÉ" were two users and a search for "AÇO" missed "Aço". A key
-rem     lower-cased with alcase$ (all of Unicode) is what user names, product
+rem     case-folded with fold$ (all of Unicode) is what user names, product
 rem     lines and the search now compare: username_key, name_key, search_key.
 rem   - the unique tax id compared the text as typed, so 11.444.777/0001-61
 rem     and 11444777000161 were two companies. tax_key is the id upper-cased
 rem     with only its letters and digits kept (tax_key$), and the partial
 rem     unique index is on (kind, tax_key).
-rem The columns are added only when missing, the keys are computed for the
-rem rows already there, and if those rows already break the new rules the
-rem upgrade is refused -- naming them -- instead of guessing which to keep.
-function migrate_v2(d@) local s$, dup$
+rem This step only adds the columns (when missing) and drops the old index;
+rem the keys and their unique indexes come after the last step
+rem (rekey_and_check), once, whichever version the file started at.
+function migrate_v2(d@)
   if add_column(d@, "users", "username_key") <> 1 then return 0
   if add_column(d@, "product_lines", "name_key") <> 1 then return 0
   if add_column(d@, "companies", "tax_key") <> 1 then return 0
   if add_column(d@, "companies", "search_key") <> 1 then return 0
   if add_column(d@, "contacts", "name_key") <> 1 then return 0
-  if sqlite_exec(d@, "DROP INDEX IF EXISTS ux_companies_tax_id") <> 1 then return 0
+  return sqlite_exec(d@, "DROP INDEX IF EXISTS ux_companies_tax_id")
+end function
+
+rem Version 3: version 2 computed its keys with alcase$, which LOWER-cases
+rem and does not FOLD -- so ΣΩΚΡΑΤΗΣ and σωκρατης (a final sigma), STRASSE
+rem and straße were two names. The keys are recomputed with fold$ (by
+rem rekey_and_check, like every upgrade), which may now find two rows the
+rem same that were not. And the file gets the table where a backup leaves
+rem its identity mark (is_open_db).
+function migrate_v3(d@)
+  return sqlite_exec(d@, "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+end function
+
+rem Compute every key again, then check the rows against the unique rules
+rem and put the unique indexes back. The indexes are dropped first, so two
+rem rows the new keys make equal are refused BY NAME -- instead of by a
+rem constraint error halfway through, or by guessing which to keep. Each
+rem check is one grouped pass (GROUP BY ... HAVING), never a count per row:
+rem the per-row form made the upgrade of 16,000 companies take 47 s.
+function rekey_and_check(d@) local s$, dup$
+  s$ = "DROP INDEX IF EXISTS ux_users_username_key;"
+  s$ = s$ + "DROP INDEX IF EXISTS ux_product_lines_name_key;"
+  s$ = s$ + "DROP INDEX IF EXISTS ux_companies_tax_key;"
+  if sqlite_exec(d@, s$) <> 1 then return 0
   if rekey_all(d@) <> 1 then return 0
-  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name, ' / ') FROM (SELECT username AS name FROM users WHERE username_key IN (SELECT username_key FROM users GROUP BY username_key HAVING count(*) > 1))")
+  rem (an error stays standing until cleared, so one test after the three
+  rem queries sees a failure in any of them -- a check that did not run is
+  rem not a check that found nothing)
+  sqlite_clearerror()
+  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name, ' / ') FROM (SELECT username AS name FROM users WHERE username_key IN (SELECT username_key FROM users GROUP BY username_key HAVING count(*) > 1) ORDER BY username_key, id)")
   if dup$ <> "" then
     schema_msg$ = "these user names differ only in upper and lower case, and must be told apart first: " + dup$
     return 0
   end if
-  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name, ' / ') FROM (SELECT name FROM product_lines WHERE name_key IN (SELECT name_key FROM product_lines GROUP BY name_key HAVING count(*) > 1))")
+  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name, ' / ') FROM (SELECT name FROM product_lines WHERE name_key IN (SELECT name_key FROM product_lines GROUP BY name_key HAVING count(*) > 1) ORDER BY name_key, id)")
   if dup$ <> "" then
     schema_msg$ = "these product lines differ only in upper and lower case, and must be told apart first: " + dup$
     return 0
   end if
-  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name || ' (' || tax_id || ')', ' / ') FROM (SELECT name, tax_id FROM companies c WHERE tax_key <> '' AND (SELECT count(*) FROM companies o WHERE o.kind = c.kind AND o.tax_key = c.tax_key) > 1)")
+  dup$ = sqlite_scalar$(d@, "SELECT group_concat(name || ' (' || tax_id || ')', ' / ') FROM (SELECT name, tax_id FROM companies WHERE tax_key <> '' AND (kind, tax_key) IN (SELECT kind, tax_key FROM companies WHERE tax_key <> '' GROUP BY kind, tax_key HAVING count(*) > 1) ORDER BY kind, tax_key, id)")
   if dup$ <> "" then
     schema_msg$ = "these companies have the same tax id written in different ways, and must be told apart first: " + dup$
+    return 0
+  end if
+  if sqlite_error() <> 0 then
+    step_err$ = sqlite_errormsg$()
     return 0
   end if
   s$ = "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username_key ON users(username_key);"
@@ -554,84 +698,118 @@ function migrate_v2(d@) local s$, dup$
 end function
 
 rem Add a text column (default '') unless the table already has it.
-function add_column(d@, table$, col$) local s@, n
-  s@ = sqlite_prepare@(d@, "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2")
-  sqlite_bindstr(s@, 1, table$)
-  sqlite_bindstr(s@, 2, col$)
-  n = 0
-  if sqlite_step(s@) = 1 then n = sqlite_getnum(s@, 1)
-  sqlite_finalize(s@)
-  if n > 0 then return 1
+function add_column(d@, table$, col$)
+  if has_column(d@, table$, col$) = 1 then return 1
   return sqlite_exec(d@, "ALTER TABLE " + table$ + " ADD COLUMN " + col$ + " TEXT NOT NULL DEFAULT ''")
 end function
 
-rem Compute every stored key from the text beside it: the upgrade does it
-rem for the rows it finds, and the sample data, which is plain SQL, needs it
-rem too. Each table is read whole first and written after, so no row is
-rem updated under a statement still reading the table. 1 on success.
-function rekey_all(d@) local s@, u@, rows@, more@, i, id$, ok
-  ok = 1
-  rem users and product lines: one name, one key
-  rows@ = dict@()
-  s@ = sqlite_prepare@(d@, "SELECT id, username FROM users")
-  while sqlite_step(s@) = 1
-    dict_set@(rows@, sqlite_gets$(s@, "id"), alcase$(sqlite_gets$(s@, "username")))
-  end while
-  sqlite_finalize(s@)
-  ok = rekey_table(d@, rows@, "UPDATE users SET username_key = ?2 WHERE id = ?1")
-  dict_free(rows@)
-  rows@ = dict@()
-  s@ = sqlite_prepare@(d@, "SELECT id, name FROM product_lines")
-  while sqlite_step(s@) = 1
-    dict_set@(rows@, sqlite_gets$(s@, "id"), alcase$(sqlite_gets$(s@, "name")))
-  end while
-  sqlite_finalize(s@)
-  if ok = 1 then ok = rekey_table(d@, rows@, "UPDATE product_lines SET name_key = ?2 WHERE id = ?1")
-  dict_free(rows@)
-  rows@ = dict@()
-  s@ = sqlite_prepare@(d@, "SELECT id, name FROM contacts")
-  while sqlite_step(s@) = 1
-    dict_set@(rows@, sqlite_gets$(s@, "id"), alcase$(sqlite_gets$(s@, "name")))
-  end while
-  sqlite_finalize(s@)
-  if ok = 1 then ok = rekey_table(d@, rows@, "UPDATE contacts SET name_key = ?2 WHERE id = ?1")
-  dict_free(rows@)
-  rem companies: two keys each, the tax id's in rows@, the search's in more@
-  rows@ = dict@()
-  more@ = dict@()
-  s@ = sqlite_prepare@(d@, "SELECT id, name, trade_name, tax_id, city FROM companies")
-  while sqlite_step(s@) = 1
-    id$ = sqlite_gets$(s@, "id")
-    dict_set@(rows@, id$, tax_key$(sqlite_gets$(s@, "tax_id")))
-    dict_set@(more@, id$, search_key$(sqlite_gets$(s@, "name"), sqlite_gets$(s@, "trade_name"), sqlite_gets$(s@, "tax_id"), sqlite_gets$(s@, "city")))
-  end while
-  sqlite_finalize(s@)
-  for i = 1 to dict_count(rows@)
-    if ok = 1 then
-      id$ = dict_key$(rows@, i)
-      u@ = sqlite_prepare@(d@, "UPDATE companies SET tax_key = ?2, search_key = ?3 WHERE id = ?1")
-      sqlite_bindnum(u@, 1, val(id$))
-      sqlite_bindstr(u@, 2, dict_get$(rows@, id$))
-      sqlite_bindstr(u@, 3, dict_get$(more@, id$))
-      ok = step_ok(u@)
-    end if
-  next
-  dict_free(rows@)
-  dict_free(more@)
+rem Compute every stored key from the text beside it: an upgrade does it for
+rem the rows it finds, and the sample data, which is plain SQL, needs it
+rem too. 1 on success; on failure step_err$ says why. Each table is read
+rem whole first and written after, so no row is updated under a statement
+rem still reading the table -- and every statement is checked as it is
+rem PREPARED: a SELECT that did not compile steps as no rows at all, and an
+rem upgrade once reported success over a table that was not ours that way.
+rem The cost is linear: one SELECT and one UPDATE prepared per table, the
+rem UPDATE re-run for each row (sqlite_reset).
+function rekey_all(d@) local ok
+  ok = rekey_names(d@, "SELECT id, username AS k FROM users", "UPDATE users SET username_key = ?2 WHERE id = ?1")
+  if ok = 1 then ok = rekey_names(d@, "SELECT id, name AS k FROM product_lines", "UPDATE product_lines SET name_key = ?2 WHERE id = ?1")
+  if ok = 1 then ok = rekey_names(d@, "SELECT id, name AS k FROM contacts", "UPDATE contacts SET name_key = ?2 WHERE id = ?1")
+  if ok = 1 then ok = rekey_companies(d@)
   return ok
 end function
 
-rem Write each id -> key pair of rows@ with update$ (?1 the id, ?2 the key).
-function rekey_table(d@, rows@, update$) local u@, i, ok
+rem One name, one key: id and k from select$, fold$(k) written by update$
+rem (?1 the id, ?2 the key).
+function rekey_names(d@, select$, update$) local s@, ids@, keys@, i, n, u@, ok
+  sqlite_clearerror()
+  s@ = sqlite_prepare@(d@, select$)
+  if prepare_failed?() = true then return 0
+  ids@ = dict@()
+  keys@ = sdict@()
+  n = 0
+  while sqlite_step(s@) = 1
+    n = n + 1
+    dict_set@(ids@, str$(n), sqlite_getn(s@, "id"))
+    sdict_set@(keys@, str$(n), fold$(sqlite_gets$(s@, "k")))
+    if n mod 5000 = 0 then upgrade_progress()
+  end while
+  sqlite_finalize(s@)
   ok = 1
-  for i = 1 to dict_count(rows@)
+  sqlite_clearerror()
+  u@ = sqlite_prepare@(d@, update$)
+  if prepare_failed?() = true then ok = 0
+  for i = 1 to n
     if ok = 1 then
-      u@ = sqlite_prepare@(d@, update$)
-      sqlite_bindnum(u@, 1, val(dict_key$(rows@, i)))
-      sqlite_bindstr(u@, 2, dict_get$(rows@, dict_key$(rows@, i)))
-      ok = step_ok(u@)
+      sqlite_bindnum(u@, 1, dict_get(ids@, str$(i)))
+      sqlite_bindstr(u@, 2, sdict_get$(keys@, str$(i)))
+      ok = step_reset_ok(u@)
+      if i mod 5000 = 0 then upgrade_progress()
     end if
   next
+  sqlite_finalize(u@)
+  dict_free(ids@)
+  dict_free(keys@)
+  return ok
+end function
+
+rem Companies have two keys each: the tax id's and the search's.
+function rekey_companies(d@) local s@, ids@, tax@, sk@, i, n, u@, ok
+  sqlite_clearerror()
+  s@ = sqlite_prepare@(d@, "SELECT id, name, trade_name, tax_id, city FROM companies")
+  if prepare_failed?() = true then return 0
+  ids@ = dict@()
+  tax@ = sdict@()
+  sk@ = sdict@()
+  n = 0
+  while sqlite_step(s@) = 1
+    n = n + 1
+    dict_set@(ids@, str$(n), sqlite_getn(s@, "id"))
+    sdict_set@(tax@, str$(n), tax_key$(sqlite_gets$(s@, "tax_id")))
+    sdict_set@(sk@, str$(n), search_key$(sqlite_gets$(s@, "name"), sqlite_gets$(s@, "trade_name"), sqlite_gets$(s@, "tax_id"), sqlite_gets$(s@, "city")))
+    if n mod 5000 = 0 then upgrade_progress()
+  end while
+  sqlite_finalize(s@)
+  ok = 1
+  sqlite_clearerror()
+  u@ = sqlite_prepare@(d@, "UPDATE companies SET tax_key = ?2, search_key = ?3 WHERE id = ?1")
+  if prepare_failed?() = true then ok = 0
+  for i = 1 to n
+    if ok = 1 then
+      sqlite_bindnum(u@, 1, dict_get(ids@, str$(i)))
+      sqlite_bindstr(u@, 2, sdict_get$(tax@, str$(i)))
+      sqlite_bindstr(u@, 3, sdict_get$(sk@, str$(i)))
+      ok = step_reset_ok(u@)
+      if i mod 5000 = 0 then upgrade_progress()
+    end if
+  next
+  sqlite_finalize(u@)
+  dict_free(ids@)
+  dict_free(tax@)
+  dict_free(sk@)
+  return ok
+end function
+
+rem Asked right after a sqlite_prepare@ that followed sqlite_clearerror():
+rem whether the statement did NOT compile, with step_err$ saying why.
+function prepare_failed?()
+  if sqlite_error() = 0 then return false
+  step_err$ = sqlite_errormsg$()
+  return true
+end function
+
+rem Step a statement that changes rows and rewind it for the next row: 1 on
+rem success, else 0 with step_err$ saying why. The statement stays alive.
+function step_reset_ok(s@) local ok
+  sqlite_clearerror()
+  sqlite_step(s@)
+  ok = 1
+  if sqlite_error() <> 0 then
+    ok = 0
+    step_err$ = sqlite_errormsg$()
+  end if
+  sqlite_reset(s@)
   return ok
 end function
 
@@ -725,12 +903,146 @@ function tax_key$(s$) local i, c$, u$, out$
 end function
 
 rem What the Search box is compared with: the company's name, trade name,
-rem tax id (as typed and as its key) and city, lower-cased with alcase$ --
+rem tax id (as typed and as its key) and city, case-folded with fold$ --
 rem all of Unicode, where SQLite's LIKE folds only ASCII -- one per line,
 rem so a search cannot match across two of them.
 function search_key$(name$, trade$, tax$, city$) local nl$
   nl$ = chr$(10)
-  return alcase$(name$ + nl$ + trade$ + nl$ + tax$ + nl$ + tax_key$(tax$) + nl$ + city$)
+  return fold$(name$ + nl$ + trade$ + nl$ + tax$ + nl$ + tax_key$(tax$) + nl$ + city$)
+end function
+
+rem Case FOLDING, the comparison Unicode defines for "the same except for
+rem case" (CaseFolding.txt, full folding: statuses C and F). alcase$ is
+rem simple lower-casing, one character for one, and that is not the same
+rem thing: it leaves a final sigma alone, so ΣΩΚΡΑΤΗΣ and σωκρατης were two
+rem names, and ß, where folding answers "ss", so STRASSE and straße were two.
+rem fold$ is alcase$ and then a table of the characters where the two part,
+rem derived from Unicode 15's casefold over every code point -- Python's
+rem str.casefold was the oracle, and fold$ was checked against it for all
+rem 1,112,062 characters. Only the noncharacters U+FFFE and U+FFFF differ:
+rem alcase$ turns them into "?". U+0130, the dotted capital I, is taken out
+rem before alcase$, which would answer a bare "i" where folding keeps the
+rem dot. A string alcase$ answers in ASCII has nothing in the table, and
+rem neither has one without any of the table's probes (fold_init): those
+rem cost an alcase$ and a few instr calls. Only a string that may hold a
+rem character of the table is walked a character at a time.
+function fold$(s$) local t$, out$, i, n, b, w, start, c$, hit
+  t$ = alcase$(replacestr$(s$, chr$(304), "i" + chr$(775)))
+  n = bytelen(t$)
+  if n = len(t$) then return t$
+  hit = 0
+  for i = 1 to dict_count(fold_probe@)
+    if hit = 0 then
+      if instr(t$, dict_key$(fold_probe@, i)) > 0 then hit = 1
+    end if
+  next
+  if hit = 0 then return t$
+  out$ = ""
+  start = 1
+  i = 1
+  while i <= n
+    b = byteat(t$, i)
+    if b < 128 then
+      i = i + 1
+    else
+      rem the length of a UTF-8 character, from its first byte
+      w = 2
+      if b >= 240 then
+        w = 4
+      elseif b >= 224 then
+        w = 3
+      end if
+      c$ = bytemid$(t$, i, w)
+      if dict_haskey(fold_map@, c$) = 1 then
+        out$ = out$ + bytemid$(t$, start, i - start) + sdict_get$(fold_map@, c$)
+        start = i + w
+      end if
+      i = i + w
+    end if
+  end while
+  return out$ + bytemid$(t$, start, n - start + 1)
+end function
+
+rem fold$'s table, as code points in hex: "DF:73.73" folds U+00DF to "ss",
+rem and "AB70-ABBF:13A0" folds a run of consecutive characters onto the run
+rem that starts at U+13A0. Built once, at start-up, into fold_map@. Most of
+rem it is letters newer than the Unicode tables alcase$ was built from
+rem (Georgian Mtavruli, Cherokee small letters, Osage, Adlam...); the rest
+rem is where full folding expands a letter: ß, the ligatures, Greek with
+rem ypogegrammeni.
+function fold_init() local t$, n, i, e$, src$, dst$, a, z, d, j, r$, p
+  t$ = "B5:3BC DF:73.73 149:2BC.6E 17F:73 1F0:6A.30C 345:3B9 "
+  t$ = t$ + "390:3B9.308.301 3B0:3C5.308.301 3C2:3C3 3D0:3B2 3D1:3B8 3D5:3C6 "
+  t$ = t$ + "3D6:3C0 3F0:3BA 3F1:3C1 3F5:3B5 587:565.582 13F8-13FD:13F0 "
+  t$ = t$ + "1C80:432 1C81:434 1C82:43E 1C83-1C84:441 1C85:442 1C86:44A "
+  t$ = t$ + "1C87:463 1C88:A64B 1C90-1CBA:10D0 1CBD-1CBF:10FD 1E96:68.331 "
+  t$ = t$ + "1E97:74.308 1E98:77.30A 1E99:79.30A 1E9A:61.2BE 1E9B:1E61 "
+  t$ = t$ + "1F50:3C5.313 1F52:3C5.313.300 1F54:3C5.313.301 1F56:3C5.313.342 "
+  t$ = t$ + "1F80:1F00.3B9 1F81:1F01.3B9 1F82:1F02.3B9 1F83:1F03.3B9 "
+  t$ = t$ + "1F84:1F04.3B9 1F85:1F05.3B9 1F86:1F06.3B9 1F87:1F07.3B9 "
+  t$ = t$ + "1F90:1F20.3B9 1F91:1F21.3B9 1F92:1F22.3B9 1F93:1F23.3B9 "
+  t$ = t$ + "1F94:1F24.3B9 1F95:1F25.3B9 1F96:1F26.3B9 1F97:1F27.3B9 "
+  t$ = t$ + "1FA0:1F60.3B9 1FA1:1F61.3B9 1FA2:1F62.3B9 1FA3:1F63.3B9 "
+  t$ = t$ + "1FA4:1F64.3B9 1FA5:1F65.3B9 1FA6:1F66.3B9 1FA7:1F67.3B9 "
+  t$ = t$ + "1FB2:1F70.3B9 1FB3:3B1.3B9 1FB4:3AC.3B9 1FB6:3B1.342 "
+  t$ = t$ + "1FB7:3B1.342.3B9 1FBE:3B9 1FC2:1F74.3B9 1FC3:3B7.3B9 "
+  t$ = t$ + "1FC4:3AE.3B9 1FC6:3B7.342 1FC7:3B7.342.3B9 1FD2:3B9.308.300 "
+  t$ = t$ + "1FD3:3B9.308.301 1FD6:3B9.342 1FD7:3B9.308.342 1FE2:3C5.308.300 "
+  t$ = t$ + "1FE3:3C5.308.301 1FE4:3C1.313 1FE6:3C5.342 1FE7:3C5.308.342 "
+  t$ = t$ + "1FF2:1F7C.3B9 1FF3:3C9.3B9 1FF4:3CE.3B9 1FF6:3C9.342 "
+  t$ = t$ + "1FF7:3C9.342.3B9 2C2F:2C5F A7B8:A7B9 A7BA:A7BB A7BC:A7BD "
+  t$ = t$ + "A7BE:A7BF A7C0:A7C1 A7C2:A7C3 A7C4:A794 A7C5:282 A7C6:1D8E "
+  t$ = t$ + "A7C7:A7C8 A7C9:A7CA A7D0:A7D1 A7D6:A7D7 A7D8:A7D9 A7F5:A7F6 "
+  t$ = t$ + "AB70-ABBF:13A0 FB00:66.66 FB01:66.69 FB02:66.6C FB03:66.66.69 "
+  t$ = t$ + "FB04:66.66.6C FB05:73.74 FB06:73.74 FB13:574.576 FB14:574.565 "
+  t$ = t$ + "FB15:574.56B FB16:57E.576 FB17:574.56D 10400-10427:10428 "
+  t$ = t$ + "104B0-104D3:104D8 10570-1057A:10597 1057C-1058A:105A3 "
+  t$ = t$ + "1058C-10592:105B3 10594-10595:105BB 10C80-10CB2:10CC0 "
+  t$ = t$ + "118A0-118BF:118C0 16E40-16E5F:16E60 1E900-1E921:1E922"
+  n = wordcount(t$, " ")
+  for i = 1 to n
+    e$ = word$(t$, i, " ")
+    p = instr(e$, ":")
+    src$ = left$(e$, p - 1)
+    dst$ = mid$(e$, p + 1)
+    if instr(src$, "-") > 0 then
+      a = hexval(word$(src$, 1, "-"))
+      z = hexval(word$(src$, 2, "-"))
+      d = hexval(dst$)
+      for j = a to z
+        sdict_set@(fold_map@, chr$(j), chr$(d + j - a))
+      next
+    else
+      r$ = ""
+      for j = 1 to wordcount(dst$, ".")
+        r$ = r$ + chr$(hexval(word$(dst$, j, ".")))
+      next
+      sdict_set@(fold_map@, chr$(hexval(src$)), r$)
+    end if
+  next
+  rem The probes fold$ looks for before walking a string: each character of
+  rem the table is found by its FIRST BYTE in UTF-8 -- except under the
+  rem first bytes C2 and C3, which every accented Latin letter (ç, ã, é)
+  rem starts with too, where the table's two characters (µ, ß) are their
+  rem own probes. A string with none of them holds nothing to fold.
+  for i = 1 to dict_count(fold_map@)
+    e$ = dict_key$(fold_map@, i)
+    if byteat(e$, 1) = 194 or byteat(e$, 1) = 195 then
+      sdict_set@(fold_probe@, e$, "")
+    else
+      sdict_set@(fold_probe@, bytestr$(byteat(e$, 1)), "")
+    end if
+  next
+  return dict_count(fold_map@)
+end function
+
+rem A hexadecimal number written with upper-case digits.
+function hexval(h$) local i, v
+  v = 0
+  for i = 1 to len(h$)
+    v = v * 16 + instr("0123456789ABCDEF", mid$(h$, i, 1)) - 1
+  next
+  return v
 end function
 
 rem A LIKE pattern finding s$ anywhere, with s$ taken LITERALLY: "%" and "_"
@@ -865,7 +1177,7 @@ function on_login(sender@) local u$, p$, s@, rec$, id, ok?
     end if
     s@ = sqlite_prepare@(db@, "INSERT INTO users(username, username_key, full_name, password, role) VALUES (?1, ?2, ?3, ?4, 'admin')")
     sqlite_bindstr(s@, 1, u$)
-    sqlite_bindstr(s@, 2, alcase$(u$))
+    sqlite_bindstr(s@, 2, fold$(u$))
     sqlite_bindstr(s@, 3, "Administrator")
     sqlite_bindstr(s@, 4, password_hash$(p$, pw_cost))
     if finish(s@, "create the administrator") <> 1 then return 0
@@ -874,7 +1186,7 @@ function on_login(sender@) local u$, p$, s@, rec$, id, ok?
   rem Look the user up by the name's key -- "José" finds "josé" -- then let
   rem the stored record decide, and call the user by the STORED name.
   s@ = sqlite_prepare@(db@, "SELECT id, username, password, role, active, full_name FROM users WHERE username_key = ?1")
-  sqlite_bindstr(s@, 1, alcase$(u$))
+  sqlite_bindstr(s@, 1, fold$(u$))
   id = 0
   ok? = false
   if sqlite_step(s@) = 1 then
@@ -1036,10 +1348,12 @@ function on_open_db(sender@) local p$
   return 0
 end function
 
-rem Whether two paths name the same file, as far as their text can say: both
-rem made absolute, and compared ignoring case on Windows, whose file names
-rem do. (A link or a second name for the same file is not seen through.)
-function same_file?(a$, b$) local x$, y$
+rem Whether two paths are spelled as one file: both made absolute, and
+rem compared ignoring case on Windows. This can only say YES -- a name with
+rem another case on a Linux mount that ignores case, a trailing dot or
+rem space on Windows, an 8.3 alias, a link, are all the same file spelled
+rem otherwise. is_open_db is what tells a file apart from the open one.
+function same_spelling?(a$, b$) local x$, y$
   x$ = path_getfullpath$(a$)
   y$ = path_getfullpath$(b$)
   if os_name$() = "Windows" then
@@ -1049,29 +1363,132 @@ function same_file?(a$, b$) local x$, y$
   return x$ = y$
 end function
 
+rem Whether the file at p$ IS the open database, asked of the files and not
+rem of their names: a mark no other file can carry -- a random token -- is
+rem committed into the open database, p$ is opened as a SECOND connection
+rem that can only read (query_only), and the mark is looked for there. Then
+rem it is taken out again. 1 when p$ shows the mark (the same file), 0 when
+rem it is proven another file -- it has no such table, it is not a database
+rem at all, or it holds no such mark -- and -1 when it cannot be told, with
+rem probe_err$ saying why: a read-only session cannot leave a mark, and a
+rem file that could not be READ (locked, say) proves nothing.
+function is_open_db(p$) local token$, s@, t@, seen$, code, why$, ans
+  probe_err$ = ""
+  if read_only? = true then
+    probe_err$ = "this database is read-only, so it cannot be marked to tell it apart"
+    return -1
+  end if
+  token$ = "probe " + str$(int(rnd() * 1000000000)) + " " + str$(now())
+  s@ = sqlite_prepare@(db@, "INSERT OR REPLACE INTO app_meta(key, value) VALUES ('identity_probe', ?1)")
+  sqlite_bindstr(s@, 1, token$)
+  if step_ok(s@) <> 1 then
+    probe_err$ = friendly_error$(step_err$)
+    return -1
+  end if
+  seen$ = ""
+  code = 0
+  why$ = ""
+  t@ = sqlite_open@(p$)
+  if sqlite_isopen(t@) = 1 then
+    sqlite_exec(t@, "PRAGMA query_only = ON")
+    sqlite_clearerror()
+    seen$ = sqlite_scalar$(t@, "SELECT value FROM app_meta WHERE key = 'identity_probe'")
+    code = sqlite_error()
+    why$ = sqlite_errormsg$()
+    sqlite_close(t@)
+  else
+    code = -1
+    why$ = sqlite_errormsg$()
+  end if
+  s@ = sqlite_prepare@(db@, "DELETE FROM app_meta WHERE key = 'identity_probe'")
+  step_ok(s@)
+  rem SQLITE_NOTADB (26) and "no such table" are answers: the open database
+  rem is a database and has the table. Anything else is a failure to look.
+  ans = -1
+  if code = 0 then
+    ans = flag(seen$ = token$)
+  elseif code = 26 or instr(why$, "no such table") > 0 then
+    ans = 0
+  else
+    probe_err$ = why$
+  end if
+  return ans
+end function
+
+rem A backup counts as done when the copy opens as a database that passes
+rem SQLite's own check and holds what the open one does -- the same users
+rem and companies -- and the open database still answers. 1 when so; else 0
+rem with probe_err$ saying what was wrong.
+function backup_landed(p$) local t@, ok, users, companies
+  probe_err$ = ""
+  rem (a call that succeeds leaves an older error standing: clear it first)
+  sqlite_clearerror()
+  users = sqlite_scalar(db@, "SELECT count(*) FROM users")
+  companies = sqlite_scalar(db@, "SELECT count(*) FROM companies")
+  if sqlite_error() <> 0 then
+    probe_err$ = "the open database no longer answers: " + sqlite_errormsg$()
+    return 0
+  end if
+  ok = 0
+  t@ = sqlite_open@(p$)
+  if sqlite_isopen(t@) = 1 then
+    sqlite_exec(t@, "PRAGMA query_only = ON")
+    sqlite_clearerror()
+    if sqlite_scalar$(t@, "PRAGMA quick_check") = "ok" then
+      if sqlite_scalar(t@, "SELECT count(*) FROM users") = users and sqlite_scalar(t@, "SELECT count(*) FROM companies") = companies and sqlite_error() = 0 then ok = 1
+    end if
+    if ok = 0 then
+      probe_err$ = "the copy does not hold what the database does"
+      if sqlite_error() <> 0 then probe_err$ = sqlite_errormsg$()
+    end if
+    sqlite_close(t@)
+  else
+    probe_err$ = sqlite_errormsg$()
+  end if
+  return ok
+end function
+
 rem A backup is written by SQLite into a NEW file, so a file already at the
 rem target is deleted first, once the person agrees. Never the open database
-rem itself: Linux would unlink the live file -- the backup "succeeds" and
-rem every later save fails, read-only -- and Windows would refuse the delete.
-rem And a delete that fails is said, not ignored.
-function on_backup(sender@) local p$
+rem itself: Linux would unlink the live file -- the backup "succeeds" into
+rem an empty copy and every row is gone -- and Windows would refuse the
+rem delete. A name that is not there names no file at all, so it cannot be
+rem the open one; a name that IS there is deleted only once is_open_db has
+rem PROVEN it another file -- a name spelled like the open database is
+rem refused before that, and "cannot tell" is refused too. A delete that
+rem fails is said, not ignored, and "Backed up" is said only once the copy
+rem has been read back (backup_landed).
+function on_backup(sender@) local p$, same
   p$ = save_path$("phosphor-contacts-backup.db", "SQLite database (*.db)|*.db")
   if p$ = "" then return 0
-  if same_file?(p$, dbpath$) = true then
+  if same_spelling?(p$, dbpath$) = true then
     say("That is the database you have open. A backup has to go to another file.")
     return 0
   end if
   if file_exists(p$) = 1 then
+    same = is_open_db(p$)
+    if same = 1 then
+      say("That is the database you have open. A backup has to go to another file.")
+      return 0
+    end if
+    if same < 0 then
+      say("Could not make sure " + p$ + " is not the database you have open (" + probe_err$ + "), so it was left alone. Back up to a name that does not exist yet.")
+      return 0
+    end if
     if ask?("Replace " + p$ + "?") = false then return 0
     if file_delete(p$) <> 1 then
       say("Could not replace " + p$ + ": it could not be deleted. Is it open in another program?")
       return 0
     end if
   end if
-  if sqlite_backup(db@, p$) = 1 then
+  if sqlite_backup(db@, p$) <> 1 then
+    say("The backup failed: " + sqlite_errormsg$())
+    return 0
+  end if
+  if backup_landed(p$) = 1 then
     say("Backed up to " + p$)
   else
-    say("The backup failed: " + sqlite_errormsg$())
+    say("The backup to " + p$ + " was written but does not read back (" + probe_err$ + "); do not rely on it.")
   end if
   return 0
 end function
@@ -1176,38 +1593,58 @@ function company_field@(k, col$)
   return w@(pre$(k) + ".f." + col$)
 end function
 
-function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, keep, found
+rem A list is sized ONCE per refresh, from a count taken before it is
+rem filled. Growing it a row at a time made the grid re-measure every row
+rem it already had at each step -- 7.5 s to list 20,000 companies, on every
+rem keystroke in Search. grid_size sets the rows under the header; while
+rem filling, grid_room makes room when the fill finds more rows than were
+rem counted (another program may add some in between) by doubling, and the
+rem refresh ends with the exact count.
+function grid_size(g@, n)
+  stringgrid_rowcount@(g@, n + 1)
+  return n
+end function
+
+function grid_room(g@, n, cap)
+  if n <= cap then return cap
+  return grid_size(g@, n * 2)
+end function
+
+function refresh_companies(k) local p$, g@, s@, sql$, where$, q$, st, line, n, cap, keep, found
   p$ = pre$(k)
   g@ = w@(p$ + ".grid")
   keep = cur(p$ + ".company")
-  rem The search compares lower-cased keys (search_key$), taking what was
+  rem The search compares case-folded keys (search_key$), taking what was
   rem typed literally (like_pattern$).
-  q$ = alcase$(trim$(edit_text$(w@(p$ + ".search"))))
+  q$ = fold$(trim$(edit_text$(w@(p$ + ".search"))))
   if q$ <> "" then q$ = like_pattern$(q$)
   st = combo_itemindex(w@(p$ + ".state"))
   line = 0
   if combo_itemindex(w@(p$ + ".linefilter")) > 1 then line = row_id("lines", combo_itemindex(w@(p$ + ".linefilter")) - 1)
+  where$ = " FROM companies c WHERE c.kind = ?1"
+  where$ = where$ + " AND (?2 = '' OR c.search_key LIKE ?2 ESCAPE '\\'"
+  where$ = where$ + "      OR EXISTS (SELECT 1 FROM contacts t WHERE t.company_id = c.id AND t.name_key LIKE ?2 ESCAPE '\\'))"
+  where$ = where$ + " AND (?3 = 3 OR c.active = (?3 = 1))"
+  where$ = where$ + " AND (?4 = 0 OR EXISTS (SELECT 1 FROM contacts t JOIN contact_lines l ON l.contact_id = t.id"
+  where$ = where$ + "      WHERE t.company_id = c.id AND l.line_id = ?4))"
+  s@ = sqlite_prepare@(db@, "SELECT count(*)" + where$)
+  bind_company_filter(s@, k, q$, st, line)
+  cap = 0
+  if sqlite_step(s@) = 1 then cap = sqlite_getnum(s@, 1)
+  sqlite_finalize(s@)
   sql$ = "SELECT c.id, c.name, c.tax_id, c.city, c.state,"
   sql$ = sql$ + " (SELECT count(*) FROM contacts t WHERE t.company_id = c.id) AS n"
-  sql$ = sql$ + " FROM companies c WHERE c.kind = ?1"
-  sql$ = sql$ + " AND (?2 = '' OR c.search_key LIKE ?2 ESCAPE '\\'"
-  sql$ = sql$ + "      OR EXISTS (SELECT 1 FROM contacts t WHERE t.company_id = c.id AND t.name_key LIKE ?2 ESCAPE '\\'))"
-  sql$ = sql$ + " AND (?3 = 3 OR c.active = (?3 = 1))"
-  sql$ = sql$ + " AND (?4 = 0 OR EXISTS (SELECT 1 FROM contacts t JOIN contact_lines l ON l.contact_id = t.id"
-  sql$ = sql$ + "      WHERE t.company_id = c.id AND l.line_id = ?4))"
-  sql$ = sql$ + " ORDER BY c.name COLLATE NOCASE"
+  sql$ = sql$ + where$ + " ORDER BY c.name COLLATE NOCASE"
   s@ = sqlite_prepare@(db@, sql$)
-  sqlite_bindstr(s@, 1, kind$(k))
-  sqlite_bindstr(s@, 2, q$)
-  sqlite_bindnum(s@, 3, st)
-  sqlite_bindnum(s@, 4, line)
+  bind_company_filter(s@, k, q$, st, line)
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
+  grid_size(g@, cap)
   n = 0
   rows_begin(p$ + ".grid")
   while sqlite_step(s@) = 1
     n = n + 1
-    stringgrid_rowcount@(g@, n + 1)
+    cap = grid_room(g@, n, cap)
     stringgrid_cell@(g@, 1, n + 1, sqlite_gets$(s@, "name"))
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "tax_id"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "city"))
@@ -1216,6 +1653,7 @@ function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, keep, fou
     rows_add(p$ + ".grid", n, sqlite_getn(s@, "id"))
   end while
   sqlite_finalize(s@)
+  if n <> cap then grid_size(g@, n)
   size_grid_columns(p$ + ".grid")
   busy = busy - 1
   rem Keep showing the record that was open, if the filter still lists it.
@@ -1236,6 +1674,16 @@ function refresh_companies(k) local p$, g@, s@, sql$, q$, st, line, n, keep, fou
     load_company(k, 0)
   end if
   return n
+end function
+
+rem The company list's four parameters, bound the same way for its count
+rem and for its rows.
+function bind_company_filter(s@, k, q$, st, line)
+  sqlite_bindstr(s@, 1, kind$(k))
+  sqlite_bindstr(s@, 2, q$)
+  sqlite_bindnum(s@, 3, st)
+  sqlite_bindnum(s@, 4, line)
+  return 0
 end function
 
 function on_company_filter(sender@)
@@ -1435,20 +1883,21 @@ function contact_field@(k, col$)
   return w@(pre$(k) + ".k." + col$)
 end function
 
-function refresh_contacts(k) local p$, g@, s@, n, n2, company, keep, prim$
+function refresh_contacts(k) local p$, g@, s@, n, n2, company, keep, prim$, cap
   p$ = pre$(k)
   g@ = w@(p$ + ".cgrid")
   company = cur(p$ + ".company")
   keep = cur(p$ + ".contact")
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
+  cap = grid_size(g@, scalar_n("SELECT count(*) FROM contacts WHERE company_id = ?1", company))
   n = 0
   rows_begin(p$ + ".cgrid")
   s@ = sqlite_prepare@(db@, "SELECT id, name, job_title, email, whatsapp, is_primary FROM contacts WHERE company_id = ?1 ORDER BY is_primary DESC, name COLLATE NOCASE")
   sqlite_bindnum(s@, 1, company)
   while sqlite_step(s@) = 1
     n = n + 1
-    stringgrid_rowcount@(g@, n + 1)
+    cap = grid_room(g@, n, cap)
     stringgrid_cell@(g@, 1, n + 1, sqlite_gets$(s@, "name"))
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "job_title"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "email"))
@@ -1459,6 +1908,7 @@ function refresh_contacts(k) local p$, g@, s@, n, n2, company, keep, prim$
     rows_add(p$ + ".cgrid", n, sqlite_getn(s@, "id"))
   end while
   sqlite_finalize(s@)
+  if n <> cap then grid_size(g@, n)
   size_grid_columns(p$ + ".cgrid")
   busy = busy - 1
   busy = busy + 1
@@ -1603,7 +2053,7 @@ function on_contact_save(sender@) local k, p$, id, company, s@, i, col$, v$, sql
     sqlite_bindstr(s@, i + 2, v$)
   next
   sqlite_bindnum(s@, cols + 3, checkbox_checked(contact_field@(k, "primary")))
-  sqlite_bindstr(s@, cols + 4, alcase$(trim$(edit_text$(contact_field@(k, "name")))))
+  sqlite_bindstr(s@, cols + 4, fold$(trim$(edit_text$(contact_field@(k, "name")))))
   if id <> 0 then sqlite_bindnum(s@, cols + 5, id)
   ok = finish(s@, "save the contact")
   if ok = 1 and id = 0 then id = sqlite_lastid(db@)
@@ -1683,7 +2133,7 @@ rem it is cleared for a new entry -- so the cursor is not a choice anybody
 rem made. Delete acts only on the entry a person PICKED since the list was
 rem last filled: cur(p$ + ".history"), set by on_history_select and
 rem forgotten here.
-function refresh_history(k) local p$, g@, s@, n, contact
+function refresh_history(k) local p$, g@, s@, n, contact, cap
   p$ = pre$(k)
   set_cur(p$ + ".history", 0)
   g@ = w@(p$ + ".hgrid")
@@ -1695,13 +2145,14 @@ function refresh_history(k) local p$, g@, s@, n, contact
   end if
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
+  cap = grid_size(g@, scalar_n("SELECT count(*) FROM interactions WHERE contact_id = ?1", contact))
   n = 0
   rows_begin(p$ + ".hgrid")
   s@ = sqlite_prepare@(db@, "SELECT i.id, i.happened_on, i.kind, i.subject, u.username FROM interactions i LEFT JOIN users u ON u.id = i.user_id WHERE i.contact_id = ?1 ORDER BY i.happened_on DESC, i.id DESC")
   sqlite_bindnum(s@, 1, contact)
   while sqlite_step(s@) = 1
     n = n + 1
-    stringgrid_rowcount@(g@, n + 1)
+    cap = grid_room(g@, n, cap)
     stringgrid_cell@(g@, 1, n + 1, sqlite_gets$(s@, "happened_on"))
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "kind"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "subject"))
@@ -1709,6 +2160,7 @@ function refresh_history(k) local p$, g@, s@, n, contact
     rows_add(p$ + ".hgrid", n, sqlite_getn(s@, "id"))
   end while
   sqlite_finalize(s@)
+  if n <> cap then grid_size(g@, n)
   size_grid_columns(p$ + ".hgrid")
   calendar_date@(w@(p$ + ".h.date"), today())
   edit_text@(w@(p$ + ".h.subject"), "")
@@ -1795,23 +2247,25 @@ function build_lines_page(t@) local g@
   return 0
 end function
 
-function refresh_lines() local g@, s@, n, n2, keep
+function refresh_lines() local g@, s@, n, n2, keep, cap
   g@ = w@("lgrid")
   keep = cur("line")
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
+  cap = grid_size(g@, sqlite_scalar(db@, "SELECT count(*) FROM product_lines"))
   n = 0
   rows_begin("lgrid")
   s@ = sqlite_prepare@(db@, "SELECT p.id, p.name, p.description, (SELECT count(*) FROM contact_lines l WHERE l.line_id = p.id) AS n FROM product_lines p ORDER BY p.name_key")
   while sqlite_step(s@) = 1
     n = n + 1
-    stringgrid_rowcount@(g@, n + 1)
+    cap = grid_room(g@, n, cap)
     stringgrid_cell@(g@, 1, n + 1, sqlite_gets$(s@, "name"))
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "description"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "n"))
     rows_add("lgrid", n, sqlite_getn(s@, "id"))
   end while
   sqlite_finalize(s@)
+  if n <> cap then grid_size(g@, n)
   size_grid_columns("lgrid")
   busy = busy - 1
   busy = busy + 1
@@ -1877,7 +2331,7 @@ function on_line_save(sender@) local id, s@, name$
   end if
   sqlite_bindstr(s@, 1, name$)
   sqlite_bindstr(s@, 2, memo_text$(w@("l.description")))
-  sqlite_bindstr(s@, 3, alcase$(name$))
+  sqlite_bindstr(s@, 3, fold$(name$))
   if finish(s@, "save the product line") <> 1 then return 0
   if id = 0 then set_cur("line", sqlite_lastid(db@))
   refresh_lines()
@@ -1964,17 +2418,18 @@ function build_users_page(t@) local g@
   return 0
 end function
 
-function refresh_users() local g@, s@, n, n2, keep, a$
+function refresh_users() local g@, s@, n, n2, keep, a$, cap
   g@ = w@("ugrid")
   keep = cur("user")
   busy = busy + 1
   stringgrid_rowcount@(g@, 1)
+  cap = grid_size(g@, sqlite_scalar(db@, "SELECT count(*) FROM users"))
   n = 0
   rows_begin("ugrid")
   s@ = sqlite_prepare@(db@, "SELECT id, username, full_name, role, active, ifnull(datetime(last_login, 'localtime'), '') AS last FROM users ORDER BY username_key")
   while sqlite_step(s@) = 1
     n = n + 1
-    stringgrid_rowcount@(g@, n + 1)
+    cap = grid_room(g@, n, cap)
     stringgrid_cell@(g@, 1, n + 1, sqlite_gets$(s@, "username"))
     stringgrid_cell@(g@, 2, n + 1, sqlite_gets$(s@, "full_name"))
     stringgrid_cell@(g@, 3, n + 1, sqlite_gets$(s@, "role"))
@@ -1985,6 +2440,7 @@ function refresh_users() local g@, s@, n, n2, keep, a$
     rows_add("ugrid", n, sqlite_getn(s@, "id"))
   end while
   sqlite_finalize(s@)
+  if n <> cap then grid_size(g@, n)
   size_grid_columns("ugrid")
   busy = busy - 1
   busy = busy + 1
@@ -2095,7 +2551,7 @@ function on_user_save(sender@) local id, s@, u$, p$, role$, active
   sqlite_bindstr(s@, 2, trim$(edit_text$(w@("u.full_name"))))
   sqlite_bindstr(s@, 3, role$)
   sqlite_bindnum(s@, 4, active)
-  sqlite_bindstr(s@, 7, alcase$(u$))
+  sqlite_bindstr(s@, 7, fold$(u$))
   if finish(s@, "save the user") <> 1 then return 0
   if id = 0 then set_cur("user", sqlite_lastid(db@))
   rem A change to your OWN account takes effect now, not at the next
@@ -2274,10 +2730,10 @@ function seed_sample_data() local s$
   rem A product line's name key is unique, so each line is written with its
   rem key already computed; the other keys can follow (rekey_all, below).
   s$ = "INSERT INTO product_lines(name, name_key, description) VALUES"
-  s$ = s$ + " ('Steel sheets', " + sqlite_quote$(alcase$("Steel sheets")) + ", 'Cold and hot rolled sheets'),"
-  s$ = s$ + " ('Industrial paint', " + sqlite_quote$(alcase$("Industrial paint")) + ", 'Epoxy and polyurethane coatings'),"
-  s$ = s$ + " ('Fasteners', " + sqlite_quote$(alcase$("Fasteners")) + ", 'Bolts, nuts and rivets'),"
-  s$ = s$ + " ('Packaging', " + sqlite_quote$(alcase$("Packaging")) + ", 'Boxes, film and pallets');"
+  s$ = s$ + " ('Steel sheets', " + sqlite_quote$(fold$("Steel sheets")) + ", 'Cold and hot rolled sheets'),"
+  s$ = s$ + " ('Industrial paint', " + sqlite_quote$(fold$("Industrial paint")) + ", 'Epoxy and polyurethane coatings'),"
+  s$ = s$ + " ('Fasteners', " + sqlite_quote$(fold$("Fasteners")) + ", 'Bolts, nuts and rivets'),"
+  s$ = s$ + " ('Packaging', " + sqlite_quote$(fold$("Packaging")) + ", 'Boxes, film and pallets');"
   s$ = s$ + "INSERT INTO companies(kind, name, trade_name, tax_id, category, phone, email, website, extra, payment_terms, city, state, country) VALUES"
   s$ = s$ + " ('supplier', 'Aço Forte Siderurgia Ltda.', 'Aço Forte', '11.222.333/0001-81', 'Steel', '+55 11 4000-1000', 'vendas@acoforte.example', 'acoforte.example', '15', '30/60 days', 'São Paulo', 'SP', 'Brazil'),"
   s$ = s$ + " ('supplier', 'Nordic Coatings AB', 'Nordic Coatings', 'SE556677889901', 'Paint', '+46 8 555 0100', 'sales@nordic.example', 'nordic.example', '30', 'Net 45', 'Stockholm', '', 'Sweden'),"
@@ -2301,7 +2757,7 @@ function seed_sample_data() local s$
     return 0
   end if
   rem Plain SQL cannot compute the keys the search and the unique rules
-  rem compare (they are BASIC's alcase$ and tax_key$), so they come after.
+  rem compare (they are BASIC's fold$ and tax_key$), so they come after.
   if rekey_all(db@) <> 1 then
     say("The sample data could not be indexed: " + step_err$)
     return 0
@@ -2356,7 +2812,7 @@ function count_of(sql$)
   return sqlite_scalar(db@, sql$)
 end function
 
-function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, bob, bulk, t0, ms
+function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, scratch$, kind, blind?, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, bob, bulk, t0, ms, t1, t2, i
   pw_cost = 1000
   path$ = temppath$() + "contact_manager_selftest.db"
   if file_exists(path$) = 1 then file_delete(path$)
@@ -2364,7 +2820,7 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   rem --- first run: the login form creates the administrator ---
   open_database(path$)
   check(first_run? = true, "a new database asks for an administrator")
-  check(sqlite_scalar(db@, "PRAGMA user_version") = 2, "it is built at schema version 2")
+  check(sqlite_scalar(db@, "PRAGMA user_version") = 3 and sqlite_scalar(db@, "PRAGMA application_id") = 1349010253, "it is built at schema version 3, marked as this program's")
   check(button_caption$(w@("login.go")) = "Create", "and the button says so")
   type_into("login.user", "admin")
   type_into("login.pass", "secret1")
@@ -2647,24 +3103,64 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(instr(default_db_path$(), dirseparator$() + dirseparator$()) = 0 and extractfilename$(default_db_path$()) = "phosphor-contacts.db", "the default database path has no doubled separator")
   check(db_path_in$(temppath$() + "no-such-folder") = path_combine$(homepath$(), "phosphor-contacts.db"), "and is in the home folder when there is no Documents folder")
 
-  rem --- back up: never onto the open database, and a failed delete is said ---
+  rem --- back up: never onto the open database, however its name is spelled,
+  rem and a failed delete is said ---
   q$ = "That is the database you have open. A backup has to go to another file."
   save_as$ = path$
   menuitem_click@(w@("menu.backup"))
-  check(last_msg$ = q$, "a backup onto the open database is refused")
-  rem The same file under another case is the same file on Windows only;
-  rem elsewhere it is another file, and the backup is written there.
-  other$ = extractfilepath$(path$) + ucase$(extractfilename$(path$))
-  save_as$ = other$
-  last_msg$ = ""
-  menuitem_click@(w@("menu.backup"))
-  check((last_msg$ = q$) = (os_name$() = "Windows"), "on Windows the open database is also seen under another case")
-  if os_name$() <> "Windows" then file_delete(other$)
+  check(last_msg$ = q$ and file_exists(path$) = 1, "a backup onto the open database is refused")
+  rem Whether a second spelling reaches the same file is a fact of the
+  rem FOLDER, not of the operating system: NTFS ignores case and ext4 does
+  rem not, but a Linux mount of a Windows drive, a FAT stick or a casefold
+  rem folder ignores it too, and Win32 drops a trailing dot. So a scratch
+  rem file in the same folder answers it, and the backup must follow: where
+  rem the spelling reaches the open database it is refused and the database
+  rem keeps its rows; where it does not, it is another file and the backup
+  rem is written there.
+  scratch$ = temppath$() + "contact_manager_selftest_case.tmp"
+  for kind = 1 to 2
+    file_writealltext(scratch$, "x")
+    blind? = file_exists(spelling$(scratch$, kind)) = 1
+    file_delete(scratch$)
+    other$ = spelling$(path$, kind)
+    rem (a leftover of a run that stopped: here it is ANOTHER file)
+    if blind? = false and file_exists(other$) = 1 then file_delete(other$)
+    save_as$ = other$
+    last_msg$ = ""
+    answer? = true
+    menuitem_click@(w@("menu.backup"))
+    if blind? = true then
+      check(last_msg$ = q$ and file_exists(path$) = 1 and count_of("SELECT count(*) FROM companies") = 5, "the open database is refused under another spelling of its name (" + str$(kind) + ") where the folder reads it as the same file")
+    else
+      check(last_msg$ = "Backed up to " + other$ and file_exists(path$) = 1, "and where the folder reads that spelling (" + str$(kind) + ") as another file, the backup is written there")
+      file_delete(other$)
+    end if
+  next
+  rem is_open_db asks the FILES, so it is checked through names that are
+  rem not aliases at all: the open database under its own name is itself,
+  rem and a backup of it -- another file holding the same rows -- is not,
+  rem nor is a file that is not a database, nor an empty one.
+  check(is_open_db(path$) = 1 and count_of("SELECT count(*) FROM app_meta") = 0, "the identity check knows the open database by its own name, and takes its mark out again")
   bk$ = temppath$() + "contact_manager_selftest_backup.db"
   if file_exists(bk$) = 1 then file_delete(bk$)
   save_as$ = bk$
   menuitem_click@(w@("menu.backup"))
-  check(last_msg$ = "Backed up to " + bk$ and file_exists(bk$) = 1, "a backup to another file is written")
+  check(last_msg$ = "Backed up to " + bk$ and backup_landed(bk$) = 1, "a backup to another file is written, and reads back")
+  check(is_open_db(bk$) = 0, "a backup is another file, though it holds the same rows")
+  bad$ = temppath$() + "contact_manager_selftest_notdb.db"
+  file_writealltext(bad$, "this is not a SQLite database")
+  check(is_open_db(bad$) = 0 and backup_landed(bad$) = 0, "a file that is not a database is another file, and is no backup")
+  file_delete(bad$)
+  file_createempty(bad$)
+  check(is_open_db(bad$) = 0 and backup_landed(bad$) = 0, "and so is an empty file")
+  file_delete(bad$)
+  rem A read-only session cannot leave the mark, so it cannot prove a file
+  rem that is there to be another one -- and replaces nothing.
+  read_only? = true
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  read_only? = false
+  check(left$(last_msg$, 19) = "Could not make sure" and backup_landed(bk$) = 1, "a read-only session will not replace a file it cannot tell apart")
   rem Windows will not delete a file another connection holds open; Linux
   rem will, and the backup then goes ahead.
   held@ = sqlite_open@(bk$)
@@ -2804,26 +3300,92 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   click("login.go")
   check(user_id = 0, "an inactive user cannot sign in")
 
-  rem --- a long list. A refresh used to look its rows up by walking an
-  rem "id,id,id" string, which took seconds at 2,000 rows (17 s measured)
-  rem against a tenth of a second for the query and the grid together; a
-  rem refresh now is linear in its rows, so 3 s is a bound with room on a
-  rem slow machine and none for the old walk ---
-  sqlite_exec(db@, "INSERT INTO companies(kind, name, search_key) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) SELECT 'supplier', 'Bulk ' || printf('%04d', i), 'bulk ' || printf('%04d', i) FROM n")
-  set_cur("s.company", 0)
-  t0 = now()
-  n = refresh_companies(1)
-  ms = millisecondsbetween(now(), t0)
-  check(n = 2003 and ms < 3000, "2,000 more suppliers are listed in under 3 s")
-  bulk = scalar_s("SELECT id FROM companies WHERE name = ?1", "Bulk 1500")
-  check(grid_select("s.grid", bulk) = 1 and edit_text$(w@("s.f.name")) = "Bulk 1500", "and one of them is found by its id")
-  t0 = now()
-  refresh_companies(1)
-  ms = millisecondsbetween(now(), t0)
-  check(ms < 3000 and edit_text$(w@("s.f.name")) = "Bulk 1500", "a refresh keeps it selected, as fast")
-  sqlite_exec(db@, "DELETE FROM companies WHERE name LIKE 'Bulk %'")
+  rem --- case FOLDING, not lower-casing. The expected keys are
+  rem CaseFolding.txt's: U+03C2 (final sigma) folds to U+03C3, status C;
+  rem U+00DF (ß) and U+1E9E (capital ß) fold to "ss", status F; U+0130
+  rem (dotted capital I) folds to "i" + U+0307, status F; U+FB01 (the fi
+  rem ligature) to "fi", status F; and U+AB70, a Cherokee small letter,
+  rem folds to its CAPITAL U+13A0, status C -- folding is not lower-casing ---
+  check(fold$("ΣΩΚΡΑΤΗΣ") = "σωκρατη" + chr$(963) and fold$("σωκρατης") = "σωκρατη" + chr$(963), "a final sigma folds like any sigma")
+  check(fold$("straße") = "strasse" and fold$("STRASSE") = "strasse" and fold$(chr$(7838)) = "ss", "ß and capital ß fold to ss")
+  check(fold$(chr$(304) + "STANBUL") = "i" + chr$(775) + "stanbul" and fold$(chr$(64257) + "LE") = "file" and fold$(chr$(43888)) = chr$(5024), "the dotted I, a ligature and Cherokee fold as CaseFolding.txt says")
+  check(fold$("Aço Forte") = "aço forte", "and an accented Latin name folds as it lower-cases")
+  type_into("login.user", "admin")
+  type_into("login.pass", "secret9")
+  click("login.go")
+  pagecontrol_pageindex@(w@("pages"), 4)
+  click("u.new")
+  type_into("u.username", "ΣΩΚΡΑΤΗΣ")
+  type_into("u.password", "sokrates1")
+  type_into("u.confirm", "sokrates1")
+  click("u.save")
+  last_msg$ = ""
+  click("u.new")
+  type_into("u.username", "σωκρατης")
+  type_into("u.password", "sokrates2")
+  type_into("u.confirm", "sokrates2")
+  click("u.save")
+  check(instr(last_msg$, "user name is taken") > 0 and count_of("SELECT count(*) FROM users WHERE username_key = 'σωκρατη" + chr$(963) + "'") = 1, "ΣΩΚΡΑΤΗΣ and σωκρατης are one user name")
+  click("u.new")
+  type_into("u.username", "STRASSE")
+  type_into("u.password", "strasse1")
+  type_into("u.confirm", "strasse1")
+  click("u.save")
+  last_msg$ = ""
+  click("u.new")
+  type_into("u.username", "straße")
+  type_into("u.password", "strasse2")
+  type_into("u.confirm", "strasse2")
+  click("u.save")
+  check(instr(last_msg$, "user name is taken") > 0 and count_of("SELECT count(*) FROM users WHERE username_key = 'strasse'") = 1, "and STRASSE and straße are one")
+  menuitem_click@(w@("menu.signout"))
+  type_into("login.user", "σωκρατης")
+  type_into("login.pass", "sokrates1")
+  click("login.go")
+  check(user_name$ = "ΣΩΚΡΑΤΗΣ", "ΣΩΚΡΑΤΗΣ signs in typing σωκρατης, the way Greek is written in lower case")
+  click("c.new")
+  type_into("c.f.name", "ΟΔΥΣΣΕΥΣ Α.Ε.")
+  type_into("c.f.trade_name", "Weiß Hellas")
+  click("c.save")
+  id = cur("c.company")
+  edit_text@(w@("c.search"), "οδυσσευς")
+  check(stringgrid_rowcount(w@("c.grid")) = 2 and stringgrid_cell$(w@("c.grid"), 1, 2) = "ΟΔΥΣΣΕΥΣ Α.Ε.", "a search for οδυσσευς finds ΟΔΥΣΣΕΥΣ")
+  edit_text@(w@("c.search"), "WEISS")
+  check(stringgrid_rowcount(w@("c.grid")) = 2, "and WEISS finds Weiß")
+  edit_text@(w@("c.search"), "")
+  grid_select("c.grid", id)
+  answer? = true
+  click("c.delete")
+  menuitem_click@(w@("menu.signout"))
 
-  rem --- the schema upgrade, version 1 to 2, on a database built the way
+  rem --- a long list. A refresh first looked its rows up by walking an
+  rem "id,id,id" string (17 s at 2,000 rows), then grew its grid a row at a
+  rem time, which made the grid re-measure every row it had at each step
+  rem (7.5 s at 20,000 rows). Both are quadratic, and no bound in seconds
+  rem tells that apart from a slow machine -- so what is checked is the
+  rem SHAPE: eight times the rows must cost about eight times as long, not
+  rem up to sixty-four. Measured on Windows: 2,500 rows in 62 ms and 20,000
+  rem in 505 ms, a ratio of 8; growing a row at a time made it 39 (173 ms
+  rem and 6,800 ms). The bound, 20, is two and a half times the linear ratio
+  rem and half the quadratic one. The small list is timed twice and the
+  rem faster run kept; the large one is timed again only if it looks slow,
+  rem so one stall of the machine does not decide the check ---
+  sqlite_exec(db@, "INSERT INTO companies(kind, name, search_key) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2500) SELECT 'supplier', 'Bulk ' || printf('%05d', i), 'bulk ' || printf('%05d', i) FROM n")
+  set_cur("s.company", 0)
+  t1 = best_refresh_ms(1, 0)
+  sqlite_exec(db@, "INSERT INTO companies(kind, name, search_key) WITH RECURSIVE n(i) AS (SELECT 2501 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) SELECT 'supplier', 'Bulk ' || printf('%05d', i), 'bulk ' || printf('%05d', i) FROM n")
+  if t1 < 1 then t1 = 1
+  t2 = best_refresh_ms(1, 20 * t1)
+  check(stringgrid_rowcount(w@("s.grid")) = 20004 and t2 < 20 * t1, "a refresh of 20,000 suppliers costs about 8 times one of 2,500, not 64 (" + str$(t1) + " ms, " + str$(t2) + " ms)")
+  bulk = scalar_s("SELECT id FROM companies WHERE name = ?1", "Bulk 15000")
+  check(grid_select("s.grid", bulk) = 1 and edit_text$(w@("s.f.name")) = "Bulk 15000", "and one of them is found by its id")
+  refresh_companies(1)
+  check(edit_text$(w@("s.f.name")) = "Bulk 15000" and stringgrid_cell$(w@("s.grid"), 1, 20004) = "Rivet & Bolt Co.", "a refresh keeps it selected, and fills the last row")
+  sqlite_exec(db@, "DELETE FROM companies WHERE name LIKE 'Bulk %'")
+  refresh_companies(1)
+  check(stringgrid_rowcount(w@("s.grid")) = 4, "and a shorter list shrinks the grid to its rows")
+
+  rem --- the schema upgrade, version 1 to 3, on a database built the way
   rem version 1 built it ---
   path3$ = temppath$() + "contact_manager_selftest_v1.db"
   if file_exists(path3$) = 1 then file_delete(path3$)
@@ -2831,11 +3393,11 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   schema_v1(v@)
   sqlite_exec(v@, "PRAGMA user_version = 1; INSERT INTO users(username, password, role) VALUES ('Ana', 'x', 'admin'); INSERT INTO companies(kind, name, tax_id, city) VALUES ('supplier', 'Old Steel', '11.444.777/0001-61', 'Curitiba'), ('customer', 'Old Buyer', '11444777000161', ''); INSERT INTO product_lines(name) VALUES ('Ação')")
   sqlite_close(v@)
-  check(open_database(path3$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 2, "a version-1 database is upgraded to version 2")
+  check(open_database(path3$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 3 and sqlite_scalar(db@, "PRAGMA application_id") = 1349010253, "a version-1 database is upgraded to version 3, and marked as this program's")
   check(count_of("SELECT count(*) FROM users WHERE username_key = 'ana'") = 1 and count_of("SELECT count(*) FROM companies WHERE tax_key = '11444777000161'") = 2 and count_of("SELECT count(*) FROM product_lines WHERE name_key = 'ação'") = 1, "with the keys of the rows it had")
   check(count_of("SELECT count(*) FROM sqlite_master WHERE name = 'ux_companies_tax_id'") = 0 and count_of("SELECT count(*) FROM sqlite_master WHERE name = 'ux_companies_tax_key'") = 1, "and the tax-id index replaced by the key's")
   sqlite_begin(db@)
-  check(migrate_v2(db@) = 1, "the upgrade's steps can run again and find nothing to do")
+  check(upgrade(db@, 1) = 1, "the upgrade's steps can run again and find nothing to do")
   sqlite_rollback(db@)
   rem Two suppliers with one id, written two ways: version 1 let them in.
   path4$ = temppath$() + "contact_manager_selftest_v1b.db"
@@ -2847,10 +3409,92 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(open_database(path4$) = 0 and instr(last_msg$, "same tax id written in different ways") > 0 and instr(last_msg$, "Second (11444777000161)") > 0, "an upgrade the old rows would break is refused, naming them")
   v@ = sqlite_open@(path4$)
   check(sqlite_scalar(v@, "PRAGMA user_version") = 1 and sqlite_scalar(v@, "SELECT count(*) FROM pragma_table_info('companies') WHERE name = 'tax_key'") = 0, "and the database is left as it was")
+  rem A read-only file of an older version cannot be upgraded, and is not
+  rem looked at as it is (its keys follow the old rule): it is refused,
+  rem saying to open a writable copy. query_only refuses every write the
+  rem way a read-only file does.
+  sqlite_exec(v@, "UPDATE companies SET tax_id = '' WHERE name = 'Second'; PRAGMA query_only = ON")
+  check(create_schema(v@) = 0 and instr(schema_msg$, "read-only") > 0 and instr(schema_msg$, "writable copy") > 0 and sqlite_scalar(v@, "PRAGMA user_version") = 1, "a read-only database of an older version is refused, saying to open a writable copy")
   sqlite_close(v@)
-  sqlite_close(db@)
-  file_delete(path3$)
   file_delete(path4$)
+
+  rem --- version 2 to 3, on a database built the way version 2 built it:
+  rem the same columns, with keys LOWER-cased by alcase$ ---
+  v@ = sqlite_open@(path4$)
+  schema_v1(v@)
+  migrate_v2(v@)
+  sqlite_exec(v@, "INSERT INTO users(username, username_key, password, role) VALUES ('Σωκράτης', " + sqlite_quote$(alcase$("Σωκράτης")) + ", 'x', 'admin')")
+  sqlite_exec(v@, "INSERT INTO companies(kind, name, search_key) VALUES ('supplier', 'Straße Bau', " + sqlite_quote$(alcase$("Straße Bau")) + ")")
+  sqlite_exec(v@, "INSERT INTO product_lines(name, name_key) VALUES ('Weiß', " + sqlite_quote$(alcase$("Weiß")) + ")")
+  sqlite_exec(v@, "CREATE UNIQUE INDEX ux_users_username_key ON users(username_key); CREATE UNIQUE INDEX ux_product_lines_name_key ON product_lines(name_key); CREATE UNIQUE INDEX ux_companies_tax_key ON companies(kind, tax_key) WHERE tax_key <> ''; PRAGMA user_version = 2")
+  sqlite_close(v@)
+  check(open_database(path4$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 3 and sqlite_scalar(db@, "PRAGMA application_id") = 1349010253, "a version-2 database is upgraded to version 3")
+  check(count_of("SELECT count(*) FROM users WHERE username_key = 'σωκράτη" + chr$(963) + "'") = 1 and count_of("SELECT count(*) FROM companies WHERE search_key LIKE 'strasse bau%'") = 1 and count_of("SELECT count(*) FROM product_lines WHERE name_key = 'weiss'") = 1, "with its keys folded again")
+  check(count_of("SELECT count(*) FROM sqlite_master WHERE name IN ('ux_users_username_key', 'ux_product_lines_name_key', 'ux_companies_tax_key')") = 3, "and its unique indexes back")
+  sqlite_close(db@)
+  file_delete(path4$)
+  rem Version 2 kept STRASSE and straße apart; folded, they are one name.
+  v@ = sqlite_open@(path4$)
+  schema_v1(v@)
+  migrate_v2(v@)
+  sqlite_exec(v@, "INSERT INTO users(username, username_key, password, role) VALUES ('STRASSE', 'strasse', 'x', 'admin'), ('straße', " + sqlite_quote$(alcase$("straße")) + ", 'y', 'operator'); CREATE UNIQUE INDEX ux_users_username_key ON users(username_key); PRAGMA user_version = 2")
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "differ only in upper and lower case") > 0 and instr(last_msg$, "STRASSE / straße") > 0, "an upgrade that folds two user names into one is refused, naming them")
+  v@ = sqlite_open@(path4$)
+  check(sqlite_scalar(v@, "PRAGMA user_version") = 2 and sqlite_scalar(v@, "SELECT count(*) FROM users WHERE username_key = 'strasse'") = 1, "and the version-2 database is left as it was")
+  sqlite_close(v@)
+  file_delete(path4$)
+
+  rem --- an upgrade is linear in its rows. Its duplicate check once counted
+  rem every company of the same kind and tax id FOR EACH company: 8,000 took
+  rem 10 s and 16,000 took 47 s. The same SHAPE check as the list's: 16,000
+  rem companies must cost about 8 times 2,000. Measured on Windows: 450 ms
+  rem and 3,500 ms, a ratio of 8, where the per-row count made it 57 (800 ms
+  rem and 45 s; 37 on Linux). Bound: 20, timed the same way ---
+  t1 = upgrade_ms(path4$, 2000, 0)
+  if t1 < 1 then t1 = 1
+  t2 = upgrade_ms(path4$, 16000, 20 * t1)
+  check(t1 > 0 and t2 > 0 and t2 < 20 * t1, "upgrading 16,000 companies costs about 8 times 2,000, not 64 (" + str$(t1) + " ms, " + str$(t2) + " ms)")
+
+  rem --- another program's SQLite file is not written into: before anything
+  rem is created or upgraded the file must be empty, or carry this
+  rem program's application id, or be a version-1 or -2 file with every
+  rem table and column version 1 built ---
+  v@ = sqlite_open@(path4$)
+  sqlite_exec(v@, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes(body) VALUES ('mine')")
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "not a Contact Manager database") > 0 and instr(last_msg$, "notes") > 0, "another program's database is refused, naming its tables")
+  v@ = sqlite_open@(path4$)
+  check(sqlite_scalar(v@, "SELECT count(*) FROM sqlite_master") = 1 and sqlite_scalar(v@, "PRAGMA user_version") = 0 and sqlite_scalar(v@, "PRAGMA application_id") = 0, "and nothing was written into it")
+  sqlite_close(v@)
+  file_delete(path4$)
+  rem A users table of its own, at a version number that looks like ours.
+  v@ = sqlite_open@(path4$)
+  sqlite_exec(v@, "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT); INSERT INTO users(email) VALUES ('a@b.example'); PRAGMA user_version = 2")
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "not a Contact Manager database") > 0, "so is one with a users table of its own")
+  v@ = sqlite_open@(path4$)
+  check(sqlite_scalar(v@, "SELECT count(*) FROM pragma_table_info('users')") = 2 and sqlite_scalar(v@, "SELECT count(*) FROM sqlite_master") = 1, "and its table is not altered")
+  sqlite_close(v@)
+  file_delete(path4$)
+  v@ = sqlite_open@(path4$)
+  sqlite_exec(v@, "PRAGMA application_id = 123")
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "belongs to another program") > 0, "and so is a file another program has marked as its own")
+  file_delete(path4$)
+  rem An empty file is a database with nothing in it yet: a new one.
+  file_createempty(path4$)
+  check(open_database(path4$) = 1 and first_run? = true and sqlite_scalar(db@, "PRAGMA application_id") = 1349010253, "an empty file is made a new database")
+  sqlite_close(db@)
+  file_delete(path4$)
+  rem A key that cannot be computed fails the upgrade instead of passing it:
+  rem a SELECT that does not compile used to step as zero rows.
+  v@ = sqlite_open@()
+  sqlite_exec(v@, "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+  step_err$ = ""
+  check(rekey_all(v@) = 0 and instr(step_err$, "username") > 0, "a table without the columns its key needs fails the rekey, saying why")
+  sqlite_close(v@)
+  file_delete(path3$)
 
   rem --- the database survives a reopen, and opens read-only too ---
   open_database(path$)
@@ -2870,6 +3514,55 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   println "passed: " + str$(passed)
   println "failed: " + str$(failed)
   return 0
+end function
+
+rem How long a refresh of page k's list takes. With slow = 0 it is the
+rem faster of two runs; otherwise a second run is made only when the first
+rem took slow ms or more -- so a passing check pays for one run, and one
+rem stall of the machine does not fail it.
+function best_refresh_ms(k, slow) local t0, a, b
+  t0 = now()
+  refresh_companies(k)
+  a = millisecondsbetween(now(), t0)
+  if slow > 0 and a < slow then return a
+  t0 = now()
+  refresh_companies(k)
+  b = millisecondsbetween(now(), t0)
+  if b < a then a = b
+  return a
+end function
+
+rem How long open_database takes to upgrade a version-1 file of n
+rem companies, each with its own tax id, run as best_refresh_ms runs a
+rem refresh; -1 when the upgrade fails.
+function upgrade_ms(path$, n, slow) local a, b
+  a = upgrade_once_ms(path$, n)
+  if a < 0 or (slow > 0 and a < slow) then return a
+  b = upgrade_once_ms(path$, n)
+  if b >= 0 and b < a then a = b
+  return a
+end function
+
+function upgrade_once_ms(path$, n) local v@, t0, ms
+  if file_exists(path$) = 1 then file_delete(path$)
+  v@ = sqlite_open@(path$)
+  schema_v1(v@)
+  sqlite_exec(v@, "PRAGMA user_version = 1; INSERT INTO users(username, password, role) VALUES ('Ana', 'x', 'admin')")
+  sqlite_exec(v@, "INSERT INTO companies(kind, name, tax_id, city) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < " + str$(n) + ") SELECT 'supplier', 'Empresa ' || printf('%06d', i), printf('%014d', i), 'São Paulo' FROM n")
+  sqlite_close(v@)
+  t0 = now()
+  if open_database(path$) <> 1 then return -1
+  ms = millisecondsbetween(now(), t0)
+  sqlite_close(db@)
+  file_delete(path$)
+  return ms
+end function
+
+rem The second spelling of path$ the backup checks use: kind 1 is the file
+rem name upper-cased, kind 2 the name with a trailing dot.
+function spelling$(path$, kind)
+  if kind = 1 then return extractfilepath$(path$) + ucase$(extractfilename$(path$))
+  return path$ + "."
 end function
 
 rem A person picking a filter: combo_itemindex@ does not fire the change

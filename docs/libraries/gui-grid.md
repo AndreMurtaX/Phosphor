@@ -69,7 +69,7 @@ grid that has been unwired really does stop.
 | `drawgrid_rowcount@(g@, n) → handle` · `drawgrid_rowcount(g@) → num` | how many rows, fixed ones included. Same refusal shape |
 | `drawgrid_fixedrows@(g@, n) → handle` · `drawgrid_fixedrows(g@) → num` | how many leading rows are frozen. Cells in them draw with `"X"` in `state$` |
 | `drawgrid_fixedcols@(g@, n) → handle` · `drawgrid_fixedcols(g@) → num` | the same for leading columns; a cell in either draws fixed |
-| `drawgrid_col(g@) → num` | which column the cursor is on, base-1. `0` — never a legal cell — when the handle is refused |
+| `drawgrid_col(g@) → num` | which column the cursor is on, base-1. `0` — never a legal cell — when the handle is refused, and when the grid has no scrollable cell (only fixed rows or columns, or nothing); `drawgrid_row` answers the same way |
 | `drawgrid_row(g@) → num` | which row the cursor is on, base-1; `0` on a refused handle |
 | `drawgrid_cursor@(g@, col, row) → handle` | move the cursor there, base-1, and answer the grid. That cell then draws with `"S"` and `"F"` in its state. A refused handle moves nothing and records `gui_error()` 1; the position itself is handed to the grid unchecked — only `drawgrid_drawcell@` validates a cell |
 | `drawgrid_drawcell@(g@, col, row) → handle` | paint that one cell now, through the grid's own `OnDrawCell`, and answer the grid. A cell outside the grid paints nothing and records `gui_error()` 1. With **nothing bound** it simply does nothing and records **no** error |

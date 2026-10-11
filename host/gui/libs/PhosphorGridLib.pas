@@ -377,12 +377,20 @@ begin
 end;
 
 { Which cell has the cursor, base-1, so a handler can tell what it is drawing. }
+{ 0 with no scrollable cell, as stringgrid_row/col answer (round 6: round 5
+  fixed only the string grid). }
 function f_dg_col_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).Col + 1); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then
+    if (TDrawGrid(c).ColCount > TDrawGrid(c).FixedCols) and
+       (TDrawGrid(c).RowCount > TDrawGrid(c).FixedRows) then
+      Result := ValInt(TDrawGrid(c).Col + 1); end;
 function f_dg_row_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := ValInt(0);
-  if GuiResolve(A[0].Hnd, TDrawGrid, c) then Result := ValInt(TDrawGrid(c).Row + 1); end;
+  if GuiResolve(A[0].Hnd, TDrawGrid, c) then
+    if (TDrawGrid(c).RowCount > TDrawGrid(c).FixedRows) and
+       (TDrawGrid(c).ColCount > TDrawGrid(c).FixedCols) then
+      Result := ValInt(TDrawGrid(c).Row + 1); end;
 function f_dg_setcursor(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; Result := A[0];
   if GuiResolve(A[0].Hnd, TDrawGrid, c) then

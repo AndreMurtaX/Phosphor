@@ -355,9 +355,11 @@ end;
   what form_showmodal answers -- 1 when it clicked a button whose
   button_modalresult@ is 1, the value it gave form_modalresult@, and so on. Like
   the dialogs: a modal form with nothing queued is not shown, it is cancelled (2)
-  and counted, and a function left in the queue fails the file; so does one that
-  returned with the form still unanswered (ModalResult 0), which a person could
-  not have left that way -- it is counted, and answered 2. Test only. }
+  and counted, and a function left in the queue fails the file. A function that
+  returns with the form still unanswered is a person who has not finished: the
+  NEXT queued function acts on the same form (round by round, see TestShowModal),
+  and only a form still open when the queue runs out is counted, and answered 2.
+  Test only. }
 var
   GModalFns: array of String;
   GModalHead: Integer = 0;

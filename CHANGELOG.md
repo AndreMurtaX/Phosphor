@@ -52,6 +52,29 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (adversarial round 6, 2026-10-10)
+
+- On Windows a command-line word holding an unpaired UTF-16 surrogate was
+  silently shortened (FPC's UTF8Encode drops it), so `phosphor` could run or
+  overwrite a different file than the one named. A program's argument now keeps
+  it as U+FFFD; a word `phosphor` would use as a path is refused.
+- A modal session no longer frees what the handler that opened it still stands
+  on (heap corruption when a timer's own tick opened the modal and a later
+  round freed it); a handler that re-binds itself no longer garbles the fault
+  report; `END` inside a modal reports no spurious faults; a modal dialog does
+  not keep `app_run` alive; a form cannot be re-parented while modal; in the
+  test runner the session sets `fsModal`, so LCL code that reads it behaves as
+  it does for real.
+- PBKDF2's price per round now matches the budget's clock (two verifications
+  at Django 5.2's default cost fit the prescribed `MaxSteps`); the record's
+  canonical spelling and the salt's time ceiling are now each held by a test
+  that can fail.
+- `drawgrid_row` / `drawgrid_col` answer 0 for a grid with no scrollable cell.
+- The contact manager: a backup target is judged by file identity, not by its
+  spelling; upgrades and refreshes are linear; user names, product lines and
+  search use Unicode case folding (schema version 3); another program's SQLite
+  file is never written to; an old read-only database is refused with a reason.
+
 ### Changed
 
 - **A program gets its own command line.** Everything after the file is the

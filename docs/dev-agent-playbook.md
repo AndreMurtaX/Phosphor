@@ -1525,6 +1525,39 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · round 6: 23 survivors, 2 HIGH, 0 killed -- the streak stays at
+  0, and BOTH HIGH were made by round 5's own fixes.**
+  - **The Windows argv fix converted with `UTF8Encode`, which DROPS an unpaired
+    surrogate** (rtl/inc/ustrings.inc UnicodeToUtf8), so `job<D800>.bas` ran
+    `job.bas` and `--out log<D800>.txt` truncated `log.txt`. The engine already
+    had the right converter (`WideToUtf8`, written for `environ$`) and the host
+    did not use it -- a fix for one door that did not ask what the other doors
+    of the same class use. A path is now refused when it holds one; an argument
+    keeps U+FFFD.
+  - **The in-modal free flush freed the opener's own sender** -- its frames were
+    under the modal loop. Round 5 reasoned "only what was queued after the mark"
+    and missed that a later queue entry can still NAME an older object. The
+    flush now keeps anything a running handler's sender dies with.
+  - **Tests that cannot fail, again, five of them**: layers that cover for each
+    other (no 96_crypto case reached the canonical re-encoding check), a probe
+    that asked only WHETHER a limit fired and not WHICH (`CheckMsg` now asks the
+    message), a guard reached only through a sibling path (`-- ""`), a flush no
+    test exercised. Seeing a test fail on the OLD code proves it guards the fix;
+    it does not prove each LAYER is guarded. When a fix has several layers,
+    remove each layer alone.
+  - **A mutation harness that corrupted the file it restored.** It read the
+    source with `Get-Content -Raw` (Windows PowerShell 5.1 decodes a BOM-less
+    file in the ANSI code page) and wrote it back with `[IO.File]::WriteAllText`
+    (UTF-8), so the one "é" in PhosphorCryptoLib's comments came back as "Ã©" --
+    the harness's own "restored: False" was the tell. Read and write a file you
+    mean to restore as BYTES (`[IO.File]::ReadAllBytes` / `WriteAllBytes`), or
+    restore it from git; and check that the restore answered True before
+    trusting anything after it.
+  - **Two runs sharing one binary.** The app-fix agent ran `bin\phosphor.exe`
+    while the runners rebuilt it: a locked file, a debug-protocol block that
+    failed for no reason of its own. Before blaming a red block, ask what else
+    is running from bin/.
+
 - **2026-10-10 · round 5: 34 survivors, 3 HIGH; the streak stays at 0.** Four
   investigators on today's new surfaces (arguments, crypto, modal forms and the
   grid, the contact manager), one skeptic per finding; 35 findings, 1 killed.

@@ -5,7 +5,7 @@ program for the people a company buys from and sells to: suppliers and
 customers, the contacts at each one, the product lines those contacts serve,
 and a dated history of what was said to whom. It keeps everything in SQLite,
 behind a login with users, roles and hashed passwords, and it is one file of
-BASIC — about 2,900 lines, a fifth of them the self-test.
+BASIC — about 3,600 lines, a fifth of them the self-test.
 
 It is here for two reasons: to show what the language and its libraries add up
 to, and because writing it was this project's first real use. It found five
@@ -34,10 +34,21 @@ home folder where there is no Documents folder, as on a Linux without
 naming it on the command line (`phosphor examples/contact_manager.bas my.db`)
 or in the environment variable `PHOSPHOR_CONTACTS_DB`. A file that cannot be
 used — not a database, in a folder that does not exist, made by a newer version
-of the program — is refused with the reason: at start-up the program then
-offers to pick another file or to end, and from **File > Open database...** it
-keeps the database you had open, and your session with it. A read-only
-database opens for looking: the sign-in says so, and every change is refused.
+of the program, **another program's SQLite database** — is refused with the
+reason: at start-up the program then offers to pick another file or to end,
+and from **File > Open database...** it keeps the database you had open, and
+your session with it. Nothing is written into a file before the program knows
+it is its own: an empty file, one it marked as its own, or one an earlier
+version made (recognised by its tables and columns). A read-only database at
+the current version opens for looking: the sign-in says so, and every change
+is refused. A read-only database **from an earlier version** is refused
+instead, saying so: opening it means upgrading it, which writes to it, and the
+program does not look at an old file as it is, because it would answer some
+sign-ins and searches by the old rule. Open a writable copy of it — the copy
+is upgraded and the original stays as it was.
+
+Upgrading a large database takes a moment — about 3 seconds for 16,000
+companies, 11 for 50,000 — and a small window says so while it runs.
 
 To look around without creating anything, start it with
 `PHOSPHOR_CONTACTS_DEMO=1`: it opens a throw-away database in the temp folder
@@ -63,8 +74,12 @@ $env:PHOSPHOR_CONTACTS_DEMO = '1'; phosphor examples\contact_manager.bas
 
 The **File** menu exports suppliers or customers to CSV (one row per contact,
 with the product lines it serves) and backs the database up — to any file but
-the open database itself, which it refuses; **Account** changes your own
-password and signs out.
+the open database itself, which it refuses under any name: another letter case
+on a folder that ignores case, a trailing dot on Windows, a link. It does not
+compare the names; it leaves a mark in the open database and looks for it in
+the target, opened read-only, and a file that is already there is replaced
+only once it is proven to be another file. "Backed up" is said only once the
+copy has been read back. **Account** changes your own password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
 
@@ -89,28 +104,40 @@ program should never write, so a bug in the BASIC cannot corrupt it:
 - **Unique keys that ignore case in any alphabet.** SQLite's `COLLATE NOCASE`
   and `LIKE` fold the 26 ASCII letters only, which made `josé` and `JOSÉ` two
   users. So each name that must be unique regardless of case is stored beside
-  a key lower-cased by BASIC's `alcase$`, which knows all of Unicode — user
-  names (`username_key`), product lines (`name_key`) — and the unique index is
-  on the key: `Olivia` and `olivia`, `José` and `josé` are the same user. The
-  search compares keys made the same way, with `LIKE ... ESCAPE '\'`.
+  a **case-folded** key — user names (`username_key`), product lines
+  (`name_key`) — and the unique index is on the key: `Olivia` and `olivia`,
+  `José` and `josé`, `ΣΩΚΡΑΤΗΣ` and `σωκρατης`, `STRASSE` and `straße` are the
+  same user. The search compares keys made the same way, with
+  `LIKE ... ESCAPE '\'`, so `οδυσσευς` finds `ΟΔΥΣΣΕΥΣ` and `WEISS` finds
+  `Weiß`. Folding is not lower-casing: BASIC's `alcase$` maps one character to
+  one, leaving a final `ς` and a `ß` as they are, where Unicode's case folding
+  (CaseFolding.txt) makes them `σ` and `ss`. The program's `fold$` is `alcase$`
+  followed by a table of the 505 characters where the two differ, derived
+  from Unicode 15's folding and checked against Python's `str.casefold` for
+  every code point; the two noncharacters U+FFFE and U+FFFF are the only ones
+  that differ, because `alcase$` turns them into `?`.
 - **A transaction** around saving a contact, its primary flag and its product
   lines: all of it or none of it.
-- **A schema version**, kept in `PRAGMA user_version`. A database already at
-  the current version is not written to when it is opened — which is what lets
-  a read-only one open. An older one is upgraded inside one transaction that
-  also sets the new version: version 1 to 2 added the keys above, computed them
-  for the rows already there, and replaced the tax-id index. If those rows
-  already break the new rules — two users whose names differ only in case, one
-  tax id written two ways — the upgrade is refused with their names and the
-  file is left as it was.
+- **A schema version**, kept in `PRAGMA user_version`, and since version 3
+  the program's own mark in `PRAGMA application_id`. A database already at the
+  current version is not written to when it is opened — which is what lets a
+  read-only one open. An older one is upgraded inside one transaction that
+  also sets the new version: version 1 to 2 added the keys above and replaced
+  the tax-id index; version 2 to 3 recomputed the keys by case folding instead
+  of lower-casing, and marked the file. The keys are computed once per upgrade,
+  in time linear in the rows. If those rows already break the new rules — two
+  users whose names differ only in case, `STRASSE` and `straße` among them,
+  one tax id written two ways — the upgrade is refused with their names and
+  the file is left as it was.
 
 And **every value is bound**, never pasted into SQL — `?1`, `?2` and
 `sqlite_bindstr` / `sqlite_bindnum` — so a company called `O'Brien; DROP TABLE`
 is just a name:
 
 ```basic
+key$ = alcase$(u$)    rem the program's fold$ goes further: see above
 s@ = sqlite_prepare@(db@, "SELECT id, username, password, role, active FROM users WHERE username_key = ?1")
-sqlite_bindstr(s@, 1, alcase$(u$))
+sqlite_bindstr(s@, 1, key$)
 if sqlite_step(s@) = 1 then rec$ = sqlite_gets$(s@, "password")
 sqlite_finalize(s@)
 ```
@@ -168,19 +195,38 @@ With `PHOSPHOR_SELFTEST=1` the program builds every window **without showing
 one**, and drives them as a person would — typing with `edit_text@`, clicking
 with `button_click@` and `menuitem_click@`, picking rows with
 `stringgrid_cursor@`, double-clicking with `control_dblclick@` — against a
-throw-away database, then checks what landed in SQLite: 133 checks, from the
+throw-away database, then checks what landed in SQLite: 163 checks, from the
 first-run administrator to a cascade delete, the whole CSV file, an operator
-who cannot see the Users page, the upgrade of a version-1 database and a
-refresh of 2,000 rows. Its message, confirmation and file boxes go through
-functions the test answers. `scripts/test-examples` runs it that way on Windows
-and on Linux (under `xvfb-run`).
+who cannot see the Users page, Greek and German names that differ only in
+case, the upgrades from versions 1 and 2, another program's database left
+untouched, and a backup onto the open database under other spellings of its
+name. Its message, confirmation and file boxes go through functions the test
+answers. `scripts/test-examples` runs it that way on Windows and on Linux
+(under `xvfb-run`).
+
+Two checks are about speed, and neither is a bound in seconds, which cannot
+tell a slow machine from a slow program: they check the **shape**. A refresh of
+20,000 companies must cost about eight times one of 2,500 (under twenty
+times; a grid grown a row at a time made it forty), and the upgrade of 16,000
+companies about eight times that of 2,000 (a per-row duplicate count made it
+sixty).
+
+The backup checks ask the **folder** whether a second spelling of a name
+reaches the same file — a scratch file and its upper-cased or dotted name —
+rather than assuming it from the operating system, so the same check expects a
+refusal on Windows and on a Linux folder that ignores case, and a written
+backup on one that does not.
 
 A check is only worth having if it can fail. An adversarial review found three
 that could not — the CSV check looked at one quoted name, the credit-limit check
 accepted any value, and the last-administrator check on deleting a user never
 reached the rule it named — so they were rewritten, and each of them, and each
 check added with the fixes of that review, was **seen to fail** in a copy of the
-program with its rule reverted.
+program with its rule reverted. The second review's fixes were held to the same
+standard, on both systems: reverting the identity check, the read-back of a
+backup, the linear duplicate check, the one-sizing of the grid, the folding,
+its table probes, the dropped indexes of an upgrade, the owner check, the
+prepare check and the read-only message each made its own checks fail.
 
 ## What writing it changed in Phosphor
 

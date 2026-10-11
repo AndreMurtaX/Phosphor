@@ -651,6 +651,15 @@ begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
   if not GuiResolve(A[1].Hnd, TWinControl, pc) then Exit;
+  { A FORM IN A MODAL SESSION STAYS A WINDOW (round 6). form_showmodal refuses a
+    parented form because its buttons would answer the top form; re-parenting it
+    inside its own session did the same, and the session could never end by its
+    own buttons -- embedded in a window the modal disables. }
+  if (c is TCustomForm) and (fsModal in TCustomForm(c).FormState) then
+  begin
+    GGuiError := 1;
+    Exit;
+  end;
   // A CONTROL CANNOT BE ITS OWN ANCESTOR. Handing a control one of its own
   // descendants makes a cycle, and the LCL then recurses until the stack is gone --
   // reported as a BASIC stack overflow, but only after the process has spun for

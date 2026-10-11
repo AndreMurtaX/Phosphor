@@ -101,6 +101,13 @@ assert_eq(stringgrid_rowcount(hg@), 0, "the grid really has no rows")
 assert_eq(stringgrid_row(hg@), 0, "an empty grid: row 0")
 assert_eq(stringgrid_col(hg@), 0, "and column 0")
 
+test_case("grid select/a draw grid with no scrollable cell has no cursor (round 6)")
+dg@ = drawgrid@(f@)
+drawgrid_rowcount@(dg@, 1)
+drawgrid_fixedrows@(dg@, 1)
+assert_eq(drawgrid_row(dg@), 0, "a header-only draw grid: row 0")
+assert_eq(drawgrid_col(dg@), 0, "and column 0")
+
 test_case("grid select/a very negative position lands on the first cell")
 rem ROUND 5: ArgI32 saturates -3e9 to the lowest Integer and "- 1"
 rem wrapped it to the highest, which the grid clamped to its LAST cell.

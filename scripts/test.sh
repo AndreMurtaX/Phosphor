@@ -1256,6 +1256,14 @@ if adgot="$("$exe" "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; 
 # "--" before the file; "-" alone after it is a word
 if adgot="$("$exe" -- "$adp" - --x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" - --x 2d2d78)" ] || ad_fail "-- before the file, - after it: got '$adgot'"
+# ROUND 6: an empty name after "--" and under debug is refused (a REPL otherwise),
+# and debug's refusal names debug's own options.
+if adgot="$("$exe" -- "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "-- followed by an empty name: exit $adcode, got '$adgot'"
+if adgot="$("$exe" debug "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "debug with an empty name: exit $adcode, got '$adgot'"
+if adgot="$("$exe" debug "$adp" --out x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'--break'* ]] && [[ "$adgot" != *'reads only --out'* ]] || ad_fail "debug's refusal: got '$adgot'"
 if [ "$okAD" -eq 0 ]; then echo 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused'
 else fail=1; fi
 
@@ -1388,6 +1396,90 @@ if command -v xvfb-run > /dev/null 2>&1; then
   else fail=1; fi
 else
   echo 'SKIP  AF:a modal in a real loop (no xvfb-run on this machine)'
+fi
+
+# --- AG: ROUND 6, THE MODAL SESSION AGAIN, IN A REAL LOOP ---------------------
+#  - a timer whose tick opened a modal is freed from INSIDE it, and the main
+#    window is closed from inside it too; then the dialog is answered. The
+#    in-modal flush used to free the timer under its own handler's frames (heap
+#    corruption; the fault report read the handler's name from freed memory),
+#    and a modal dialog counted as a window keeping app_run alive. Expected: the
+#    handler's fault after the modal names on_t, app_run ends ("ended"), and no
+#    watchdog line;
+#  - END inside a modal whose form has onclosequery and onclose: the close
+#    asked both on the halted session and reported each refusal as a handler
+#    fault. Expected: "before", exit 0, and no "carries on" on stderr.
+printf '%s\n' 'main@ = form@("AG", 200, 100)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'dlg@ = form@("AG dialog", 200, 100)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'button_modalresult@(ok@, 1)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'opened = 0' >> "$tmpdir/ag.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_interval@(t@, 50)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/ag.bas"
+printf '%s\n' 't3@ = timer@()' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_interval@(t3@, 300)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_ontimer@(t3@, "on_t3")' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_enabled@(t3@, 1)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'tw@ = timer@()' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_interval@(tw@, 8000)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_ontimer@(tw@, "on_watchdog")' >> "$tmpdir/ag.bas"
+printf '%s\n' 'timer_enabled@(tw@, 1)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/ag.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/ag.bas"
+printf '%s\n' 'println "ended"' >> "$tmpdir/ag.bas"
+printf '%s\n' 'end' >> "$tmpdir/ag.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  if opened = 1 then return 0' >> "$tmpdir/ag.bas"
+printf '%s\n' '  opened = 1' >> "$tmpdir/ag.bas"
+printf '%s\n' '  r = form_showmodal(dlg@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  zero = 0' >> "$tmpdir/ag.bas"
+printf '%s\n' '  x = 1 / zero' >> "$tmpdir/ag.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/ag.bas"
+printf '%s\n' 'end function' >> "$tmpdir/ag.bas"
+printf '%s\n' 'function on_t3(s@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  if form_visible(dlg@) = 0 then return 0' >> "$tmpdir/ag.bas"
+printf '%s\n' '  control_free(t@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  form_close@(main@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  button_click@(ok@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/ag.bas"
+printf '%s\n' 'end function' >> "$tmpdir/ag.bas"
+printf '%s\n' 'function on_watchdog(s@)' >> "$tmpdir/ag.bas"
+printf '%s\n' '  println "watchdog: app_run still running with no window"' >> "$tmpdir/ag.bas"
+printf '%s\n' '  app_quit()' >> "$tmpdir/ag.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/ag.bas"
+printf '%s\n' 'end function' >> "$tmpdir/ag.bas"
+printf '%s\n' 'dlg@ = form@("AG end", 200, 100)' >> "$tmpdir/agend.bas"
+printf '%s\n' 'form_onclosequery@(dlg@, "q?")' >> "$tmpdir/agend.bas"
+printf '%s\n' 'form_onclose@(dlg@, "c")' >> "$tmpdir/agend.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agend.bas"
+printf '%s\n' 'timer_interval@(t@, 200)' >> "$tmpdir/agend.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agend.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agend.bas"
+printf '%s\n' 'println "before"' >> "$tmpdir/agend.bas"
+printf '%s\n' 'r = form_showmodal(dlg@)' >> "$tmpdir/agend.bas"
+printf '%s\n' 'end' >> "$tmpdir/agend.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agend.bas"
+printf '%s\n' '  end' >> "$tmpdir/agend.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agend.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agend.bas"
+printf '%s\n' 'function q?(s@)' >> "$tmpdir/agend.bas"
+printf '%s\n' '  return true' >> "$tmpdir/agend.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agend.bas"
+printf '%s\n' 'function c(s@)' >> "$tmpdir/agend.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agend.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agend.bas"
+if command -v xvfb-run > /dev/null 2>&1; then
+  okAG=0
+  if aggot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/ag.bas" < /dev/null 2>"$tmpdir/ag.err")"; then agcode=0; else agcode=$?; fi
+  [ "$agcode" -eq 0 ] && [ "$(printf '%s' "$aggot" | tr -d '\r')" = "ended" ] && grep -qF -- "in the event handler on_t;" "$tmpdir/ag.err" || { echo "FAIL  AG:the sender freed inside its modal: exit $agcode, got '$aggot', stderr '$(cat "$tmpdir/ag.err")'"; okAG=1; }
+  if aggot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/agend.bas" < /dev/null 2>"$tmpdir/agend.err")"; then agcode=0; else agcode=$?; fi
+  [ "$agcode" -eq 0 ] && [ "$(printf '%s' "$aggot" | tr -d '\r')" = "before" ] && ! grep -qF -- "carries on" "$tmpdir/agend.err" || { echo "FAIL  AG:END inside a modal with close handlers: exit $agcode, got '$aggot', stderr '$(cat "$tmpdir/agend.err")'"; okAG=1; }
+  if [ "$okAG" -eq 0 ]; then echo 'PASS  AG:a modal session frees nothing its opener stands on, ends with the last window, and END reports no fault'
+  else fail=1; fi
+else
+  echo 'SKIP  AG:the modal session in a real loop (no xvfb-run on this machine)'
 fi
 
 exit "$fail"

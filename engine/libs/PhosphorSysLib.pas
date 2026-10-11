@@ -55,6 +55,13 @@ function HostAppConfigDir: String;
   a probe can sweep them on a machine whose environment never needs them. }
 function IsWellFormedUtf8(const S: String): Boolean;
 function Utf8Scrub(const S: String): String;
+{ UTF-16 to UTF-8 with an unpaired surrogate as U+FFFD -- where FPC's UTF8Encode
+  drops it without a trace (rtl/inc/ustrings.inc, UnicodeToUtf8). Exported for the
+  console host, which reads its command line and console input as UTF-16. }
+function WideToUtf8(const W: UnicodeString): String;
+{ Does W hold a surrogate that is not one half of a pair? Such a word converts
+  to U+FFFD, so it can be shown -- but it cannot name a file. }
+function HasUnpairedSurrogate(const W: UnicodeString): Boolean;
 
 implementation
 
@@ -153,6 +160,28 @@ function GetTempPathW(nBufferLength: LongWord; lpBuffer: PWideChar): LongWord;
 { UTF-16 to the engine's UTF-8: a surrogate pair is one code point, and an
   unpaired surrogate -- which a Windows environment block can hold -- is
   U+FFFD, Utf8Char's own answer for one. }
+function HasUnpairedSurrogate(const W: UnicodeString): Boolean;
+var i, n: Integer; c: Word;
+begin
+  Result := False;
+  n := Length(W);
+  i := 1;
+  while i <= n do
+  begin
+    c := Word(W[i]);
+    if (c >= $D800) and (c <= $DBFF) then
+    begin
+      if (i < n) and (Word(W[i + 1]) >= $DC00) and (Word(W[i + 1]) <= $DFFF) then
+        Inc(i)
+      else
+        Exit(True);
+    end
+    else if (c >= $DC00) and (c <= $DFFF) then
+      Exit(True);
+    Inc(i);
+  end;
+end;
+
 function WideToUtf8(const W: UnicodeString): String;
 var i, n, cp, o: Integer; hi, lo: Word; ch, buf: String;
 begin

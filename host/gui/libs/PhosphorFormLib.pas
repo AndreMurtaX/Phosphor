@@ -398,6 +398,10 @@ begin
         f.ModalResult := mrNone;
         AddHookModal(f);
         try
+          { fsModal, as ShowModal sets it (round 6): LCL code reads it -- a Close
+            BitBtn answers mrClose on a modal form and calls Close on any other --
+            so without it the hook took the non-modal path the real one never does. }
+          Include(TFormAccess(f).FFormState, fsModal);
           f.Visible := True;
           round := 0;
           while f.ModalResult = mrNone do
@@ -418,6 +422,7 @@ begin
           end;
           r := f.ModalResult;
         finally
+          Exclude(TFormAccess(f).FFormState, fsModal);
           RemoveHookModal(f);
           f.Visible := False;
         end;

@@ -986,16 +986,51 @@ begin
   Result := GDispatchDepth;
 end;
 
+{ Does a handler that is running right now stand on AObj -- is its sender AObj,
+  or something that dies with AObj (DiesWith: owned by it, a menu item under it)?
+  Then AObj must outlive the handler: its LCL frames are still on the stack. }
+function SenderDiesWith(AObj: TObject): Boolean;
+var i: Integer;
+begin
+  for i := 0 to High(GSenders) do
+    if (GSenders[i] is TComponent) and DiesWith(TComponent(GSenders[i]), AObj) then
+      Exit(True);
+  Result := False;
+end;
+
 procedure GuiFlushFreesSince(AMark, ADepth: Integer);
 var
-  list: array of Int64;
+  list, kept: array of Int64;
   i: Integer;
+  o: TObject;
 begin
   if (GDispatchDepth > ADepth) or (AMark < 0) or (Length(GPending) <= AMark) then Exit;
   list := Copy(GPending, AMark, Length(GPending) - AMark);
   SetLength(GPending, AMark);   // off the list first, as GuiFlushFrees does
+  kept := nil;
   for i := 0 to High(list) do
-    FreeHandle(list[i]);
+  begin
+    { NOT WHAT THE OPENER STANDS ON (round 6, 2026-10-10). A free queued INSIDE
+      the session can still name the handler's own sender -- the timer whose tick
+      opened the modal, freed by a later round -- and its frames are under this
+      loop: freeing it here let TTimerGuard.Fire write to freed memory when the
+      modal returned, and the fault report read the handler name out of a freed
+      bridge. Such an entry stays pending, for GuiFlushFrees at depth 0. }
+    o := HandleObj(list[i]);
+    if (o is TGuiRef) and (TGuiRef(o).Control <> nil) and
+       SenderDiesWith(TGuiRef(o).Control) then
+    begin
+      SetLength(kept, Length(kept) + 1);
+      kept[High(kept)] := list[i];
+    end
+    else
+      FreeHandle(list[i]);
+  end;
+  for i := 0 to High(kept) do
+  begin
+    SetLength(GPending, Length(GPending) + 1);
+    GPending[High(GPending)] := kept[i];
+  end;
 end;
 
 procedure GuiEndModals;
@@ -1037,9 +1072,20 @@ function GuiCallBack(AVM: TPhosphorVM; const AHandler: String;
   const AArgs: array of TValue): TValue;
 var
   err: TPhosphorError;
+  handler: String;
 begin
   Result := ValInt(0);
-  if (AVM = nil) or (AHandler = '') then Exit;
+  { OUR OWN COPY OF THE NAME (round 6). AHandler is const, usually the bridge's
+    FHandler: a handler that re-binds its own event (or frees its sender, whose
+    bridge goes with it) drops the last reference while this call still reads it,
+    and the fault report printed whatever the freed memory held. }
+  handler := AHandler;
+  if (AVM = nil) or (handler = '') then Exit;
+  { A HALTED SESSION RUNS NOTHING, AND THAT IS NOT A FAULT (round 6): END inside
+    a modal closes it, and the close asks onclosequery and onclose, which the
+    halted VM refuses -- reported as two handler faults with "the program
+    carries on", about a program that had just ended. }
+  if AVM.Halted then Exit;
   if SenderDead(AArgs) then Exit;
   Inc(GDispatchDepth);
   // The sender is live here (SenderDead said so) or there is none; either way
@@ -1051,7 +1097,7 @@ begin
   else
     GSenders[GDispatchDepth - 1] := nil;
   try
-    Result := AVM.CallUserFunc(AHandler, AArgs, err);
+    Result := AVM.CallUserFunc(handler, AArgs, err);
   finally
     Dec(GDispatchDepth);
     SetLength(GSenders, GDispatchDepth);
@@ -1063,7 +1109,7 @@ begin
       statement's line: CallUserFunc copies LastError out of the ExecFrom that
       set both. }
     if Assigned(GuiOnHandlerFault) then
-      GuiOnHandlerFault(AHandler, AVM.ErrorLine, err.Message);
+      GuiOnHandlerFault(handler, AVM.ErrorLine, err.Message);
   end;
   { A handler that says END means the program is over. The engine records that
     instead of quietly ending only the handler's own activation, so the window it
@@ -1951,10 +1997,14 @@ begin
   begin
     if id = 0 then Break;
     o := HandleObj(id);
+    { A form in a modal session is not counted (round 6): its answer never ends
+      the loop, by design, so counting it meant closing the main window from
+      inside a dialog left app_run running with nothing on screen. }
     if (o is TGuiHandle) and (TGuiHandle(o).Control <> nil) and
        (TGuiHandle(o).Control <> AExcept) and
        (TGuiHandle(o).Control is TForm) and
-       TForm(TGuiHandle(o).Control).Visible then
+       TForm(TGuiHandle(o).Control).Visible and
+       not (fsModal in TForm(TGuiHandle(o).Control).FormState) then
       Exit(True);
     id := NextLiveHandle(id);
   end;

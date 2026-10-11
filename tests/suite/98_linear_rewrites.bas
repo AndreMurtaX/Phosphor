@@ -22,7 +22,9 @@ rem                         walk they made, and must still walk the same.
 rem    strings_delimitedtext  TStrings.DelimitedText: fields split at the
 rem                         delimiter, a QuoteChar field may hold it and
 rem                         doubles a quote, blanks around a field are
-rem                         dropped unless StrictDelimiter. Its field
+rem                         dropped unless StrictDelimiter (and, round 8,
+rem                         a blank BETWEEN two fields separates them --
+rem                         99_delimitedtext.bas pins that). Its field
 rem                         buffer was the size of the rest of the input,
 rem                         once per field.
 rem    rag_analyze$         keywords deduplicated in FIRST-SEEN order --

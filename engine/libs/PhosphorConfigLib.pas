@@ -41,7 +41,7 @@ type
     procedure Touch;
     function Save: Boolean;
     procedure Reload;
-    procedure LoadFile;
+    function LoadFile: Boolean;          // False = the budget refused the read; nothing changed
   end;
 
 { THE LINES THE RTL CANNOT KEEP (ledger d12).
@@ -426,12 +426,13 @@ end;
 { Read the bound file the way TIniFile.ReadIniValues does -- same BOM handling,
   same encoding detection -- then wrap what the RTL would mangle, and hand it the
   lines. No file, or none bound, is an empty config. }
-procedure TPhosphorConfig.LoadFile;
+function TPhosphorConfig.LoadFile: Boolean;
 var
   sl: TStringList;
   m: TBudgetMeter;
   i: Integer;
 begin
+  Result := False;
   sl := TStringList.Create();
   try
     // Asked HERE, where the file is read -- the path was judged at cfg_open@, and
@@ -442,6 +443,17 @@ begin
     begin
       sl.Options := sl.Options + [soPreserveBOM];
       sl.LoadFromFile(FileName, nil);
+      { The read and the line layer over it, charged for what the file held
+        (round 7): a config is reloaded, or opened, as often as a script asks.
+        A spent budget leaves the config AS IT WAS -- its keys, its encoding,
+        its BOM -- and the caller reports (round 8: it used to be emptied, so a
+        refused cfg_reload@ threw away every setting a program held). An open
+        that is refused frees the object, so there "as it was" is nothing. }
+      BudgetMeterStart(m);
+      for i := 0 to sl.Count - 1 do
+        if m.On and not BudgetMeterAdd(m, BudgetMilliNameItem +
+                                          Int64(Length(sl[i])) * BudgetMilliRewrite) then Break;
+      if not BudgetMeterEnd(m) then Exit;
       if OwnsEnc then Enc.Free;
       if TEncoding.IsStandardEncoding(sl.Encoding) then
       begin
@@ -454,21 +466,10 @@ begin
         OwnsEnc := True;
       end;
       Bom := sl.WriteBOM;
-      { The read and the line layer over it, charged for what the file held
-        (round 7): a config is reloaded, or opened, as often as a script asks.
-        A spent budget leaves the config EMPTY and the caller reports. }
-      BudgetMeterStart(m);
-      for i := 0 to sl.Count - 1 do
-        if m.On and not BudgetMeterAdd(m, BudgetMilliNameItem +
-                                          Int64(Length(sl[i])) * BudgetMilliRewrite) then Break;
-      if not BudgetMeterEnd(m) then
-      begin
-        Ini.Clear();
-        Exit;
-      end;
       WrapForeign(sl);
     end;
     Ini.SetStrings(sl);
+    Result := True;
   finally
     sl.Free;
   end;
@@ -489,6 +490,9 @@ begin
   // sits in front of the line layer's writer now, unchanged.)
   Result := (FileName <> '') and SandboxAllows(FileName, puWrite);
   if not Result then Exit;
+  { The path is the script's, and the save hands it to the OS twice (the folder
+    it forces, the file it writes): priced once, up front (round 8). }
+  if not BudgetLinear(Length(FileName), BudgetMilliOs) then Exit(False);
   raw := TStringList.Create();
   sl := TStringList.Create();
   BudgetMeterStart(m);
@@ -564,9 +568,8 @@ end;
 procedure TPhosphorConfig.Reload;
 begin
   // Re-read from disk, discarding cached in-memory changes, through the same
-  // line layer the first read went through.
-  LoadFile();
-  Modified := False;
+  // line layer the first read went through. A refused read discards nothing.
+  if LoadFile() then Modified := False;
 end;
 
 { WHAT CANNOT BE WRITTEN AND READ BACK AS ITSELF IS REFUSED, AS A VALUE (ledger
@@ -669,12 +672,55 @@ begin
   if FreeHandle(Args[0].Hnd) then Result := ValInt(1);
 end;
 
-{ A change the config may have saved (autosave), and the save may have been
-  refused by the budget: reported, never answered as success. }
-procedure TouchOk(c: TPhosphorConfig; const AWho: String; var Err: TPhosphorError);
+{ A REFUSED CHANGE IS NO CHANGE (round 8). A setter wrote its value and THEN
+  the autosave was refused, and a delete removed its key and THEN the walk over
+  its shadows was refused: the call reported a refusal over a config that had
+  changed anyway -- the in-memory value set, the file not. So a change that a
+  later step can refuse is made over a SNAPSHOT of the config's lines (the
+  representation the line layer itself reads and writes through GetStrings and
+  SetStrings), and a refusal puts the lines and the Modified flag back. A
+  change nothing can refuse -- a plain set on a config that does not autosave
+  -- takes no snapshot.
+
+  And a budget that is already spent refuses a change before it is made: every
+  consultation after the latch refuses, and these consult (the autosave, the
+  shadow walk), so the refusal is theirs, made up front. }
+type
+  TConfigUndo = record
+    Lines: TStringList;     // nil = nothing to roll back to
+    Modified: Boolean;
+  end;
+
+function ChangeBegins(c: TPhosphorConfig; const AWho: String; AMetered: Boolean;
+                      out AUndo: TConfigUndo; var Err: TPhosphorError): Boolean;
 begin
-  c.Touch();
-  if BudgetSpent() then Err := BudgetRefusal(AWho);
+  AUndo.Lines := nil;
+  AUndo.Modified := c.Modified;
+  if BudgetSpent() then begin Err := BudgetRefusal(AWho); Exit(False); end;
+  if (c.AutoSave or AMetered) and BudgetActive() then
+  begin
+    AUndo.Lines := TStringList.Create();
+    c.Ini.GetStrings(AUndo.Lines);
+  end;
+  Result := True;
+end;
+
+{ The change has been made: autosave it, and if the budget refused that, or
+  anything before it in this call, put the config back and report. }
+procedure TouchOk(c: TPhosphorConfig; const AWho: String; var AUndo: TConfigUndo;
+                  var Err: TPhosphorError);
+begin
+  try
+    if not BudgetSpent() then c.Touch();
+    if BudgetSpent() then
+    begin
+      Err := BudgetRefusal(AWho);
+      if AUndo.Lines <> nil then c.Ini.SetStrings(AUndo.Lines);
+      c.Modified := AUndo.Modified;
+    end;
+  finally
+    FreeAndNil(AUndo.Lines);
+  end;
 end;
 
 function SecName(const S: String): String;
@@ -744,13 +790,14 @@ end;
 
 // --- string get/set ---------------------------------------------------------
 function t_cfg_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   if not Storable('cfg_set@', Args[1].Str, Args[2].Str, Args[3].Str, Err) then Exit;
+  if not ChangeBegins(c, 'cfg_set@', False, undo, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, Args[3].Str);
-  TouchOk(c, 'cfg_set@', Err);
+  TouchOk(c, 'cfg_set@', undo, Err);
 end;
 function t_cfg_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig; sec: String;
@@ -761,13 +808,14 @@ begin
   if c.Ini.ValueExists(sec, Args[2].Str) then Result := ValStr(c.Ini.ReadString(sec, Args[2].Str, ''));
 end;
 function t_cfg_sets(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   if not Storable('cfg_sets@', '', Args[1].Str, Args[2].Str, Err) then Exit;
+  if not ChangeBegins(c, 'cfg_sets@', False, undo, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, Args[2].Str);
-  TouchOk(c, 'cfg_sets@', Err);
+  TouchOk(c, 'cfg_sets@', undo, Err);
 end;
 function t_cfg_gets(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -799,7 +847,6 @@ end;
 procedure WriteNum(c: TPhosphorConfig; const Sec, Key: String; V: Double);
 begin
   c.Ini.WriteString(Sec, Key, NumToInv(V));
-  c.Touch();
 end;
 { THE READER THE WRITER PROVED AGAINST, and since 2026-10-09 that is
   load-bearing. WriteNum spells a value with NumToInv, which keeps a spelling
@@ -824,13 +871,14 @@ begin
   if r.Ok then Result := ValDouble(r.Value) else Result := ValDouble(0);
 end;
 function t_cfg_setn(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   if not Storable('cfg_setn@', Args[1].Str, Args[2].Str, NumToInv(AsDouble(Args[3])), Err) then Exit;
+  if not ChangeBegins(c, 'cfg_setn@', False, undo, Err) then Exit;
   WriteNum(c, SecName(Args[1].Str), Args[2].Str, AsDouble(Args[3]));
-  if BudgetSpent() then Err := BudgetRefusal('cfg_setn@');
+  TouchOk(c, 'cfg_setn@', undo, Err);
 end;
 function t_cfg_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -841,13 +889,14 @@ begin
   if BudgetSpent() then Err := BudgetRefusal('cfg_getn');
 end;
 function t_cfg_setns(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   if not Storable('cfg_setns@', '', Args[1].Str, NumToInv(AsDouble(Args[2])), Err) then Exit;
+  if not ChangeBegins(c, 'cfg_setns@', False, undo, Err) then Exit;
   WriteNum(c, 'General', Args[1].Str, AsDouble(Args[2]));
-  if BudgetSpent() then Err := BudgetRefusal('cfg_setns@');
+  TouchOk(c, 'cfg_setns@', undo, Err);
 end;
 function t_cfg_getns(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -867,13 +916,14 @@ begin
     Result := Def;
 end;
 function t_cfg_setb(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   if not Storable('cfg_setb@', Args[1].Str, Args[2].Str, IntToStr(Ord(AsDouble(Args[3]) <> 0)), Err) then Exit;
+  if not ChangeBegins(c, 'cfg_setb@', False, undo, Err) then Exit;
   c.Ini.WriteString(SecName(Args[1].Str), Args[2].Str, IntToStr(Ord(AsDouble(Args[3]) <> 0)));
-  TouchOk(c, 'cfg_setb@', Err);
+  TouchOk(c, 'cfg_setb@', undo, Err);
 end;
 function t_cfg_getb(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -883,13 +933,14 @@ begin
   Result := ReadBool(c, SecName(Args[1].Str), Args[2].Str, Args[3]);
 end;
 function t_cfg_setbs(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
   if not Storable('cfg_setbs@', '', Args[1].Str, IntToStr(Ord(AsDouble(Args[2]) <> 0)), Err) then Exit;
+  if not ChangeBegins(c, 'cfg_setbs@', False, undo, Err) then Exit;
   c.Ini.WriteString('General', Args[1].Str, IntToStr(Ord(AsDouble(Args[2]) <> 0)));
-  TouchOk(c, 'cfg_setbs@', Err);
+  TouchOk(c, 'cfg_setbs@', undo, Err);
 end;
 function t_cfg_getbs(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var c: TPhosphorConfig;
@@ -1007,38 +1058,42 @@ end;
 
 // --- deletion ---------------------------------------------------------------
 function t_cfg_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not ChangeBegins(c, 'cfg_delete@', True, undo, Err) then Exit;
   c.Ini.DeleteKey(SecName(Args[1].Str), Args[2].Str);
   DropShadows(c.Ini, SecName(Args[1].Str), Args[2].Str);
-  TouchOk(c, 'cfg_delete@', Err);
+  TouchOk(c, 'cfg_delete@', undo, Err);
 end;
 function t_cfg_deletekey(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not ChangeBegins(c, 'cfg_deletekey@', True, undo, Err) then Exit;
   c.Ini.DeleteKey('General', Args[1].Str);
   DropShadows(c.Ini, 'General', Args[1].Str);
-  TouchOk(c, 'cfg_deletekey@', Err);
+  TouchOk(c, 'cfg_deletekey@', undo, Err);
 end;
 function t_cfg_section_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not ChangeBegins(c, 'cfg_section_delete@', False, undo, Err) then Exit;
   c.Ini.EraseSection(Args[1].Str);
-  TouchOk(c, 'cfg_section_delete@', Err);
+  TouchOk(c, 'cfg_section_delete@', undo, Err);
 end;
 function t_cfg_clear(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var c: TPhosphorConfig;
+var c: TPhosphorConfig; undo: TConfigUndo;
 begin
   Result := Args[0];
   if not GetConfig(Args[0], c, Err) then Exit;
+  if not ChangeBegins(c, 'cfg_clear@', False, undo, Err) then Exit;
   c.Ini.Clear();
-  TouchOk(c, 'cfg_clear@', Err);
+  TouchOk(c, 'cfg_clear@', undo, Err);
 end;
 
 // --- autosave ---------------------------------------------------------------

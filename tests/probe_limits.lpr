@@ -27,7 +27,8 @@ program probe_limits;
 
 uses
   Classes, SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler,
-  PhosphorOpcodes, PhosphorValue, PhosphorRegistry, PhosphorVM, PhosphorHandles;
+  PhosphorOpcodes, PhosphorValue, PhosphorRegistry, PhosphorVM, PhosphorHandles,
+  PhosphorBudget, PhosphorBase64Lib, PhosphorGzipLib, PhosphorHttpLib;
 
 var
   Ok: Integer = 0;
@@ -1595,6 +1596,306 @@ begin
                        'not sixty-four times the time');
 end;
 
+{ ---------------------------------------------------------------------------
+  ROUND 8 (2026-10-11): ONE CHECK PER FINDING, IN BOTH DIRECTIONS -- the abuse
+  is refused, and the legitimate shape beside it runs. Every exact number is
+  derived in the comment above it from PhosphorBudget's prices and the
+  arguments, never read off a run: MaxSteps 100000 is an allowance of
+  100000 * 256 = 25600000 units, and string$(n) / mulstring$ cost n units (RunOf
+  asks one a byte). A programme that checks its own state after a caught
+  refusal ends `x = 1 / 0` when the state is wrong -- a division error, which
+  Check (expecting success) reports as a failure.
+--------------------------------------------------------------------------- }
+
+{ A file of ALines lines of 49 'x' and an LF, written by the host so the script
+  under test measures the loads and nothing else. Forward slashes, so the path
+  can sit in a BASIC string literal (a backslash there is an escape). }
+function MakeLinesFile(const AName: String; ALines: Integer): String;
+var fs: TFileStream; line, block: String; i, left: Integer;
+begin
+  Result := StringReplace(GetTempDir(False), '\', '/', [rfReplaceAll]) + AName;
+  line := StringOfChar('x', 49) + #10;
+  // Written a 20000-line block at a time: one system call a line is slow on Linux.
+  block := '';
+  for i := 1 to 20000 do block := block + line;
+  fs := TFileStream.Create(Result, fmCreate);
+  try
+    left := ALines;
+    while left >= 20000 do
+    begin
+      fs.WriteBuffer(block[1], Length(block));
+      Dec(left, 20000);
+    end;
+    for i := 1 to left do fs.WriteBuffer(line[1], Length(line));
+  finally
+    fs.Free;
+  end;
+end;
+
+procedure CheckRound8;
+var big60, cfgPath: String;
+begin
+  { (1) path_matchespattern folded both strings WHOLE before its metered loop:
+    2000 calls on a 100 MB name with the pattern "x" ran 45859 ms under the
+    pair and succeeded step-only. The fold is now per comparison, so that call
+    reads ONE byte -- the loop finishes quickly and that is the right answer. }
+  CheckQuick('path_matchespattern with a pattern that fails at once reads one byte',
+             's$ = string$(20000000, 97)' + LF + Loop(300, 'r = path_matchespattern(s$, "x")') +
+             'if r <> 0 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  { ...and a pattern that makes it read the whole name is charged for that:
+    "*b" against a's compares every byte, 4096 comparisons a unit block, so 300
+    calls of 20 MB is about 6e9 comparisons and stops at the ceiling. }
+  CheckTimed('path_matchespattern that reads the whole name stops at the ceiling',
+             's$ = string$(20000000, 97)' + LF + Loop(300, 'r = path_matchespattern(s$, "*b")'),
+             1000000, 2000, 'path_matchespattern: ', 3000);
+
+  { (2) json_removeat@ shifted the array's tail unpriced. Each removal from the
+    front of n elements now asks (n - 1) pointers at JsonShiftMilliPerItem 128:
+    999999 * 0.128 = 127999.872 -> 128000 units the first time (a pointer moved
+    measured 0.4 to 1.5 ns from run to run; 1 ns sits inside the bound for both). }
+  CheckTimed('json_removeat@ from the front of a million is refused at the ceiling',
+             'a@ = json_parse@("[" + mulstring$("1,", 999999) + "1]")' + LF +
+             Loop(50000, 'a@ = json_removeat@(a@, 1)'),
+             1000000, 0, 'json_removeat@: ', 4000);   // the defect: 22 s
+  // ...and the refusal leaves the array whole: after a caught refusal at pass
+  // k, exactly k - 1 elements are gone.
+  Check('a refused json_removeat@ removes nothing',
+        'a@ = json_parse@("[" + mulstring$("1,", 999999) + "1]")' + LF +
+        'on error goto h' + LF +
+        'for k = 1 to 50000' + LF + 'a@ = json_removeat@(a@, 1)' + LF + 'next' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if json_len(a@) <> 1000000 - (k - 1) then x = 1 / 0' + LF +
+        'if k >= 50000 then x = 1 / 0' + LF,
+        1000000, 0, 0, False);
+  // ...while removing from the END, which moves nothing, runs.
+  CheckQuick('json_removeat@ of the last element is cheap',
+             'a@ = json_parse@("[" + mulstring$("1,", 99999) + "1]")' + LF +
+             Loop(50000, 'a@ = json_removeat@(a@, json_len(a@))') +
+             'if json_len(a@) <> 50000 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+
+  { (4) path_combine$ copied its arguments unpriced. The three-part form copies
+    the first pair twice: 2 * (1000000 + 1) + 1 = 2000003 bytes at MOVE 48 =
+    96000.144 -> 96001 units a call. 24600000 / 96001 = 256.2, so 256 calls
+    spend 24576256 and leave 23744 for the 257th. }
+  CheckMsg('path_combine$ is priced by what it copies (MOVE)',
+           'r$ = string$(1000000, 97)' + LF + Loop(300, 'p$ = path_combine$(r$, "x", "y")'),
+           100000, 0, 'path_combine$: that would take 96001 units of work and only 23744 are left');
+  CheckQuick('path_combine$ of ordinary paths',
+             Loop(20000, 'p$ = path_combine$("C:/data/projects", "phosphor", "notes.txt")'),
+             1000000, 2000, 1500);
+
+  { (5) strings_delimitedtext$ charged about 19 ns a field for about 475 ns of
+    work: 1000 renders of two million fields ran 36 s step-only. It is now
+    sized once and charged per field at PIECE; a step-only host stops at the
+    ceiling's worth of work. }
+  CheckTimed('strings_delimitedtext$ x1000 over two million fields stops at the ceiling',
+             's$ = replacestr$(string$(2000000, 65), "A", "ab,c d" + chr$(10))' + LF +
+             'l@ = strings@()' + LF + 'n = strings_text(l@, s$)' + LF +
+             Loop(1000, 'r$ = strings_delimitedtext$(l@)'),
+             1000000, 0, 'strings_delimitedtext$: ', 4000);   // the defect: 36 s; the exact check below pins the price
+  { ...and exactly: 10000 fields of "ab,c d", each charged PIECE 4352 + 6 bytes
+    at SCAN 80 = 4832 milli as it is scanned (48320 units a render), then the
+    answer -- 10000 * 8 quoted bytes + 9999 delimiters = 89999 -- asked at COPY
+    128: ceil(11519.872) = 11520. 59840 a render. The setup is mulstring$'s
+    70000 and strings_text's SCAN 5600 + 10001 pieces (43525) + COPY 8960:
+    128085, leaving 25471915 of 25600000; 425 renders spend 25432000, and the
+    426th is refused part way through its scan. }
+  Check('strings_delimitedtext$ is priced per field and per byte',
+        's$ = mulstring$("ab,c d" + chr$(10), 10000)' + LF + 'l@ = strings@()' + LF +
+        'n = strings_text(l@, s$)' + LF +
+        'on error goto h' + LF +
+        'for k = 1 to 1000' + LF + 'r$ = strings_delimitedtext$(l@)' + LF + 'next' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if k <> 426 then x = 1 / 0' + LF,
+        100000, 0, 0, False);
+  CheckQuick('strings_delimitedtext$ of a hundred thousand fields',
+             's$ = replacestr$(string$(100000, 65), "A", "ab,c d" + chr$(10))' + LF +
+             'l@ = strings@()' + LF + 'n = strings_text(l@, s$)' + LF +
+             Loop(5, 'r$ = strings_delimitedtext$(l@)') +
+             'if bytelen(r$) <> 100000 * 8 + 99999 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+
+  { (6) A REFUSED MUTATOR LEAVES THE CONTAINER AS IT WAS. strings_values for
+    the LAST name of a 20000-line list walks every line, each NAMEITEM 4096
+    plus its name and separator (3 to 7 bytes) at COPY 128 -- about 4.9 units
+    a line, 98000 a call -- so step-only it is refused near the 2600th call;
+    before round 8 that refused call APPENDED a duplicate "k20000=" line, and
+    the old value stayed on line 20000. }
+  Check('a refused strings_values changes nothing',
+        'l@ = strings@()' + LF + Loop(20000, 'n = strings_add(l@, "k" + str$(i) + "=v")') +
+        'on error goto h' + LF +
+        'for k = 1 to 100000' + LF + 'n = strings_values(l@, "k20000", "new" + str$(k))' + LF + 'next' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if k >= 100000 then x = 1 / 0' + LF +
+        'if strings_count(l@) <> 20000 then x = 1 / 0' + LF +
+        'if strings_strings$(l@, 20000) <> "k20000=new" + str$(k - 1) then x = 1 / 0' + LF,
+        1000000, 0, 0, False);
+  { Once the budget has latched, an UNSORTED add -- O(1), consulting nothing --
+    is not refused and adds exactly once; a SORTED add is metered, so it is
+    refused and adds nothing. The latch: a needle as long as each of 20 lines
+    makes strings_indexof compare them all, 20 * (1152 + 131072 * 80) milli =
+    209738 units a call; the setup spends about 5.9M of the 25.6M, so the loop
+    latches within a hundred calls. }
+  Check('after the latch an unsorted add adds once, a sorted add not at all',
+        'big@ = strings@()' + LF +
+        'n = strings_text(big@, mulstring$(string$(131072, 97) + chr$(10), 20))' + LF +
+        'nd$ = string$(131072, 98)' + LF +
+        's@ = strings@()' + LF + 'n = strings_add(s@, "m")' + LF + 'n = strings_sorted(s@, 1)' + LF +
+        'on error goto h1' + LF +
+        'for k = 1 to 100000' + LF + 'n = strings_indexof(big@, nd$)' + LF + 'next' + LF +
+        'h1:' + LF + 'on error goto 0' + LF +
+        'if k >= 100000 then x = 1 / 0' + LF +
+        'u@ = strings@()' + LF + 'n = strings_add(u@, "first")' + LF +
+        'if n <> 1 then x = 1 / 0' + LF +
+        'if strings_count(u@) <> 1 then x = 1 / 0' + LF +
+        'on error goto h2' + LF + 'n = strings_add(s@, "a")' + LF + 'x = 1 / 0' + LF +
+        'h2:' + LF + 'on error goto 0' + LF +
+        'if strings_count(s@) <> 1 then x = 1 / 0' + LF,
+        100000, 0, 0, False);
+  { A refused SORT leaves the order it found. 200000 lines "b","a","b",... cost
+    mulstring$'s 400000 units and strings_text's SCAN 32000 + 200001 pieces at
+    4352 (870405) + COPY 51200 = 953605: 1353605 of the 2560000 a MaxSteps of
+    10000 allows. The merge sort charges a unit a comparison, about
+    200000 * 17.6 = 3.5M, so it is refused part way -- and the old one had
+    already written its finished passes back, so line 1 had become "a". }
+  Check('a refused strings_sort leaves the list in its order',
+        'l@ = strings@()' + LF +
+        'n = strings_text(l@, mulstring$("b" + chr$(10) + "a" + chr$(10), 100000))' + LF +
+        'on error goto h' + LF + 'n = strings_sort(l@)' + LF + 'x = 1 / 0' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if strings_strings$(l@, 1) <> "b" then x = 1 / 0' + LF +
+        'if strings_strings$(l@, 2) <> "a" then x = 1 / 0' + LF +
+        'if strings_strings$(l@, 199999) <> "b" then x = 1 / 0' + LF,
+        10000, 0, 0, False);
+  Check('...and strings_sorted refused leaves the flag off',
+        'l@ = strings@()' + LF +
+        'n = strings_text(l@, mulstring$("b" + chr$(10) + "a" + chr$(10), 100000))' + LF +
+        'on error goto h' + LF + 'n = strings_sorted(l@, 1)' + LF + 'x = 1 / 0' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if strings_sorted(l@) <> 0 then x = 1 / 0' + LF +
+        'if strings_strings$(l@, 1) <> "b" then x = 1 / 0' + LF,
+        10000, 0, 0, False);
+  { A refused json_merge@ merges NOTHING. s holds three members, each an array
+    of 100001 ones: its text is 6 + 3 * 200000 + 8 + 8 + 3 = 600025 bytes with
+    1 + 3 + 3 + 300000 + 2 = 300009 openers outside strings, so its parse costs
+    SCAN ceil(600025 * 0.08) = 48002, NODE ceil(300010 * 76.8) = 23040768 and
+    BYTE ceil(600025 * 1.92) = 1152048: 24240818, after mulstring$'s 200000 and
+    one unit for t's one-byte name -- 24440819 of 25600000, leaving 1159181.
+    The overlap walk visits 2 + 300007 nodes at ITEM (345611), leaving 813570:
+    enough to clone the first member (100002 nodes * 7.68 = 768016) and not the
+    second. The old merge priced each member as it grafted it, so it merged "a"
+    and then reported the refusal; the new one prices all three first. }
+  Check('a refused json_merge@ merges nothing',
+        'r$ = mulstring$("1,", 100000)' + LF +
+        's@ = json_parse@("{\"a\":[" + r$ + "1],\"b\":[" + r$ + "1],\"c\":[" + r$ + "1]}")' + LF +
+        't@ = json_object@()' + LF + 't@ = json_setn@(t@, "x", 1)' + LF +
+        'on error goto h' + LF + 't@ = json_merge@(t@, s@)' + LF + 'x = 1 / 0' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if json_count(t@) <> 1 then x = 1 / 0' + LF,
+        100000, 0, 0, False);
+  { A refused autosave puts the config back. The 2 MB value costs string$'s
+    2000000 units; MaxSteps 10157 allows 2600192, leaving 600192. The set asks
+    its line, 1 + 2000000 bytes at REWRITE 216 = 432001, leaving 168191; the
+    autosave then walks the line it would write (NAMEITEM + 2000002 * 216 milli,
+    about 432005) and is refused. Before round 8 the value stayed set in memory
+    and Modified said so; the file is never written either way. }
+  cfgPath := StringReplace(GetTempDir(False), '\', '/', [rfReplaceAll]) + 'phosphor_r8_auto.ini';
+  DeleteFile(cfgPath);
+  Check('a refused autosave leaves the config as it was',
+        'v$ = string$(2000000, 97)' + LF +
+        'c@ = cfg_open_auto@("' + cfgPath + '")' + LF +
+        'on error goto h' + LF + 'c@ = cfg_sets@(c@, "k", v$)' + LF + 'x = 1 / 0' + LF +
+        'h:' + LF + 'on error goto 0' + LF +
+        'if cfg_haskey(c@, "k") <> 0 then x = 1 / 0' + LF +
+        'if cfg_modified(c@) <> 0 then x = 1 / 0' + LF +
+        'if file_exists("' + cfgPath + '") <> 0 then x = 1 / 0' + LF,
+        10157, 0, 0, False);
+  DeleteFile(cfgPath);
+
+  { (7) line$ charged the whole text before a walk that stops at the line:
+    line$(b$, 1) of a 20 MB text was refused after 160 calls for work that
+    costs nothing. It is charged for the bytes it walked... }
+  CheckQuick('line$ of the first line of a 20 MB text is cheap',
+             'b$ = "header,line" + chr$(10) + string$(20000000, 97)' + LF +
+             Loop(1000, 'h$ = line$(b$, 1)') + 'if h$ <> "header,line" then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  CheckQuick('s$[1] of a 20 MB text is cheap too',
+             'b$ = "header,line" + chr$(10) + string$(20000000, 97)' + LF +
+             Loop(1000, 'h$ = b$[1]') + 'if h$ <> "header,line" then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  { ...and a line that is not there walks, and is charged, the whole text: a
+    1000000-byte text with no LF read at SCAN 80 is 80000 units a call, and
+    24600000 / 80000 = 307.5, so the 308th call latches. }
+  CheckMsg('line$ is charged for the whole walk when the line is not there',
+           'r$ = string$(1000000, 97)' + LF + Loop(400, 'h$ = line$(r$, 2)'),
+           100000, 0, 'line$: the run has spent its step budget of 100000 inside library calls');
+
+  { (8) The TEXT price charged every byte as the densest text there can be.
+    Two loads of a 60 MB file of 50-byte lines were refused at 12% of the
+    allowance's work; the pieces are now counted. Each load: COPY 60M * 0.128
+    = 7680000 after the read, SCAN 4800000, 1200001 pieces at 4352 (5222405)
+    and COPY 7680000 for the split: 25382405, twice 50764810 of 256000000. }
+  big60 := MakeLinesFile('phosphor_r8_big60.txt', 1200000);
+  CheckQuick('two loads of a 60 MB file of 50-byte lines',
+             'l@ = strings@()' + LF + 'm@ = strings@()' + LF +
+             'n = strings_loadfromfile(l@, "' + big60 + '")' + LF +
+             'n = strings_loadfromfile(m@, "' + big60 + '")' + LF +
+             'if strings_count(l@) + strings_count(m@) <> 2400000 then x = 1 / 0' + LF,
+             1000000, 2000, 3000);
+  // Step-only, so the refusal is the budget's arithmetic (the eleventh load:
+  // ten spend 253824050 of 256000000) and not whichever clock reads first.
+  CheckTimed('twenty loads of it stop at the ceiling',
+             'l@ = strings@()' + LF + Loop(20, 'n = strings_loadfromfile(l@, "' + big60 + '")'),
+             1000000, 0, 'strings_loadfromfile: ', 4000);
+  DeleteFile(big60);
+  { ...and a DENSE text still pays what a dense text costs. 100000 lines of
+    "a": SCAN 200000 * 0.08 = 16000, 100001 pieces at 4352 = 435205, COPY
+    200000 * 0.128 = 25600, 476805 a call. After mulstring$'s 200000, 25400000
+    buys 53 calls (25270665) and leaves 129335; the 54th's scan is allowed
+    (113335 left) and its pieces are not. }
+  CheckMsg('strings_text of a dense text is priced by its pieces',
+           't$ = mulstring$("a" + chr$(10), 100000)' + LF + 'l@ = strings@()' + LF +
+           Loop(100, 'n = strings_text(l@, t$)'),
+           100000, 0, 'strings_text: that would take 435205 units of work and only 113335 are left');
+
+  (* (9) json_parse@ counted the commas INSIDE a string as values. A 1 MB
+    document carrying a CSV in one member: '{"csv": "' + 1000000 bytes + '"}'
+    is 1000011 bytes with 2 openers outside the string, so a parse is SCAN
+    80001 + NODE ceil(3 * 76.8) = 231 + BYTE ceil(1000011 * 1.92) = 1920022:
+    2000254. Ten of them fit in a fraction of the pair's allowance; before
+    round 8 the seventh was refused. *)
+  CheckQuick('ten parses of a 1 MB document carrying a CSV string',
+             'r$ = mulstring$("x,", 500000)' + LF +
+             'd$ = "{\"csv\": \"" + r$ + "\"}"' + LF +
+             Loop(10, 'j@ = json_parse@(d$)' + LF + 'n = json_free(j@)'),
+             1000000, 2000, 1500);
+  // Step-only, from 24600000: 12 parses spend 24003048 and leave 596952; the
+  // 13th's scan (80001) and nodes (231) leave 516720, and its bytes do not fit.
+  CheckMsg('json_parse@ is priced by the values outside strings, and the bytes',
+           'r$ = mulstring$("x,", 500000)' + LF +
+           'd$ = "{\"csv\": \"" + r$ + "\"}"' + LF +
+           Loop(20, 'j@ = json_parse@(d$)' + LF + 'n = json_free(j@)'),
+           100000, 0, 'json_parse@: that would take 1920022 units of work and only 516720 are left');
+
+  { (10) path_hasvalidfilenamechars was priced at SCAN and cost 2.7 times that.
+    At REWRITE 216: 216000 units a megabyte; 24600000 / 216000 = 113.9, so 113
+    calls spend 24408000 and the 114th finds 192000. }
+  CheckMsg('path_hasvalidfilenamechars is priced at its measured rate (REWRITE)',
+           'r$ = string$(1000000, 97)' + LF + Loop(200, 'n = path_hasvalidfilenamechars(r$)'),
+           100000, 0, 'path_hasvalidfilenamechars: that would take 216000 units of work and only 192000 are left');
+  { changefileext$ makes two copies of stem and extension: 2 * (1000000 + 2)
+    at COPY 128 = 256000.512 -> 256001; 96 calls spend 24576096 and leave
+    23904. }
+  CheckMsg('changefileext$ is priced by its two copies',
+           'r$ = string$(1000000, 97)' + LF + Loop(200, 'p$ = changefileext$(r$, ".x")'),
+           100000, 0, 'path_changeextension$: that would take 256001 units of work and only 23904 are left');
+  CheckQuick('path_hasvalidfilenamechars of an ordinary name',
+             Loop(50000, 'n = path_hasvalidfilenamechars("report-2026.txt")'),
+             1000000, 2000, 1500);
+end;
+
 procedure CheckFaultEscapes(const AName, ASource: String);
 var
   eng: TPhosphorEngine;
@@ -1618,7 +1919,360 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------------------
+  --prices: WHAT EACH PRICED CALL IS CHARGED, BESIDE WHAT IT COSTS (round 8).
+
+  Round 7 wrote a table of BudgetMilli* prices, each "rounded UP from its
+  family's slowest member" -- and three of the functions charged from it were
+  never in the measurement: strings_delimitedtext$ cost 25-32 times its price,
+  path_hasvalidfilenamechars 2.7 times, changefileext$ 2.2 times, while the
+  TEXT price refused two loads of a 60 MB file that cost 12% of the allowance.
+  A price nobody measured is a guess, and this is the measurement, kept where
+  the next price can be held to it.
+
+  Each case runs its statement in a loop under a budget too large to refuse
+  anything (MaxSteps 1e12), reads the units the loop was charged (BudgetUsed)
+  and the wall time it took, and prints the ratio of the two on the budget's
+  own scale (BudgetUnitsPerMsOfWork units = 1 ms). The loop is lengthened until
+  it runs at least 300 ms, so GetTickCount64's resolution is a few percent of
+  it. The arguments are megabytes, so the VM's own work per iteration is noise.
+
+  THE BOUND, stated once: a charge is right when it is at least HALF of what
+  the call costs on this machine (so a host is never over its ceiling by more
+  than 2x on this hardware, and a slower one -- Linux under WSL measured 1.1 to
+  1.5x -- by less than 3x) and at most FOUR times it (so ordinary work charged
+  at a quarter of the allowance is never refused). Outside that the line is
+  marked UNDER or OVER and the run exits 1. It prints timings and is not run by
+  the suite: a millisecond bar on an unknown machine is red at random -- the
+  same reason bench_debug keeps its real measurement behind --full.
+--------------------------------------------------------------------------- }
+function t_tick(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
+  E := NoError();
+  Result := ValInt(Int64(GetTickCount64()));
+end;
+
+function t_units(const A: array of TValue; out E: TPhosphorError): TValue;
+begin
+  E := NoError();
+  Result := ValInt(BudgetUsed());
+end;
+
+var
+  PriceBad: Integer = 0;
+  PriceRows: Integer = 0;
+  PriceFilter: String = '';   // --prices TEXT: only the cases whose name holds it
+  PriceBaseNs: Double = 0;    // the loop's own cost per iteration (the baseline row)
+
+{ One measured loop: K iterations of AStmt after ASetup. ms and units, or
+  False when the run failed (a failure must never read as cheap). }
+function PriceRun(const ASetup, AStmt: String; K: Int64; out AMs, AUnits: Int64;
+                  out AWhy: String): Boolean;
+var
+  eng: TPhosphorEngine;
+  sink: TTextSink;
+  src, last: String;
+  sl: TStringList;
+  sp: Integer;
+begin
+  Result := False;
+  AMs := 0; AUnits := 0; AWhy := '';
+  src := ASetup + LF +
+         'u0% = budget_units%()' + LF + 't0% = tick_ms%()' + LF +
+         'for i = 1 to ' + IntToStr(K) + LF + AStmt + LF + 'next' + LF +
+         't1% = tick_ms%()' + LF + 'u1% = budget_units%()' + LF +
+         'println str$(t1% - t0%) + " " + str$(u1% - u0%)' + LF;
+  eng := TPhosphorEngine.Create();
+  sink := TTextSink.Create();
+  sl := TStringList.Create();
+  try
+    RegisterBase64Funcs(eng.Registry);
+    RegisterGzipFuncs(eng.Registry);
+    RegisterHttpFuncs(eng.Registry);
+    eng.Registry.Add('tick_ms%:', @t_tick);
+    eng.Registry.Add('budget_units%:', @t_units);
+    eng.OnOutput := @sink.Take;
+    eng.MaxSteps := 1000000000000;
+    if eng.Run(src) <> 0 then
+    begin
+      AWhy := eng.ErrorMessage;
+      Exit;
+    end;
+    sl.Text := sink.Text;
+    if sl.Count = 0 then begin AWhy := 'no output'; Exit; end;
+    last := Trim(sl[sl.Count - 1]);
+    sp := Pos(' ', last);
+    AMs := StrToInt64Def(Copy(last, 1, sp - 1), -1);
+    AUnits := StrToInt64Def(Copy(last, sp + 1, MaxInt), -1);
+    Result := (AMs >= 0) and (AUnits >= 0);
+    if not Result then AWhy := 'unreadable: ' + last;
+  finally
+    sl.Free;
+    sink.Free;
+    eng.Free;
+  end;
+end;
+
+{ AKnown: a price that is outside the bound ON PURPOSE, with the reason -- printed
+  beside the row and not counted against the sweep. Each one is a debt with its
+  reason written down, the way check-budget.py's ALLOWED is. }
+procedure Price(const AName, ASetup, AStmt: String; const AKnown: String = '');
+var
+  k, ms, units: Int64;
+  why, mark: String;
+  ratio: Double;
+begin
+  if (PriceFilter <> '') and (Pos(PriceFilter, AName) = 0) and
+     (AName <> 'baseline (x = 1)') then Exit;
+  k := 1;
+  repeat
+    if not PriceRun(ASetup, AStmt, k, ms, units, why) then
+    begin
+      Writeln(Format('%-34s FAILED: %s', [AName, why]));
+      Inc(PriceBad);
+      Exit;
+    end;
+    if ms >= 300 then Break;
+    if ms < 20 then k := k * 16 else k := k * (450 div ms + 1);
+  until k > 100000000;
+  Inc(PriceRows);
+  if ms <= 0 then
+  begin
+    Writeln(Format('%-34s k=%-8d %6d ms   charged %9.1f ms   (too fast to judge)',
+                   [AName, k, ms, units / BudgetUnitsPerMsOfWork]));
+    Exit;
+  end;
+  ratio := (units / BudgetUnitsPerMsOfWork) / ms;
+  { A call whose work, net of the loop's own instructions, is under 5 us is
+    constant work: nothing linear is left to under-charge, so only an
+    over-charge is judged. The baseline row measures the loop itself. }
+  if AName = 'baseline (x = 1)' then
+  begin
+    PriceBaseNs := ms * 1000000.0 / k;
+    mark := '  (the loop itself)';
+  end
+  else if ms * 1000000.0 / k - PriceBaseNs < 5000 then
+  begin
+    if ratio > 4.0 then mark := '  OVER (constant work)' else mark := '  constant work';
+  end
+  else if ratio < 0.5 then mark := '  UNDER'
+  else if ratio > 4.0 then mark := '  OVER'
+  else mark := '';
+  if (AKnown <> '') and ((Pos('UNDER', mark) > 0) or (Pos('OVER', mark) > 0)) then
+    mark := mark + ' -- KNOWN: ' + AKnown
+  else if (Pos('UNDER', mark) > 0) or (Pos('OVER', mark) > 0) then Inc(PriceBad);
+  Writeln(Format('%-34s k=%-8d %6d ms   charged %9.1f ms   ratio %6.2f%s',
+                 [AName, k, ms, units / BudgetUnitsPerMsOfWork, ratio, mark]));
+end;
+
+procedure RunPrices;
+const
+  S4 ='s$ = string$(4000000, 97)';
+  T4 = 't$ = mulstring$("Hello World 42 ", 266667)';
+  LD = 'ld$ = mulstring$("a" + chr$(10), 2000000)';
+  LS = 'ls$ = mulstring$(string$(49, 120) + chr$(10), 80000)';
+  { An index of 200 documents in the temp folder, each naming 50 tags and 50
+    functions in its header, rebuilt into r@. }
+  RagKb = 'kb$ = temppath$() + "/phosphor_price_kb"' + LF +
+          'n = dir_create(kb$)' + LF +
+          'fl$ = ""' + LF + 'tl$ = ""' + LF +
+          'for j = 1 to 50' + LF + 'fl$ = fl$ + "f" + str$(j) + ", "' + LF +
+          'tl$ = tl$ + "t" + str$(j) + ", "' + LF + 'next' + LF +
+          'for d = 1 to 200' + LF +
+          'h$ = "---" + chr$(10) + "id: d" + str$(d) + chr$(10) + "title: doc " + str$(d) + chr$(10) +' +
+          ' "tags: " + tl$ + chr$(10) + "functions: " + fl$ + chr$(10) + "---" + chr$(10) + "# body" + chr$(10)' + LF +
+          'n = file_writealltext(kb$ + "/d" + str$(d) + ".md", h$)' + LF + 'next' + LF +
+          'r@ = rag@(kb$)' + LF + 'r@ = rag_rebuild@(r@)';
+begin
+  Writeln('price sweep: charged / measured, on the budget''s own scale; bound 0.5 .. 4');
+  Price('baseline (x = 1)', '', 'x = 1');
+  // --- strings: a pass over a 4 MB argument ------------------------------
+  Price('ucase$', S4, 'r$ = ucase$(s$)');
+  Price('lcase$', S4, 'r$ = lcase$(s$)');
+  Price('len', S4, 'n = len(s$)');
+  Price('left$ (all)', S4, 'r$ = left$(s$, 4000000)');
+  Price('right$ (all)', S4, 'r$ = right$(s$, 4000000)');
+  Price('mid$ (from 2)', S4, 'r$ = mid$(s$, 2)');
+  Price('trim$', 's$ = " " + string$(4000000, 97) + " "', 'r$ = trim$(s$)');
+  Price('ltrim$', 's$ = " " + string$(4000000, 97)', 'r$ = ltrim$(s$)');
+  Price('rtrim$', 's$ = string$(4000000, 97) + " "', 'r$ = rtrim$(s$)');
+  Price('reverse$', S4, 'r$ = reverse$(s$)',
+        'still the quadratic-append price; scripts/probe_budget.lpr pins a refusal of 40 MB ' +
+        '(see CpReverse in PhosphorStrLib)');
+  Price('proper$', T4, 'r$ = proper$(t$)');
+  Price('swapcase$', T4, 'r$ = swapcase$(t$)');
+  Price('alcase$', T4, 'r$ = alcase$(t$)');
+  Price('aucase$', T4, 'r$ = aucase$(t$)');
+  Price('val', 'z$ = string$(4000000, 48)', 'n = val(z$)');
+  Price('isnumeric', 'z$ = string$(4000000, 48)', 'n = isnumeric(z$)');
+  Price('isalpha', S4, 'n = isalpha(s$)');
+  Price('isdigits', 'z$ = string$(4000000, 48)', 'n = isdigits(z$)');
+  Price('isalnum', S4, 'n = isalnum(s$)');
+  Price('isspace', 'z$ = string$(4000000, 32)', 'n = isspace(z$)');
+  Price('islower', S4, 'n = islower(s$)');
+  Price('isupper', 'z$ = string$(4000000, 65)', 'n = isupper(z$)');
+  Price('strcmp', S4 + LF + 'u$ = string$(4000000, 97)', 'n = strcmp(s$, u$)');
+  Price('strcmpi', S4 + LF + 'u$ = string$(4000000, 65)', 'n = strcmpi(s$, u$)');
+  Price('startsstr', S4 + LF + 'u$ = string$(3999999, 97)', 'n = startsstr(s$, u$)');
+  Price('endsstr', S4 + LF + 'u$ = string$(3999999, 97)', 'n = endsstr(s$, u$)');
+  Price('startstext', S4 + LF + 'u$ = string$(3999999, 65)', 'n = startstext(s$, u$)');
+  Price('endstext', S4 + LF + 'u$ = string$(3999999, 65)', 'n = endstext(s$, u$)');
+  Price('insert$', S4, 'r$ = insert$(s$, "x", 2)');
+  Price('delete$', S4, 'r$ = delete$(s$, 2, 1)');
+  Price('stuffstring$', S4, 'r$ = stuffstring$(s$, 2, 1, "xy")');
+  Price('ltab$', S4, 'r$ = ltab$(s$, 4000010)');
+  Price('lfill$', S4, 'r$ = lfill$(s$, 4000010, 46)');
+  Price('center$', S4, 'r$ = center$(s$, 4000010)');
+  Price('bytemid$', S4, 'r$ = bytemid$(s$, 2, 3999998)');
+  Price('strchar$ (middle)', S4, 'r$ = strchar$(s$, 2000000)');
+  Price('strsetchar$', S4, 'r$ = strsetchar$(s$, 2000000, "b")');
+  Price('instr (absent byte)', S4, 'n = instr(s$, "b")');
+  Price('instrrev (absent byte)', S4, 'n = instrrev(s$, "b")');
+  Price('countstr', S4, 'n = countstr(s$, "b")');
+  Price('containstext', S4, 'n = containstext(s$, "B")');
+  Price('replacestr$ (nothing to do)', S4, 'r$ = replacestr$(s$, "b", "c")');
+  Price('replacetext$ (nothing to do)', S4, 'r$ = replacetext$(s$, "b", "c")');
+  // ...and the searches where every byte is a first-byte hit, the shape the
+  // per-hit price exists for.
+  Price('instr (every byte a hit)', S4, 'n = instr(s$, "ab")');
+  Price('instr (a 1000-byte needle, 1 MB)', 's$ = string$(1000000, 97)', 'n = instr(s$, string$(1000, 97) + "b")');
+  Price('countstr (every byte a match)', S4, 'n = countstr(s$, "a")');
+  Price('replacestr$ (every byte, a -> bb)', S4, 'r$ = replacestr$(s$, "a", "bb")');
+  Price('replacestr$ (a few, in text)', T4, 'r$ = replacestr$(t$, "World", "Earth")');
+  Price('wordcount (every byte a hit)', 'w$ = mulstring$("a,", 2000000)', 'n = wordcount(w$, ",b")');
+  Price('count (dense lines)', LD, 'n = count(ld$)');
+  Price('count (50-byte lines)', LS, 'n = count(ls$)');
+  Price('line$ (last of dense)', LD, 'r$ = line$(ld$, 2000000)');
+  Price('line$ (last of 50-byte)', LS, 'r$ = line$(ls$, 80000)');
+  Price('line$ (first of 4 MB)', LS, 'r$ = line$(ls$, 1)');
+  Price('strline$ (last of 50-byte)', LS, 'r$ = strline$(ls$, 80000)');
+  Price('strsetline$ (last)', LS, 'r$ = strsetline$(ls$, 80000, "x")');
+  Price('wordcount (dense)', 'w$ = mulstring$("a,", 2000000)', 'n = wordcount(w$, ",")');
+  Price('wordcount (50-byte)', 'w$ = mulstring$(string$(49, 120) + ",", 80000)', 'n = wordcount(w$, ",")');
+  Price('word$ (last, 50-byte)', 'w$ = mulstring$(string$(49, 120) + ",", 80000)', 'r$ = word$(w$, 80000, ",")');
+  Price('funcexists?', S4, 'b? = funcexists?(s$)');
+  // --- the OS and paths ------------------------------------------------------
+  Price('environ$', S4, 'r$ = environ$(s$)');
+  Price('path_getfullpath$', 's$ = string$(400000, 97)', 'r$ = path_getfullpath$(s$)');
+  Price('path_getfilename$', S4, 'r$ = path_getfilename$(s$)');
+  Price('path_getextension$', S4, 'r$ = path_getextension$(s$)');
+  Price('path_getdirectoryname$', 's$ = string$(2000000, 97) + "/" + string$(2000000, 97)', 'r$ = path_getdirectoryname$(s$)');
+  Price('changefileext$', S4 + '+ ".txt"', 'r$ = changefileext$(s$, ".bak")');
+  Price('path_combine$ (3)', S4, 'r$ = path_combine$(s$, "x", "y")');
+  Price('path_hasvalidpathchars', S4, 'n = path_hasvalidpathchars(s$)');
+  Price('path_hasvalidfilenamechars', S4, 'n = path_hasvalidfilenamechars(s$)');
+  Price('path_matchespattern (2-arg, x)', S4, 'n = path_matchespattern(s$, "x")');
+  Price('path_matchespattern (*b)', S4, 'n = path_matchespattern(s$, "*b")');
+  Price('file_exists (long path)', S4, 'n = file_exists(s$)');
+  Price('dir_exists (long path)', S4, 'n = dir_exists(s$)');
+  Price('file_readalltext$ (long path)', S4, 'r$ = file_readalltext$(s$)');
+  Price('file_getsize (long path)', S4, 'n = file_getsize(s$)');
+  Price('dir_getfiles$ (long path)', S4, 'r$ = dir_getfiles$(s$)');
+  // --- lists -----------------------------------------------------------------
+  Price('strings_text (dense)', LD + LF + 'l@ = strings@()', 'n = strings_text(l@, ld$)');
+  Price('strings_text (50-byte)', LS + LF + 'l@ = strings@()', 'n = strings_text(l@, ls$)');
+  Price('strings_commatext (dense)', 'c$ = mulstring$("a,", 2000000)' + LF + 'l@ = strings@()', 'n = strings_commatext(l@, c$)');
+  Price('strings_commatext (50-byte)', 'c$ = mulstring$(string$(49, 120) + ",", 80000)' + LF + 'l@ = strings@()', 'n = strings_commatext(l@, c$)');
+  Price('strings_delimitedtext (dense)', 'c$ = mulstring$("a,", 2000000)' + LF + 'l@ = strings@()', 'n = strings_delimitedtext(l@, c$)');
+  Price('strings_delimitedtext (50-byte)', 'c$ = mulstring$(string$(49, 120) + ",", 80000)' + LF + 'l@ = strings@()', 'n = strings_delimitedtext(l@, c$)');
+  Price('strings_delimitedtext (quoted)', 'c$ = mulstring$(chr$(34) + "a b" + chr$(34) + ",", 1000000)' + LF + 'l@ = strings@()', 'n = strings_delimitedtext(l@, c$)');
+  Price('strings_text$ (dense)', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)', 'r$ = strings_text$(l@)');
+  Price('strings_text$ (50-byte)', LS + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ls$)', 'r$ = strings_text$(l@)');
+  Price('strings_commatext$ (dense)', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)', 'r$ = strings_commatext$(l@)');
+  Price('strings_delimitedtext$ (quoted)', 's$ = mulstring$("ab,c d" + chr$(10), 500000)' + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, s$)', 'r$ = strings_delimitedtext$(l@)');
+  Price('strings_delimitedtext$ (plain)', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)', 'r$ = strings_delimitedtext$(l@)');
+  Price('strings_indexof (absent)', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)', 'n = strings_indexof(l@, "zz")');
+  Price('strings_indexofname (absent)', 'k$ = mulstring$("k=v" + chr$(10), 1000000)' + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, k$)', 'n = strings_indexofname(l@, "zz")');
+  Price('strings_values$ (absent)', 'k$ = mulstring$("k=v" + chr$(10), 1000000)' + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, k$)', 'r$ = strings_values$(l@, "zz")');
+  Price('strings_insert (front)', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)', 'n = strings_insert(l@, 1, "x")' + LF + 'n = strings_delete(l@, 1)');
+  Price('strings_sort (sorted input)', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)', 'n = strings_sort(l@)');
+  Price('strings_equals', LD + LF + 'l@ = strings@()' + LF + 'n = strings_text(l@, ld$)' + LF + 'm@ = strings@()' + LF + 'n = strings_text(m@, ld$)', 'n = strings_equals(l@, m@)');
+  // --- dictionaries -----------------------------------------------------------
+  Price('dict_get (4 MB key)', S4 + LF + 'd@ = dict@()', 'n = dict_get(d@, s$)');
+  Price('dict_set@ (4 MB key)', S4 + LF + 'd@ = dict@()', 'd@ = dict_set@(d@, s$, 1)');
+  Price('dict_remove (front of 200000)', 'd@ = dict@()' + LF + 'for i = 1 to 200000' + LF + 'd@ = dict_set@(d@, "k" + str$(i), 1)' + LF + 'next', 'n = dict_remove(d@, "k1")' + LF + 'd@ = dict_set@(d@, "k1", 1)');
+  // --- json --------------------------------------------------------------------
+  Price('json_parse@ (numbers)', 'j$ = "[" + mulstring$("1,", 500000) + "1]"', 'j@ = json_parse@(j$)' + LF + 'n = json_free(j@)');
+  Price('json_parse@ (short strings)', 'j$ = "[" + mulstring$(chr$(34) + "abcdefgh" + chr$(34) + ",", 200000) + "1]"', 'j@ = json_parse@(j$)' + LF + 'n = json_free(j@)');
+  Price('json_parse@ (one long string)', 'j$ = "[" + chr$(34) + string$(4000000, 97) + chr$(34) + "]"', 'j@ = json_parse@(j$)' + LF + 'n = json_free(j@)');
+  Price('json_parse@ (csv in a string)', 'j$ = "{" + chr$(34) + "csv" + chr$(34) + ": " + chr$(34) + mulstring$("x,", 500000) + chr$(34) + "}"', 'j@ = json_parse@(j$)' + LF + 'n = json_free(j@)');
+  Price('json_clone@', 'j@ = json_parse@("[" + mulstring$("1,", 500000) + "1]")', 'c@ = json_clone@(j@)' + LF + 'n = json_free(c@)');
+  Price('json_stringify$', 'j@ = json_parse@("[" + mulstring$("123,", 500000) + "1]")', 'r$ = json_stringify$(j@)');
+  Price('json_value$ (a string)', 'j@ = json_parse@("[" + chr$(34) + string$(4000000, 97) + chr$(34) + "]")', 'r$ = json_value$(j@)');
+  Price('json_keys@', 'j@ = json_object@()' + LF + 'for i = 1 to 200000' + LF + 'j@ = json_setn@(j@, "k" + str$(i), 1)' + LF + 'next', 'k@ = json_keys@(j@)' + LF + 'n = json_free(k@)');
+  Price('json_removeat@ (front)', 'j@ = json_parse@("[" + mulstring$("1,", 1000000) + "1]")', 'j@ = json_removeat@(j@, 1)' + LF + 'j@ = json_pushn@(j@, 1)');
+  Price('json_remove@ (first member)', 'j@ = json_object@()' + LF + 'for i = 1 to 200000' + LF + 'j@ = json_setn@(j@, "k" + str$(i), 1)' + LF + 'next', 'j@ = json_remove@(j@, "k1")' + LF + 'j@ = json_setn@(j@, "k1", 1)');
+  Price('json_setn@ (replace first)', 'j@ = json_object@()' + LF + 'for i = 1 to 200000' + LF + 'j@ = json_setn@(j@, "k" + str$(i), 1)' + LF + 'next', 'j@ = json_setn@(j@, "k1", 2)');
+  Price('json_paths$ (long path)', 'j@ = json_parse@("{}")' + LF + S4, 'r$ = json_paths$(j@, s$)');
+  // --- buffers -----------------------------------------------------------------
+  Price('buffer_fill', 'b@ = buffer_new@(4000000)', 'n = buffer_fill(b@, 7)');
+  Price('buffer_slice$', 'b@ = buffer_new@(4000000)', 'r$ = buffer_slice$(b@, 1, 4000000)');
+  Price('buffer_write', 'b@ = buffer_new@(4000000)' + LF + S4, 'n = buffer_write(b@, 1, s$)');
+  Price('buffer_copy', 'b@ = buffer_new@(4000000)' + LF + 'c@ = buffer_new@(4000000)', 'n = buffer_copy(c@, 1, b@, 1, 4000000)');
+  Price('buffer_equal', 'b@ = buffer_new@(4000000)' + LF + 'c@ = buffer_new@(4000000)', 'n = buffer_equal(b@, c@)');
+  Price('buffer_fromstr@', S4, 'b@ = buffer_fromstr@(s$)' + LF + 'n = buffer_free(b@)');
+  Price('buffer_tostr$', 'b@ = buffer_new@(4000000)', 'r$ = buffer_tostr$(b@)');
+  Price('buffer_indexof (absent)', 'b@ = buffer_new@(4000000)', 'n = buffer_indexof(b@, "x")');
+  Price('buffer_indexof (every byte a hit)', 'b@ = buffer_new@(4000000)' + LF + 'n = buffer_fill(b@, 97)', 'n = buffer_indexof(b@, "ab")');
+  // --- crypto, encoders --------------------------------------------------------
+  Price('crypto_equal?', S4 + LF + 'u$ = string$(4000000, 97)', 'b? = crypto_equal?(s$, u$)');
+  Price('sha256$', S4, 'r$ = sha256$(s$)');
+  Price('md5$', S4, 'r$ = md5$(s$)');
+  Price('base64_encode$', S4, 'r$ = base64_encode$(s$)');
+  Price('base64_decode$', 'e$ = base64_encode$(string$(3000000, 97))', 'r$ = base64_decode$(e$)');
+  Price('hex_encode$', S4, 'r$ = hex_encode$(s$)');
+  Price('hex_decode$', 'e$ = hex_encode$(string$(2000000, 97))', 'r$ = hex_decode$(e$)');
+  Price('http_urlencode$', T4, 'r$ = http_urlencode$(t$)');
+  Price('http_urldecode$', 'e$ = mulstring$("a%20b", 800000)', 'r$ = http_urldecode$(e$)');
+  Price('http_htmlencode$', 'e$ = mulstring$("a<b", 1333333)', 'r$ = http_htmlencode$(e$)');
+  Price('http_htmldecode$', 'e$ = mulstring$("a&lt;b", 666666)', 'r$ = http_htmldecode$(e$)');
+  Price('gzip_compress$ (one byte repeated)', S4, 'r$ = gzip_compress$(s$)');
+  Price('gzip_compress$ (random bytes)', 'b@ = buffer_new@(1000000)' + LF +
+        'for j = 1 to 1000000' + LF + 'buffer_set(b@, j, int(rnd() * 256))' + LF + 'next' + LF +
+        'g$ = buffer_tostr$(b@)', 'r$ = gzip_compress$(g$)');
+  Price('gzip_compress$ (text)', T4, 'r$ = gzip_compress$(t$)');
+  // English: this tree's own reference, a few times over (run from the root).
+  Price('gzip_compress$ (english, 6)', 'e$ = mulstring$(file_readalltext$("docs/function-reference.md"), 3)', 'r$ = gzip_compress$(e$)');
+  Price('gzip_compress$ (english, 1)', 'e$ = mulstring$(file_readalltext$("docs/function-reference.md"), 3)', 'r$ = gzip_compress$(e$, 1)');
+  Price('gzip_compress$ (english, 9)', 'e$ = mulstring$(file_readalltext$("docs/function-reference.md"), 3)', 'r$ = gzip_compress$(e$, 9)');
+  Price('gzip_compress$ (text, 9)', T4, 'r$ = gzip_compress$(t$, 9)');
+  Price('gzip_compress$ (random, 9)', 'b@ = buffer_new@(1000000)' + LF +
+        'for j = 1 to 1000000' + LF + 'buffer_set(b@, j, int(rnd() * 256))' + LF + 'next' + LF +
+        'g$ = buffer_tostr$(b@)', 'r$ = gzip_compress$(g$, 9)');
+  Price('gzip_compress$ (one byte, 1)', S4, 'r$ = gzip_compress$(s$, 1)');
+  Price('gzip_decompress$ (text)', T4 + LF + 'z$ = gzip_compress$(t$)', 'r$ = gzip_decompress$(z$)');
+  // --- config ------------------------------------------------------------------
+  Price('cfg_sets@ (4 MB value)', 'c@ = cfg_open@("")' + LF + S4, 'c@ = cfg_sets@(c@, "k", s$)');
+  Price('cfg_gets$ (4 MB value)', 'c@ = cfg_open@("")' + LF + S4 + LF + 'c@ = cfg_sets@(c@, "k", s$)', 'r$ = cfg_gets$(c@, "k", "")');
+  Price('formatsettings$', S4, 'r$ = formatsettings$(s$)');
+  Price('color', S4, 'n = color(s$)');
+  // --- rag -----------------------------------------------------------------------
+  Price('rag_analyze$ (a 4 MB query)', 'r@ = rag@("")' + LF + T4, 'a$ = rag_analyze$(r@, t$)');
+  Price('rag_retrieve$ (a 4 MB query)', 'r@ = rag@("")' + LF + T4, 'a$ = rag_retrieve$(r@, t$)');
+  Price('rag_functions$ (a 4 MB list)', 'r@ = rag@("")' + LF + T4, 'a$ = rag_functions$(r@, t$)');
+  Price('rag_tags$ (a 4 MB list)', 'r@ = rag@("")' + LF + 's$ = mulstring$("tag,", 1000000)', 'a$ = rag_tags$(r@, s$)');
+  // ...and against an index: 200 documents of 50 tags and 50 functions each,
+  // so the products the price names are what the work is.
+  Price('rag_functions$ (1000 names, 200 docs)', RagKb + LF +
+        'q$ = ""' + LF + 'for j = 1 to 1000' + LF + 'q$ = q$ + "nf" + str$(j) + " "' + LF + 'next',
+        'a$ = rag_functions$(r@, q$)');
+  Price('rag_tags$ (1000 tags, 200 docs)', RagKb + LF +
+        'q$ = ""' + LF + 'for j = 1 to 1000' + LF + 'q$ = q$ + "nt" + str$(j) + ","' + LF + 'next',
+        'a$ = rag_tags$(r@, q$)');
+  Price('rag_retrieve$ (1000 words, 200 docs)', RagKb + LF +
+        'q$ = ""' + LF + 'for j = 1 to 1000' + LF + 'q$ = q$ + "word" + str$(j) + " "' + LF + 'next',
+        'a$ = rag_retrieve$(r@, q$)');
+  Price('rag_rebuild@ (200 docs)', RagKb, 'r@ = rag_rebuild@(r@)');
+  Writeln(Format('price sweep: %d rows, %d outside the bound', [PriceRows, PriceBad]));
+end;
+
+begin
+  if (ParamCount >= 1) and (ParamStr(1) = '--prices') then
+  begin
+    if ParamCount >= 2 then PriceFilter := ParamStr(2);
+    RunPrices();
+    if PriceBad > 0 then Halt(1) else Halt(0);
+  end;
   ProveFail := (ParamCount >= 1) and (ParamStr(1) = '--fail');
 
   // Step budget bounds an infinite loop.
@@ -1785,8 +2439,10 @@ begin
            100000, 0, 'dict_haskey: that would take 128000 units of work and only 24000 are left');
   // strings_values$ is metered per line: NAMEITEM 4096 + 2 bytes of name at
   // COPY 128 = 4352 milli a line, 435200 units a call over 100000 lines. The
-  // list costs mulstring$'s 400000 and strings_text's 400000 * 2.08 = 832000;
-  // 24368000 left buys 55 calls (23936000), and the 56th latches mid-walk.
+  // list costs mulstring$'s 400000 and strings_text's SCAN 32000 + 100001
+  // pieces at 4352 (435205) + COPY 51200 = 518405 (round 8; it was TEXT,
+  // 832000); 24681595 left buys 56 calls (24371200), and the 57th latches
+  // mid-walk.
   CheckMsg('strings_values$ is metered per line',
            'l@ = strings@()' + LF +
            'n = strings_text(l@, mulstring$("k=v" + chr$(10), 100000))' + LF +
@@ -1827,20 +2483,28 @@ begin
              1000000, 2000, 'dict_get: ', 3000);
   { JsonText's swallowed refusal: json_value$ of a 30 MB array answered "" on its
     eighth call and the run reported success. A render the budget stops is now
-    the peLimit of the function that asked for it. }
+    the peLimit of the function that asked for it.
+
+    RE-DERIVED IN ROUND 8, when a rendered byte stopped costing a whole unit
+    (7.8 ns; it measures under 2) and costs JsonRenderMilliPerByte, 320: the
+    string$ is 30000000 units and the parse SCAN + BYTE 2 * 30000004 = about
+    60000008, leaving about 166M; a render is 30000004 * 0.32 = 9600002, so
+    the eighth no longer reaches the line and the 18th does. Step-only, so it
+    is the budget that stops the render and not whichever clock reads first. }
   CheckTimed('json_value$ reports a render the budget stopped',
              's$ = "[" + chr$(34) + string$(30000000, 97) + chr$(34) + "]"' + LF +
-             'j@ = json_parse@(s$)' + LF + Loop(8, 'v$ = json_value$(j@)'),
-             1000000, 2000, 'json_value$: ', 3000);
+             'j@ = json_parse@(s$)' + LF + Loop(40, 'v$ = json_value$(j@)'),
+             1000000, 0, 'json_value$: ', 3000);
   { rag_analyze$, now LINEAR (its dedup was quadratic) and priced by the query:
     40000 words "w1 w2 ..." are 268894 bytes (188894 digits, 40000 w's and a
-    separator after each), at RagAnalyzeMilliPerByte 1216000 = 326975104
-    units: more than the whole 256000000 allowance, so it is refused up front. }
+    separator after each), at RagAnalyzeMilliPerByte 1000000 (round 8; it was
+    1216000) = 268894000 units: more than the whole 256000000 allowance, so it
+    is refused up front. }
   CheckTimed('rag_analyze$ of a 40000-word query is refused up front',
              'l@ = strings@()' + LF + Loop(40000, 'n = strings_add(l@, "w" + str$(i))') +
              'n = strings_linebreak(l@, " ")' + LF + 'q$ = strings_text$(l@)' + LF +
              'r@ = rag@("")' + LF + 'a$ = rag_analyze$(r@, q$)' + LF,
-             1000000, 2000, 'rag_analyze$: that would take 326975104 units', 3000);
+             1000000, 2000, 'rag_analyze$: that would take 268894000 units', 3000);
 
   { AND THE LEGITIMATE CALLS OF ORDINARY SIZE STILL RUN, under the pair, and
     quickly. strings_delimitedtext was QUADRATIC: one call on four megabytes
@@ -1875,7 +2539,7 @@ begin
   { The two other quadratics, at a size the budget ALLOWS -- so only their
     speed can fail these. rag_analyze$ deduplicated by scanning everything kept
     (20000 "$" words: 2891 ms, past the clock); a query of them is 148894 bytes,
-    181 million units at RagAnalyzeMilliPerByte, inside the allowance, and runs
+    149 million units at RagAnalyzeMilliPerByte, inside the allowance, and runs
     in under a second now. wordcount's SplitBy reallocated its slots once per
     piece (4 million pieces: about 2 s; ten million: 12197 ms). }
   CheckQuick('rag_analyze$ of 20000 distinct words is linear',
@@ -1897,8 +2561,9 @@ begin
              'if wordcount(mulstring$("a,", 4000000), ",") <> 4000001 then x = 1 / 0' + LF,
              1000000, 2000, 1500);
   { Every file operation prices its PATH at the door (IoGate): a 50 MB path is
-    53200000 units at the OS rate, so the fourth file_exists of one is refused
-    -- and it is REPORTED, as file_exists's peLimit, not answered 0. }
+    10800000 units at the REWRITE rate (round 8; it was the OS rate), and after
+    string$'s 50000000 the 20th file_exists of one is refused -- and it is
+    REPORTED, as file_exists's peLimit, not answered 0. }
   CheckTimed('file_exists x200 of a 50 MB path stops at the ceiling',
              'r$ = string$(50000000, 97)' + LF + Loop(200, 'n = file_exists(r$)'),
              1000000, 2000, 'file_exists: ', 3000);
@@ -1906,6 +2571,8 @@ begin
              'b? = funcexists?(string$(50000000, 97))' + LF +
              'if b? = true then x = 1 / 0' + LF,
              1000000, 2000, 1500);
+
+  CheckRound8();
 
   { --- a fault in the interpreter; see the section above --------------------- }
 

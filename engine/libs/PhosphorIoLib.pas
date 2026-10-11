@@ -76,8 +76,12 @@ var
 { THE PATH IS PRICED HERE, AT THE ONE DOOR EVERY FILE OPERATION PASSES (round
   7). SandboxAllows reads the whole path -- a NUL scan, a trim, a walk of its
   components -- and the RTL hands it to the OS as a wide string after that, so a
-  file call is linear in its path, which a script can make 50 MB long. Priced at
-  the OS rate, before the gate reads it. A refusal is the walk's: GWalkSpent is
+  file call is linear in its path, which a script can make 50 MB long. Priced
+  before the gate reads it -- at the REWRITE rate since round 8, which is what
+  the gate and a failing system call measured (1.3 to 2.2 ns a byte across
+  file_exists, dir_exists, file_readalltext$ and file_getsize); the OS rate it
+  had was path_getfullpath$'s, a call that does far more with the path, and
+  charged these 6.5 times their cost. A refusal is the walk's: GWalkSpent is
   set, so every operation that reports a walk (WalkRefused) reports this as the
   peLimit it is, and the rest answer 0 with the run's budget refusing next. }
 function IoGate(const APath: String; AUse: TPathUse): Boolean;
@@ -89,7 +93,7 @@ begin
     the disk exactly then), and bounds what an unpriced call can cost to 4096
     bytes of path. A longer path is priced WHOLE -- no OS accepts one past 32767
     UTF-16 units, but the gate and the conversion read it all first. }
-  if (Length(APath) > IoPathFreeBytes) and not BudgetLinear(Length(APath), BudgetMilliOs) then
+  if (Length(APath) > IoPathFreeBytes) and not BudgetLinear(Length(APath), BudgetMilliRewrite) then
   begin
     GWalkSpent := True;
     GPathPriced := True;
@@ -328,7 +332,11 @@ function t_path_changeextension(const Args: array of TValue; out Err: TPhosphorE
 var p, ext: String; sep, dot: Integer;
 begin
   Err := NoError(); p := Args[0].Str; ext := Args[1].Str;
-  if not PathOk('path_changeextension$', p + ext, Err) then Exit(ValStr(''));
+  { Two copies (the stem, then the stem and the extension) after the backward
+    scans. It was priced as ONE copy of `p + ext` -- a copy it made just to ask
+    the price, and then made twice more (round 8, measured at 2.2x its price). }
+  if not BudgetLinearOk('path_changeextension$', 2 * (Int64(Length(p)) + Length(ext)),
+                        BudgetMilliCopy, Err) then Exit(ValStr(''));
   sep := LastSep(p);
   dot := LastDotAfter(p, sep);
   if dot > 0 then Result := ValStr(Copy(p, 1, dot - 1) + ext) else Result := ValStr(p + ext);
@@ -389,22 +397,34 @@ end;
   the counter is the number of character comparisons actually made, and a run
   whose budget is spent stops and says so through GWalkSpent, exactly as the
   directory walk does. With no budget installed BudgetCharge answers True on its
-  first line and this is a plain matcher again. }
+  first line and this is a plain matcher again.
+
+  THE CASE FOLD IS PER COMPARISON, NOT A PASS (round 8). The lenient form began
+  `n := LowerCase(AName); p := LowerCase(APattern)` -- two copies of both
+  strings, made before the loop that charges, and charged by nothing. With the
+  pattern "x" against a name of a's, the first comparison fails, the loop ends
+  without a tick, and 2000 calls on a 100 MB name ran 45859 ms under a 2000 ms
+  ceiling (step-only: success). SysUtils.LowerCase folds A..Z and nothing else,
+  byte by byte, so folding each byte as it is compared answers exactly what
+  comparing the two folded copies answered -- and the only work left is the
+  comparisons, which the loop already charges. The trailing run of stars is
+  walked under the same meter. }
+function FoldGlob(C: Char; AFold: Boolean): Char; inline;
+begin
+  if AFold and (C >= 'A') and (C <= 'Z') then Result := Chr(Ord(C) + 32)
+  else Result := C;
+end;
+
 function MatchGlob(const AName, APattern: String; ACaseSensitive: Boolean): Boolean;
 var
-  n, p: String;
   ni, pi, starPi, starNi, ln, lp: Integer;
   ticks: Int64;
-begin
-  if ACaseSensitive then begin n := AName; p := APattern; end
-  else begin n := LowerCase(AName); p := LowerCase(APattern); end;
-  ln := Length(n);
-  lp := Length(p);
-  ni := 1; pi := 1;
-  starPi := 0; starNi := 0;
-  ticks := 0;
-  while ni <= ln do
+  fold: Boolean;
+
+  { One comparison's worth of work, charged in blocks; False = stop. }
+  function Tick: Boolean;
   begin
+    Result := True;
     Inc(ticks);
     if ticks >= BudgetClockEvery then
     begin
@@ -416,19 +436,32 @@ begin
         Exit(False);
       end;
     end;
+  end;
+
+begin
+  fold := not ACaseSensitive;
+  ln := Length(AName);
+  lp := Length(APattern);
+  ni := 1; pi := 1;
+  starPi := 0; starNi := 0;
+  ticks := 0;
+  while ni <= ln do
+  begin
+    if not Tick() then Exit(False);
     // '*' is tested FIRST. Round two tested the literal/'?' comparison first,
     // and a pattern '*' landing on a name byte that is itself '*' was consumed
     // as a literal pair with no star remembered: path_matchespattern("*a","*")
     // answered 0. A name may legally contain '*' (dir_getfiles$ on Linux), so
     // the star branch must win the tie. 100 of 7225 length-0..3 cases over
     // {a,b,*,?} were wrong before this reordering; 0 of 7225 after it.
-    if (pi <= lp) and (p[pi] = '*') then
+    if (pi <= lp) and (APattern[pi] = '*') then
     begin
       starPi := pi;
       starNi := ni;
       Inc(pi);
     end
-    else if (pi <= lp) and ((p[pi] = '?') or (p[pi] = n[ni])) then
+    else if (pi <= lp) and ((APattern[pi] = '?') or
+                            (FoldGlob(APattern[pi], fold) = FoldGlob(AName[ni], fold))) then
     begin
       Inc(ni); Inc(pi);
     end
@@ -442,7 +475,11 @@ begin
     else
       Exit(False);
   end;
-  while (pi <= lp) and (p[pi] = '*') do Inc(pi);
+  while (pi <= lp) and (APattern[pi] = '*') do
+  begin
+    if not Tick() then Exit(False);
+    Inc(pi);
+  end;
   Result := pi > lp;
 end;
 
@@ -832,6 +869,9 @@ begin
   WalkBegin();
   ReadAllBytes(Args[0].Str, s);
   if WalkRefused('file_appendalltext', Err) then Exit(ValInt(0));
+  // ...and the joined text is a copy of both, made before the write asks.
+  if not BudgetLinearOk('file_appendalltext', Int64(Length(s)) + Length(Args[1].Str),
+                        BudgetMilliMove, Err) then Exit(ValInt(0));
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, s + Args[1].Str)));
   if WalkRefused('file_appendalltext', Err) then Result := ValInt(0);
 end;
@@ -923,9 +963,17 @@ begin
 end;
 
 // --- path extras ------------------------------------------------------------
+{ PRICED BY WHAT IT COPIES (round 8). Each Combine2 is a fresh string holding
+  both halves, and the three-part form makes two -- the first pair copied twice.
+  It priced nothing: 2000 calls on a 100 MB path ran 19641 ms under a 2000 ms
+  ceiling. }
 function t_path_combine(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var copied: Int64;
 begin
   Err := NoError();
+  copied := Int64(Length(Args[0].Str)) + Length(Args[1].Str);
+  if Length(Args) >= 3 then copied := 2 * copied + Length(Args[2].Str);
+  if not BudgetLinearOk('path_combine$', copied, BudgetMilliMove, Err) then Exit(ValStr(''));
   if Length(Args) >= 3 then Result := ValStr(Combine2(Combine2(Args[0].Str, Args[1].Str), Args[2].Str))
   else Result := ValStr(Combine2(Args[0].Str, Args[1].Str));
 end;
@@ -979,16 +1027,25 @@ begin
   Result := ValInt(Ord(MatchGlob(Args[0].Str, Args[1].Str, cs)));
   if WalkRefused('path_matchespattern', Err) then Result := ValInt(0);
 end;
+{ ONE TEST A BYTE, two loops (round 8). The file form tested Ord(c) < 32 and
+  then a nine-element set on every byte -- about 2 ns a byte against the SCAN
+  price of 0.625 that both forms were charged, so a step-only host ran 2.7
+  times past its ceiling. One set test a byte measured 1.6 ns, which is still
+  not a SCAN, so the file form is priced at the REWRITE rate it measures at;
+  the path form, one compare a byte, stays a SCAN. The answer is the same byte
+  for byte. }
 function HasValidChars(const S: String; AForFile: Boolean): Boolean;
-var i: Integer; c: Char;
+var i: Integer;
 begin
   Result := True;
-  for i := 1 to Length(S) do
+  if AForFile then
   begin
-    c := S[i];
-    if Ord(c) < 32 then Exit(False);
-    if AForFile and (c in ['/', '\', ':', '*', '?', '"', '<', '>', '|']) then Exit(False);
-  end;
+    for i := 1 to Length(S) do
+      if S[i] in [#0..#31, '/', '\', ':', '*', '?', '"', '<', '>', '|'] then Exit(False);
+  end
+  else
+    for i := 1 to Length(S) do
+      if S[i] < #32 then Exit(False);
 end;
 function t_path_hasvalidpathchars(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -1000,7 +1057,7 @@ end;
 function t_path_hasvalidfilenamechars(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not BudgetLinearOk('path_hasvalidfilenamechars', Length(Args[0].Str), BudgetMilliScan, Err) then
+  if not BudgetLinearOk('path_hasvalidfilenamechars', Length(Args[0].Str), BudgetMilliRewrite, Err) then
     Exit(ValInt(0));
   Result := ValInt(Ord(HasValidChars(Args[0].Str, True)));
 end;

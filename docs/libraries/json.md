@@ -104,7 +104,7 @@ JSON reader stops at 64.
 | `json_set@(o@, key$, v@) → handle` | `o@`, with `key$` set to a **clone** of `v@`. That is how a nested object or array is attached |
 | `json_setval@(o@, key$, value) → handle` | the same, with the JSON kind chosen from the value's runtime kind (number, string, bool, handle). This is what a `{ }` literal compiles into; a handle that is not a JSON value is an error |
 | `json_remove@(o@, key$) → handle` | `o@` without `key$`. A key that was not there is **not** an error — the answer is the same object either way, so removal is idempotent |
-| `json_merge@(dst@, src@) → handle` | `dst@` with a clone of each of `src@`'s members copied in, overwriting on a name collision. `src@` is untouched. Either side not an object is an error, and so is **overlap** — one value inside the other, or the two being the same value: a merge that would destroy its own source has no result worth naming |
+| `json_merge@(dst@, src@) → handle` | `dst@` with a clone of each of `src@`'s members copied in, overwriting on a name collision. `src@` is untouched. Either side not an object is an error, and so is **overlap** — one value inside the other, or the two being the same value: a merge that would destroy its own source has no result worth naming. Under a host's execution budget the whole merge is priced before the first member is copied, so a refused merge copies **none** of them |
 
 ### Objects — reading
 
@@ -131,7 +131,7 @@ refused with `json value is not an array`.
 | `json_pushnull@(a@) → handle` | `a@`, one null longer |
 | `json_push@(a@, v@) → handle` | `a@` with a **clone** of `v@` appended — an object goes in whole |
 | `json_pushval@(a@, value) → handle` | the same, with the kind taken from the value's runtime kind; what a `[ ]` literal compiles into |
-| `json_removeat@(a@, i) → handle` | `a@` without element `i`, the rest shifted down. An index outside `1..json_len` removes nothing and is **not** an error |
+| `json_removeat@(a@, i) → handle` | `a@` without element `i`, the rest shifted down. An index outside `1..json_len` removes nothing and is **not** an error. Under a host's execution budget the shift is priced by the elements it moves — removing from the front of a large array costs what moving it does, from the end nothing — and a refused removal removes nothing |
 | `json_pop@(a@) → handle` | `a@` without its last element. On an empty array it does nothing, and still answers the array |
 
 ### Arrays — reading (1-based)

@@ -199,6 +199,10 @@ type
   TZipWriter = class
     Z: TZipper;
     Owned: TList;
+    { The bytes its entries hold, kept as they are added -- the disk entry's
+      size read where its path is gated -- so zip_close can price the deflate
+      without touching the disk again (round 8). }
+    Bytes: Int64;
     constructor Create(const APath: String);
     destructor Destroy; override;
     procedure AddFile(const ADisk, AArchive: String);
@@ -525,6 +529,7 @@ begin
 end;
 
 procedure TZipWriter.AddFile(const ADisk, AArchive: String);
+var sr: TSearchRec;
 begin
   // Checked HERE, at the call the program can still react to. AddFileEntry only
   // records a name: a missing file was reported as a successful add and only failed
@@ -535,6 +540,11 @@ begin
   if not FileExists(ADisk) then
     raise EInOutError.Create('zip_addfile: "' + ADisk + '" does not exist');
   CheckEntryName('zip_addfile', AArchive);
+  if FindFirst(ADisk, faAnyFile, sr) = 0 then
+  begin
+    Bytes := Bytes + sr.Size;
+    FindClose(sr);
+  end;
   Z.Entries.AddFileEntry(ADisk, AArchive);
 end;
 
@@ -548,6 +558,7 @@ begin
   if Length(AContent) > 0 then ms.WriteBuffer(AContent[1], Length(AContent));
   ms.Position := 0;
   Owned.Add(ms);
+  Bytes := Bytes + Length(AContent);
   Z.Entries.AddFileEntry(ms, AArchive);
 end;
 
@@ -696,6 +707,29 @@ end;
 
 // --- whole-archive functions (unchanged) ------------------------------------
 { Byte-wise, case-sensitive: the same order on every filesystem. }
+{ DEFLATING AN ARCHIVE IS PRICED LIKE gzip_compress$ (round 8): it asked nothing
+  for the bytes it compressed -- zip_compress charged a step per directory
+  entry and zip_close nothing at all, so a folder holding one gigabyte file was
+  a gigabyte deflated inside one opCall. The deflate's cost varies tenfold with
+  the data (see PhosphorGzipLib), so it is asked for the FLOOR, the cheapest
+  input there is, before it starts -- which refuses a huge archive before a byte
+  is written -- and charged the wall time it took, less that floor, once it is
+  done. The archive is written by then, so that charge does not undo it: it
+  latches the budget, and whatever the script asks next is refused. }
+const
+  ZipFloorMilli = 512;
+
+{ The deflate's time beyond its floor, charged; the answer is ignored on
+  purpose -- see above. }
+procedure DeflateTook(AStart: QWord; ABytes: Int64);
+var extra: Int64;
+begin
+  if not BudgetActive() then Exit;
+  extra := Int64(GetTickCount64() - AStart) * BudgetUnitsPerMsOfWork -
+           BudgetMilliUnits(ABytes, ZipFloorMilli);
+  if extra > 0 then BudgetCharge(extra);
+end;
+
 function CompareNameBytes(AList: TStringList; A, B: Integer): Integer;
 begin
   Result := CompareStr(AList[A], AList[B]);
@@ -703,9 +737,14 @@ end;
 
 function f_zip_compress(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var z: TZipper; sr: TSearchRec; base: String; names: TStringList; i: Integer;
+    bytes: Int64; t0: QWord;
 begin
   Err := NoError();
   Result := ValInt(0);
+  // Both paths are the script's, read by the gate and named in every file the
+  // walk opens: priced once, before either is touched (round 8).
+  if not BudgetLinearOk('zip_compress', Int64(Length(Args[0].Str)) + Length(Args[1].Str),
+                        BudgetMilliOs, Err) then Exit;
   { TWO PATHS, SO TWO QUESTIONS, EACH WITH THE VERB ITS PATH DESERVES. Only
     Args[1], the source directory, was ever asked about. Args[0] is the archive
     this WRITES, and it went straight to TZipper.FileName -- so a run confined by
@@ -738,20 +777,26 @@ begin
       // unzip_entry$(z$, 1) answered a different file. A byte order is arbitrary,
       // but it is the same arbitrary order everywhere.
       names := TStringList.Create();
+      bytes := 0;
       try
         if FindFirst(base + '*', faAnyFile, sr) = 0 then
         try
           repeat
             // The same directory walk IoLib charges, and for the same reason: the
             // filesystem decides how many iterations this is, not the argument.
+            { The two finally blocks around this close the search and free the
+              list on the way out; this branch used to do both itself as well,
+              so a refused walk freed the list TWICE (round 8, read). }
             if not BudgetCharge(BudgetUnitsPerStep) then
             begin
               Err := BudgetRefusal('zip_compress');
-              FindClose(sr);
-              names.Free;
               Exit(ValInt(0));
             end;
-            if (sr.Attr and faDirectory) = 0 then names.Add(sr.Name);
+            if (sr.Attr and faDirectory) = 0 then
+            begin
+              names.Add(sr.Name);
+              bytes := bytes + sr.Size;
+            end;
           until FindNext(sr) <> 0;
         finally
           FindClose(sr);
@@ -775,8 +820,7 @@ begin
           if not SandboxAllows(base + names[i], puRead) then
           begin
             ZipErr := 1;
-            names.Free;
-            Exit(ValInt(0));
+            Exit(ValInt(0));       // the finally below frees the list, once
           end;
           z.Entries.AddFileEntry(base + names[i], names[i]);
         end;
@@ -790,7 +834,11 @@ begin
       // that is genuinely empty, and one holding only subdirectories, which this
       // function deliberately does not descend into.
       if z.Entries.Count = 0 then begin ZipErr := 1; Exit(ValInt(0)); end;
+      if not BudgetLinearOk('zip_compress', bytes, ZipFloorMilli, Err) then
+      begin ZipErr := 1; Exit(ValInt(0)); end;
+      t0 := GetTickCount64();
       z.ZipAllFiles;
+      DeflateTook(t0, bytes);
       Result := ValInt(1);
       ZipErr := 0;
     finally
@@ -1452,7 +1500,10 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetWriter(Args[0].Hnd, w) then begin ZipErr := 1; Exit; end;
-  // Args[1] is a path ON DISK being read into the archive.
+  // Args[1] is a path ON DISK being read into the archive -- the script's,
+  // checked and kept with its archive name: priced once (round 8).
+  if not BudgetLinearOk('zip_addfile', Int64(Length(Args[1].Str)) + Length(Args[2].Str),
+                        BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(Args[1].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     w.AddFile(Args[1].Str, Args[2].Str);
@@ -1470,6 +1521,9 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetWriter(Args[0].Hnd, w) then begin ZipErr := 1; Exit; end;
+  // The content is copied into the writer's own stream (round 8: unpriced).
+  if not BudgetLinearOk('zip_addstr', Int64(Length(Args[1].Str)) + Length(Args[2].Str),
+                        BudgetMilliMove, Err) then Exit;
   try
     w.AddStr(Args[1].Str, Args[2].Str);
     Result := ValInt(1);
@@ -1481,7 +1535,7 @@ begin
 end;
 
 function f_zip_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var w: TZipWriter; r: TZipReader; wrote: Boolean;
+var w: TZipWriter; r: TZipReader; wrote: Boolean; bytes: Int64; t0: QWord;
 begin
   Err := NoError();
   Result := ValInt(0);
@@ -1493,7 +1547,18 @@ begin
       // left a 0-byte file (see TZipWriter.Save) -- a program acting on that 1
       // reports a backup that does not exist. The handle is released either way,
       // so nothing leaks and a second close still reports itself as a stale one.
+      { The deflate's floor, asked before anything is written: a refused close
+        writes no archive (and still releases the writer, as every close does). }
+      bytes := w.Bytes;
+      if not BudgetLinearOk('zip_close', bytes, ZipFloorMilli, Err) then
+      begin
+        FreeHandle(Args[0].Hnd);
+        ZipErr := 1;
+        Exit;
+      end;
+      t0 := GetTickCount64();
       wrote := w.Save();               // flush the archive to disk before releasing
+      DeflateTook(t0, bytes);
       FreeHandle(Args[0].Hnd);
       if wrote then
       begin

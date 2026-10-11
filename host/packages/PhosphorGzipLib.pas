@@ -252,19 +252,54 @@ end;
 // --- bound functions --------------------------------------------------------
 { DEFLATE IS PRICED BY ITS INPUT (round 7). Measured (-O2, no ceilings, 2 MB):
   random bytes 29 ns a byte, English-like text 42 ns at level 6 and 76 ns at
-  level 9 -- the level-9 lazy matcher walks longer chains. Priced at 80 ns
-  whatever the level, on the budget's clock scale (128 milli-units a ns). The
-  CRC pass is in the same price. Decompression is metered by what it writes. }
+  level 9 -- the level-9 lazy matcher walks longer chains. It was priced at
+  80 ns a byte whatever the level and whatever the data.
+
+  AND THE DATA DECIDES IT TENFOLD, SO IT IS CHARGED WHAT IT TOOK (round 8). The
+  price sweep (tests/probe_limits.lpr --prices) measured, per input byte: one
+  byte repeated 3.3 ns at level 1, a repetitive text 7 ns, this tree's own
+  reference 14.5 / 36 / 50 ns at levels 1 / 6 / 9, random bytes 28-30 ns at
+  every level -- so the 80 ns price charged a log file eleven times what
+  compressing it cost, and no single per-byte price can sit within a factor of
+  two of all of them. So the deflate is asked, up front, for the FLOOR -- the
+  cheapest input there is, GzipFloorMilli -- which still refuses a gigabyte
+  before a byte is compressed, and is then charged the wall time it actually
+  took, less the floor already paid, the moment it returns. That is the
+  budget's own scale (BudgetUnitsPerMsOfWork a millisecond), and it is the rule
+  the HTTP package already follows for a wait on the network: work that cannot
+  be sized is charged as it is measured. An overrun is at most one call, and
+  the charge latches the budget for the next. The CRC pass is in the time.
+  Decompression is metered by what it writes. }
 const
-  GzipMilliPerByte = 10240;
+  GzipFloorMilli = 384;
+
+{ The time a deflate took, beyond the floor it was asked for. False = the budget
+  is spent (latched); the deflate's answer is then not handed back. }
+function DeflateCharged(const AWho: String; AStart: QWord; ABytes: Int64;
+                        var Err: TPhosphorError): Boolean;
+var took, extra: Int64;
+begin
+  Result := True;
+  if not BudgetActive() then Exit;
+  took := Int64(GetTickCount64() - AStart);
+  extra := took * BudgetUnitsPerMsOfWork - BudgetMilliUnits(ABytes, GzipFloorMilli);
+  if (extra > 0) and not BudgetCharge(extra) then
+  begin
+    Err := BudgetRefusal(AWho);
+    Result := False;
+  end;
+end;
 
 function f_gzip_compress(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var t0: QWord;
 begin
   Err := NoError();
-  if not BudgetLinearOk('gzip_compress$', Length(Args[0].Str), GzipMilliPerByte, Err) then
+  if not BudgetLinearOk('gzip_compress$', Length(Args[0].Str), GzipFloorMilli, Err) then
     Exit(ValStr(''));
   try
+    t0 := GetTickCount64();
     Result := ValStr(GzipWrap(Args[0].Str, 6));
+    if not DeflateCharged('gzip_compress$', t0, Length(Args[0].Str), Err) then Exit(ValStr(''));
     GzipErr := 0;
   except
     Result := ValStr('');
@@ -273,12 +308,15 @@ begin
 end;
 
 function f_gzip_compress_lvl(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var t0: QWord;
 begin
   Err := NoError();
-  if not BudgetLinearOk('gzip_compress$', Length(Args[0].Str), GzipMilliPerByte, Err) then
+  if not BudgetLinearOk('gzip_compress$', Length(Args[0].Str), GzipFloorMilli, Err) then
     Exit(ValStr(''));
   try
+    t0 := GetTickCount64();
     Result := ValStr(GzipWrap(Args[0].Str, ArgI32(Args[1])));
+    if not DeflateCharged('gzip_compress$', t0, Length(Args[0].Str), Err) then Exit(ValStr(''));
     GzipErr := 0;
   except
     Result := ValStr('');
@@ -316,14 +354,19 @@ end;
 
 function DoCompressFile(const Src, Dst: String; ALevel: Integer;
                         var Err: TPhosphorError): Boolean;
-var raw: RawByteString;
+var raw, gz: RawByteString; t0: QWord;
 begin
   Result := False;
   if not LoadFileStr(Src, raw) then Exit;
-  // The read, charged for what it read; then the deflate, asked before it runs.
+  // The read, charged for what it read; then the deflate's floor, asked before
+  // it runs, and its time once it has -- and nothing is written if that is
+  // refused.
   if not (BudgetLinearAfterOk('gzip_compressfile', Length(raw), BudgetMilliCopy, Err) and
-          BudgetLinearOk('gzip_compressfile', Length(raw), GzipMilliPerByte, Err)) then Exit;
-  Result := SaveFileStr(Dst, GzipWrap(raw, ALevel));
+          BudgetLinearOk('gzip_compressfile', Length(raw), GzipFloorMilli, Err)) then Exit;
+  t0 := GetTickCount64();
+  gz := GzipWrap(raw, ALevel);
+  if not DeflateCharged('gzip_compressfile', t0, Length(raw), Err) then Exit;
+  Result := SaveFileStr(Dst, gz);
 end;
 
 function f_gzip_compressfile(const Args: array of TValue; out Err: TPhosphorError): TValue;

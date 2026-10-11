@@ -313,13 +313,6 @@ ALLOWED = {
     # scanned by this gate (see the note at the top), so the entry would be stale
     # rather than protective; the reason it was exempt is unchanged -- one entry
     # per byte of a string already in memory, trimmed to the count found.
-    'PhosphorStrListLib.pas:TPhosphorStringList.SetDelimitedText':
-        'ONE field buffer, the length of the input, allocated once; each field is '
-        'copied out of it at its own length. Until round 7 this reason read "the '
-        'field buffer is trimmed to the field it just read" -- true, and beside '
-        'the point: the buffer was sized to the REST of the input once per '
-        'field, which is quadratic (19484 ms for one 4 MB call). Its caller '
-        'prices the split per byte (linear pass)',
     'PhosphorBase64Lib.pas:f_hex_decode':
         'exactly half the input length, trimmed to the pairs actually decoded',
     'PhosphorHttpLib.pas:DoUrlDecode':
@@ -551,6 +544,9 @@ ALLOWED = {
         '`Result := Result + ...` as a string append',
     'PhosphorRagLib.pas:IndexNames':
         'the same integer sum, over the documents\' tag counts',
+    'PhosphorRagLib.pas:TPhosphorRag.TagTotal':
+        'the same integer sum, over the documents\' tag counts (round 8: what '
+        'rag_tags$ is priced by)',
 
     # ---- A WAIT ON THE USER, which is what a key read IS ---------------------
     # Written down rather than hidden, like the sqlite note above. KbdRead's loop
@@ -765,6 +761,11 @@ def param_taint(body):
         return out
     for part in m.group(1).split(';'):
         if not NUMPARAM.search(part):
+            continue
+        # An `out` parameter carries nothing IN: it is a result, and a loop that
+        # counts it up to a bound is judged by the bound (ReadColorLiteral's
+        # AStop, round 8). Whatever is assigned to it is still read by flow().
+        if re.match(r'\s*out\b', part, re.I):
             continue
         for nm in NAMES.findall(DECOR.sub(' ', part.split(':')[0])):
             out.add(nm)
@@ -1129,6 +1130,50 @@ LIN_HANDLECLASS = [re.compile(r'HandleObj\s*\([^;]*?\)\s*\)?\s*is\s+(T[A-Za-z0-9
                    re.compile(r'\b(T[A-Za-z0-9_]+)\s*\(\s*HandleObj\b')]
 LIN_STRSRC = re.compile(r'\.\s*Str\b|\bHandleObj\s*\(|\bArgStr\s*\(', re.I)
 LIN_REGISTER = re.compile(r'\b(?:Add|AddHost)\s*\([^;]*?,\s*@\s*([A-Za-z_]\w*)\s*\)')
+# The same registration read off the RAW text, with its signature literal:
+# 'name:sig' -- or a computed name, whose signature this cannot read.
+LIN_REGSIG = re.compile(r"\b(?:Add|AddHost)\s*\(\s*(?:'[^':]*:([^']*)'|[^,;]*?)\s*,\s*@\s*"
+                        r"([A-Za-z_]\w*)\s*\)")
+#: the signature codes that carry a NUMBER (or a bool): an argument the
+#: registry hands over as one is a value of fixed size, whatever the script.
+LIN_NUMCODES = set('n%?')
+
+
+def lin_numeric_args(raw_texts):
+    """{registered function: set of argument positions that EVERY one of its
+    registered signatures types as a number}. A function registered under a
+    name this cannot read gets the empty set: nothing is assumed."""
+    sigs = {}
+    for text in raw_texts:
+        for m in LIN_REGSIG.finditer(text):
+            sigs.setdefault(m.group(2), []).append(m.group(1))
+    out = {}
+    for fn, ss in sigs.items():
+        if any(s is None for s in ss):
+            out[fn] = set()
+            continue
+        pos = set(range(max(len(s) for s in ss)))
+        for s in ss:
+            for k in list(pos):
+                if k < len(s) and s[k] not in LIN_NUMCODES:
+                    pos.discard(k)
+        out[fn] = pos
+    return out
+
+
+def lin_unnumber(body, positions):
+    """The body with every `A[k]`/`Args[k]` whose k is a NUMBER argument
+    replaced by a literal of the same length -- positions are kept, because the
+    coverage rule reads them. `ArgI32(A[1])` is a count and stays tainted for
+    the first rule; for THIS rule a number is not a pass over anything."""
+    if not positions:
+        return body
+
+    def sub(m):
+        if int(m.group(2)) in positions:
+            return '0'.ljust(len(m.group(0)))
+        return m.group(0)
+    return re.sub(r'\b(A|Args)\s*\[\s*(\d+)\s*\](?!\s*\.\s*Str)', sub, body)
 # Routines OUTSIDE these directories, or in the RTL, whose work is linear in an
 # argument. A call with a tainted argument is a linear pass. The value names which
 # argument carries the size: None = any argument, or the 0-based index of it.
@@ -1158,10 +1203,55 @@ LINEAR_CALLS = {
     'Clone': None, 'IndexOfName': None,
     # sized moves: the count is the argument named.
     'Move': 2, 'FillChar': 1, 'CompareByte': 2, 'CompareMem': 2, 'SetString': 2,
+    # ROUND EIGHT: the searches and rewrites are linear in their haystack too.
+    # The first rule names them as PRODUCTS (SEARCHES); this rule, which asks
+    # about a pass over what the script holds, did not name them at all.
+    'Pos': None, 'PosEx': None, 'AnsiPos': None, 'StringReplace': None,
+    'ContainsText': None, 'ContainsStr': None, 'LastDelimiter': None,
+    # A value spelled as text: a string value is copied whole.
+    'ValToStr': None,
+    # A stream written or read by a count: zip_addstr's copy of its content.
+    'WriteBuffer': 1, 'ReadBuffer': 1,
 }
 LIN_CALL = re.compile(r'\b(' + '|'.join(sorted(LINEAR_CALLS, key=len, reverse=True)) +
                       r')\s*\(')
 LIN_COPY = re.compile(r'\bCopy\s*\(', re.I)
+
+# ROUND EIGHT: TWO SHAPES THE LINEAR PASS COULD NOT SEE, each a hole it reported
+# as "0 holes".
+#
+# A METHOD THAT SHIFTS A CONTAINER the script holds. json_removeat@ is
+# `a.Delete(z)`: TFPList.Delete moves every pointer after z, and TFPHashList's
+# rehashes every name after it (fcl-base contnrs.pp, read). 50000 removals from
+# the front of a million-element array ran 22219 ms under MaxSteps 1000000 and
+# reported success; nothing in LINEAR_CALLS could name it, because the work is in
+# the RECEIVER, not in an argument. A call of one of these on a tainted receiver
+# is a linear pass. (Our own classes' methods of the same names are judged
+# through the call graph, by what they do.)
+LIN_METHODS = ('Delete', 'Insert', 'Remove', 'Extract', 'IndexOf', 'Sort',
+               'CustomSort', 'AddStrings', 'Assign')
+LIN_METHOD = re.compile(r'(\b[A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)?\.\s*(' +
+                        '|'.join(LIN_METHODS) + r')\b')
+# The RTL's own string Delete/Insert, called bare: they move the tail of the
+# string. The value is the argument that is the string.
+LIN_SHIFT = {'Delete': 0, 'Insert': 1}
+LIN_SHIFT_CALL = re.compile(r'(?<![.\w])(Delete|Insert)\s*\(')
+# A CONCATENATION OF A SCRIPT STRING. path_combine$ is `A + PathDelim + B`: a
+# fresh copy of both arguments, no loop, no Copy, no call -- so a body made of
+# one concatenation was invisible, and 2000 calls on a 100 MB string ran 19641 ms
+# past a 2000 ms ceiling. A `+` with an operand that is a tainted STRING (a name
+# declared of a string type, an element of a string array, or an argument's
+# .Str) is a copy of that operand.
+LIN_STRTYPE = re.compile(r'^\s*(String|AnsiString|RawByteString|UTF8String|UnicodeString|'
+                         r'WideString|TJSONStringType)\s*$', re.I)
+LIN_STRARRAY = re.compile(r'^\s*(array\s+of\s+(String|AnsiString|RawByteString)|'
+                          r'TStringDynArray|TStrings|TStringList)\s*$', re.I)
+LIN_OPND_L = re.compile(r'([A-Za-z_]\w*)\s*(\[[^\[\]]*\])?\s*(\.\s*Str)?\s*$')
+LIN_OPND_R = re.compile(r'^\s*([A-Za-z_]\w*)\s*(\[[^\[\]]*\])?\s*(\.\s*Str\b)?')
+# What COVERS a construct: a charge. BudgetMeterEnd settles what MeterAdd
+# accrued and prices nothing of its own, so it covers nothing.
+LIN_COVER = re.compile(r'\bBudget(Allows|Append|Charge|Sleep|Linear\w*|MeterAdd|'
+                       r'SearchCost)\b')
 
 # THE WALKERS THAT ARE O(1) PER CALL, each with the reason. Keyed like ALLOWED,
 # "<file>:<routine>". A routine listed here is treated as NOT linear, so its
@@ -1175,6 +1265,30 @@ LINEAR_ALLOWED = {
         'three iterations whatever the array holds',
     'PhosphorArrayLib.pas:TPhosphorArray.TotalSize':
         'the same: a product over at most three dimensions',
+    'PhosphorBufferLib.pas:ReadRaw':
+        'reads AW bytes, and every caller has passed AW through CheckWidth '
+        '(1, 2, 4 or 8) or hands it a literal 4 or 8: at most eight iterations',
+    'PhosphorBufferLib.pas:WriteRaw':
+        'writes AW bytes, AW checked by CheckWidth or a literal 4 or 8, as '
+        'ReadRaw: at most eight iterations',
+    'PhosphorBufferLib.pas:DoSetInt':
+        'its one linear-looking construct is ValToStr(A[3]) in a refusal, and '
+        'every signature buffer_setint is registered under types A[3] a NUMBER '
+        '(n or %), which ValToStr spells in at most 24 bytes',
+    'PhosphorBufferLib.pas:SetIntRefusal':
+        'AWhat is IntToStr of a number or DoSetInt\'s ValToStr of a number: at '
+        'most 24 bytes either way',
+    'PhosphorZipLib.pas:CompareNameBytes':
+        'compares two DIRECTORY-ENTRY names, the sort comparator of '
+        'zip_compress\'s walk, which charges a step per entry: no filesystem '
+        'this runs on allows a name component past 255 bytes',
+    'PhosphorRagLib.pas:TPhosphorRag.FunctionTotal':
+        'an integer sum, one addition (about a nanosecond) per indexed '
+        'document; every document was charged a step (2 us) and its bytes when '
+        'the rebuild read it, and each caller prices work per function that '
+        'dwarfs the sum',
+    'PhosphorRagLib.pas:TPhosphorRag.TagTotal':
+        'the same integer sum, over the documents\' tag counts',
     'PhosphorCryptoLib.pas:ToHex':
         'hex of a DIGEST or a DERIVED KEY, never of a script string: its callers '
         'hand it 16, 20 or 32 digest bytes, or a pbkdf2 key that CountArg caps '
@@ -1217,19 +1331,10 @@ LINEAR_ALLOWED = {
     'PhosphorJsonLib.pas:MemberIndex':
         'refuses a name longer than JSON_MAX_NAME (255 bytes) on its first line, '
         'so the hashed lookup it makes is of at most 255 bytes',
-    'PhosphorJsonLib.pas:BufStr':
-        'copies the rendered text once; every byte of it was charged by BufAdd as '
-        'it was written, at one unit a byte -- eight times the rate of a copy',
     # ---- sqlite: bounded by what sqlite3 itself allows ----------------------
-    'PhosphorSqliteLib.pas:DoStep':
-        'loops over the COLUMNS of one result row, which sqlite3 caps at '
-        'SQLITE_MAX_COLUMN (2000 by default, 32767 in any build): a constant '
-        'of the library, whatever the script asked',
     'PhosphorSqliteLib.pas:FindCol':
         'at most SQLITE_MAX_COLUMN columns, each compared by SameText, which '
         'stops at the shorter of the two names',
-    'PhosphorSqliteLib.pas:BuildRowObject':
-        'one member per COLUMN of the current row: at most SQLITE_MAX_COLUMN',
     'PhosphorSqliteLib.pas:SqlTarget':
         'compares the first five bytes of the name; the path itself is priced '
         'by its callers (sqlite_open@ and sqlite_backup ask BudgetLinearOk '
@@ -1242,10 +1347,6 @@ LINEAR_ALLOWED = {
     'PhosphorSysLib.pas:HostTempDir':
         'the size GetTempPathW (or the platform) reports for the temp path: an OS '
         'path of at most 32767 characters, not a script string',
-    'PhosphorSysLib.pas:HostUserDir':
-        'an OS special-folder path, at most 32767 characters, not a script string',
-    'PhosphorSysLib.pas:HostAppConfigDir':
-        'an OS special-folder path, at most 32767 characters, not a script string',
     'PhosphorSysLib.pas:t_paramstr':
         'scrubs ParamStr(i): a word of this PROCESS\'S command line, which the '
         'host was started with (at most 32767 characters on Windows); the '
@@ -1299,9 +1400,50 @@ def lin_header(body):
     return tainted, arity
 
 
-def lin_taint(name, body, containers, fields):
-    """The names in this routine that carry script-supplied size."""
+def lin_params(body):
+    """[(name, type, is_out)] of a routine's parameters, in order."""
+    m = PARAMLIST.match(body)
+    out = []
+    if not m:
+        return out
+    for part in m.group(1).split(';'):
+        names, typ = (part.split(':', 1) + [''])[:2]
+        is_out = bool(re.search(r'\bout\b', names, re.I))
+        for nm in NAMES.findall(DECOR.sub(' ', names)):
+            out.append((nm, typ.strip(), is_out))
+    return out
+
+
+#: Calls whose RESULT is a short string whatever their argument: a number
+#: spelled out. An argument built from one carries no script-supplied size,
+#: however many tainted names the number was computed from.
+LIN_BOUNDED = re.compile(r'\b(IntToStr|Int64ToStr|UIntToStr|FloatToStr|NumToInv|BoolToStr|'
+                         r'HexStr|IntToHex|Ord|Chr)\s*\(')
+
+
+def lin_neutral(expr):
+    """expr with every LIN_BOUNDED call replaced by a literal."""
+    while True:
+        m = LIN_BOUNDED.search(expr)
+        if not m:
+            return expr
+        inner = balanced_arg(expr, m.end() - 1)
+        expr = expr[:m.start()] + ' 0 ' + expr[m.end() + len(inner) + 1:]
+
+
+def lin_taint(name, body, containers, fields, seed=None):
+    """The names in this routine that carry script-supplied size.
+
+    seed: None for a routine whose callers are not all in view (a registered
+    function, a callback, a routine nothing here calls) -- every parameter of a
+    data type is tainted, as before. Otherwise the parameters some caller in
+    view passes script-supplied data in (linear_scan propagates it): AFn in
+    `MakeError(peRuntime, AFn + ': not a buffer')` is the caller's literal
+    function name, at every call site, and is not a pass over anything the
+    script holds."""
     tainted, arity = lin_header(body)
+    if seed is not None:
+        tainted = set(seed)
     hdr_end = body.find('begin')
     decls = body[:hdr_end] if hdr_end >= 0 else ''
     for m in LIN_VARDECL.finditer(decls):
@@ -1310,7 +1452,7 @@ def lin_taint(name, body, containers, fields):
     if '.' in name:
         cls = name.split('.')[0]
         if cls in containers:
-            tainted |= fields.get(cls, set())
+            tainted |= set(fields.get(cls, {}))
             tainted.add('Self')
     assigns = [(m.group(1), m.group(2)) for m in ASSIGN.finditer(body)]
     changed = True
@@ -1335,29 +1477,171 @@ def lin_reads(expr, tainted, arity):
     return bool(names & tainted) or bool(LIN_STRSRC.search(expr))
 
 
-def lin_direct(name, body, containers, fields, ours=frozenset()):
-    """Linear constructs written in this routine, as short labels. `ours` is the
-    set of names this body calls that resolve to a routine in these directories:
-    a LINEAR_CALLS name that is one of ours (TPhosphorStringList.IndexOfName, not
-    fcl-json's) is judged through the call graph instead, by what it does."""
-    tainted, arity = lin_taint(name, body, containers, fields)
+def lin_types(name, body, ftypes):
+    """Declared type of every name this routine can see: its parameters, its
+    locals, its own Result, and -- in a method -- its class's fields."""
+    types = {}
+    if '.' in name:
+        types.update(ftypes.get(name.split('.')[0], {}))
+    m = PARAMLIST.match(body)
+    if m:
+        for part in m.group(1).split(';'):
+            if ':' in part:
+                nms, typ = part.split(':', 1)
+                for nm in NAMES.findall(DECOR.sub(' ', nms)):
+                    types[nm] = typ.strip()
+    r = re.match(r'^function\b[^;]*?\)\s*:\s*([A-Za-z_][\w.]*)\s*;', body, re.I | re.S) or \
+        re.match(r'^function\s+[\w.]+\s*:\s*([A-Za-z_][\w.]*)\s*;', body, re.I)
+    if r:
+        types['Result'] = r.group(1)
+    hdr_end = body.find('begin')
+    for d in LIN_VARDECL.finditer(body[:hdr_end] if hdr_end >= 0 else ''):
+        for nm in NAMES.findall(DECOR.sub(' ', d.group(1))):
+            types[nm] = d.group(2)
+    for d in re.finditer(r'\b([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:\s*(array\s+of\s+\w+)\s*;',
+                         body[:hdr_end] if hdr_end >= 0 else '', re.I):
+        for nm in NAMES.findall(d.group(1)):
+            types[nm] = d.group(2)
+    return types
+
+
+def lin_string_operand(nm, index, dotstr, tainted, types):
+    """Is this operand of a `+` a script-supplied STRING?"""
+    if dotstr:
+        return nm in tainted or nm in ('A', 'Args')
+    if nm not in tainted:
+        return False
+    typ = types.get(nm, '')
+    if index:
+        return bool(LIN_STRARRAY.match(typ))
+    return bool(LIN_STRTYPE.match(typ))
+
+
+def lin_concats(body, tainted, types):
+    """(pos, label) of every `+` with a script-supplied string operand."""
+    out = []
+    for m in re.finditer(r'\+', body):
+        k = m.start()
+        left = LIN_OPND_L.search(body[max(0, k - 160):k])
+        right = LIN_OPND_R.match(body[k + 1:k + 161])
+        for op in (left, right):
+            if op and lin_string_operand(op.group(1), op.group(2), op.group(3),
+                                         tainted, types):
+                out.append((k, '%s + ..' % op.group(1)))
+                break
+    return out
+
+
+def lin_direct(name, body, containers, fields, ours=frozenset(), seed=None):
+    """Linear constructs written in this routine, as short labels."""
+    return sorted(set(lab for _, lab in lin_constructs(name, body, containers, fields,
+                                                        ours, seed)))
+
+
+def lin_loop_spans(body):
+    """{position of a loop's keyword: (start, end) of its body}."""
+    spans = {}
+    for m in LOOPSTART.finditer(body):
+        if m.group(1).lower() == 'repeat':
+            u = UNTILWORD.search(body, m.end())
+            spans[m.start()] = (m.end(), u.start() if u else len(body))
+            continue
+        d = DOWORD.search(body, m.end())
+        if d is None:
+            continue
+        rest = body[d.end():]
+        stripped = rest.lstrip()
+        if stripped[:5].lower() == 'begin':
+            open_at = d.end() + (len(rest) - len(stripped))
+            spans[m.start()] = (open_at, block_end(body, open_at))
+        else:
+            semi = body.find(';', d.end())
+            spans[m.start()] = (d.end(), semi if semi >= 0 else len(body))
+    return spans
+
+
+def lin_cover(body, proxies=frozenset()):
+    """(upfront, regions): whether this body charges the budget OUTSIDE every
+    loop -- a charge that answers for the routine -- and the loop bodies that
+    charge INSIDE themselves, each of which answers only for itself.
+
+    THE RULE THE ROUND-7 PASS DID NOT HAVE (round 8). It asked whether a body
+    consults the budget ANYWHERE, so MatchGlob -- `n := LowerCase(AName)` over
+    the whole name, then a loop that charges per 4096 comparisons -- read as
+    consulting, and its up-front case fold was free. With the pattern "x", the
+    loop ends at its first comparison and charges nothing, so 2000 calls on a
+    100 MB name ran 45859 ms under a 2000 ms ceiling. A charge inside a loop
+    prices that loop's iterations; it does not price the pass before it."""
+    spans = list(lin_loop_spans(body).values())
+    cons = [m.start() for m in LIN_COVER.finditer(body)]
+    for p in proxies:
+        cons += [m.start() for m in re.finditer(r'\b' + re.escape(p) + r'\b', body)]
+    # A charge inside a NESTED routine is made where that routine is CALLED --
+    # MatchGlob's Tick sits textually before the main body, outside every
+    # loop, and read by position it answered for the whole routine.
+    nested = []
+    for m in re.finditer(r'\n[ \t]+(?:function|procedure)\s+([A-Za-z_]\w*)', body):
+        b = re.search(r'\bbegin\b', body[m.end():])
+        if b:
+            at = m.end() + b.start()
+            nested.append((m.group(1), m.start(), block_end(body, at)))
+    if nested:
+        moved = []
+        for q in cons:
+            owner = [n for n in nested if n[1] <= q < n[2]]
+            if not owner:
+                moved.append(q)
+                continue
+            nm, lo, hi = owner[0]
+            for c in re.finditer(r'\b' + re.escape(nm) + r'\b', body):
+                if not any(o[1] <= c.start() < o[2] for o in nested if o[0] == nm):
+                    moved.append(c.start())
+        cons = moved
+    upfront, regions = False, []
+    for q in cons:
+        inside = [s for s in spans if s[0] <= q < s[1]]
+        if not inside:
+            upfront = True
+        else:
+            regions.append(min(inside, key=lambda s: s[1] - s[0]))
+    return upfront, regions
+
+
+def lin_covered(pos, cover):
+    upfront, regions = cover
+    return upfront or any(lo <= pos < hi for lo, hi in regions)
+
+
+def lin_constructs(name, body, containers, fields, ours=frozenset(), seed=None):
+    """Linear constructs written in this routine, as (position, label). `ours`
+    is the set of names this body calls that resolve to a routine in these
+    directories: a LINEAR_CALLS name that is one of ours
+    (TPhosphorStringList.IndexOfName, not fcl-json's) is judged through the call
+    graph instead, by what it does. A LOOP's position is the first character of
+    its body, so a charge inside the loop is a charge beside it."""
+    tainted, arity = lin_taint(name, body, containers, fields, seed)
     if not tainted:
         return []
+    spans = lin_loop_spans(body)
+
+    def at_loop(m):
+        sp = spans.get(m.start())
+        return sp[0] if sp else m.start()
     hits = []
     for m in FORLOOP.finditer(body):
         limit = m.group(3) if m.group(2).lower() == 'to' else m.group(1)
         if lin_reads(limit, tainted, arity):
-            hits.append('for .. %s' % ' '.join(limit.split())[:40])
+            hits.append((at_loop(m), 'for .. %s' % ' '.join(limit.split())[:40]))
     for m in WHILELOOP.finditer(body):
         if lin_reads(m.group(1), tainted, arity):
-            hits.append('while %s' % ' '.join(m.group(1).split())[:40])
+            hits.append((at_loop(m), 'while %s' % ' '.join(m.group(1).split())[:40]))
     for m in REPEATLOOP.finditer(body):
         if lin_reads(m.group(1), tainted, arity):
-            hits.append('repeat .. until %s' % ' '.join(m.group(1).split())[:40])
+            hits.append((at_loop(m), 'repeat .. until %s' % ' '.join(m.group(1).split())[:40]))
     for m in ALLOC.finditer(body):
         args = lin_split_args(balanced_arg(body, m.end() - 1))
         if lin_reads(args[-1], tainted, arity):
-            hits.append('%s(.., %s)' % (m.group(1), ' '.join(args[-1].split())[:30]))
+            hits.append((m.start(), '%s(.., %s)' % (m.group(1), ' '.join(args[-1].split())[:30])))
     for m in LIN_CALL.finditer(body):
         if m.group(1) in ours:
             continue
@@ -1365,7 +1649,18 @@ def lin_direct(name, body, containers, fields, ours=frozenset()):
         which = LINEAR_CALLS[m.group(1)]
         look = args if which is None else args[which:which + 1]
         if any(lin_reads(a, tainted, arity) for a in look):
-            hits.append('%s(..)' % m.group(1))
+            hits.append((m.start(), '%s(..)' % m.group(1)))
+    for m in LIN_SHIFT_CALL.finditer(body):
+        args = lin_split_args(balanced_arg(body, m.end() - 1))
+        which = LIN_SHIFT[m.group(1)]
+        if len(args) > which and lin_reads(args[which], tainted, arity):
+            hits.append((m.start(), '%s(..)' % m.group(1)))
+    for m in LIN_METHOD.finditer(body):
+        if m.group(2) in ours:
+            continue
+        if m.group(1) in tainted:
+            hits.append((m.start(), '%s.%s' % (m.group(1), m.group(2))))
+    hits.extend(lin_concats(body, tainted, lin_types(name, body, fields)))
     for m in LIN_COPY.finditer(body):
         args = lin_split_args(balanced_arg(body, m.end() - 1))
         if len(args) == 2:
@@ -1379,8 +1674,12 @@ def lin_direct(name, body, containers, fields, ours=frozenset()):
         else:
             continue
         if lin_reads(size, tainted, arity):
-            hits.append('Copy(.., %s)' % ' '.join(size.split())[:30])
-    return sorted(set(hits))
+            hits.append((m.start(), 'Copy(.., %s)' % ' '.join(size.split())[:30]))
+    # Nothing in the routine's own header is a construct: `function
+    # TPhosphorStringList.IndexOfName(` is a declaration, not a call.
+    hm = PARAMLIST.match(body)
+    hdr = hm.end() if hm else 0
+    return sorted(set(h for h in hits if h[0] >= hdr))
 
 
 def lin_classes(texts):
@@ -1395,7 +1694,7 @@ def lin_classes(texts):
         for m in re.finditer(r'\b(T[A-Za-z0-9_]+)\s*=\s*class\b(.*?)\bend\s*;', text, re.S):
             if m.group(1) not in containers:
                 continue
-            fs = set()
+            fs = {}
             for line in m.group(2).split(';'):
                 ln = line.strip()
                 if not ln or re.match(r'(?i)(procedure|function|constructor|destructor|'
@@ -1406,7 +1705,9 @@ def lin_classes(texts):
                                           r'property|class)\b', ln):
                         continue
                 if ':' in ln:
-                    fs |= set(NAMES.findall(ln.split(':')[0]))
+                    nms, typ = ln.split(':', 1)
+                    for nm in NAMES.findall(nms):
+                        fs[nm] = typ.strip()
             fields[m.group(1)] = fs
     return containers, fields
 
@@ -1483,16 +1784,23 @@ def lin_callees(key, body, routines):
     return sorted(out)
 
 
+#: the last scan's uncovered routines, helpers included, for the report.
+LAST_UNCOVERED = {}
+
+
 def linear_scan(dirs, allowed, test_hosts=None):
     """(holes, consulting-entries, used-exemptions, flagged-walkers).
 
     holes: registered functions that reach a linear pass and consult nothing,
     each with the chain that reaches it."""
-    files = []
+    files, raws = [], []
     for path in sources(dirs):
         with open(path, encoding='utf-8') as fh:
-            files.append((os.path.basename(path), strip_comments(fh.read())))
+            raw = fh.read()
+        raws.append(raw)
+        files.append((os.path.basename(path), strip_comments(raw)))
     containers, fields = lin_classes([t for _, t in files])
+    numargs = lin_numeric_args(raws)
     routines = []          # (key, short, body)
     entries = set()
     consults = set()
@@ -1500,6 +1808,7 @@ def linear_scan(dirs, allowed, test_hosts=None):
         rs = list(routines_of(text))
         entries |= set(LIN_REGISTER.findall(text))
         for name, body in rs:
+            body = lin_unnumber(body, numargs.get(name, set()))
             key = '%s:%s' % (base, name)
             routines.append((key, name.split('.')[-1], body))
             # DIRECT, not resolved through helpers the way the first rule's
@@ -1511,11 +1820,49 @@ def linear_scan(dirs, allowed, test_hosts=None):
             if LIN_GATE.search(body):
                 consults.add(key)
     calls = {key: lin_callees(key, body, routines) for key, _, body in routines}
+    # WHICH PARAMETERS CARRY SCRIPT DATA (round 8), propagated from the call
+    # sites in view. A routine whose callers are not all in view -- registered,
+    # taken as a callback, or called from nowhere here -- keeps the round-7
+    # reading: every data parameter is tainted.
+    alltext = '\n'.join(t for _, t in files)
+    callbacks = set(re.findall(r'@\s*([A-Za-z_]\w*)', alltext))
+    called = set(c for k in calls for c in calls[k])
+    params = {key: lin_params(body) for key, _, body in routines}
+    seed = {}
+    for key, short, _ in routines:
+        if short in entries or short in callbacks or key not in called:
+            seed[key] = None
+        else:
+            seed[key] = set()
+    bodies = {key: body for key, _, body in routines}
+    changed = True
+    while changed:
+        changed = False
+        for key, short, body in routines:
+            name = key.split(':', 1)[1]
+            tainted, arity = lin_taint(name, body, containers, fields, seed[key])
+            if not tainted:
+                continue
+            for callee in calls[key]:
+                if seed[callee] is None:
+                    continue
+                cshort = callee.split(':', 1)[1].split('.')[-1]
+                for m in re.finditer(r'\b' + re.escape(cshort) + r'\s*\(', body):
+                    if m.start() == 0 or body[:m.start()].rstrip().endswith(
+                            ('function', 'procedure')):
+                        continue
+                    args = lin_split_args(balanced_arg(body, m.end() - 1))
+                    for i, (pn, _, is_out) in enumerate(params[callee]):
+                        if i >= len(args) or is_out or pn in seed[callee]:
+                            continue
+                        if lin_reads(lin_neutral(args[i]), tainted, arity):
+                            seed[callee].add(pn)
+                            changed = True
     direct, used = {}, set()
     for key, short, body in routines:
         name = key.split(':', 1)[1]
         ours = frozenset(c.split(':', 1)[1].split('.')[-1] for c in calls[key])
-        d = lin_direct(name, body, containers, fields, ours)
+        d = lin_constructs(name, body, containers, fields, ours, seed[key])
         if d:
             if key in allowed:
                 used.add(key)
@@ -1528,12 +1875,30 @@ def linear_scan(dirs, allowed, test_hosts=None):
     # its own work, which is the lfill$ lesson above; it does not count.
     wrappers = set(k for k in consults
                    if k not in direct and not any(c in direct for c in calls[k]))
-    for key, _, _ in routines:
-        if key not in consults and any(c in wrappers for c in calls[key]):
-            consults.add(key)
-    # A routine is linear if it walks, or calls (by name) a linear routine that
-    # does not consult the budget itself. Fixed point.
-    linear = {k: list(v) for k, v in direct.items()}
+    # WHAT ANSWERS FOR A CONSTRUCT IS A CHARGE BESIDE IT (round 8). A charge
+    # outside every loop answers for the routine; a charge inside a loop
+    # answers for that loop's body only (lin_cover). A construct no charge
+    # answers for is UNCOVERED, and so is a call to an uncovered routine that no
+    # charge in the caller answers for. A registered function with anything
+    # uncovered is a hole -- however many charges it makes for OTHER work.
+    bodies = {key: body for key, _, body in routines}
+    cover = {}
+    for key, _, body in routines:
+        proxies = set(c.split(':', 1)[1].split('.')[-1] for c in calls[key] if c in wrappers)
+        cover[key] = lin_cover(body, proxies)
+    uncovered = {}
+    for key, cons in direct.items():
+        labs = sorted(set(lab for pos, lab in cons if not lin_covered(pos, cover[key])))
+        if labs:
+            uncovered[key] = labs
+
+    def call_sites(key, callee):
+        short = callee.split(':', 1)[1].split('.')[-1]
+        body = bodies[key]
+        hdr = body.find('(')
+        return [m.start() for m in re.finditer(r'\b' + re.escape(short) + r'\b', body)
+                if m.start() > (hdr if hdr >= 0 else 0)]
+    # Fixed point over the call graph.
     changed = True
     while changed:
         changed = False
@@ -1541,31 +1906,47 @@ def linear_scan(dirs, allowed, test_hosts=None):
             if key in allowed:
                 continue
             for callee in calls[key]:
-                if callee in linear and callee not in consults:
-                    lab = 'via %s' % callee.split(':', 1)[1]
-                    cur = linear.setdefault(key, [])
-                    if lab not in cur:
-                        cur.append(lab)
-                        changed = True
+                if callee not in uncovered:
+                    continue
+                if all(lin_covered(p, cover[key]) for p in call_sites(key, callee)):
+                    continue
+                lab = 'via %s' % callee.split(':', 1)[1]
+                cur = uncovered.setdefault(key, [])
+                if lab not in cur:
+                    cur.append(lab)
+                    changed = True
+    # Linear at all, covered or not: for the count the green line reports.
+    linear = set(direct)
+    changed = True
+    while changed:
+        changed = False
+        for key, short, _ in routines:
+            if key in allowed or key in linear:
+                continue
+            if any(c in linear for c in calls[key]):
+                linear.add(key)
+                changed = True
     # An exemption is USED only while the routine it names would be linear
     # without it -- by its own walk or through a callee -- so an entry whose
     # reason has stopped being needed is reported stale, like ALLOWED's.
     for key, short, _ in routines:
-        if key in allowed and any(c in linear and c not in consults for c in calls[key]):
+        if key in allowed and any(c in uncovered for c in calls[key]):
             used.add(key)
     holes, ok = [], 0
     for key, short, _ in routines:
         if short not in entries or key not in linear:
             continue
-        if key in consults:
+        if key not in uncovered:
             ok += 1
             continue
         base = key.split(':', 1)[0]
         if test_hosts and base in test_hosts:
             used.add(base)
             continue
-        holes.append((key, linear[key]))
-    flagged = sorted(direct.items())
+        holes.append((key, uncovered[key]))
+    LAST_UNCOVERED.clear()
+    LAST_UNCOVERED.update(uncovered)
+    flagged = sorted((k, sorted(set(lab for _, lab in v))) for k, v in direct.items())
     return holes, ok, used, flagged
 
 
@@ -1829,7 +2210,10 @@ def prove():
              "  if not BudgetLinearOk('up$', Length(A[0].Str), BudgetMilliRewrite, E) then Exit;\n"
              '  Result := ValStr(Up(A[0].Str));\nend;\n', False),
             ('the same, beside a helper that asks for its own work only',
-             "begin\n  Pad(' ', 3);\n  Result := ValStr(Up(A[0].Str));\nend;\n", True),
+             # lfill$'s own shape: the pad RunOf builds is the script's
+             # (since round 8 a helper handed only literals reads as a pure
+             # proxy, which it then is).
+             "begin\n  Pad(A[0].Str, 3);\n  Result := ValStr(Up(A[0].Str));\nend;\n", True),
         ]
         for label, body, want in lin_cases:
             with open(os.path.join(d, 'PhosphorPlantedLib.pas'), 'w',
@@ -1865,6 +2249,107 @@ def prove():
                 return 1
             print('prove: linear pass, %s -> %s.'
                   % (label, 'reported' if want else 'quiet'))
+
+        # ROUND EIGHT: the shapes the round-7 pass read as consulting or could
+        # not see at all, each planted with a twin that must go quiet, so each
+        # rule is seen both to fire and to be satisfiable. Every planted body is
+        # registered, and none has a loop over a count, an allocation over a
+        # count or a native -- nothing the first rule could report instead.
+        r8_head = ('unit PhosphorPlantedLib;\ninterface\nimplementation\n'
+                   'type TPlantedBox = class\n  Items: array of String;\n'
+                   '  procedure Delete(I: Integer);\nend;\n'
+                   # MatchGlob's shape: a fold of the whole name, then a loop that
+                   # charges per comparison -- and stops at the first one.
+                   'function Glob(const AName, APat: String): Boolean;\n'
+                   'var n: String; i, t: Integer;\n'
+                   'begin\n'
+                   '  n := LowerCase(AName);\n'
+                   '  i := 1; t := 0;\n'
+                   '  while i <= Length(n) do\n'
+                   '  begin\n'
+                   '    Inc(t);\n'
+                   '    if not BudgetCharge(1) then Exit(False);\n'
+                   '    if n[i] <> APat[1] then Exit(False);\n'
+                   '    Inc(i);\n'
+                   '  end;\n'
+                   '  Result := True;\n'
+                   'end;\n'
+                   # Combine2's shape: one concatenation, nothing else.
+                   'function Join2(const A, B: String): String;\n'
+                   'begin\n'
+                   "  Result := A + '/' + B;\n"
+                   'end;\n'
+                   # A helper whose string parameter only ever receives a
+                   # literal: its concatenation is not a pass over script data.
+                   'function Named(const AFn: String): String;\n'
+                   'begin\n'
+                   "  Result := AFn + ': refused';\n"
+                   'end;\n')
+        r8_cases = [
+            ('a fold before a loop that charges for its OWN iterations only',
+             'f_planted_glob',
+             'begin\n  Result := ValInt(Ord(Glob(A[0].Str, A[1].Str)));\nend;\n', True),
+            ('the same, the fold priced by the caller',
+             'f_planted_glob',
+             "begin\n  if not BudgetLinearOk('glob', Length(A[0].Str), BudgetMilliRewrite, E) then Exit;\n"
+             '  Result := ValInt(Ord(Glob(A[0].Str, A[1].Str)));\nend;\n', False),
+            ('a body whose only charge is inside a loop, beside a copy',
+             'f_planted_beside',
+             'var s: String; i: Integer;\n'
+             'begin\n  s := Copy(A[0].Str, 2, MaxInt);\n'
+             '  for i := 1 to Length(A[1].Str) do\n'
+             '    if not BudgetCharge(1) then Exit;\n'
+             '  Result := ValStr(s);\nend;\n', True),
+            ('a concatenation of two script strings',
+             'f_planted_join',
+             'begin\n  Result := ValStr(Join2(A[0].Str, A[1].Str));\nend;\n', True),
+            ('the same, priced',
+             'f_planted_join',
+             "begin\n  if not BudgetLinearOk('join$', Length(A[0].Str) + Length(A[1].Str), BudgetMilliCopy, E) then Exit;\n"
+             '  Result := ValStr(Join2(A[0].Str, A[1].Str));\nend;\n', False),
+            ('a concatenation of a literal function name, whatever the script holds',
+             'f_planted_named',
+             "begin\n  E := MakeError(peRuntime, Named('named'));\n  Result := ValStr(A[0].Str);\nend;\n",
+             False),
+            ('a shift of a container the script holds (json_removeat@)',
+             'f_planted_shift',
+             'var a: TPlantedBox;\n'
+             'begin\n  a := TPlantedBox(HandleObj(A[0].Hnd));\n'
+             '  a.Delete(ArgI32(A[1]));\n  Result := A[0];\nend;\n', True),
+            ('the same, priced',
+             'f_planted_shift',
+             'var a: TPlantedBox;\n'
+             'begin\n  a := TPlantedBox(HandleObj(A[0].Hnd));\n'
+             "  if not BudgetLinearOk('shift@', Length(a.Items), BudgetMilliItem, E) then Exit;\n"
+             '  a.Delete(ArgI32(A[1]));\n  Result := A[0];\nend;\n', False),
+        ]
+        for label, fname, body, want in r8_cases:
+            with open(os.path.join(d, 'PhosphorPlantedLib.pas'), 'w',
+                      encoding='utf-8') as fh:
+                fh.write(r8_head +
+                         'function %s(const A: array of TValue;\n'
+                         '  out E: TPhosphorError): TValue;\n' % fname + body +
+                         'procedure RegisterPlanted(Reg: TPhosphorRegistry);\n'
+                         'begin\n'
+                         "  Reg.Add('planted:$$', @%s);\n"
+                         'end;\n'
+                         'end.\n' % fname)
+            holes, _, _, _ = linear_scan([d], {})
+            got = 'PhosphorPlantedLib.pas:%s' % fname in [k for k, _ in holes]
+            if got != want:
+                print('PROVE FAILED: the linear pass on "%s" reported %s, wanted %s'
+                      % (label, [k for k, _ in holes] or 'nothing',
+                         fname if want else 'nothing'))
+                return 1
+            # Reported for the RIGHT reason: in Glob the loop that charges is
+            # covered and the fold before it is not.
+            if fname == 'f_planted_glob' and want and \
+               LAST_UNCOVERED.get('PhosphorPlantedLib.pas:Glob') != ['LowerCase(..)']:
+                print('PROVE FAILED: Glob was reported for %s, wanted the fold alone'
+                      % LAST_UNCOVERED.get('PhosphorPlantedLib.pas:Glob'))
+                return 1
+            print('prove: linear pass, %s -> %s.'
+                  % (label, 'reported (%s)' % ', '.join(holes[0][1]) if want else 'quiet'))
 
         # And the unzip rule, in both of the shapes d47 had: a LOCAL plain
         # unzipper asked to extract, and a FIELD reached through a handle. Then
@@ -1916,9 +2401,29 @@ def linear(sites=False):
     if holes:
         print('LINEAR HOLES -- registered functions whose work grows with a script-')
         print('supplied string, array, list, dictionary, tree or buffer, and that')
-        print('consult nothing:')
+        print('consult nothing that answers for it:')
         for key, hits in holes:
             print('  %-56s %s' % (key, ', '.join(hits)))
+        # WHERE EACH CHAIN ENDS: the uncovered constructs themselves, so a
+        # reader does not have to re-derive them from a list of helper names.
+        ends = set()
+        todo = [h[4:] for _, hits in holes for h in hits if h.startswith('via ')]
+        while todo:
+            name = todo.pop()
+            if name in ends:
+                continue
+            ends.add(name)
+            for key, labs in LAST_UNCOVERED.items():
+                if key.split(':', 1)[1] == name:
+                    todo += [h[4:] for h in labs if h.startswith('via ')]
+        if ends:
+            print('')
+            print('...where each chain ends (the uncovered constructs):')
+            for key in sorted(LAST_UNCOVERED):
+                if key.split(':', 1)[1] in ends:
+                    own = [h for h in LAST_UNCOVERED[key] if not h.startswith('via ')]
+                    if own:
+                        print('  %-56s %s' % (key, ', '.join(own)))
         print('')
         print('One call is one VM instruction however long its argument is, and the')
         print('VM reads its clock every 4096 of them. Price the pass before it runs')

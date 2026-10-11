@@ -3022,6 +3022,10 @@ function f_http_basicauth(const Args: array of TValue; out Err: TPhosphorError):
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  { The pair is joined (a copy) and base64-encoded (a third larger): priced at
+    the encoder rate over both, before either (round 8 -- it asked nothing). }
+  if not BudgetLinearOk('http_basicauth', Int64(Length(Args[1].Str)) + Length(Args[2].Str),
+                        BudgetMilliEncode, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin
     c.AuthHeader := 'Basic ' + EncodeStringBase64(Args[1].Str + ':' + Args[2].Str);

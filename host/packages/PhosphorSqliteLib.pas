@@ -444,6 +444,10 @@ end;
   for x'41004243' while every reader here returned 1 byte. SQLite says how many
   bytes there are; ask it. (PtrStr stays for the genuinely NUL-terminated things --
   an error message, a column name.) }
+{ A column's text is copied out of SQLite's buffer: CHARGED for its bytes
+  before the copy (round 8 -- a text column is as long as the script made it,
+  and sqlite_getstr$ of a 100 MB value in a loop copied it unpriced). A refusal
+  answers '' and latches the budget; the caller reports it (BudgetSpent). }
 function ColStr(AStmt: psqlite3_stmt; ACol: Integer): String;
 var p: PAnsiChar; n: Integer;
 begin
@@ -451,6 +455,7 @@ begin
   if p = nil then Exit('');
   n := sqlite3_column_bytes(AStmt, ACol);
   if n <= 0 then Exit('');
+  if not BudgetLinearAfter(n, BudgetMilliMove) then Exit('');
   SetLength(Result, n);
   Move(p^, Result[1], n);
 end;
@@ -834,6 +839,21 @@ begin
 end;
 
 { Double-quote-wrap a SQL identifier (a table name), doubling internal quotes. }
+{ ESCAPING IS A REPLACE (round 8: neither door asked anything). Priced by the
+  model PhosphorBudget states for a search -- the quotes are its first-byte
+  hits, each one a splice -- plus the answer copied once, at most twice the
+  text. }
+function EscapePriceOk(const AWho, S: String; AQuote: Char; var Err: TPhosphorError): Boolean;
+var hits, units: Int64;
+begin
+  units := BudgetSearchCostHits(S, AQuote, False, hits);
+  if units < High(Int64) div 2 then
+    units := units + BudgetMilliUnits(hits, BudgetMilliItem) +
+             BudgetMilliUnits(Int64(Length(S)) + hits, BudgetMilliCopy);
+  Result := BudgetAllows(units);
+  if not Result then Err := BudgetRefusal(AWho);
+end;
+
 function QuoteIdent(const AName: String): String;
 begin
   Result := '"' + StringReplace(AName, '"', '""', [rfReplaceAll]) + '"';
@@ -1124,6 +1144,7 @@ begin
     TSqliteDb.CloseConn). }
   try
     if sqlite3_step(st) = SQLITE_ROW then Result := ValStr(ColStr(st, 0));
+    if BudgetSpent() then begin Err := BudgetRefusal('sqlite_scalar$'); Result := ValStr(''); end;
     { A path refused inside the SQL can be refused at the STEP rather than at the
       prepare -- VACUUM INTO's callback arrives there -- and this route reported
       nothing at all for it: no code, no message, an empty answer. PrepareStmt
@@ -1280,6 +1301,8 @@ begin
   Err := NoError();
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
+  // The table name is quoted (a replace) and handed to SQLite in a statement.
+  if not EscapePriceOk('sqlite_columns@', Args[1].Str, '"', Err) then Exit;
   arr := TJSONArray.Create();
   try
     if PrepareStmt(db, 'PRAGMA table_info(' + QuoteIdent(Args[1].Str) + ')', st) then
@@ -1497,6 +1520,7 @@ begin
   c := ArgI32(Args[1]) - 1;
   if s.OnRow and (c >= 0) and (c < sqlite3_column_count(s.StmtPtr)) then
     Result := ValStr(ColStr(s.StmtPtr, c));
+  if BudgetSpent() then begin Err := BudgetRefusal('sqlite_getstr$'); Result := ValStr(''); end;
 end;
 
 function f_getnum(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1518,6 +1542,7 @@ begin
   if not GetStmt(Args[0].Hnd, s) then Exit;
   c := FindCol(s, Args[1].Str);
   if s.OnRow and (c >= 0) then Result := ValStr(ColStr(s.StmtPtr, c));
+  if BudgetSpent() then begin Err := BudgetRefusal('sqlite_gets$'); Result := ValStr(''); end;
 end;
 
 function f_getn(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1746,10 +1771,18 @@ end;
 
 // --- text helpers -----------------------------------------------------------
 function f_escape(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(EscapeSql(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not EscapePriceOk('sqlite_escape$', Args[0].Str, '''', Err) then Exit(ValStr(''));
+  Result := ValStr(EscapeSql(Args[0].Str));
+end;
 
 function f_quote(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr('''' + EscapeSql(Args[0].Str) + ''''); end;
+begin
+  Err := NoError();
+  if not EscapePriceOk('sqlite_quote$', Args[0].Str, '''', Err) then Exit(ValStr(''));
+  Result := ValStr('''' + EscapeSql(Args[0].Str) + '''');
+end;
 
 // --- errors -----------------------------------------------------------------
 function f_error(const Args: array of TValue; out Err: TPhosphorError): TValue;

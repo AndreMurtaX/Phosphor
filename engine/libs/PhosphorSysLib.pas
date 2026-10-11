@@ -671,33 +671,35 @@ const
   blanks and tabs, one optional sign, then decimal digits or a '$', 'x', '0x',
   '&' or '%' prefix and at least one digit valid in that base. A NUL is no
   digit. True with the magnitude, saturated past MaxColor (AOver), and the
-  sign; the caller decides what is a colour. }
-function ReadColorLiteral(const S: String; out AMag: Int64; out ANeg, AOver: Boolean): Boolean;
-var i, n, base, dv: Integer; c: Char;
+  sign; the caller decides what is a colour. AStop is the byte the read stopped
+  at, which is what the call is charged for (round 8). }
+function ReadColorLiteral(const S: String; out AMag: Int64; out ANeg, AOver: Boolean;
+                          out AStop: Integer): Boolean;
+var n, base, dv: Integer; c: Char;
 begin
   Result := False;
   AMag := 0;
   ANeg := False;
   AOver := False;
   n := Length(S);
-  i := 1;
-  while (i <= n) and (S[i] in [' ', #9]) do Inc(i);
-  if (i <= n) and (S[i] in ['+', '-']) then
+  AStop := 1;
+  while (AStop <= n) and (S[AStop] in [' ', #9]) do Inc(AStop);
+  if (AStop <= n) and (S[AStop] in ['+', '-']) then
   begin
-    ANeg := S[i] = '-';
-    Inc(i);
+    ANeg := S[AStop] = '-';
+    Inc(AStop);
   end;
-  if i > n then Exit;
+  if AStop > n then Exit;
   base := 10;
-  if S[i] in ['$', 'x', 'X'] then begin base := 16; Inc(i); end
-  else if S[i] = '&' then begin base := 8; Inc(i); end
-  else if S[i] = '%' then begin base := 2; Inc(i); end
-  else if (S[i] = '0') and (i < n) and (S[i + 1] in ['x', 'X']) then
-    begin base := 16; Inc(i, 2); end;
-  if i > n then Exit;                        // a sign or a prefix with no digit
-  while i <= n do
+  if S[AStop] in ['$', 'x', 'X'] then begin base := 16; Inc(AStop); end
+  else if S[AStop] = '&' then begin base := 8; Inc(AStop); end
+  else if S[AStop] = '%' then begin base := 2; Inc(AStop); end
+  else if (S[AStop] = '0') and (AStop < n) and (S[AStop + 1] in ['x', 'X']) then
+    begin base := 16; Inc(AStop, 2); end;
+  if AStop > n then Exit;                        // a sign or a prefix with no digit
+  while AStop <= n do
   begin
-    c := S[i];
+    c := S[AStop];
     if c in ['0'..'9'] then dv := Ord(c) - Ord('0')
     else if c in ['a'..'f'] then dv := Ord(c) - Ord('a') + 10
     else if c in ['A'..'F'] then dv := Ord(c) - Ord('A') + 10
@@ -710,22 +712,30 @@ begin
       AMag := AMag * base + dv;
       if AMag > MaxColor then AOver := True;
     end;
-    Inc(i);
+    Inc(AStop);
   end;
   Result := True;
 end;
 
-function ColorOf(const AName: String): Int64;
-var i: Integer; mag: Int64; neg, over: Boolean;
+{ ARead: how many bytes of AName the answer read. A name is compared with every
+  colour name, and each comparison stops at the shorter of the two, so that part
+  is bounded by the table; the literal read is not, and stops where it stops. }
+function ColorOf(const AName: String; out ARead: Int64): Int64;
+var i, stop: Integer; mag: Int64; neg, over: Boolean;
 begin
+  ARead := 0;
   for i := 0 to High(ColorNames) do
+  begin
+    Inc(ARead, Length(ColorNames[i]));
     if SameText(ColorNames[i], AName) then Exit(ColorVals[i]);
+  end;
   // a '$bbggrr' or decimal literal also reads; -0 is 0, any other negative
   // and anything past 2^32 - 1 is no colour
-  if ReadColorLiteral(AName, mag, neg, over) and not over and ((not neg) or (mag = 0)) then
+  if ReadColorLiteral(AName, mag, neg, over, stop) and not over and ((not neg) or (mag = 0)) then
     Result := mag
   else
     Result := 0;
+  Inc(ARead, stop);
 end;
 
 { The whole unsigned value, in hex. The number used to be narrowed by ArgI32,
@@ -744,19 +754,25 @@ begin
     if ColorVals[i] = n then begin Result := ValStr(ColorNames[i]); Exit; end;
   Result := ValStr('$' + IntToHex(n, 6));
 end;
-{ A name compared against every colour name, then read as a literal. }
+{ A name compared against every colour name, then read as a literal --
+  CHARGED FOR WHAT IT READ (round 8). It was asked a REWRITE of the whole text up
+  front, and the read stops at the first byte that is no digit: color() of a
+  4 MB word was charged about 3800 times what it cost. }
 function t_color(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var v, read: Int64;
 begin
   Err := NoError();
-  if not BudgetLinearOk('color', Length(Args[0].Str), BudgetMilliRewrite, Err) then Exit(ValInt(0));
-  Result := ValInt(ColorOf(Args[0].Str));
+  v := ColorOf(Args[0].Str, read);
+  if not BudgetLinearAfterOk('color', read, BudgetMilliScan, Err) then Exit(ValInt(0));
+  Result := ValInt(v);
 end;
 function t_alphacolor(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var v, read: Int64;
 begin
   Err := NoError();
-  if not BudgetLinearOk('alphacolor', Length(Args[0].Str), BudgetMilliRewrite, Err) then
-    Exit(ValInt(0));
-  Result := ValInt(ColorOf(Args[0].Str) or Int64($FF000000));   // opaque alpha
+  v := ColorOf(Args[0].Str, read);
+  if not BudgetLinearAfterOk('alphacolor', read, BudgetMilliScan, Err) then Exit(ValInt(0));
+  Result := ValInt(v or Int64($FF000000));   // opaque alpha
 end;
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);

@@ -52,6 +52,56 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (adversarial round 8, 2026-10-11)
+
+- **Budget: a charge answers only for the work beside it, a refusal changes
+  nothing, and every price is measured.** `check-budget.py` now reads where a
+  charge sits, so it sees a case-fold before a metered loop (`path_matchespattern`
+  ran 45 s under a 2 s ceiling), a concatenation (`path_combine$`) and a container
+  shift (`json_removeat@`, 22 s step-only); about forty more unpriced sites were
+  found and priced (RAG retrieval, SQLite copies and escaping, zip, http basic
+  auth, file appends). A refused call leaves its container as it was:
+  `strings_values` no longer appends a duplicate key, a sort is not left half
+  done, a merge is priced before its first member is copied, a refused autosave
+  or reload is rolled back. Prices are measured by `probe_limits --prices` and
+  held between 0.5x and 4x of the work: searches, splits, `line$`/`s$[n]`,
+  `json_parse@` (no longer counting commas inside strings: a 1 MB document is not
+  refused on its 7th parse), `strings_delimitedtext$` and `reverse$` re-priced,
+  deflate charged its wall time. **`strings_delimitedtext` no longer drops every
+  field after an unquoted field holding a space** (`"John Smith,42,NY"` gave one
+  field); it follows `TStrings.DelimitedText` and loses nothing.
+- **GUI: every door that makes or unmakes a window asks `app_run`, and a move
+  inside a handler is deferred.** An embedded form whose host was freed stayed
+  visible and top-level with no window, so `app_run` never returned; it is now
+  hidden with its host. Moving the only window into another form ends the loop as
+  closing it does. A window shown with `control_visible@` or `control_set@
+  "Visible"` had no closer: `form@` now installs it for every form. And
+  `control_parent@` inside a radio's `onchange` while the LCL walked its siblings
+  killed the program ("List index out of bounds"): a move asked for inside a
+  handler lands when the handler returns.
+- **One keyboard model, and INPUT reads a line, on both systems.** After any
+  `getkey$`/`inkey$`/`keypressed()`, `input` on Windows answered part of a line,
+  and on Linux it swallowed the keys typed right after the Enter; a line is now
+  read in line mode, no further than its Enter. Modifier and lock keys alone are
+  not keys (Shift+A was `chr$(0)+chr$(16)` then `A`); Alt+numpad entry answers its
+  character; a repeat count of N is N keys; an emoji whose halves arrive
+  separately is one key; `keypressed()` no longer answers 0 for ever behind 32
+  mouse or focus events; Linux `getkey$` answers U+FFFD for bytes that are not
+  UTF-8. The console line read asks for 32768 units, so a legacy conhost keeps as
+  much of a line as it can. `temppath$()` on Windows continues past an unusable
+  TEMP/TMP to USERPROFILE and the Windows Temp directory and never answers `""`.
+- **Contact manager judges the journal SQLite will find, the way SQLite decides
+  it.** It asks SQLite for the file's name (`PRAGMA database_list`, before any
+  query): SQLite follows a symbolic link on Linux and drops a trailing dot on
+  Windows, so another program's hot journal was rolled back through a link or
+  through `x.db.`. A torn page 1 with a journal beside it is judged on the copy
+  (the program's own file opens again); schema names are compared ignoring case,
+  as SQLite compares them; a spent PERSIST journal is not a crash; an earlier
+  version's file that lost a table is named for it. 205 self-test checks.
+- CI: the Windows job's "nothing was skipped" step is case-sensitive (a PASS line
+  saying a TEMP "is skipped" read as a SKIP), and the console-input harness
+  measures the console's own line cap instead of assuming Windows 11's.
+
 ### Fixed (adversarial round 7, 2026-10-11)
 
 - **Library work that grows with what the script hands in is priced.** About

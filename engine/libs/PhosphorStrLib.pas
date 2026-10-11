@@ -157,22 +157,18 @@ end;
   it is RULE 1 -- priced once, refused whole, never truncated half way. False here
   means the budget said no; the caller turns that into the peLimit.
 
-  The append went when the answer began to be sized once (below), and its PRICE
-  stayed: twelve units a byte, the quadratic-append rate, for a walk that now
-  costs about 5 ns a byte -- 18 times over when the round-8 price sweep
-  measured it (tests/probe_limits.lpr --prices). The measured price is
-  BudgetMilliChar. It is NOT applied yet, and that is a recorded exception,
-  not an oversight: scripts/probe_budget.lpr pins "reverse$ refuses the same"
-  -- reverse$ of 40 MB refused under the prescribed pair -- an expectation
-  written while the routine was quadratic, and 40 MB now costs about 210 ms.
-  That probe lies outside the round-8 budget fixer's files; the price moves
-  to BudgetMilliChar with the probe's size (to something whose measured cost
-  really is past the allowance), in one change. }
+  The append went when the answer began to be sized once (below), and since
+  round 8 the PRICE is what that walk measures: BudgetMilliChar, a character
+  step (tests/probe_limits.lpr --prices). Until then it kept twelve units a
+  byte, the quadratic-append rate, 18 times over -- held back only because
+  scripts/probe_budget.lpr pinned "reverse$ of 40 MB is refused", which was
+  written while the routine was quadratic; that probe now asks for a size
+  whose measured cost really is past the allowance. }
 function CpReverse(const S: String; out AAllowed: Boolean): String;
 var p, q, o: SizeInt;
 begin
   Result := '';
-  AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
+  AAllowed := BudgetLinear(Length(S), BudgetMilliChar);
   if not AAllowed then Exit;
   { Sized once and filled from the back, a character at a time: the same spans
     the old table gave, without the table or the append. }

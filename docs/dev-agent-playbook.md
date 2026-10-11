@@ -1525,6 +1525,47 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-11 · round 8: 29 survivors, 6 HIGH, 2 killed -- the streak stays at
+  0.** Four investigators on what round 7 rewrote; for the first time the attack
+  was also on guards that REFUSE legitimate work, and it found them.
+  - **A charge answers for the work beside it.** Round 7's gate asked whether a
+    body consults the budget at all, and that cannot fail for work that sits
+    beside a consultation: MatchGlob charged inside its loop while the case-fold
+    of both whole strings before the loop was free, and with a pattern that
+    fails on the first comparison the loop never ticked. The gate now reads WHERE
+    a charge sits. And a price table "rounded up from the slowest member" was a
+    guess wherever a function was never measured (one 1/30 of its cost, searches
+    20-44x over, `line$` 800x): the measurement now lives in the tree
+    (`probe_limits --prices`) with its bound written down.
+  - **A refusal reported after the mutation is not a refusal.** Price first, or
+    work on a copy and swap: `strings_values` appended a duplicate key and then
+    said no.
+  - **A fix keyed to the door found is a fix to one door.** Round 7 deferred a
+    FREE under the LCL's radio walk; `control_parent@` shortens the same list. It
+    stopped counting forms with a parent; freeing the HOST made one parentless
+    again. It installed the closer in the two functions that came to mind; a
+    window shown by `control_visible@` had none. Name the mutation, not the
+    function -- and when the doors into a state cannot be listed, hook the one
+    place every such object is made (the closer now lives in `form@`).
+  - **A mode is somebody's state; a reader that does not own it must not inherit
+    it.** Raw mode belonged to the key functions and outlived them, so INPUT read
+    in it: one character per INPUT on Windows, the next keys eaten on Linux --
+    green for months because every console test typed into a fresh console. And
+    round 7's surrogate fix rested on "the console queues both halves together",
+    true only in its own test's shape (one batched write). When a fix rests on a
+    timing premise, the test must break the premise before the fix is believed.
+  - **Ask the library for the name it will use.** The contact manager built
+    `p$ + "-journal"`; SQLite names the journal after ITS full path, through a
+    symlink on Linux and without a trailing dot on Windows. Checking a different
+    copy of the value than the one that acts, again.
+  - **CI taught the console twice.** The GitHub Windows Server console keeps a
+    typed line only up to the FIRST ReadConsoleW buffer minus 2 and discards the
+    rest -- so a harness that assumed Windows 11's behaviour failed, and so did
+    its first fix, which calibrated with a smaller buffer than phosphor's. The
+    read size IS the result there; the harness now reads it from the source.
+    And `Select-String` ignores case by default: a PASS line saying something
+    "is skipped" failed the no-SKIP step.
+
 - **2026-10-11 · round 7: 22 survivors, 9 HIGH, 0 killed -- the streak stays at 0.**
   Four investigators on what round 6 and its diff review rewrote; seven of the nine
   HIGH were one class, and most findings were OLDER defects of a class round 6 had

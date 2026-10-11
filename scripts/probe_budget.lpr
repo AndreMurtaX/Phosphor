@@ -1202,8 +1202,16 @@ begin
           'println len(aucase$(string$(40000000, 97)))' + LF);
   Refused('alcase$ refuses the same',
           'println len(alcase$(string$(40000000, 97)))' + LF);
-  Refused('reverse$ refuses the same',
-          'println len(reverse$(string$(40000000, 97)))' + LF);
+  { reverse$ is no longer quadratic, so its price is the character walk it
+    measures (BudgetMilliChar = 0.704 units a byte) and 40 MB fits. What must
+    still be refused is a string whose reversal does not: under the pair the
+    allowance is 1000000 * 256 = 256000000 units; string$(160000000) charges
+    one unit a byte, 160000000, leaving 96000000; reversing it asks
+    160000000 * 0.704 = 112640000, which is more. }
+  Refused('reverse$ refuses a string it cannot walk inside the budget',
+          'println len(reverse$(string$(160000000, 97)))' + LF);
+  Allowed('and reverses 40 MB, which it now can',
+          'println len(reverse$(string$(40000000, 97)))' + LF, '40000000' + LF);
   Refused('base64_valid refuses the same',
           'println base64_valid(string$(40000000, 97))' + LF, 4000);
   Refused('json_stringify$ refuses a string of a million quotes',

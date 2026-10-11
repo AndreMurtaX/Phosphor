@@ -559,6 +559,10 @@ def run_unix(exe, work):
     failed = 0
 
     import termios
+    # termios.IUTF8 is missing from some Pythons (Ubuntu 24.04's 3.12 among
+    # them, round 10); the value is the kernel's, octal 0040000, as
+    # PhosphorCrtLib declares it.
+    IUTF8 = getattr(termios, 'IUTF8', 0o40000)
 
     def case(name, program, bursts, want, timeout=20, shows=None, iflag=(0, 0), lflag=(0, 0)):
         """bursts: (seconds to wait, bytes to write). The program's own answer
@@ -708,9 +712,9 @@ def run_unix(exe, work):
     # takes one byte (61 c3 78); without ICANON nothing is edited and DEL is
     # in the line (61 62 7f 63).
     case('typeahead-werase-utf8', gk_in, [(0.7, b'xab n\xc3\xa3o\x17x\r')], '78 61622078',
-         iflag=(termios.IUTF8, 0))
+         iflag=(IUTF8, 0))
     case('typeahead-erase-no-iutf8', gk_in, [(0.7, b'xa\xc3\xa9\x7fx\r')], '78 61c378',
-         iflag=(0, termios.IUTF8))
+         iflag=(0, IUTF8))
     case('typeahead-no-icanon', gk_in, [(0.7, b'xab\x7fc\r')], '78 61627f63',
          lflag=(0, termios.ICANON))
     # A TAB ERASED TYPED AHEAD goes back the columns it took FROM WHERE THE

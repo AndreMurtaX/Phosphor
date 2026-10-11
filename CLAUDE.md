@@ -180,6 +180,10 @@ BASE-1 indexing. Conditions need a comparison (`if x <> 0 then`, not `if x then`
 - **An exit code answers the question the tool asked, not the one you meant.** Three
   spellings of the same trap, each of which has produced a false report here:
   - **`$?` after a pipeline measures the pipe.** Capture the exit code on its own line.
+  - **`wsl -- bash -lc '...; echo rc=$?'` prints the LOGIN shell's `$?`**: `wsl --`
+    hands the line to a shell to parse first, so `$?`, `$var` and `~` expand before
+    `bash -lc` runs. It printed `rc=0` under `SUITE FAILED` on 2026-10-10. Use
+    `wsl ... --exec bash -lc '...'` whenever the command names a `$`.
   - **`cmd | grep -q` is not a gate**: `grep -q` exits at the first match and SIGPIPEs
     upstream, so it reads non-zero *even when it matched* — an intermittent false SKIP.
   - **Windows `ping` exits 0 when a ROUTER answers** "destination host unreachable", so

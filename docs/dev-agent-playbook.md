@@ -1551,6 +1551,12 @@ the sweep above. Verify before fixing, as with everything on this page.
   noncharacters well-formed, and a "replacement" is a byte the script never
   wrote; and **a byte-sweep oracle that reports 0 bad over 0 lines is not a
   pass** -- the first run's BASIC did not parse, and only the exit code said so.
+  And one about the Linux leg itself: `wsl -d ... -- bash -lc '...; echo
+  rc=$?'` printed `rc=0` under `SUITE FAILED`. `wsl --` hands its command line
+  to the login shell to PARSE, which expands `$?` (and `$var`, `~`) before
+  `bash -lc` ever runs; `bash -c "exit 1"; echo rc=$?` measured `rc=0` that way
+  and `rc=1` through `wsl ... --exec bash -lc '...'`. Use `--exec` whenever the
+  command names a `$`.
   Left as they were, recorded: the RTL table's age (124 BMP mappings Python has,
   e.g. Georgian Mtavruli) and no supplementary mappings (520) -- the engine
   leaves those unchanged, it does not corrupt them; and the console host still

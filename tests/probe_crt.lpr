@@ -274,7 +274,11 @@ begin
   Script := #$9F;
   Key('however much of it arrived', $F0, @Feed, #$EF#$BF#$BD);
   Report(Leftover = -1, 'and its arrived part is not handed back');
-  Script := #$E9'q';
+  { The lead byte E9 is Key's argument; Script is what FOLLOWS it -- just the
+    q. It was written #$E9'q', which repeated the lead and, being a byte
+    literal mixed with a quoted one under codepage UTF8, compiled as C3 A9 q
+    (CLAUDE.md's binary-literal trap): the byte handed back was C3, not q. }
+  Script := 'q';
   Key('a Latin-1 e-acute (E9) before a q is U+FFFD', $E9, @Feed, #$EF#$BF#$BD);
   Report(Leftover = Ord('q'), 'and the q is the next key');
   Script := #$80;

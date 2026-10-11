@@ -617,6 +617,11 @@ end;
   self-synchronising, so a valid sequence can only be found at a character
   boundary. A prefix, suffix or substring test on the folded BYTES therefore says
   exactly what the same test on the folded CHARACTERS would say.
+  (2026-10-10: "well-formed" holds for well-formed input. A malformed byte is now
+  copied through unchanged rather than turned into '?', so a malformed operand
+  is compared byte for byte, as containsstr compares it; one character still
+  folds to one character, and replacetext$ accepts a match only on character
+  boundaries -- see DoReplace.)
 
   WHAT IT COSTS. An uppercased copy of each operand -- which containstext and
   replacetext$ were already paying inside the RTL, on both operands, for every
@@ -684,7 +689,7 @@ var
   outlen: Int64;
   hay, needle, fh, fn, r: String;
   ok, ok2: Boolean;
-  fp, target, fcur, hcur, seg: SizeInt;
+  fp, target, fcur, hcur, seg, tf, th: SizeInt;
 begin
   E := NoError();
   hay := s0(A); needle := A[1].Str;
@@ -718,18 +723,37 @@ begin
   if not AIgnoreCase then
     Exit(ValStr(StringReplace(hay, needle, A[2].Str, [rfReplaceAll])));
   if fn = '' then Exit(ValStr(hay));       // an empty needle answers the text unchanged
+  { A MATCH COUNTS ONLY ON CHARACTER BOUNDARIES (2026-10-10). The fold now
+    copies a malformed byte through instead of turning it into '?' (see
+    Utf8CaseU), so a malformed NEEDLE -- a lone 0xA9, which bytemid$ hands out
+    -- can be found in the middle of a character of the folded text, inside the
+    C2 A9 of a copyright sign. There is no place in the ORIGINAL that such a
+    match maps to: walking to it overshoots, and the old loop then emitted the
+    whole character and appended the replacement after it. A match that does
+    not begin AND end where a character does is skipped, and the search goes on
+    one byte later. For well-formed operands every match is already on a
+    boundary (UTF-8 is self-synchronising), so nothing that was right changes. }
   r := ''; fcur := 1; hcur := 1; seg := 1;
   fp := PosEx(fn, fh, 1);
   while fp > 0 do
   begin
     while fcur < fp do
     begin fcur := NextCp(fh, fcur); hcur := NextCp(hay, hcur); end;
-    r := r + Copy(hay, seg, hcur - seg) + A[2].Str;
-    target := fp + Length(fn);
-    while fcur < target do
-    begin fcur := NextCp(fh, fcur); hcur := NextCp(hay, hcur); end;
-    seg := hcur;
-    fp := PosEx(fn, fh, target);
+    if fcur = fp then
+    begin
+      target := fp + Length(fn);
+      tf := fcur; th := hcur;
+      while tf < target do
+      begin tf := NextCp(fh, tf); th := NextCp(hay, th); end;
+      if tf = target then
+      begin
+        r := r + Copy(hay, seg, hcur - seg) + A[2].Str;
+        fcur := tf; hcur := th; seg := hcur;
+        fp := PosEx(fn, fh, target);
+        Continue;
+      end;
+    end;
+    fp := PosEx(fn, fh, fp + 1);              // not on a boundary: look further on
   end;
   Result := ValStr(r + Copy(hay, seg, Length(hay) - seg + 1));
 end;
@@ -1056,39 +1080,98 @@ end;
 
   THE MIRROR. A BMP code unit takes the same TCharacter.ToUpper it always took,
   and an unpaired surrogate takes it too, so every string that was right stays
-  byte-identical. Only a well-formed surrogate PAIR takes the new branch. }
+  byte-identical. Only a well-formed surrogate PAIR takes the new branch.
+  (2026-10-10: the walk no longer goes through UTF-16 at all -- see the note
+  over Utf8CaseU -- but a supplementary character is still answered whole and
+  unchanged, which is what this branch did.) }
 { QUADRATIC APPEND, charged -- the same shape and the same reason as CpReverse.
   Unbudgeted, aucase$/alcase$ of a 160 MB string took 48984 ms under a 2000 ms
   ceiling and reported success. Length(S) is an upper bound on the number of
-  appends (UTF8Decode never produces more UTF-16 units than input bytes), so the
-  price is fixed before the loop starts. }
+  appends (the walk below makes at most two per character, a character is at
+  least one byte, and only a character with a stray tail makes the second -- so
+  at most one per byte), so the price is fixed before the loop starts. }
+{ NO RTL DECODER, AND NOTHING IS EVER REPLACED (2026-10-10).
+
+  This used to start with `u := UTF8Decode(S)`, and UTF8Decode is the RTL's
+  Utf8ToUnicode (rtl/inc/ustrings.inc), which writes UNICODE_INVALID -- declared
+  there as 63, a '?' -- for every sequence it will not accept. It will not
+  accept two things a string can hold:
+
+    - U+FFFE and U+FFFF. Its three-byte branch tests `UC >= $FFFE` beside the
+      overlong and surrogate tests and calls them invalid UTF-8. They are not:
+      they are NONCHARACTERS, well-formed in UTF-8 (RFC 3629) and in Unicode
+      (Corrigendum #9), with no case mapping. aucase$/alcase$ of chr$(65534)
+      and chr$(65535) answered "?", and a sweep of all 1112064 encodable
+      codepoints against Python's Unicode data found exactly those four answers
+      that were neither Python's nor the input.
+    - Any malformed byte. A stray continuation byte, a truncated or overlong
+      sequence, an encoded surrogate: each became '?', which is a byte the
+      script never wrote. Worse for the fold family: "A" then a stray 0x80 is
+      ONE character to len() (Utf8Starts attaches the orphan to the A) and came
+      back as "A?", TWO -- so replacetext$, which walks the folded string and
+      the original in step, one character at a time, lost its place.
+
+  So the walk is now over the ENGINE'S characters, by the engine's own rule
+  (PhosphorValue.Utf8Starts: byte 1, then every byte that is not a continuation
+  byte, begins one). A character whose lead is a well-formed encoding of one
+  codepoint -- RFC 3629 section 4, so no overlong, no surrogate, nothing past
+  U+10FFFF -- has that codepoint mapped; whatever follows it inside the same
+  character (stray continuation bytes) is copied as it stands. A character
+  whose lead is not well-formed is copied WHOLE, unchanged. That is the
+  identity on everything with no case mapping, which is the only right answer
+  for a byte that is not a character, and it is what Python's own
+  `b.decode('utf-8', 'surrogateescape').upper()` answers -- the oracle
+  tests/suite/97_case_noncharacters.bas derives its expectations from.
+
+  Every input character yields exactly one output character, starting at a
+  non-continuation byte, so the folded string and the original advance in
+  step under NextCp, malformed or not. }
 function Utf8CaseU(const S: String; AUpper: Boolean; out AAllowed: Boolean): String;
-var u: UnicodeString; i, n: SizeInt; hi, lo: Word;
+var p, q, n, need, k: SizeInt; cp: LongWord; b: Byte; ok: Boolean;
 begin
   Result := '';
   AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
   if not AAllowed then Exit;
-  u := UTF8Decode(S);
-  n := Length(u);
-  i := 1;
-  while i <= n do
+  n := Length(S);
+  p := 1;
+  while p <= n do
   begin
-    hi := Word(u[i]);
-    if (hi >= $D800) and (hi <= $DBFF) and (i < n) then
+    q := p + 1;                                 // one past this character
+    while (q <= n) and ((Ord(S[q]) and $C0) = $80) do Inc(q);
+    b := Ord(S[p]);
+    ok := True;
+    cp := 0;
+    if b < $80 then begin cp := b; need := 0; end
+    else if (b >= $C2) and (b <= $DF) then begin cp := b and $1F; need := 1; end
+    else if (b >= $E0) and (b <= $EF) then begin cp := b and $0F; need := 2; end
+    else if (b >= $F0) and (b <= $F4) then begin cp := b and $07; need := 3; end
+    else begin ok := False; need := 0; end;     // C0, C1, F5..FF, or a lone continuation
+    if ok and (p + need >= q) then ok := False; // truncated: not enough continuations
+    if ok then
     begin
-      lo := Word(u[i + 1]);
-      if (lo >= $DC00) and (lo <= $DFFF) then
-      begin
-        Result := Result + Utf8Char(
-          $10000 + ((Integer(hi) - $D800) shl 10) + (Integer(lo) - $DC00));
-        Inc(i, 2);
-        Continue;
+      for k := 1 to need do cp := (cp shl 6) or (Ord(S[p + k]) and $3F);
+      case need of                              // the shortest form, and a scalar value
+        1: ok := cp >= $80;
+        2: ok := (cp >= $800) and ((cp < $D800) or (cp > $DFFF));
+        3: ok := (cp >= $10000) and (cp <= $10FFFF);
       end;
     end;
-    // a BMP code unit, or an UNPAIRED surrogate: the single-unit path, unchanged
-    if AUpper then Result := Result + Utf8Char(Ord(TCharacter.ToUpper(u[i])))
-    else Result := Result + Utf8Char(Ord(TCharacter.ToLower(u[i])));
-    Inc(i);
+    if not ok then
+      Result := Result + Copy(S, p, q - p)      // not a character: the bytes, unchanged
+    else
+    begin
+      { A BMP codepoint takes TCharacter's simple mapping, as it always did.
+        Above the BMP there is no codepoint-level entry point (see above), so
+        the character is its own answer -- and its bytes are already it. }
+      if cp > $FFFF then
+        Result := Result + Copy(S, p, need + 1)
+      else if AUpper then
+        Result := Result + Utf8Char(Ord(TCharacter.ToUpper(WideChar(cp))))
+      else
+        Result := Result + Utf8Char(Ord(TCharacter.ToLower(WideChar(cp))));
+      Result := Result + Copy(S, p + need + 1, q - p - need - 1);  // stray tail, if any
+    end;
+    p := q;
   end;
 end;
 

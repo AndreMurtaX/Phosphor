@@ -1525,6 +1525,39 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-10 · `aucase$`/`alcase$` answered "?" for U+FFFE and U+FFFF -- and
+  for every malformed byte.** A whole-range sweep against Python found the two
+  noncharacters; the cause, read in rtl/inc/ustrings.inc rather than guessed, is
+  `UTF8Decode` -> `Utf8ToUnicode`, whose three-byte branch tests `UC >= $FFFE`
+  beside the overlong and surrogate tests and writes `UNICODE_INVALID` (= 63, a
+  '?'). The CLASS was wider than the report: the same decoder turns every
+  malformed byte into '?' (659,972 wrong answers over a 409,856-string byte
+  sweep, 25,152 of them changing `len()`), and a truncated `E3 81 x` was
+  re-read as a TWO-byte sequence and came back as an invented `Á`. Through the
+  fold family `chr$(65535)` "contained" a question mark, the two noncharacters
+  were equal under `strcmpi`, and `replacetext$` -- which walks folded and
+  original text in step -- dropped a following character. `Utf8CaseU` now walks
+  the engine's own characters (Utf8Starts' rule), maps only a well-formed lead
+  and copies anything else byte for byte; `replacetext$` accepts a match only on
+  character boundaries, which a malformed needle can now violate. It was the
+  only engine route through the RTL's UTF-16 decoder (SysLib's converters are
+  hand-written and keep U+FFFE; every other case function is ASCII-bytewise).
+  Proof: the codepoint sweep differs from before in exactly two lines, zero
+  corruptions remain against Python; the byte sweep goes from 659,972 wrong to
+  0 against a surrogateescape oracle that was itself run against the old
+  binary; `tests/suite/97_case_noncharacters.bas` failed 21 of 30 on the old
+  code, and each half of the new boundary guard was mutated and caught.
+  Lessons: **an RTL decoder's "invalid" is its own opinion** -- Unicode calls
+  noncharacters well-formed, and a "replacement" is a byte the script never
+  wrote; and **a byte-sweep oracle that reports 0 bad over 0 lines is not a
+  pass** -- the first run's BASIC did not parse, and only the exit code said so.
+  Left as they were, recorded: the RTL table's age (124 BMP mappings Python has,
+  e.g. Georgian Mtavruli) and no supplementary mappings (520) -- the engine
+  leaves those unchanged, it does not corrupt them; and the console host still
+  hands interactive Windows output to `UTF8Decode` before `WriteConsoleW`, a
+  display-only path (pipes and files get the raw bytes), so U+FFFF typed to a
+  live console shows as '?'.
+
 - **2026-10-10 · round 5: 34 survivors, 3 HIGH; the streak stays at 0.** Four
   investigators on today's new surfaces (arguments, crypto, modal forms and the
   grid, the contact manager), one skeptic per finding; 35 findings, 1 killed.

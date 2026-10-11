@@ -17,7 +17,11 @@ things the test suites had not, listed at the end.
 
 It needs the SQLite runtime: `sqlite3.dll` beside `phosphor.exe` on Windows
 (the 64-bit DLL from [sqlite.org](https://www.sqlite.org/download.html)), or
-`libsqlite3` on Linux, which most distributions install already.
+`libsqlite3` on Linux, which most distributions install already. **SQLite
+3.39.0 or later** is what it is built for; it runs on an older library too
+(Ubuntu 22.04 ships 3.37.2, Debian 11 3.34), with one question left unasked —
+see *the journal looked for* below. Its self-test passes whole against 3.37.2 and
+3.45.
 
 ```bash
 phosphor examples/contact_manager.bas
@@ -62,14 +66,35 @@ torn by a power cut is what a journal exists to put back, and the program's
 own file comes back whole. What counts as unfinished work is what SQLite
 counts: a journal whose header is zeroed is one a program *finished* with in
 `PERSIST` mode, not a crash, and SQLite leaves it alone, so the program does
-too — and says a program stopped in the middle of a change only when the
-journal shows one. And the journal looked for is the one SQLite will find,
+too — and speaks of a change in the middle only when the journal shows one.
+Even then it does not say the program that left it *stopped*: SQLite leaves a
+journal alone while its writer still holds the file's lock, and that lock
+cannot be asked without SQLite reading the file, so the refusal says the
+journal is either a program's at work right now or one that stopped in the
+middle of a change — and a person is not told to "recover" a live journal.
+And the journal looked for is the one SQLite will find,
 beside the file **as SQLite names it**: SQLite follows a symbolic link to its
 target on Linux and drops a trailing dot on Windows, so the journal it would
 roll back into `docs/phosphor-contacts.db` linked to `other.db`, or into
 `x.db.`, is `other.db-journal` or `x.db-journal` — not the one beside the name
 you gave. The program asks SQLite for that name (`PRAGMA database_list`, before
-any query) and judges the journal beside it.
+any query) and judges the journal beside it. **Before SQLite 3.39.0** that
+pragma reads the file to answer — and reading it is what rolls a hot journal
+back — so with an older library the program does not ask: it judges the
+journal beside the name you gave, and a file no program has marked is judged
+on a copy of its own bytes before SQLite opens it, so another program's file
+is still refused and left as it was. What an older library loses is the
+journal's name in that refusal when it lies beside a link's target, and a
+torn first page put back through a link (that file is refused as no
+database). Some names are not handed to SQLite at all: one beginning `file:`
+is a URI to a library built to read URIs (Ubuntu's is; the sqlite.org DLL is
+not), naming a file nothing has looked at, and `:memory:` or no name is a
+database with no file; a name ending in `-journal`, `-wal` or `-shm`; and a
+name the folder lists that is no file — a folder, or a symbolic link that
+leads to no file, through which SQLite would create one wherever it leads. A
+name that is not there yet is asked of SQLite too (which creates the file, as
+opening it would the next moment): on Linux, a link that leads to a journal's
+name is refused there, and the empty file taken away.
 A file that carries the program's mark is not trusted on the mark alone
 either: one without every table, column, index and foreign key its version
 has is refused as damaged, naming what is missing — the uniqueness of user
@@ -127,8 +152,11 @@ refused outright: that is where SQLite keeps a database's unfinished work, and
 a backup there would be cut short by the open database or taken for the
 unfinished work of the file beside it. So is a name that *leads* to one: a
 symbolic link that points at nothing is no file, so nothing above stops it,
-and SQLite would write the backup through it to wherever it points — the name
-the backup will be written under is asked of SQLite first. "Backed up" is said only once the copy
+and SQLite would write the backup through it to wherever it points. On
+Linux the name the backup will be written under is asked of SQLite first,
+which follows the link; on Windows SQLite's name for a link is the link's
+own, so there a name the folder lists that is no file — such a link, or a
+folder — is refused outright. A `file:` URI is refused too. "Backed up" is said only once the copy
 has been read back. **Account** changes your own password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
@@ -298,9 +326,20 @@ privilege is needed to make it, and a test cannot make any other link. Under
 `--sandbox`, as `scripts/test-examples` runs it, SQLite opens no file through
 a link at all, so on Linux there the pair checks that refusal instead (the
 count is the same on both systems); the pair proper runs on Linux when the
-self-test is started without a sandbox, `PHOSPHOR_SELFTEST=1 phosphor run
-examples/contact_manager.bas`. A backup through a link that points at
-nothing cannot be made by a test at all, and was proved by hand on Linux.
+self-test is started without a sandbox, which **block AI** of `scripts/test.sh`
+does — round 9 found that nothing did, so the Linux judging could be removed
+with every runner green. A BASIC program cannot make a real link, so block AI
+of `scripts/test.sh` and of `scripts/test.ps1` makes two, each leading to no
+file yet, and names their folder in `PHOSPHOR_SELFTEST_LINKS`: the self-test
+then runs three checks more — a backup and a database through a link onto a
+journal's name are refused and write nothing there, and another program's
+file reached through a link is refused and left with its journal. The self-test
+also pretends its SQLite is older than 3.39.0 for four checks, on every
+library: the version compared as numbers, the name of a file that is there not
+asked, and another program's file still refused and left byte for byte, under
+its own name and under another. The whole self-test was run once against a
+real 3.37.2 DLL too (Windows): every check passes there, where round 8's
+program failed eight.
 
 A check is only worth having if it can fail. An adversarial review found three
 that could not — the CSV check looked at one quoted name, the credit-limit check
@@ -326,7 +365,13 @@ And the eighth's: judging the name as given instead of SQLite's name for it
 its journal is looked at, comparing index, collation and column names byte for
 byte, calling a file that lost a whole table one of "other tables", taking a
 finished `PERSIST` journal for unfinished work, and describing every journal
-as an interrupted change.
+as an interrupted change. And the ninth's: asking an older SQLite for a name
+(the pretended age's checks fail, and a real 3.37.2 failed eight), the folder
+not asked about a name that is no file (a directory, and the Windows links of
+block AI), a `file:` URI handed to SQLite, the old "a program stopped" wording
+for a journal whose writer is at work, a name that leads to a journal's opened
+as a database (block AI on Linux), and the judging by SQLite's name removed
+(block AI on Linux, where every sandboxed runner stayed green).
 
 ## What writing it changed in Phosphor
 

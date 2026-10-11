@@ -1926,4 +1926,47 @@ else
   echo "FAIL  AH:keyboard on a pty (exit $ahkcode):"; sed 's/^/        /' "$tmpdir/ahkeys.out"; okAH=1; fail=1
 fi
 
+# --- AI: ROUND 9, THE CONTACT MANAGER WITHOUT A SANDBOX, THROUGH REAL LINKS ----
+# scripts/test-examples runs examples/contact_manager.bas's self-test under
+# --sandbox, and there the SQLite package opens no file through a link at all --
+# so on Linux its check that the journal judged is the one SQLite would roll back
+# (beside a link's TARGET, which SQLite names: sqlite_name$) held with that
+# judging REMOVED: round 9 measured the mutant at 205 of 205 sandboxed, and 203
+# of 205 without the sandbox, which nothing ran. Nor can a BASIC program make a
+# link, so a backup through one onto a journal's name was reached by no check on
+# either system. This block runs the self-test with NO sandbox, and with
+# PHOSPHOR_SELFTEST_LINKS naming a folder that holds two real symbolic links,
+# each leading to no file yet: tojournal.db -> other.db-journal (a backup or a
+# database there would land on another database's journal name) and tohot.db ->
+# hot.db (the self-test makes hot.db: another program's file with a hot
+# journal). The folder is named as `cd -P` names it, which is how SQLite names
+# a file reached through a link. Its own TMPDIR keeps the self-test's fixed
+# scratch names out of every other run's way. Expected: every check passes, and
+# the count is the golden's plus the three checks the self-test runs only when
+# that variable is set. The twin is block AI of scripts/test.ps1.
+okAI=0
+aidir="$(cd -P "$tmpdir" && pwd)/ai"
+mkdir -p "$aidir/temp"
+ln -s "$aidir/other.db-journal" "$aidir/tojournal.db"
+ln -s "$aidir/hot.db" "$aidir/tohot.db"
+aigolden="$(tr -d '\r' < "$root/examples/contact_manager.expected")"
+aiwant=""
+if [ "$(printf '%s\n' "$aigolden" | sed -n 2p)" = "failed: 0" ]; then
+  ain="$(printf '%s\n' "$aigolden" | sed -n 1p | sed -n 's/^passed: \([0-9][0-9]*\)$/\1/p')"
+  if [ -n "$ain" ]; then aiwant="$(printf 'passed: %s\nfailed: 0' "$((ain + 3))")"; fi
+fi
+if [ -z "$aiwant" ]; then
+  echo "FAIL  AI:examples/contact_manager.expected is not 'passed: N / failed: 0'"; okAI=1; fail=1
+elif command -v xvfb-run > /dev/null 2>&1; then
+  if aigot="$(PHOSPHOR_SELFTEST=1 PHOSPHOR_SELFTEST_LINKS="$aidir" TMPDIR="$aidir/temp" timeout 300 xvfb-run -a "$exe" run "$root/examples/contact_manager.bas" < /dev/null 2>&1)"; then aicode=0; else aicode=$?; fi
+  if [ "$aicode" -eq 0 ] && [ "$(printf '%s' "$aigot" | tr -d '\r')" = "$aiwant" ]; then
+    echo 'PASS  AI:the contact manager judges the journal beside a link'"'"'s target, and refuses a backup or a database through a link onto a journal'
+  else
+    echo "FAIL  AI:the contact manager without a sandbox, through real links: exit $aicode, want '$(printf '%s' "$aiwant" | tr '\n' '/')', got:"
+    printf '%s\n' "$aigot" | sed 's/^/        /'; okAI=1; fail=1
+  fi
+else
+  echo 'SKIP  AI:the contact manager through real links (no xvfb-run on this machine)'
+fi
+
 exit "$fail"

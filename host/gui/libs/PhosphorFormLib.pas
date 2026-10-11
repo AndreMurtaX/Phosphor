@@ -152,9 +152,18 @@ begin
   Result := @DoClose;
 end;
 
-{ The closer serving AForm, created and installed on demand. Both form_show and
-  form_onclose@ go through this, so whichever the program calls first wins the
-  installation and the other finds it. }
+{ The closer serving AForm: installed when the form is MADE (f_form), and found
+  by form_show and form_onclose@.
+
+  EVERY FORM HAS ONE FROM BIRTH (round 8, 2026-10-11). It used to be installed
+  by form_show and form_onclose@ only, so a form made a window any other way --
+  control_visible@(f@, 1), control_set@(f@, "Visible", 1), the shown state a
+  form gets back after a modal session -- closed (the X button, form_close@)
+  without asking app_run, and the loop ran on with nothing on screen. The doors
+  that SHOW a form cannot be listed once and kept listed; the one that MAKES a
+  form can. A closer on a form that is never shown costs nothing: it hides, as
+  a form's close does anyway, and it asks app_run only about a window that WAS
+  on screen (GuiWindowLeaving). }
 function CloserOf(AForm: TForm): TFormCloser;
 var i: Integer;
 begin
@@ -181,6 +190,7 @@ begin
       frm.Width := ArgI32(Args[1]);
       frm.Height := ArgI32(Args[2]);
     end;
+  CloserOf(frm);   // from birth: every door that shows it then closes it alike
   Result := ValHandle(GuiRegister(frm, True));   // a form owns its tree
 end;
 
@@ -259,8 +269,8 @@ begin
   Err := NoError;
   if GuiResolve(Args[0].Hnd, TForm, c) then
   begin
-    // Find-or-create: if the program already bound form_onclose@, the closer is
-    // there and keeps that binding rather than being replaced.
+    // The closer has been there since form@ made the form (CloserOf); finding it
+    // again here only keeps a form_onclose@ binding where it is.
     CloserOf(TForm(c));
     TForm(c).Show;
   end;
@@ -392,8 +402,11 @@ begin
   { A form parented inside another is refused too (round 5): its buttons answer
     the TOP form (TCustomButton.Click uses GetParentForm), so its session could
     never end by its own buttons, and GTK complains it is not a window. }
+  { The parent asked is the one counted (GuiEffectiveParent): a move a handler
+    asked for has not landed yet, and is refused for a modal form when it does
+    -- so the form is judged as already where it was asked to go (round 8). }
   if f.Visible or (not f.Enabled) or (fsModal in f.FormState) or
-     (f.Parent <> nil) or InHookModal(f) then
+     (GuiEffectiveParent(f) <> nil) or InHookModal(f) then
   begin
     GGuiError := 1;
     Exit;

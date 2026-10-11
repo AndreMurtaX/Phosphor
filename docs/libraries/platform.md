@@ -45,7 +45,7 @@ on the box.
 | function | what it answers |
 | --- | --- |
 | `os_name$() → str` | `"Windows"`, `"macOS"` or `"Linux"`, fixed at compile time. A POSIX target that is none of those answers `"Unix"` — never `""` |
-| `os_platform$() → str` | the FPC target OS string, e.g. `Win64`, `linux`, `darwin`. Finer-grained than `os_name$`, because it carries the bitness on Windows |
+| `os_platform$() → str` | the FPC target OS string, e.g. `Win64`, `Linux`, `Darwin` -- capitalised as FPC spells them (measured on Linux, round 10: a test that compared with `linux` never took its Linux branch). Compare with `os_name$` when the program only needs which system. Finer-grained than `os_name$`, because it carries the bitness on Windows |
 | `os_architecture$() → str` | the FPC target CPU string, e.g. `x86_64`, `i386`, `aarch64` |
 
 ### Version

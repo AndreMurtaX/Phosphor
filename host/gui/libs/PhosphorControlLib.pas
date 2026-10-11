@@ -748,33 +748,19 @@ var c: TComponent; begin E := NoError; Result := A[0];
   while a move of the control waits, the position went into the OLD parent's
   chain and the landing then appended the control to the new one: a handler
   that moved an edit and made it first in its new panel read 0 back and found
-  it last afterwards. It is recorded instead and applied when the move lands,
-  and read back as the LCL will place it there: the end of the new parent's
-  chain (TWinControl.Insert appends to FTabList), or the position asked,
-  clamped to that chain as UpdateTabOrder clamps it. }
-function PendingTabOrder(c: TWinControl; h: TGuiHandle): Integer;
-var
-  lp: TWinControl;
-  i, n: Integer;
-begin
-  lp := GuiEffectiveParent(c);
-  if (lp = nil) or (lp = c.Parent) then Exit(c.TabOrder);
-  n := 0;   // the new parent's chain before it arrives: its windowed children
-  for i := 0 to lp.ControlCount - 1 do
-    if lp.Controls[i] is TWinControl then Inc(n);
-  if h.TabSet and (h.TabWanted >= 0) and (h.TabWanted < n) then
-    Result := h.TabWanted
-  else
-    Result := n;
-end;
+  it last afterwards. It is recorded instead and applied when the move lands.
+
+  READ BACK AS IT WILL LAND, FOR EVERY CONTROL (round 10). Round 9 read a
+  waiting control's position as the end of its new parent's chain, or the one
+  set: a move back to the control's OWN parent answered the old position (2
+  where 0 had been set), and two controls waiting for one parent both
+  answered the same end. A control that is not moving shifts too when one
+  arrives before it or leaves. GuiTabOrder replays every waiting move in the
+  order they land, and LandMoves imposes the chain it computes. }
 function f_taborder_get(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; h: TGuiHandle; begin E := NoError; Result := ValInt(0);
+var c: TComponent; begin E := NoError; Result := ValInt(0);
   if GuiResolve(A[0].Hnd, TWinControl, c) then
-  begin
-    h := GuiMovePending(c);
-    if h <> nil then Result := ValInt(PendingTabOrder(TWinControl(c), h))
-    else Result := ValInt(TWinControl(c).TabOrder);
-  end; end;
+    Result := ValInt(GuiTabOrder(TWinControl(c))); end;
 function f_taborder_set(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; h: TGuiHandle; v: Integer; begin E := NoError; Result := A[0];
   if GuiResolve(A[0].Hnd, TWinControl, c) then

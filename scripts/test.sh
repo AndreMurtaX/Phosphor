@@ -1519,6 +1519,21 @@ fi
 #    before its move lands, so moving it into a form never shown, with main
 #    hidden, leaves nothing on screen (agviewleave: tick 2 -- judged by where
 #    it physically still was, it asked nothing and ran to the watchdog).
+#  - ROUND 10 (2026-10-11): which radio is checked is the program's answer
+#    (docs/libraries/gui-choice.md). TRadioButton's rule: siblings are
+#    exclusive, and the checked one stays checked until something checks
+#    another -- nothing does here between the program's set and the read, so
+#    each expected value is the program's last set. agradioshow: d1 checked,
+#    a modal session (answered by a timer, which reads both radios first), d2
+#    checked while the dialog is hidden, a second session. Expected "session
+#    1: d1=1 d2=0", "session 2: d1=0 d2=1", "after: d1=0 d2=1" -- on Windows
+#    the second session read d1=1 d2=0: the form handed the focus back to d1,
+#    and a win32 radio that gets the focus unchecked checks itself. Linux was
+#    right already; this pins it. agradioplain: the same through form_show@
+#    again, with a radio d3 made while the dialog was hidden and checked
+#    before d2. Expected "re-shown: d1=0 d2=1 d3=0" -- Windows re-checked d1,
+#    and on Linux a radio made in a hidden, once-shown form joined no gtk2
+#    group, so checking d2 left d3 checked too.
 printf '%s\n' 'main@ = form@("AG", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'dlg@ = form@("AG dialog", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/ag.bas"
@@ -2081,6 +2096,58 @@ printf '%s\n' '    app_quit()' >> "$tmpdir/agviewleave.bas"
 printf '%s\n' '  end if' >> "$tmpdir/agviewleave.bas"
 printf '%s\n' '  return 0' >> "$tmpdir/agviewleave.bas"
 printf '%s\n' 'end function' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'main@ = form@("main", 300, 200)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'dlg@ = form@("options", 300, 200)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'dp@ = panel@(dlg@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'd1@ = radiobutton@(dp@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'd2@ = radiobutton@(dp@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'radio_checked@(d1@, 1)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'sess = 0' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'timer_interval@(t@, 200)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'tw@ = timer@()' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'timer_interval@(tw@, 8000)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'timer_ontimer@(tw@, "on_wd")' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'timer_enabled@(tw@, 1)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'r = form_showmodal(dlg@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'radio_checked@(d2@, 1)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'r = form_showmodal(dlg@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'println "after: d1=" + str$(radio_checked(d1@)) + " d2=" + str$(radio_checked(d2@))' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'end' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  if form_visible(dlg@) = 0 then return 0' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  sess = sess + 1' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  println "session " + str$(sess) + ": d1=" + str$(radio_checked(d1@)) + " d2=" + str$(radio_checked(d2@))' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  form_modalresult@(dlg@, 1)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'function on_wd(s@)' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  println "watchdog"' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  end' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agradioshow.bas"
+printf '%s\n' 'dlg@ = form@("options", 300, 200)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'dp@ = panel@(dlg@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'd1@ = radiobutton@(dp@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'd2@ = radiobutton@(dp@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'radio_checked@(d1@, 1)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'form_show@(dlg@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'x = app_processmessages()' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'form_close@(dlg@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'x = app_processmessages()' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'radio_checked@(d2@, 1)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'd3@ = radiobutton@(dp@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'radio_checked@(d3@, 1)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'radio_checked@(d2@, 1)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'form_show@(dlg@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'x = app_processmessages()' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'println "re-shown: d1=" + str$(radio_checked(d1@)) + " d2=" + str$(radio_checked(d2@)) + " d3=" + str$(radio_checked(d3@))' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'form_close@(dlg@)' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'x = app_processmessages()' >> "$tmpdir/agradioplain.bas"
+printf '%s\n' 'end' >> "$tmpdir/agradioplain.bas"
 if command -v xvfb-run > /dev/null 2>&1; then
   okAG=0
   # xvfb-run runs the program with 2>&1, so stdout and stderr arrive as ONE
@@ -2093,7 +2160,7 @@ if command -v xvfb-run > /dev/null 2>&1; then
   if timeout 60 xvfb-run -a "$exe" "$tmpdir/agend.bas" < /dev/null > "$tmpdir/agend.out" 2>&1; then agcode=0; else agcode=$?; fi
   tr -d '\r' < "$tmpdir/agend.out" > "$tmpdir/agend.txt"
   [ "$agcode" -eq 0 ] && grep -qxF -- "before" "$tmpdir/agend.txt" && ! grep -qF -- "carries on" "$tmpdir/agend.txt" || { echo "FAIL  AG:END inside a modal with close handlers: exit $agcode, got '$(cat "$tmpdir/agend.txt")'"; okAG=1; }
-  for agcase in agwiz aglatch agembed agorder agfree agtray aghidden agradio agembfree agembpanel agembhidden agvisible agvisset agmovefree agmoveheld agtrayembed agreshow agtrayheld agviewleave; do
+  for agcase in agwiz aglatch agembed agorder agfree agtray aghidden agradio agembfree agembpanel agembhidden agvisible agvisset agmovefree agmoveheld agtrayembed agreshow agtrayheld agviewleave agradioshow agradioplain; do
     if timeout 60 xvfb-run -a "$exe" "$tmpdir/$agcase.bas" < /dev/null > "$tmpdir/$agcase.out" 2>&1; then agcode=0; else agcode=$?; fi
     tr -d '\r' < "$tmpdir/$agcase.out" > "$tmpdir/$agcase.txt"
     case "$agcase" in
@@ -2116,6 +2183,8 @@ if command -v xvfb-run > /dev/null 2>&1; then
     agembhidden) printf '%s\n' 'app_run ended at tick 2' > "$tmpdir/$agcase.want" ;;
     agvisible) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;
     agvisset) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;
+    agradioshow) printf '%s\n' 'session 1: d1=1 d2=0' 'session 2: d1=0 d2=1' 'after: d1=0 d2=1' > "$tmpdir/$agcase.want" ;;
+    agradioplain) printf '%s\n' 're-shown: d1=0 d2=1 d3=0' > "$tmpdir/$agcase.want" ;;
     esac
     [ "$agcode" -eq 0 ] && cmp -s "$tmpdir/$agcase.txt" "$tmpdir/$agcase.want" || { echo "FAIL  AG:$agcase -- want '$(cat "$tmpdir/$agcase.want")': exit $agcode, got '$(cat "$tmpdir/$agcase.txt")'"; okAG=1; }
   done

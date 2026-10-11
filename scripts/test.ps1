@@ -2024,6 +2024,11 @@ if ($okAF) { Write-Host 'PASS  AF:a modal in a real loop: no timer re-entry, OK 
 #    the list it leaves, and every rule reads the parent asked --
 #    agmovefree, agmoveheld, agtrayembed, agreshow, agtrayheld, agviewleave;
 #    the expected values and why are in the twin block in scripts/test.sh.
+#  - ROUND 10 (2026-10-11): a radio choice the program makes while a dialog
+#    is hidden is the choice once it is shown again -- agradioshow (two
+#    modal sessions), agradioplain (form_show@ again, and a radio made while
+#    it was hidden); the expected values and why are in the twin block in
+#    scripts/test.sh.
 $agDir = Join-Path $tmp 'ag'
 New-Item -ItemType Directory -Force $agDir | Out-Null
 function Invoke-AG([string] $name, [string[]] $lines) {
@@ -2101,6 +2106,12 @@ if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "app_run ended at tick 10")) 
 $ag = Invoke-AG 'agviewleave' @('main@ = form@("Main", 300, 200)', 'pnl@ = panel@(main@)', 'pb@ = button@(pnl@)', 'button_onclick@(pb@, "on_pb")', 'inner@ = form@("Inner", 160, 90)', 'control_parent@(inner@, pnl@)', 'control_visible@(inner@, 1)', 'holder@ = form@("Holder", 300, 200)', 'hp@ = panel@(holder@)', 'form_show@(main@)', 'ticks = 0', 't@ = timer@()', 'timer_interval@(t@, 100)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 'app_run()', 'println "app_run ended at tick " + str$(ticks)', 'end', 'function on_pb(s@)', '  x = control_free(pnl@)', '  form_show@(inner@)', '  control_visible@(main@, 0)', '  control_parent@(inner@, hp@)', '  return 0', 'end function', 'function on_t(s@)', '  ticks = ticks + 1', '  if ticks = 2 then button_click@(pb@)', '  if ticks = 30 then', '    println "watchdog: app_run still running at tick 30"', '    app_quit()', '  end if', '  return 0', 'end function')
 if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "app_run ended at tick 2")) {
     $okAG = $false; Write-Host ("FAIL  AG:agviewleave -- a move lands at once unless a walk may stand on it, and every rule reads the parent asked (round 9): ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
+$ag = Invoke-AG 'agradioshow' @('main@ = form@("main", 300, 200)', 'dlg@ = form@("options", 300, 200)', 'dp@ = panel@(dlg@)', 'd1@ = radiobutton@(dp@)', 'd2@ = radiobutton@(dp@)', 'radio_checked@(d1@, 1)', 'sess = 0', 't@ = timer@()', 'timer_interval@(t@, 200)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 'tw@ = timer@()', 'timer_interval@(tw@, 8000)', 'timer_ontimer@(tw@, "on_wd")', 'timer_enabled@(tw@, 1)', 'form_show@(main@)', 'r = form_showmodal(dlg@)', 'radio_checked@(d2@, 1)', 'r = form_showmodal(dlg@)', 'println "after: d1=" + str$(radio_checked(d1@)) + " d2=" + str$(radio_checked(d2@))', 'end', 'function on_t(s@)', '  if form_visible(dlg@) = 0 then return 0', '  sess = sess + 1', '  println "session " + str$(sess) + ": d1=" + str$(radio_checked(d1@)) + " d2=" + str$(radio_checked(d2@))', '  form_modalresult@(dlg@, 1)', '  return 0', 'end function', 'function on_wd(s@)', '  println "watchdog"', '  end', '  return 0', 'end function')
+if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "session 1: d1=1 d2=0`nsession 2: d1=0 d2=1`nafter: d1=0 d2=1")) {
+    $okAG = $false; Write-Host ("FAIL  AG:agradioshow -- a radio choice made while a dialog is hidden is the choice once it is shown again (round 10): ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
+$ag = Invoke-AG 'agradioplain' @('dlg@ = form@("options", 300, 200)', 'dp@ = panel@(dlg@)', 'd1@ = radiobutton@(dp@)', 'd2@ = radiobutton@(dp@)', 'radio_checked@(d1@, 1)', 'form_show@(dlg@)', 'x = app_processmessages()', 'form_close@(dlg@)', 'x = app_processmessages()', 'radio_checked@(d2@, 1)', 'd3@ = radiobutton@(dp@)', 'radio_checked@(d3@, 1)', 'radio_checked@(d2@, 1)', 'form_show@(dlg@)', 'x = app_processmessages()', 'println "re-shown: d1=" + str$(radio_checked(d1@)) + " d2=" + str$(radio_checked(d2@)) + " d3=" + str$(radio_checked(d3@))', 'form_close@(dlg@)', 'x = app_processmessages()', 'end')
+if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "re-shown: d1=0 d2=1 d3=0")) {
+    $okAG = $false; Write-Host ("FAIL  AG:agradioplain -- a radio choice made while a dialog is hidden is the choice once it is shown again (round 10): ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
 if ($okAG) { Write-Host 'PASS  AG:a modal session frees nothing its opener stands on, ends with the last window, and END reports no fault' -ForegroundColor Green }
 
 # --- AH: ROUND 7, WHAT A WINDOWS PROCESS IS HANDED IN UTF-16 ---------------------

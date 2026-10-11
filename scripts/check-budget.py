@@ -52,11 +52,20 @@ WHAT THE FIRST VERSION COULD NOT SEE, all three now closed:
      reached it. A routine's own numeric parameters are now tainted inside it,
      which is the shape a helper always takes.
 
+AND A CONSULTATION IS NOT AN ANSWER UNTIL SOMEBODY HEARS IT (round 9). The
+refusal gate (refusal_scan, "THE REFUSAL CONTRACT" below) holds the other half:
+a refusal that does not latch is written into an error where it is asked, and
+a refusal that latches is asked about before an answer leaves. Two round-9
+defects -- an autosaving cfg_set@ that reported success over a refused save,
+and sqlite_row@ handing back emptied text columns as a success -- were each a
+refusal lost between the call that made it and the door that answered.
+
 Exit 0 when every amplifier consults the budget. Exit 1 names the routine.
 
   python scripts/check-budget.py            check the tree
   python scripts/check-budget.py --prove    plant a violation and confirm it fails
   python scripts/check-budget.py --narrowing  the 64-bit-guard / 32-bit-narrow sweep
+  python scripts/check-budget.py --refusal    the refusal contract alone (round 9)
 
 --narrowing is a SECOND rule in the same file because it is the same mistake in a
 different coat: a guard written for one width followed by an operation of another.
@@ -170,10 +179,10 @@ SCAN_DIRS = [
 # and now image_setbitmap@) and pinned by tests/gui/19, 20 and 23, not by a gate.
 
 GATE = re.compile(r'\bBudget(Allows|Append|Charge|Active|Refusal|Sleep|Spent|PatternBounded|'
-                  r'UnitsPerStep|UnitsPerMs|Linear\w*|Meter\w*|SearchCost)\b')
+                  r'UnitsPerStep|UnitsPerMs|Linear\w*|Claim\w*|Meter\w*|SearchCost)\b')
 # The verbs that CHARGE. The linear pass below asks for one of these in the
 # routine itself: naming BudgetRefusal or BudgetActive prices nothing.
-LIN_GATE = re.compile(r'\bBudget(Allows|Append|Charge|Sleep|Linear\w*|MeterAdd|MeterEnd|'
+LIN_GATE = re.compile(r'\bBudget(Allows|Append|Charge|Sleep|Linear\w*|Claim\w*|MeterAdd|MeterEnd|'
                       r'SearchCost)\b')
 
 # A size or bound that is derived from something ALREADY IN MEMORY is bounded by
@@ -1219,6 +1228,21 @@ LINEAR_CALLS = {
     'ValToStr': None,
     # A stream written or read by a count: zip_addstr's copy of its content.
     'WriteBuffer': 1, 'ReadBuffer': 1,
+    # ROUND NINE: A PATH OR A STATEMENT HANDED TO SOMEBODY ELSE IS READ WHOLE.
+    # The engine's own doors priced a script path at IoGate since round 7 --
+    # "a file call is linear in its path, which a script can make 50 MB long" --
+    # and the packages called the same primitives with no price at all, because
+    # nothing here named them: zip_open@ on a 4 MB path ran 49860 ms under
+    # MaxSteps 1000000 alone, three thousand sqlite_prepare@ of 4 MB of SQL ran
+    # 24296 ms, each reporting success, while file_exists on the same path was
+    # refused at 2468 ms. The gate reads the path (a NUL scan, a trim, every
+    # component), the RTL converts it for the OS, and SQLite tokenizes every
+    # byte of a statement before it can say anything about it.
+    'SandboxAllows': 0, 'FileExists': 0, 'DirectoryExists': 0,
+    'ForceDirectories': 0, 'DeleteFile': 0, 'RemoveDir': 0, 'CreateDir': 0,
+    'SetCurrentDir': 0, 'RenameFile': None, 'FileAge': 0, 'FileSetDate': 0,
+    'TFileStream.Create': 0, 'LoadFromFile': 0, 'SaveToFile': 0,
+    'sqlite3_open': 0, 'sqlite3_prepare_v2': 1, 'sqlite3_exec': 1,
 }
 LIN_CALL = re.compile(r'\b(' + '|'.join(sorted(LINEAR_CALLS, key=len, reverse=True)) +
                       r')\s*\(')
@@ -1257,7 +1281,7 @@ LIN_OPND_L = re.compile(r'([A-Za-z_]\w*)\s*(\[[^\[\]]*\])?\s*(\.\s*Str)?\s*$')
 LIN_OPND_R = re.compile(r'^\s*([A-Za-z_]\w*)\s*(\[[^\[\]]*\])?\s*(\.\s*Str\b)?')
 # What COVERS a construct: a charge. BudgetMeterEnd settles what MeterAdd
 # accrued and prices nothing of its own, so it covers nothing.
-LIN_COVER = re.compile(r'\bBudget(Allows|Append|Charge|Sleep|Linear\w*|MeterAdd|'
+LIN_COVER = re.compile(r'\bBudget(Allows|Append|Charge|Sleep|Linear\w*|Claim\w*|MeterAdd|'
                        r'SearchCost)\b')
 
 # THE WALKERS THAT ARE O(1) PER CALL, each with the reason. Keyed like ALLOWED,
@@ -1362,6 +1386,20 @@ LINEAR_ALLOWED = {
 
 #: Files the linear pass does not hold to the rule, with the reason. Only a TEST
 #: host may be here: its registered stand-ins exist for one runner's programs.
+#: Helpers that price a PATH for the system call their caller makes over it
+#: next. Each answers for that call, and the reason must say why the price
+#: covers it -- a helper that merely asks the budget answers only for itself.
+LINEAR_PROXIES = {
+    'PhosphorIoLib.pas:IoGateAt':
+        'prices the whole path past IoPathFreeBytes before the gate reads it, at '
+        'the rate its caller passes -- the rate measured for the OS call that '
+        'caller makes next over the same path (tests/probe_limits.lpr --prices); '
+        'a path within IoPathFreeBytes is bounded by 4096 bytes',
+    'PhosphorIoLib.pas:IoGate':
+        'IoGateAt at the query rate, for the doors whose OS call over the path '
+        'costs what the gate\'s own read does (file_exists, file_readalltext$)',
+}
+
 LINEAR_TEST_HOSTS = {
     'phosphorhttptest.lpr':
         'the HTTP package\'s TEST host (tests/packages): its stand-ins resolve '
@@ -1882,6 +1920,14 @@ def linear_scan(dirs, allowed, test_hosts=None):
     # its own work, which is the lfill$ lesson above; it does not count.
     wrappers = set(k for k in consults
                    if k not in direct and not any(c in direct for c in calls[k]))
+    # A PATH PRICER (round 9) works -- the gate reads the path -- and answers
+    # for the caller's next system call over the SAME path, which is the whole
+    # reason it prices the path rather than its own read of it. Named, with the
+    # reason, in LINEAR_PROXIES; never inferred.
+    for k in LINEAR_PROXIES:
+        if k in bodies:
+            wrappers.add(k)
+            used.add(k)
     # WHAT ANSWERS FOR A CONSTRUCT IS A CHARGE BESIDE IT (round 8). A charge
     # outside every loop answers for the routine; a charge inside a loop
     # answers for that loop's body only (lin_cover). A construct no charge
@@ -1955,6 +2001,461 @@ def linear_scan(dirs, allowed, test_hosts=None):
     LAST_UNCOVERED.update(uncovered)
     flagged = sorted((k, sorted(set(lab for _, lab in v))) for k, v in direct.items())
     return holes, ok, used, flagged
+
+
+#  --- THE REFUSAL CONTRACT (round 9, 2026-10-11) -----------------------------
+# Every rule above asks whether work CONSULTS the budget. None asked whether the
+# answer it got was HEARD, and round 9 found two refusals lost between a helper
+# and the door above it, each in a shape the other one could not have shown:
+#
+#   cfg_set@ on an autosaving config. TPhosphorConfig.Save priced its path with
+#   BudgetLinear -- which refuses WITHOUT LATCHING -- and answered False. Touch
+#   threw that False away, and TouchOk asked only BudgetSpent, which a refusal
+#   that does not latch never sets. The set "succeeded", the value never reached
+#   the file, and every later autosave failed the same silent way.
+#
+#   sqlite_row@. ColStr's charge LATCHES and answers '' -- its comment said "the
+#   caller reports it (BudgetSpent)" -- and BuildRowObject, RowValue and
+#   sqlite_fetchall@'s last row never asked. A row of emptied text columns came
+#   back as a success, rc = 0.
+#
+# The same class twice: a refusal reported by RETURN VALUE and read by a caller
+# that asks only the LATCH, and a refusal reported by the LATCH and read by a
+# caller that never asks it. So the contract is now one sentence per kind, and
+# this is what holds it:
+#
+#   ASK (BudgetAllows, BudgetLinear) refuses WITHOUT latching -- one oversized
+#   argument is a bad argument, not a spent run -- so its Boolean is the ONLY
+#   record of the refusal. It is asked only in a routine that holds a
+#   TPhosphorError, and the statement that asks it writes the refusal there
+#   (BudgetRefusal, or a reporter below), in place. A helper with no error to
+#   write uses CLAIM (BudgetClaim, BudgetClaimLinear): the same up-front test,
+#   and a refusal that latches.
+#
+#   LATCH (BudgetCharge, BudgetLinearAfter, BudgetAppend, the meter, BudgetSleep,
+#   BudgetSearchCost, BudgetClaim*) records the refusal in the budget itself.
+#   Its Boolean may be dropped, but somebody must ASK before a result leaves:
+#   after every latching call, the routine reports in that statement, or asks
+#   BudgetSpent, or calls a reporter, or makes a later consultation that sees
+#   the latch and reports. A routine that does none of these hands the duty to
+#   its callers -- a LATCHING HELPER -- and a routine holding a TPhosphorError
+#   that does none of them is a HOLE: it can hand back a short answer as a
+#   whole one.
+#
+#   A REPORTER is a routine holding a TPhosphorError that writes a refusal into
+#   it: BudgetLinearOk, GateRefused, WalkRefused, DigestAllowed. Its Boolean,
+#   like ASK's, must not be dropped.
+REF_ASK = ('BudgetAllows', 'BudgetLinear')
+REF_OK = ('BudgetLinearOk', 'BudgetLinearAfterOk')
+REF_LATCH = ('BudgetCharge', 'BudgetLinearAfter', 'BudgetAppend', 'BudgetMeterAdd',
+             'BudgetMeterEnd', 'BudgetSleep', 'BudgetSearchCost', 'BudgetSearchCostHits',
+             'BudgetClaim', 'BudgetClaimLinear')
+# A later consultation SEES a latch -- answers False at once -- except the meter's
+# add, which only reaches the budget once a block has accrued.
+REF_SEES = (set(REF_ASK) | set(REF_OK) | set(REF_LATCH)) - {'BudgetMeterAdd'}
+REF_TOKEN = re.compile(r"[A-Za-z_]\w*|:=|\S")
+#: The statements that TEST what a call answered.
+REF_TESTS = ('if', 'while', 'case')
+REF_STOP_BACK = {'begin', 'then', 'else', 'do', 'try', 'finally', 'except', 'repeat',
+                 'otherwise'}
+REF_OPEN = {'begin', 'case', 'try', 'repeat', 'record', 'asm'}
+REF_CLOSE = {'end', 'until'}
+
+# A routine may break the contract only for a reason written here, keyed like
+# ALLOWED. A stale entry fails, like every other list in this file.
+REFUSAL_ALLOWED = {
+    'PhosphorDateTimeLib.pas:Render':
+        'the refusal of the COUNTING pass is reported through o.Refused before '
+        'the second FormatInto begins; the second is the WRITING pass, and Put '
+        'charges only while O.Counting is set, so it can refuse nothing',
+    'phosphorhttptest.lpr:f_http_test_spend':
+        'the HTTP package\'s TEST host: the stand-in exists to SPEND the budget '
+        'and answers BudgetCharge\'s own Boolean as its value; no shipped binary '
+        'links it',
+}
+
+# A LATCHING HELPER WHOSE ANSWER A REFUSAL NEVER SHORTENS: it charges for work it
+# has done and finishes that work, so what it hands back is whole and the latch
+# refuses the run's NEXT consultation. Its callers inherit no duty. The reason
+# must say why the answer is whole -- that the work was paid for is not one.
+REFUSAL_WHOLE = {
+    'PhosphorDictLib.pas:TPhosphorDict.IndexOf':
+        'the meter\'s answer is not read: the probe runs to its empty slot or '
+        'its match whatever the budget says, so the index it answers is the '
+        'true one, and the charge is for a probe that happened',
+    'PhosphorJsonLib.pas:JsonUnmark':
+        'its buffer is TxtInit(b, False) -- B.Charge off -- so TxtAddByte never '
+        'charges and never stops: undoing a marker is uncharged by design (the '
+        'text was charged on the way in) and always whole',
+    'PhosphorZipLib.pas:DeflateTook':
+        'it settles the wall time of a deflate that has FINISHED: the archive '
+        'is written and whole, and the latch refuses the next consultation',
+}
+
+
+def ref_tokens(body):
+    return [(m.start(), m.group(0)) for m in REF_TOKEN.finditer(body)]
+
+
+def ref_index(toks, pos):
+    """Index of the token starting at pos."""
+    lo, hi = 0, len(toks)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if toks[mid][0] < pos:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def ref_statement(toks, i):
+    """(start, end) token indices of the statement holding token i. A statement
+    starts after a ';' or a block keyword at paren depth 0, and ends at the ';'
+    that closes it, at the end of the block enclosing it, or -- for anything
+    that is not an `if` -- at an `else`."""
+    depth, j = 0, i - 1
+    while j >= 0:
+        t = toks[j][1]
+        tl = t.lower()
+        if t == ')':
+            depth += 1
+        elif t == '(':
+            depth -= 1
+        elif depth <= 0 and (t == ';' or tl in REF_STOP_BACK):
+            break
+        j -= 1
+    start = j + 1
+    first = toks[start][1].lower() if start < len(toks) else ''
+    is_if = first in ('if', 'while')
+    # A `case` is read from its own keyword, so its `end` closes it.
+    depth, block, k = 0, 0, (start if first == 'case' else i)
+    while k < len(toks):
+        t = toks[k][1]
+        tl = t.lower()
+        if t == '(':
+            depth += 1
+        elif t == ')':
+            depth -= 1
+        elif depth <= 0:
+            if tl in REF_OPEN:
+                block += 1
+            elif tl in REF_CLOSE:
+                block -= 1
+                if block < 0:
+                    break
+            elif t == ';' and block == 0:
+                break
+            elif tl == 'else' and block == 0 and not is_if:
+                break
+        k += 1
+    return start, k
+
+
+def ref_text(body, toks, a, b):
+    lo = toks[a][0] if a < len(toks) else len(body)
+    hi = toks[b][0] if b < len(toks) else len(body)
+    return body[lo:hi]
+
+
+def ref_reports(text, reporters):
+    if re.search(r'\bBudgetRefusal\s*\(', text):
+        return True
+    return any(re.search(r'\b' + re.escape(r) + r'\s*\(', text) for r in reporters)
+
+
+def ref_calls(body, names):
+    """[(pos, name)] of calls `name(` to any of names, outside the header."""
+    hdr = body.find(')')
+    out = []
+    if not names:
+        return out
+    rx = re.compile(r'(?<![\w.@])(?:[A-Za-z_]\w*\s*\.\s*)?\b(' +
+                    '|'.join(re.escape(n) for n in sorted(names, key=len, reverse=True)) +
+                    r')\s*\(')
+    for m in rx.finditer(body):
+        if m.start(1) > hdr:
+            out.append((m.start(1), m.group(1)))
+    return out
+
+
+def ref_bare(toks, start, i):
+    """Is token i the first thing its statement does -- a call whose answer
+    nothing reads (`Foo(..)` or `x.Foo(..)`)?"""
+    return start == i or (start + 2 == i and toks[start + 1][1] == '.')
+
+
+def ref_reported_at(body, toks, pos, reporters):
+    """Does the statement holding the call at pos write the refusal it can see?
+    Two shapes: an if/while/case whose condition holds the call and whose text
+    writes a refusal (or calls a reporter); or `V := <call>` followed at once by
+    an `if` or `case` that tests V and writes one."""
+    i = ref_index(toks, pos)
+    start, end = ref_statement(toks, i)
+    first = toks[start][1].lower() if start < len(toks) else ''
+    if first in REF_TESTS:
+        return ref_reports(ref_text(body, toks, start, end + 1), reporters)
+    assign = None
+    for k in range(start, i):
+        if toks[k][1] == ':=':
+            assign = ''.join(t for _, t in toks[start:k]).strip()
+            break
+    if assign is None or end + 1 >= len(toks):
+        return False
+    nstart, nend = ref_statement(toks, end + 1)
+    nxt = ref_text(body, toks, nstart, nend + 1)
+    return toks[nstart][1].lower() in ('if', 'case') and \
+        bool(re.search(r'\b' + re.escape(assign.split('.')[-1]) + r'\b', nxt)) and \
+        ref_reports(nxt, reporters)
+
+
+def ref_ask_verdict(body, toks, pos, reporters, accountable):
+    """None when the ASK at pos is reported in place, else why it is not."""
+    i = ref_index(toks, pos)
+    start, _ = ref_statement(toks, i)
+    if ref_bare(toks, start, i):
+        return 'its answer is dropped (a bare call)'
+    if not accountable:
+        return 'asked in a helper with no error to write it into -- use BudgetClaim*'
+    if ref_reported_at(body, toks, pos, reporters):
+        return None
+    return 'refused without latching, and the statement that sees it writes no refusal'
+
+
+def ref_settled(body, toks, pos, reporters):
+    """Is the latching call at pos reported -- in its own statement, or by
+    something after it that asks the latch: BudgetSpent, a reporter, or a later
+    consultation (which answers False at once on a latched budget) whose own
+    statement reports?"""
+    if ref_reported_at(body, toks, pos, reporters):
+        return True
+    i = ref_index(toks, pos)
+    start, end = ref_statement(toks, i)
+    # `if not Helper(..) then Exit` LEAVES before anything after it can ask:
+    # what follows the statement does not answer for that branch. t_file_copy
+    # asked WalkRefused at its end and left at its first line on a refused path.
+    if toks[start][1].lower() in REF_TESTS and \
+       re.search(r'\bExit\b', ref_text(body, toks, start, end + 1), re.I):
+        return False
+    base = toks[end][0] if end < len(toks) else len(body)
+    after = body[base:]
+    if re.search(r'\bBudgetSpent\s*\(', after):
+        return True
+    # A unit's own record of the latch, read later and written as the refusal:
+    # `if o.Refused then E := BudgetRefusal(..)`, WalkRefused's GWalkSpent. The
+    # gate cannot see which flag a helper sets; it can see that a refusal is
+    # WRITTEN after the call, which neither round-9 defect did.
+    if re.search(r'\bBudgetRefusal\s*\(', after):
+        return True
+    if any(re.search(r'\b' + re.escape(r) + r'\s*\(', after) for r in reporters):
+        return True
+    for p, _ in ref_calls(body, REF_SEES):
+        if p > base and ref_reported_at(body, toks, p, reporters):
+            return True
+    return False
+
+
+#: Method names every container class has: a call through a receiver whose type
+#: this scan cannot name is not guessed onto one of ours by these.
+REF_COMMON = {'Create', 'Free', 'Destroy', 'Add', 'Put', 'Find', 'Read', 'Write',
+              'IndexOf', 'IndexOfName', 'Delete', 'Remove', 'Clear', 'Get', 'Insert',
+              'Sort', 'Assign', 'Exchange', 'Move', 'Extract', 'Seek', 'Count'}
+
+
+def ref_resolver(files):
+    """files: [(base, text)]. Returns (bodies, resolve) where resolve(key) lists
+    (pos, callee-key) for every call in that routine's body to a routine here.
+
+    Narrower than lin_callees on purpose. That one answers "could this reach a
+    linear pass", where a guess too many costs a look; this one answers "who
+    must ask the latch", where a guess too many sends a door to ask about a
+    helper it never calls -- `GBorrowed.Put(` is a hash insert, not
+    PhosphorDateTimeLib's Put. A bare name resolves in its own unit first, and to
+    another unit only when that unit EXPORTS it; a method through a receiver
+    resolves by the receiver's declared type, or, when the type is not in view,
+    to a method of that name in the same unit that no RTL container also has."""
+    bodies, fileof, exported, types_of = {}, {}, {}, {}
+    for base, text in files:
+        impl = re.search(r'^implementation\b', text, re.M | re.I)
+        intf = text[:impl.start()] if impl else ''
+        exported[base] = set(m.group(1) for m in ROUTINE.finditer(intf))
+        types = {}
+        for d in LIN_VARDECL.finditer(text):
+            for nm in NAMES.findall(DECOR.sub(' ', d.group(1))):
+                types.setdefault(nm, d.group(2))
+        types_of[base] = types
+        for name, body in routines_of(text):
+            key = '%s:%s' % (base, name)
+            if key in bodies and len(bodies[key]) >= len(body):
+                continue
+            bodies[key] = body
+            fileof[key] = base
+    free, meth = {}, {}
+    for key in bodies:
+        base, name = key.split(':', 1)
+        if '.' in name:
+            cls, short = name.split('.', 1)
+            meth.setdefault(cls, {}).setdefault(short, []).append(key)
+        else:
+            free.setdefault(name, []).append(key)
+
+    def resolve(key):
+        body = bodies[key]
+        base = fileof[key]
+        name = key.split(':', 1)[1]
+        own = name.split('.')[0] if '.' in name else None
+        local = dict(types_of[base])
+        hdr_end = body.find('begin')
+        m = PARAMLIST.match(body)
+        for part in ([m.group(1)] if m else []) + [body[:hdr_end] if hdr_end >= 0 else '']:
+            for piece in part.split(';'):
+                if ':' in piece:
+                    nms, typ = piece.split(':', 1)
+                    for nm in NAMES.findall(DECOR.sub(' ', nms)):
+                        local[nm] = typ.strip().rstrip(')').strip()
+        out = []
+        start = m.end() if m else 0
+        for c in re.finditer(r'(?:(\b[A-Za-z_]\w*|\))\s*\.\s*)?\b([A-Za-z_]\w*)\s*\(', body):
+            if c.start(2) < start:
+                continue
+            recv, word = c.group(1), c.group(2)
+            cands = []
+            if recv is None:
+                if own in meth and word in meth[own]:
+                    cands = meth[own][word]
+                else:
+                    same = [k for k in free.get(word, []) if fileof[k] == base]
+                    cands = same or [k for k in free.get(word, [])
+                                     if word in exported[fileof[k]]]
+            elif recv == 'Self':
+                cands = meth.get(own, {}).get(word, [])
+            elif recv in meth:
+                cands = meth[recv].get(word, [])
+            elif local.get(recv) in meth:
+                cands = meth[local[recv]].get(word, [])
+            elif recv not in local and word not in REF_COMMON:
+                cands = [k for cls in meth for k in meth[cls].get(word, [])
+                         if fileof[k] == base]
+            for k in cands:
+                out.append((c.start(2), k))
+        return out
+    return bodies, resolve
+
+
+def refusal_scan(dirs, allowed, whole=None):
+    """(holes, used-exemptions, latching-helpers). holes: [(key, [why])].
+    whole: REFUSAL_WHOLE -- latching helpers whose answer a refusal never
+    shortens, which therefore hand no duty to their callers."""
+    whole = whole or {}
+    files = []
+    for path in sources(dirs):
+        with open(path, encoding='utf-8') as fh:
+            files.append((os.path.basename(path), strip_comments(fh.read())))
+    bodies, resolve = ref_resolver(files)
+    sites = {key: resolve(key) for key in bodies}
+    calls = {key: sorted(set(k for _, k in sites[key])) for key in bodies}
+    toks = {key: ref_tokens(body) for key, body in bodies.items()}
+
+    def header(body):
+        m = PARAMLIST.match(body)
+        return m.group(1) if m else ''
+    accountable = set(k for k, b in bodies.items() if 'TPhosphorError' in header(b))
+
+    def answers_error(body):
+        """A routine whose RESULT is a TPhosphorError (ArchiveRefusal)."""
+        m = PARAMLIST.match(body)
+        end = body.find(';', m.end() if m else 0)
+        return bool(re.search(r':\s*TPhosphorError\s*$', body[:end] if end >= 0 else ''))
+    shortof = {k: k.split(':', 1)[1].split('.')[-1] for k in bodies}
+    # Reporters, to a fixed point: a routine holding an error that writes a
+    # refusal into it -- or answering one -- directly or through a reporter it
+    # hands the error to.
+    rep = set(k for k in bodies
+              if (k in accountable or answers_error(bodies[k])) and
+              re.search(r'\bBudgetRefusal\s*\(|\b(' + '|'.join(REF_OK) + r')\s*\(',
+                        bodies[k]))
+    changed = True
+    while changed:
+        changed = False
+        names = set(shortof[k] for k in rep)
+        for k in accountable - rep:
+            if any(c in rep for c in calls[k]) and ref_calls(bodies[k], names):
+                rep.add(k)
+                changed = True
+    reporters = set(shortof[k] for k in rep)
+    holes = {}
+    used = set()
+    # ASK: in place, in a routine holding an error.
+    for key, body in bodies.items():
+        for pos, name in ref_calls(body, REF_ASK):
+            why = ref_ask_verdict(body, toks[key], pos, reporters, key in accountable)
+            if why:
+                holes.setdefault(key, []).append('%s: %s' % (name, why))
+        # BudgetLinearOk does not latch either: its Boolean dropped means the
+        # refused work went ahead with the error already written.
+        for pos, name in ref_calls(body, ('BudgetLinearOk',)):
+            i = ref_index(toks[key], pos)
+            start, _ = ref_statement(toks[key], i)
+            if ref_bare(toks[key], start, i):
+                holes.setdefault(key, []).append('%s: its answer is dropped' % name)
+
+    def unsettled(key, latching):
+        body = bodies[key]
+        cands = ref_calls(body, REF_LATCH) + \
+            [(p, shortof[k]) for p, k in sites[key] if k in latching and k != key]
+        return sorted(set(n for p, n in cands
+                          if not ref_settled(body, toks[key], p, reporters)))
+    # LATCH: the helpers that hand the duty on, to a fixed point over the calls.
+    latching = set()
+    changed = True
+    while changed:
+        changed = False
+        for key in bodies:
+            if key in latching or key in accountable or not unsettled(key, latching):
+                continue
+            if key in whole:
+                used.add(key)
+                continue
+            latching.add(key)
+            changed = True
+    for key in accountable:
+        bad = unsettled(key, latching)
+        if bad:
+            holes.setdefault(key, []).append(
+                'latched by %s, and nothing asks before the answer leaves' % ', '.join(bad))
+    out = []
+    for key in sorted(holes):
+        if key in allowed:
+            used.add(key)
+            continue
+        out.append((key, holes[key]))
+    return out, used, latching
+
+
+def refusal():
+    holes, used, _ = refusal_scan(LINEAR_DIRS, REFUSAL_ALLOWED, REFUSAL_WHOLE)
+    if holes:
+        print('REFUSAL HOLES -- a budget refusal that can be lost between the call')
+        print('that made it and the answer that leaves:')
+        for key, whys in holes:
+            print('  %s' % key)
+            for w in whys:
+                print('      %s' % w)
+        print('')
+        print('ASK (BudgetAllows, BudgetLinear) does not latch: report it where it')
+        print('is asked, into the routine\'s TPhosphorError, or use BudgetClaim* in a')
+        print('helper. LATCH: ask BudgetSpent (or call a reporter) after the last')
+        print('latching call, before the answer leaves.')
+        return 1
+    stale = (set(REFUSAL_ALLOWED) | set(REFUSAL_WHOLE)) - used
+    if stale:
+        print('STALE REFUSAL EXEMPTIONS -- listed but no longer reached:')
+        for key in sorted(stale):
+            print('  ' + key)
+        return 1
+    print('refusal gate: every budget refusal is reported where it is asked, or '
+          'asked about before the answer leaves')
+    return 0
 
 
 def report(holes):
@@ -2392,6 +2893,112 @@ def prove():
                       % (kind, bad, want))
                 return 1
             print('prove: the unzip rule over %s reports %s.' % (kind, bad or 'nothing'))
+
+        # AND THE REFUSAL CONTRACT, in the two shapes round 9 found. Each is
+        # planted broken and must be reported for the reason it is broken, then
+        # repaired and must go quiet -- a rule never seen to fire is not a rule.
+        ref_cases = [
+            ('a non-latching refusal turned into False by a helper (cfg Save)',
+             'function Save(const P: String): Boolean;\n'
+             'begin\n'
+             '  if not BudgetLinear(Length(P), BudgetMilliOs) then Exit(False);\n'
+             '  Result := True;\n'
+             'end;\n'
+             'function f_set(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  Save(A[0].Str);\n'
+             '  if BudgetSpent() then E := BudgetRefusal(\'set\');\n'
+             '  Result := A[0];\n'
+             'end;\n',
+             'PhosphorPlantedLib.pas:Save', 'asked in a helper'),
+            ('... repaired: the helper claims, so the latch it asks is set',
+             'function Save(const P: String): Boolean;\n'
+             'begin\n'
+             '  if not BudgetClaimLinear(Length(P), BudgetMilliOs) then Exit(False);\n'
+             '  Result := True;\n'
+             'end;\n'
+             'function f_set(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  Save(A[0].Str);\n'
+             '  if BudgetSpent() then E := BudgetRefusal(\'set\');\n'
+             '  Result := A[0];\n'
+             'end;\n',
+             None, None),
+            ('a latching helper whose door never asks (sqlite_row@)',
+             'function ColStr(N: Integer): String;\n'
+             'begin\n'
+             '  if not BudgetLinearAfter(N, BudgetMilliMove) then Exit(\'\');\n'
+             '  Result := \'x\';\n'
+             'end;\n'
+             'function Row(N: Integer): String;\n'
+             'begin\n'
+             '  Result := ColStr(N) + ColStr(N);\n'
+             'end;\n'
+             'function f_row(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  Result := ValStr(Row(ArgI32(A[0])));\n'
+             'end;\n',
+             'PhosphorPlantedLib.pas:f_row', 'latched by Row'),
+            ('... repaired: the door asks the latch before its answer leaves',
+             'function ColStr(N: Integer): String;\n'
+             'begin\n'
+             '  if not BudgetLinearAfter(N, BudgetMilliMove) then Exit(\'\');\n'
+             '  Result := \'x\';\n'
+             'end;\n'
+             'function Row(N: Integer): String;\n'
+             'begin\n'
+             '  Result := ColStr(N) + ColStr(N);\n'
+             'end;\n'
+             'function f_row(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  Result := ValStr(Row(ArgI32(A[0])));\n'
+             '  if BudgetSpent() then E := BudgetRefusal(\'row\');\n'
+             'end;\n',
+             None, None),
+            ('a door that leaves on a refused helper before it asks (file_copy)',
+             'function Gate(const P: String): Boolean;\n'
+             'begin\n'
+             '  Result := BudgetClaim(Length(P));\n'
+             'end;\n'
+             'function f_copy(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  if not Gate(A[0].Str) then Exit(ValInt(0));\n'
+             '  Result := ValInt(1);\n'
+             '  if BudgetSpent() then E := BudgetRefusal(\'copy\');\n'
+             'end;\n',
+             'PhosphorPlantedLib.pas:f_copy', 'latched by Gate'),
+            ('a non-latching answer dropped in a door',
+             'function f_drop(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  BudgetLinearOk(\'drop\', Length(A[0].Str), BudgetMilliCopy, E);\n'
+             '  Result := A[0];\n'
+             'end;\n',
+             'PhosphorPlantedLib.pas:f_drop', 'dropped'),
+        ]
+        for label, src, want_key, want_why in ref_cases:
+            with open(os.path.join(d, 'PhosphorPlantedLib.pas'), 'w',
+                      encoding='utf-8') as fh:
+                fh.write('unit PhosphorPlantedLib;\ninterface\nimplementation\n' +
+                         src + 'end.\n')
+            holes, _, _ = refusal_scan([d], {})
+            keys = [k for k, _ in holes]
+            if want_key is None:
+                if holes:
+                    print('PROVE FAILED: the refusal rule on "%s" reported %s, wanted '
+                          'nothing' % (label, holes))
+                    return 1
+                print('prove: refusal rule, %s -> quiet.' % label)
+                continue
+            whys = dict(holes).get(want_key, [])
+            if not any(want_why in w for w in whys):
+                print('PROVE FAILED: the refusal rule on "%s" reported %s, wanted %s '
+                      'naming "%s"' % (label, holes or 'nothing', want_key, want_why))
+                return 1
+            print('prove: refusal rule, %s -> reported (%s).' % (label, whys[0]))
         return 0
 
 
@@ -2438,7 +3045,7 @@ def linear(sites=False):
         print('length only the walk finds (BudgetMeterAdd), or list the walker in')
         print('LINEAR_ALLOWED with the reason ONE call of it is O(1).')
         return 1
-    stale = (set(LINEAR_ALLOWED) | set(LINEAR_TEST_HOSTS)) - used
+    stale = (set(LINEAR_ALLOWED) | set(LINEAR_TEST_HOSTS) | set(LINEAR_PROXIES)) - used
     if stale:
         print('STALE LINEAR EXEMPTIONS -- listed but no longer reached:')
         for key in sorted(stale):
@@ -2456,6 +3063,8 @@ def main():
         return narrowing()
     if '--linear' in sys.argv:
         return linear(sites=True)
+    if '--refusal' in sys.argv:
+        return refusal()
     # A SCAN DIRECTORY THAT YIELDS NOTHING IS A GREEN LINE ABOUT NOTHING. This is
     # not hypothetical: host/console holds two .lpr files and sources() yielded
     # only .pas, so adding the directory without also widening the extensions
@@ -2501,6 +3110,8 @@ def main():
     # The linear pass and the narrowing sweep run on every plain invocation too:
     # a second rule that has to be REMEMBERED is a rule half the runs do not have.
     if linear():
+        return 1
+    if refusal():
         return 1
     return narrowing()
 

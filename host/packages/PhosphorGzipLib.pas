@@ -211,17 +211,30 @@ begin
 end;
 
 // --- raw file I/O (bytes, no text conversion, no BOM) -----------------------
-function LoadFileStr(const APath: String; out S: RawByteString): Boolean;
-var fs: TFileStream;
+{ THE PATH AND THE FILE ARE BOTH PRICED, BEFORE EITHER IS TOUCHED (round 9).
+  The path is the script's: the gate reads it whole and the OS converts it, and
+  nothing asked about it -- the engine's own doors have priced a path at IoGate
+  since round 7, and this package's file doors ran 30 s on a 4 MB path under a
+  budget worth 2000 ms. And the file's size was committed (SetLength) before
+  anything was asked, where file_readalltext$ asks first; the read was charged
+  only after it had been made. Both are asked here, and both refusals are
+  written into the caller's error, as AWho's. }
+function LoadFileStr(const AWho, APath: String; out S: RawByteString;
+                     var Err: TPhosphorError): Boolean;
+var fs: TFileStream; len: Int64;
 begin
   Result := False;
   S := '';
+  if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(APath, puRead) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
-      SetLength(S, fs.Size);
-      if fs.Size > 0 then fs.ReadBuffer(S[1], fs.Size);
+      len := fs.Size;
+      // The read is a copy of the file: charged at that rate, before it is made.
+      if not BudgetLinearOk(AWho, len, BudgetMilliCopy, Err) then Exit;
+      SetLength(S, len);
+      if len > 0 then fs.ReadBuffer(S[1], len);
       Result := True;
     finally
       fs.Free;
@@ -231,10 +244,12 @@ begin
   end;
 end;
 
-function SaveFileStr(const APath: String; const S: RawByteString): Boolean;
+function SaveFileStr(const AWho, APath: String; const S: RawByteString;
+                     var Err: TPhosphorError): Boolean;
 var fs: TFileStream;
 begin
   Result := False;
+  if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(APath, puWrite) then Exit;
   try
     fs := TFileStream.Create(APath, fmCreate);
@@ -357,16 +372,15 @@ function DoCompressFile(const Src, Dst: String; ALevel: Integer;
 var raw, gz: RawByteString; t0: QWord;
 begin
   Result := False;
-  if not LoadFileStr(Src, raw) then Exit;
-  // The read, charged for what it read; then the deflate's floor, asked before
+  if not LoadFileStr('gzip_compressfile', Src, raw, Err) then Exit;
+  // The read was charged by LoadFileStr; the deflate's floor is asked before
   // it runs, and its time once it has -- and nothing is written if that is
   // refused.
-  if not (BudgetLinearAfterOk('gzip_compressfile', Length(raw), BudgetMilliCopy, Err) and
-          BudgetLinearOk('gzip_compressfile', Length(raw), GzipFloorMilli, Err)) then Exit;
+  if not BudgetLinearOk('gzip_compressfile', Length(raw), GzipFloorMilli, Err) then Exit;
   t0 := GetTickCount64();
   gz := GzipWrap(raw, ALevel);
   if not DeflateCharged('gzip_compressfile', t0, Length(raw), Err) then Exit;
-  Result := SaveFileStr(Dst, gz);
+  Result := SaveFileStr('gzip_compressfile', Dst, gz, Err);
 end;
 
 function f_gzip_compressfile(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -405,14 +419,15 @@ begin
   Result := ValInt(0);
   GzipErr := 1;
   try
-    if not (LoadFileStr(Args[0].Str, raw) and GzipUnwrap(raw, body)) then Exit;
+    if not (LoadFileStr('gzip_decompressfile', Args[0].Str, raw, Err) and
+            GzipUnwrap(raw, body)) then Exit;
     plain := RawInflate(body, spent);
     if spent then
     begin
       Err := BudgetRefusal('gzip_decompressfile');
       Exit;
     end;
-    if SaveFileStr(Args[1].Str, plain) then
+    if SaveFileStr('gzip_decompressfile', Args[1].Str, plain, Err) then
     begin Result := ValInt(1); GzipErr := 0; end;
   except
     Result := ValInt(0); GzipErr := 1;

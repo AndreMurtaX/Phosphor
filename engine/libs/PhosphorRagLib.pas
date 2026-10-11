@@ -473,7 +473,7 @@ var sr: TSearchRec; base: String; doc: TRagDoc; docs: array of TRagDoc; n: Integ
     refused: Boolean;
 begin
   FSpent := False;
-  if not BudgetLinear(Length(FBasePath), BudgetMilliOs) then begin FSpent := True; Exit; end;
+  if not BudgetClaimLinear(Length(FBasePath), BudgetMilliOs) then begin FSpent := True; Exit; end;
   docs := nil;
   n := 0;
   if SandboxAllows(FBasePath, puRead) and DirectoryExists(FBasePath) then
@@ -839,7 +839,7 @@ begin
     function name of the query with every function of the document -- a few
     lower-cases and a substring test each -- so a long query against a document
     with many tags was the product, charged as one step. Charged as the product. }
-  if not BudgetLinear(Int64(Length(AAn.Keywords)) * (Length(FDocs[ADocIdx].Tags) + 2) +
+  if not BudgetClaimLinear(Int64(Length(AAn.Keywords)) * (Length(FDocs[ADocIdx].Tags) + 2) +
                       Int64(Length(AAn.FunctionNames)) * Length(FDocs[ADocIdx].Functions) + 1,
                       2 * BudgetMilliNameItem) then
   begin
@@ -990,11 +990,14 @@ end;
 const
   RagAnalyzeMilliPerByte = 1000000;
 
+{ Every up-front price in this unit is a CLAIM (round 9): these helpers hold
+  no error of their own, so a refusal is recorded where the doors look for it --
+  FSpent, and the run's latch -- never in a Boolean only one caller reads. }
 function TPhosphorRag.AnalysisAllowed(const AQuery: String): Boolean;
 begin
-  Result := BudgetLinear(Length(AQuery), RagAnalyzeMilliPerByte) and
-            BudgetLinear(Int64(Length(AQuery)) * Length(FDocs), BudgetMilliScan) and
-            BudgetLinear(FunctionTotal, BudgetMilliNameItem);
+  Result := BudgetClaimLinear(Length(AQuery), RagAnalyzeMilliPerByte) and
+            BudgetClaimLinear(Int64(Length(AQuery)) * Length(FDocs), BudgetMilliScan) and
+            BudgetClaimLinear(FunctionTotal, BudgetMilliNameItem);
 end;
 
 // Core retrieval: score, sort, fit to budget, load & truncate content.
@@ -1124,10 +1127,10 @@ begin
     the script's list is charged for its bytes and the names it made; then
     every name is compared with every indexed function -- two lower-cases and
     a compare each -- and that product is asked for before the first. }
-  if not BudgetLinear(Length(AFuncs), BudgetMilliCopy) then begin FSpent := True; Exit; end;
+  if not BudgetClaimLinear(Length(AFuncs), BudgetMilliCopy) then begin FSpent := True; Exit; end;
   names := SplitChars(AFuncs, [',', ' ']);
   if not (BudgetLinearAfter(Length(names), 2 * BudgetMilliPiece) and
-          BudgetLinear(Int64(Length(names)) * FunctionTotal, 2 * BudgetMilliNameItem)) then
+          BudgetClaimLinear(Int64(Length(names)) * FunctionTotal, 2 * BudgetMilliNameItem)) then
   begin
     FSpent := True;
     Exit;
@@ -1174,10 +1177,10 @@ begin
   seen := nil;
   SetLength(seen, Length(FDocs));
   // Priced as FindByFunctions is: the split, then the product it compares.
-  if not BudgetLinear(Length(ATags), BudgetMilliCopy) then begin FSpent := True; Exit; end;
+  if not BudgetClaimLinear(Length(ATags), BudgetMilliCopy) then begin FSpent := True; Exit; end;
   tags := SplitCSV(ATags);
   if not (BudgetLinearAfter(Length(tags), 4 * BudgetMilliPiece) and
-          BudgetLinear(Int64(Length(tags)) * TagTotal, 2 * BudgetMilliNameItem)) then
+          BudgetClaimLinear(Int64(Length(tags)) * TagTotal, 2 * BudgetMilliNameItem)) then
   begin
     FSpent := True;
     Exit;

@@ -154,8 +154,10 @@ end;
   O(1) body, so Length(S) does not bound this the way it bounds a plain scan:
   unbudgeted, reverse$ of a 160 MB string took 50750 ms under a 2000 ms ceiling
   and reported success. The cost is fixed by Length(S) before the loop starts, so
-  it is RULE 1 -- priced once, refused whole, never truncated half way. False here
-  means the budget said no; the caller turns that into the peLimit.
+  it is RULE 1 -- priced once, refused whole, never truncated half way. A
+  refusal is written into E, the caller's own error, as AWho's peLimit: it
+  does not latch, so where it is asked is the only place it can be said (round
+  9 -- it used to come back as an `out AAllowed` the caller had to read).
 
   The append went when the answer began to be sized once (below), and since
   round 8 the PRICE is what that walk measures: BudgetMilliChar, a character
@@ -164,12 +166,15 @@ end;
   scripts/probe_budget.lpr pinned "reverse$ of 40 MB is refused", which was
   written while the routine was quadratic; that probe now asks for a size
   whose measured cost really is past the allowance. }
-function CpReverse(const S: String; out AAllowed: Boolean): String;
+function CpReverse(const S, AWho: String; var E: TPhosphorError): String;
 var p, q, o: SizeInt;
 begin
   Result := '';
-  AAllowed := BudgetLinear(Length(S), BudgetMilliChar);
-  if not AAllowed then Exit;
+  if not BudgetLinear(Length(S), BudgetMilliChar) then
+  begin
+    E := BudgetRefusal(AWho);
+    Exit;
+  end;
   { Sized once and filled from the back, a character at a time: the same spans
     the old table gave, without the table or the append. }
   SetLength(Result, Length(S));
@@ -377,11 +382,11 @@ begin
   Result := ValStr(r);
 end;
 function f_reverse(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: String; ok: Boolean;
+var r: String;
 begin
   E := NoError();
-  r := CpReverse(s0(A), ok);
-  if not ok then begin E := BudgetRefusal('reverse$'); Exit(ValStr('')); end;
+  r := CpReverse(s0(A), 'reverse$', E);
+  if IsError(E) then Exit(ValStr(''));
   Result := ValStr(r);
 end;
 
@@ -802,7 +807,7 @@ end;
   replacetext$ were already paying inside the RTL, on both operands, for every
   call. It is charged to the budget inside Utf8CaseU, and a refusal is the
   ordinary peLimit these functions already carry for their search cost. }
-function FoldText(const S: String; out AAllowed: Boolean): String; forward;
+function FoldText(const S, AWho: String; var E: TPhosphorError): String; forward;
 
 { One codepoint forward from a byte position in a well-formed UTF-8 string:
   step off the lead byte, then over its continuation bytes. Bounded by
@@ -863,7 +868,6 @@ function DoReplace(const A: array of TValue; const AFn: String; AIgnoreCase: Boo
 var
   outlen: Int64;
   hay, needle, fh, fn, r: String;
-  ok, ok2: Boolean;
   fp, target, fcur, hcur, seg, tf, th: SizeInt;
 begin
   E := NoError();
@@ -879,9 +883,9 @@ begin
       at a time, and every stretch that did not match keeps the text's own
       spelling. The size guard and the price are measured on the folded pair,
       because that is the search that is actually going to run. }
-    fh := FoldText(hay, ok);
-    fn := FoldText(needle, ok2);
-    if not (ok and ok2) then begin E := BudgetRefusal(AFn); Exit(ValStr('')); end;
+    fh := FoldText(hay, AFn, E);
+    fn := FoldText(needle, AFn, E);
+    if IsError(E) then Exit(ValStr(''));
   end;
   if not ReplaceFitsRtl(fh, fn, A[2].Str, outlen) then
   begin
@@ -995,7 +999,7 @@ end;
   to fewer than k and simply is not equal. See CpWalk for the measurement that
   made the bound necessary. }
 function f_startstext(const A: array of TValue; out E: TPhosphorError): TValue;
-var t, ft, fx: String; k, n: Int64; e2: SizeInt; ok, ok2: Boolean;
+var t, ft, fx: String; k, n: Int64; e2: SizeInt;
 begin
   E := NoError();
   t := s0(A);
@@ -1003,13 +1007,13 @@ begin
   k := Utf8Len(A[1].Str);
   CpWalk(t, k, n, e2);
   if not BudgetLinearAfterOk('startstext', e2 - 1, BudgetMilliScan, E) then Exit(ValInt(0));
-  ft := FoldText(Copy(t, 1, e2 - 1), ok);
-  fx := FoldText(A[1].Str, ok2);
-  if not (ok and ok2) then begin E := BudgetRefusal('startstext'); Exit(ValInt(0)); end;
+  ft := FoldText(Copy(t, 1, e2 - 1), 'startstext', E);
+  fx := FoldText(A[1].Str, 'startstext', E);
+  if IsError(E) then Exit(ValInt(0));
   Result := ValInt(Ord(ft = fx));
 end;
 function f_endstext(const A: array of TValue; out E: TPhosphorError): TValue;
-var t, ft, fx: String; k: Int64; st: SizeInt; ok, ok2: Boolean;
+var t, ft, fx: String; k: Int64; st: SizeInt;
 begin
   E := NoError();
   t := s0(A);
@@ -1018,9 +1022,9 @@ begin
   st := CpSuffixStart(t, k);
   if not BudgetLinearAfterOk('endstext', Length(t) - st + 1, BudgetMilliScan, E) then
     Exit(ValInt(0));
-  ft := FoldText(Copy(t, st, Length(t) - st + 1), ok);
-  fx := FoldText(A[1].Str, ok2);
-  if not (ok and ok2) then begin E := BudgetRefusal('endstext'); Exit(ValInt(0)); end;
+  ft := FoldText(Copy(t, st, Length(t) - st + 1), 'endstext', E);
+  fx := FoldText(A[1].Str, 'endstext', E);
+  if IsError(E) then Exit(ValInt(0));
   Result := ValInt(Ord(ft = fx));
 end;
 
@@ -1393,12 +1397,17 @@ end;
   Every input character yields exactly one output character, starting at a
   non-continuation byte, so the folded string and the original advance in
   step under NextCp, malformed or not. }
-function Utf8CaseU(const S: String; AUpper: Boolean; out AAllowed: Boolean): String;
+function Utf8CaseU(const S: String; AUpper: Boolean; const AWho: String;
+                   var E: TPhosphorError): String;
 var p, q, n, need, k: SizeInt; cp: LongWord; b: Byte; ok: Boolean;
 begin
   Result := '';
-  AAllowed := BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte);
-  if not AAllowed then Exit;
+  // Refused in place, into the caller's error: this does not latch (round 9).
+  if not BudgetAllows(Int64(Length(S)) * BudgetUnitsPerAppendedByte) then
+  begin
+    E := BudgetRefusal(AWho);
+    Exit;
+  end;
   n := Length(S);
   p := 1;
   while p <= n do
@@ -1442,23 +1451,23 @@ begin
   end;
 end;
 
-function Utf8UpperU(const S: String; out AAllowed: Boolean): String;
+function Utf8UpperU(const S, AWho: String; var E: TPhosphorError): String;
 begin
-  Result := Utf8CaseU(S, True, AAllowed);
+  Result := Utf8CaseU(S, True, AWho, E);
 end;
-function Utf8LowerU(const S: String; out AAllowed: Boolean): String;
+function Utf8LowerU(const S, AWho: String; var E: TPhosphorError): String;
 begin
-  Result := Utf8CaseU(S, False, AAllowed);
+  Result := Utf8CaseU(S, False, AWho, E);
 end;
 
 { THE FOLD THE "ignoring case" FAMILY USES, and the whole of it: it is aucase$'s
   own engine, not a second copy of the rule. The long note above DoReplace says
   why there is exactly one, why it is this one, and why Windows and Linux answer
-  the same. AAllowed False means the budget refused the fold, and the caller turns
-  that into the peLimit it would have raised for the search. }
-function FoldText(const S: String; out AAllowed: Boolean): String;
+  the same. A refused fold is written into E as AWho's peLimit -- the one the
+  search would have raised -- and answers ''. }
+function FoldText(const S, AWho: String; var E: TPhosphorError): String;
 begin
-  Result := Utf8UpperU(S, AAllowed);
+  Result := Utf8UpperU(S, AWho, E);
 end;
 
 function SignI(c: Int64): Integer; inline;
@@ -1509,19 +1518,19 @@ begin
 end;
 
 function f_alcase(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: String; ok: Boolean;
+var r: String;
 begin
   E := NoError();
-  r := Utf8LowerU(s0(A), ok);
-  if not ok then begin E := BudgetRefusal('alcase$'); Exit(ValStr('')); end;
+  r := Utf8LowerU(s0(A), 'alcase$', E);
+  if IsError(E) then Exit(ValStr(''));
   Result := ValStr(r);
 end;
 function f_aucase(const A: array of TValue; out E: TPhosphorError): TValue;
-var r: String; ok: Boolean;
+var r: String;
 begin
   E := NoError();
-  r := Utf8UpperU(s0(A), ok);
-  if not ok then begin E := BudgetRefusal('aucase$'); Exit(ValStr('')); end;
+  r := Utf8UpperU(s0(A), 'aucase$', E);
+  if IsError(E) then Exit(ValStr(''));
   Result := ValStr(r);
 end;
 
@@ -1661,7 +1670,7 @@ begin
 end;
 
 function f_containstext(const A: array of TValue; out E: TPhosphorError): TValue;
-var ft, fx: String; ok, ok2: Boolean;
+var ft, fx: String;
 begin
   E := NoError();
   // The fold upper-cases BOTH strings and then searches, so it is the naive
@@ -1670,8 +1679,8 @@ begin
   // unit's rule instead of by the platform's.
   if not BudgetAllows(SearchCost(s0(A), A[1].Str, True)) then
   begin E := BudgetRefusal('containstext'); Exit(ValInt(0)); end;
-  ft := FoldText(s0(A), ok); fx := FoldText(A[1].Str, ok2);
-  if not (ok and ok2) then begin E := BudgetRefusal('containstext'); Exit(ValInt(0)); end;
+  ft := FoldText(s0(A), 'containstext', E); fx := FoldText(A[1].Str, 'containstext', E);
+  if IsError(E) then Exit(ValInt(0));
   Result := ValInt(Ord(Pos(fx, ft) > 0));
 end;
 
@@ -1695,7 +1704,7 @@ end;
   Without the bound, strcmpi(32-MB string, "x") folded 32 MB to answer a question
   the first character settles: 28 s against 0.057 s, measured. }
 function f_strcmpi(const A: array of TValue; out E: TPhosphorError): TValue;
-var sa, sb, fa, fb: String; lim, ka, kb, k, c, kc: Int64; ea, eb: SizeInt; ok, ok2: Boolean;
+var sa, sb, fa, fb: String; lim, ka, kb, k, c, kc: Int64; ea, eb: SizeInt;
 begin
   E := NoError();
   sa := s0(A); sb := A[1].Str;
@@ -1708,9 +1717,9 @@ begin
   if ka < kb then k := ka else k := kb;
   CpWalk(sa, k, kc, ea);
   CpWalk(sb, k, kc, eb);
-  fa := FoldText(Copy(sa, 1, ea - 1), ok);
-  fb := FoldText(Copy(sb, 1, eb - 1), ok2);
-  if not (ok and ok2) then begin E := BudgetRefusal('strcmpi'); Exit(ValInt(0)); end;
+  fa := FoldText(Copy(sa, 1, ea - 1), 'strcmpi', E);
+  fb := FoldText(Copy(sb, 1, eb - 1), 'strcmpi', E);
+  if IsError(E) then Exit(ValInt(0));
   c := CompareStr(fa, fb);
   if c = 0 then c := ka - kb;
   Result := ValInt(SignI(c));

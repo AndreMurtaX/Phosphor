@@ -89,7 +89,7 @@ The setter form replaces every item; the `$` form renders the list back.
 | `strings_delimitedtext$(l@) → str` | the items joined by the delimiter, quoting any field that is empty, holds the delimiter or the quote character, or — unless strict — holds whitespace |
 | `strings_delimiter(l@, c$) → num` | set the delimiter to the **first character** of `c$`, answering `1`. An empty string restores `,` |
 | `strings_delimiter$(l@) → str` | that character; `","` on a fresh list |
-| `strings_quotechar(l@, c$) → num` | set the quote character from the first character of `c$`, answering `1`. An empty string restores `"` |
+| `strings_quotechar(l@, c$) → num` | set the quote character from the first character of `c$`, answering `1`. An empty string restores `"`. A quote character of byte 0 (`bytestr$(0)`) quotes NOTHING, as in the RTL: `strings_delimitedtext$` writes every field as it stands and the reader reads none as quoted (until round 9 the writer put the NUL byte around each field it would have quoted) |
 | `strings_quotechar$(l@) → str` | that character; the double quote on a fresh list |
 | `strings_strictdelimiter(l@, on) → num` | set the strict flag, answering `1`. Strict means whitespace is ordinary text: it is neither skipped when reading nor a reason to quote when writing |
 | `strings_strictdelimiter(l@) → num` | that flag: `1` or `0`. Off on a fresh list |
@@ -102,7 +102,7 @@ the same lines mean.
 | function | what it answers |
 | --- | --- |
 | `strings_values$(l@, name$) → str` | the text right of the first separator on the first line whose name matches. `""` when the name is absent — and `""` is also what a genuinely empty value answers, so use `strings_indexofname` when the difference matters |
-| `strings_values(l@, name$, value$) → num` | `1`, having rewritten that line — or **appended** `name$ + separator + value$` when the name was absent. It is an upsert, not a replace |
+| `strings_values(l@, name$, value$) → num` | `1`, having rewritten that line — or **added** `name$ + separator + value$` when the name was absent, exactly as `strings_add` would: at the end of an unsorted list, in its sorted place on a sorted one (until round 9 it appended there too, and the list then said it was sorted while `strings_find` missed the line). It is an upsert, not a replace |
 | `strings_valuefromindex$(l@, i) → str` | the value half of line `i`; `""` when that line holds no separator at all. Out of bounds is an error |
 | `strings_valuefromindex(l@, i, value$) → num` | `1`, having replaced the value half of line `i` and kept its name. A line with no separator gains one, with an empty name |
 | `strings_names$(l@, i) → str` | the name half of line `i`; `""` when the line holds no separator |

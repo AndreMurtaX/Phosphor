@@ -39,7 +39,11 @@ answer an empty value — `""`, `0`, an empty JSON object — and leave a code b
 for `sqlite_error()` and `sqlite_errormsg$()`. That is the last-error-as-a-value
 pattern `ioerror()` and `http_error()` follow. (Two engine-wide rules still
 stop a call here as they stop any library call: the run's budget running out,
-and a number read back that is not finite — see the note on infinity below.) The consequence is worth stating
+and a number read back that is not finite — see the note on infinity below. The
+budget prices a statement's TEXT before SQLite reads it, since SQLite tokenizes
+all of it before it can answer: `sqlite_prepare@`, `sqlite_exec`,
+`sqlite_scalar$`, `sqlite_scalar` and `sqlite_query$` of a statement too long for
+what is left are refused, by name, before SQLite is called.) The consequence is worth stating
 plainly: `sqlite_scalar$()` answering `""` may mean *no rows*, *a NULL*, *an empty
 string*, or *the query was nonsense* — only `sqlite_error()` separates them.
 
@@ -164,7 +168,7 @@ which reads exactly like an empty table, and is meant to.
 
 | function | what it answers |
 | --- | --- |
-| `sqlite_row@(s@) → handle` | the current row as a JSON object, column names as keys. An **empty object** when the cursor is not on a row; handle `0` for a non-statement handle. One member per **name**: when two columns share one — `select *` over a join of two tables that both have an `id` — the **later** column is kept, as in a row read into a dictionary; alias them (`a.id as a_id`) to keep both. A column name past 255 bytes cannot be a JSON member name and is a runtime error (the same rule holds for `sqlite_fetchone@` and `sqlite_fetchall@`) |
+| `sqlite_row@(s@) → handle` | the current row as a JSON object, column names as keys. An **empty object** when the cursor is not on a row; handle `0` for a non-statement handle. A row whose text a host's execution budget stopped copying is not handed out: the call is the budget's catchable limit error, naming the function (until round 9 it answered a row whose text columns were all `""`, as a success; the same holds for `sqlite_fetchone@` and for every row of `sqlite_fetchall@`, the last included). One member per **name**: when two columns share one — `select *` over a join of two tables that both have an `id` — the **later** column is kept, as in a row read into a dictionary; alias them (`a.id as a_id`) to keep both. A column name past 255 bytes cannot be a JSON member name and is a runtime error (the same rule holds for `sqlite_fetchone@` and `sqlite_fetchall@`) |
 | `sqlite_fetchone@(s@) → handle` | steps first, then hands back the new current row. At the end of the result that is an empty object — check with `json_count` rather than expecting a failure |
 | `sqlite_fetchall@(s@) → handle` | a JSON array of every **remaining** row, stepping a fresh cursor onto the first one for you. Empty array when the cursor is already exhausted. Count it with `json_len` |
 | `sqlite_insertjson(db@, t$, o@) → num` | inserts an object as a row, keys as columns, values bound rather than pasted into SQL; an integer member is stored as an INTEGER, every digit kept up to 2^63-1 (past it, the REAL nearest to it); answers the number of rows written. An array or object member is stored as its JSON text (see [Nested members](#nested-members)). `0` for an empty object, a handle that is not an object, an insert SQLite refused, or a member with no JSON text (`sqlite_error()` `20`, and no row is written) |

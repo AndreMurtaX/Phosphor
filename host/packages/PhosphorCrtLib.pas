@@ -49,7 +49,8 @@ interface
 uses
   SysUtils,
   {$IFDEF WINDOWS}Windows,{$ELSE}BaseUnix, Unix, termio,{$ENDIF}
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorStdIO;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorStdIO
+  {$IFDEF WINDOWS}, PhosphorSysLib{$ENDIF};
 
 procedure RegisterCrtFuncs(Reg: TPhosphorRegistry);
 
@@ -87,6 +88,20 @@ function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource;
   fields an INPUT_RECORD carries and answers what the key is; tests/probe_crt.lpr
   calls it with no console in sight. }
 function CrtKeyFromEvent(AUnicodeChar: WideChar; AVirtualKey: Word): String;
+{ A CHARACTER OUTSIDE THE BMP IS TWO KEY EVENTS (round 7, 2026-10-11). An
+  INPUT_RECORD carries ONE UTF-16 unit, so an emoji arrives as a high surrogate
+  and then a low one. CrtKeyFromEvent converted each with UTF8Encode, which
+  DROPS a lone surrogate (rtl/inc/ustrings.inc, UnicodeToUtf8): both halves
+  answered '', KbdRead took '' for "not a key", and the keystroke vanished --
+  the program read the NEXT key in its place, where Linux (CrtAssembleKey)
+  answers the whole character. This is the pair decision: AFirst is the key
+  event's character, ANext the character of the next key-down event when one
+  is already waiting (AHaveNext). A high half followed by a low half is ONE
+  key, its UTF-8 bytes, and AUsedNext says the second event belongs to it.
+  Anything else is AFirst alone -- a lone half being U+FFFD, the answer
+  WideToUtf8 gives for one -- and the next event is left for the next read. }
+function CrtKeyFromPair(AFirst: WideChar; AHaveNext: Boolean; ANext: WideChar;
+                        out AUsedNext: Boolean): String;
 {$ENDIF}
 
 implementation
@@ -292,8 +307,13 @@ end;
 function CrtKeyFromEvent(AUnicodeChar: WideChar; AVirtualKey: Word): String;
 begin
   if AUnicodeChar <> #0 then
-    // A normal key: its character, as UTF-8 bytes.
-    Result := UTF8Encode(WideString(AUnicodeChar))
+  begin
+    // A normal key: its character, as UTF-8 bytes. WideToUtf8, not UTF8Encode:
+    // a surrogate half on its own is U+FFFD, not '' (see CrtKeyFromPair). And
+    // tagged, for the reason the extended branch gives below.
+    Result := WideToUtf8(UnicodeString(AUnicodeChar));
+    SetCodePage(RawByteString(Result), CP_UTF8, False);
+  end
   else
   begin
     // An arrow or function key: chr$(0) + the virtual-key code.
@@ -319,6 +339,25 @@ begin
   end;
 end;
 
+function IsHighHalf(C: WideChar): Boolean;
+begin
+  Result := (Word(C) >= $D800) and (Word(C) <= $DBFF);
+end;
+
+function CrtKeyFromPair(AFirst: WideChar; AHaveNext: Boolean; ANext: WideChar;
+                        out AUsedNext: Boolean): String;
+begin
+  AUsedNext := IsHighHalf(AFirst) and AHaveNext and
+               (Word(ANext) >= $DC00) and (Word(ANext) <= $DFFF);
+  if AUsedNext then
+  begin
+    Result := WideToUtf8(UnicodeString(AFirst) + UnicodeString(ANext));
+    SetCodePage(RawByteString(Result), CP_UTF8, False);
+  end
+  else
+    Result := CrtKeyFromEvent(AFirst, 0);
+end;
+
 function EventToKey(const ARec: INPUT_RECORD): String;
 begin
   Result := '';
@@ -341,22 +380,58 @@ begin
       Exit(True);
 end;
 
+{ A high half is HELD (APend) until the event that settles it: the next
+  key-down. A low half completes the character; anything else leaves the high
+  half alone, U+FFFD, and is not consumed -- it is the next key. What stands
+  between them (the high half's own key-up, a mouse or focus event) is consumed,
+  as it always was. While a half is held nothing waits: the console queues both
+  halves of a character together, so a partner not already queued is not
+  coming as part of this key. Every turn still consumes one event or ends. }
 function KbdRead(ABlock: Boolean): String;
-var h: THandle; rec: INPUT_RECORD; navail, nread: DWORD;
+var h: THandle; rec: INPUT_RECORD; navail, nread: DWORD; used: Boolean; pend: WideChar;
 begin
   Result := '';
+  pend := #0;
   h := GetStdHandle(STD_INPUT_HANDLE);
   while True do
   begin
-    if not ABlock then
+    if (not ABlock) or (pend <> #0) then
     begin
       navail := 0;
-      if (not GetNumberOfConsoleInputEvents(h, navail)) or (navail = 0) then Exit;
+      if (not GetNumberOfConsoleInputEvents(h, navail)) or (navail = 0) then
+      begin
+        if pend <> #0 then Result := CrtKeyFromPair(pend, False, #0, used);
+        Exit;
+      end;
     end;
     nread := 0;
-    if (not ReadConsoleInputW(h, rec, 1, nread)) or (nread = 0) then Exit;
+    if pend <> #0 then
+    begin
+      if (not PeekConsoleInputW(h, rec, 1, nread)) or (nread = 0) then
+        Exit(CrtKeyFromPair(pend, False, #0, used));
+      if (rec.EventType = KEY_EVENT) and rec.Event.KeyEvent.bKeyDown then
+      begin
+        Result := CrtKeyFromPair(pend, True, rec.Event.KeyEvent.UnicodeChar, used);
+        if used then ReadConsoleInputW(h, rec, 1, nread);
+        Exit;
+      end;
+    end;
+    if (not ReadConsoleInputW(h, rec, 1, nread)) or (nread = 0) then
+    begin
+      if pend <> #0 then Result := CrtKeyFromPair(pend, False, #0, used);
+      Exit;
+    end;
+    if pend <> #0 then Continue;           // what stood between the halves
     Result := EventToKey(rec);
-    if Result <> '' then Exit;             // skip key-up / mouse / focus events
+    if Result = '' then Continue;          // skip key-up / mouse / focus events
+    if IsHighHalf(rec.Event.KeyEvent.UnicodeChar) then
+    begin
+      // the first half of a character outside the BMP: the key is the PAIR
+      pend := rec.Event.KeyEvent.UnicodeChar;
+      Result := '';
+      Continue;
+    end;
+    Exit;
   end;
 end;
 {$ELSE}

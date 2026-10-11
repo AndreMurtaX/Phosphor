@@ -246,7 +246,10 @@ jobs:
         if: success() || failure()
         shell: pwsh
         run: |
-          $skips = Select-String -Path ci-*.log -Pattern '^SKIP|SKIPPED'
+          # -CaseSensitive: Select-String ignores case by default, so a PASS line
+          # that says a TEMP "is skipped" read as a SKIP (2026-10-11). grep, on
+          # the Linux job, was always case-sensitive.
+          $skips = Select-String -CaseSensitive -Path ci-*.log -Pattern '^SKIP|SKIPPED'
           if ($skips) {
             $skips | ForEach-Object { Write-Host $_ }
             Write-Host 'FAIL  a runner skipped work on Windows, where nothing is platform-only'

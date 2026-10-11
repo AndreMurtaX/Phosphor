@@ -101,6 +101,25 @@ def inner(spec_path):
         if not ok or written.value != len(recs):
             fe.write(('HARNESS: wrote %d of %d key events\n' % (written.value, len(recs))).encode())
             return
+        if spec.get('calibrate'):
+            # The console's OWN answer, read here and not by phosphor: cooked
+            # ReadConsoleW calls, as many as it takes, until the line's CR.
+            # Their total is how many units of a typed line this console keeps.
+            k32.ReadConsoleW.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD,
+                                         ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
+            buf = ctypes.create_unicode_buffer(4096)
+            got = ''
+            for _ in range(64):
+                n = wt.DWORD(0)
+                if not k32.ReadConsoleW(h, buf, 4096, ctypes.byref(n), None) or n.value == 0:
+                    break
+                got += buf[:n.value]
+                if '\r' in got or '\n' in got:
+                    break
+            cut = min([i for i in (got.find('\r'), got.find('\n')) if i >= 0] or [len(got)])
+            fo.write(str(cut).encode())
+            fe.write(b'exit 0\n')
+            return
         try:
             p = subprocess.run([spec['exe'], spec['bas']], stdout=fo, stderr=fe,
                                timeout=spec['timeout'])
@@ -115,12 +134,13 @@ def main():
     failed = 0
     harness = 0
 
-    def case(name, program, typed, want, timeout=20):
+    def case(name, program, typed, want, timeout=20, calibrate=False):
         nonlocal failed, harness
         bas = os.path.join(work, name + '.bas')
         with open(bas, 'w', newline='\n', encoding='utf-8') as f:
             f.write(program)
         spec = {'units': units(typed), 'exe': exe, 'bas': bas, 'timeout': timeout,
+                'calibrate': calibrate,
                 'out': os.path.join(work, name + '.out'),
                 'err': os.path.join(work, name + '.err')}
         sp = os.path.join(work, name + '.json')
@@ -138,6 +158,12 @@ def main():
             err = open(spec['err'], 'rb').read().decode('utf-8', 'replace').strip()
         except OSError:
             got, err = None, 'no output files'
+        if calibrate:
+            if got is None or err.startswith('HARNESS') or not got.isdigit():
+                print('HARNESS  %s: %s %r' % (name, err, got))
+                harness += 1
+                return None
+            return int(got)
         if got is None or err.startswith('HARNESS'):
             print('HARNESS  %s: %s' % (name, err))
             harness += 1
@@ -170,17 +196,42 @@ def main():
     case('getkey-lone-low', keys, '\ude00q', 'efbfbd 71\n')
     lines = ('input a$\nprintln str$(bytelen(a$)) + " " + hex_encode$(right$(a$, 3))\n'
              'input b$\nprintln str$(bytelen(b$)) + " " + hex_encode$(b$)\n')
+
+    # HOW MUCH OF A TYPED LINE THIS CONSOLE KEEPS, asked of the console itself
+    # and not of phosphor. On Windows 11 it kept all 10000 units; on the GitHub
+    # Windows Server runner its line editor keeps 8190 and DISCARDS the rest of
+    # the line (2026-10-11, the first CI run of these cases: every long case
+    # answered 8190, then the next line whole). What phosphor must answer is
+    # what the console hands over: the first `cap` units of the line, as ONE
+    # line, then the next line -- never the line's tail as a second INPUT.
+    cap = case('console-cap', '', 'a' * 10000 + '\r', None, timeout=40, calibrate=True)
+    if cap is None:
+        sys.exit(2)
+
+    def line_want(typed_line):
+        u = typed_line.encode('utf-16-le', 'surrogatepass')[:2 * cap]
+        b = u.decode('utf-16-le', 'surrogatepass').encode('utf-8', 'surrogatepass')
+        # a pair the console's cut halves is one unpaired surrogate: U+FFFD
+        b = b.replace(b'\xed\xa0\xbd', b'\xef\xbf\xbd')
+        # right$(a$, 3) counts CHARACTERS: the last three, in UTF-8
+        tail = b.decode('utf-8')[-3:].encode('utf-8')
+        return '? %d %s\n? 1 7a\n' % (len(b), tail.hex())
+
+    if cap < 8192:
+        print('NOTE  this console keeps %d units of a typed line, fewer than one '
+              '8192-unit read: no line it hands over can span two reads, so the '
+              'cases below check that what it keeps is one line' % cap)
     # A line longer than one read is still ONE line; the next INPUT gets the
-    # next line. 10000 typed 'a' are 10000 bytes.
-    case('line-long', lines, 'a' * 10000 + '\rz\r', '? 10000 616161\n? 1 7a\n', timeout=40)
+    # next line. 10000 typed 'a' are 10000 bytes, where the console keeps them.
+    case('line-long', lines, 'a' * 10000 + '\rz\r', line_want('a' * 10000), timeout=40)
     # A pair across the read boundary: 8191 'a' fill the buffer to its last
     # unit, the high half lands there and the low half in the next read. The
-    # line is 8191 + 4 + 1 = 8196 bytes, ending a, U+1F600, b.
+    # whole line is 8191 + 4 + 1 = 8196 bytes, ending a, U+1F600, b.
     case('line-pair-cut', lines, 'a' * 8191 + emoji + 'b\rz\r',
-         '? 8196 61f09f988062\n? 1 7a\n', timeout=40)
+         line_want('a' * 8191 + emoji + 'b'), timeout=40)
     # A line that fills the buffer EXACTLY up to its CR: the LF is left for the
     # next read, and must not become an empty second line.
-    case('line-cr-at-end', lines, 'a' * 8191 + '\rz\r', '? 8191 616161\n? 1 7a\n', timeout=40)
+    case('line-cr-at-end', lines, 'a' * 8191 + '\rz\r', line_want('a' * 8191), timeout=40)
 
     if harness:
         sys.exit(2)

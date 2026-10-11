@@ -437,6 +437,20 @@ def run_windows(exe, work):
          + typed('bc\r'), '? |61 6263\n', screen='bc')
     case('taps-then-backspace', gk_in, typed('aaa') + tap(8, 0x08) + tap(8, 0x08) + typed('bc\r'),
          '? |61 6263\n', screen='bc')
+    # ROUND 10: A HELD TAB OR CTRL CHORD IS TEXT TOO. Only presses from ' ' up
+    # were kept, so the two unanswered presses of a Tab held for three vanished
+    # ('|09 78'). Expected: what the same keys TAPPED answer -- the console's
+    # own cooked read keeps a Tab and a Ctrl chord in a line (measured on
+    # Windows 11: three taps of ^A then 'x' Enter answer 01 01 01 78, shown
+    # ^A^A^Ax) -- and a held Backspace's unanswered presses erase nothing, as
+    # three taps of it before 'x' leave the line 'x'.
+    case('repeat-tab-then-input', gk_in,
+         [key(9, 0x09, rep=3), key(9, 0x09, False)] + typed('x\r'), '? |09 090978\n')
+    case('repeat-ctrl-a-then-input', gk_in,
+         [key(1, 0x41, state=LEFT_CTRL, rep=3), key(1, 0x41, False, state=LEFT_CTRL)] + typed('x\r'),
+         '? |01 010178\n', screen='^A^Ax')
+    case('repeat-backspace-then-input', gk_in,
+         [key(8, 0x08, rep=3), key(8, 0x08, False)] + typed('x\r'), '? |08 78\n', screen='x')
 
     # ROUND 9: INKEY$ NEVER WAITS FOR A HALF. Five lone high halves queued
     # (key-downs, no partners): each of the first four is settled by the key
@@ -544,10 +558,19 @@ def run_unix(exe, work):
 
     failed = 0
 
-    def case(name, program, bursts, want, timeout=20, shows=None):
+    import termios
+    # termios.IUTF8 is missing from some Pythons (Ubuntu 24.04's 3.12 among
+    # them, round 10); the value is the kernel's, octal 0040000, as
+    # PhosphorCrtLib declares it.
+    IUTF8 = getattr(termios, 'IUTF8', 0o40000)
+
+    def case(name, program, bursts, want, timeout=20, shows=None, iflag=(0, 0), lflag=(0, 0)):
         """bursts: (seconds to wait, bytes to write). The program's own answer
         is its line starting '|', found in what the pty echoes back; shows,
-        bytes the terminal must have been sent (the prompt and the echo)."""
+        bytes the terminal must have been sent (the prompt and the echo).
+        iflag, lflag: (bits to set, bits to clear) in the terminal's modes
+        before the program starts, as `stty` would -- a new pty has IUTF8
+        off (the kernel's tty_std_termios), where a UTF-8 terminal sets it."""
         nonlocal failed
         bas = os.path.join(work, name + '.bas')
         with open(bas, 'w', newline='\n', encoding='utf-8') as f:
@@ -555,6 +578,11 @@ def run_unix(exe, work):
         pid, fd = pty.fork()
         if pid == 0:
             try:
+                if iflag != (0, 0) or lflag != (0, 0):
+                    a = termios.tcgetattr(0)
+                    a[0] = (a[0] | iflag[0]) & ~iflag[1]
+                    a[3] = (a[3] | lflag[0]) & ~lflag[1]
+                    termios.tcsetattr(0, termios.TCSANOW, a)
                 os.execv(exe, [exe, bas])
             finally:
                 os._exit(127)
@@ -675,12 +703,176 @@ def run_unix(exe, work):
     # Nothing typed ahead: the line discipline's own line mode, as before.
     case('typed-live', gk_in, [(0.7, b'x'), (0.5, b'helo\x7flo\r')], '78 68656c6c6f')
 
+    # ---- round 10: THE SAME LINE TYPED AHEAD AS TYPED LIVE -------------------
+    # Each expected line is what Linux's own line discipline answered for the
+    # same keys typed after INPUT began (measured in round 10's verification),
+    # and what n_tty.c defines: Ctrl+W after 'n a-tilde o' takes the whole
+    # word under IUTF8 (isalnum() of the lead byte C3, _U in the kernel's
+    # Latin-1 table) -- typed ahead it took the 'o' alone; without IUTF8 erase
+    # takes one byte (61 c3 78); without ICANON nothing is edited and DEL is
+    # in the line (61 62 7f 63).
+    case('typeahead-werase-utf8', gk_in, [(0.7, b'xab n\xc3\xa3o\x17x\r')], '78 61622078',
+         iflag=(IUTF8, 0))
+    case('typeahead-erase-no-iutf8', gk_in, [(0.7, b'xa\xc3\xa9\x7fx\r')], '78 61c378',
+         iflag=(0, IUTF8))
+    case('typeahead-no-icanon', gk_in, [(0.7, b'xab\x7fc\r')], '78 61627f63',
+         lflag=(0, termios.ICANON))
+    # A TAB ERASED TYPED AHEAD goes back the columns it took FROM WHERE THE
+    # PROMPT ENDED: after 'Name:' (5 columns) 'ab' Tab took 8 - 7 = 1, after
+    # '? ' 8 - 4 = 4 -- the backspaces the live line discipline sent. It sent
+    # six for both, into the prompt.
+    name_in = ('crt_init()\nk$ = getkey$()\ninput "Name:", a$\ncrt_done()\n'
+               'println "|" + hex_encode$(k$) + " " + hex_encode$(a$)\n')
+    case('typeahead-tab-after-name', name_in, [(0.7, b'xab\t\x7fx\r')], '78 616278',
+         shows=b'Name:ab\t\x08x')
+    case('typeahead-tab-after-question', gk_in, [(0.7, b'xab\t\x7fx\r')], '78 616278',
+         shows=b'? ab\t\x08\x08\x08\x08x')
+    # A PASTE INTO A getkey$ LOOP costs a key's work per key: 256 KB took 2 s
+    # and a megabyte 21 (each key was cut off the front of a queue as long as
+    # the paste). Expected: every key counted inside the case's limit, 20 s --
+    # a bound on the whole run that the linear reader meets several times
+    # over (round 10's slowest machine, WSL, ran 2M keys of a bare loop in
+    # 7 s) and the quadratic one missed on every machine measured (21 to 84
+    # s for the megabyte). Judge it on WSL or CI, never on the VM.
+    paste = ('crt_init()\nprintln "ready"\nn = 0\nk$ = getkey$()\nwhile k$ <> "q" and k$ <> ""\n'
+             '  n = n + 1\n  k$ = getkey$()\nwend\ncrt_done()\nprintln "|n=" + str$(n) + "|"\n')
+    case('paste-1mb', paste, [(0.7, b'a' * (1 << 20) + b'q')], 'n=1048576|', timeout=20)
+
+    # ---- round 10: CTRL+Z, AND fg ---------------------------------------------
+    # A program stopped in getkey$ with the terminal raw: bash put its own
+    # modes back and did not re-apply the job's on fg, so after fg 'b' was
+    # echoed and getkey$ waited for Enter; dash left the terminal raw while the
+    # shell prompted. Expected, the convention vim, less and readline keep:
+    # ECHO and ICANON on while stopped, and after fg 'b' answered at once,
+    # unechoed. Run under each shell's job control, on a pty.
+    import shlex
+    import shutil
+
+    def job_control(shell, argv, judge_stopped_modes):
+        nonlocal failed
+        path = shutil.which(shell)
+        if not path:
+            print('FAIL  ctrlz-fg-%s: no %s on this machine' % (shell, shell))
+            failed += 1
+            return
+        bas = os.path.join(work, 'tstp.bas')
+        with open(bas, 'w', newline='\n', encoding='utf-8') as f:
+            f.write('crt_init()\nprintln "ready"\nk$ = getkey$()\nprintln "|A" + hex_encode$(k$) + "|"\n'
+                    'k$ = getkey$()\nprintln "|B" + hex_encode$(k$) + "|"\ncrt_done()\nprintln "done"\n')
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                os.execve(path, [shell] + argv, {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                                 'PS1': 'PROMPT$ ', 'TERM': 'dumb', 'HOME': work})
+            finally:
+                os._exit(127)
+        out = b''
+
+        def wait_until(test, secs):
+            nonlocal out
+            end = time.monotonic() + secs
+            while time.monotonic() < end and not test():
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if r:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        chunk = b''
+                    if not chunk:
+                        break
+                    out += chunk
+            return test()
+
+        steps = []
+        ok = wait_until(lambda: b'PROMPT$ ' in out, 10)
+        steps.append('prompt %s' % ok)
+        if ok:
+            os.write(fd, ('%s %s\n' % (shlex.quote(exe), shlex.quote(bas))).encode())
+            ok = wait_until(lambda: b'ready' in out, 15)
+            steps.append('ready %s' % ok)
+        if ok:
+            time.sleep(0.3)
+            os.write(fd, b'a')
+            ok = wait_until(lambda: b'|A61|' in out, 5)
+            steps.append('A %s' % ok)
+        stopped_modes = False
+        if ok:
+            prompts = out.count(b'PROMPT$ ')
+            os.write(fd, b'\x1a')
+            ok = wait_until(lambda: out.count(b'PROMPT$ ') > prompts, 5)
+            steps.append('stopped %s' % ok)
+            time.sleep(0.2)
+            lf = termios.tcgetattr(fd)[3]
+            stopped_modes = bool(lf & termios.ECHO) and bool(lf & termios.ICANON)
+            steps.append('modes while stopped %s' % stopped_modes)
+        got_b = False
+        if ok:
+            os.write(fd, b'fg\n')
+            # read what the shell shows for fg (the job's command line, which
+            # has a 'b' in it) before marking where 'b' is typed
+            wait_until(lambda: False, 1.0)
+            mark = len(out)
+            os.write(fd, b'b')
+            got_b = wait_until(lambda: b'|B62|' in out[mark:], 3)
+            before = out[mark:].split(b'|B62|')[0]
+            if got_b and b'b' in before:
+                got_b = False
+                steps.append('b echoed')
+            steps.append('B %s' % got_b)
+            if got_b:
+                wait_until(lambda: b'done' in out[mark:], 5)
+        try:
+            os.write(fd, b'\x04exit\n')
+        except OSError:
+            pass
+        end = time.monotonic() + 5
+        status = None
+        while time.monotonic() < end:
+            done, st = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = st
+                break
+            r, _, _ = select.select([fd], [], [], 0.1)
+            if r:
+                try:
+                    os.read(fd, 4096)
+                except OSError:
+                    break
+        if status is None:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+        os.close(fd)
+        if (stopped_modes or not judge_stopped_modes) and got_b:
+            print('PASS  ctrlz-fg-%s' % shell)
+        else:
+            print('FAIL  ctrlz-fg-%s: want %sb answered unechoed after fg, got %s (pty said %r)'
+                  % (shell, 'ECHO and ICANON while stopped and ' if judge_stopped_modes else '',
+                     ', '.join(steps), out[-300:]))
+            failed += 1
+
+    # WHICH SHELL CAN SHOW WHICH HALF. Interactive bash reads its prompt through
+    # readline, which turns ICANON and ECHO OFF while it waits -- so the modes
+    # read at bash's prompt are readline's, whatever the program left (the first
+    # Linux run of this case, 2026-10-11, failed on exactly that, with the
+    # program right). bash still shows the fg half: 'b' answered at once and
+    # unechoed. dash reads its prompt in cooked mode and restores nothing of its
+    # own, so the modes at ITS prompt are the ones the stopped program left:
+    # dash shows the stop half too.
+    job_control('bash', ['--norc', '--noprofile', '-i'], False)
+    job_control('dash', ['-i'], True)
+
     # ---- round 9: CTRL+C IN getkey$ PUTS THE TERMINAL BACK -------------------
     # The default action of SIGINT ended the process past finalization, and the
     # terminal stayed with ECHO and ICANON off. Expected: both on again after
     # it, and the process still killed BY SIGINT -- the handler restores and
     # re-raises, so a shell sees what it always saw.
-    import termios
     bas = os.path.join(work, 'ctrlc.bas')
     with open(bas, 'w', newline='\n', encoding='utf-8') as f:
         f.write('crt_init()\nz = keypressed()\nprintln "ready"\nk$ = getkey$()\n'

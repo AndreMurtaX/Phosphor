@@ -1215,7 +1215,11 @@ printf '%s\n' 't$ = temppath$()' 'f$ = tempfilename$()' 'println t$' 'ok = 0' \
   'if len(f$) > len(t$) then' '  if left$(f$, len(t$)) = t$ then' '    ok = 1' '  end if' 'end if' \
   'println str$(ok)' > "$tmpdir/acrel.bas"
 acdir="$(cd "$tmpdir" && pwd -P)"
-for acv in 'TEMP=foo' 'TMP=bar' 'TMPDIR=rel'; do
+# ROUND 10 (2026-10-11): A '~' IS A NAME. The environment is not shell-expanded
+# (POSIX), so TMPDIR='~/y' names <working directory>/~/y/ exactly as '~x'
+# already did -- it answered $HOME/y/, through ExpandFileName's tilde
+# expansion. The quotes below keep this shell from expanding it either.
+for acv in 'TEMP=foo' 'TMP=bar' 'TMPDIR=rel' 'TMPDIR=~/y' 'TMPDIR=~'; do
   acwant="$acdir/${acv#*=}/"
   if acgot="$(cd "$tmpdir" && env -u TEMP -u TMP -u TMPDIR "$acv" "$exe" "$tmpdir/acrel.bas" < /dev/null 2>&1)"; then accode=0; else accode=$?; fi
   acgot="$(printf '%s' "$acgot" | tr -d '\r')"
@@ -1224,6 +1228,26 @@ for acv in 'TEMP=foo' 'TMP=bar' 'TMPDIR=rel'; do
   if [ "$accode" -eq 0 ] && [ "$ac1" = "$acwant" ] && [ "$ac2" = "1" ]; then
     echo "PASS  AC:$acv answers the full path $acwant, and tempfilename\$ a name in it"
   else echo "FAIL  AC:$acv: exit $accode, want '$acwant' and 1, got '$ac1' / '$ac2'"; fail=1; fi
+done
+# ROUND 10: A WORKING DIRECTORY THAT IS GONE. A relative value is made full
+# against the working directory -- and with that directory deleted there is
+# none to ask: FPC 3.2.2's getcwd answers -1 as a pointer and the RTL copied
+# its untouched buffer, so TMPDIR=rel gave temppath$ '/rel/' and tempfilename$
+# six bytes of a stack address and '/rel/TMP00000.tmp'. Expected (sys.md):
+# such a value is skipped as if unset -- TEMP=rel with TMP set answers TMP's
+# directory, and TMPDIR=rel alone /tmp/. The directory is one this block makes
+# and removes with a plain rmdir; stderr is kept apart (the GUI-linked host's
+# fontconfig complains under a deleted directory) and not judged.
+for acv in "TMP=$acdir" 'TMPDIR=rel'; do
+  if [ "${acv%%=*}" = TMP ]; then acwant="$acdir/"; acset="TEMP=rel"; else acwant='/tmp/'; acset="TMPDIR=rel"; fi
+  acgone="$(mktemp -d "$tmpdir/gone.XXXXXX")"
+  if acgot="$(cd "$acgone" && rmdir "$acgone" && env -u TEMP -u TMP -u TMPDIR "$acset" "$acv" "$exe" "$tmpdir/acrel.bas" < /dev/null 2> "$tmpdir/acgone.err")"; then accode=0; else accode=$?; fi
+  acgot="$(printf '%s' "$acgot" | tr -d '\r')"
+  ac1="$(printf '%s\n' "$acgot" | sed -n 1p)"
+  ac2="$(printf '%s\n' "$acgot" | sed -n 2p)"
+  if [ "$accode" -eq 0 ] && [ "$ac1" = "$acwant" ] && [ "$ac2" = "1" ]; then
+    echo "PASS  AC:$acset (and $acv) under a deleted working directory skips the relative value: $acwant"
+  else echo "FAIL  AC:$acset (and $acv) under a deleted working directory: exit $accode, want '$acwant' and 1, got '$(printf '%s' "$ac1" | od -An -c | tr -s ' ' | head -c 160)' / '$ac2'"; fail=1; fi
 done
 
 # --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
@@ -2228,6 +2252,13 @@ fi
 # byte waiting), a key split across two reads is one key (nothing waited for
 # its rest), keys typed ahead of INPUT are edited and echoed (DEL landed in
 # the line as a byte), and Ctrl+C in getkey$ leaves ECHO and ICANON on.
+# ROUND 10 (2026-10-11) added: a line typed ahead is edited as the live line
+# discipline edits it -- word erase over a non-ASCII letter, IUTF8 and ICANON
+# off, a Tab rubbed out from where the prompt ended; a pasted megabyte read by
+# a getkey$ loop inside 20 s (it took 21 to 84: the queue was quadratic); and
+# Ctrl+Z then fg under bash and under dash -- the terminal put back while the
+# job is stopped, raw mode re-applied after fg. These Linux cases were written
+# on Windows, where wsl was refused to the fixer, and first ran after merge.
 if python3 "$root/tests/console_input_test.py" "$exe" > "$tmpdir/ahkeys.out" 2>&1; then ahkcode=0; else ahkcode=$?; fi
 if [ "$ahkcode" -eq 0 ] && grep -c '^PASS' "$tmpdir/ahkeys.out" > /dev/null; then
   echo 'PASS  AH:on a terminal, a line after a key function is the line, and a key that is not UTF-8 is U+FFFD'

@@ -30,7 +30,8 @@ program probe_crt;
 {$codepage UTF8}
 
 uses
-  SysUtils, PhosphorValue, PhosphorCrtLib;
+  SysUtils, PhosphorValue, PhosphorCrtLib,
+  PhosphorSysLib;   // the Unix temp directory's decisions (round 10), see below
 
 var
   Ok: Integer = 0;
@@ -117,10 +118,12 @@ end;
 { Bytes arrive at set times; a wait advances the clock to the next arrival or
   by its whole length. A read takes everything that has arrived, as a read()
   of a terminal does. Nothing here sleeps, so a 500 ms wait costs nothing. }
+{ FillChunk > 0: one read hands over at most that many bytes, as a read() of a
+  terminal into TerminalFill's 4096-byte chunk does. }
 var
   EvAt: array of QWord;
   EvData: array of RawByteString;
-  NextEv: Integer;
+  NextEv, EvOff, FillChunk: Integer;
   FakeNow: QWord;
   R: TCrtKeyReader;
 
@@ -130,6 +133,7 @@ begin
 end;
 
 function FakeFill(var ABuf: RawByteString; AWaitMs: Integer): Integer;
+var piece: RawByteString;
 begin
   Result := 0;
   if (NextEv > High(EvAt)) then
@@ -150,9 +154,15 @@ begin
   end;
   while (NextEv <= High(EvAt)) and (EvAt[NextEv] <= FakeNow) do
   begin
-    Inc(Result, Length(EvData[NextEv]));
-    ABuf := J(ABuf, EvData[NextEv]);
+    piece := Copy(EvData[NextEv], EvOff + 1, MaxInt);
+    if (FillChunk > 0) and (Length(piece) > FillChunk - Result) then
+      piece := Copy(piece, 1, FillChunk - Result);
+    ABuf := J(ABuf, piece);
+    Inc(Result, Length(piece));
+    Inc(EvOff, Length(piece));
+    if EvOff < Length(EvData[NextEv]) then Break;     // the chunk is full
     Inc(NextEv);
+    EvOff := 0;
   end;
 end;
 
@@ -161,11 +171,10 @@ begin
   SetLength(EvAt, 0);
   SetLength(EvData, 0);
   NextEv := 0;
+  EvOff := 0;
+  FillChunk := 0;
   FakeNow := 0;
-  R.Buf := '';
-  R.Arrived := 0;
-  R.Fill := @FakeFill;
-  R.Clock := @FakeClock;
+  CrtReaderInit(R, @FakeFill, @FakeClock);
 end;
 
 procedure At(AMs: QWord; const AData: RawByteString);
@@ -190,25 +199,50 @@ end;
 
 { ---- a line typed ahead: CrtEditLine ----------------------------------------- }
 
-{ Feed AInput a byte at a time; the line and the echo it ends with. }
-procedure Edit(const AName: String; const AInput: RawByteString; const AKeys: TCrtEditKeys;
-               AWantStep: TCrtEditStep; const AWantLine, AWantEcho: RawByteString);
-var line, echo: String; all: RawByteString; lit: Boolean; i: Integer; step: TCrtEditStep;
+{ Feed AInput a byte at a time to a line begun at column ACol; the line and
+  the echo it ends with. }
+procedure EditAt(const AName: String; ACol: Integer; const AInput: RawByteString;
+                 const AKeys: TCrtEditKeys; AWantStep: TCrtEditStep;
+                 const AWantLine, AWantEcho: RawByteString);
+var st: TCrtEditState; echo: String; all: RawByteString; i: Integer; step: TCrtEditStep;
 begin
-  line := '';
+  CrtEditStart(st, ACol);
   all := '';
-  lit := False;
   step := cesMore;
   for i := 1 to Length(AInput) do
   begin
-    step := CrtEditLine(line, lit, Byte(AInput[i]), AKeys, echo);
+    step := CrtEditLine(st, Byte(AInput[i]), AKeys, echo);
     all := J(all, echo);
     if step <> cesMore then Break;
   end;
-  Report((step = AWantStep) and SameBytes(line, AWantLine) and SameBytes(all, AWantEcho),
+  Report((step = AWantStep) and SameBytes(st.Line, AWantLine) and SameBytes(all, AWantEcho),
          AName + ' (wanted ' + IntToStr(Ord(AWantStep)) + ' [' + Hex(AWantLine) + '] echo [' +
-         Hex(AWantEcho) + '], got ' + IntToStr(Ord(step)) + ' [' + Hex(line) + '] echo [' +
+         Hex(AWantEcho) + '], got ' + IntToStr(Ord(step)) + ' [' + Hex(st.Line) + '] echo [' +
          Hex(all) + '])');
+end;
+
+procedure Edit(const AName: String; const AInput: RawByteString; const AKeys: TCrtEditKeys;
+               AWantStep: TCrtEditStep; const AWantLine, AWantEcho: RawByteString);
+begin
+  EditAt(AName, 0, AInput, AKeys, AWantStep, AWantLine, AWantEcho);
+end;
+
+var
+  Cwd: array of Char;     // a getcwd buffer, exactly as long as its bytes
+
+procedure CwdBuf(const S: RawByteString);
+var i: Integer;
+begin
+  SetLength(Cwd, Length(S));
+  for i := 1 to Length(S) do Cwd[i - 1] := S[i];
+end;
+
+{ n backspaces, as bytes. }
+function Bs(N: Integer): RawByteString;
+var i: Integer;
+begin
+  SetLength(Result, N);
+  for i := 1 to N do Result[i] := #8;
 end;
 
 {$IFDEF WINDOWS}
@@ -349,6 +383,26 @@ begin
   EventKey('the Alt key-up carries the composed character', False, #$00E9, $12, $38, 0, B([$C3, $A9]));
   EventKey('an Alt key-up with no character is not a key', False, #0, $12, $38, 0, '');
   EventKey('any other key-up is not a key', False, 'a', $41, $1E, 0, '');
+
+  // WHICH UNANSWERED PRESSES BEGIN A LINE (round 10, 2026-10-11). Only keys
+  // from ' ' up were kept, and a held Tab or Ctrl chord lost the presses
+  // getkey$ had not answered. The expected answers are the console's own
+  // cooked read, measured on Windows 11's conhost (three taps of each
+  // character, then 'x' Enter; and the same held with a repeat count): it
+  // keeps Tab, ^A..^Z and ^\ ^] ^^ ^_ in the line, and drops 08 (Backspace,
+  // Ctrl+H), 0A (Ctrl+J) and 1B (Escape), which edit a line and have nothing
+  // to edit at its start. A key with no character is not text.
+  Report(CrtPressIsLineText(#9), 'a held Tab is text in a line');
+  Report(CrtPressIsLineText(#1), 'and so is a held Ctrl+A');
+  Report(CrtPressIsLineText(#26), 'and Ctrl+Z (the line then ends input, as typed)');
+  Report(CrtPressIsLineText(#31), 'and Ctrl+_');
+  Report(CrtPressIsLineText('a'), 'and a letter');
+  Report(CrtPressIsLineText(B([$C3, $A9])), 'and a UTF-8 character');
+  Report(not CrtPressIsLineText(#8), 'Backspace is not: it erases, and before the line nothing');
+  Report(not CrtPressIsLineText(#10), 'nor Ctrl+J');
+  Report(not CrtPressIsLineText(#27), 'nor Escape');
+  Report(not CrtPressIsLineText(Extended(VK_LEFT_)), 'nor an arrow (no character)');
+  Report(not CrtPressIsLineText(''), 'nor nothing');
   {$ENDIF}
 
   // ======== THE UNIX KEYBOARD, on every system ===============================
@@ -545,6 +599,175 @@ begin
        J(T('a'), T('^W')));
   Edit('a tab erased at the start goes back eight columns', B([9, $7F]), Sane, cesMore, '',
        B([9, 8, 8, 8, 8, 8, 8, 8, 8]));
+
+  // ---- round 10: the editor follows ALL of n_tty's definition --------------
+  // WORD ERASE OVER A NON-ASCII LETTER. n_tty's eraser() tests isalnum() on a
+  // character's lead byte (under IUTF8) with the kernel's Latin-1 table
+  // (lib/ctype.c), where C3 is _U: so all of 'n a-tilde o' (6E C3 A3 6F) is a
+  // word, and Ctrl+W leaves 'ab ' -- three rub-outs, one per character. It
+  // left 'ab n a-tilde', one rub-out. Without IUTF8 the walk is byte by byte,
+  // and A3 is _P (punctuation): the word stops at it, one rub-out.
+  Edit('word erase takes a word with a non-ASCII letter in it',
+       J(T('ab n'), B([$C3, $A3, Ord('o'), $17])), Sane, cesMore, T('ab '),
+       J(J(T('ab n'), B([$C3, $A3, Ord('o')])), J(Rub, J(Rub, Rub))));
+  K := Sane; K.Utf8 := False;
+  Edit('without IUTF8 word erase stops at the continuation byte A3',
+       J(T('ab n'), B([$C3, $A3, Ord('o'), $17])), K, cesMore, J(T('ab n'), B([$C3, $A3])),
+       J(J(T('ab n'), B([$C3, $A3, Ord('o')])), Rub));
+  Edit('a multiplication sign (C3 97 under IUTF8: lead C3) is a word byte too',
+       J(T('a '), B([$C3, $97, $17])), Sane, cesMore, T('a '), J(J(T('a '), B([$C3, $97])), Rub));
+  // a lead D7 is _P in the kernel's table: not a word byte, so the word 'cd'
+  // after it is erased and the erase stops there (were it a word byte, the
+  // whole line would go)
+  Edit('a character led by D7 ends a word',
+       J(J(T('ab'), B([$D7, $90])), J(T('cd'), B([$17]))), Sane, cesMore, J(T('ab'), B([$D7, $90])),
+       J(J(J(T('ab'), B([$D7, $90])), T('cd')), J(Rub, Rub)));
+  // WITHOUT IUTF8 erase takes ONE BYTE (is_continuation() needs I_IUTF8):
+  // 'a' C3 A9 DEL 'x' Enter is 61 C3 78, one rub-out, as the live line
+  // discipline answered it; and a line that begins with a continuation byte
+  // is not erased into under IUTF8 ("do not partially erase").
+  Edit('without IUTF8 erase takes one byte',
+       J(T('a'), B([$C3, $A9, $7F, Ord('x'), 13])), K, cesLine, B([Ord('a'), $C3, Ord('x')]),
+       J(J(T('a'), B([$C3, $A9])), J(Rub, J(T('x'), B([10])))));
+  Edit('a leading continuation byte is not erased into', B([$A9, $7F]), Sane, cesMore, B([$A9]),
+       B([$A9]));
+  // WITHOUT ICANON the line discipline edits nothing: DEL is a character
+  // (^? under ECHOCTL), Ctrl+U and Ctrl+D too, and a CR mapped by ICRNL ends
+  // the line with a raw newline; a newline typed as itself is shown ^J
+  // (echo_char(), which shows a control character so).
+  K := Sane; K.Canon := False;
+  Edit('without ICANON DEL is a character', J(T('ab'), B([$7F, Ord('c'), 13])), K, cesLine,
+       B([Ord('a'), Ord('b'), $7F, Ord('c')]), J(T('ab^?c'), B([10])));
+  Edit('and Ctrl+D on an empty line is one too', B([4, 13]), K, cesLine, B([4]), J(T('^D'), B([10])));
+  Edit('and a newline typed as itself shows ^J', J(T('a'), B([10])), K, cesLine, T('a'), T('a^J'));
+  // LITERAL-NEXT shows '^' BS only under ECHOCTL; ECHONL shows the line's
+  // newline with echo off (n_tty_receive_char_canon()); INLCR makes a typed
+  // newline a CR, a character.
+  K := Sane; K.EchoCtl := False;
+  Edit('without ECHOCTL literal-next shows nothing of its own', B([$16, $15]), K, cesMore, B([$15]),
+       B([$15]));
+  K := Sane; K.EchoOn := False; K.EchoNl := True;
+  Edit('ECHONL shows the newline when nothing else is shown', J(T('ab'), B([13])), K, cesLine, T('ab'),
+       B([10]));
+  K := Sane; K.NlIsCr := True; K.CrIsNl := False;
+  Edit('INLCR: a typed newline is a CR in the line', J(T('a'), B([10])), K, cesMore,
+       J(T('a'), B([13])), T('a^M'));
+
+  // A TAB IS RUBBED OUT BY THE COLUMNS IT TOOK FROM WHERE THE LINE BEGAN.
+  // eraser() counts what stands between the Tab and the line's start, and
+  // __process_echoes() adds canon_column, the column the first character
+  // went to: after 'Name:' (column 5) 'ab' Tab took 8 - (5 + 2) = 1 column,
+  // after '? ' 8 - (2 + 2) = 4 -- exactly what the live line discipline
+  // echoed (1 and 4 backspaces). Round 9 counted from column 0: six, into
+  // the prompt.
+  EditAt('after Name: a tab erased goes back one column', 5,
+         J(T('ab'), B([9, $7F, Ord('x'), 13])), Sane, cesLine, T('abx'),
+         J(T('ab'), J(B([9]), J(Bs(1), J(T('x'), B([10]))))));
+  EditAt('after "? " four', 2, J(T('ab'), B([9, $7F, Ord('x'), 13])), Sane, cesLine, T('abx'),
+         J(T('ab'), J(B([9]), J(Bs(4), J(T('x'), B([10]))))));
+  // after an earlier Tab the count is from that Tab, and the column the line
+  // began in does not matter: 'ab' after it is 2, so 6
+  EditAt('after an earlier tab, from that tab', 5, J(B([9]), J(T('ab'), B([9, $7F]))), Sane,
+         cesMore, J(B([9]), T('ab')), J(B([9]), J(T('ab'), J(B([9]), Bs(6)))));
+  // a control character takes two columns shown ^A, none shown raw
+  EditAt('^A before a tab counts two columns under ECHOCTL', 0, B([1, 9, $7F]), Sane, cesMore, B([1]),
+         J(T('^A'), J(B([9]), Bs(6))));
+  K := Sane; K.EchoCtl := False;
+  EditAt('and none without', 0, B([1, 9, $7F]), K, cesMore, B([1]), J(B([1, 9]), Bs(8)));
+  // a UTF-8 character takes one column under IUTF8, a byte each without
+  EditAt('e-acute before a tab is one column under IUTF8', 0, B([$C3, $A9, 9, $7F]), Sane, cesMore,
+         B([$C3, $A9]), J(B([$C3, $A9, 9]), Bs(7)));
+  K := Sane; K.Utf8 := False;
+  EditAt('and two without', 0, B([$C3, $A9, 9, $7F]), K, cesMore, B([$C3, $A9]),
+         J(B([$C3, $A9, 9]), Bs(6)));
+  // THE LINE'S COLUMN IS WHERE ITS FIRST CHARACTER WENT: after a kill shown
+  // as ^U and a newline (no ECHOKE), the next character is at column 0, so a
+  // Tab there is eight -- not 8 - 3 for the column the line began in.
+  K := Sane; K.EchoKillErase := False;
+  EditAt('a line begun again after a killed line counts from column 0', 3,
+         J(T('ab'), B([$15, 9, $7F])), K, cesMore, '',
+         J(T('ab^U'), J(B([10, 9]), Bs(8))));
+
+  // ---- the terminal's column (CrtColumnAfter), as do_output_char() counts --
+  Report(CrtColumnAfter(0, T('Name:'), True) = 5, 'a prompt of five characters ends at column 5');
+  Report(CrtColumnAfter(0, J(B([ESC]), T('[1mab')), True) = 5,
+         'an escape sequence''s bytes after ESC count, as the kernel counts them');
+  Report(CrtColumnAfter(3, J(T('ab'), B([9])), True) = 8, 'a tab goes to the next multiple of 8');
+  Report(CrtColumnAfter(7, B([13, 10]), True) = 0, 'CR LF goes to column 0');
+  Report(CrtColumnAfter(0, B([$C3, $A9]), True) = 1, 'a UTF-8 character is one column under IUTF8');
+  Report(CrtColumnAfter(0, B([$C3, $A9]), False) = 2, 'and two without');
+  Report(CrtColumnAfter(0, B([$85]), True) = 0, 'a lone continuation byte none under IUTF8');
+  Report(CrtColumnAfter(0, B([$85]), False) = 1,
+         'and one without: 80..9F are not control characters in the kernel''s table');
+  Report(CrtColumnAfter(1, B([8, 8, 1]), True) = 0, 'a backspace stops at 0, a control character none');
+
+  // ---- what a job-control signal does to the terminal (round 10) -----------
+  Report(CrtJobSignalAction(True, True, True) = ctaRestore, 'Ctrl+Z in raw mode: put the terminal back');
+  Report(CrtJobSignalAction(False, True, True) = ctaRaw, 'fg in raw mode: raw again');
+  Report(CrtJobSignalAction(False, True, False) = ctaNone,
+         'continued in the background (bg): the terminal is not this job''s');
+  Report(CrtJobSignalAction(True, False, True) = ctaNone, 'stopped with no key function: nothing');
+  Report(CrtJobSignalAction(False, False, True) = ctaNone, 'continued with none: nothing');
+
+  // ---- the queue costs one key's work per key (round 10) -------------------
+  // A paste read by a getkey$ loop: every read took up to 4096 more bytes,
+  // so the queue grew to the whole paste, and each key was cut off its front
+  // with Delete -- 21 s for a megabyte. Expected, from the bound written in
+  // TCrtKeyReader: every key answered, the queue never longer than two reads
+  // (4096 bytes each, as TerminalFill hands them) and a key's worth, and no
+  // byte moved more than once on average.
+  Script; FillChunk := 4096;
+  SetLength(Long, 65536);
+  for i := 1 to Length(Long) do Long[i] := 'a';
+  At(0, J(Long, T('q')));
+  taken := 0;
+  wait := 0;
+  while True do
+  begin
+    if Length(R.Buf) > wait then wait := Length(R.Buf);
+    if CrtReaderKey(R, True) <> 'a' then Break;
+    Inc(taken);
+  end;
+  Report(taken = 65536, 'a 64 KB paste is 65536 keys (got ' + IntToStr(taken) + ')');
+  Report(wait <= 2 * (4096 + CRT_SEQ_MAX),
+         'and the queue stayed short: at most ' + IntToStr(wait) + ' bytes');
+  Report(R.Moved <= 65536, 'and moved ' + IntToStr(R.Moved) + ' bytes for 65536 keys');
+  // The line reader over a queue already holding all of it (CrtLineModeBegin
+  // takes everything the terminal holds): the same, a byte at a time.
+  Script;
+  At(0, J(Long, B([13])));
+  taken := 0;
+  while CrtReaderByte(R, Bt) and (Bt = Ord('a')) do Inc(taken);
+  Report((taken = 65536) and (R.Moved <= 65536),
+         'the line reader over 64 KB queued: ' + IntToStr(taken) + ' bytes, ' + IntToStr(R.Moved) +
+         ' moved');
+
+  // ======== THE UNIX TEMP DIRECTORY, on every system (round 10) =============
+  // Here because this is the probe that runs the Unix half of the host on
+  // both systems; the decisions are PhosphorSysLib's. Expected from the
+  // contract in docs/libraries/sys.md: a relative value is made full against
+  // the working directory, as written -- a '~' is a name like any other --
+  // and a value no full path can be made of is skipped ('').
+  Report(UnixFullTempDir('rel', '/tmp') = '/tmp/rel/', 'TMPDIR=rel under /tmp is /tmp/rel/');
+  Report(UnixFullTempDir('rel', '/') = '/rel/', 'and under / is /rel/');
+  Report(UnixFullTempDir('~/y', '/tmp') = '/tmp/~/y/', 'TMPDIR=~/y is a directory named ~, not $HOME');
+  Report(UnixFullTempDir('~', '/tmp') = '/tmp/~/', 'and TMPDIR=~ likewise');
+  Report(UnixFullTempDir('rel', '') = '', 'with no working directory a relative value is skipped');
+  Report(UnixFullTempDir('/abs', '') = '/abs/', 'a full one needs none');
+  Report(UnixFullTempDir('/abs/', '/x') = '/abs/', 'and keeps its one trailing slash');
+  Report(UnixFullTempDir('', '/tmp') = '', 'an empty value is unset');
+  // getcwd's answer: FPC 3.2.2's Linux fpgetcwd returns the syscall's result
+  // as a pointer, -1 on failure; the buffer is then whatever it held.
+  CwdBuf(T('XXXXXXXX'));
+  Report(UnixCwdFromGetcwd(-1, Cwd) = '', 'a failed getcwd is no directory, whatever the buffer holds');
+  CwdBuf(J(T('/tmp/d'), B([0, Ord('Z')])));
+  Report(UnixCwdFromGetcwd(-1, Cwd) = '', 'even a buffer that looks like one');
+  Report(UnixCwdFromGetcwd(7, Cwd) = '/tmp/d', 'a successful one is the path up to its NUL');
+  Report(UnixCwdFromGetcwd(0, Cwd) = '', 'nil is a failure too');
+  CwdBuf(J(T('(unreachable)/x'), B([0])));
+  Report(UnixCwdFromGetcwd(16, Cwd) = '', 'an unreachable directory is no full path');
+  CwdBuf(T('/abcdefg'));
+  Report(UnixCwdFromGetcwd(8, Cwd) = '', 'nor a buffer with no NUL inside it');
 
   if ProveFail then
     Report(False, 'deliberate failure (--fail)');

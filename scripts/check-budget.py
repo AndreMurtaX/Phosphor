@@ -296,8 +296,9 @@ ALLOWED = {
         'the registration table; MaxIndirectArgs is a constant of this unit',
     'PhosphorCrtLib.pas:CrtAssembleKey':
         'at most three continuation bytes: one UTF-8 codepoint',
-    'PhosphorCrtLib.pas:KbdKeyPressed':
-        'iterates the bytes one console read returned',
+    'PhosphorCrtLib.pas:CrtTakePendingLine':
+        'copies the unanswered presses of ONE key-down: wRepeatCount is a 16-bit '
+        'field the console fills, never a number from the script',
     'PhosphorBase64Lib.pas:f_b64_urldecode':
         'the append loop is `while (Length(s) mod 4) <> 0 do s := s + \'=\'`: at '
         'most three iterations of padding, whatever the input',
@@ -487,9 +488,10 @@ ALLOWED = {
     'PhosphorSysLib.pas:Utf8Scrub':
         'shrinks the answer to the bytes written, at most 3 * Length(S) -- the size '
         'the routine allocated from the string already in memory two lines up',
-    'PhosphorSysLib.pas:HostTempDir':
-        'the size GetTempPathW says the temp path needs: an OS path, which Windows '
-        'caps at 32767 characters, never a number from the script',
+    'PhosphorSysLib.pas:AskWidePath':
+        'the size kernel32 says an OS path needs (GetTempPathW, '
+        'GetWindowsDirectoryW, for HostTempDir): a path, which Windows caps at '
+        '32767 characters, never a number from the script',
     'PhosphorSqliteLib.pas:QuoteIdent':
         'doubles one quote character inside one identifier',
     'PhosphorSqliteLib.pas:EscapeSql':
@@ -559,9 +561,10 @@ ALLOWED = {
     # input. What is unbounded is the blocking read inside it -- and a host that
     # loads the CRT package has asked for a console that waits for a person. There
     # is no count here for a budget to bound; a key read is not "running long".
-    'PhosphorCrtLib.pas:KbdRead':
-        'each turn of the loop consumes one console event; the wait inside is a '
-        'wait on the user, which is the whole purpose of a key read',
+    'PhosphorCrtLib.pas:HeadKey':
+        'each turn of the loop consumes one console event or waits for one; the '
+        'wait is a wait on the user, which is the whole purpose of a key read, '
+        'and a call that must not block waits at most PAIR_WAIT_MS',
 
     # ---- host/console: THE VM IS NOT RUNNING WHEN THESE RUN ------------------
     # One discriminator covers all but two of this directory, and it is worth
@@ -632,9 +635,13 @@ ALLOWED = {
         'capped: RenderOperand cuts to BP_MAX_OPERAND_BYTES and Breakpoint to '
         'BP_MAX_MESSAGE_BYTES, both BEFORE calling in, so the haystack is at most '
         'a kilobyte and every needle is one character',
+    'phosphor.lpr:ReadTerminalLine':
+        'ReadLine on a Unix terminal: ONE line, a byte per read, as long as what '
+        'a person typed at the terminal -- the console sizes it, never the script',
     'phosphor.lpr:TConsoleHost.ReadLine':
-        'reads ONE console line into a fixed 8192-WideChar buffer; both SetLengths '
-        'are sized by what ReadConsoleW reported into it, and the Pos looks for a '
+        'reads ONE console line into a buffer of the constant CONSOLE_READ_UNITS '
+        '(32768 WideChars); the other SetLengths are sized by what ReadConsoleW '
+        'reported into it, and the Pos looks for a '
         'single Ctrl+Z character in that same line',
     'phosphor.lpr:ClipRetryCopy':
         'the clipboard is a contended OS resource, so a write is retried at most '

@@ -1786,5 +1786,20 @@ if [ "$ahcode" -eq 0 ] && [ "$(printf '%s' "$ahgot" | tr -d '\r')" = "$ahwant" ]
 else
   echo "FAIL  AH:a long line: exit $ahcode, got '$(printf '%s' "$ahgot" | head -c 200)'"; okAH=1; fail=1
 fi
+# ROUND 8 (2026-10-11): ONE KEYBOARD MODEL, and INPUT and the key functions
+# reading one keyboard. On a terminal -- a pty here, python's pty module --
+# tests/console_input_test.py pins the Unix half: a line read after getkey$
+# is in line mode and stops AT its Enter (a key typed in the same burst as the
+# Enter went into the line reader's buffer, where inkey$ never saw it), and a
+# key that is not UTF-8 is U+FFFD (it was the raw bytes). Its header carries
+# the defects and the expected values; this is the same script the Windows
+# block AH runs, which answers the Windows half there. The python's exit code
+# is read on its own line, never through a pipe.
+if python3 "$root/tests/console_input_test.py" "$exe" > "$tmpdir/ahkeys.out" 2>&1; then ahkcode=0; else ahkcode=$?; fi
+if [ "$ahkcode" -eq 0 ] && grep -c '^PASS' "$tmpdir/ahkeys.out" > /dev/null; then
+  echo 'PASS  AH:on a terminal, a line after a key function is the line, and a key that is not UTF-8 is U+FFFD'
+else
+  echo "FAIL  AH:keyboard on a pty (exit $ahkcode):"; sed 's/^/        /' "$tmpdir/ahkeys.out"; okAH=1; fail=1
+fi
 
 exit "$fail"

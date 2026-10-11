@@ -46,23 +46,40 @@ at offset 68 — because SQLite itself does more than read: a *hot journal*
 left beside a file (`name-journal`, from a program killed in mid-transaction)
 is rolled back into the file by the first query, even a `PRAGMA` on a
 read-only connection. So a file another program marked is refused without
-being opened. An unmarked one with an unfinished journal or write-ahead log
-beside it is this program's own most likely crash — an upgrade marks the file
-only as its last step, so one killed in mid-upgrade is unmarked with a hot
-journal, and so is a first run killed before its first commit — and it is
-judged on a **copy**: the file and what lies beside it are copied to the temp
-folder, SQLite opens the copy and does there exactly what it would do to the
-file (rolls the journal back, applies the log, or leaves a journal that holds
-nothing), and the copy's owner is the file's. The program's own file then
-opens and is upgraded again; another program's is refused, naming the journal
-and its tables, and it and its journal are left byte for byte as they were.
+being opened. An unmarked one with unfinished work beside it — a journal
+SQLite would act on, or a write-ahead log — is this program's own most likely
+crash — an upgrade marks the file only as its last step, so one killed in
+mid-upgrade is unmarked with a hot journal, and so is a first run killed
+before its first commit — and it is judged on a **copy**: the file and what
+lies beside it are copied to the temp folder, SQLite opens the copy and does
+there exactly what it would do to the file (rolls the journal back, applies
+the log, or deletes a journal it has no use for), and the copy's owner is the
+file's. The program's own file then opens and is upgraded again; another
+program's is refused, naming the journal and its tables, and it and its
+journal are left byte for byte as they were. So is a file whose header is
+not a database's at all while such a journal lies beside it — a first page
+torn by a power cut is what a journal exists to put back, and the program's
+own file comes back whole. What counts as unfinished work is what SQLite
+counts: a journal whose header is zeroed is one a program *finished* with in
+`PERSIST` mode, not a crash, and SQLite leaves it alone, so the program does
+too — and says a program stopped in the middle of a change only when the
+journal shows one. And the journal looked for is the one SQLite will find,
+beside the file **as SQLite names it**: SQLite follows a symbolic link to its
+target on Linux and drops a trailing dot on Windows, so the journal it would
+roll back into `docs/phosphor-contacts.db` linked to `other.db`, or into
+`x.db.`, is `other.db-journal` or `x.db-journal` — not the one beside the name
+you gave. The program asks SQLite for that name (`PRAGMA database_list`, before
+any query) and judges the journal beside it.
 A file that carries the program's mark is not trusted on the mark alone
 either: one without every table, column, index and foreign key its version
 has is refused as damaged, naming what is missing — the uniqueness of user
-names, product lines and tax ids lives in those indexes and nowhere else. An
-unmarked file that has an earlier version's tables but has lost a part of one
-is refused naming that part, as a damaged copy of an earlier version's file
-or another program's. A read-only database at
+names, product lines and tax ids lives in those indexes and nowhere else.
+Those are compared the way SQLite compares names, ignoring the case of A–Z:
+an index spelled `UX_USERS_USERNAME_KEY`, a collation spelled `nocase` or a
+column renamed in capitals is the same one. An unmarked file that has at
+least one of an earlier version's tables whole, but has lost a part — a
+column, an index, whole tables — is refused naming that part, as a damaged
+copy of an earlier version's file or another program's. A read-only database at
 the current version opens for looking: the sign-in says so, and every change
 is refused. A read-only database **from an earlier version** is refused
 instead, saying so: opening it means upgrading it, which writes to it, and the
@@ -108,7 +125,10 @@ file that is already there is replaced only once it is proven to be another
 file, and only if you say so. A name ending in `-journal`, `-wal` or `-shm` is
 refused outright: that is where SQLite keeps a database's unfinished work, and
 a backup there would be cut short by the open database or taken for the
-unfinished work of the file beside it. "Backed up" is said only once the copy
+unfinished work of the file beside it. So is a name that *leads* to one: a
+symbolic link that points at nothing is no file, so nothing above stops it,
+and SQLite would write the backup through it to wherever it points — the name
+the backup will be written under is asked of SQLite first. "Backed up" is said only once the copy
 has been read back. **Account** changes your own password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
@@ -239,19 +259,22 @@ With `PHOSPHOR_SELFTEST=1` the program builds every window **without showing
 one**, and drives them as a person would — typing with `edit_text@`, clicking
 with `button_click@` and `menuitem_click@`, picking rows with
 `stringgrid_cursor@`, double-clicking with `control_dblclick@` — against a
-throw-away database, then checks what landed in SQLite: 194 checks, from the
+throw-away database, then checks what landed in SQLite: 205 checks, from the
 first-run administrator to a cascade delete, the whole CSV file, an operator
 who cannot see the Users page, Greek, German and Turkish names that differ
 only in case, the upgrades from versions 1 and 2, another program's database
 left byte for byte untouched — one with a hot journal beside it among them,
 which the test makes by copying a file and its journal in the middle of a
 transaction, and first checks that SQLite would roll it back, another with
-its last change still in a write-ahead log — the program's own files left
-unfinished (a version-2 file killed in mid-upgrade, a first run killed before
-its first commit, a spent journal), which open, a damaged file carrying the
-program's mark (a table, a column, a unique index or a foreign key gone), and
-a backup onto the open database under other
-spellings of its name or of its journal's. Its message, confirmation and file boxes go through functions the test
+its last change still in a write-ahead log, another beside a journal it
+finished with, another beside a file that is no journal, and one reached by a
+name whose journal SQLite looks for elsewhere — the program's own files left
+unfinished (a version-2 file killed in mid-upgrade, the same with its first
+page torn, a first run killed before its first commit, a spent journal), which
+open, a damaged file carrying the program's mark (a table, a column, a unique
+index or a foreign key gone) and one whose names differ only in case, which
+opens, an earlier version's file that lost a table, and a backup onto the open
+database under other spellings of its name or of its journal's. Its message, confirmation and file boxes go through functions the test
 answers. `scripts/test-examples` runs it that way on Windows and on Linux
 (under `xvfb-run`).
 
@@ -267,6 +290,17 @@ reaches the same file — a scratch file and its upper-cased or dotted name —
 rather than assuming it from the operating system, so the same check expects a
 refusal on Windows and on a Linux folder that ignores case, and a written
 backup on one that does not.
+
+The name SQLite resolves to another is the one check that differs by system:
+on Windows it is the file's name with a trailing dot, on Linux the symbolic
+link `/proc/self/fd/N` that Linux keeps for a file the process holds open — no
+privilege is needed to make it, and a test cannot make any other link. Under
+`--sandbox`, as `scripts/test-examples` runs it, SQLite opens no file through
+a link at all, so on Linux there the pair checks that refusal instead (the
+count is the same on both systems); the pair proper runs on Linux when the
+self-test is started without a sandbox, `PHOSPHOR_SELFTEST=1 phosphor run
+examples/contact_manager.bas`. A backup through a link that points at
+nothing cannot be made by a test at all, and was proved by hand on Linux.
 
 A check is only worth having if it can fail. An adversarial review found three
 that could not — the CSV check looked at one quoted name, the credit-limit check
@@ -287,6 +321,12 @@ and foreign-key comparison, the same comparison asked of an older file in
 full (which refuses every version-2 file, whose old tax-id index the upgrade
 drops), a copy judged without its journal or log, a copy left behind, the
 fold that stepped by a lead byte's width, and the earlier-version message.
+And the eighth's: judging the name as given instead of SQLite's name for it
+(on Windows, and on Linux without a sandbox), refusing a torn header before
+its journal is looked at, comparing index, collation and column names byte for
+byte, calling a file that lost a whole table one of "other tables", taking a
+finished `PERSIST` journal for unfinished work, and describing every journal
+as an interrupted change.
 
 ## What writing it changed in Phosphor
 

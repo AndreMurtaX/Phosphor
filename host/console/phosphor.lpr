@@ -466,16 +466,26 @@ begin
 end;
 
 {$IFDEF WINDOWS}
-{ Two byte strings joined by copying. Concatenating two Strings can CONVERT
-  between their code-page tags, and a line's bytes are UTF-8 whatever either
-  piece happens to be tagged. }
-function JoinLineBytes(const A, B: String): String;
+type
+  { ReadConsoleW's last argument (wincon.h): nInitialChars units at the start
+    of the buffer are text already typed, which the console's line editor
+    keeps and lets the user edit. }
+  TConsoleReadControl = record
+    nLength, nInitialChars, dwCtrlWakeupMask, dwControlKeyState: ULONG;
+  end;
+
+{ Text on the console's SCREEN, where a cooked read echoes: CONOUT$, the
+  active screen buffer, and not stdout, which may be a file. }
+procedure ShowOnConsole(const W: UnicodeString);
+var h: THandle; written: DWORD;
 begin
-  if A = '' then Exit(B);
-  if B = '' then Exit(A);
-  SetLength(Result, Length(A) + Length(B));
-  Move(A[1], Result[1], Length(A));
-  Move(B[1], Result[Length(A) + 1], Length(B));
+  if W = '' then Exit;
+  h := CreateFileW('CONOUT$', GENERIC_READ or GENERIC_WRITE,
+                   FILE_SHARE_READ or FILE_SHARE_WRITE, nil, OPEN_EXISTING, 0, 0);
+  if h = INVALID_HANDLE_VALUE then Exit;
+  written := 0;
+  WriteConsoleW(h, PWideChar(W), Length(W), written, nil);
+  CloseHandle(h);
 end;
 {$ENDIF}
 
@@ -488,17 +498,38 @@ end;
   a buffer no key function ever reads (round 8, 2026-10-11: 'hello' Enter 'q'
   in one burst, and inkey$ never saw the 'q'). One byte per read leaves
   everything after the line where it was typed. False at end of input with
-  nothing read. }
+  nothing read.
+  KEYS TYPED AHEAD (round 9, 2026-10-11): when keys typed while the terminal
+  was raw are held (CrtTypedAhead), the terminal is still raw and the line
+  discipline will not edit them, so the line is read from them -- and then
+  from the terminal, still raw -- each byte edited and shown by CrtEditLine,
+  by the program's own terminal settings, as the line discipline would have
+  edited and shown it. }
 function ReadTerminalLine(out ALine: String): Boolean;
-var pre: String; c: Char; r, n: LongInt;
+var c: Char; r, n: LongInt; keys: TCrtEditKeys; echo: String; literal: Boolean; b: Byte;
 begin
-  if CrtTakePendingLine(pre) then
+  ALine := '';
+  Result := False;
+  if CrtTypedAhead() then
   begin
-    ALine := pre;
-    Exit(True);
+    keys := CrtTerminalEditKeys();
+    literal := False;
+    while CrtReadHeldByte(b) do
+    begin
+      case CrtEditLine(ALine, literal, b, keys, echo) of
+        cesLine:
+          begin
+            CrtEcho(echo);
+            Exit(True);
+          end;
+        cesEnd:
+          Exit(False);
+        cesMore:
+          CrtEcho(echo);
+      end;
+    end;
+    Exit(ALine <> '');                   // the terminal went away mid-line
   end;
-  ALine := pre;
-  Result := ALine <> '';
   while True do
   begin
     c := #0;
@@ -545,8 +576,10 @@ var
   numRead: DWORD;
   w: UnicodeString;
   z: Integer;
-  hadEOF: Boolean;
+  hadEOF, ok: Boolean;
   pre: String;
+  wpre: UnicodeString;
+  ctl: TConsoleReadControl;
 {$ENDIF}
 var
   wasRaw: Boolean;
@@ -566,13 +599,29 @@ begin
       mode for the read; raw mode resumes after it. }
     wasRaw := CrtLineModeBegin();
     try
+      { THE PRESSES A KEY FUNCTION HAD NOT ANSWERED ARE TEXT THE USER TYPED
+        (round 9, 2026-10-11): the rest of a held key, read as one event
+        with a repeat count. They were joined in front of the line AFTER the
+        console's read -- never shown, and out of reach of its editing, so
+        'a' held three times, one read by getkey$, then Backspace Backspace
+        'bc' Enter answered 'aabc' with 'bc' on the screen. They are now
+        shown, and handed to the console's line editor as text already
+        typed (nInitialChars), where Backspace erases them like any other.
+        A held Enter's presses are empty lines, each shown as one. }
       if CrtTakePendingLine(pre) then
       begin
+        ShowOnConsole(#13#10);
         ALine := pre;
         Exit(True);
       end;
+      wpre := UTF8Decode(pre);
+      ShowOnConsole(wpre);
       w := '';
-      SetLength(wbuf, CONSOLE_READ_UNITS);
+      SetLength(wbuf, CONSOLE_READ_UNITS + Length(wpre));
+      FillChar(ctl, SizeOf(ctl), 0);
+      ctl.nLength := SizeOf(ctl);
+      ctl.nInitialChars := Length(wpre);
+      if wpre <> '' then Move(wpre[1], wbuf[0], Length(wpre) * SizeOf(WideChar));
       { ONE LINE IS AS MANY READS AS IT TAKES (round 7, 2026-10-11). A read that
         FILLS the buffer without reaching the line's end has not read the line:
         the console keeps the rest for the next ReadConsoleW. This took one read
@@ -588,14 +637,17 @@ begin
         is read through its LF, and the Ctrl+Z cuts it below. }
       repeat
         numRead := 0;
-        if not ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil) then
+        // the text already typed belongs to the FIRST read only
+        if w = '' then ok := ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, @ctl)
+        else ok := ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil);
+        if not ok then
         begin
-          if (w = '') and (pre = '') then Exit(False);
+          if w = '' then Exit(False);
           Break;                        // keep what this line already read
         end;
         if numRead = 0 then
         begin
-          if (w = '') and (pre = '') then Exit(False);
+          if w = '' then Exit(False);
           Break;
         end;
         z := Length(w);
@@ -612,9 +664,9 @@ begin
       end;
       while (Length(w) > 0) and ((w[Length(w)] = #10) or (w[Length(w)] = #13)) do
         SetLength(w, Length(w) - 1);
-      // UTF-16 -> UTF-8; an unpaired surrogate is U+FFFD. After the keys the
-      // key functions had already taken, which were typed first.
-      ALine := JoinLineBytes(pre, WideToUtf8(w));
+      // UTF-16 -> UTF-8; an unpaired surrogate is U+FFFD. The keys the key
+      // functions had already taken are in it, at its start, as edited.
+      ALine := WideToUtf8(w);
       if hadEOF and (Length(ALine) = 0) then
         Exit(False);
       Exit(True);
@@ -623,7 +675,9 @@ begin
     end;
   end;
   {$ELSE}
-  { A terminal: in line mode, and no further than the line's own end. }
+  { A terminal: in line mode, and no further than the line's own end -- or,
+    with keys typed while a key function held it raw, edited here from them
+    (CrtLineModeBegin, PhosphorCrtLib). }
   if IsATTY(StdInputHandle) = 1 then
   begin
     wasRaw := CrtLineModeBegin();

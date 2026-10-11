@@ -1667,17 +1667,40 @@ $acFBas = Join-Path $abDir 'tmpf.bas'
     'end if', 'println str$(ok)') -join "`n") + "`n"), $utf8)
 $acBad = $acT + [string][char]0xD800
 $acProfile = $env:USERPROFILE.TrimEnd('\') + '\'
-$acWinTemp = [Environment]::GetFolderPath('Windows').TrimEnd('\') + '\Temp\'
+# ROUND 9 (2026-10-11): the last step is the Windows DIRECTORY, as Windows
+# documents it -- and as GetTempPathW answers with nothing set -- not its Temp
+# subdirectory: with USERPROFILE unset, an UNUSABLE TEMP answered
+# C:\Windows\Temp\ and an UNSET one C:\Windows\, so "skipped as if unset" was
+# false. Both cases are here now, and must agree.
+$acWinDir = [Environment]::GetFolderPath('Windows').TrimEnd('\') + '\'
+# AND EVERY VALUE IS MADE FULL, as GetTempPathW makes the one it picks
+# (GetFullPathNameW): TEMP=foo answered foo\ and TEMP=C: the drive's root.
+# These run in $abDir, so the expected answers are written out from it: foo
+# and ..\x against it, and C: -- the current directory on drive C:, which is
+# $abDir itself when $abDir is on C: (it lives under the user's temp
+# directory). A value no full path can be made of (" ") is skipped like an
+# unpaired surrogate.
+$acRunDir = [IO.Path]::GetFullPath($abDir).TrimEnd('\')
+$acParent = Split-Path -Parent $acRunDir
 $okACF = $true
-foreach ($c in @(@('both unusable', $acBad, $acBad, $null, $acProfile),
-                 @('TEMP alone, unusable', $acBad, '', $null, $acProfile),
-                 @('TMP alone, unusable', '', $acBad, $null, $acProfile),
-                 @('USERPROFILE unusable too', $acBad, $acBad, $acBad, $acWinTemp))) {
+$acCases = @(@('both unusable', $acBad, $acBad, $null, $acProfile),
+             @('TEMP alone, unusable', $acBad, '', $null, $acProfile),
+             @('TMP alone, unusable', '', $acBad, $null, $acProfile),
+             @('USERPROFILE unusable too', $acBad, $acBad, $acBad, $acWinDir),
+             @('USERPROFILE unset, TEMP and TMP unset', '', '', '-', $acWinDir),
+             @('USERPROFILE unset, TEMP unusable', $acBad, '', '-', $acWinDir),
+             @('TEMP relative', 'foo', '', $null, ($acRunDir + '\foo\')),
+             @('TEMP relative to the parent', '..\x', '', $null, ($acParent + '\x\')),
+             @('TMP relative', '', 'bar', $null, ($acRunDir + '\bar\')),
+             @('TEMP a blank', ' ', '', $null, $acProfile))
+if ($acRunDir.StartsWith('C:\', [StringComparison]::OrdinalIgnoreCase)) {
+    $acCases += ,@('TEMP drive-relative C:', 'C:', '', $null, ($acRunDir + '\')) }
+foreach ($c in $acCases) {
     $acSaveTemp = $env:TEMP; $acSaveTmp = $env:TMP; $acSaveProf = $env:USERPROFILE
     if ($c[1] -eq '') { $env:TEMP = $null } else { $env:TEMP = $c[1] }
     if ($c[2] -eq '') { $env:TMP = $null } else { $env:TMP = $c[2] }
-    if ($null -ne $c[3]) { $env:USERPROFILE = $c[3] }
-    cmd /c "`"$exe`" `"$acFBas`" < NUL > `"$acTOut`" 2>&1"
+    if ($c[3] -eq '-') { $env:USERPROFILE = $null } elseif ($null -ne $c[3]) { $env:USERPROFILE = $c[3] }
+    cmd /c "cd /d `"$abDir`" && `"$exe`" `"$acFBas`" < NUL > `"$acTOut`" 2>&1"
     $acFCode = $LASTEXITCODE
     $env:TEMP = $acSaveTemp; $env:TMP = $acSaveTmp; $env:USERPROFILE = $acSaveProf
     $acFGot = @((Read-Text $acTOut).Trim().ToLower() -split "`r?`n")
@@ -1687,8 +1710,26 @@ foreach ($c in @(@('both unusable', $acBad, $acBad, $null, $acProfile),
         Write-Host ("FAIL  AC:{0}: exit {1}, want {2} and a temp file name inside it, got '{3}'" -f
                     $c[0], $acFCode, $acFWant, ($acFGot -join ' / ')) -ForegroundColor Red }
 }
-if ($okACF) { Write-Host 'PASS  AC:past an unusable TEMP/TMP the order goes on: USERPROFILE, then the Windows Temp, never ""' -ForegroundColor Green }
-$okAC = $okAC -and $okACT -and $okACF
+if ($okACF) { Write-Host 'PASS  AC:the temp directory is a full path: TEMP, TMP, USERPROFILE, the Windows directory, each skipped alike when unusable' -ForegroundColor Green }
+# A RELATIVE VALUE FOLLOWS THE WORKING DIRECTORY, as GetTempPathW's does: the
+# answer is made full at each call. What must hold is that it is FULL both
+# times, and that tempfilename$ names a file in the answer of its own call.
+$acCdBas = Join-Path $abDir 'tmpcd.bas'
+[IO.File]::WriteAllText($acCdBas, ((@('println temppath$()', 'ok = mkdir("sub")', 'ok = chdir("sub")',
+    'println temppath$()', 'println tempfilename$()', 'ok = chdir("..")', 'ok = rmdir("sub")') -join "`n") + "`n"), $utf8)
+$acSaveTemp = $env:TEMP; $acSaveTmp = $env:TMP
+$env:TEMP = 'foo'; $env:TMP = $null
+cmd /c "cd /d `"$abDir`" && `"$exe`" `"$acCdBas`" < NUL > `"$acTOut`" 2>&1"
+$acCdCode = $LASTEXITCODE
+$env:TEMP = $acSaveTemp; $env:TMP = $acSaveTmp
+$acCd = @((Read-Text $acTOut).Trim() -split "`r?`n")
+$acCdWant1 = $acRunDir + '\foo\'; $acCdWant2 = $acRunDir + '\sub\foo\'
+$okACC = ($acCdCode -eq 0) -and ($acCd.Count -ge 3) -and ($acCd[0] -eq $acCdWant1) -and ($acCd[1] -eq $acCdWant2) -and
+         ($acCd[2] -match ('^' + [regex]::Escape($acCdWant2) + 'TMP\d{5}\.tmp$'))
+if ($okACC) { Write-Host 'PASS  AC:a relative TEMP is made full against the working directory at each call, as GetTempPathW does' -ForegroundColor Green }
+else { Write-Host ("FAIL  AC:TEMP=foo across a chdir: exit {0}, want '{1}', '{2}' and a name in it, got '{3}'" -f
+       $acCdCode, $acCdWant1, $acCdWant2, ($acCd -join ' / ')) -ForegroundColor Red }
+$okAC = $okAC -and $okACT -and $okACF -and $okACC
 
 # --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
 # The twin of block AD in scripts/test.sh, whose comment carries the reason.

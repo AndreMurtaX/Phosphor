@@ -176,6 +176,22 @@ def inner(spec_path):
             fo.write(str(cut).encode())
             fe.write(b'exit 0\n')
             return
+        k32.GetConsoleMode.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+        mode_before = wt.DWORD(0)
+        k32.GetConsoleMode(h, ctypes.byref(mode_before))
+        if spec.get('ctrlc'):
+            # This harness lives through the Ctrl+C it sends: a handler that
+            # answers TRUE (a FUNCTION, which a child does not inherit -- the
+            # ignore flag NULL would set, it does).
+            # And Ctrl+C is turned back ON for this process and the program
+            # it starts: "ignore Ctrl+C" is inherited, and a harness started
+            # from a parent that set it (Git Bash's python does) passed it to
+            # phosphor, which then never saw the Ctrl+C and waited in getkey$
+            # until the timeout -- a FAIL that measured the parent, not phosphor.
+            k32.SetConsoleCtrlHandler(None, False)
+            HANDLER = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
+            keep = HANDLER(lambda t: True)
+            k32.SetConsoleCtrlHandler(keep, True)
         p = subprocess.Popen([spec['exe'], spec['bas']], stdout=fo, stderr=fe)
         # The timed bursts: the program is running, and blocked in what it
         # reads, before each arrives. A burst written 'separate' is one write
@@ -186,13 +202,39 @@ def inner(spec_path):
                 bad = write(chunk)
                 if bad:
                     fe.write(bad.encode())
+        if spec.get('ctrlc'):
+            # Ctrl+C once the program says it is in getkey$, as a person
+            # would press it: to every process on this console.
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and b'ready' not in open(spec['out'], 'rb').read():
+                time.sleep(0.05)
+            time.sleep(0.3)
+            k32.GenerateConsoleCtrlEvent(0, 0)          # CTRL_C_EVENT
         try:
             p.wait(spec['timeout'])
-            fe.write(('exit %d\n' % p.returncode).encode())
+            if spec.get('ctrlc'):
+                mode_after = wt.DWORD(0)
+                k32.GetConsoleMode(h, ctypes.byref(mode_after))
+                fe.write(('modes %x %x\n' % (mode_before.value, mode_after.value)).encode())
+            fe.write(('exit %d\n' % (p.returncode & 0xFFFFFFFF)).encode())
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait(10)
             fe.write(b'TIMEOUT (killed)\n')
+        if spec.get('screen'):
+            # What the console SHOWS: its first row, read back from the
+            # screen buffer. The program's stdout is a file, so the screen
+            # holds only what the console's own line editor echoed.
+            class COORD(ctypes.Structure):
+                _fields_ = [('X', ctypes.c_short), ('Y', ctypes.c_short)]
+            k32.ReadConsoleOutputCharacterW.argtypes = [wt.HANDLE, ctypes.c_wchar_p, wt.DWORD,
+                                                        COORD, ctypes.POINTER(wt.DWORD)]
+            ho = k32.CreateFileW('CONOUT$', 0xC0000000, 3, None, 3, 0, None)
+            row = ctypes.create_unicode_buffer(80)
+            n = wt.DWORD(0)
+            k32.ReadConsoleOutputCharacterW(ho, row, 80, COORD(0, 0), ctypes.byref(n))
+            with open(spec['screen'], 'w', encoding='utf-8') as fs:
+                fs.write(row.value[:n.value].rstrip())
 
 
 def run_windows(exe, work):
@@ -200,7 +242,11 @@ def run_windows(exe, work):
     failed = 0
     harness = 0
 
-    def case(name, program, pre, want, timeout=20, calibrate=False, bursts=()):
+    def case(name, program, pre, want, timeout=20, calibrate=False, bursts=(), screen=None,
+             ctrlc=False):
+        """screen: what the console's first row must show afterwards. ctrlc:
+        send Ctrl+C once the program prints 'ready'; `want` is then the
+        exit status, and the console mode must be what it was before."""
         nonlocal failed, harness
         bas = os.path.join(work, name + '.bas')
         with open(bas, 'w', newline='\n', encoding='utf-8') as f:
@@ -208,7 +254,8 @@ def run_windows(exe, work):
         if isinstance(pre, str):
             pre = typed(pre)
         spec = {'pre': pre, 'exe': exe, 'bas': bas, 'timeout': timeout,
-                'calibrate': calibrate,
+                'calibrate': calibrate, 'ctrlc': ctrlc,
+                'screen': os.path.join(work, name + '.screen') if screen is not None else None,
                 'bursts': [[d, typed(r) if isinstance(r, str) else r, sep]
                            for d, r, sep in bursts],
                 'out': os.path.join(work, name + '.out'),
@@ -234,13 +281,28 @@ def run_windows(exe, work):
                 harness += 1
                 return None
             return int(got)
+        shown = None
+        if screen is not None:
+            try:
+                shown = open(spec['screen'], encoding='utf-8').read()
+            except OSError:
+                shown = None
         if got is None or 'HARNESS' in err:
             print('HARNESS  %s: %s' % (name, err))
             harness += 1
-        elif got == want and err.endswith('exit 0'):
+        elif ctrlc:
+            m = re.search(r'modes (\w+) (\w+)\s+exit (\d+)$', err)
+            if m and m.group(1) == m.group(2) and int(m.group(3)) == want:
+                print('PASS  %s' % name)
+            else:
+                print('FAIL  %s: want the mode kept and exit %d, got %r' % (name, want, err))
+                failed += 1
+        elif got == want and err.endswith('exit 0') and (screen is None or shown == screen):
             print('PASS  %s' % name)
         else:
-            print('FAIL  %s: want %r, got %r (%s)' % (name, want, got, err.replace('\n', ' / ')))
+            print('FAIL  %s: want %r%s, got %r%s (%s)' % (
+                name, want, '' if screen is None else ' showing %r' % screen, got,
+                '' if screen is None else ' showing %r' % shown, err.replace('\n', ' / ')))
             failed += 1
 
     emoji = '\U0001F600'
@@ -345,10 +407,46 @@ def run_windows(exe, work):
     # The presses of a repeated key not yet read were typed BEFORE the rest of
     # the line, so INPUT takes them first: 'a' x3, one read by getkey$, then
     # 'bc' Enter is the line 'aabc'.
-    case('repeat-then-input', 'crt_init()\nk$ = getkey$()\ninput a$\ncrt_done()\n'
-         'println "|" + hex_encode$(k$) + " " + hex_encode$(a$)\n',
+    # ROUND 9: AND THE SCREEN SHOWS THEM, and Backspace erases them. They were
+    # joined after the console's read -- never shown, out of its editing -- so
+    # the line said 'aabc' with 'bc' on the screen. Now what the screen shows
+    # is what INPUT answers. (The program's stdout is a file, so the screen's
+    # first row holds only the line as the console echoed it.)
+    gk_in = ('crt_init()\nk$ = getkey$()\ninput a$\ncrt_done()\n'
+             'println "|" + hex_encode$(k$) + " " + hex_encode$(a$)\n')
+    case('repeat-then-input', gk_in,
          [key(ord('a'), 0x41, rep=3), key(ord('a'), 0x41, False)] + typed('bc\r'),
-         '? |61 61616263\n')
+         '? |61 61616263\n', screen='aabc')
+    # Two Backspaces erase the two presses getkey$ had not answered: the line
+    # is 'bc', as three separate taps of 'a' would have made it.
+    case('repeat-then-backspace', gk_in,
+         [key(ord('a'), 0x41, rep=3), key(ord('a'), 0x41, False)] + tap(8, 0x08) + tap(8, 0x08)
+         + typed('bc\r'), '? |61 6263\n', screen='bc')
+    case('taps-then-backspace', gk_in, typed('aaa') + tap(8, 0x08) + tap(8, 0x08) + typed('bc\r'),
+         '? |61 6263\n', screen='bc')
+
+    # ROUND 9: INKEY$ NEVER WAITS FOR A HALF. Five lone high halves queued
+    # (key-downs, no partners): each of the first four is settled by the key
+    # behind it, U+FFFD; the fifth has nothing behind it, so it is not a key
+    # YET -- inkey$ answers "" and keypressed() 0 rather than waiting 500 ms
+    # for it. Once its PAIR_WAIT_MS (500) has passed it is U+FFFD, and
+    # keypressed() says so first.
+    halves = ('crt_init()\nk1$ = inkey$()\nk2$ = inkey$()\nk3$ = inkey$()\nk4$ = inkey$()\n'
+              'k5$ = inkey$()\na = keypressed()\npause(0.7)\nb = keypressed()\nk6$ = inkey$()\n'
+              'crt_done()\nprintln hex_encode$(k1$) + " " + hex_encode$(k2$) + " " + '
+              'hex_encode$(k3$) + " " + hex_encode$(k4$) + " [" + hex_encode$(k5$) + "] " + '
+              'str$(a) + " " + str$(b) + " " + hex_encode$(k6$)\n')
+    case('inkey-lone-halves', halves, [key(u) for u in (0xD83D, 0xD83E, 0xD83F, 0xD840, 0xD841)],
+         'efbfbd efbfbd efbfbd efbfbd [] 0 1 efbfbd\n')
+
+    # ROUND 9: CTRL+C IN getkey$ PUTS THE CONSOLE BACK. Its default handler
+    # ends the process past finalization, and the console stayed with line
+    # input and echo off (0x1F7 before, 0x1F1 after). Expected: the mode the
+    # console had before, and the exit status Ctrl+C always gave,
+    # STATUS_CONTROL_C_EXIT (C000013A, ntstatus.h) -- the handler restores and
+    # lets the default one run.
+    case('ctrlc-getkey', 'crt_init()\nz = keypressed()\nprintln "ready"\nk$ = getkey$()\n'
+         'println "|" + hex_encode$(k$)\n', [], 0xC000013A, ctrlc=True)
 
     lines = ('input a$\nprintln str$(bytelen(a$)) + " " + hex_encode$(right$(a$, 3))\n'
              'input b$\nprintln str$(bytelen(b$)) + " " + hex_encode$(b$)\n')
@@ -433,9 +531,10 @@ def run_unix(exe, work):
 
     failed = 0
 
-    def case(name, program, bursts, want, timeout=20):
+    def case(name, program, bursts, want, timeout=20, shows=None):
         """bursts: (seconds to wait, bytes to write). The program's own answer
-        is its line starting '|', found in what the pty echoes back."""
+        is its line starting '|', found in what the pty echoes back; shows,
+        bytes the terminal must have been sent (the prompt and the echo)."""
         nonlocal failed
         bas = os.path.join(work, name + '.bas')
         with open(bas, 'w', newline='\n', encoding='utf-8') as f:
@@ -475,10 +574,11 @@ def run_unix(exe, work):
         os.close(fd)
         m = re.search(rb'\|([^\r\n]*)', out)
         got = m.group(1).decode('ascii', 'replace') if m else None
-        if got == want:
+        if got == want and (shows is None or shows in out):
             print('PASS  %s' % name)
         else:
-            print('FAIL  %s: want %r, got %r (pty said %r)' % (name, want, got, out[-200:]))
+            print('FAIL  %s: want %r%s, got %r (pty said %r)' % (
+                name, want, '' if shows is None else ' showing %r' % shows, got, out[-200:]))
             failed += 1
 
     gk_lines = ('crt_init()\nk$ = getkey$()\ninput a$\ninput b$\ncrt_done()\n'
@@ -510,6 +610,110 @@ def run_unix(exe, work):
     case('utf8-stray-continuation', three, [(0.7, b'\x80\xc3\xa9q')], 'efbfbd c3a9 71')
     case('utf8-cut-short', three, [(0.7, b'\xf0\x9f'), (0.5, b'qr')], 'efbfbd 71 72')
     case('utf8-whole', three, [(0.7, b'\xc3\xa9\xf0\x9f\x98\x80q')], 'c3a9 f09f9880 71')
+
+    # ---- round 9: ONE KEY PER KEY, however the bytes arrive -----------------
+    # KEYS TYPED WHILE THE PROGRAM IS BUSY: queued, then read. An escape
+    # sequence ends at its final byte (ECMA-48), so three presses of Up are
+    # three keys and Esc, q, r three more -- as Windows answers them. It
+    # answered one key of everything waiting (1b5b411b5b411b5b41), and the
+    # program then blocked for keys typed later ('12' here, so the old binary
+    # fails with an answer rather than a timeout).
+    busy = ('crt_init()\nz = keypressed()\nprintln "ready"\npause(1.5)\nk1$ = getkey$()\n'
+            'k2$ = getkey$()\nk3$ = getkey$()\ncrt_done()\nprintln "|" + hex_encode$(k1$) + " " + '
+            'hex_encode$(k2$) + " " + hex_encode$(k3$)\n')
+    up, down = b'\x1b[A', b'\x1b[B'
+    case('arrows-busy', busy, [(0.7, up), (0.2, up), (0.2, up), (2.0, b'12')],
+         '1b5b41 1b5b41 1b5b41')
+    case('esc-busy', busy, [(0.7, b'\x1b'), (0.3, b'q'), (0.3, b'r'), (2.0, b'12')], '1b 71 72')
+    case('esc-burst', three, [(0.7, up + down + b'q'), (2.0, b'12')], '1b5b41 1b5b42 71')
+    # A KEY SPLIT ACROSS TWO READS is one key: the reader blocked in getkey$
+    # wakes on the first part and waits for the rest (100 ms for an escape
+    # sequence, 500 for a UTF-8 character). It answered 1b 5b 41, and two or
+    # three U+FFFD for one character.
+    case('esc-split', three, [(0.7, b'\x1b'), (0.02, b'[A'), (0.1, b'qr')], '1b5b41 71 72')
+    case('utf8-split', three, [(0.7, b'\xc3'), (0.01, b'\xa9'), (0.1, b'qr')], 'c3a9 71 72')
+    case('emoji-split', three, [(0.7, b'\xf0\x9f'), (0.01, b'\x98\x80'), (0.1, b'qr')],
+         'f09f9880 71 72')
+    # Escape on its own is still a key: decided when its wait runs out.
+    case('esc-alone', three, [(0.7, b'\x1b'), (0.5, b'q'), (0.2, b'r')], '1b 71 72')
+    # And inkey$, which never waits: polled while half an arrow has arrived,
+    # it answers "" until the rest comes -- then the arrow, whole.
+    poll = ('crt_init()\nk$ = ""\nc = 0\nwhile k$ = "" and c < 300\n  k$ = inkey$()\n'
+            '  if k$ = "" then\n    pause(0.01)\n  end if\n  c = c + 1\nwend\ncrt_done()\n'
+            'println "|" + hex_encode$(k$)\n')
+    case('inkey-split', poll, [(0.7, b'\x1b'), (0.03, b'[A')], '1b5b41')
+
+    # ---- round 9: KEYS TYPED AHEAD OF INPUT ARE EDITED AND SHOWN -------------
+    # Typed while getkey$ held the terminal raw, they were handed to INPUT as
+    # raw bytes -- a DEL inside the line, nothing on the screen ('68656c6f7f6c6f').
+    # Expected from the line discipline's definition (n_tty, `stty sane`):
+    # DEL erases a character and shows BS SP BS; Ctrl+U erases the line; the
+    # Enter shows a newline (CR LF, through the terminal's own output map).
+    gk_in = ('crt_init()\nk$ = getkey$()\ninput a$\ncrt_done()\n'
+             'println "|" + hex_encode$(k$) + " " + hex_encode$(a$)\n')
+    case('typeahead-del', gk_in, [(0.7, b'xhelo\x7flo\r')], '78 68656c6c6f',
+         shows=b'? helo\x08 \x08lo\r\n')
+    case('typeahead-kill', gk_in, [(0.7, b'xab\x15hello\r')], '78 68656c6c6f',
+         shows=b'? ab\x08 \x08\x08 \x08hello\r\n')
+    # Part of the line typed ahead, the rest typed during INPUT: still one
+    # line under one editor -- the DELs reach back into what was typed ahead.
+    case('typeahead-then-live', gk_in, [(0.7, b'xhel'), (0.5, b'\x7f\x7fy\r')], '78 6879',
+         shows=b'? hel\x08 \x08\x08 \x08y\r\n')
+    # Nothing typed ahead: the line discipline's own line mode, as before.
+    case('typed-live', gk_in, [(0.7, b'x'), (0.5, b'helo\x7flo\r')], '78 68656c6c6f')
+
+    # ---- round 9: CTRL+C IN getkey$ PUTS THE TERMINAL BACK -------------------
+    # The default action of SIGINT ended the process past finalization, and the
+    # terminal stayed with ECHO and ICANON off. Expected: both on again after
+    # it, and the process still killed BY SIGINT -- the handler restores and
+    # re-raises, so a shell sees what it always saw.
+    import termios
+    bas = os.path.join(work, 'ctrlc.bas')
+    with open(bas, 'w', newline='\n', encoding='utf-8') as f:
+        f.write('crt_init()\nz = keypressed()\nprintln "ready"\nk$ = getkey$()\n'
+                'println "|" + hex_encode$(k$)\n')
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            os.execv(exe, [exe, bas])
+        finally:
+            os._exit(127)
+    out = b''
+    start = time.monotonic()
+    sent = False
+    status = None
+    while time.monotonic() - start < 20:
+        if not sent and b'ready' in out:
+            time.sleep(0.3)
+            os.write(fd, b'\x03')
+            sent = True
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                chunk = b''
+            out += chunk
+        done, st = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = st
+            break
+    if status is None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
+    lflag = termios.tcgetattr(fd)[3]
+    os.close(fd)
+    echo_on = bool(lflag & termios.ECHO) and bool(lflag & termios.ICANON)
+    by_sigint = status is not None and os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGINT
+    if echo_on and by_sigint:
+        print('PASS  ctrlc-getkey')
+    else:
+        print('FAIL  ctrlc-getkey: want ECHO and ICANON back and death by SIGINT, got '
+              'ECHO|ICANON %s, status %r (pty said %r)' % (echo_on, status, out[-200:]))
+        failed += 1
     return 1 if failed else 0
 
 

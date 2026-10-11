@@ -1629,9 +1629,17 @@ else { Write-Host ("FAIL  AC:environ$ of an unpaired surrogate: exit {0}, want 6
 # tdir<U+FFFD> and a program wrote there. The rule (sys.md, temppath$): a value
 # that cannot be spelled is skipped as if unset, so with TMP=tdir the answer is
 # tdir\ -- TMP's own value plus the separator, written here, not read off a run
-# -- and the file lands in tdir; with both unusable, GetTempPathW answers the
-# same unusable TMP, and there is no temp directory: "". A decoy tdir<U+FFFD>
-# exists, so a wrong answer can write somewhere and be seen doing it.
+# -- and the file lands in tdir. A decoy tdir<U+FFFD> exists, so a wrong answer
+# can write somewhere and be seen doing it.
+# ROUND 8 (2026-10-11): and the order goes ON past an unusable answer. With
+# both unusable -- or just ONE set, and unusable -- GetTempPathW re-reads that
+# same value, and round 7 answered "": temppath$() + name was then a RELATIVE
+# name, and a program wrote into its working directory. Windows' documented
+# order is TMP, TEMP, USERPROFILE, the Windows directory, so the answer is
+# USERPROFILE\ (this process's own, not anything Phosphor printed), and with
+# USERPROFILE unusable too, the Windows directory's Temp (.NET's
+# GetFolderPath('Windows') + \Temp\). These runs only PRINT: a write would land
+# in the profile folder.
 $acT = Join-Path $abDir 'tdir'
 $acDecoy = $acT + [string][char]0xFFFD
 New-Item -ItemType Directory -Force $acT, $acDecoy | Out-Null
@@ -1645,18 +1653,42 @@ $env:TEMP = $acT + [string][char]0xD800; $env:TMP = $acT
 cmd /c "`"$exe`" `"$acTBas`" < NUL > `"$acTOut`" 2>&1"
 $acTCode = $LASTEXITCODE
 $acTGot1 = (Read-Text $acTOut).Trim().ToLower()
-$env:TMP = $acT + [string][char]0xD800
-cmd /c "`"$exe`" `"$acTBas`" < NUL > `"$acTOut`" 2>&1"
-$acTCode2 = $LASTEXITCODE
-$acTGot2 = (Read-Text $acTOut).Trim()
 $env:TEMP = $acSaveTemp; $env:TMP = $acSaveTmp
 $acTWant = (($utf8.GetBytes($acT + '\') | ForEach-Object { $_.ToString('x2') }) -join '')
 $okACT = ($acTCode -eq 0) -and ($acTGot1 -eq $acTWant) -and (Test-Path (Join-Path $acT 'written.txt')) -and
-         -not (Test-Path (Join-Path $acDecoy 'written.txt')) -and ($acTCode2 -eq 0) -and ($acTGot2 -eq '')
+         -not (Test-Path (Join-Path $acDecoy 'written.txt'))
 if ($okACT) { Write-Host 'PASS  AC:a TEMP that cannot name a directory is skipped, not read as another' -ForegroundColor Green }
-else { Write-Host ("FAIL  AC:TEMP with an unpaired surrogate: exit {0}, want {1}, got {2}; decoy written: {3}; both unusable: exit {4}, got '{5}'" -f
-       $acTCode, $acTWant, $acTGot1, (Test-Path (Join-Path $acDecoy 'written.txt')), $acTCode2, $acTGot2) -ForegroundColor Red }
-$okAC = $okAC -and $okACT
+else { Write-Host ("FAIL  AC:TEMP with an unpaired surrogate: exit {0}, want {1}, got {2}; decoy written: {3}" -f
+       $acTCode, $acTWant, $acTGot1, (Test-Path (Join-Path $acDecoy 'written.txt'))) -ForegroundColor Red }
+# The fallback cases: temppath$, and whether tempfilename$ is a name inside it.
+$acFBas = Join-Path $abDir 'tmpf.bas'
+[IO.File]::WriteAllText($acFBas, ((@('t$ = temppath$()', 'f$ = tempfilename$()', 'println hex_encode$(t$)',
+    'ok = 0', 'if len(f$) > len(t$) then', '  if left$(f$, len(t$)) = t$ then', '    ok = 1', '  end if',
+    'end if', 'println str$(ok)') -join "`n") + "`n"), $utf8)
+$acBad = $acT + [string][char]0xD800
+$acProfile = $env:USERPROFILE.TrimEnd('\') + '\'
+$acWinTemp = [Environment]::GetFolderPath('Windows').TrimEnd('\') + '\Temp\'
+$okACF = $true
+foreach ($c in @(@('both unusable', $acBad, $acBad, $null, $acProfile),
+                 @('TEMP alone, unusable', $acBad, '', $null, $acProfile),
+                 @('TMP alone, unusable', '', $acBad, $null, $acProfile),
+                 @('USERPROFILE unusable too', $acBad, $acBad, $acBad, $acWinTemp))) {
+    $acSaveTemp = $env:TEMP; $acSaveTmp = $env:TMP; $acSaveProf = $env:USERPROFILE
+    if ($c[1] -eq '') { $env:TEMP = $null } else { $env:TEMP = $c[1] }
+    if ($c[2] -eq '') { $env:TMP = $null } else { $env:TMP = $c[2] }
+    if ($null -ne $c[3]) { $env:USERPROFILE = $c[3] }
+    cmd /c "`"$exe`" `"$acFBas`" < NUL > `"$acTOut`" 2>&1"
+    $acFCode = $LASTEXITCODE
+    $env:TEMP = $acSaveTemp; $env:TMP = $acSaveTmp; $env:USERPROFILE = $acSaveProf
+    $acFGot = @((Read-Text $acTOut).Trim().ToLower() -split "`r?`n")
+    $acFWant = (($utf8.GetBytes($c[4]) | ForEach-Object { $_.ToString('x2') }) -join '')
+    if (-not (($acFCode -eq 0) -and ($acFGot.Count -ge 2) -and ($acFGot[0] -eq $acFWant) -and ($acFGot[1] -eq '1'))) {
+        $okACF = $false
+        Write-Host ("FAIL  AC:{0}: exit {1}, want {2} and a temp file name inside it, got '{3}'" -f
+                    $c[0], $acFCode, $acFWant, ($acFGot -join ' / ')) -ForegroundColor Red }
+}
+if ($okACF) { Write-Host 'PASS  AC:past an unusable TEMP/TMP the order goes on: USERPROFILE, then the Windows Temp, never ""' -ForegroundColor Green }
+$okAC = $okAC -and $okACT -and $okACF
 
 # --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
 # The twin of block AD in scripts/test.sh, whose comment carries the reason.
@@ -2017,13 +2049,20 @@ if ($okAG) { Write-Host 'PASS  AG:a modal session frees nothing its opener stand
 # a console, so tests/console_input_test.py types into a new one; its header
 # carries the measurements and the expected values. Like block V it opens a
 # console window, by necessity, once per case.
+# ROUND 8 (2026-10-11) put the keyboard MODEL in the same script, every case a
+# measured defect: INPUT after a key function answered part of a line (raw
+# mode left on for the read), a modifier alone was a key, Alt+numpad entry was
+# lost, a repeat count was one key, keypressed() went blind behind 32 events
+# that are not keys, an emoji written in two halves was two U+FFFD, and a
+# Ctrl+Z in a long line's first read left the tail for the next INPUT. The
+# Linux half of the same script runs from block AH of scripts/test.sh.
 $ahOut = Join-Path $tmp 'phosphor_coninput.out'
 cmd /c "python `"$root\tests\console_input_test.py`" `"$exe`" > `"$ahOut`" 2>&1"
 $ahCode = $LASTEXITCODE
 $ahText = Get-Content -Raw $ahOut
 if ($null -eq $ahText) { $ahText = '' }
 $okAH = ($ahCode -eq 0)
-if ($okAH) { Write-Host 'PASS  AH:a key outside the BMP is one key, and a long typed line is one line' -ForegroundColor Green }
+if ($okAH) { Write-Host 'PASS  AH:typed keys follow one keyboard model, and a typed line is one line' -ForegroundColor Green }
 else {
     Write-Host ("FAIL  AH:console input (exit {0})" -f $ahCode) -ForegroundColor Red
     $ahText -split "`r?`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }

@@ -42,15 +42,58 @@ finalization is a backstop, so a forgotten `crt_done` still does not leave a
 person's terminal in raw mode). When stdin is **not** a terminal — a pipe, a
 redirect, the headless test harness — there is no keyboard at all, so `inkey$()`
 and `getkey$()` answer `""` and `keypressed()` answers `0` immediately, without
-blocking and without touching the terminal. A normal key comes back as its
-character, a whole UTF-8 character including accented ones and those outside the
-Basic Multilingual Plane — an emoji is one key of four bytes on both systems,
-though Windows delivers it as two key events (until 2026-10-11, round 7, Windows
-dropped both halves without a trace and the program read the *next* key in its
-place; a half that arrives with no partner is now U+FFFD, never `""`); an arrow or function
-key comes back as `chr$(0)` plus a code byte on Windows (a virtual-key code) and
-as the raw escape sequence on Unix; Escape pressed on its own is `chr$(27)` with
-nothing after it.
+blocking and without touching the terminal.
+
+### What a key is
+
+One model, kept by both systems (round 8, 2026-10-11, set it down after Windows
+and Linux had been answering differently):
+
+- **A character key is its character**, a whole UTF-8 character including
+  accented ones and those outside the Basic Multilingual Plane — an emoji is one
+  key of four bytes on both systems, though Windows delivers it as two key
+  events, which may arrive separately (until 2026-10-11, round 7, Windows
+  dropped both halves without a trace; until round 8 two halves written
+  separately were two U+FFFD). A Ctrl chord is its control character:
+  Ctrl+A is `chr$(1)`, as a terminal sends it.
+- **What is not a character is U+FFFD** (`EF BF BD`), never `""` and never raw
+  bytes: a surrogate half with no partner on Windows, and on Unix a byte
+  sequence that is not UTF-8 — one U+FFFD per maximal ill-formed subpart, the
+  rule `environ$` keeps, so a Latin-1 terminal's `é` (byte `E9`) is U+FFFD and
+  the key after it is still its own key (until round 8 Unix answered the raw
+  bytes).
+- **An arrow, a function key or another key with no character** comes back as
+  `chr$(0)` plus a code byte on Windows (its virtual-key code) and as the raw
+  escape sequence on Unix; Escape pressed on its own is `chr$(27)` with nothing
+  after it.
+- **A modifier or lock key alone is not a key**: Shift, Ctrl, Alt, AltGr, the
+  Windows keys, Caps Lock, Num Lock, Scroll Lock. A terminal sends nothing for
+  them, and until round 8 Windows answered each press as `chr$(0)` plus its code
+  — so a capital letter typed with Shift was two keys, and "press Y" read the
+  Shift.
+- **Alt+numpad entry is the character it composes** (hold Alt, type `0233` on
+  the numpad, release Alt: `é`), which Windows delivers when Alt is released;
+  the Alt press and the numpad digits are not keys.
+- **A held key is a key per repeat**: Windows may report several presses of a
+  held key as one event with a repeat count, and each of them is a key.
+
+`keypressed()`, `inkey$()` and `getkey$()` read **one queue**: when
+`keypressed()` answers `1`, `inkey$()` answers a key. (Until round 8 Windows'
+`keypressed()` looked only at the first 32 console events, and answered `0`
+forever behind 32 that were not keys — mouse moves, focus changes — while
+`inkey$()` read the key at once.)
+
+**`input` reads a line, even in raw mode.** A key function leaves the terminal
+in raw mode until `crt_done()`, but `input` puts it back in line mode for the
+line — echo, line editing, the line ending at Enter — and returns it to raw mode
+afterwards, so a menu key read with `getkey$` and then a name read with `input`
+works without `crt_done()` between them. The line is read no further than its
+Enter: a key typed straight after it is the next key function's. Keys a key
+function had already taken but not answered (the remaining repeats of a held
+key) were typed first, and begin the line. (Until round 8, on Windows `input`
+after any key function — a single `keypressed()` was enough — answered
+whatever keys had arrived, `h` and then `ello` for the next `input`; on Linux
+it took the keys typed after the Enter, where no key function could see them.)
 
 ## Functions
 
@@ -163,8 +206,11 @@ Two things worth noticing:
   implementation rather than growing a second one that drifts.
 - The keyboard decision — where one key ends, given the bytes a terminal hands
   over — is lifted out of the terminal I/O so it can be tested with no console
-  present: `CrtAssembleKey` on Unix, `CrtKeyFromEvent` on Windows, exercised by
-  `tests/probe_crt.lpr`.
+  present: `CrtAssembleKey` on Unix, `CrtEventKey`, `CrtKeyFromEvent` and
+  `CrtKeyFromPair` on Windows, exercised by `tests/probe_crt.lpr`. The I/O half
+  — keys and lines typed into a real Windows console, and onto a Unix pty — is
+  `tests/console_input_test.py`, run by block AH of `scripts/test.ps1` and
+  `scripts/test.sh`.
 - Runnable programs live in `examples/crt_demo.bas` (colours and attributes),
   `examples/crt_dashboard.bas` (a positioned layout) and `examples/crt_keys.bas`
   (the key loop). `tests/packages/05_crt.bas` pins every sequence byte for byte.

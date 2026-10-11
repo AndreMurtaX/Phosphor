@@ -159,6 +159,10 @@ function GetEnvironmentVariableW(lpName, lpBuffer: PWideChar; nSize: LongWord): 
   (GetTempPathW's documentation). Same unit, same reason, as above. }
 function GetTempPathW(nBufferLength: LongWord; lpBuffer: PWideChar): LongWord;
   stdcall; external 'kernel32.dll' name 'GetTempPathW';
+{ The Windows directory, the last place HostTempDir looks. The answer is the
+  length written, without its NUL, or the size needed when it did not fit. }
+function GetWindowsDirectoryW(lpBuffer: PWideChar; uSize: LongWord): LongWord;
+  stdcall; external 'kernel32.dll' name 'GetWindowsDirectoryW';
 {$ENDIF}
 
 { Outside the Windows block, both of these: the interface declares them and
@@ -331,38 +335,81 @@ end;
   one TEMP names nor the one Windows calls its temp directory. The rule the
   console host keeps for a word on its command line (RefuseBadWord): such a
   value reads as a different path, so it is not used as one. It is skipped as
-  if unset -- TEMP, then TMP, then GetTempPathW -- and when what GetTempPathW
-  answers cannot be spelled either, there is no temp directory: "", which a
-  program can see. }
+  if unset -- TEMP, then TMP, then GetTempPathW. }
+{ AND THE ORDER GOES ON PAST AN UNUSABLE ANSWER (round 8, 2026-10-11). Round 7
+  stopped there: when what GetTempPathW answered could not be spelled, the
+  answer was "". But GetTempPathW re-reads the very variable just skipped, so
+  TEMP=x<D800> with TMP unset -- one bad variable, a perfectly good profile
+  folder -- answered "", and temppath$() + name became a RELATIVE name: a
+  program wrote, read and deleted its scratch files in whatever directory it
+  was started from. The order is now finished here, the way Windows documents
+  it, skipping each value that cannot name a directory: TEMP, TMP, what
+  GetTempPathW answers (with neither set, the OS's own temp directory),
+  USERPROFILE, then the Windows directory's Temp. Windows always names its own
+  directory, so this never answers "" (only a host's OnGetTempDir can). }
+{$IFDEF WINDOWS}
+function UsableTempWide(const W: UnicodeString): Boolean;
+begin
+  Result := (W <> '') and not HasUnpairedSurrogate(W);
+end;
+
+{ A kernel32 path answer: AFn writes into a buffer and answers the length
+  written, or the size it needs when the buffer was short; a second call with
+  that size reads it. '' when it fails. }
+type
+  TWidePathFn = function(ABuf: PWideChar; ASize: LongWord): LongWord;
+
+function WindowsTempPath(ABuf: PWideChar; ASize: LongWord): LongWord;
+begin
+  Result := GetTempPathW(ASize, ABuf);
+end;
+
+function WindowsDirPath(ABuf: PWideChar; ASize: LongWord): LongWord;
+begin
+  Result := GetWindowsDirectoryW(ABuf, ASize);
+end;
+
+function AskWidePath(AFn: TWidePathFn): UnicodeString;
+var buf: UnicodeString; got: LongWord;
+begin
+  Result := '';
+  SetLength(buf, 1024);
+  got := AFn(PWideChar(buf), 1024);
+  if got >= 1024 then
+  begin
+    SetLength(buf, got + 1);
+    got := AFn(PWideChar(buf), got + 1);
+    if got >= LongWord(Length(buf)) then got := 0;
+  end;
+  if got > 0 then Result := Copy(buf, 1, got);
+end;
+{$ENDIF}
+
 function HostTempDir: String;
 {$IFDEF WINDOWS}
-var buf, w: UnicodeString; got: LongWord;
+var w: UnicodeString;
 {$ENDIF}
 begin
   if SandboxActive then Exit(SandboxScratchPath);
   {$IFDEF WINDOWS}
   if Assigned(OnGetTempDir) then Exit(GetTempDir(False));
   Result := '';
-  if HostEnvWide('TEMP', w) and not HasUnpairedSurrogate(w) then
+  if HostEnvWide('TEMP', w) and UsableTempWide(w) then
     Result := WideToUtf8(w)
-  else if HostEnvWide('TMP', w) and not HasUnpairedSurrogate(w) then
+  else if HostEnvWide('TMP', w) and UsableTempWide(w) then
     Result := WideToUtf8(w)
   else
   begin
-    // the answer is the length written, without its NUL; a larger one is the
-    // size the path needs, and a second call with that size reads it
-    SetLength(buf, 1024);
-    got := GetTempPathW(1024, PWideChar(buf));
-    if got >= 1024 then
+    w := AskWidePath(@WindowsTempPath);
+    if UsableTempWide(w) then
+      Result := WideToUtf8(w)
+    else if HostEnvWide('USERPROFILE', w) and UsableTempWide(w) then
+      Result := WideToUtf8(w)
+    else
     begin
-      SetLength(buf, got + 1);
-      got := GetTempPathW(got + 1, PWideChar(buf));
-      if got >= LongWord(Length(buf)) then got := 0;
-    end;
-    if got > 0 then
-    begin
-      w := Copy(buf, 1, got);
-      if not HasUnpairedSurrogate(w) then Result := WideToUtf8(w);
+      w := AskWidePath(@WindowsDirPath);
+      if UsableTempWide(w) then
+        Result := IncludeTrailingPathDelimiter(WideToUtf8(w)) + 'Temp';
     end;
   end;
   if Result <> '' then Result := IncludeTrailingPathDelimiter(Result);

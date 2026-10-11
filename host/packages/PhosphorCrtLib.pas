@@ -33,9 +33,14 @@
   stdin). It puts the terminal in raw/cbreak mode on first use -- keys arrive one at a
   time, unechoed -- via termios on Unix and the console API on Windows, and restores it
   at crt_done() or unit finalization. inkey$ is non-blocking ("" when nothing waits);
-  getkey$ blocks for one key; keypressed() reports whether one is waiting. A normal key
-  comes back as its character; an arrow / function key as chr$(0) followed by a code
-  byte (a VK code on Windows, the raw escape sequence on Unix). When stdin is not a
+  getkey$ blocks for one key; keypressed() reports whether one is waiting -- the three
+  read ONE queue, so keypressed() = 1 means inkey$ answers a key. A normal key
+  comes back as its character (a whole UTF-8 one; what is not a character is U+FFFD);
+  an arrow / function key as chr$(0) followed by a code byte (a VK code on Windows,
+  the raw escape sequence on Unix). A modifier or lock key alone is not a key, a
+  held key's repeats are each a key, and Alt+numpad entry is its composed character
+  (CrtEventKey has the model). INPUT reads a line in LINE mode even while raw mode
+  is on (CrtLineModeBegin). When stdin is not a
   terminal (a pipe, a redirect) there is no keyboard, so inkey$/getkey$ return "" and
   keypressed() returns 0 without blocking.
 ******************************************************************************}
@@ -102,7 +107,51 @@ function CrtKeyFromEvent(AUnicodeChar: WideChar; AVirtualKey: Word): String;
   WideToUtf8 gives for one -- and the next event is left for the next read. }
 function CrtKeyFromPair(AFirst: WideChar; AHaveNext: Boolean; ANext: WideChar;
                         out AUsedNext: Boolean): String;
+{ THE KEYBOARD MODEL, one event at a time (round 8, 2026-10-11). Which console
+  events are KEYS, decided from the fields an INPUT_RECORD's key event carries,
+  and answered as the key ('' for an event that is not one). The model is the
+  one a Unix terminal already keeps, because a terminal sends bytes only for a
+  key that means something:
+    * a key-down with a character is that character;
+    * a key-down with no character is chr(0) + its virtual-key code -- an arrow,
+      a function key, Insert, Home and the rest;
+    * a MODIFIER OR LOCK KEY ALONE IS NOT A KEY: Shift, Ctrl, Alt, the Windows
+      keys, Caps/Num/Scroll Lock. Every capital letter typed on a real keyboard
+      used to cost an extra key, chr(0) + chr(16), ahead of it;
+    * a numpad digit typed while Alt is held is ALT+NUMPAD ENTRY, not a key: the
+      console delivers the composed character on the ALT KEY-UP, and that key-up
+      is the key. It used to answer chr(0)+chr(18) and chr(0)+chr(98) and never
+      the character;
+    * every other key-up is not a key.
+  How many times a key-down counts (wRepeatCount) is the reader's business, not
+  this function's: a key is a key once here. }
+function CrtEventKey(AKeyDown: Boolean; AUnicodeChar: WideChar; AVirtualKey, AScanCode: Word;
+                     AControlState: LongWord): String;
 {$ENDIF}
+
+{ INPUT AND THE KEY FUNCTIONS READ ONE KEYBOARD (round 8, 2026-10-11). Raw mode
+  is a KEY reader's state, and it lasted from the first getkey$/inkey$/
+  keypressed() until crt_done(), INPUT included: on Windows a line read with
+  line input off answered whatever keys had arrived -- 'h', and the next INPUT
+  'ello' -- and on Linux the line read took every byte waiting, keys typed
+  after the Enter too, where no key function could see them again. A line is
+  read in LINE mode: the host's line reader brackets its read with these two,
+  which put the terminal back the way the program found it (echo, line
+  editing, the line discipline stopping at the Enter) and then return it to raw
+  mode. CrtLineModeBegin answers whether raw mode was on; pass that to
+  CrtLineModeEnd. No-ops when no key function ran. }
+function CrtLineModeBegin: Boolean;
+procedure CrtLineModeEnd(AWasRaw: Boolean);
+{ Keys the key functions took from the terminal and have not answered yet:
+  on Windows the rest of a key-down whose repeat count was more than one, on
+  Unix the one byte a key's assembly read and handed back. They were typed
+  BEFORE whatever the terminal still holds, so a line read takes them first.
+  True when they hold a whole line -- an Enter among them: APrefix is the line,
+  and what follows the Enter stays for the next read. False otherwise: APrefix
+  is the start of the line (possibly ''), and they are all taken. A key with no
+  character (an arrow, a function key) is not text, and a line has no place
+  for it. }
+function CrtTakePendingLine(out APrefix: String): Boolean;
 
 implementation
 
@@ -358,81 +407,201 @@ begin
     Result := CrtKeyFromEvent(AFirst, 0);
 end;
 
-function EventToKey(const ARec: INPUT_RECORD): String;
+const
+  { Virtual-key codes and control-key flags, as numbers: CrtEventKey is in the
+    interface with plain types so the probe can call it, and these are the
+    values winuser.h and wincon.h give. }
+  VKC_SHIFT = $10; VKC_CONTROL = $11; VKC_MENU = $12; VKC_CAPITAL = $14;
+  VKC_LWIN = $5B; VKC_RWIN = $5C; VKC_NUMPAD0 = $60; VKC_NUMPAD9 = $69;
+  VKC_NUMLOCK = $90; VKC_SCROLL = $91; VKC_LSHIFT = $A0; VKC_RMENU = $A5;
+  CKS_RIGHT_ALT = $0001; CKS_LEFT_ALT = $0002; CKS_ENHANCED = $0100;
+  { How long a high surrogate waits for its low half. The two halves are two
+    key events, and the console host writes each as its own event -- a reader
+    blocked in getkey$ wakes on the FIRST, with the second not yet queued. The
+    round-7 reader decided "nothing queued, so no partner is coming" and
+    answered two U+FFFD for one emoji (7 runs in 8 with the halves written
+    back to back). A partner arrives within microseconds; this bound is only
+    ever spent on a half that has none, which no keyboard produces. }
+  PAIR_WAIT_MS = 500;
+
+function IsModifierVk(AVk: Word): Boolean;
 begin
-  Result := '';
-  if (ARec.EventType = KEY_EVENT) and (ARec.Event.KeyEvent.bKeyDown) then
-    Result := CrtKeyFromEvent(ARec.Event.KeyEvent.UnicodeChar,
-                              ARec.Event.KeyEvent.wVirtualKeyCode);
+  Result := (AVk = VKC_SHIFT) or (AVk = VKC_CONTROL) or (AVk = VKC_MENU) or
+            (AVk = VKC_CAPITAL) or (AVk = VKC_LWIN) or (AVk = VKC_RWIN) or
+            (AVk = VKC_NUMLOCK) or (AVk = VKC_SCROLL) or
+            ((AVk >= VKC_LSHIFT) and (AVk <= VKC_RMENU));
 end;
 
-function KbdKeyPressed: Boolean;
-var h: THandle; recs: array[0..31] of INPUT_RECORD; navail, nread: DWORD; i: Integer;
+{ A numpad digit key, by its virtual-key code (NumLock on) or, NumLock off, by
+  its scan code on a key that is not one of the dedicated cluster's (those
+  carry ENHANCED_KEY): 7 8 9 / 4 5 6 / 1 2 3 / 0 are scan codes 47 48 49 4B 4C
+  4D 4F 50 51 52 -- the table FPC's own crt reads for the same composition. }
+function IsNumpadDigit(AVk, AScan: Word; AState: LongWord): Boolean;
+begin
+  Result := (AVk >= VKC_NUMPAD0) and (AVk <= VKC_NUMPAD9);
+  if (not Result) and ((AState and CKS_ENHANCED) = 0) then
+    case AScan of
+      $47, $48, $49, $4B, $4C, $4D, $4F, $50, $51, $52: Result := True;
+    end;
+end;
+
+function CrtEventKey(AKeyDown: Boolean; AUnicodeChar: WideChar; AVirtualKey, AScanCode: Word;
+                     AControlState: LongWord): String;
+begin
+  Result := '';
+  if not AKeyDown then
+  begin
+    // Alt+numpad entry: the composed character arrives on the Alt key-up.
+    if (AVirtualKey = VKC_MENU) and (AUnicodeChar <> #0) then
+      Result := CrtKeyFromEvent(AUnicodeChar, 0);
+    Exit;
+  end;
+  if AUnicodeChar = #0 then
+  begin
+    if IsModifierVk(AVirtualKey) then Exit;
+    if ((AControlState and (CKS_LEFT_ALT or CKS_RIGHT_ALT)) <> 0) and
+       IsNumpadDigit(AVirtualKey, AScanCode, AControlState) then Exit;
+  end;
+  Result := CrtKeyFromEvent(AUnicodeChar, AVirtualKey);
+end;
+
+{ One console event under the model: the key ('' for none), its UTF-16 unit
+  (#0 for a key with no character) and how many presses it is. A key-down's
+  wRepeatCount is presses: "a key held down may arrive as one event with this
+  member equal to 5" (KEY_EVENT_RECORD's documentation), and the console host
+  merges a held key's repeats exactly so when the reader is slow. It used to be
+  read as one press, and a held arrow key lost its moves. }
+function RecordKey(const ARec: INPUT_RECORD; out AUnit: WideChar; out ACount: Integer): String;
+begin
+  Result := '';
+  AUnit := #0;
+  ACount := 0;
+  if ARec.EventType <> KEY_EVENT then Exit;
+  Result := CrtEventKey(ARec.Event.KeyEvent.bKeyDown, ARec.Event.KeyEvent.UnicodeChar,
+                        ARec.Event.KeyEvent.wVirtualKeyCode,
+                        ARec.Event.KeyEvent.wVirtualScanCode,
+                        ARec.Event.KeyEvent.dwControlKeyState);
+  if Result = '' then Exit;
+  AUnit := ARec.Event.KeyEvent.UnicodeChar;
+  ACount := 1;
+  if ARec.Event.KeyEvent.bKeyDown and (ARec.Event.KeyEvent.wRepeatCount > 1) then
+    ACount := ARec.Event.KeyEvent.wRepeatCount;
+end;
+
+var
+  { The presses of a repeated key-down not answered yet: gRepLeft more of
+    gRepKey. Part of the keyboard queue, ahead of anything still in the
+    console's -- keypressed() counts them and INPUT reads them first. }
+  gRepKey: String = '';
+  gRepLeft: Integer = 0;
+
+{ THE ONE VIEW OF THE QUEUE that keypressed, inkey$ and getkey$ all take: wait
+  up to ATimeout ms (0 polls, INFINITE blocks) until the event at the head of
+  the console's queue is a key, and answer it there, NOT consumed. Events ahead
+  of it that are not keys are consumed on the way, as reading always did; that
+  is what keypressed() needed and did not do -- it peeked a fixed window of 32
+  events and answered 0 forever once 32 non-keys (mouse moves, focus changes,
+  stray key-ups) sat ahead of a key that inkey$ read at once. }
+function HeadKey(ATimeout: DWORD; out ARec: INPUT_RECORD): Boolean;
+var h: THandle; navail, nread, wait: DWORD; start, spent: QWord; u: WideChar; c: Integer;
 begin
   Result := False;
   h := GetStdHandle(STD_INPUT_HANDLE);
-  navail := 0;
-  if (not GetNumberOfConsoleInputEvents(h, navail)) or (navail = 0) then Exit;
-  nread := 0;
-  if not PeekConsoleInputW(h, recs[0], Length(recs), nread) then Exit;
-  for i := 0 to Integer(nread) - 1 do
-    if (recs[i].EventType = KEY_EVENT) and recs[i].Event.KeyEvent.bKeyDown then
-      Exit(True);
-end;
-
-{ A high half is HELD (APend) until the event that settles it: the next
-  key-down. A low half completes the character; anything else leaves the high
-  half alone, U+FFFD, and is not consumed -- it is the next key. What stands
-  between them (the high half's own key-up, a mouse or focus event) is consumed,
-  as it always was. While a half is held nothing waits: the console queues both
-  halves of a character together, so a partner not already queued is not
-  coming as part of this key. Every turn still consumes one event or ends. }
-function KbdRead(ABlock: Boolean): String;
-var h: THandle; rec: INPUT_RECORD; navail, nread: DWORD; used: Boolean; pend: WideChar;
-begin
-  Result := '';
-  pend := #0;
-  h := GetStdHandle(STD_INPUT_HANDLE);
+  start := GetTickCount64();
   while True do
   begin
-    if (not ABlock) or (pend <> #0) then
+    navail := 0;
+    if not GetNumberOfConsoleInputEvents(h, navail) then Exit;
+    if navail = 0 then
     begin
-      navail := 0;
-      if (not GetNumberOfConsoleInputEvents(h, navail)) or (navail = 0) then
+      if ATimeout = 0 then Exit;
+      if ATimeout = INFINITE then wait := INFINITE
+      else
       begin
-        if pend <> #0 then Result := CrtKeyFromPair(pend, False, #0, used);
-        Exit;
+        spent := GetTickCount64() - start;
+        if spent >= ATimeout then Exit;
+        wait := ATimeout - DWORD(spent);
       end;
-    end;
-    nread := 0;
-    if pend <> #0 then
-    begin
-      if (not PeekConsoleInputW(h, rec, 1, nread)) or (nread = 0) then
-        Exit(CrtKeyFromPair(pend, False, #0, used));
-      if (rec.EventType = KEY_EVENT) and rec.Event.KeyEvent.bKeyDown then
-      begin
-        Result := CrtKeyFromPair(pend, True, rec.Event.KeyEvent.UnicodeChar, used);
-        if used then ReadConsoleInputW(h, rec, 1, nread);
-        Exit;
-      end;
-    end;
-    if (not ReadConsoleInputW(h, rec, 1, nread)) or (nread = 0) then
-    begin
-      if pend <> #0 then Result := CrtKeyFromPair(pend, False, #0, used);
-      Exit;
-    end;
-    if pend <> #0 then Continue;           // what stood between the halves
-    Result := EventToKey(rec);
-    if Result = '' then Continue;          // skip key-up / mouse / focus events
-    if IsHighHalf(rec.Event.KeyEvent.UnicodeChar) then
-    begin
-      // the first half of a character outside the BMP: the key is the PAIR
-      pend := rec.Event.KeyEvent.UnicodeChar;
-      Result := '';
+      // the console input handle is signalled while its queue holds an event
+      if WaitForSingleObject(h, wait) <> WAIT_OBJECT_0 then Exit;
       Continue;
     end;
-    Exit;
+    nread := 0;
+    if not PeekConsoleInputW(h, ARec, 1, nread) then Exit;
+    if nread = 0 then Continue;
+    if RecordKey(ARec, u, c) <> '' then Exit(True);
+    if (not ReadConsoleInputW(h, ARec, 1, nread)) or (nread = 0) then Exit;   // not a key
   end;
+end;
+
+function KbdKeyPressed: Boolean;
+var rec: INPUT_RECORD;
+begin
+  Result := (gRepLeft > 0) or HeadKey(0, rec);
+end;
+
+{ The next key, consumed. A HIGH SURROGATE is half of one: it is settled by the
+  next KEY, whenever that comes within PAIR_WAIT_MS -- a low half completes the
+  character; any other key leaves the high half alone, U+FFFD, and is not
+  consumed, because it is the next key. Events that are not keys between them
+  (the half's own key-up, a Shift pressed in between) are passed over as they
+  are everywhere. }
+function KbdRead(ABlock: Boolean): String;
+var h: THandle; rec: INPUT_RECORD; nread, t: DWORD; used: Boolean; u, u2: WideChar;
+    count, c2: Integer;
+begin
+  Result := '';
+  if gRepLeft > 0 then
+  begin
+    Dec(gRepLeft);
+    Exit(gRepKey);
+  end;
+  if ABlock then t := INFINITE else t := 0;
+  if not HeadKey(t, rec) then Exit;
+  h := GetStdHandle(STD_INPUT_HANDLE);
+  nread := 0;
+  if (not ReadConsoleInputW(h, rec, 1, nread)) or (nread = 0) then Exit;
+  Result := RecordKey(rec, u, count);
+  if IsHighHalf(u) then
+  begin
+    count := 1;    // a pair is one key; no keyboard repeats half of one
+    if HeadKey(PAIR_WAIT_MS, rec) and (RecordKey(rec, u2, c2) <> '') then
+    begin
+      Result := CrtKeyFromPair(u, True, u2, used);
+      if used then ReadConsoleInputW(h, rec, 1, nread);
+    end
+    else
+      Result := CrtKeyFromPair(u, False, #0, used);
+  end;
+  if count > 1 then
+  begin
+    gRepKey := Result;
+    gRepLeft := count - 1;
+  end;
+end;
+
+function CrtTakePendingLine(out APrefix: String): Boolean;
+var n, i: Integer;
+begin
+  APrefix := '';
+  Result := False;
+  if gRepLeft <= 0 then Exit;
+  if (Length(gRepKey) = 1) and (gRepKey[1] = #13) then
+  begin
+    // an Enter, held: each press is an empty line, one per read
+    Dec(gRepLeft);
+    Exit(True);
+  end;
+  // The bytes, copied, never concatenated: the key is tagged UTF-8 and a
+  // String concatenation would convert it to the system code page.
+  n := Length(gRepKey);
+  if (n > 0) and (gRepKey[1] >= ' ') then
+  begin
+    SetLength(APrefix, n * gRepLeft);
+    for i := 0 to gRepLeft - 1 do
+      Move(gRepKey[1], APrefix[1 + i * n], n);
+  end;
+  gRepLeft := 0;   // a key with no character is not text
 end;
 {$ELSE}
 var
@@ -508,14 +677,33 @@ end;
 
 { How many bytes follow this UTF-8 lead byte. 0 for ASCII and for anything that is
   not a lead byte -- a continuation byte arriving first is a broken stream, and
-  guessing a length for it would consume bytes belonging to the next key. }
+  guessing a length for it would consume bytes belonging to the next key. The
+  leads are the Unicode Standard's (Table 3-7): C0, C1 and F5..FF begin nothing. }
 function Utf8Extra(AFirst: Byte): Integer;
 begin
   if AFirst < $80 then Result := 0
-  else if (AFirst >= $C0) and (AFirst <= $DF) then Result := 1
+  else if (AFirst >= $C2) and (AFirst <= $DF) then Result := 1
   else if (AFirst >= $E0) and (AFirst <= $EF) then Result := 2
-  else if (AFirst >= $F0) and (AFirst <= $F7) then Result := 3
+  else if (AFirst >= $F0) and (AFirst <= $F4) then Result := 3
   else Result := 0;
+end;
+
+{ May B follow the lead byte ALead as the byte at position AIndex (1 = the
+  first after the lead)? Table 3-7 narrows the first continuation after four
+  leads -- that is what makes an overlong form, a surrogate or a code point
+  past U+10FFFF ill-formed -- and every other is 80..BF. }
+function Utf8Continues(ALead, B: Byte; AIndex: Integer): Boolean;
+var lo, hi: Byte;
+begin
+  lo := $80; hi := $BF;
+  if AIndex = 1 then
+    case ALead of
+      $E0: lo := $A0;
+      $ED: hi := $9F;
+      $F0: lo := $90;
+      $F4: hi := $8F;
+    end;
+  Result := (B >= lo) and (B <= hi);
 end;
 
 function CrtAssembleKey(AFirst: Byte; ANext: TCrtByteSource;
@@ -543,7 +731,7 @@ begin
       Result[n] := Chr(b);
     end;
   end
-  else
+  else if AFirst >= $80 then
   begin
     // A UTF-8 character: take exactly its continuation bytes, no more. Stopping
     // at the first byte that is not a continuation leaves the stream where the
@@ -552,10 +740,23 @@ begin
     for i := 1 to want do
     begin
       if not ANext(b) then Break;
-      if (b < $80) or (b > $BF) then begin ALeftover := b; Break; end;
+      if not Utf8Continues(AFirst, b, i) then begin ALeftover := b; Break; end;
       n := Length(Result) + 1;
       SetLength(Result, n);
       Result[n] := Chr(b);
+    end;
+    // WHAT IS NOT A CHARACTER IS U+FFFD (round 8, 2026-10-11): one per
+    // maximal ill-formed subpart, the rule environ$ and paramstr$ keep for
+    // every other thing the OS hands over, and the answer Windows gives for a
+    // lone surrogate. This handed the program the raw bytes -- E9 from a
+    // Latin-1 terminal, a stray 80, a cut-off F0 9F -- strings that are not
+    // UTF-8, where Windows answered EF BF BD for the same broken key.
+    if (want = 0) or (Length(Result) <> want + 1) then
+    begin
+      SetLength(Result, 3);
+      Result[1] := Chr($EF);
+      Result[2] := Chr($BF);
+      Result[3] := Chr($BD);
     end;
   end;
   SetCodePage(RawByteString(Result), CP_UTF8, False);
@@ -577,7 +778,34 @@ begin
   // Give back what did not belong to this key, so the next read sees it.
   if leftover >= 0 then GPushback := leftover;
 end;
+
+function CrtTakePendingLine(out APrefix: String): Boolean;
+begin
+  APrefix := '';
+  Result := False;
+  if GPushback < 0 then Exit;
+  // the terminal's Enter is LF (ICRNL); a CR is one with that mapping off
+  if (GPushback = 10) or (GPushback = 13) then
+    Result := True
+  else
+  begin
+    SetLength(APrefix, 1);
+    APrefix[1] := Chr(GPushback);
+  end;
+  GPushback := -1;
+end;
 {$ENDIF}
+
+function CrtLineModeBegin: Boolean;
+begin
+  Result := gRawOn;
+  if Result then KbdRestore();
+end;
+
+procedure CrtLineModeEnd(AWasRaw: Boolean);
+begin
+  if AWasRaw then KbdEnterRaw();
+end;
 
 // --- the console this process owns (Windows only) ---------------------------
 { Is the console attached to this process ours alone?

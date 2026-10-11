@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keys and lines TYPED into a real Windows console. Windows only.
+"""Keys and lines TYPED into a real terminal: a Windows console, or a Unix pty.
 
 Two readers in this tree take UTF-16 from the console one piece at a time, and
 both lost what did not fit the piece (adversarial round 7, 2026-10-11):
@@ -17,47 +17,59 @@ both lost what did not fit the piece (adversarial round 7, 2026-10-11):
     tail of the first -- and a pair cut at the boundary became two U+FFFD.
     Measured: 10000 'a' typed answered 8192 and then 1808.
 
-No headless runner can reach either: both paths run only when stdin IS a
-console. So this script starts a copy of itself in a NEW console
-(CREATE_NEW_CONSOLE), which writes the keystrokes into that console's input
-buffer with WriteConsoleInputW -- a key-down and a key-up per UTF-16 unit, as
-a keyboard makes them -- and then runs the program there, stdout to a file.
+Round 8 (2026-10-11) defined ONE KEYBOARD MODEL for both systems and pinned it
+here, every case a measured defect (see PhosphorCrtLib.pas#CrtEventKey):
+
+  * INPUT after any key function read with line input still off: 'h', and the
+    next INPUT 'ello'; with both lines queued, both at once and a hang. Linux:
+    the line read took the keys typed after the Enter, and inkey$ never saw
+    them. A line is now read in line mode, and no further than its end.
+  * A modifier alone (Shift, Ctrl) was a key, chr(0)+chr(16), ahead of every
+    capital letter; Alt+numpad entry answered Alt and the digits, never the
+    character; a key-down with a repeat count of 3 was one key; keypressed()
+    answered 0 forever behind 32 events that are not keys; and an emoji whose
+    halves arrive in two writes -- the normal shape, since the reader wakes on
+    the first -- became two U+FFFD.
+  * Linux getkey$ answered raw bytes that are not UTF-8; it answers U+FFFD.
+
+No headless runner can reach any of this: these paths run only when stdin IS a
+terminal. On Windows this script starts a copy of itself in a NEW console
+(CREATE_NEW_CONSOLE), which writes key events into that console's input buffer
+with WriteConsoleInputW -- a key-down and a key-up per UTF-16 unit, as a
+keyboard makes them, or the exact records a case names -- before the program
+starts or, for the timed cases, in bursts while it runs, stdout to a file. On
+Unix it runs the program on a pty (python's pty module) and writes bytes to it.
 
 EXPECTED VALUES are written out below from definitions, never from a run:
 U+1F600 is D83D DE00 in UTF-16 and F0 9F 98 80 in UTF-8; U+FFFD is EF BF BD; a
-line is everything up to the Enter, so its length is what was typed. INPUT
-prints its "? " prompt to stdout, which is why each line of output starts so.
+line is everything up to the Enter, so its length is what was typed; a key is
+what the model above says. INPUT prints its "? " prompt to stdout, which is why
+the lines of a Windows case's output start so.
 
-Usage: console_input_test.py <phosphor.exe>
+Usage: console_input_test.py <phosphor executable>
 Exit 0 pass, 1 fail, 2 the harness could not set a case up.
 """
-import ctypes
-import ctypes.wintypes as wt
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 
-if os.name != 'nt':
-    print('SKIP  Windows only: a Unix terminal hands the program bytes, not UTF-16 units')
-    sys.exit(0)
-
-CREATE_NEW_CONSOLE = 0x10
-
-
-class KEY_EVENT_RECORD(ctypes.Structure):
-    _fields_ = [('bKeyDown', wt.BOOL), ('wRepeatCount', wt.WORD),
-                ('wVirtualKeyCode', wt.WORD), ('wVirtualScanCode', wt.WORD),
-                ('UnicodeChar', wt.WORD), ('dwControlKeyState', wt.DWORD)]
+# ---- the records a case can name -------------------------------------------
+# A key event: [1, down, unit, vk, scan, control-state, repeat]. A mouse move:
+# [2, x, y]. A focus change: [16, set]. Codes from winuser.h / wincon.h.
+SHIFT_PRESSED, LEFT_CTRL, LEFT_ALT = 0x10, 0x08, 0x02
 
 
-class EVENT(ctypes.Union):
-    _fields_ = [('KeyEvent', KEY_EVENT_RECORD), ('pad', ctypes.c_byte * 16)]
+def key(u, vk=0, down=True, scan=0, state=0, rep=1):
+    return [1, 1 if down else 0, u, vk, scan, state, rep]
 
 
-class INPUT_RECORD(ctypes.Structure):
-    _fields_ = [('EventType', wt.WORD), ('Event', EVENT)]
+def tap(u, vk=0, scan=0, state=0):
+    """A key pressed and released."""
+    return [key(u, vk, True, scan, state), key(u, vk, False, scan, state)]
 
 
 def units(text):
@@ -78,28 +90,71 @@ def units(text):
     return out
 
 
+def typed(text):
+    """The records for text typed: a key-down and a key-up per unit."""
+    recs = []
+    for u, vk in units(text):
+        recs += tap(u, vk)
+    return recs
+
+
 def inner(spec_path):
     """Runs inside the new console: type the keys, then run the program."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    class KEY_EVENT_RECORD(ctypes.Structure):
+        _fields_ = [('bKeyDown', wt.BOOL), ('wRepeatCount', wt.WORD),
+                    ('wVirtualKeyCode', wt.WORD), ('wVirtualScanCode', wt.WORD),
+                    ('UnicodeChar', wt.WORD), ('dwControlKeyState', wt.DWORD)]
+
+    class MOUSE_EVENT_RECORD(ctypes.Structure):
+        _fields_ = [('X', ctypes.c_short), ('Y', ctypes.c_short),
+                    ('dwButtonState', wt.DWORD), ('dwControlKeyState', wt.DWORD),
+                    ('dwEventFlags', wt.DWORD)]
+
+    class EVENT(ctypes.Union):
+        _fields_ = [('KeyEvent', KEY_EVENT_RECORD), ('MouseEvent', MOUSE_EVENT_RECORD),
+                    ('SetFocus', wt.BOOL), ('pad', ctypes.c_byte * 16)]
+
+    class INPUT_RECORD(ctypes.Structure):
+        _fields_ = [('EventType', wt.WORD), ('Event', EVENT)]
+
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
     k32.CreateFileW.restype = wt.HANDLE
     with open(spec_path, encoding='utf-8') as f:
         spec = json.load(f)
-    us = spec['units']
     h = k32.CreateFileW('CONIN$', 0xC0000000, 3, None, 3, 0, None)
-    recs = (INPUT_RECORD * (2 * len(us)))()
-    for i, (u, vk) in enumerate(us):
-        for j, down in enumerate((1, 0)):
-            r = recs[2 * i + j]
-            r.EventType = 1                     # KEY_EVENT
-            r.Event.KeyEvent.bKeyDown = down
-            r.Event.KeyEvent.wRepeatCount = 1
-            r.Event.KeyEvent.wVirtualKeyCode = vk
-            r.Event.KeyEvent.UnicodeChar = u
-    written = wt.DWORD(0)
-    ok = k32.WriteConsoleInputW(h, recs, len(recs), ctypes.byref(written))
-    with open(spec['out'], 'wb') as fo, open(spec['err'], 'wb') as fe:
+
+    def fill(r, rec):
+        r.EventType = rec[0]
+        if rec[0] == 1:
+            e = r.Event.KeyEvent
+            (e.bKeyDown, e.UnicodeChar, e.wVirtualKeyCode, e.wVirtualScanCode,
+             e.dwControlKeyState, e.wRepeatCount) = rec[1:7]
+        elif rec[0] == 2:
+            m = r.Event.MouseEvent
+            m.X, m.Y, m.dwEventFlags = rec[1], rec[2], 1      # MOUSE_MOVED
+        else:
+            r.Event.SetFocus = rec[1]
+
+    def write(recs):
+        """One WriteConsoleInputW; '' or what went wrong."""
+        if not recs:
+            return ''
+        arr = (INPUT_RECORD * len(recs))()
+        for r, rec in zip(arr, recs):
+            fill(r, rec)
+        written = wt.DWORD(0)
+        ok = k32.WriteConsoleInputW(h, arr, len(recs), ctypes.byref(written))
         if not ok or written.value != len(recs):
-            fe.write(('HARNESS: wrote %d of %d key events\n' % (written.value, len(recs))).encode())
+            return 'HARNESS: wrote %d of %d events\n' % (written.value, len(recs))
+        return ''
+
+    with open(spec['out'], 'wb') as fo, open(spec['err'], 'wb') as fe:
+        bad = write(spec['pre'])
+        if bad:
+            fe.write(bad.encode())
             return
         if spec.get('calibrate'):
             # The console's OWN answer, read here and not by phosphor: cooked
@@ -107,11 +162,12 @@ def inner(spec_path):
             # Their total is how many units of a typed line this console keeps.
             k32.ReadConsoleW.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD,
                                          ctypes.POINTER(wt.DWORD), ctypes.c_void_p]
-            buf = ctypes.create_unicode_buffer(4096)
+            size = spec['calibrate']
+            buf = ctypes.create_unicode_buffer(size)
             got = ''
-            for _ in range(64):
+            for _ in range(256):
                 n = wt.DWORD(0)
-                if not k32.ReadConsoleW(h, buf, 4096, ctypes.byref(n), None) or n.value == 0:
+                if not k32.ReadConsoleW(h, buf, size, ctypes.byref(n), None) or n.value == 0:
                     break
                 got += buf[:n.value]
                 if '\r' in got or '\n' in got:
@@ -120,27 +176,41 @@ def inner(spec_path):
             fo.write(str(cut).encode())
             fe.write(b'exit 0\n')
             return
+        p = subprocess.Popen([spec['exe'], spec['bas']], stdout=fo, stderr=fe)
+        # The timed bursts: the program is running, and blocked in what it
+        # reads, before each arrives. A burst written 'separate' is one write
+        # per event -- the shape the console host itself delivers.
+        for delay, recs, separate in spec['bursts']:
+            time.sleep(delay)
+            for chunk in ([[r] for r in recs] if separate else [recs]):
+                bad = write(chunk)
+                if bad:
+                    fe.write(bad.encode())
         try:
-            p = subprocess.run([spec['exe'], spec['bas']], stdout=fo, stderr=fe,
-                               timeout=spec['timeout'])
+            p.wait(spec['timeout'])
             fe.write(('exit %d\n' % p.returncode).encode())
         except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait(10)
             fe.write(b'TIMEOUT (killed)\n')
 
 
-def main():
-    exe = os.path.abspath(sys.argv[1])
-    work = tempfile.mkdtemp(prefix='phosphor-coninput-')
+def run_windows(exe, work):
+    CREATE_NEW_CONSOLE = 0x10
     failed = 0
     harness = 0
 
-    def case(name, program, typed, want, timeout=20, calibrate=False):
+    def case(name, program, pre, want, timeout=20, calibrate=False, bursts=()):
         nonlocal failed, harness
         bas = os.path.join(work, name + '.bas')
         with open(bas, 'w', newline='\n', encoding='utf-8') as f:
             f.write(program)
-        spec = {'units': units(typed), 'exe': exe, 'bas': bas, 'timeout': timeout,
+        if isinstance(pre, str):
+            pre = typed(pre)
+        spec = {'pre': pre, 'exe': exe, 'bas': bas, 'timeout': timeout,
                 'calibrate': calibrate,
+                'bursts': [[d, typed(r) if isinstance(r, str) else r, sep]
+                           for d, r, sep in bursts],
                 'out': os.path.join(work, name + '.out'),
                 'err': os.path.join(work, name + '.err')}
         sp = os.path.join(work, name + '.json')
@@ -149,7 +219,7 @@ def main():
         p = subprocess.Popen([sys.executable, '-I', os.path.abspath(__file__), '--inner', sp],
                              creationflags=CREATE_NEW_CONSOLE)
         try:
-            p.wait(timeout + 30)
+            p.wait(timeout + 30 + sum(b[0] for b in bursts))
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait(10)
@@ -164,7 +234,7 @@ def main():
                 harness += 1
                 return None
             return int(got)
-        if got is None or err.startswith('HARNESS'):
+        if got is None or 'HARNESS' in err:
             print('HARNESS  %s: %s' % (name, err))
             harness += 1
         elif got == want and err.endswith('exit 0'):
@@ -194,19 +264,128 @@ def main():
     # is still the next key, not swallowed as the missing half.
     case('getkey-lone-high', keys, '\ud83dq', 'efbfbd 71\n')
     case('getkey-lone-low', keys, '\ude00q', 'efbfbd 71\n')
+
+    # ---- round 8: the keyboard model ----------------------------------------
+    # THE HALVES IN SEPARATE WRITES, after the program is blocked in getkey$:
+    # the reader wakes on the high half with the low one not queued yet, and
+    # must wait for it (it answered efbfbd efbfbd in 7 runs of 8). Then with
+    # only the two key-downs, each its own write.
+    case('getkey-pair-split', keys, [], 'f09f9880 71\n',
+         bursts=[(1.0, tap(0xD83D) + tap(0xDE00) + tap(ord('q'), 0x51), True)])
+    case('getkey-pair-split-downs', keys, [], 'f09f9880 71\n',
+         bursts=[(1.0, [key(0xD83D), key(0xDE00)] + tap(ord('q'), 0x51), True)])
+    # A MODIFIER ALONE IS NOT A KEY. Shift+A typed as a person types it is
+    # 'A', and the next key 'q' (it was 0010 41: chr(0)+chr(16), then 'A').
+    shift_a = ([key(0, 0x10, True, 0x2A, SHIFT_PRESSED)] + tap(ord('A'), 0x41, 0x1E, SHIFT_PRESSED)
+               + [key(0, 0x10, False, 0x2A, 0)] + tap(ord('q'), 0x51, 0x10))
+    case('shift-a', keys, shift_a, '41 71\n')
+    # Ctrl+A is chr(1), as a terminal sends it; the Ctrl press is nothing.
+    ctrl_a = ([key(0, 0x11, True, 0x1D, LEFT_CTRL)] + tap(1, 0x41, 0x1E, LEFT_CTRL)
+              + [key(0, 0x11, False, 0x1D, 0)] + tap(ord('q'), 0x51, 0x10))
+    case('ctrl-a', keys, ctrl_a, '01 71\n')
+    # A Shift pressed and released alone: no key is waiting, and inkey$ agrees.
+    case('shift-alone', 'crt_init()\na = keypressed()\nk$ = inkey$()\ncrt_done()\n'
+         'println str$(a) + " [" + hex_encode$(k$) + "]"\n',
+         [key(0, 0x10, True, 0x2A, SHIFT_PRESSED), key(0, 0x10, False, 0x2A, 0)], '0 []\n')
+    # And a Shift between the halves of a pair does not break the pair.
+    case('pair-shift-between', keys,
+         tap(0xD83D) + [key(0, 0x10, True, 0x2A, SHIFT_PRESSED)] + tap(0xDE00)
+         + [key(0, 0x10, False, 0x2A, 0)] + tap(ord('q'), 0x51), 'f09f9880 71\n')
+    # ALT+NUMPAD: Alt down, numpad 2 3 0 (VK_NUMPAD2 62 / 3 63 / 0 60, scan
+    # codes 50 51 52), and the Alt KEY-UP carrying the composed U+00E9, whose
+    # UTF-8 is C3 A9. It answered 0012 then 0062.
+    altnum = ([key(0, 0x12, True, 0x38, LEFT_ALT)] + tap(0, 0x62, 0x50, LEFT_ALT)
+              + tap(0, 0x63, 0x51, LEFT_ALT) + tap(0, 0x60, 0x52, LEFT_ALT)
+              + [key(0xE9, 0x12, False, 0x38, 0)] + tap(ord('q'), 0x51))
+    case('alt-numpad', keys, altnum, 'c3a9 71\n')
+    # A REPEAT COUNT IS PRESSES: 'a' down with wRepeatCount 3 is three keys
+    # (KEY_EVENT_RECORD: "one event with this member equal to 5" for five), and
+    # keypressed() counts the ones not yet read. An arrow likewise.
+    four = ('crt_init()\nk1$ = getkey$()\nk2$ = getkey$()\nk3$ = getkey$()\n'
+            'k4$ = getkey$()\ncrt_done()\nprintln hex_encode$(k1$) + " " + hex_encode$(k2$)'
+            ' + " " + hex_encode$(k3$) + " " + hex_encode$(k4$)\n')
+    case('repeat-3', four, [key(ord('a'), 0x41, rep=3), key(ord('a'), 0x41, False)]
+         + tap(ord('q'), 0x51), '61 61 61 71\n')
+    case('repeat-arrow', four, [key(0, 0x26, scan=0x48, state=0x100, rep=3),
+                                key(0, 0x26, False, 0x48, 0x100)] + tap(ord('q'), 0x51),
+         '0026 0026 0026 71\n')
+    case('repeat-keypressed', 'crt_init()\nk$ = getkey$()\na = keypressed()\nk2$ = inkey$()\n'
+         'b = keypressed()\ncrt_done()\nprintln hex_encode$(k$) + " " + str$(a) + " " + '
+         'hex_encode$(k2$) + " " + str$(b)\n',
+         [key(ord('a'), 0x41, rep=2), key(ord('a'), 0x41, False)], '61 1 61 0\n')
+    # KEYPRESSED BEHIND 100 EVENTS THAT ARE NOT KEYS: 40 mouse moves, 20 focus
+    # changes, 40 stray key-ups, then 'q'. It peeked 32 and answered 0 on every
+    # poll while inkey$ read the q at once (30 [71]); a key is waiting: 0 [71].
+    junk = ([[2, i, 1] for i in range(40)] + [[16, i % 2] for i in range(20)]
+            + [key(ord('z'), 0x5A, False) for _ in range(40)])
+    case('keypressed-behind-junk', 'crt_init()\nc = 0\nwhile keypressed() = 0 and c < 30\n'
+         '  pause(0.05)\n  c = c + 1\nwend\nk$ = inkey$()\ncrt_done()\n'
+         'println str$(c) + " [" + hex_encode$(k$) + "]"\n',
+         junk + tap(ord('q'), 0x51), '0 [71]\n')
+    # INPUT AFTER A KEY FUNCTION IS A LINE: getkey$ reads 'x', then the keys
+    # arrive in bursts as a person types -- 'h'; 'ello' Enter; 'world' Enter.
+    # It answered 68 / 656c6c6f: one character, and the next INPUT the rest.
+    gk_lines = ('crt_init()\nk$ = getkey$()\ninput a$\ninput b$\ncrt_done()\n'
+                'println "|" + hex_encode$(k$) + " " + hex_encode$(a$) + " " + hex_encode$(b$)\n')
+    case('getkey-then-input', gk_lines, [], '? ? |78 68656c6c6f 776f726c64\n',
+         bursts=[(1.0, 'x', False), (0.5, 'h', False), (0.2, 'ello\r', False),
+                 (0.2, 'world\r', False)])
+    # A lone keypressed() puts the console in the same state.
+    case('keypressed-then-input', 'crt_init()\nz = keypressed()\ninput a$\ninput b$\n'
+         'crt_done()\nprintln "|" + str$(z) + " " + hex_encode$(a$) + " " + hex_encode$(b$)\n',
+         [], '? ? |0 68656c6c6f 776f726c64\n',
+         bursts=[(1.0, 'h', False), (0.2, 'ello\r', False), (0.2, 'world\r', False)])
+    # Everything typed before the program starts: the first INPUT took BOTH
+    # lines and the second waited forever. Raw mode resumes after the lines,
+    # so the key after them is getkey$'s.
+    case('getkey-then-input-queued', 'crt_init()\nk$ = getkey$()\ninput a$\ninput b$\n'
+         'k2$ = getkey$()\ncrt_done()\nprintln "|" + hex_encode$(k$) + " " + hex_encode$(a$)'
+         ' + " " + hex_encode$(b$) + " " + hex_encode$(k2$)\n',
+         'xhello\rworld\rq', '? ? |78 68656c6c6f 776f726c64 71\n')
+    # The presses of a repeated key not yet read were typed BEFORE the rest of
+    # the line, so INPUT takes them first: 'a' x3, one read by getkey$, then
+    # 'bc' Enter is the line 'aabc'.
+    case('repeat-then-input', 'crt_init()\nk$ = getkey$()\ninput a$\ncrt_done()\n'
+         'println "|" + hex_encode$(k$) + " " + hex_encode$(a$)\n',
+         [key(ord('a'), 0x41, rep=3), key(ord('a'), 0x41, False)] + typed('bc\r'),
+         '? |61 61616263\n')
+
     lines = ('input a$\nprintln str$(bytelen(a$)) + " " + hex_encode$(right$(a$, 3))\n'
              'input b$\nprintln str$(bytelen(b$)) + " " + hex_encode$(b$)\n')
 
+    # HOW MANY UNITS PHOSPHOR ASKS FOR IN ONE READ: CONSOLE_READ_UNITS, read
+    # from host/console/phosphor.lpr itself rather than copied here, so the
+    # line lengths below sit on the boundary the host really has.
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'host',
+                       'console', 'phosphor.lpr')
+    try:
+        m = re.search(r'CONSOLE_READ_UNITS\s*=\s*(\d+)\s*;', open(src, encoding='utf-8').read())
+    except OSError:
+        m = None
+    if not m:
+        print('HARNESS  CONSOLE_READ_UNITS not found in %s' % src)
+        return 2
+    read = int(m.group(1))
+
     # HOW MUCH OF A TYPED LINE THIS CONSOLE KEEPS, asked of the console itself
-    # and not of phosphor. On Windows 11 it kept all 10000 units; on the GitHub
-    # Windows Server runner its line editor keeps 8190 and DISCARDS the rest of
-    # the line (2026-10-11, the first CI run of these cases: every long case
-    # answered 8190, then the next line whole). What phosphor must answer is
-    # what the console hands over: the first `cap` units of the line, as ONE
-    # line, then the next line -- never the line's tail as a second INPUT.
-    cap = case('console-cap', '', 'a' * 10000 + '\r', None, timeout=40, calibrate=True)
-    if cap is None:
-        sys.exit(2)
+    # and not of phosphor: cooked reads of 4096 units, as many as it takes, of
+    # a line longer than phosphor's read. Two consoles, measured 2026-10-11:
+    # Windows 11 keeps the whole line across as many reads as it takes; the
+    # GitHub Windows Server runner's legacy conhost keeps only what the FIRST
+    # read's buffer holds, less two units (its CR LF) -- 4096 answered 4094,
+    # and phosphor's then-8192-unit read 8190 -- and DISCARDS the rest. So an
+    # answer short of one 4096 read says the console truncates, by
+    # 4096 - answer units, and what it keeps of a line PHOSPHOR reads is its
+    # own first read less that; any other answer is the console's own cap.
+    # What phosphor must answer is what the console hands over: the first
+    # `cap` units of the line, as ONE line, then the next line -- never the
+    # line's tail as a second INPUT.
+    probe = 4096
+    longest = read + 1808
+    got = case('console-cap', '', 'a' * longest + '\r', None, timeout=120, calibrate=probe)
+    if got is None:
+        return 2
+    cap = read - (probe - got) if got < probe else got
 
     def line_want(typed_line):
         u = typed_line.encode('utf-16-le', 'surrogatepass')[:2 * cap]
@@ -217,25 +396,129 @@ def main():
         tail = b.decode('utf-8')[-3:].encode('utf-8')
         return '? %d %s\n? 1 7a\n' % (len(b), tail.hex())
 
-    if cap < 8192:
-        print('NOTE  this console keeps %d units of a typed line, fewer than one '
-              '8192-unit read: no line it hands over can span two reads, so the '
-              'cases below check that what it keeps is one line' % cap)
+    if cap < read:
+        print('NOTE  this console keeps %d units of a line phosphor reads (its 4096-unit '
+              'read kept %d), fewer than one %d-unit read: no line it hands over can '
+              'span two reads, so the cases below check that what it keeps is one '
+              'line' % (cap, got, read))
     # A line longer than one read is still ONE line; the next INPUT gets the
-    # next line. 10000 typed 'a' are 10000 bytes, where the console keeps them.
-    case('line-long', lines, 'a' * 10000 + '\rz\r', line_want('a' * 10000), timeout=40)
-    # A pair across the read boundary: 8191 'a' fill the buffer to its last
+    # next line. Typed 'a' are one byte each, where the console keeps them.
+    case('line-long', lines, 'a' * longest + '\rz\r', line_want('a' * longest), timeout=120)
+    # A pair across the read boundary: read-1 'a' fill the buffer to its last
     # unit, the high half lands there and the low half in the next read. The
-    # whole line is 8191 + 4 + 1 = 8196 bytes, ending a, U+1F600, b.
-    case('line-pair-cut', lines, 'a' * 8191 + emoji + 'b\rz\r',
-         line_want('a' * 8191 + emoji + 'b'), timeout=40)
+    # whole line is read - 1 + 4 + 1 bytes, ending a, U+1F600, b.
+    case('line-pair-cut', lines, 'a' * (read - 1) + emoji + 'b\rz\r',
+         line_want('a' * (read - 1) + emoji + 'b'), timeout=120)
     # A line that fills the buffer EXACTLY up to its CR: the LF is left for the
     # next read, and must not become an empty second line.
-    case('line-cr-at-end', lines, 'a' * 8191 + '\rz\r', line_want('a' * 8191), timeout=40)
+    case('line-cr-at-end', lines, 'a' * (read - 1) + '\rz\r', line_want('a' * (read - 1)),
+         timeout=120)
+    # A Ctrl+Z (1A) inside a long line ends the LINE's text, not the read: the
+    # line is 'ab', and the next INPUT the next line 'z' -- it was given the
+    # line's tail (811 'c' of 9000 behind an 8192-unit read) when the Ctrl+Z
+    # sat in the first full read. On a console that truncates, 'ab' still.
+    case('line-ctrlz-long', lines, 'ab\x1a' + 'c' * (read + 800) + '\rz\r',
+         '? 2 6162\n? 1 7a\n', timeout=120)
 
     if harness:
-        sys.exit(2)
-    sys.exit(1 if failed else 0)
+        return 2
+    return 1 if failed else 0
+
+
+# ---- Unix: the same model on a pty ---------------------------------------------
+def run_unix(exe, work):
+    import pty
+    import select
+    import signal
+
+    failed = 0
+
+    def case(name, program, bursts, want, timeout=20):
+        """bursts: (seconds to wait, bytes to write). The program's own answer
+        is its line starting '|', found in what the pty echoes back."""
+        nonlocal failed
+        bas = os.path.join(work, name + '.bas')
+        with open(bas, 'w', newline='\n', encoding='utf-8') as f:
+            f.write(program)
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                os.execv(exe, [exe, bas])
+            finally:
+                os._exit(127)
+        out = b''
+        start = time.monotonic()
+        plan = []
+        t = 0.0
+        for d, data in bursts:
+            t += d
+            plan.append((t, data))
+        while time.monotonic() - start < timeout:
+            now = time.monotonic() - start
+            while plan and plan[0][0] <= now:
+                os.write(fd, plan.pop(0)[1])
+            wait = (plan[0][0] - now) if plan else 0.2
+            r, _, _ = select.select([fd], [], [], max(0.0, min(wait, 0.2)))
+            if r:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    chunk = b''
+                if not chunk:
+                    break                 # the program has ended
+                out += chunk
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        m = re.search(rb'\|([^\r\n]*)', out)
+        got = m.group(1).decode('ascii', 'replace') if m else None
+        if got == want:
+            print('PASS  %s' % name)
+        else:
+            print('FAIL  %s: want %r, got %r (pty said %r)' % (name, want, got, out[-200:]))
+            failed += 1
+
+    gk_lines = ('crt_init()\nk$ = getkey$()\ninput a$\ninput b$\ncrt_done()\n'
+                'println "|" + hex_encode$(k$) + " " + hex_encode$(a$) + " " + hex_encode$(b$)\n')
+    # The Windows defect's shape, pinned here too: a line after a key function
+    # is the line (Linux answered it right; now the model says so on both).
+    case('getkey-then-input', gk_lines,
+         [(0.7, b'x'), (0.5, b'h'), (0.2, b'ello\r'), (0.2, b'world\r')],
+         '78 68656c6c6f 776f726c64')
+    mix = ('crt_init()\nk1$ = getkey$()\ninput a$\nk2$ = inkey$()\nc = 0\n'
+           'while k2$ = "" and c < 20\n  pause(0.1)\n  k2$ = inkey$()\n  c = c + 1\nwend\n'
+           'crt_done()\nprintln "|" + hex_encode$(k1$) + " " + hex_encode$(a$) + " [" + '
+           'hex_encode$(k2$) + "]"\n')
+    # A KEY TYPED IN THE SAME BURST AS THE LINE'S ENTER is the next key, not
+    # part of the line read: 'hello' CR 'q' in one write. It answered [] -- the
+    # line read's buffer took the q, and no key function reads that buffer.
+    case('input-then-inkey-burst', mix, [(0.7, b'x'), (0.5, b'hello\rq')],
+         '78 68656c6c6f [71]')
+    # And typed before INPUT even began, while getkey$ held the terminal raw.
+    case('input-then-inkey-typed-ahead', mix, [(0.7, b'xhello\rq')], '78 68656c6c6f [71]')
+    three = ('crt_init()\nk1$ = getkey$()\nk2$ = getkey$()\nk3$ = getkey$()\ncrt_done()\n'
+             'println "|" + hex_encode$(k1$) + " " + hex_encode$(k2$) + " " + hex_encode$(k3$)\n')
+    # WHAT IS NOT UTF-8 IS U+FFFD (EF BF BD), one per maximal ill-formed
+    # subpart, and the key after it is still its own: a Latin-1 e-acute E9
+    # before 'q' 'r'; a stray continuation 80 before a whole C3 A9; a four-byte
+    # lead F0 9F cut short, then 'q' 'r' half a second later. It answered the
+    # raw E9, 80 and F0 9F.
+    case('utf8-latin1-byte', three, [(0.7, b'\xe9qr')], 'efbfbd 71 72')
+    case('utf8-stray-continuation', three, [(0.7, b'\x80\xc3\xa9q')], 'efbfbd c3a9 71')
+    case('utf8-cut-short', three, [(0.7, b'\xf0\x9f'), (0.5, b'qr')], 'efbfbd 71 72')
+    case('utf8-whole', three, [(0.7, b'\xc3\xa9\xf0\x9f\x98\x80q')], 'c3a9 f09f9880 71')
+    return 1 if failed else 0
+
+
+def main():
+    exe = os.path.abspath(sys.argv[1])
+    work = tempfile.mkdtemp(prefix='phosphor-coninput-')
+    if os.name == 'nt':
+        sys.exit(run_windows(exe, work))
+    sys.exit(run_unix(exe, work))
 
 
 if __name__ == '__main__':

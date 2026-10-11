@@ -465,15 +465,91 @@ begin
   {$ENDIF}
 end;
 
+{$IFDEF WINDOWS}
+{ Two byte strings joined by copying. Concatenating two Strings can CONVERT
+  between their code-page tags, and a line's bytes are UTF-8 whatever either
+  piece happens to be tagged. }
+function JoinLineBytes(const A, B: String): String;
+begin
+  if A = '' then Exit(B);
+  if B = '' then Exit(A);
+  SetLength(Result, Length(A) + Length(B));
+  Move(A[1], Result[1], Length(A));
+  Move(B[1], Result[Length(A) + 1], Length(B));
+end;
+{$ENDIF}
+
+{$IFNDEF WINDOWS}
+{ A line from a TERMINAL, a byte at a time, stopping AT its LF. ReadLn reads
+  through a Text buffer, which takes every byte one read() hands over: with the
+  line discipline in canonical mode that is one line, but bytes already waiting
+  when a line read begins -- typed while a key function had the terminal in
+  raw mode -- are handed over together, and the ones after the Enter landed in
+  a buffer no key function ever reads (round 8, 2026-10-11: 'hello' Enter 'q'
+  in one burst, and inkey$ never saw the 'q'). One byte per read leaves
+  everything after the line where it was typed. False at end of input with
+  nothing read. }
+function ReadTerminalLine(out ALine: String): Boolean;
+var pre: String; c: Char; r, n: LongInt;
+begin
+  if CrtTakePendingLine(pre) then
+  begin
+    ALine := pre;
+    Exit(True);
+  end;
+  ALine := pre;
+  Result := ALine <> '';
+  while True do
+  begin
+    c := #0;
+    r := FileRead(StdInputHandle, c, 1);
+    if r < 0 then
+    begin
+      if fpgeterrno = ESysEINTR then Continue;
+      Break;
+    end;
+    if r = 0 then Break;              // end of input (Ctrl+D)
+    Result := True;
+    if c = #10 then
+    begin
+      n := Length(ALine);
+      if (n > 0) and (ALine[n] = #13) then SetLength(ALine, n - 1);
+      Exit(True);
+    end;
+    n := Length(ALine) + 1;
+    SetLength(ALine, n);
+    ALine[n] := c;
+  end;
+end;
+{$ENDIF}
+
+{$IFDEF WINDOWS}
+const
+  { HOW MUCH OF A LINE ONE ReadConsoleW ASKS FOR (round 8, 2026-10-11), and on
+    a legacy console it is how much of the line there IS. The GitHub Windows
+    Server runner's conhost keeps a typed line only up to the FIRST read's
+    buffer, less two units for its CR LF, and DISCARDS the rest: measured, a
+    4096-unit read kept 4094 units of 10000, and this host's 8192-unit read
+    8190 -- for every long line. Windows 11's console keeps the whole line
+    across as many reads as it takes. 32768 units is the console's own line
+    limit, so the first read asks for all a legacy console can keep; the rest
+    of the loop below is for a console that keeps more. The console test
+    (tests/console_input_test.py) reads this constant's value from this file. }
+  CONSOLE_READ_UNITS = 32768;
+{$ENDIF}
+
 function TConsoleHost.ReadLine(out ALine: String): Boolean;
 {$IFDEF WINDOWS}
 var
-  wbuf: array[0..8191] of WideChar;
+  wbuf: array of WideChar;
   numRead: DWORD;
   w: UnicodeString;
   z: Integer;
   hadEOF: Boolean;
+  pre: String;
 {$ENDIF}
+var
+  wasRaw: Boolean;
 begin
   ALine := '';
   {$IFDEF WINDOWS}
@@ -482,51 +558,83 @@ begin
   Follow(System.Input, FStdIn, FInIsConsole);
   if FInIsConsole then
   begin
-    w := '';
-    { ONE LINE IS AS MANY READS AS IT TAKES (round 7, 2026-10-11). A read that
-      FILLS the buffer without reaching the line's end has not read the line:
-      the console keeps the rest for the next ReadConsoleW. This took one read
-      for one line, so a typed line longer than 8191 units arrived as TWO
-      INPUT lines -- the second INPUT silently given the tail of the first --
-      and a surrogate pair cut at the boundary was converted half by half,
-      into two U+FFFD. Each read is appended as UTF-16, and the line is
-      converted once, whole, so a pair across two reads is still one
-      character. A read that stops short of the buffer is where the console
-      ended it (the CR LF, a Ctrl+Z, a raw-mode key), as it always was. }
-    repeat
-      numRead := 0;
-      if not ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil) then
+    { A LINE IS READ IN LINE MODE (round 8, 2026-10-11). After any getkey$,
+      inkey$ or keypressed() the console was left with line input off until
+      crt_done(), and a read in that state answers whatever keys are there:
+      'h', then 'ello' for the next INPUT, or two lines at once and an INPUT
+      that waited forever. CrtLineModeBegin gives the console back its own
+      mode for the read; raw mode resumes after it. }
+    wasRaw := CrtLineModeBegin();
+    try
+      if CrtTakePendingLine(pre) then
       begin
-        if w = '' then Exit(False);
-        Break;                        // keep what this line already read
+        ALine := pre;
+        Exit(True);
       end;
-      if numRead = 0 then
+      w := '';
+      SetLength(wbuf, CONSOLE_READ_UNITS);
+      { ONE LINE IS AS MANY READS AS IT TAKES (round 7, 2026-10-11). A read that
+        FILLS the buffer without reaching the line's end has not read the line:
+        the console keeps the rest for the next ReadConsoleW. This took one read
+        for one line, so a typed line longer than the buffer (then 8192) arrived as TWO
+        INPUT lines -- the second INPUT silently given the tail of the first --
+        and a surrogate pair cut at the boundary was converted half by half,
+        into two U+FFFD. Each read is appended as UTF-16, and the line is
+        converted once, whole, so a pair across two reads is still one
+        character. A read that stops short of the buffer is where the console
+        ended it: the CR LF. A Ctrl+Z inside the line is NOT where it ends
+        (round 8): the loop used to stop at one, and when it sat in the first
+        full read the rest of the line was left for the next INPUT. The line
+        is read through its LF, and the Ctrl+Z cuts it below. }
+      repeat
+        numRead := 0;
+        if not ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil) then
+        begin
+          if (w = '') and (pre = '') then Exit(False);
+          Break;                        // keep what this line already read
+        end;
+        if numRead = 0 then
+        begin
+          if (w = '') and (pre = '') then Exit(False);
+          Break;
+        end;
+        z := Length(w);
+        SetLength(w, z + Integer(numRead));
+        Move(wbuf[0], w[z + 1], numRead * SizeOf(WideChar));
+      until (numRead < DWORD(Length(wbuf))) or (w[Length(w)] = #10);
+      { A Ctrl+Z (#26) anywhere ends input; keep any text before it. }
+      hadEOF := False;
+      z := Pos(WideChar($1A), w);
+      if z > 0 then
       begin
-        if w = '' then Exit(False);   // Ctrl+Z at line start -> EOF
-        Break;
+        SetLength(w, z - 1);
+        hadEOF := True;
       end;
-      z := Length(w);
-      SetLength(w, z + Integer(numRead));
-      Move(wbuf[0], w[z + 1], numRead * SizeOf(WideChar));
-    until (numRead < DWORD(Length(wbuf))) or (w[Length(w)] = #10) or
-          (Pos(WideChar($1A), w) > 0);
-    { A Ctrl+Z (#26) anywhere ends input; keep any text before it. }
-    hadEOF := False;
-    z := Pos(WideChar($1A), w);
-    if z > 0 then
-    begin
-      SetLength(w, z - 1);
-      hadEOF := True;
+      while (Length(w) > 0) and ((w[Length(w)] = #10) or (w[Length(w)] = #13)) do
+        SetLength(w, Length(w) - 1);
+      // UTF-16 -> UTF-8; an unpaired surrogate is U+FFFD. After the keys the
+      // key functions had already taken, which were typed first.
+      ALine := JoinLineBytes(pre, WideToUtf8(w));
+      if hadEOF and (Length(ALine) = 0) then
+        Exit(False);
+      Exit(True);
+    finally
+      CrtLineModeEnd(wasRaw);
     end;
-    while (Length(w) > 0) and ((w[Length(w)] = #10) or (w[Length(w)] = #13)) do
-      SetLength(w, Length(w) - 1);
-    ALine := WideToUtf8(w);           // UTF-16 -> UTF-8; an unpaired surrogate is U+FFFD
-    if hadEOF and (Length(ALine) = 0) then
-      Exit(False);
-    Exit(True);
+  end;
+  {$ELSE}
+  { A terminal: in line mode, and no further than the line's own end. }
+  if IsATTY(StdInputHandle) = 1 then
+  begin
+    wasRaw := CrtLineModeBegin();
+    try
+      Exit(ReadTerminalLine(ALine));
+    finally
+      CrtLineModeEnd(wasRaw);
+    end;
   end;
   {$ENDIF}
-  { Redirected stdin or non-Windows: standard line read (raw bytes). }
+  { Redirected stdin: standard line read (raw bytes). }
   if EOF(Input) then
     Exit(False);
   ReadLn(ALine);

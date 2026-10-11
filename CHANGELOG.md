@@ -52,6 +52,59 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (adversarial round 9, 2026-10-11)
+
+- **A budget refusal is reported where it can be heard.** An autosaving
+  `cfg_set@` (and every autosaving setter or deleter) whose save the budget
+  refused reported success while the value never reached the file, and
+  `cfg_save` answered 0; `sqlite_row@`, `sqlite_fetchone@` and the last row of
+  `sqlite_fetchall@` handed back rows whose text columns had become `""`. All are
+  now the call's `peLimit`, and the refused change is put back. The classic
+  `chdir`/`mkdir`/`rmdir`/`forcedirectories`/`kill`/`fileexists` and
+  `strings_savetofile`/`strings_loadfromfile` raise the `peLimit` for a priced-out
+  path instead of answering 0 -- and a refused path is still only a refused
+  argument: the run goes on. Paths in the opt-in packages and SQL text are
+  priced; the directory doors at their measured price. `file_getsize` asks the
+  directory instead of opening the file, so a FIFO with no writer no longer
+  blocks past every limit. `strings_values` keeps a sorted list sorted; a NUL
+  quote character quotes nothing in `strings_delimitedtext$`.
+  `scripts/check-budget.py` gained a refusal gate that holds one contract: a
+  non-latching refusal is written into an error or the unit's own flag where it
+  is asked, a helper with neither latches, and every latching call is asked
+  about before its answer leaves.
+- **GUI: a move lands at once unless a walk may stand on it.** Round 8 deferred
+  every `control_parent@` inside any handler, so the program's view and the
+  LCL's disagreed until the handler returned: the only window, moved into a host
+  freed in the same handler, was hidden and `app_run` never ended; a form re-shown
+  in the handler that freed its host had no window; a deferred embed ended a tray
+  program's `app_run`. A move now waits only when the control or its parent is a
+  running handler's sender or an ancestor of one (every LCL walk that runs BASIC
+  reaches it through such an event -- the radio walks and `PaintControls`), and
+  while one waits every rule reads the parent the program asked for. Waiting
+  moves are bounded per control; freeing a windowed control no longer walks
+  every live handle (15 s for 2000 frees at 100k handles is now 15 ms).
+- **Keyboard and line input.** Unix `getkey$`/`inkey$` read one key per key: an
+  escape sequence ends at its ECMA-48 final byte, so keys queued while the
+  program was busy no longer merge; a key split across reads is waited for
+  (100 ms for an escape sequence, 500 ms for UTF-8) while `inkey$` and
+  `keypressed()` never wait. Keys typed ahead of `input` are edited and echoed on
+  Linux by the terminal's own rules, and on Windows a held key's unanswered
+  repeats are shown and erasable. Ctrl+C during a key function restores the
+  console or terminal mode. `temppath$`/`tempfilename$` are always a full path,
+  and an unusable TEMP/TMP is skipped exactly as if unset.
+- **Contact manager.** Before SQLite 3.39.0, asking a file's name reads it, so
+  the guard itself rolled back another program's hot journal: an older library
+  is not asked about an existing file, and the whole self-test passes under a
+  real 3.37.2. `file:` URIs, `:memory:`, empty and journal names, and names that
+  are not a file (a Windows link that leads nowhere) are refused at open and at
+  backup; a journal whose writer may be alive is not called a crash. A new block
+  AI of `scripts/test.{sh,ps1}` runs the self-test without a sandbox through real
+  symbolic links -- the sandboxed self-test could not fail with the Linux link
+  judging removed. 213 self-test checks.
+- The console-input harness runs each case in a `conhost.exe` named by path:
+  a bare new console became a Windows Terminal tab that stayed open after the
+  case, and two days of cases left 356 of them on the owner's desktop.
+
 ### Fixed (adversarial round 8, 2026-10-11)
 
 - **Budget: a charge answers only for the work beside it, a refusal changes

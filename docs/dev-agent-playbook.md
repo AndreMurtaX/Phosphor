@@ -1525,6 +1525,50 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-11 · round 9: 30 survivors, 7 HIGH, 1 killed -- the streak stays at
+  0.** Every HIGH was made by round 8's own fixes or reached through a door next
+  to one.
+  - **A refusal has two channels, and a caller must read the one it was sent
+    on.** cfg's autosave refused by return value and its caller asked only the
+    latch; sqlite_row@'s column copy refused by the latch and its caller never
+    asked. The first fix made every refusal latch and passed its own new gate --
+    and one old probe ("a refused write does not poison the next file_copy") said
+    it broke RULE 1. When you replace a contract, run the tests that pinned the
+    old one before trusting the new gate's green. The final contract has three
+    shapes, and a flag is not the latch: only a reader of that flag settles it.
+  - **A deferral splits the truth; decide which half every reader trusts.**
+    Round 8 deferred every move inside a handler, so "what the program asked"
+    and "what the LCL did" disagreed for the rest of it, and each reader picked
+    one without saying which. Reading the LCL showed exactly which moves a walk
+    can stand under; the rest land at once, and the ones that wait have one
+    named truth. Anything that must find "what this free affects" walks what the
+    free destroys, through an index -- never every live handle.
+  - **A parser of a stream is tested on what FOLLOWS the token.** The Unix key
+    reader's ESC branch took "whatever is already waiting", true only when
+    nothing else is queued; the probe pinned one arrow on an empty queue. Lifting
+    the reader's clock and byte source out let both OSes run it.
+  - **A check whose only runner skips it is not coverage.** The Linux symlink
+    judging could be deleted with the self-test still 205/205, because every
+    runner used `--sandbox`, which refuses links first. Block AI runs it with
+    real links and no sandbox. And "ask the library" is version-dependent: a
+    pragma read-only from SQLite 3.39.0 acted on the file before it.
+  - **A test can step around the defect it was written for.** The FIFO check
+    held the FIFO open before asking `file_getsize`, so the old blocking code
+    passed it; the real check asks with no writer, on a thread with a deadline.
+  - **Parallel fixers need their own scratch.** One overwrote another's
+    mutate.py in a shared folder, leaving a mutation applied to the other's
+    source; it was caught only by a diff against a backup.
+  - **Interrupted work is a hazard of its own.** A reboot stopped a fixer in the
+    middle of its mutations; its tree was saved as a WIP commit marked "may hold
+    a mutation, do not merge", and the resumer audited every hunk before going
+    on -- the WIP held no mutation, but four failures nobody had ever run.
+  - **The default terminal changes what "a new console" is.** On Windows 11 a
+    bare CREATE_NEW_CONSOLE becomes a Windows Terminal tab that outlives the
+    program: the console harness left 356 of them. Name conhost.exe.
+  - **CI noise is not a verdict.** `30_http_path_colon` failed once on the
+    Windows runner (an empty POST after 3 s) and passed on a rerun of the same
+    commit: a runner hiccup, recorded, not a defect.
+
 - **2026-10-11 · round 8: 29 survivors, 6 HIGH, 2 killed -- the streak stays at
   0.** Four investigators on what round 7 rewrote; for the first time the attack
   was also on guards that REFUSE legitimate work, and it found them.

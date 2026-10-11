@@ -61,6 +61,20 @@ unchecked checks itself; the form now hands its focus to the checked radio of
 that group, or to no radio when none is checked). The program reads back the
 last choice it — or the user — made.
 
+**"No radio checked" is a per-OS answer, and the widget set's.** Windows holds a
+group with nothing checked: `radio_checked@(r@, 0)` on the checked one leaves
+none, and that survives the form being shown again. A **Linux** (gtk2) group
+cannot have no checked member once its radios have windows: GTK refuses to make
+the group's only active radio inactive, so `radio_checked@(r@, 0)` on it leaves it
+checked and `radio_checked(r@)` answers `1` (the LCL itself notes that gtk does
+not allow a radio button to be unchecked), and a group whose windows are made
+with nothing checked comes up with its first radio checked. A program that needs
+"no choice" on every OS should not use the radios for it — add an explicit
+"none" radio, or use a radio group (`radiogroup_itemindex@(g@, 0)`), which the
+LCL makes hold "none" on gtk2 with a hidden radio of its own (radiogroup.inc,
+`FHiddenButton`). The library does not plant such a radio in a panel of yours: it
+would be one more control in that panel's list and tab chain.
+
 | check box | radio button | toggle box | what it answers |
 | --- | --- | --- | --- |
 | `checkbox@(parent@) → handle` | `radiobutton@(parent@) → handle` | `togglebox@(parent@) → handle` | a new control parented to `parent@`. Handle `0` when `parent@` is not a container that can hold children, with `gui_error()` set. The control arrives at the widget set's default position and size — give it bounds with `control_bounds@` |

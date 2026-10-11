@@ -887,8 +887,10 @@ function GuiTabOrder(AObj: TWinControl): Integer;
   window that is not there, gtk2 grouped the new radio with nothing, and two
   radios of one panel read checked (round 10; Linux after radio_checked@,
   both OSes after a move). Checked here, after the widgetset has had its say:
-  GuiRadioRealize first gives a radio whose parent has a window a window of
-  its own (so gtk2 groups it -- a gtk radio cannot be unchecked alone), and
+  GuiRadioRealize first gives the radio being CHECKED, when its parent has a
+  window, a window of its own (so gtk2 groups it -- a gtk radio cannot be
+  unchecked alone; never an unchecked one, which on gtk2 would be created
+  active when it starts a group of its own), and
   GuiRadioExclusive then unchecks every sibling still checked. A move of a
   checked radio is a check too: the one arriving wins, which is what each
   widgetset does once the window exists. Siblings are PHYSICAL ones -- the
@@ -1514,8 +1516,11 @@ begin
     // never raised into the program.
     on Exception do begin GGuiError := 1; Exit; end;
   end;
-  // A checked radio arriving is a check: it wins (see GuiRadioExclusive).
-  if (AChild is TRadioButton) and (AParent <> nil) then
+  { A checked radio arriving is a check: it wins (see GuiRadioExclusive).
+    Only a CHECKED one is given a window here: on gtk2 a radio whose window
+    starts a group of its own is created active, and an unchecked one would
+    then read checked (a gtk radio cannot be unchecked alone). }
+  if (AChild is TRadioButton) and (AParent <> nil) and TRadioButton(AChild).Checked then
   begin
     GuiRadioRealize(AChild);
     GuiRadioExclusive(AChild);

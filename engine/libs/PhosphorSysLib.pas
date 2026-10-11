@@ -154,15 +154,16 @@ end;
   'windows' unit, which the engine boundary keeps out. }
 function GetEnvironmentVariableW(lpName, lpBuffer: PWideChar; nSize: LongWord): LongWord;
   stdcall; external 'kernel32.dll' name 'GetEnvironmentVariableW';
-{ The OS's own temp directory, for when neither TEMP nor TMP is set: TMP, TEMP,
-  USERPROFILE, then the Windows directory, with a trailing backslash
-  (GetTempPathW's documentation). Same unit, same reason, as above. }
-function GetTempPathW(nBufferLength: LongWord; lpBuffer: PWideChar): LongWord;
-  stdcall; external 'kernel32.dll' name 'GetTempPathW';
 { The Windows directory, the last place HostTempDir looks. The answer is the
-  length written, without its NUL, or the size needed when it did not fit. }
+  length written, without its NUL, or the size needed when it did not fit.
+  Same unit, same reason, as above. }
 function GetWindowsDirectoryW(lpBuffer: PWideChar; uSize: LongWord): LongWord;
   stdcall; external 'kernel32.dll' name 'GetWindowsDirectoryW';
+{ A path made full the way Windows makes one -- against the working directory,
+  and for a drive-relative 'C:' or 'C:x' against that drive's own current
+  directory -- the call GetTempPathW makes on the value it picks. }
+function GetFullPathNameW(lpFileName: PWideChar; nBufferLength: LongWord; lpBuffer: PWideChar;
+  lpFilePart: Pointer): LongWord; stdcall; external 'kernel32.dll' name 'GetFullPathNameW';
 {$ENDIF}
 
 { Outside the Windows block, both of these: the interface declares them and
@@ -347,6 +348,23 @@ end;
   GetTempPathW answers (with neither set, the OS's own temp directory),
   USERPROFILE, then the Windows directory's Temp. Windows always names its own
   directory, so this never answers "" (only a host's OnGetTempDir can). }
+{ A FULL PATH, AND ONE RULE FOR WHAT IS SKIPPED (round 9, 2026-10-11). Each
+  value was used as it was written, so TEMP=foo answered foo\ -- a RELATIVE
+  name, the very thing round 8 had just removed by another door, resolved
+  against whatever directory the program was in when it used it -- TEMP=C:
+  answered C:\, the root of the drive, where Windows names that drive's
+  current directory, and TEMP=" " answered " \". GetTempPathW makes the value
+  it picks full (GetFullPathNameW), and so does this now: against the working
+  directory at the time of the call, as Windows does, and a value that no
+  full path can be made of (" ") is skipped like an unpaired surrogate. And
+  the order is now Windows' own, done here, with no call to GetTempPathW at
+  all -- that call re-read the variables just skipped, and ended at the
+  Windows directory where the fallback written here ended at its Temp
+  subdirectory, so with USERPROFILE unset an UNUSABLE TEMP answered
+  C:\Windows\Temp\ and an UNSET one C:\Windows\: "skipped as if unset" was
+  false. TEMP (first, as the RTL reads it), TMP, USERPROFILE, the Windows
+  directory -- each skipped by the same rule. Linux makes a relative TEMP,
+  TMP or TMPDIR full against the working directory too. }
 {$IFDEF WINDOWS}
 function UsableTempWide(const W: UnicodeString): Boolean;
 begin
@@ -358,11 +376,6 @@ end;
   that size reads it. '' when it fails. }
 type
   TWidePathFn = function(ABuf: PWideChar; ASize: LongWord): LongWord;
-
-function WindowsTempPath(ABuf: PWideChar; ASize: LongWord): LongWord;
-begin
-  Result := GetTempPathW(ASize, ABuf);
-end;
 
 function WindowsDirPath(ABuf: PWideChar; ASize: LongWord): LongWord;
 begin
@@ -383,6 +396,23 @@ begin
   end;
   if got > 0 then Result := Copy(buf, 1, got);
 end;
+
+{ W, if it can name a directory, made full as GetFullPathNameW makes it, with
+  a trailing backslash, in UTF-8. '' for a value that cannot: unset or empty,
+  holding an unpaired surrogate, or one no full path can be made of. The
+  buffer is the longest path Windows has (32767 units and its NUL). }
+function FullTempDir(const W: UnicodeString): String;
+var buf: UnicodeString; got: LongWord;
+begin
+  Result := '';
+  if not UsableTempWide(W) then Exit;
+  SetLength(buf, 32768);
+  got := GetFullPathNameW(PWideChar(W), 32768, PWideChar(buf), nil);
+  if (got = 0) or (got >= 32768) then Exit;
+  buf := Copy(buf, 1, got);
+  if not UsableTempWide(buf) then Exit;
+  Result := IncludeTrailingPathDelimiter(WideToUtf8(buf));
+end;
 {$ENDIF}
 
 function HostTempDir: String;
@@ -392,29 +422,23 @@ var w: UnicodeString;
 begin
   if SandboxActive then Exit(SandboxScratchPath);
   {$IFDEF WINDOWS}
-  if Assigned(OnGetTempDir) then Exit(GetTempDir(False));
-  Result := '';
-  if HostEnvWide('TEMP', w) and UsableTempWide(w) then
-    Result := WideToUtf8(w)
-  else if HostEnvWide('TMP', w) and UsableTempWide(w) then
-    Result := WideToUtf8(w)
-  else
+  if Assigned(OnGetTempDir) then
   begin
-    w := AskWidePath(@WindowsTempPath);
-    if UsableTempWide(w) then
-      Result := WideToUtf8(w)
-    else if HostEnvWide('USERPROFILE', w) and UsableTempWide(w) then
-      Result := WideToUtf8(w)
-    else
-    begin
-      w := AskWidePath(@WindowsDirPath);
-      if UsableTempWide(w) then
-        Result := IncludeTrailingPathDelimiter(WideToUtf8(w)) + 'Temp';
-    end;
+    // a host's own answer, made full by the same rule when it is not
+    Result := GetTempDir(False);
+    if (Result <> '') and Utf8ToWide(Result, w) then Result := FullTempDir(w);
+    Exit;
   end;
-  if Result <> '' then Result := IncludeTrailingPathDelimiter(Result);
+  Result := '';
+  if HostEnvWide('TEMP', w) then Result := FullTempDir(w);
+  if (Result = '') and HostEnvWide('TMP', w) then Result := FullTempDir(w);
+  if (Result = '') and HostEnvWide('USERPROFILE', w) then Result := FullTempDir(w);
+  if Result = '' then Result := FullTempDir(AskWidePath(@WindowsDirPath));
   {$ELSE}
+  // TEMP, TMP, TMPDIR, then /tmp/ -- the RTL's order -- and full
   Result := GetTempDir(False);
+  if (Result <> '') and (Result[1] <> '/') then
+    Result := IncludeTrailingPathDelimiter(ExpandFileName(Result));
   {$ENDIF}
 end;
 

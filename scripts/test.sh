@@ -1204,6 +1204,27 @@ ac2="$(printf '%s\n' "$acgot" | sed -n 2p)"
 if [ "$accode" -eq 0 ] && [ "$ac1" = "[]" ] && [ "$ac2" = "61efbfbd62efbfbd63" ]; then
   echo 'PASS  AC:environ$ answers U+FFFD for what is not a character'
 else echo "FAIL  AC:environ\$ of bytes that are not UTF-8: exit $accode, want [] and 61efbfbd62efbfbd63, got '$ac1' / '$ac2'"; fail=1; fi
+# ROUND 9 (2026-10-11): A RELATIVE VALUE IS MADE FULL. sys.md promises
+# tempfilename$ is "never a relative name", and TEMP=foo or TMPDIR=rel answered
+# foo/ and rel/TMP00000.tmp -- names in whatever directory the program was in
+# when it used them. The value is now made full against the working directory
+# at the call, as Windows' GetTempPathW makes its own. Expected: the run's
+# directory (pwd -P, as getcwd spells it) plus the value and a slash, written
+# out here; and tempfilename$ a name inside it.
+printf '%s\n' 't$ = temppath$()' 'f$ = tempfilename$()' 'println t$' 'ok = 0' \
+  'if len(f$) > len(t$) then' '  if left$(f$, len(t$)) = t$ then' '    ok = 1' '  end if' 'end if' \
+  'println str$(ok)' > "$tmpdir/acrel.bas"
+acdir="$(cd "$tmpdir" && pwd -P)"
+for acv in 'TEMP=foo' 'TMP=bar' 'TMPDIR=rel'; do
+  acwant="$acdir/${acv#*=}/"
+  if acgot="$(cd "$tmpdir" && env -u TEMP -u TMP -u TMPDIR "$acv" "$exe" "$tmpdir/acrel.bas" < /dev/null 2>&1)"; then accode=0; else accode=$?; fi
+  acgot="$(printf '%s' "$acgot" | tr -d '\r')"
+  ac1="$(printf '%s\n' "$acgot" | sed -n 1p)"
+  ac2="$(printf '%s\n' "$acgot" | sed -n 2p)"
+  if [ "$accode" -eq 0 ] && [ "$ac1" = "$acwant" ] && [ "$ac2" = "1" ]; then
+    echo "PASS  AC:$acv answers the full path $acwant, and tempfilename\$ a name in it"
+  else echo "FAIL  AC:$acv: exit $accode, want '$acwant' and 1, got '$ac1' / '$ac2'"; fail=1; fi
+done
 
 # --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
 # Until 2026-10-10 a program could be given no arguments: the console host
@@ -2133,6 +2154,11 @@ fi
 # the defects and the expected values; this is the same script the Windows
 # block AH runs, which answers the Windows half there. The python's exit code
 # is read on its own line, never through a pipe.
+# ROUND 9 (2026-10-11) added the Unix cases that were missing: keys queued
+# while the program was busy are one key each (an escape sequence took every
+# byte waiting), a key split across two reads is one key (nothing waited for
+# its rest), keys typed ahead of INPUT are edited and echoed (DEL landed in
+# the line as a byte), and Ctrl+C in getkey$ leaves ECHO and ICANON on.
 if python3 "$root/tests/console_input_test.py" "$exe" > "$tmpdir/ahkeys.out" 2>&1; then ahkcode=0; else ahkcode=$?; fi
 if [ "$ahkcode" -eq 0 ] && grep -c '^PASS' "$tmpdir/ahkeys.out" > /dev/null; then
   echo 'PASS  AH:on a terminal, a line after a key function is the line, and a key that is not UTF-8 is U+FFFD'

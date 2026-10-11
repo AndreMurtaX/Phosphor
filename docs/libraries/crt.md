@@ -39,7 +39,13 @@ keyboard directly — deliberately *not* through FPC's `crt` unit, which spins o
 non-interactive stdin — putting the terminal in raw/cbreak mode on first use, so
 keys arrive one at a time and unechoed, and restoring it at `crt_done()` (unit
 finalization is a backstop, so a forgotten `crt_done` still does not leave a
-person's terminal in raw mode). When stdin is **not** a terminal — a pipe, a
+person's terminal in raw mode). **Ctrl+C restores it too**: Ctrl+C is the
+ordinary way out of a key loop, and it ends the program as it always did — on
+Unix the process is still killed by `SIGINT` (also `SIGQUIT`, `SIGTERM` and
+`SIGHUP`, unless the program was started with one ignored), on Windows the
+exit status is still `C000013A` — but the terminal's echo and line editing are
+put back first. Until 2026-10-11 (round 9) they stayed off on both systems,
+under any parent that does not reset them itself. When stdin is **not** a terminal — a pipe, a
 redirect, the headless test harness — there is no keyboard at all, so `inkey$()`
 and `getkey$()` answer `""` and `keypressed()` answers `0` immediately, without
 blocking and without touching the terminal.
@@ -65,7 +71,24 @@ and Linux had been answering differently):
 - **An arrow, a function key or another key with no character** comes back as
   `chr$(0)` plus a code byte on Windows (its virtual-key code) and as the raw
   escape sequence on Unix; Escape pressed on its own is `chr$(27)` with nothing
-  after it.
+  after it. On Unix a sequence is what ECMA-48 says it is — `ESC [`, any
+  parameter and intermediate bytes, and **one** final byte (`40`–`7E`); or
+  `ESC O` and one byte; or the Linux console's `ESC [ [` and a letter — and
+  the bytes after it are the next key. `ESC` followed by anything else is
+  Escape on its own. So keys typed while the program is busy are still one key
+  each: three presses of Up queued behind a `pause` are three keys, and Esc, `q`,
+  `r` are three keys, as on Windows. (Until round 9 an escape took **every**
+  byte already waiting, and all of those were one key.) The one ambiguity is
+  the terminal's, not this library's: Escape typed and immediately followed by
+  `[` or `O` while the program is busy reads as the start of a sequence.
+- **A key is one key however its bytes arrive.** A terminal, an ssh link or a
+  pty may hand over an arrow's `ESC` and its `[A`, or the two halves of an `é`,
+  in two reads; the reader waits for the rest — **100 ms** after the last byte
+  of an unfinished escape sequence (vim's `ttimeoutlen`), **500 ms** after the
+  start of a UTF-8 character (the bound Windows gives the second half of a
+  surrogate pair). Escape pressed alone is therefore answered 100 ms after it
+  arrives. A character whose rest never comes is U+FFFD. (Until round 9 Unix
+  never waited: a split arrow was three keys, a split `é` two U+FFFD.)
 - **A modifier or lock key alone is not a key**: Shift, Ctrl, Alt, AltGr, the
   Windows keys, Caps Lock, Num Lock, Scroll Lock. A terminal sends nothing for
   them, and until round 8 Windows answered each press as `chr$(0)` plus its code
@@ -81,19 +104,35 @@ and Linux had been answering differently):
 `keypressed()` answers `1`, `inkey$()` answers a key. (Until round 8 Windows'
 `keypressed()` looked only at the first 32 console events, and answered `0`
 forever behind 32 that were not keys — mouse moves, focus changes — while
-`inkey$()` read the key at once.)
+`inkey$()` read the key at once.) A key whose first part has arrived and whose
+rest may still be coming is **not a key yet**: `inkey$()` answers `""` and
+`keypressed()` `0`, without waiting, until it is whole or its wait above has
+run out — so a polling loop sees Escape alone 100 ms after it was pressed, and
+a lone surrogate half on Windows 500 ms after a reader first saw it. (Until
+round 9 Windows' `inkey$` *waited* those 500 ms, inside a call documented never
+to block.)
 
 **`input` reads a line, even in raw mode.** A key function leaves the terminal
 in raw mode until `crt_done()`, but `input` puts it back in line mode for the
 line — echo, line editing, the line ending at Enter — and returns it to raw mode
 afterwards, so a menu key read with `getkey$` and then a name read with `input`
 works without `crt_done()` between them. The line is read no further than its
-Enter: a key typed straight after it is the next key function's. Keys a key
-function had already taken but not answered (the remaining repeats of a held
-key) were typed first, and begin the line. (Until round 8, on Windows `input`
-after any key function — a single `keypressed()` was enough — answered
-whatever keys had arrived, `h` and then `ello` for the next `input`; on Linux
-it took the keys typed after the Enter, where no key function could see them.)
+Enter: a key typed straight after it is the next key function's. **Keys typed
+ahead belong to the line, and are shown and edited like the rest of it**:
+what the key functions had taken but not answered — on Windows the remaining
+repeats of a held key, on Unix every key typed while the terminal was raw — was
+typed first, so it begins the line; it appears after the prompt, and
+Backspace, Ctrl+U and the rest reach back into it. What the screen shows is
+what `input` answers. On Unix those keys are edited by the terminal's own
+settings (`stty`: erase, kill, word erase, end of file, literal next, the echo
+flags) the way its line discipline would have edited them; Linux's own does
+not re-read keys that arrived raw, and until round 9 handed them over as raw
+bytes — a DEL inside the line, nothing on the screen. On Windows they were
+joined to the line after the console's read, invisible and out of reach of
+Backspace. (Until round 8, on Windows `input` after any key function — a
+single `keypressed()` was enough — answered whatever keys had arrived, `h` and
+then `ello` for the next `input`; on Linux it took the keys typed after the
+Enter, where no key function could see them.)
 
 ## Functions
 
@@ -143,7 +182,7 @@ often ignored, so do not use them to carry meaning on their own.
 
 | function | what it answers |
 | --- | --- |
-| `inkey$() → str` | the key that is waiting, or `""` when none is — it never blocks. `""` also means "there is no keyboard" (piped or redirected stdin), and the two cases are indistinguishable, so a polling loop needs an end condition of its own |
+| `inkey$() → str` | the key that is waiting, or `""` when none is — it never blocks, and a key only partly arrived is not one yet (see *What a key is*). `""` also means "there is no keyboard" (piped or redirected stdin), and the two cases are indistinguishable, so a polling loop needs an end condition of its own |
 | `getkey$() → str` | block until a key is pressed and answer it. It answers `""` **only** when there is nothing to wait for — no terminal, or the input ended — so an empty result means *stop*, never *try again*; a loop that retries on `""` spins forever under a pipe |
 | `keypressed() → num` | `1` when a key is waiting, `0` when none is. `0` with no keyboard, again without blocking |
 
@@ -206,8 +245,12 @@ Two things worth noticing:
   implementation rather than growing a second one that drifts.
 - The keyboard decision — where one key ends, given the bytes a terminal hands
   over — is lifted out of the terminal I/O so it can be tested with no console
-  present: `CrtAssembleKey` on Unix, `CrtEventKey`, `CrtKeyFromEvent` and
-  `CrtKeyFromPair` on Windows, exercised by `tests/probe_crt.lpr`. The I/O half
+  present: `CrtEventKey`, `CrtKeyFromEvent` and `CrtKeyFromPair` on Windows;
+  for Unix, `CrtAssembleKey` (where a key ends), `CrtReaderKey` (when the rest
+  of one is waited for, with the terminal and the clock as parameters) and
+  `CrtEditLine` (how a typed-ahead line is edited and shown). The Unix three are
+  compiled on every system, so `tests/probe_crt.lpr` runs them on both — with a
+  scripted terminal and its own clock, so a 500 ms wait costs nothing. The I/O half
   — keys and lines typed into a real Windows console, and onto a Unix pty — is
   `tests/console_input_test.py`, run by block AH of `scripts/test.ps1` and
   `scripts/test.sh`.

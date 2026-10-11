@@ -436,6 +436,152 @@ function out_then_free_both(s@)
   return 0
 end function
 
+rem --- round 10: the waiting moves land as they were asked -----------
+test_case("land/a control moved again after another was moved under it")
+rem gui-control.md, control_parent@: each move is judged against what
+rem the program asked before it. The button is in B, so every move
+rem below waits (B's list, and B's own place in main's, may be under a
+rem walk). A to main; then B into A -- no cycle, A is in main by then;
+rem then A to main AGAIN. Expected, from those asks: B ends inside A
+rem and A in main, nothing is refused, so A into B is then a cycle.
+rem Round 9 re-queued A behind B and landed them one at a time against
+rem the tree as it stood: B's landing found A still inside B, refused
+rem it (gui_error 1 at the next call), left B in main, and A into B was
+rem then accepted.
+lb@ = panel@(main@)
+la@ = panel@(lb@)
+lbtn@ = button@(lb@)
+button_onclick@(lbtn@, "on_reorder_asks")
+asked_err = -1
+button_click@(lbtn@)
+assert_eq(asked_err, 0, "none of the three asks was refused")
+gui_clearerror()
+w = control_width(main@)
+assert_eq(gui_error(), 0, "nothing was refused when they landed")
+gui_clearerror()
+control_parent@(la@, lb@)
+assert_eq(gui_error(), 1, "B is inside A, so A into B is a cycle")
+
+function on_reorder_asks(s@)
+  gui_clearerror()
+  control_parent@(la@, main@)
+  control_parent@(lb@, la@)
+  control_parent@(la@, main@)
+  asked_err = gui_error()
+  return 0
+end function
+
+test_case("tab/a waiting move to the control's own parent reads the position set")
+rem gui-control.md, control_taborder: while a move waits, the position
+rem read is where the control will be. The button is in s1, so the
+rem move of g3 into s1 -- where it already is -- waits; the landing
+rem moves nothing and applies the 0 (TWinControl.UpdateTabOrder), so
+rem s1's chain g1 g2 g3 sb becomes g3 g1 g2 sb. Round 9 answered g3's
+rem old position, 2.
+s1@ = panel@(main@)
+g1@ = edit@(s1@)
+g2@ = edit@(s1@)
+g3@ = edit@(s1@)
+sb@ = button@(s1@)
+button_onclick@(sb@, "on_same_parent")
+tab_g3 = -1
+tab_g1 = -1
+button_click@(sb@)
+assert_eq(tab_g3, 0, "g3 read inside the handler")
+assert_eq(tab_g1, 1, "and g1, which it went ahead of")
+assert_eq(control_taborder(g3@), 0, "g3 after the move landed")
+assert_eq(control_taborder(g1@), 1, "g1 after it")
+
+function on_same_parent(s@)
+  control_parent@(g3@, s1@)
+  control_taborder@(g3@, 0)
+  tab_g3 = control_taborder(g3@)
+  tab_g1 = control_taborder(g1@)
+  return 0
+end function
+
+test_case("tab/a waiting move away and back reads the position set")
+rem h2 is asked into s3 and then back into s2: the latest asked is
+rem where it already is (control_parent@, each parent once, the latest
+rem last), so nothing moves and the 0 set is applied there -- s2's
+rem chain h1 h2 sb2 becomes h2 h1 sb2. Round 9 answered 1.
+s2@ = panel@(main@)
+s3@ = panel@(main@)
+h1@ = edit@(s2@)
+h2@ = edit@(s2@)
+sb2@ = button@(s2@)
+button_onclick@(sb2@, "on_away_back")
+tab_h2 = -1
+button_click@(sb2@)
+assert_eq(tab_h2, 0, "h2 read inside the handler")
+assert_eq(control_taborder(h2@), 0, "and after the move landed")
+assert_eq(control_taborder(h1@), 1, "h1 after it")
+
+function on_away_back(s@)
+  control_parent@(h2@, s3@)
+  control_parent@(h2@, s2@)
+  control_taborder@(h2@, 0)
+  tab_h2 = control_taborder(h2@)
+  return 0
+end function
+
+test_case("tab/two controls waiting for one parent read one after the other")
+rem tq holds one edit; te1 then te2 are asked into it from tp, whose
+rem button is clicked, so both wait. TWinControl.Insert appends each to
+rem tq's chain as it arrives: tqa 0, te1 1, te2 2. And tp's button,
+rem which moves nowhere, is left alone in tp's chain: 0. Round 9 read
+rem the same end for both arrivals (1 and 1) and the button's old 2.
+tq@ = panel@(main@)
+tqa@ = edit@(tq@)
+tp@ = panel@(main@)
+te1@ = edit@(tp@)
+te2@ = edit@(tp@)
+tpb@ = button@(tp@)
+button_onclick@(tpb@, "on_two_arrive")
+tab_e1 = -1
+tab_e2 = -1
+tab_b = -1
+button_click@(tpb@)
+assert_eq(tab_e1, 1, "te1 read inside the handler")
+assert_eq(tab_e2, 2, "te2 read inside the handler")
+assert_eq(tab_b, 0, "the button left behind, read inside the handler")
+assert_eq(control_taborder(tqa@), 0, "tqa after the moves landed")
+assert_eq(control_taborder(te1@), 1, "te1 after them")
+assert_eq(control_taborder(te2@), 2, "te2 after them")
+assert_eq(control_taborder(tpb@), 0, "the button after them")
+
+function on_two_arrive(s@)
+  control_parent@(te1@, tq@)
+  control_parent@(te2@, tq@)
+  tab_e1 = control_taborder(te1@)
+  tab_e2 = control_taborder(te2@)
+  tab_b = control_taborder(tpb@)
+  return 0
+end function
+
+test_case("tab/a control that stays shifts when one arrives ahead of it")
+rem ua holds ux; uy is asked into ua and made first: ua's chain ux
+rem becomes ux uy (appended) and then uy ux (placed at 0), so ux, which
+rem moves nowhere, reads 1 -- inside the handler and after the landing.
+ua@ = panel@(main@)
+ux@ = edit@(ua@)
+ub@ = panel@(main@)
+uy@ = edit@(ub@)
+ubb@ = button@(ub@)
+button_onclick@(ubb@, "on_ahead")
+tab_ux = -1
+button_click@(ubb@)
+assert_eq(tab_ux, 1, "ux read inside the handler")
+assert_eq(control_taborder(ux@), 1, "ux after the move landed")
+assert_eq(control_taborder(uy@), 0, "uy after it")
+
+function on_ahead(s@)
+  control_parent@(uy@, ua@)
+  control_taborder@(uy@, 0)
+  tab_ux = control_taborder(ux@)
+  return 0
+end function
+
 test_case("orphan/a form held by a panel its freed host owns, placed elsewhere")
 rem A control dies with its OWNER, not with the window it sits in: hp6@
 rem was made in host6@ and moved into main. Freeing host6@ frees hp6@, and

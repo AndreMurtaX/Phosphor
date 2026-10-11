@@ -35,3 +35,4 @@
 31_modal_form
 32_parent_walk
 33_move_view
+34_radio_choice

@@ -119,8 +119,26 @@ function f_rb_caption_set(const A: array of TValue; out E: TPhosphorError): TVal
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TRadioButton, c) then TRadioButton(c).Caption := A[1].Str; Result := A[0]; end;
 function f_rb_caption_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TRadioButton, c) then Result := ValStr(TRadioButton(c).Caption) else Result := ValStr(''); end;
+{ CHECKING A RADIO UNCHECKS ITS SIBLINGS, WHOEVER HOLDS A WINDOW (round 10).
+  The LCL leaves that to two walks that each cover half -- see
+  GuiRadioExclusive -- and on a form shown and then hidden, a radio made or
+  moved there read checked beside a checked sibling. The library decides:
+  the radio is given a window where its parent has one (so a gtk2 group
+  holds it), checked, and then every sibling still checked is unchecked. }
 function f_rb_checked_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TRadioButton, c) then TRadioButton(c).Checked := ArgOn(A[1]); Result := A[0]; end;
+var c: TComponent;
+begin
+  E := NoError; Result := A[0];
+  if not GuiResolve(A[0].Hnd, TRadioButton, c) then Exit;
+  if ArgOn(A[1]) then
+  begin
+    GuiRadioRealize(TRadioButton(c));
+    TRadioButton(c).Checked := True;
+    GuiRadioExclusive(TRadioButton(c));
+  end
+  else
+    TRadioButton(c).Checked := False;
+end;
 function f_rb_checked_get(const A: array of TValue; out E: TPhosphorError): TValue;
 var c: TComponent; begin E := NoError; if GuiResolve(A[0].Hnd, TRadioButton, c) then Result := ValInt(Ord(TRadioButton(c).Checked)) else Result := ValInt(0); end;
 function f_rb_onchange(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;

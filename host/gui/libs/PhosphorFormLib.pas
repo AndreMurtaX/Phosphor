@@ -70,6 +70,9 @@ var
 
 implementation
 
+uses
+  LCLType, LMessages, StdCtrls;   // the activation guard (TPhosphorForm)
+
 var
   { The forms in a hook-run modal session: what fsModal says for a real one. }
   GHookModal: array of TCustomForm;
@@ -174,12 +177,78 @@ begin
   AForm.OnClose := Result.Handler;
 end;
 
+type
+  { THE FOCUS A FORM GIVES BACK MUST NOT CHOOSE AN UNCHECKED RADIO (round 10).
+
+    A form that gets the focus -- shown, shown modally, shown again, or
+    brought back from another window -- hands it to the control it remembers
+    (TCustomForm.WndProc on LM_SETFOCUS, and SetActive on LM_ACTIVATE). On
+    win32 a radio button that gets the focus while unchecked CHECKS ITSELF:
+    the button sends BN_CLICKED on focus, and the LCL's BM_SETDONTCLICK, meant
+    to stop that, only works with the themed common controls. So a dialog
+    whose program checked d2 while it was hidden came back with d1 checked
+    again -- d1 had the focus when it was hidden -- and the program read back
+    a choice nobody made, on Windows only (round 10; Linux kept d2). Measured
+    by logging the form's messages: the form gets LM_SETFOCUS, hands it to d1,
+    d1's change fires, and only then does LM_ACTIVATE arrive; a form whose
+    focus was on a button kept the program's choice.
+
+    So before the form hands its focus on, a remembered focus on an unchecked
+    radio moves to the checked radio of its group, or, when none is checked,
+    to nothing -- the LCL then picks a TabStop control, and an unchecked radio
+    is not one (TRadioButton.DoClickOnChange keeps TabStop = Checked). Both
+    messages every activation goes through are guarded here, not each door
+    that shows a form; and every form@ is one of these, from birth. }
+  TPhosphorForm = class(TForm)
+  private
+    procedure GuardRadioFocus;
+  protected
+    procedure WndProc(var TheMessage: TLMessage); override;
+  end;
+
+procedure TPhosphorForm.GuardRadioFocus;
+var
+  a, p, pick: TWinControl;
+  i: Integer;
+begin
+  a := ActiveControl;
+  if not (a is TRadioButton) or TRadioButton(a).Checked then Exit;
+  pick := nil;
+  p := a.Parent;
+  if p <> nil then
+    for i := 0 to p.ControlCount - 1 do
+      if (p.Controls[i] is TRadioButton) and TRadioButton(p.Controls[i]).Checked then
+      begin
+        pick := TRadioButton(p.Controls[i]);
+        Break;
+      end;
+  try
+    if (pick <> nil) and not pick.CanFocus then pick := nil;
+    ActiveControl := pick;
+  except
+    on Exception do
+      try
+        ActiveControl := nil;
+      except
+        on Exception do ;   // the LCL refused both: the focus goes on as it was
+      end;
+  end;
+end;
+
+procedure TPhosphorForm.WndProc(var TheMessage: TLMessage);
+begin
+  if (TheMessage.Msg = LM_SETFOCUS) or
+     ((TheMessage.Msg = LM_ACTIVATE) and (LoWord(TheMessage.WParam) <> WA_INACTIVE)) then
+    GuardRadioFocus;
+  inherited WndProc(TheMessage);
+end;
+
 function f_form(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var
   frm: TForm;
 begin
   Err := NoError;
-  frm := TForm.CreateNew(nil);
+  frm := TPhosphorForm.CreateNew(nil);
   if Length(Args) >= 1 then frm.Caption := Args[0].Str;
   // A form is a TControl too, so form@(caption$, w, h) is held to the same
   // ceiling as control_width@ -- see GuiMaxExtent. Refused, the window keeps the

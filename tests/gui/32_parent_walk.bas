@@ -21,9 +21,27 @@ rem
 rem The doors into the walked list, each crossed here: a MOVE out of it
 rem (the defect), a FREE (deferred since round 7), a control MADE under
 rem it (TWinControl.Insert appends at ControlCount, past the bound the
-rem loop already read), and a REORDER (control_bringtofront@ keeps the
-rem count). Expected for each, from the loop above: nothing is raised,
-rem and the walk unchecks r2.
+rem loop already read), and a REORDER (control_sendtoback@ keeps the
+rem count, so it lands at once). Expected for each, from the loop above:
+rem nothing is raised, and the walk unchecks r2.
+rem
+rem THE REORDER MUST REORDER (round 10). This case used to bring r3 to
+rem the front, and r3 was already last: TWinControl.SetChildZPosition
+rem clamps the new place to Count-1, which was r3's own, and moved
+rem nothing -- every assertion held with the handler doing nothing. It
+rem now sends r3 to the BACK, ahead of the r1 the walk started from,
+rem and asks the order back (zbefore, below). And a reorder asked while
+rem a move of the control waits applies to the parent it is going to,
+rem once it gets there (gui-control.md, control_sendtoback@): crossed by
+rem "moveback", which moves r3 out under the walk and sends it to the
+rem back of the OTHER panel. Applied at once instead, it would reorder
+rem the walked list and leave r3 at the front of the other panel.
+rem
+rem THE ORDER OF A PARENT'S LIST IS READ BACK THROUGH A WALK TOO. With
+rem w checked and its onchange checking x, checking c walks the list:
+rem met before w, x is still unchecked and the handler checks it after;
+rem met after w, the handler checks it first and the walk then unchecks
+rem it. So x ends checked exactly when x comes before w.
 rem
 rem WHERE A CONTROL LIVES IS READ BACK THROUGH THE SAME WALK. There is
 rem no parent getter, but sibling radios uncheck each other and radios
@@ -63,6 +81,23 @@ function sibling(a@, b@)
   return 0
 end function
 
+function zbefore(x@, w@, c@)
+  rem 1 when x@ comes before w@ in their parent's list (see above);
+  rem x@, w@ and c@ are sibling radios.
+  zx@ = x@
+  radio_checked@(x@, 0)
+  radio_checked@(w@, 1)
+  radio_onchange@(w@, "z_watch")
+  radio_checked@(c@, 1)
+  radio_onchange@(w@, "")
+  return radio_checked(x@)
+end function
+
+function z_watch(s@)
+  radio_checked@(zx@, 1)
+  return 0
+end function
+
 rem --- the walk, crossed with each door ----------------------------
 function walk_case(m$) local rp@, other@, r1@, r2@, r3@, label$
   mode$ = m$
@@ -74,6 +109,8 @@ function walk_case(m$) local rp@, other@, r1@, r2@, r3@, label$
   r1@ = radiobutton@(rp@)
   r2@ = radiobutton@(rp@)
   r3@ = radiobutton@(rp@)
+  o1@ = radiobutton@(other@)
+  o2@ = radiobutton@(other@)
   wr3@ = r3@
   wother@ = other@
   wrp@ = rp@
@@ -95,9 +132,14 @@ function walk_case(m$) local rp@, other@, r1@, r2@, r3@, label$
   if m$ = "make" then
     assert_eq(sibling(r1@, newr@), 1, label$ + ": the radio made under the walk is r1's sibling")
   end if
-  if m$ = "front" then
+  if m$ = "back" then
     assert_eq(radio_checked(r3@), 0, label$ + ": r3 was never checked")
-    assert_eq(sibling(r1@, r3@), 1, label$ + ": and r3 is still r1's sibling")
+    assert_eq(zbefore(r3@, r2@, r1@), 1, label$ + ": r3 went to the back of the walked list at once")
+    assert_eq(sibling(r1@, r3@), 1, label$ + ": and is still r1's sibling")
+  end if
+  if m$ = "moveback" then
+    assert_eq(sibling(r1@, r3@), 0, label$ + ": r3 landed in the other panel")
+    assert_eq(zbefore(r3@, o2@, o1@), 1, label$ + ": at the back of it, as asked")
   end if
   if m$ = "free" then
     gui_clearerror()
@@ -116,8 +158,12 @@ function on_r2(s@)
   if mode$ = "make" then
     newr@ = radiobutton@(wrp@)
   end if
-  if mode$ = "front" then
-    control_bringtofront@(wr3@)
+  if mode$ = "back" then
+    control_sendtoback@(wr3@)
+  end if
+  if mode$ = "moveback" then
+    control_parent@(wr3@, wother@)
+    control_sendtoback@(wr3@)
   end if
   if mode$ = "free" then
     x = control_free(wr3@)
@@ -130,8 +176,10 @@ test_case("walk/a sibling moved out of the panel under the walk")
 walk_case("move")
 test_case("walk/a sibling made under the walk")
 walk_case("make")
-test_case("walk/a sibling brought to the front under the walk")
-walk_case("front")
+test_case("walk/a sibling sent to the back under the walk")
+walk_case("back")
+test_case("walk/a sibling moved out and sent to the back under the walk")
+walk_case("moveback")
 test_case("walk/a sibling freed under the walk")
 walk_case("free")
 

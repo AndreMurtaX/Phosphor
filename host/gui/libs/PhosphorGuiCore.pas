@@ -815,6 +815,22 @@ procedure GuiReleaseOrphanedForms(AObj: TObject);
   messages as soon as nothing running under the session blocks it. A move that
   waited lands after moves of other controls asked later that did not.
 
+  WAITING MOVES LAND AS ONE STEP (round 10). Each control's waiting moves
+  land at its latest place in the queue, and every one of them was judged a
+  cycle against the program's view when it was asked. Landed one by one
+  against the tree as it physically stands, a legitimate sequence was refused
+  at landing: A to main, then B into A, then A to main AGAIN re-queued A
+  behind B, B's landing found A still physically inside B, and B stayed where
+  it was with gui_error 1 on an unrelated later call. So a move that would
+  place a control inside itself only because another waiting move has not
+  landed yet waits for that one, within the same landing; only a move still a
+  cycle once nothing else can land (a parent freed meanwhile let an earlier
+  ask count again) is refused, the latest asked first. And the tab chains
+  come out as the program was told (GuiTabOrder): each parent's chain is
+  computed BEFORE anything moves, in queue order (each control at its latest
+  ask), and imposed after -- so the order the moves physically landed in
+  cannot show.
+
   THE PROGRAM'S VIEW IS THE TRUTH. While a move waits, every reader in this
   package answers with the parent asked for (GuiEffectiveParent): the
   last-window question (GuiIsShownWindow), the forms a free leaves without a
@@ -828,6 +844,8 @@ procedure GuiReleaseOrphanedForms(AObj: TObject);
   moves two controls back and forth holds two entries, not one per pass; the
   landing queue is compacted as it grows; and a move costs a walk up each
   running sender's chain plus the cycle check, never a scan of what waits.
+  (Reading a tab order while moves wait does scan them, once per read: the
+  answer is where the control lands, and that depends on every one.)
 
   The caller has resolved both handles and refused a cycle (GuiWouldCycle,
   pending moves counted) and a modal form; both are asked again when a waiting
@@ -847,6 +865,38 @@ function GuiMovePending(AObj: TObject): TGuiHandle;
   lands into. }
 function GuiWouldCycle(AChild: TObject; AParent: TWinControl;
   APending: Boolean): Boolean;
+{ THE TAB ORDER IN THE PROGRAM'S VIEW (round 10). With nothing waiting, the
+  LCL's own (TWinControl.GetTabOrder: the index in the parent's FTabList).
+  With moves waiting, where AObj will be once they land: the chain of the
+  parent it was asked into, replayed through every waiting move in the order
+  they land -- a control leaving that parent drops out, one arriving is
+  appended (TWinControl.Insert), a position set while waiting is applied as
+  UpdateTabOrder applies it -- and LandMoves imposes that same chain. Round 9
+  answered the OLD position when the move went back to the control's own
+  parent, and the same "end of chain" for two controls arriving in one. A
+  control asked to the top level answers its own (an unparented control's
+  TabOrder is only remembered). }
+function GuiTabOrder(AObj: TWinControl): Integer;
+
+{ RADIO EXCLUSIVITY IS THE LIBRARY'S (round 10). Siblings in one parent are
+  exclusive -- TRadioButton.ApplyChanges unchecks each one when the radios
+  have no window, ClearSiblingRadioButtons does on win32 and the radio's group
+  on gtk2 when they have -- but each of those walks covers only its own half.
+  On a form that was shown and then hidden, a radio made in it, or moved into
+  it, has no window while its siblings have one: win32 sent the uncheck to a
+  window that is not there, gtk2 grouped the new radio with nothing, and two
+  radios of one panel read checked (round 10; Linux after radio_checked@,
+  both OSes after a move). Checked here, after the widgetset has had its say:
+  GuiRadioRealize first gives the radio being CHECKED, when its parent has a
+  window, a window of its own (so gtk2 groups it -- a gtk radio cannot be
+  unchecked alone; never an unchecked one, which on gtk2 would be created
+  active when it starts a group of its own), and
+  GuiRadioExclusive then unchecks every sibling still checked. A move of a
+  checked radio is a check too: the one arriving wins, which is what each
+  widgetset does once the window exists. Siblings are PHYSICAL ones -- the
+  LCL's own walk, which nothing here can stop, is too. }
+procedure GuiRadioRealize(R: TControl);
+procedure GuiRadioExclusive(R: TControl);
 
 { A MODAL SESSION'S OWN FREES (round 5, 2026-10-10). GuiFlushFrees runs only at
   dispatch depth 0, and a modal opened from a handler never returns there until
@@ -901,7 +951,8 @@ implementation
 
 uses
   ComCtrls,   // TTreeNode / TListItem: what a non-component handle can wrap
-  Menus;      // TMenuItem: a menu item dies with the item above it, not its owner
+  Menus,      // TMenuItem: a menu item dies with the item above it, not its owner
+  StdCtrls;   // TRadioButton: sibling exclusivity (GuiRadioExclusive)
 
 // --- the object -> handle index (see TGuiRef.Id) ----------------------------
 { ONE HANDLE PER OBJECT, FOUND BY THE OBJECT (round 9). Every GuiRegister is a
@@ -1408,6 +1459,54 @@ end;
 { The move itself, at a moment no walk can stand on the list it leaves. It asks
   app_run nothing: a window that stops being one asked when the move was asked
   (GuiMoveControl), which is when the program's view changed. }
+procedure GuiRadioRealize(R: TControl);
+begin
+  if not (R is TRadioButton) then Exit;
+  if (R.Parent = nil) or not R.Parent.HandleAllocated then Exit;
+  if TWinControl(R).HandleAllocated then Exit;
+  { Only where the parent has a window already: that is a place a window can
+    be made without realizing anything new (an unshown form's tree has none,
+    and the LCL's own handle-less walk covers it). }
+  try
+    TWinControl(R).HandleNeeded;
+  except
+    on Exception do ;   // no window: the walk below still covers the state
+  end;
+end;
+
+procedure GuiRadioExclusive(R: TControl);
+var
+  p: TWinControl;
+  sibs: array of TRadioButton;
+  i, n: Integer;
+begin
+  if not (R is TRadioButton) then Exit;
+  p := R.Parent;
+  if (p = nil) or not TRadioButton(R).Checked then Exit;
+  { A snapshot: unchecking a sibling runs its onchange, which may make,
+    move or free controls of p (a move out of p waits and a free is
+    deferred while it runs -- see GuiMoveControl -- but a control made is
+    appended). Each is asked again before it is touched. }
+  n := 0;
+  SetLength(sibs, p.ControlCount);
+  for i := 0 to p.ControlCount - 1 do
+    if (p.Controls[i] is TRadioButton) and (p.Controls[i] <> R) then
+    begin
+      sibs[n] := TRadioButton(p.Controls[i]);
+      Inc(n);
+    end;
+  for i := 0 to n - 1 do
+  begin
+    if not TRadioButton(R).Checked then Exit;   // a handler chose another
+    if (sibs[i].Parent = p) and sibs[i].Checked then
+      try
+        sibs[i].Checked := False;
+      except
+        on Exception do GGuiError := 1;
+      end;
+  end;
+end;
+
 procedure DoMove(AChild: TControl; AParent: TWinControl);
 begin
   try
@@ -1415,17 +1514,26 @@ begin
   except
     // The LCL refuses some pairings itself (EInvalidOperation): recorded,
     // never raised into the program.
-    on Exception do GGuiError := 1;
+    on Exception do begin GGuiError := 1; Exit; end;
+  end;
+  { A checked radio arriving is a check: it wins (see GuiRadioExclusive).
+    Only a CHECKED one is given a window here: on gtk2 a radio whose window
+    starts a group of its own is created active, and an unchecked one would
+    then read checked (a gtk radio cannot be unchecked alone). }
+  if (AChild is TRadioButton) and (AParent <> nil) and TRadioButton(AChild).Checked then
+  begin
+    GuiRadioRealize(AChild);
+    GuiRadioExclusive(AChild);
   end;
 end;
 
-{ What the program set relative to the new parent while the move waited. }
-procedure ApplyAfterMove(AChild: TControl; ATabSet: Boolean; ATab, AZ: Integer);
+{ What the program set relative to the new parent while the move waited --
+  the front/back of it. The tab position is imposed by LandMoves. }
+procedure ApplyZ(AChild: TControl; AZ: Integer);
 begin
   try
     if AZ = 1 then AChild.BringToFront
     else if AZ = 2 then AChild.SendToBack;
-    if ATabSet and (AChild is TWinControl) then TWinControl(AChild).TabOrder := ATab;
   except
     on Exception do GGuiError := 1;
   end;
@@ -1494,19 +1602,224 @@ begin
   Enqueue(h, AChildId);
 end;
 
+{ ONE WAITING MOVE, read off its handle while it is still waiting: what
+  LandMoves does with it and what GuiTabOrder replays. Read from a live
+  place of the queue only (the handle alive, the place its latest). }
+type
+  TGuiLanding = record
+    Id, Seq: Int64;
+    Ctl: TControl;
+    Has: Boolean;          // a target still alive (nil target: the top level)
+    Target: TWinControl;
+    TabSet: Boolean;
+    Tab, Z: Integer;
+  end;
+  TGuiLandings = array of TGuiLanding;
+  TGuiWinList = array of TWinControl;
+
+function ReadLanding(const AQ: TGuiQueued; out L: TGuiLanding): Boolean;
+var
+  o: TObject;
+  h: TGuiHandle;
+begin
+  Result := False;
+  L.Id := AQ.Id;
+  L.Seq := AQ.Seq;
+  L.Ctl := nil;
+  L.Has := False;
+  L.Target := nil;
+  L.TabSet := False;
+  L.Tab := 0;
+  L.Z := 0;
+  o := HandleObj(AQ.Id);
+  if not (o is TGuiHandle) then Exit;
+  h := TGuiHandle(o);
+  if (h.MoveSeq <> AQ.Seq) or not (h.Control is TControl) then Exit;
+  L.Ctl := TControl(h.Control);
+  L.Has := ResolveTarget(h, L.Target);
+  L.TabSet := h.TabSet;
+  L.Tab := h.TabWanted;
+  L.Z := h.ZWanted;
+  Result := True;
+end;
+
+{ Does the landing of L physically move its control? Not when its target is
+  where it is, and not for a form in a modal session (refused at landing). }
+function LandingMoves(const L: TGuiLanding): Boolean;
+begin
+  Result := L.Has and (L.Target <> L.Ctl.Parent) and
+    not ((L.Ctl is TCustomForm) and (fsModal in TCustomForm(L.Ctl).FormState));
+end;
+
+{ AParent's tab chain as it stands: its windowed children in FTabList order,
+  which is what TabOrder indexes (TWinControl.GetTabOrder). }
+function TabChain(AParent: TWinControl): TGuiWinList;
+var
+  i, n, k, extra: Integer;
+  w: TControl;
+  spill: TGuiWinList;
+begin
+  Result := nil;
+  n := 0;
+  for i := 0 to AParent.ControlCount - 1 do
+    if AParent.Controls[i] is TWinControl then Inc(n);
+  SetLength(Result, n);
+  for i := 0 to n - 1 do Result[i] := nil;
+  spill := nil;
+  extra := 0;
+  for i := 0 to AParent.ControlCount - 1 do
+  begin
+    w := AParent.Controls[i];
+    if not (w is TWinControl) then Continue;
+    k := TWinControl(w).TabOrder;
+    if (k >= 0) and (k < n) and (Result[k] = nil) then
+      Result[k] := TWinControl(w)
+    else
+    begin
+      SetLength(spill, extra + 1);   // never expected: kept, never dropped
+      spill[extra] := TWinControl(w);
+      Inc(extra);
+    end;
+  end;
+  k := 0;
+  for i := 0 to n - 1 do
+    if (Result[i] = nil) and (k < extra) then
+    begin
+      Result[i] := spill[k];
+      Inc(k);
+    end;
+end;
+
+procedure ChainRemove(var L: TGuiWinList; W: TWinControl);
+var i, j: Integer;
+begin
+  for i := 0 to High(L) do
+    if L[i] = W then
+    begin
+      for j := i to High(L) - 1 do L[j] := L[j + 1];
+      SetLength(L, Length(L) - 1);
+      Exit;
+    end;
+end;
+
+procedure ChainAppend(var L: TGuiWinList; W: TWinControl);
+begin
+  SetLength(L, Length(L) + 1);
+  L[High(L)] := W;
+end;
+
+{ W to position V, as TWinControl.UpdateTabOrder puts it: out of the chain,
+  then in at V -- at the end when V is negative or past it. }
+procedure ChainPlace(var L: TGuiWinList; W: TWinControl; V: Integer);
+var j: Integer;
+begin
+  ChainRemove(L, W);
+  if (V < 0) or (V >= Length(L)) then
+  begin
+    ChainAppend(L, W);
+    Exit;
+  end;
+  SetLength(L, Length(L) + 1);
+  for j := High(L) downto V + 1 do L[j] := L[j - 1];
+  L[V] := W;
+end;
+
+{ AParent's chain once the landings AL[0..ACount-1] have landed, in that
+  order, each placed where it was asked to be. }
+function LandedChain(AParent: TWinControl; const AL: TGuiLandings;
+  ACount: Integer): TGuiWinList;
+var
+  i: Integer;
+  x: TWinControl;
+  after: TWinControl;
+begin
+  Result := TabChain(AParent);
+  for i := 0 to ACount - 1 do
+  begin
+    if not (AL[i].Ctl is TWinControl) then Continue;
+    x := TWinControl(AL[i].Ctl);
+    after := x.Parent;
+    if LandingMoves(AL[i]) then
+    begin
+      if x.Parent = AParent then ChainRemove(Result, x);
+      if AL[i].Target = AParent then ChainAppend(Result, x);
+      after := AL[i].Target;
+    end;
+    if AL[i].TabSet and (after = AParent) then ChainPlace(Result, x, AL[i].Tab);
+  end;
+end;
+
+function GuiTabOrder(AObj: TWinControl): Integer;
+var
+  lp: TWinControl;
+  al: TGuiLandings;
+  n, i: Integer;
+  chain: TGuiWinList;
+begin
+  Result := AObj.TabOrder;
+  if GQueueLen = 0 then Exit;
+  lp := GuiEffectiveParent(AObj);
+  if lp = nil then Exit;
+  SetLength(al, GQueueLen);
+  n := 0;
+  for i := 0 to GQueueLen - 1 do
+    if ReadLanding(GQueue[i], al[n]) then Inc(n);
+  chain := LandedChain(lp, al, n);
+  for i := 0 to High(chain) do
+    if chain[i] = AObj then Exit(i);
+end;
+
 { Land the waiting moves, each control's at its latest place in the queue.
   AInSession: a move still blocked by a handler running under the session
-  waits on, ahead of anything queued while this ran. }
+  waits on, ahead of anything queued while this ran.
+
+  A move whose target is, right now, inside the control itself is one whose
+  way out is another waiting move that has not landed yet (each was refused a
+  cycle against the program's view when asked): it waits for the next pass.
+  A pass that lands nothing leaves only real cycles -- a target freed
+  meanwhile let an earlier ask count again -- and the latest asked of them is
+  refused (gui_error 1) before the next pass. Each pass lands or refuses one
+  at least, so this ends; it costs a pass per move that had to wait, which
+  only such a sequence makes. }
 procedure LandMoves(AInSession: Boolean);
 var
   q, kept, rest: array of TGuiQueued;
-  n, nk, nr, i: Integer;
+  land: TGuiLandings;
+  waiting, still: array of Integer;
+  landed: array of Boolean;
+  parents: TGuiWinList;
+  chains: array of TGuiWinList;
+  n, nk, nr, nl, nw, ns, np, i, j, k: Integer;
   o: TObject;
   h: TGuiHandle;
   c: TControl;
   p: TWinControl;
-  has, tabSet: Boolean;
-  tab, z: Integer;
+  progress: Boolean;
+  fin: TGuiWinList;
+
+  procedure AddParent(AP: TWinControl);
+  var t: Integer;
+  begin
+    if AP = nil then Exit;
+    for t := 0 to np - 1 do
+      if parents[t] = AP then Exit;
+    SetLength(parents, np + 1);
+    parents[np] := AP;
+    Inc(np);
+  end;
+
+  { The handle of land[AIdx] when that place is still its live one -- a
+    handler run by a landing may have asked for it again, or freed it. }
+  function LiveHandle(AIdx: Integer): TGuiHandle;
+  var ob: TObject;
+  begin
+    Result := nil;
+    ob := HandleObj(land[AIdx].Id);
+    if (ob is TGuiHandle) and (TGuiHandle(ob).MoveSeq = land[AIdx].Seq) and
+       (TGuiHandle(ob).Control = land[AIdx].Ctl) then
+      Result := TGuiHandle(ob);
+  end;
+
 begin
   if GQueueLen = 0 then Exit;
   // Off the queue first: a landing can fire a handler that asks for another.
@@ -1517,6 +1830,8 @@ begin
   GCompactAt := 64;
   kept := nil;
   nk := 0;
+  SetLength(land, n);
+  nl := 0;
   for i := 0 to n - 1 do
   begin
     o := HandleObj(q[i].Id);
@@ -1532,21 +1847,102 @@ begin
       Inc(nk);
       Continue;
     end;
-    has := ResolveTarget(h, p);
-    tabSet := h.TabSet;
-    tab := h.TabWanted;
-    z := h.ZWanted;
-    ClearMove(h);
-    if has and (p <> c.Parent) then
-    begin
-      if ((c is TCustomForm) and (fsModal in TCustomForm(c).FormState)) or
-         ((p <> nil) and GuiWouldCycle(c, p, False)) then
-        GGuiError := 1   // what was asked can no longer be done
-      else
-        DoMove(c, p);
-    end;
-    ApplyAfterMove(c, tabSet, tab, z);
+    if ReadLanding(q[i], land[nl]) then Inc(nl);
   end;
+
+  // The chains the program was told, before anything moves (GuiTabOrder).
+  parents := nil;
+  np := 0;
+  for i := 0 to nl - 1 do
+    if land[i].Ctl is TWinControl then
+    begin
+      AddParent(land[i].Ctl.Parent);
+      if land[i].Has then AddParent(land[i].Target);
+    end;
+  SetLength(chains, np);
+  for k := 0 to np - 1 do chains[k] := LandedChain(parents[k], land, nl);
+
+  // The moves.
+  SetLength(landed, nl);
+  SetLength(waiting, nl);
+  for i := 0 to nl - 1 do
+  begin
+    landed[i] := False;
+    waiting[i] := i;
+  end;
+  nw := nl;
+  SetLength(still, nl);
+  while nw > 0 do
+  begin
+    progress := False;
+    ns := 0;
+    for j := 0 to nw - 1 do
+    begin
+      i := waiting[j];
+      h := LiveHandle(i);
+      if h = nil then Continue;   // asked again meanwhile: it waits in the new queue
+      c := land[i].Ctl;
+      if ResolveTarget(h, p) and (p <> c.Parent) then
+      begin
+        if (c is TCustomForm) and (fsModal in TCustomForm(c).FormState) then
+        begin
+          ClearMove(h);
+          GGuiError := 1;   // what was asked can no longer be done
+          progress := True;
+          Continue;
+        end;
+        if (p <> nil) and GuiWouldCycle(c, p, False) then
+        begin
+          still[ns] := i;   // inside itself only until another lands
+          Inc(ns);
+          Continue;
+        end;
+        ClearMove(h);
+        DoMove(c, p);
+      end
+      else
+        ClearMove(h);
+      landed[i] := True;
+      progress := True;
+    end;
+    if (ns > 0) and not progress then
+    begin
+      // Nothing can land: a real cycle. The latest asked is refused.
+      h := LiveHandle(still[ns - 1]);
+      if h <> nil then ClearMove(h);
+      GGuiError := 1;
+      Dec(ns);
+    end;
+    for j := 0 to ns - 1 do waiting[j] := still[j];
+    nw := ns;
+  end;
+
+  // Front or back in the new parent, in ask order.
+  for i := 0 to nl - 1 do
+    if landed[i] and (land[i].Z <> 0) then ApplyZ(land[i].Ctl, land[i].Z);
+
+  { The tab chains, as told: what each parent holds now, in the order told,
+    and anything it holds that the program was not told of after them. }
+  for k := 0 to np - 1 do
+  begin
+    fin := nil;
+    for i := 0 to High(chains[k]) do
+      if chains[k][i].Parent = parents[k] then ChainAppend(fin, chains[k][i]);
+    chains[k] := TabChain(parents[k]);   // reused: what it holds now
+    for i := 0 to High(chains[k]) do
+    begin
+      j := 0;
+      while (j <= High(fin)) and (fin[j] <> chains[k][i]) do Inc(j);
+      if j > High(fin) then ChainAppend(fin, chains[k][i]);
+    end;
+    for i := 0 to High(fin) do
+      try
+        if fin[i].TabOrder <> i then fin[i].TabOrder := i;
+      except
+        on Exception do GGuiError := 1;
+      end;
+  end;
+
   if nk = 0 then Exit;
   // What waits goes back AHEAD of anything a landing queued meanwhile.
   rest := GQueue;

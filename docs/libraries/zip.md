@@ -83,7 +83,13 @@ runtime error. When it stops part-way through an entry, the half-written file of
 that entry is deleted rather than left holding whatever fitted; entries that
 finished before it stay where they were written. A *stored* (uncompressed) entry
 is charged the same way, by the bytes actually copied — whatever size either
-header declared.
+header declared. An archive whose ENTRY COUNT the budget cannot pay to check is
+the budget's limit error too, naming the function (until round 9 it was reported
+as `archive refused: ...`, a hostile archive that was only a large one). And
+every path a script hands this package — `zip_open@`, `zip_create@`,
+`unzip_count`, `unzip_entry$`, `unzip_extract` and the destinations of
+`zip_extract` / `zip_extractall` — is priced by its length before anything reads
+it, as the engine's own file calls are.
 
 One more failure is not hostile at all, only **damaged**: an entry whose bytes do not match the
 CRC-32 recorded for it (PKWARE APPNOTE 4.4.7). Stored or compressed alike, it is

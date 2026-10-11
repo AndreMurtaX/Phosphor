@@ -112,17 +112,30 @@ begin
 end;
 
 // --- whole-file encode / decode (bytes, no text conversion, no BOM) ---------
-function LoadFileStr(const APath: String; out S: RawByteString): Boolean;
-var fs: TFileStream;
+{ THE PATH AND THE FILE ARE BOTH PRICED, BEFORE EITHER IS TOUCHED (round 9).
+  The path is the script's: the gate reads it whole and the OS converts it, and
+  nothing asked about it -- the engine's own doors have priced a path at IoGate
+  since round 7, and this package's file doors ran 30 s on a 4 MB path under a
+  budget worth 2000 ms. And the file's size was committed (SetLength) before
+  anything was asked, where file_readalltext$ asks first; the read was charged
+  only after it had been made. Both are asked here, and both refusals are
+  written into the caller's error, as AWho's. }
+function LoadFileStr(const AWho, APath: String; out S: RawByteString;
+                     var Err: TPhosphorError): Boolean;
+var fs: TFileStream; len: Int64;
 begin
   Result := False;
   S := '';
+  if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(APath, puRead) then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
-      SetLength(S, fs.Size);
-      if fs.Size > 0 then fs.ReadBuffer(S[1], fs.Size);
+      len := fs.Size;
+      // The read is a copy of the file: charged at that rate, before it is made.
+      if not BudgetLinearOk(AWho, len, BudgetMilliCopy, Err) then Exit;
+      SetLength(S, len);
+      if len > 0 then fs.ReadBuffer(S[1], len);
       Result := True;
     finally
       fs.Free;
@@ -132,10 +145,12 @@ begin
   end;
 end;
 
-function SaveFileStr(const APath: String; const S: RawByteString): Boolean;
+function SaveFileStr(const AWho, APath: String; const S: RawByteString;
+                     var Err: TPhosphorError): Boolean;
 var fs: TFileStream;
 begin
   Result := False;
+  if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(APath, puWrite) then Exit;
   try
     fs := TFileStream.Create(APath, fmCreate);
@@ -154,11 +169,10 @@ function f_b64_encodefile(const Args: array of TValue; out Err: TPhosphorError):
 var raw: RawByteString;
 begin
   Err := NoError();
-  if LoadFileStr(Args[0].Str, raw) then
+  if LoadFileStr('base64_encodefile$', Args[0].Str, raw, Err) then
   begin
-    // The read, charged for what it read; then the encode, asked before it runs.
-    if not (BudgetLinearAfterOk('base64_encodefile$', Length(raw), BudgetMilliCopy, Err) and
-            BudgetLinearOk('base64_encodefile$', Length(raw), B64MilliPerByte, Err)) then
+    // The read was charged by LoadFileStr; the encode is asked before it runs.
+    if not BudgetLinearOk('base64_encodefile$', Length(raw), B64MilliPerByte, Err) then
       Exit(ValStr(''));
     Result := ValStr(EncodeStringBase64(raw)); B64Err := 0;
   end
@@ -172,7 +186,7 @@ begin
   if not BudgetLinearOk('base64_decodefile', Length(Args[0].Str), B64MilliPerByte, Err) then
     Exit(ValInt(0));
   try
-    if SaveFileStr(Args[1].Str, DecodeStringBase64(Args[0].Str)) then
+    if SaveFileStr('base64_decodefile', Args[1].Str, DecodeStringBase64(Args[0].Str), Err) then
     begin Result := ValInt(1); B64Err := 0; end
     else begin Result := ValInt(0); B64Err := 1; end;
   except
@@ -189,14 +203,19 @@ end;
   way it bounds a scan: unbudgeted, base64_valid of a 160 MB string took 78031 ms
   under a 2000 ms ceiling and answered SUCCESS with islimit FALSE. The cost is
   fixed by Length(AText) before the loop starts, so it is priced once (RULE 1).
-  AAllowed False means the budget refused; the caller turns that into the peLimit
-  rather than answering "not valid base64", which would be a wrong answer. }
-function IsValidBase64(const AText: String; out AAllowed: Boolean): Boolean;
+  A refusal is written into Err, the caller's own, and never answered as "not
+  valid base64", which would be a wrong answer. (It used to come back through
+  an `out AAllowed` the caller had to remember to read -- a refusal that does
+  not latch must be written where it is asked; round 9.) }
+function IsValidBase64(const AText: String; var Err: TPhosphorError): Boolean;
 var s: String; i, pad: Integer; c: Char;
 begin
   Result := False;
-  AAllowed := BudgetAllows(Int64(Length(AText)) * BudgetUnitsPerAppendedByte);
-  if not AAllowed then Exit;
+  if not BudgetAllows(Int64(Length(AText)) * BudgetUnitsPerAppendedByte) then
+  begin
+    Err := BudgetRefusal('base64_valid');
+    Exit;
+  end;
   s := '';
   for i := 1 to Length(AText) do
     if (AText[i] <> #13) and (AText[i] <> #10) then s := s + Copy(AText, i, 1);
@@ -221,11 +240,11 @@ begin
 end;
 
 function f_b64_valid(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var ok, valid: Boolean;
+var valid: Boolean;
 begin
   Err := NoError();
-  valid := IsValidBase64(Args[0].Str, ok);
-  if not ok then begin Err := BudgetRefusal('base64_valid'); Exit(ValInt(0)); end;
+  valid := IsValidBase64(Args[0].Str, Err);
+  if IsError(Err) then Exit(ValInt(0));
   Result := ValInt(Ord(valid));
 end;
 

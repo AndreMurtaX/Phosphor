@@ -990,11 +990,15 @@ end;
 const
   RagAnalyzeMilliPerByte = 1000000;
 
+{ A CLAIM, because this helper's only answer is a Boolean (round 9): a
+  refusal must be recorded where a door looks for it. Every other up-front
+  price in this unit sets FSpent in the statement that asks, which every rag_
+  door reports, and so stays the non-latching ask RULE 1 makes it. }
 function TPhosphorRag.AnalysisAllowed(const AQuery: String): Boolean;
 begin
-  Result := BudgetLinear(Length(AQuery), RagAnalyzeMilliPerByte) and
-            BudgetLinear(Int64(Length(AQuery)) * Length(FDocs), BudgetMilliScan) and
-            BudgetLinear(FunctionTotal, BudgetMilliNameItem);
+  Result := BudgetClaimLinear(Length(AQuery), RagAnalyzeMilliPerByte) and
+            BudgetClaimLinear(Int64(Length(AQuery)) * Length(FDocs), BudgetMilliScan) and
+            BudgetClaimLinear(FunctionTotal, BudgetMilliNameItem);
 end;
 
 // Core retrieval: score, sort, fit to budget, load & truncate content.

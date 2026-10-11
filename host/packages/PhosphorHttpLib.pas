@@ -2334,10 +2334,15 @@ var path: String;
 begin
   Err := NoError();
   path := Args[0].Str;
+  { ExpandFileName and the gate both read the script's path whole: priced
+    first, and a refusal of the expanded path by IoGate is this call's
+    peLimit, not a quiet "" (round 9). }
+  if not BudgetLinearOk('http_ca_file$', Length(path), BudgetMilliOs, Err) then
+    Exit(ValStr(''));
   { The path made ABSOLUTE is both what the gate judges and what OpenSSL is
     handed, so a later change of directory cannot make them two files. }
   if path <> '' then path := ExpandFileName(path);
-  if (path <> '') and not IoGate(path, puRead) then
+  if (path <> '') and not (IoGate(path, puRead) or GateRefused('http_ca_file$', Err)) then
     Exit(ValStr(''));
   IoAnswer(True);              // only for its effect: ioerror() is THIS call's, 0
   gCAFile := path;
@@ -3241,9 +3246,14 @@ begin
     Exit(IoAnswer(True));
   end;
   if key = '' then key := cert;
+  // Both paths are read whole by ExpandFileName and the gate: priced first,
+  // and a priced refusal is the peLimit it is (round 9).
+  if not BudgetLinearOk('http_clientcert', Int64(Length(cert)) + Length(key),
+                        BudgetMilliOs, Err) then Exit(ValInt(0));
   cert := ExpandFileName(cert);
   key := ExpandFileName(key);
-  if (not IoGate(cert, puRead)) or (not IoGate(key, puRead)) then Exit(ValInt(0));
+  if not ((IoGate(cert, puRead) or GateRefused('http_clientcert', Err)) and
+          (IoGate(key, puRead) or GateRefused('http_clientcert', Err))) then Exit(ValInt(0));
   c.ClientCert := cert;
   c.ClientKey := key;
   Result := IoAnswer(True);

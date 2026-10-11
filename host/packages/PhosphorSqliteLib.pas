@@ -684,12 +684,24 @@ begin
   end;
 end;
 
+{ THE TEXT OF A STATEMENT IS READ WHOLE BEFORE IT CAN DO ANYTHING (round 9).
+  sqlite3_prepare_v2 and sqlite3_exec tokenize every byte of what they are
+  given -- a 4 MB comment included -- and the length is in hand before the
+  call, so this is RULE 1 work and not the one sqlite3_step the binding cannot
+  interrupt: 3000 sqlite_prepare@ of 4 MB of SQL ran 24296 ms under MaxSteps
+  1000000 alone and reported success. Priced here, where every statement this
+  package hands SQLite passes, and written into the caller's error. }
+const
+  SqlTextMilli = BudgetMilliRewrite;
+
 { Run a non-query statement (or several, ';'-separated). Records the error on
   failure. Autocommit is on unless a BEGIN opened a transaction. }
-function ExecSql(ADb: TSqliteDb; const ASql: String): Boolean;
+function ExecSql(const AWho: String; ADb: TSqliteDb; const ASql: String;
+                 var Err: TPhosphorError): Boolean;
 var rc: Integer; msg: PAnsiChar;
 begin
   Result := False;
+  if not BudgetLinearOk(AWho, Length(ASql), SqlTextMilli, Err) then Exit;
   if (ADb = nil) or (ADb.DbPtr = nil) then Exit;
   msg := nil;
   GAuthDenied := False;
@@ -702,10 +714,12 @@ begin
     if GAuthDenied then RefusePath else SetErrFromDb(ADb);
 end;
 
-function PrepareStmt(ADb: TSqliteDb; const ASql: String; out AStmt: psqlite3_stmt): Boolean;
+function PrepareStmt(const AWho: String; ADb: TSqliteDb; const ASql: String;
+                     out AStmt: psqlite3_stmt; var Err: TPhosphorError): Boolean;
 var rc: Integer;
 begin
   AStmt := nil;
+  if not BudgetLinearOk(AWho, Length(ASql), SqlTextMilli, Err) then Exit(False);
   if (ADb = nil) or (ADb.DbPtr = nil) then Exit(False);
   GAuthDenied := False;
   GAuthPath := '';
@@ -994,10 +1008,12 @@ begin
   end;
 end;
 
-function OpenDatabase(const APath: String): TValue;
+function OpenDatabase(const AWho, APath: String; var Err: TPhosphorError): TValue;
 var p: psqlite3; rc: Integer; full: String;
 begin
   Result := ValHandle(0);
+  // The path is resolved (SqlTarget) and handed to the OS: priced first.
+  if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not GReady then Exit;
   { THE GUARD LIVES HERE, not only in the registered function, so every caller is
     covered including any added later. ':memory:' is not a path -- sqlite reads it
@@ -1055,7 +1071,7 @@ function f_available(const Args: array of TValue; out Err: TPhosphorError): TVal
 begin Err := NoError(); Result := ValInt(Ord(GReady)); end;
 
 function f_open_mem(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := OpenDatabase(':memory:'); end;
+begin Err := NoError(); Result := OpenDatabase('sqlite_open@', ':memory:', Err); end;
 
 { A DATABASE IS A FILE. This package asked the gate nowhere, and
   check-sandbox.py could not see it: sqlite3_open is a C call, not one of the
@@ -1070,10 +1086,7 @@ begin Err := NoError(); Result := OpenDatabase(':memory:'); end;
 function f_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  // The path is resolved (SqlTarget) and handed to the OS: priced first.
-  if not BudgetLinearOk('sqlite_open@', Length(Args[0].Str), BudgetMilliOs, Err) then
-    Exit(ValHandle(0));
-  Result := OpenDatabase(Args[0].Str);   // which asks the gate
+  Result := OpenDatabase('sqlite_open@', Args[0].Str, Err);   // which prices and gates it
 end;
 
 function f_close(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1128,7 +1141,7 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
-  Result := ValInt(Ord(ExecSql(db, Args[1].Str)));
+  Result := ValInt(Ord(ExecSql('sqlite_exec', db, Args[1].Str, Err)));
 end;
 
 function f_scalar_str(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1137,7 +1150,7 @@ begin
   Err := NoError();
   Result := ValStr('');
   if not GetDb(Args[0].Hnd, db) then Exit;
-  if not PrepareStmt(db, Args[1].Str, st) then Exit;
+  if not PrepareStmt('sqlite_scalar$', db, Args[1].Str, st, Err) then Exit;
   { EVERY STATEMENT PREPARED INSIDE A CALL IS FINALIZED IN A FINALLY -- here and
     in every routine below that prepares one. One that is not, on any exit an
     exception takes, holds the connection open after sqlite_close (see
@@ -1162,7 +1175,7 @@ begin
   Err := NoError();
   Result := ValDouble(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
-  if not PrepareStmt(db, Args[1].Str, st) then Exit;
+  if not PrepareStmt('sqlite_scalar', db, Args[1].Str, st, Err) then Exit;
   try
     if sqlite3_step(st) = SQLITE_ROW then Result := ValDouble(sqlite3_column_double(st, 0));
     { A path refused inside the SQL can be refused at the STEP rather than at the
@@ -1182,7 +1195,7 @@ begin
   Err := NoError();
   Result := ValStr('');
   if not GetDb(Args[0].Hnd, db) then Exit;
-  if not PrepareStmt(db, Args[1].Str, st) then Exit;
+  if not PrepareStmt('sqlite_query$', db, Args[1].Str, st, Err) then Exit;
   r := '';
   { A RESULT SET IS A LOOP WITH NO ARGUMENT ON IT. "select * from big" steps a
     row at a time inside one opCall, and neither the SQL text nor anything else in
@@ -1253,7 +1266,8 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
-  if not PrepareStmt(db, 'SELECT 1 FROM sqlite_master WHERE type=''table'' AND name=?', st) then Exit;
+  if not PrepareStmt('sqlite_tableexists', db,
+                     'SELECT 1 FROM sqlite_master WHERE type=''table'' AND name=?', st, Err) then Exit;
   try
     nm := Args[1].Str;
     sqlite3_bind_text(st, 1, PAnsiChar(nm), Length(nm), sqlite3_destructor_type(SQLITE_TRANSIENT));
@@ -1271,8 +1285,8 @@ begin
   if not GetDb(Args[0].Hnd, db) then Exit;
   arr := TJSONArray.Create();
   try
-    if PrepareStmt(db, 'SELECT name FROM sqlite_master WHERE type=''table'' AND ' +
-      'name NOT LIKE ''sqlite_%'' ORDER BY name', st) then
+    if PrepareStmt('sqlite_tables@', db, 'SELECT name FROM sqlite_master WHERE type=''table'' AND ' +
+      'name NOT LIKE ''sqlite_%'' ORDER BY name', st, Err) then
     try
       while sqlite3_step(st) = SQLITE_ROW do
       begin
@@ -1305,7 +1319,7 @@ begin
   if not EscapePriceOk('sqlite_columns@', Args[1].Str, '"', Err) then Exit;
   arr := TJSONArray.Create();
   try
-    if PrepareStmt(db, 'PRAGMA table_info(' + QuoteIdent(Args[1].Str) + ')', st) then
+    if PrepareStmt('sqlite_columns@', db, 'PRAGMA table_info(' + QuoteIdent(Args[1].Str) + ')', st, Err) then
     try
       while sqlite3_step(st) = SQLITE_ROW do
       begin
@@ -1338,7 +1352,7 @@ begin
   Err := NoError();
   Result := ValHandle(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
-  if PrepareStmt(db, Args[1].Str, st) then Result := RegisterStmt(db, st);
+  if PrepareStmt('sqlite_prepare@', db, Args[1].Str, st, Err) then Result := RegisterStmt(db, st);
 end;
 
 function f_step(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1591,11 +1605,25 @@ begin
 end;
 
 // --- rows as JSON -----------------------------------------------------------
-{ The row as a registered JSON document, or the reason it cannot be one. }
-function RowValue(AStmt: TSqliteStmt; out Err: TPhosphorError): TValue;
+{ The row as a registered JSON document, or the reason it cannot be one.
+
+  A ROW WHOSE TEXT THE BUDGET STOPPED COPYING IS NOT A ROW (round 9). ColStr
+  answers '' when its charge is refused, and latches -- it says so, and says the
+  caller reports. This caller did not ask: sqlite_row@ and sqlite_fetchone@
+  handed back an object whose refused column and every text column after it
+  were "", rc = 0, the 1-byte id of a row beside a 20 MB column included. The
+  object is freed and the refusal named, as sqlite_getstr$ beside it does. }
+function RowValue(const AWho: String; AStmt: TSqliteStmt;
+                  out Err: TPhosphorError): TValue;
 var o: TJSONObject; why: String;
 begin
   o := BuildRowObject(AStmt, why);
+  if BudgetSpent() then
+  begin
+    o.Free;
+    Err := BudgetRefusal(AWho);
+    Exit(ValHandle(0));
+  end;
   if o = nil then
   begin
     Err := MakeError(peRuntime, why);
@@ -1610,7 +1638,7 @@ begin
   Err := NoError();
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
-  Result := RowValue(s, Err);
+  Result := RowValue('sqlite_row@', s, Err);
 end;
 
 function f_fetchone(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1620,7 +1648,7 @@ begin
   Result := ValHandle(0);
   if not GetStmt(Args[0].Hnd, s) then Exit;
   DoStep(s);   // advance, then hand back the new current row (empty object at end)
-  Result := RowValue(s, Err);
+  Result := RowValue('sqlite_fetchone@', s, Err);
 end;
 
 function f_fetchall(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1645,6 +1673,16 @@ begin
       Exit(ValHandle(0));
     end;
     row := BuildRowObject(s, why);
+    { Asked of EVERY row, not only at the top of the next: the charge above
+      sees a latch that the previous row's ColStr set, but the LAST row has no
+      next, and its emptied text columns went out inside a success (round 9). }
+    if BudgetSpent() then
+    begin
+      row.Free;
+      arr.Free;
+      Err := BudgetRefusal('sqlite_fetchall@');
+      Exit(ValHandle(0));
+    end;
     if row = nil then
     begin
       arr.Free;
@@ -1686,7 +1724,7 @@ begin
   SetLength(wanted, obj.Count);
   for i := 0 to obj.Count - 1 do wanted[i] := True;
   if not NestedTexts(obj, wanted, 'sqlite_insertjson', texts, Err) then Exit;
-  if not PrepareStmt(db, sql, st) then Exit;
+  if not PrepareStmt('sqlite_insertjson', db, sql, st, Err) then Exit;
   try
     for i := 0 to obj.Count - 1 do
       BindNode(st, i + 1, obj.Items[i], texts[i]);
@@ -1724,7 +1762,7 @@ begin
   SetLength(wanted, obj.Count);
   for i := 0 to obj.Count - 1 do wanted[i] := True;
   if not NestedTexts(obj, wanted, 'sqlite_updatejson', texts, Err) then Exit;
-  if not PrepareStmt(db, sql, st) then Exit;
+  if not PrepareStmt('sqlite_updatejson', db, sql, st, Err) then Exit;
   try
     for i := 0 to obj.Count - 1 do
       BindNode(st, i + 1, obj.Items[i], texts[i]);
@@ -1741,7 +1779,7 @@ var db: TSqliteDb;
 begin
   Err := NoError();
   Result := ValInt(0);
-  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'BEGIN')));
+  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql('sqlite_begin', db, 'BEGIN', Err)));
 end;
 
 function f_commit(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1749,7 +1787,7 @@ var db: TSqliteDb;
 begin
   Err := NoError();
   Result := ValInt(0);
-  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'COMMIT')));
+  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql('sqlite_commit', db, 'COMMIT', Err)));
 end;
 
 function f_rollback(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1757,7 +1795,7 @@ var db: TSqliteDb;
 begin
   Err := NoError();
   Result := ValInt(0);
-  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'ROLLBACK')));
+  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql('sqlite_rollback', db, 'ROLLBACK', Err)));
 end;
 
 function f_intrans(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1837,7 +1875,8 @@ begin
     Exit;
   end;
   // VACUUM INTO writes a fresh, self-contained copy of the whole database.
-  Result := ValInt(Ord(ExecSql(db, 'VACUUM INTO ''' + EscapeSql(Args[1].Str) + '''')));
+  Result := ValInt(Ord(ExecSql('sqlite_backup', db,
+                               'VACUUM INTO ''' + EscapeSql(Args[1].Str) + '''', Err)));
 end;
 
 function f_vacuum(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1845,7 +1884,7 @@ var db: TSqliteDb;
 begin
   Err := NoError();
   Result := ValInt(0);
-  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql(db, 'VACUUM')));
+  if GetDb(Args[0].Hnd, db) then Result := ValInt(Ord(ExecSql('sqlite_vacuum', db, 'VACUUM', Err)));
 end;
 
 function SqliteAvailable: Boolean;

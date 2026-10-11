@@ -89,7 +89,7 @@ The setter form replaces every item; the `$` form renders the list back.
 | `strings_delimitedtext$(l@) → str` | the items joined by the delimiter, quoting any field that is empty, holds the delimiter or the quote character, or — unless strict — holds whitespace |
 | `strings_delimiter(l@, c$) → num` | set the delimiter to the **first character** of `c$`, answering `1`. An empty string restores `,` |
 | `strings_delimiter$(l@) → str` | that character; `","` on a fresh list |
-| `strings_quotechar(l@, c$) → num` | set the quote character from the first character of `c$`, answering `1`. An empty string restores `"` |
+| `strings_quotechar(l@, c$) → num` | set the quote character from the first character of `c$`, answering `1`. An empty string restores `"`. A quote character of byte 0 (`bytestr$(0)`) quotes NOTHING, as in the RTL: `strings_delimitedtext$` writes every field as it stands and the reader reads none as quoted (until round 9 the writer put the NUL byte around each field it would have quoted) |
 | `strings_quotechar$(l@) → str` | that character; the double quote on a fresh list |
 | `strings_strictdelimiter(l@, on) → num` | set the strict flag, answering `1`. Strict means whitespace is ordinary text: it is neither skipped when reading nor a reason to quote when writing |
 | `strings_strictdelimiter(l@) → num` | that flag: `1` or `0`. Off on a fresh list |
@@ -102,7 +102,7 @@ the same lines mean.
 | function | what it answers |
 | --- | --- |
 | `strings_values$(l@, name$) → str` | the text right of the first separator on the first line whose name matches. `""` when the name is absent — and `""` is also what a genuinely empty value answers, so use `strings_indexofname` when the difference matters |
-| `strings_values(l@, name$, value$) → num` | `1`, having rewritten that line — or **appended** `name$ + separator + value$` when the name was absent. It is an upsert, not a replace |
+| `strings_values(l@, name$, value$) → num` | `1`, having rewritten that line — or **added** `name$ + separator + value$` when the name was absent, exactly as `strings_add` would: at the end of an unsorted list, in its sorted place on a sorted one (until round 9 it appended there too, and the list then said it was sorted while `strings_find` missed the line). It is an upsert, not a replace |
 | `strings_valuefromindex$(l@, i) → str` | the value half of line `i`; `""` when that line holds no separator at all. Out of bounds is an error |
 | `strings_valuefromindex(l@, i, value$) → num` | `1`, having replaced the value half of line `i` and kept its name. A line with no separator gains one, with an empty name |
 | `strings_names$(l@, i) → str` | the name half of line `i`; `""` when the line holds no separator |
@@ -147,9 +147,9 @@ record an encoding name on the list; the two-argument forms record the default.
 
 | function | what it answers |
 | --- | --- |
-| `strings_savetofile(l@, path$ [, enc$]) → num` | the number of lines written, or `0` when nothing was written — the path was outside the sandbox, its directory does not exist, or the disk refused it. An empty list also answers `0`. (Until 2026-10-05 it answered the line count even when the write never happened.) |
+| `strings_savetofile(l@, path$ [, enc$]) → num` | the number of lines written, or `0` when nothing was written — the path was outside the sandbox, its directory does not exist, or the disk refused it. An empty list also answers `0`. (Until 2026-10-05 it answered the line count even when the write never happened.) A path longer than a host's execution budget can pay for is the call's catchable limit error, never that `0` (until round 9 it was a `0`) |
 | `strings_save(l@, path$) → num` | the short spelling of the same call |
-| `strings_loadfromfile(l@, path$ [, enc$]) → num` | the number of lines read, the list having been replaced. A missing or unreadable file is **not** an error: the list ends up empty and the answer is `0` — so a `0` means "no lines", from whichever cause |
+| `strings_loadfromfile(l@, path$ [, enc$]) → num` | the number of lines read, the list having been replaced. A missing or unreadable file is **not** an error: the list ends up empty and the answer is `0` — so a `0` means "no lines", from whichever cause. The one exception is a path a host's execution budget cannot pay for: that is the call's catchable limit error, and the list is left as it was (until round 9 it was emptied and answered `0`) |
 | `strings_load(l@, path$) → num` | the short spelling of the same call |
 | `strings_loadfromstream(l@, bytes@ [, enc$]) → num` | the number of lines read out of a byte buffer — the handle `file_readallbytes@` and `buffer_new@` hand out. A second handle that is not a buffer is an error |
 | `strings_savetostream(l@, bytes@ [, enc$]) → num` | the number of lines written into that buffer, **replacing** whatever it held; it does not append |

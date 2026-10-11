@@ -26,9 +26,12 @@ program probe_limits;
 {$codepage UTF8}
 
 uses
+  // cthreads first: the round-9 FIFO check asks file_getsize from a thread.
+  {$ifdef unix} cthreads, BaseUnix, {$endif}
   Classes, SysUtils, PhosphorErrors, PhosphorEngine, PhosphorCompiler,
   PhosphorOpcodes, PhosphorValue, PhosphorRegistry, PhosphorVM, PhosphorHandles,
-  PhosphorBudget, PhosphorBase64Lib, PhosphorGzipLib, PhosphorHttpLib;
+  PhosphorBudget, PhosphorBase64Lib, PhosphorGzipLib, PhosphorHttpLib,
+  PhosphorZipLib, PhosphorSqliteLib;
 
 var
   Ok: Integer = 0;
@@ -1896,6 +1899,382 @@ begin
              1000000, 2000, 1500);
 end;
 
+{ ---------------------------------------------------------------------------
+  ROUND 9: A REFUSAL IS NOT AN ANSWER UNTIL SOMEBODY HEARS IT.
+
+  Every check below runs one door at a remainder the probe sets EXACTLY --
+  leaveunits(n) charges the run down to n units -- so the expected message is
+  arithmetic written beside it, not a reading of a run. Each asserts the
+  MESSAGE (the door named, and why) and what the door left behind: the
+  config's lines, the file on disk, the row it did not hand out. And each
+  fails with its fix removed; the round's report has the mutation table.
+--------------------------------------------------------------------------- }
+var
+  R9Allow: Int64 = 0;   // MaxSteps * BudgetUnitsPerStep of the run in progress
+
+function t_leave(const A: array of TValue; out E: TPhosphorError): TValue;
+var want, spend: Int64;
+begin
+  E := NoError();
+  want := Trunc(AsDouble(A[0]));
+  spend := R9Allow - BudgetUsed() - want;
+  if spend > 0 then BudgetCharge(spend);
+  Result := ValInt(R9Allow - BudgetUsed());
+end;
+
+{ Run ASource with every package registered, under ASteps and no clock; the
+  printed text comes back in AOut, the run's error message in AMsg. }
+function R9Run(const ASource: String; ASteps: Int64; out AOut, AMsg: String): Integer;
+var eng: TPhosphorEngine; sink: TTextSink;
+begin
+  eng := TPhosphorEngine.Create();
+  sink := TTextSink.Create();
+  try
+    RegisterBase64Funcs(eng.Registry);
+    RegisterGzipFuncs(eng.Registry);
+    RegisterZipFuncs(eng.Registry);
+    RegisterSqliteFuncs(eng.Registry);
+    RegisterHttpFuncs(eng.Registry);
+    eng.Registry.Add('leaveunits%:n', @t_leave);
+    eng.OnOutput := @sink.Take;
+    eng.MaxSteps := ASteps;
+    eng.TimeoutMs := 0;
+    R9Allow := ASteps * BudgetUnitsPerStep;
+    Result := eng.Run(ASource);
+    AOut := sink.Text;
+    AMsg := eng.LastError.Message;
+  finally
+    sink.Free;
+    eng.Free;
+  end;
+end;
+
+{ The door's refusal, caught: the handler prints errmsg$() after "E:". }
+function Caught(const ASetup, ADoor: String): String;
+begin
+  Result := ASetup + LF + 'on error goto h' + LF + ADoor + LF +
+            'println "NO ERROR"' + LF + 'goto done' + LF +
+            'h:' + LF + 'println "E:" + errmsg$()' + LF + 'done:' + LF;
+end;
+
+procedure R9Expect(const AName, ASource: String; ASteps: Int64; const AWant: String);
+var o, m: String;
+begin
+  R9Run(ASource, ASteps, o, m);
+  Report(Pos('E:' + AWant, o) > 0,
+         AName + ' (wanted "E:' + AWant + '", got "' + Trim(o) + '" / "' + m + '")');
+end;
+
+function FileText(const APath: String): String;
+var fs: TFileStream;
+begin
+  Result := '';
+  if not FileExists(APath) then Exit('<none>');
+  fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+  try
+    SetLength(Result, fs.Size);
+    if fs.Size > 0 then fs.ReadBuffer(Result[1], fs.Size);
+  finally
+    fs.Free;
+  end;
+end;
+
+{ ceil(ACount * AMilli / 1000), the price PhosphorBudget's BudgetLinear asks. }
+function Milli(ACount, AMilli: Int64): Int64;
+begin
+  Result := (ACount * AMilli + 999) div 1000;
+end;
+
+{$ifdef unix}
+{ One file_getsize, on a thread, so a call that BLOCKS in the kernel can be
+  seen blocking instead of hanging the probe. }
+type
+  TSizeAsk = class(TThread)
+  public
+    Src, Got, Msg: String;
+    Done: Boolean;
+    procedure Execute; override;
+  end;
+
+procedure TSizeAsk.Execute;
+begin
+  R9Run(Src, 1000000, Got, Msg);
+  Done := True;
+end;
+{$endif}
+
+procedure CheckRound9;
+var
+  tmp, p, o, m, q, sql, sq: String;
+  fs: TFileStream;
+  door: Integer;
+  {$ifdef unix} fifo: String; hold: THandle; ask: TSizeAsk; waited: Integer; {$endif}
+const
+  Doors: array[0..5] of String = ('chdir', 'mkdir', 'rmdir', 'forcedirectories', 'kill',
+                                  'fileexists');
+  Calls: array[0..5] of String = ('n = chdir(s$)', 'n = mkdir(s$)', 'n = rmdir(s$)',
+                                  'n = forcedirectories(s$)', 'n = kill(s$)',
+                                  'n = fileexists(s$, 0)');
+begin
+  tmp := StringReplace(GetTempDir(False), '\', '/', [rfReplaceAll]);
+
+  { (1) AN AUTOSAVING cfg_set@ WHOSE SAVE IS REFUSED. The second set's line --
+    "s" + "second" + "2", 8 bytes at REWRITE 216 -- asks 2 units of the 20 left;
+    the save then claims the path at OS 1064 a byte, more than the 18 that
+    remain. Before round 9 that price was BudgetLinear, which does not latch,
+    and TouchOk asked only the latch: no error, the value in memory, the file
+    without it. Now: the set's peLimit, the lines put back, the file untouched. }
+  p := tmp + 'phosphor_r9_autosave.ini';
+  DeleteFile(p);
+  R9Run(Caught('c@ = cfg_open_auto@("' + p + '")' + LF +
+               'c@ = cfg_set@(c@, "s", "first", "1")' + LF + 'n = leaveunits%(20)',
+               'c@ = cfg_set@(c@, "s", "second", "2")') +
+        'println "second=" + cfg_get$(c@, "s", "second", "none") + " modified=" + str$(cfg_modified(c@))' + LF,
+        100000, o, m);
+  Report(Pos('E:cfg_set@: that would take ' + IntToStr(Milli(Length(p), BudgetMilliOs)) +
+             ' units of work and only 18 are left', o) > 0,
+         'a refused autosave is cfg_set@''s peLimit (got "' + Trim(o) + '")');
+  Report(Pos('second=none modified=0', o) > 0,
+         'a refused autosave puts the lines and the flag back (got "' + Trim(o) + '")');
+  q := FileText(p);
+  Report((Pos('first=1', q) > 0) and (Pos('second', q) = 0),
+         'a refused autosave leaves the file as the last save wrote it (got "' + q + '")');
+  DeleteFile(p);
+
+  { (2) cfg_save, refused the same way, answered 0 and raised nothing. }
+  p := tmp + 'phosphor_r9_save.ini';
+  DeleteFile(p);
+  R9Expect('a refused cfg_save is its peLimit',
+           Caught('c@ = cfg_open@("' + p + '")' + LF + 'c@ = cfg_set@(c@, "s", "k", "v")' + LF +
+                  'n = leaveunits%(20)', 'ok = cfg_save(c@)'),
+           100000, 'cfg_save: that would take ' + IntToStr(Milli(Length(p), BudgetMilliOs)) +
+                   ' units of work and only 20 are left');
+  Report(not FileExists(p), 'a refused cfg_save writes no file');
+  { cfg_open@ was the one door of the config unit whose path nothing priced:
+    100000 bytes at OS 1064 = 106400 units, past the 1000 left. }
+  R9Expect('cfg_open@ prices its path',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'c@ = cfg_open@(s$)'),
+           100000, 'cfg_open@: that would take 106400 units of work and only 1000 are left');
+  { ...priced at the DOOR, before the load, so the refusal is an argument's and
+    does not latch (RULE 1): the load's own claim of the same path would name
+    the same price, and latch. After it, string$(100, 97) is still built. }
+  R9Run(Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'c@ = cfg_open@(s$)') +
+        'println "AFTER " + str$(len(string$(100, 97)))' + LF, 100000, o, m);
+  Report(Pos('AFTER 100', o) > 0,
+         'a cfg_open@ path priced out does not latch the run (got "' + Trim(o) + '" / "' + m + '")');
+  DeleteFile(p);
+
+  { (3) SysLib's classic doors answered a priced path as 0, ioerror 3, with
+    nothing latched. A 10000-byte path at OSPATH 8192 milli is 81920 units
+    (kill: OS 1064 -> 10640; fileexists: the query rate, REWRITE 216 -> 2160),
+    each past the 1000 left -- and each is now the door's own peLimit. The
+    OSPATH figure is also the check on the RATE: at the query rate chdir would
+    have been charged 2160 and refused just the same, so the exact number is
+    what is asserted. }
+  for door := 0 to High(Doors) do
+  begin
+    if door = 4 then sq := IntToStr(Milli(10000, BudgetMilliOs))
+    else if door = 5 then sq := IntToStr(Milli(10000, BudgetMilliRewrite))
+    else sq := IntToStr(Milli(10000, BudgetMilliOsPath));
+    R9Expect(Doors[door] + ' of a priced path is its peLimit, at its rate',
+             Caught('s$ = string$(10000, 97)' + LF + 'n = leaveunits%(1000)', Calls[door]),
+             100000, Doors[door] + ': that would take ' + sq +
+                     ' units of work and only 1000 are left');
+  end;
+  // ...and the IoLib twins of the directory doors, at the same rate.
+  R9Expect('dir_setcurrent of a priced path, at OSPATH',
+           Caught('s$ = string$(10000, 97)' + LF + 'n = leaveunits%(1000)', 'n = dir_setcurrent(s$)'),
+           100000, 'dir_setcurrent: that would take ' + IntToStr(Milli(10000, BudgetMilliOsPath)) +
+                   ' units of work and only 1000 are left');
+  R9Expect('dir_delete of a priced path is its peLimit',
+           Caught('s$ = string$(10000, 97)' + LF + 'n = leaveunits%(1000)', 'n = dir_delete(s$)'),
+           100000, 'dir_delete: that would take ' + IntToStr(Milli(10000, BudgetMilliOsPath)) +
+                   ' units of work and only 1000 are left');
+  { ...and a refused PATH IS A REFUSED ARGUMENT (RULE 1): it does not spend the
+    run. After the handler, string$(100, 97) -- 100 units of the 1000 still
+    left -- is built. The first draft of this round CLAIMED the path, which
+    latched, and this line was refused. }
+  R9Run(Caught('s$ = string$(10000, 97)' + LF + 'n = leaveunits%(1000)', 'n = chdir(s$)') +
+        'println "AFTER " + str$(len(string$(100, 97)))' + LF, 100000, o, m);
+  Report(Pos('AFTER 100', o) > 0,
+         'a priced-out path does not latch the run (got "' + Trim(o) + '" / "' + m + '")');
+  { strings_savetofile and strings_loadfromfile asked the LATCH after a path
+    the gate priced out, which a path refusal never sets: the save answered 0
+    with ioerror() 3 and the load answered 0 lines, an empty file. Found by
+    the refusal gate's flag rule, not by a run. The query rate: 2160 units.
+    The lists are EMPTY so that the save's own join costs nothing and the
+    remainder the path meets is exactly the 1000 left. }
+  R9Expect('strings_savetofile of a priced path is its peLimit',
+           Caught('s$ = string$(10000, 97)' + LF + 'l@ = strings@()' + LF +
+                  'n = leaveunits%(1000)',
+                  'n = strings_savetofile(l@, s$)'),
+           100000, 'strings_savetofile: that would take ' + IntToStr(Milli(10000, BudgetMilliRewrite)) +
+                   ' units of work and only 1000 are left');
+  R9Expect('strings_loadfromfile of a priced path is its peLimit',
+           Caught('s$ = string$(10000, 97)' + LF + 'l@ = strings@()' + LF +
+                  'n = leaveunits%(1000)',
+                  'n = strings_loadfromfile(l@, s$)'),
+           100000, 'strings_loadfromfile: that would take ' + IntToStr(Milli(10000, BudgetMilliRewrite)) +
+                   ' units of work and only 1000 are left');
+
+  { (4) file_copy: CopyFileBytes charges the bytes it copies through
+    BudgetCharge, which latches and sets no GWalkSpent, and WalkRefused asked
+    only the flag. A 10000-byte file at 15000 left: the read claims 10000, the
+    copy's 10000 is over the 5000 that remain -- latched, and now reported. }
+  p := tmp + 'phosphor_r9_copy_src.bin';
+  q := tmp + 'phosphor_r9_copy_dst.bin';
+  DeleteFile(q);
+  fs := TFileStream.Create(p, fmCreate);
+  try
+    sq := StringOfChar('x', 10000);
+    fs.WriteBuffer(sq[1], Length(sq));
+  finally
+    fs.Free;
+  end;
+  R9Expect('a file_copy whose copy charge is refused is its peLimit',
+           Caught('n = leaveunits%(15000)', 'n = file_copy("' + p + '", "' + q + '")'),
+           1000, 'file_copy: the run has spent its step budget of 1000 inside library calls');
+  Report(not FileExists(q), 'a refused file_copy writes no target');
+  DeleteFile(p);
+  DeleteFile(q);
+
+  { (5) file_getsize ASKS THE DIRECTORY, never opens the file. A directory is
+    not a regular file and answers 0 on both systems (Linux used to open it and
+    answer whatever lseek made of a directory), and a regular file its size. }
+  p := tmp + 'phosphor_r9_size.bin';
+  fs := TFileStream.Create(p, fmCreate);
+  try
+    sq := StringOfChar('y', 1234);
+    fs.WriteBuffer(sq[1], Length(sq));
+  finally
+    fs.Free;
+  end;
+  R9Run('println str$(file_getsize("' + p + '")) + " " + str$(file_getsize("' +
+        ExcludeTrailingPathDelimiter(tmp) + '"))' + LF, 0, o, m);
+  Report(Trim(o) = '1234 0', 'file_getsize: a file''s size, a directory''s 0 (got "' + Trim(o) + '")');
+  { ...and a file HELD EXCLUSIVELY by somebody else still has the size its
+    directory entry records: nothing is opened to be refused. The old open was
+    refused and answered 0 on BOTH systems -- a sharing violation on Windows,
+    and on Linux the RTL's own flock, which FileOpen takes even for
+    fmShareDenyNone (a shared one: rtl/unix/sysutils.pp, DoFileLocking),
+    against this exclusive one (measured: the mutation that puts the open back
+    fails this check on both). }
+  fs := TFileStream.Create(p, fmOpenReadWrite or fmShareExclusive);
+  try
+    R9Run('println str$(file_getsize("' + p + '"))' + LF, 0, o, m);
+  finally
+    fs.Free;
+  end;
+  Report(Trim(o) = '1234', 'file_getsize of a file held exclusively (got "' + Trim(o) + '")');
+  DeleteFile(p);
+  {$ifdef unix}
+  { ...and a FIFO WITH NO WRITER answers 0 AT ONCE. The old open(O_RDONLY)
+    blocked in the kernel until a writer came, past both ceilings, so the ask
+    runs on a thread and is given 5 s (a stat takes microseconds). If it is
+    still waiting, this side opens the FIFO read-write -- a writer -- which
+    lets the blocked open return, so the probe can report and end. (Held open
+    by a writer FIRST, as the first draft of this check did, the old code did
+    not block and answered 0 too: that check passed with the defect in.) }
+  fifo := tmp + 'phosphor_r9_fifo';
+  DeleteFile(fifo);
+  if fpMkFifo(PChar(fifo), &600) = 0 then
+  begin
+    ask := TSizeAsk.Create(True);
+    ask.Src := 'println str$(file_getsize("' + fifo + '"))' + LF;
+    ask.Start;
+    waited := 0;
+    while (not ask.Done) and (waited < 5000) do
+    begin
+      Sleep(20);
+      Inc(waited, 20);
+    end;
+    if ask.Done then
+      Report(Trim(ask.Got) = '0', 'file_getsize of a FIFO with no writer answers 0 (got "' +
+             Trim(ask.Got) + '")')
+    else
+    begin
+      Report(False, 'file_getsize of a FIFO with no writer was still blocked after 5 s ' +
+             '(it OPENED the FIFO instead of asking the directory)');
+      // O_RDWR on a FIFO never blocks on Linux: it is a reader and a writer.
+      hold := FileOpen(fifo, fmOpenReadWrite);
+      ask.WaitFor;
+      if hold <> feInvalidHandle then FileClose(hold);
+    end;
+    ask.Free;
+    DeleteFile(fifo);
+  end
+  else Report(False, 'file_getsize: could not make a FIFO to ask about');
+  {$endif}
+
+  { (6) THE PACKAGES' PATHS. Each door's path is priced at OS 1064 before
+    anything reads it: 100000 bytes = 106400 units, past the 1000 left. }
+  R9Expect('zip_open@ prices its path',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'z@ = zip_open@(s$)'),
+           100000, 'zip_open@: that would take 106400 units of work and only 1000 are left');
+  R9Expect('zip_create@ prices its path',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'z@ = zip_create@(s$)'),
+           100000, 'zip_create@: that would take 106400 units of work and only 1000 are left');
+  R9Expect('unzip_count prices its path',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'n = unzip_count(s$)'),
+           100000, 'unzip_count: that would take 106400 units of work and only 1000 are left');
+  R9Expect('gzip_compressfile prices its path',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'n = gzip_compressfile(s$, "x")'),
+           100000, 'gzip_compressfile: that would take 106400 units of work and only 1000 are left');
+  R9Expect('base64_encodefile$ prices its path',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'r$ = base64_encodefile$(s$)'),
+           100000, 'base64_encodefile$: that would take 106400 units of work and only 1000 are left');
+  R9Expect('http_ca_file$ prices its path before it expands it',
+           Caught('s$ = string$(100000, 97)' + LF + 'n = leaveunits%(1000)', 'r$ = http_ca_file$(s$)'),
+           100000, 'http_ca_file$: that would take 106400 units of work and only 1000 are left');
+
+  { (7) SQLITE. The text of a statement is tokenized whole before SQLite can
+    say anything: "select 1 --" and a million bytes of comment, 1000011 bytes at
+    REWRITE 216 = 216002.376 -> 216003 units. And a ROW whose text the budget
+    stopped copying: ColStr's charge for a 2000000-byte column at MOVE 48 is
+    96000 units, past the 50000 left; it latches and answers '', and
+    sqlite_row@ / sqlite_fetchall@ handed out the row of emptied columns, rc 0. }
+  if not SqliteAvailable then
+    Writeln('skip: the round-9 sqlite checks (no SQLite runtime library)')
+  else
+  begin
+    sql := 's$ = "select 1 --" + string$(1000000, 97)' + LF + 'db@ = sqlite_open@()' + LF +
+           'n = leaveunits%(1000)';
+    R9Expect('sqlite_prepare@ prices its SQL', Caught(sql, 'q@ = sqlite_prepare@(db@, s$)'),
+             100000, 'sqlite_prepare@: that would take 216003 units of work and only 1000 are left');
+    R9Expect('sqlite_exec prices its SQL', Caught(sql, 'n = sqlite_exec(db@, s$)'),
+             100000, 'sqlite_exec: that would take 216003 units of work and only 1000 are left');
+    R9Expect('sqlite_scalar$ prices its SQL', Caught(sql, 'r$ = sqlite_scalar$(db@, s$)'),
+             100000, 'sqlite_scalar$: that would take 216003 units of work and only 1000 are left');
+    sql := 'db@ = sqlite_open@()' + LF +
+           'q@ = sqlite_prepare@(db@, "select ''k'' as id, printf(''%.*c'', 2000000, ''a'') as t")' + LF +
+           'n = sqlite_step(q@)' + LF + 'n = leaveunits%(50000)';
+    R9Run(Caught(sql, 'r@ = sqlite_row@(q@)' + LF +
+                 'println "ROW id=" + json_gets$(r@, "id") + " t=" + str$(len(json_gets$(r@, "t")))'),
+          100000, o, m);
+    Report((Pos('E:sqlite_row@: the run has spent its step budget of 100000 inside library calls', o) > 0) and
+           (Pos('ROW', o) = 0),
+           'a row whose text the budget stopped is sqlite_row@''s peLimit, not a row (got "' + Trim(o) + '")');
+    sql := 'db@ = sqlite_open@()' + LF +
+           'q@ = sqlite_prepare@(db@, "select ''k'' as id, printf(''%.*c'', 2000000, ''a'') as t")' + LF +
+           'n = leaveunits%(50000)';
+    R9Run(Caught(sql, 'a@ = sqlite_fetchall@(q@)' + LF + 'println "ROWS " + str$(json_len(a@))'),
+          100000, o, m);
+    Report((Pos('E:sqlite_fetchall@: the run has spent its step budget of 100000 inside library calls', o) > 0) and
+           (Pos('ROWS', o) = 0),
+           'a last row the budget stopped is sqlite_fetchall@''s peLimit (got "' + Trim(o) + '")');
+    { sqlite_tables@ copies each name with the same ColStr: a 200000-byte table
+      name at MOVE 48 is 9600 units, past the 5000 left. Its loop's own charge
+      after the copy sees the latch -- pinned here, since it is the other
+      listing the round's finding named. }
+    sql := 'db@ = sqlite_open@()' + LF +
+           'n = sqlite_exec(db@, "create table " + string$(200000, 116) + " (a)")' + LF +
+           'n = leaveunits%(5000)';
+    R9Expect('a table name the budget stopped copying is sqlite_tables@''s peLimit',
+             Caught(sql, 'a@ = sqlite_tables@(db@)' + LF + 'println "TABLES " + str$(json_len(a@))'),
+             100000, 'sqlite_tables@: the run has spent its step budget of 100000 inside library calls');
+  end;
+end;
+
 procedure CheckFaultEscapes(const AName, ASource: String);
 var
   eng: TPhosphorEngine;
@@ -1989,6 +2368,8 @@ begin
     RegisterBase64Funcs(eng.Registry);
     RegisterGzipFuncs(eng.Registry);
     RegisterHttpFuncs(eng.Registry);
+    RegisterZipFuncs(eng.Registry);
+    RegisterSqliteFuncs(eng.Registry);
     eng.Registry.Add('tick_ms%:', @t_tick);
     eng.Registry.Add('budget_units%:', @t_units);
     eng.OnOutput := @sink.Take;
@@ -2096,9 +2477,7 @@ begin
   Price('trim$', 's$ = " " + string$(4000000, 97) + " "', 'r$ = trim$(s$)');
   Price('ltrim$', 's$ = " " + string$(4000000, 97)', 'r$ = ltrim$(s$)');
   Price('rtrim$', 's$ = string$(4000000, 97) + " "', 'r$ = rtrim$(s$)');
-  Price('reverse$', S4, 'r$ = reverse$(s$)',
-        'still the quadratic-append price; scripts/probe_budget.lpr pins a refusal of 40 MB ' +
-        '(see CpReverse in PhosphorStrLib)');
+  Price('reverse$', S4, 'r$ = reverse$(s$)');
   Price('proper$', T4, 'r$ = proper$(t$)');
   Price('swapcase$', T4, 'r$ = swapcase$(t$)');
   Price('alcase$', T4, 'r$ = alcase$(t$)');
@@ -2168,6 +2547,31 @@ begin
   Price('file_readalltext$ (long path)', S4, 'r$ = file_readalltext$(s$)');
   Price('file_getsize (long path)', S4, 'n = file_getsize(s$)');
   Price('dir_getfiles$ (long path)', S4, 'r$ = dir_getfiles$(s$)');
+  // ROUND 9: the doors that make the OS do more with a path than a query does
+  // -- create, remove or enter a directory, delete a file. Round 8 set the
+  // path's rate from the four rows above only, the cheap ones, and on Windows
+  // chdir of a 4 MB path cost 36 times it. Each is priced at
+  // BudgetMilliOsPath, and each is here so that rate stays a measurement.
+  Price('chdir (long path)', S4, 'n = chdir(s$)');
+  Price('mkdir (long path)', S4, 'n = mkdir(s$)');
+  Price('rmdir (long path)', S4, 'n = rmdir(s$)');
+  Price('forcedirectories (long path)', S4, 'n = forcedirectories(s$)');
+  Price('kill (long path)', S4, 'n = kill(s$)');
+  Price('fileexists (long path)', S4, 'n = fileexists(s$, 0)');
+  Price('dir_create (long path)', S4, 'n = dir_create(s$)');
+  Price('dir_setcurrent (long path)', S4, 'n = dir_setcurrent(s$)');
+  Price('dir_delete (long path)', S4, 'n = dir_delete(s$)');
+  Price('file_delete (long path)', S4, 'n = file_delete(s$)');
+  // ...and the packages' paths and statements (round 9), at OS and REWRITE.
+  Price('cfg_open@ (long path)', S4, 'c@ = cfg_open@(s$)' + LF + 'n = cfg_free(c@)');
+  Price('zip_open@ (long path)', S4, 'z@ = zip_open@(s$)');
+  Price('unzip_count (long path)', S4, 'n = unzip_count(s$)');
+  Price('gzip_compressfile (long path)', S4, 'n = gzip_compressfile(s$, s$)');
+  Price('base64_encodefile$ (long path)', S4, 'r$ = base64_encodefile$(s$)');
+  Price('sqlite_prepare@ (4 MB of SQL)', 'q$ = "select 1 --" + string$(4000000, 97)' + LF +
+        'db@ = sqlite_open@()', 'q@ = sqlite_prepare@(db@, q$)' + LF + 'n = sqlite_finalize(q@)');
+  Price('sqlite_exec (4 MB of SQL)', 'q$ = "select 1 --" + string$(4000000, 97)' + LF +
+        'db@ = sqlite_open@()', 'n = sqlite_exec(db@, q$)');
   // --- lists -----------------------------------------------------------------
   Price('strings_text (dense)', LD + LF + 'l@ = strings@()', 'n = strings_text(l@, ld$)');
   Price('strings_text (50-byte)', LS + LF + 'l@ = strings@()', 'n = strings_text(l@, ls$)');
@@ -2573,6 +2977,7 @@ begin
              1000000, 2000, 1500);
 
   CheckRound8();
+  CheckRound9();
 
   { --- a fault in the interpreter; see the section above --------------------- }
 

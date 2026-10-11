@@ -651,22 +651,31 @@ begin Err := NoError(); Result := ValStr(GuidHex(AsDouble(Args[0]) <> 0)); end;
 // names are the same operations and had been left behind. Now 1 means it
 // happened, 0 means it did not, and ioerror() says which kind of 0: 3 tried
 // and failed, 5 refused (see IoAnswer). tests/suite/77_sys_answers.bas.
+// A path the BUDGET refuses is neither: it is this call's peLimit, as it is
+// at dir_create and dir_setcurrent, through GateRefused (round 9 -- these
+// answered it as 0 with ioerror 3, and nothing latched, so the loop that made
+// it ran on). The directory doors and kill price the path at the rate the OS
+// work over it was measured at (BudgetMilliOsPath; kill BudgetMilliOs),
+// not the query rate.
 function t_mkdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  if not (IoGateAt(Args[0].Str, puWrite, BudgetMilliOsPath) or GateRefused('mkdir', Err)) then
+    Exit(ValInt(0));
   Result := IoAnswer(CreateDir(Args[0].Str));
 end;
 function t_rmdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
+  if not (IoGateAt(Args[0].Str, puDelete, BudgetMilliOsPath) or GateRefused('rmdir', Err)) then
+    Exit(ValInt(0));
   Result := IoAnswer(RemoveDir(Args[0].Str));
 end;
 function t_forcedirectories(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  if not (IoGateAt(Args[0].Str, puWrite, BudgetMilliOsPath) or
+          GateRefused('forcedirectories', Err)) then Exit(ValInt(0));
   // Through IoAnswer like the other mutators: a success left a refusal's 5
   // standing, and a failure recorded nothing, so it read as "refused" (2026-10-07).
   Result := IoAnswer(ForceDirectories(Args[0].Str));
@@ -674,7 +683,8 @@ end;
 function t_chdir(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not (IoGateAt(Args[0].Str, puRead, BudgetMilliOsPath) or GateRefused('chdir', Err)) then
+    Exit(ValInt(0));
   { "" names no directory. The sandbox refuses it, but with none in force the
     RTL's ChDir returns early on '' and reports no error, so SetCurrentDir('') is
     True and this answered 1 having moved nothing (2026-10-07). Refused, as the
@@ -685,13 +695,15 @@ end;
 function t_fileexists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puRead) or GateRefused('fileexists', Err)) then
+    Exit(ValInt(0));
   Result := IoQueried(FileExists(Args[0].Str, AsDouble(Args[1]) <> 0));
 end;
 function t_kill(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puDelete) then begin Result := ValInt(0); Exit; end;
+  if not (IoGateAt(Args[0].Str, puDelete, BudgetMilliOs) or GateRefused('kill', Err)) then
+    Exit(ValInt(0));
   Result := IoAnswer(DeleteFile(Args[0].Str));
 end;
 

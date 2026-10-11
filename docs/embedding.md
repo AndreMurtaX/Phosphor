@@ -516,9 +516,20 @@ clock scale (a unit is 1/128000 of a millisecond of work): a byte scan costs
 OS call over a path 8.3 ns, a list item compared 9 ns, a piece split off a text
 34 ns, a JSON value parsed 600 ns and a JSON node copied 60 ns — the table, and
 how each figure was measured, is in `engine/PhosphorBudget.pas`. A file
-operation's path is priced at the door at 1.7 ns a byte (and one of 4096 bytes
-or less is the price of its system call and is not asked about, so
-`file_exists` still answers after a script has spent its budget). A pass whose
+operation's path is priced at the door at the rate of what the OS does with it:
+1.7 ns a byte for a query (`file_exists`, `file_readalltext$`), 8.3 ns for a file
+deleted or a directory searched (`kill`, `file_delete`, `file_getsize`), and
+64 ns for a directory made, removed or entered (`chdir`, `mkdir`, `rmdir`,
+`forcedirectories`, `dir_create`, `dir_delete`, `dir_setcurrent` -- measured at
+52 to 56 ns on Windows, where until round 9 they were charged the query's 1.7
+and 3000 `chdir` calls on a 4 MB path ran 117 s under a budget worth 2000 ms).
+One of 4096 bytes or less is the price of its system call and is not asked
+about, so `file_exists` still answers after a script has spent its budget. The
+opt-in packages price a script's path the same way (8.3 ns: `zip_open@`,
+`zip_create@`, the `unzip_*` names, the `gzip_*file` and `base64_*file` doors,
+`cfg_open@`, `http_ca_file$`, `http_clientcert`), and SQLite's statements by
+their text (1.7 ns a byte: `sqlite_prepare@`, `sqlite_exec`, `sqlite_scalar*`,
+`sqlite_query$`), which SQLite tokenizes whole before it can answer. A pass whose
 length the arguments fix is asked **before** it runs and refused whole; a walk
 that a count cuts short (`left$`, `mid$`, `line$`, `s$[n]` — a malformed string
 can make one character fifty megabytes long) is charged for what it read before
@@ -555,9 +566,10 @@ is to refuse `string$(1e18)` before a byte is committed on a host that set only
 one ceiling; and `gzip_compress$`, `zip_compress` and `zip_close`, whose deflate
 costs ten times more on random bytes than on a log file, are asked for the
 cheapest input's price before they start and then charged the wall time they
-actually took. `reverse$` is still charged its old quadratic-append price
-(about 18 times its cost) for one recorded reason: a probe outside this change
-pins a refusal of 40 MB that the measured price would allow.
+actually took. `reverse$` is charged its measured price -- a character step,
+5.5 ns a byte -- since 45c0363; until then it kept the old quadratic-append
+price, about 18 times its cost, because a probe pinned a refusal of 40 MB that
+the measured price allows (`scripts/probe_budget.lpr` now asks for 160 MB).
 
 **A refused call changes nothing.** A function that answers with a `peLimit`
 leaves its container exactly as it found it: a list mutator that is refused
@@ -570,6 +582,34 @@ a refused `rag_rebuild@` keeps the old index, and a refused
 `strings_savetofile` / `strings_savetostream` writes nothing. And an operation
 that consults nothing is not refused because an EARLIER call spent the budget:
 `strings_add` on an unsorted list (O(1)) adds after the latch, once.
+
+**A refusal is reported where it can be heard (round 9).** A library
+consultation answers in one of two ways, and each has one rule. A refusal of an
+oversized ARGUMENT -- `string$(1e18)` -- does not latch: refusing it leaves
+`string$(10)` working, so its answer is the only record of it, and it is
+written into the calling function's error where it is asked. A refusal that
+LATCHES -- a charge for work under way, a meter, a wait -- is recorded in the
+budget itself, and every function asks the latch before its answer leaves. A
+helper deep in a library that has no error of its own to write into either
+records the refusal in its unit's own flag, which every door of that unit
+reads and reports (a file path or a file too large for what is left: refused,
+and the run goes on), or latches, so the question its caller asks is the one
+that answers.
+`scripts/check-budget.py` holds both rules. Two defects taught them: an
+autosaving `cfg_set@` whose save was refused by a price that did not latch
+reported success while the value never reached the file (the caller asked only
+the latch), and `sqlite_row@` / `sqlite_fetchone@` / the last row of
+`sqlite_fetchall@` handed back a row whose text columns the budget had stopped
+copying -- every one `""` -- as a success (the copy latched; nothing asked). The
+classic `chdir`, `mkdir`, `rmdir`, `forcedirectories`, `kill` and `fileexists`
+answered a priced path as a plain `0` with `ioerror()` 3 while `dir_create`
+beside them raised the `peLimit`; they raise it now, as `strings_savetofile`
+and `strings_loadfromfile` do, and `file_copy` reports a copy the budget
+stopped. A refused PATH is still an argument refused: the program can catch the
+error and go on with a shorter one. One consequence a host can see: a helper
+whose only answer was a Boolean -- a list's join, a config's save, a PBKDF2
+derivation, an archive's entry count, a rag query's analysis -- now latches the
+run when it is refused, so the call after it is refused too.
 
 **A refused render is an error, never an empty answer.** `json_value$`,
 `json_gets$`, `json_items$`, `json_paths$`, `rag_analyze$` and

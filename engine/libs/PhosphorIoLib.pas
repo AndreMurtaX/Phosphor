@@ -47,6 +47,21 @@ const
   IoPathFreeBytes = 4096;
 
 function IoGate(const APath: String; AUse: TPathUse): Boolean;
+{ THE SAME DOOR, AT THE CALLER'S RATE (round 9). IoGate prices a long path at
+  what the gate and a QUERY cost (file_exists, file_getsize: BudgetMilliRewrite).
+  A call that makes the OS do more with the path -- create, remove or enter a
+  directory, delete a file -- passes the rate measured for it: on Windows a
+  chdir of a 4 MB path cost 249 ms, 36 times the query's price, and 3000 of them
+  ran 117 s under a step budget worth 2000 ms. }
+function IoGateAt(const APath: String; AUse: TPathUse; AMilliEach: Int64): Boolean;
+{ After an IoGate that said no: the BUDGET's refusal of the path is AFn's
+  peLimit, named in Err; the SANDBOX's stays what it always was, 0 with
+  ioerror() 5. Always False, so a door reads `IoGate(..) or GateRefused(..)`.
+  EVERY caller of IoGate that holds an error asks it -- SysLib's mkdir, rmdir,
+  chdir, kill and fileexists did not, and answered a refused path as a plain 0
+  with ioerror() 3, a failure, while dir_create beside them said peLimit
+  (round 9; scripts/check-budget.py's refusal gate now holds it). }
+function GateRefused(const AFn: String; var Err: TPhosphorError): Boolean;
 { THE ANSWER OF A FILESYSTEM MUTATOR, in one place: 1 when the operation
   happened and 0 when it did not, with ioerror() set to match -- 0 on success,
   IOERR_FAILED on failure. Pass it what the RTL call returned. A refusal never
@@ -83,8 +98,18 @@ var
   had was path_getfullpath$'s, a call that does far more with the path, and
   charged these 6.5 times their cost. A refusal is the walk's: GWalkSpent is
   set, so every operation that reports a walk (WalkRefused) reports this as the
-  peLimit it is, and the rest answer 0 with the run's budget refusing next. }
-function IoGate(const APath: String; AUse: TPathUse): Boolean;
+  peLimit it is, and every other door asks GateRefused, which names it.
+
+  A REFUSAL HERE DOES NOT LATCH, AND THE DOOR MUST ASK (round 9). A long path
+  is an ARGUMENT, and an oversized argument is refused without spending the run
+  (RULE 1): the program may go on with a shorter one. So the refusal's only
+  record is GWalkSpent / GPathPriced, and every door that calls this asks
+  GateRefused or WalkRefused, which turn it into the door's peLimit -- the
+  five SysLib doors that never asked answered a refused path as 0 with
+  ioerror() 3, and nothing else would ever have said it. scripts/check-budget.py
+  holds the rule: a refusal recorded in a flag is settled only by a REPORTER
+  of that flag, never by a later BudgetSpent, which a flag does not set. }
+function IoGateAt(const APath: String; AUse: TPathUse; AMilliEach: Int64): Boolean;
 begin
   GPathPriced := False;
   { A path no longer than IoPathFreeBytes is the price of the system call it
@@ -93,7 +118,7 @@ begin
     the disk exactly then), and bounds what an unpriced call can cost to 4096
     bytes of path. A longer path is priced WHOLE -- no OS accepts one past 32767
     UTF-16 units, but the gate and the conversion read it all first. }
-  if (Length(APath) > IoPathFreeBytes) and not BudgetLinear(Length(APath), BudgetMilliRewrite) then
+  if (Length(APath) > IoPathFreeBytes) and not BudgetLinear(Length(APath), AMilliEach) then
   begin
     GWalkSpent := True;
     GPathPriced := True;
@@ -104,10 +129,11 @@ begin
   if not Result then GIoError := IOERR_REFUSED;
 end;
 
-{ After an IoGate that said no, in an operation that does not otherwise report
-  a walk: a refusal by the BUDGET (the path priced in IoGate) is this function's
-  peLimit, named; a refusal by the SANDBOX stays what it always was, 0 with
-  ioerror() 5. Always False, so it reads `IoGate(..) or GateRefused(..)`. }
+function IoGate(const APath: String; AUse: TPathUse): Boolean;
+begin
+  Result := IoGateAt(APath, AUse, BudgetMilliRewrite);
+end;
+
 function GateRefused(const AFn: String; var Err: TPhosphorError): Boolean;
 begin
   Result := False;
@@ -145,9 +171,14 @@ begin
   GWalkSpent := False;
 end;
 
+{ GWalkSpent OR THE LATCH (round 9). CopyFileBytes charges the bytes it copies
+  through BudgetCharge, which latches the run and sets no GWalkSpent -- so a
+  file_copy refused there answered 0 as a failure, ioerror 3, while the same
+  refusal one helper over (ReadAllBytes) was the peLimit it is. Every charge
+  below a door either sets the flag or latches the budget; this asks both. }
 function WalkRefused(const AFn: String; out Err: TPhosphorError): Boolean;
 begin
-  Result := GWalkSpent;
+  Result := GWalkSpent or BudgetSpent();
   if Result then
   begin
     Err := BudgetRefusal(AFn);
@@ -253,7 +284,8 @@ end;
 function t_file_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (IoGate(Args[0].Str, puDelete) or GateRefused('file_delete', Err)) then
+  if not (IoGateAt(Args[0].Str, puDelete, BudgetMilliOs) or
+          GateRefused('file_delete', Err)) then
   begin Result := ValInt(0); Exit; end;
   Result := IoAnswer(DeleteFile(Args[0].Str));
 end;
@@ -651,7 +683,8 @@ begin
   // Same class as dir_delete's: the answer was discarded and 1 returned regardless,
   // so a path that could not be created reported success. An empty path is refused
   // here too -- ForceDirectories('') answers True having made nothing.
-  if not (IoGate(Args[0].Str, puWrite) or GateRefused('dir_create', Err)) then
+  if not (IoGateAt(Args[0].Str, puWrite, BudgetMilliOsPath) or
+          GateRefused('dir_create', Err)) then
   begin
     Result := ValInt(0);
     Exit;
@@ -678,7 +711,8 @@ begin
   // REFUSE BEFORE DOING ANYTHING. dir_delete("", 1) used to walk the root of the
   // current drive and delete it, then answer 1 -- because DirectoryExists("") is
   // False, so the post-check read the disaster as success.
-  if not IoGate(Args[0].Str, puDelete) then
+  if not (IoGateAt(Args[0].Str, puDelete, BudgetMilliOsPath) or
+          GateRefused('dir_delete', Err)) then
   begin
     Result := ValInt(0);
     Exit;
@@ -744,7 +778,8 @@ begin
   // Moving the working directory outside the root would make every RELATIVE path
   // after it resolve outside too, so the move itself is what has to be refused.
   Err := NoError();
-  if not (IoGate(Args[0].Str, puRead) or GateRefused('dir_setcurrent', Err)) then begin Result := ValInt(0); Exit; end;
+  if not (IoGateAt(Args[0].Str, puRead, BudgetMilliOsPath) or
+          GateRefused('dir_setcurrent', Err)) then Exit(ValInt(0));
   if Args[0].Str = '' then Exit(IoRefused());   // see chdir: '' moved nothing and answered 1
   Result := IoAnswer(SetCurrentDir(Args[0].Str));
 end;
@@ -817,7 +852,8 @@ end;
 function t_file_copy(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (IoGate(Args[0].Str, puRead) and IoGate(Args[1].Str, puWrite)) then
+  if not ((IoGate(Args[0].Str, puRead) or GateRefused('file_copy', Err)) and
+          (IoGate(Args[1].Str, puWrite) or GateRefused('file_copy', Err))) then
   begin Result := ValInt(0); Exit; end;
   if (Length(Args) >= 3) and (AsDouble(Args[2]) = 0) and FileExists(Args[1].Str) then
   begin Result := ValInt(0); Exit; end;   // no overwrite, target exists
@@ -850,15 +886,54 @@ begin
   Result := ValInt(Ord(WriteAllBytes(Args[0].Str, '')));
   if WalkRefused('file_createempty', Err) then Result := ValInt(0);
 end;
+{ A SIZE IS ASKED OF THE DIRECTORY, NEVER BY OPENING THE FILE (round 9).
+
+  This opened the path -- TFileStream.Create, open(O_RDONLY) -- to read one
+  number. On Linux, open() of a FIFO with no writer BLOCKS in the kernel until a
+  writer comes, and neither ceiling can reach a call that is blocked: under
+  MaxSteps 1000000 and TimeoutMs 2000 a file_getsize of a FIFO was still waiting
+  when it was killed at ten seconds, and with a writer present it answered -1,
+  which nothing documents. A directory walk that sums sizes hangs on the first
+  FIFO in it -- io.md's own example is one.
+
+  FindFirst is what `ls -l` and `du` do: a stat on Unix, FindFirstFileW on
+  Windows, and the size the filesystem records, with no open at all. Only a
+  REGULAR file has a size here: a directory, a FIFO, a device or a socket
+  answers 0 at once, the 0 a missing file answers. A file another process holds
+  locked is answered too, since nothing is opened to be refused.
+
+  A name holding a wildcard is matched EXACTLY: FindFirst would read 'a*b' as a
+  pattern, and the first file it happened to match is not the one asked about.
+  Windows names cannot hold one; a Linux name can. }
 function t_file_getsize(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var fs: TFileStream;
+var sr: TSearchRec; want: String; exact: Boolean;
 begin
   Err := NoError(); Result := ValInt(0);
-  if not (IoGate(Args[0].Str, puRead) or GateRefused('file_getsize', Err)) then Exit;
+  // The directory search reads the path as the OS does: 3.9 ns a byte measured.
+  if not (IoGateAt(Args[0].Str, puRead, BudgetMilliOs) or
+          GateRefused('file_getsize', Err)) then Exit;
+  want := ExtractFileName(Args[0].Str);
+  exact := (Pos('*', want) > 0) or (Pos('?', want) > 0);
+  if FindFirst(Args[0].Str, faAnyFile, sr) <> 0 then Exit;
   try
-    fs := TFileStream.Create(Args[0].Str, fmOpenRead or fmShareDenyNone);
-    try Result := ValInt(fs.Size); finally fs.Free; end;
-  except end;
+    repeat
+      // A pattern walks the directory: an entry is a step, as in the listings.
+      if exact and not BudgetCharge(BudgetUnitsPerStep) then
+      begin
+        Err := BudgetRefusal('file_getsize');
+        Exit;
+      end;
+      if exact and (sr.Name <> want) then Continue;
+      if (sr.Attr and faDirectory) <> 0 then Exit;
+      {$ifdef unix}
+      // S_IFMT / S_IFREG: a FIFO, a device or a socket has no size to give.
+      if (sr.Mode and $F000) <> $8000 then Exit;
+      {$endif}
+      Exit(ValInt(sr.Size));
+    until FindNext(sr) <> 0;
+  finally
+    FindClose(sr);
+  end;
 end;
 function t_file_appendalltext(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: String;
@@ -998,7 +1073,11 @@ end;
 function t_path_getfullpath(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  // ExpandFileName hands the path to the OS (GetFullPathNameW on Windows).
+  { ExpandFileName is the RTL's own FExpand (rtl/inc/fexpand.inc), a walk over
+    every byte of the path in Pascal -- NOT GetFullPathNameW, which this comment
+    used to claim: that call drops a trailing dot, and path_getfullpath$("a.")
+    keeps it (measured, round 9). The OS is asked only for the current
+    directory a relative path is joined to (GetDir). Priced at the OS rate. }
   if not BudgetLinearOk('path_getfullpath$', Length(Args[0].Str), BudgetMilliOs, Err) then
     Exit(ValStr(''));
   Result := ValStr(ExpandFileName(Args[0].Str));

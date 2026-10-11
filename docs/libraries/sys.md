@@ -138,12 +138,20 @@ every destructive one of them even with no sandbox in force. A refusal also
 records `5` in `ioerror()` (`iostrerror$()` answers `access denied`), so a `0`
 here can be told from whatever the previous file call left in that slot.
 
+A path a host's execution budget cannot pay for is neither kind of `0`: it is
+the call's catchable limit error, naming it, exactly as at `dir_create` and
+`dir_setcurrent` (a path of 4096 bytes or less is never asked about). Until
+round 9 these six answered it as a `0` with `ioerror()` `3`, and the loop that
+made it ran on. The directory calls price a path at what the OS does with it,
+which on Windows is about 55 ns a byte -- see
+[embedding](../embedding.md#the-ceilings-reach-inside-a-library-call-too).
+
 | function | what it answers |
 | --- | --- |
 | `mkdir(path$) → num` | `1` when it created the directory. `0` when the directory already existed, when its parent does not exist, or when refused. One level: `forcedirectories` makes a chain |
 | `rmdir(path$) → num` | `1` when it removed the directory. `0` for a directory that is not there, for one that is not empty (it stays), or when refused. Removes one level: it is not recursive |
 | `forcedirectories(path$) → num` | the one to prefer: `1` when the whole chain of directories exists afterwards — creating however many levels were missing — and `0` when it could not be made (`ioerror()` `3`) or was refused (`5`) |
-| `chdir(path$) → num` | `1` when the process working directory moved. `0` for a directory that does not exist, which moves nothing, and when refused — for this one that means outside the sandbox root, or `""` with or without a sandbox in force (until 2026-10-07 an unsandboxed `chdir("")` answered `1` and moved nothing: the RTL's `ChDir` ignores an empty name); it is a read, so the drive-root rule does not apply |
+| `chdir(path$) → num` | `1` when the process working directory moved. `0` for a directory that does not exist, which moves nothing, and when refused by the sandbox — for this one that means outside the sandbox root, or `""` with or without a sandbox in force (until 2026-10-07 an unsandboxed `chdir("")` answered `1` and moved nothing: the RTL's `ChDir` ignores an empty name); it is a read, so the drive-root rule does not apply |
 | `fileexists(path$, followlink) → num` | `1` when the file is there, `0` when it is not. A non-zero `followlink` resolves a symbolic link and asks about its target; `0` asks about the link itself. A refused path also answers `0`, and it can be told from absent by `ioerror()`: `5` for the refusal, `0` after any answer |
 | `kill(path$) → num` | `1` when it deleted the file. `0` for a file that is not there, for a directory (`rmdir` removes those), for one the OS would not delete, or when refused |
 

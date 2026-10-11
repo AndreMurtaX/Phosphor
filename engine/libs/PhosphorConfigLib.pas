@@ -439,6 +439,10 @@ begin
     // that judgement is not this read. (check-sandbox.py named both halves of the
     // line layer the day they were written; the RTL used to do this read, out of
     // the gate's sight.)
+    { The bound path, read by the gate and the OS on every reload: claimed,
+      so a refusal latches and both doors above -- cfg_open@ and cfg_reload@,
+      which ask BudgetSpent -- report it (round 9). }
+    if (FileName <> '') and not BudgetClaimLinear(Length(FileName), BudgetMilliOs) then Exit;
     if (FileName <> '') and SandboxAllows(FileName, puRead) and FileExists(FileName) then
     begin
       sl.Options := sl.Options + [soPreserveBOM];
@@ -491,8 +495,16 @@ begin
   Result := (FileName <> '') and SandboxAllows(FileName, puWrite);
   if not Result then Exit;
   { The path is the script's, and the save hands it to the OS twice (the folder
-    it forces, the file it writes): priced once, up front (round 8). }
-  if not BudgetLinear(Length(FileName), BudgetMilliOs) then Exit(False);
+    it forces, the file it writes): priced once, up front (round 8).
+
+    CLAIMED, SO THE REFUSAL LATCHES (round 9). This was BudgetLinear, which
+    refuses WITHOUT latching, and its False went to Touch, which drops it, and
+    to TouchOk and cfg_save, which ask BudgetSpent -- the one question a
+    non-latching refusal never answers. With the remainder between the set's
+    own charges and this path's price, an autosaving cfg_set@ came back with no
+    error, the value in memory and the file without it, and every later
+    autosave the same. Every caller of Save asks the latch, so Save latches. }
+  if not BudgetClaimLinear(Length(FileName), BudgetMilliOs) then Exit(False);
   raw := TStringList.Create();
   sl := TStringList.Create();
   BudgetMeterStart(m);
@@ -752,6 +764,10 @@ function OpenConfig(const AWho, APath: String; AAuto: Boolean;
 var c: TPhosphorConfig;
 begin
   Err := NoError();
+  { The path is the script's: the gate reads it here and again at every load
+    and save, and the OS is handed it. Priced before any of that (round 9 --
+    cfg_open@ was the one door of this unit whose path nothing priced). }
+  if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit(ValHandle(0));
   c := TPhosphorConfig.Create(APath, AAuto);
   if BudgetSpent() then
   begin

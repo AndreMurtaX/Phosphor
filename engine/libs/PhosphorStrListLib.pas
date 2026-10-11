@@ -358,10 +358,13 @@ begin
     sweep measured a list of 50-byte lines at 13 times its cost. The separator is
     the one part that is not already in the list: n items times a long
     separator are bytes no argument holds, so every separator byte past the
-    first is charged as an allocation, one unit each, as RunOf charges a run. }
-  if not BudgetAllows(BudgetMilliUnits(Count, 2 * BudgetMilliItem) +
-                      BudgetMilliUnits(total, BudgetMilliScan) +
-                      Int64(Count) * (Length(ASep) - Ord(Length(ASep) > 0))) then Exit(False);
+    first is charged as an allocation, one unit each, as RunOf charges a run.
+    CLAIMED (round 9): this method holds no error to write a refusal into, so
+    the refusal latches, and a caller that has only the Boolean or only asks
+    BudgetSpent reads the same answer. }
+  if not BudgetClaim(BudgetMilliUnits(Count, 2 * BudgetMilliItem) +
+                     BudgetMilliUnits(total, BudgetMilliScan) +
+                     Int64(Count) * (Length(ASep) - Ord(Length(ASep) > 0))) then Exit(False);
   SetLength(AText, total);
   at := 1;
   for i := 0 to Count - 1 do
@@ -442,11 +445,17 @@ begin
          ((not StrictDelimiter) and (s[j] <= ' ')) then
         need[i] := True;
     end;
+    { A QUOTE CHARACTER OF NUL QUOTES NOTHING, as in the RTL's own writer
+      (stringl.inc: `if DoQuote and (QuoteChar<>#0)`) and as this unit's reader
+      already treats it. It wrote the NUL as an opening and a closing quote:
+      "a,b" went out as five bytes, NUL a , b NUL (round 9). }
+    if QuoteChar = #0 then need[i] := False;
     total := total + Length(s);
     if need[i] then total := total + 2 + quotes;
   end;
   if not BudgetMeterEnd(m) then Exit(False);
-  if not BudgetLinear(total, BudgetMilliCopy) then Exit(False);
+  // Claimed, as JoinInto's is: a refusal here latches (round 9).
+  if not BudgetClaimLinear(total, BudgetMilliCopy) then Exit(False);
   // Delimiter and QuoteChar are Chars, written here as single BYTES of the
   // answer -- never concatenated through this unit's code page, which turned a
   // non-ASCII delimiter into '?' and broke the round trip.
@@ -653,13 +662,21 @@ begin
 end;
 
 { False = refused, and the list is exactly as it was: the search is finished
-  (and paid for) before anything is written. }
+  (and paid for) before anything is written.
+
+  A NEW NAME GOES WHERE strings_add WOULD PUT IT (round 9). It was appended
+  with Add, so on a SORTED list strings_values(l@, "a", "1") after "m=1" and
+  "z=1" answered m=1,z=1,a=1 -- a list that still said it was sorted, and
+  whose strings_find, a binary search, answered 0 for a line that was there.
+  FPC's TStrings.SetValue calls Add, and TStringList.Add on a sorted list
+  inserts at the place Find returns; AddIndexed is this unit's spelling of
+  that, metered, and its -1 is a refusal that has changed nothing. }
 function TPhosphorStringList.SetValue(const AName, AValue: String): Boolean;
 var idx: Integer;
 begin
   if not IndexOfName(AName, idx) then Exit(False);
   if idx >= 0 then Items[idx] := AName + NameValueSeparator + AValue
-  else Add(AName + NameValueSeparator + AValue);
+  else if AddIndexed(AName + NameValueSeparator + AValue) < 0 then Exit(False);
   Result := True;
 end;
 
@@ -772,7 +789,7 @@ begin
   if not Result then Exit;
   if L.WriteBOM then
   begin
-    if not BudgetLinear(Length(AText), BudgetMilliCopy) then begin AText := ''; Exit(False); end;
+    if not BudgetClaimLinear(Length(AText), BudgetMilliCopy) then begin AText := ''; Exit(False); end;
     AText := Utf8Bom + AText;
   end;
 end;
@@ -814,6 +831,11 @@ begin
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
       len := fs.Size;
+      { ASKED BEFORE THE ALLOCATION, as ReadAllBytes asks: the door charged the
+        read only after it had been made, so a file of any size was committed
+        to memory first (round 9). A claim: this helper holds no error, and
+        the door's next consultation reports the latch. }
+      if not BudgetClaim(len) then Exit;
       SetLength(AText, len);
       if len > 0 then fs.ReadBuffer(AText[1], len);
     finally fs.Free; end;
@@ -1458,6 +1480,8 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not RenderForSave(l, t) then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
+  // A spent budget writes nothing and renames nothing (round 9).
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   { THE WRITE'S ANSWER IS THE ANSWER. This discarded SaveTextToFile's Boolean and
     returned the line count whatever happened, so a write the sandbox refused, or
@@ -1466,8 +1490,13 @@ begin
     0 when nothing was written, which is what file_writealltext answers for the
     same refusal; an empty list also answers 0, exactly as strings_loadfromfile's
     0 means "no lines" from whichever cause. }
-  if SaveTextToFile(Args[1].Str, t) then
-    Result := ValInt(l.Count);
+  { A PATH THE BUDGET PRICED OUT is this call's peLimit, not that 0 (round 9).
+    IoGate's refusal of a long path does not latch -- it is an argument, refused
+    without spending the run -- so GateRefused is the only thing that can say
+    it; this door asked BudgetSpent, which a path refusal never sets, and
+    answered 0 with ioerror() 3. scripts/check-budget.py found it. }
+  if not (SaveTextToFile(Args[1].Str, t) or GateRefused('strings_savetofile', Err)) then Exit;
+  Result := ValInt(l.Count);
 end;
 
 { A REFUSED LOAD CHANGES NOTHING (round 8). The encoding was written before the
@@ -1478,7 +1507,14 @@ var l: TPhosphorStringList; s: String;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  LoadTextFromFile(Args[1].Str, s);
+  { A path the budget priced out is this call's peLimit (round 9): the load
+    used to go on with '' and answer 0 lines, a refusal read as an empty file.
+    Any other failure keeps that answer, as it always had. }
+  if not LoadTextFromFile(Args[1].Str, s) then
+  begin
+    GateRefused('strings_loadfromfile', Err);
+    if IsError(Err) then Exit;
+  end;
   { The read is charged for what it read, before the split is asked for. }
   if not BudgetLinearAfterOk('strings_loadfromfile', Length(s), BudgetMilliCopy, Err) then Exit;
   if not (BudgetLinearOk('strings_loadfromfile', Length(s), BudgetMilliScan, Err) and

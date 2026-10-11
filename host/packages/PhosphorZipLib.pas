@@ -224,6 +224,18 @@ type
     procedure DoDoneStream(Sender: TObject; var AStream: TStream; AItem: TFullZipFileEntry);
   end;
 
+{ AN ARCHIVE JUDGED IS REFUSED FOR ONE OF TWO REASONS, and they are different
+  errors. JudgeArchive refuses an archive whose records overlap or repeat --
+  peRuntime, "archive refused: ..." -- and it also refuses one whose entry count
+  the BUDGET cannot pay for, which was reported the same way: a peLimit dressed
+  as a hostile archive (round 9). Its price is a claim now, so the latch says
+  which it was. }
+function ArchiveRefusal(const AWho, AWhy: String): TPhosphorError;
+begin
+  if BudgetSpent() then Result := BudgetRefusal(AWho)
+  else Result := MakeError(peRuntime, 'archive refused: ' + AWhy);
+end;
+
 function JudgeArchive(AEntries: TFullZipFileEntries; AStream: TStream;
   AForDisk: Boolean; out AWhy: String): Boolean; forward;
 
@@ -911,7 +923,8 @@ begin
   total := 0;
   for i := 0 to AUz.Entries.Count - 1 do
     total := total + AUz.Entries[i].Size;
-  Result := BudgetAllows(total);
+  // A claim: this helper holds no error, and every caller reports the latch.
+  Result := BudgetClaim(total);
 end;
 
 function ArchiveIsSafe(AUz: TUnZipper): Boolean;
@@ -1137,7 +1150,7 @@ begin
   { One seek and one bounded read per entry, over an entry count the ARCHIVE
     chose: charged before the pass, as it always was. The two sorts below charge
     their own passes as they go. }
-  if not BudgetAllows(n) then
+  if not BudgetClaim(n) then
   begin
     AWhy := 'the execution budget refuses an archive of ' + IntToStr(n) + ' entries';
     Exit;
@@ -1319,6 +1332,10 @@ var uz: TMeteredUnZipper; why: String; unread: Boolean;
 begin
   Err := NoError();
   Result := ValInt(0);
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('unzip_extract', Int64(Length(Args[0].Str)) + Length(Args[1].Str),
+                        BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   { Args[1] IS A PATH ON DISK TOO -- the directory every entry is written into,
     and the half of this call nobody asked the gate about. The two guards below
@@ -1350,7 +1367,7 @@ begin
           "failures are answered" rule; an archive that could not be re-read is
           an ordinary failure and keeps the 0 / zip_error() = 1 it always had. }
         if not unread then
-          Err := MakeError(peRuntime, 'archive refused: ' + why);
+          Err := ArchiveRefusal('unzip_extract', why);
         Exit;
       end;
       if not ArchiveFitsBudget(uz) then
@@ -1366,7 +1383,7 @@ begin
         on E: EZipRefused do
         begin
           ZipErr := 1;
-          Err := MakeError(peRuntime, 'archive refused: ' + E.Message);
+          Err := ArchiveRefusal('unzip_extract', E.Message);
           Exit;
         end;
         else
@@ -1397,6 +1414,9 @@ var uz: TUnZipper;
 begin
   Err := NoError();
   Result := ValInt(0);
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('unzip_count', Length(Args[0].Str), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     uz := TUnZipper.Create();
@@ -1422,6 +1442,9 @@ var uz: TUnZipper; n: Integer;
 begin
   Err := NoError();
   Result := ValStr('');
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('unzip_entry$', Length(Args[0].Str), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   try
     uz := TUnZipper.Create();
@@ -1485,6 +1508,10 @@ end;
 function f_zip_create(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('zip_create@', Length(Args[0].Str), BudgetMilliOs, Err) then
+    Exit(ValHandle(0));
   try
     Result := ValHandle(RegisterHandle(TZipWriter.Create(Args[0].Str)));
     ZipErr := 0;
@@ -1586,6 +1613,10 @@ end;
 function f_zip_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('zip_open@', Length(Args[0].Str), BudgetMilliOs, Err) then
+    Exit(ValHandle(0));
   try
     Result := ValHandle(RegisterHandle(TZipReader.Create(Args[0].Str)));
     ZipErr := 0;
@@ -1641,7 +1672,7 @@ begin
     begin
       Result := ValStr('');
       ZipErr := 1;
-      Err := MakeError(peRuntime, 'archive refused: ' + E.Message);
+      Err := ArchiveRefusal('zip_read$', E.Message);
     end;
     else
     begin
@@ -1688,6 +1719,9 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('zip_extract', Length(Args[2].Str), BudgetMilliOs, Err) then Exit;
   try
     if not ArchiveIsSafe(r.UZ) then
     begin
@@ -1706,7 +1740,7 @@ begin
       // An archive that vanished between zip_open@ and here is answered, not
       // raised -- see the same guard in f_unzip_extract.
       if not unread then
-        Err := MakeError(peRuntime, 'archive refused: ' + why);
+        Err := ArchiveRefusal('zip_extract', why);
       Exit;
     end;
     // Args[2] is a DESTINATION DIRECTORY on disk. ArchiveIsSafe above stops an
@@ -1748,7 +1782,7 @@ begin
       on E: EZipRefused do
       begin
         ZipErr := 1;
-        Err := MakeError(peRuntime, 'archive refused: ' + E.Message);
+        Err := ArchiveRefusal('zip_extract', E.Message);
         Exit;
       end;
       else
@@ -1776,6 +1810,9 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
+  // Every path is the script's, read whole by the gate and by the OS: priced
+  // first, as zip_compress and zip_addfile always were (round 9).
+  if not BudgetLinearOk('zip_extractall', Length(Args[1].Str), BudgetMilliOs, Err) then Exit;
   try
     if not ArchiveIsSafe(r.UZ) then
     begin
@@ -1791,7 +1828,7 @@ begin
       // An archive that vanished between zip_open@ and here is answered, not
       // raised -- see the same guard in f_unzip_extract.
       if not unread then
-        Err := MakeError(peRuntime, 'archive refused: ' + why);
+        Err := ArchiveRefusal('zip_extractall', why);
       Exit;
     end;
     { Args[1] is a DESTINATION DIRECTORY on disk, and this routine asked the gate
@@ -1822,7 +1859,7 @@ begin
       on E: EZipRefused do
       begin
         ZipErr := 1;
-        Err := MakeError(peRuntime, 'archive refused: ' + E.Message);
+        Err := ArchiveRefusal('zip_extractall', E.Message);
         Exit;
       end;
       else

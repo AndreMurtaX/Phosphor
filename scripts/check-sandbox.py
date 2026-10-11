@@ -62,7 +62,8 @@ PRIMITIVES = [
 # DeleteTree and CopyTree are NOT in that list: they are this project's own
 # helpers and they ask the gate themselves, at every level of their recursion.
 
-GATE = re.compile(r'\b(?:Sandbox(?:Allows|Active|ScratchPath|Root)|IoGate)\b')
+# IoGateAt is the same door at a caller's rate (round 9); IoGate calls it.
+GATE = re.compile(r'\b(?:Sandbox(?:Allows|Active|ScratchPath|Root)|IoGate(?:At)?)\b')
 
 # THE UNITS THAT OWN ioerror() ASK THROUGH IoGate, NEVER AROUND IT (ledger n10,
 # d62). IoGate (engine/libs/PhosphorIoLib.pas) is SandboxAllows plus the one thing
@@ -70,8 +71,8 @@ GATE = re.compile(r'\b(?:Sandbox(?:Allows|Active|ScratchPath|Root)|IoGate)\b')
 # refusal recorded 2 in one function, 3 in five, and nothing in the rest, so
 # ioerror() kept the previous call's code and a script read that as this call's.
 # A bare SandboxAllows in one of these units is that defect waiting to come back:
-# it would gate the path and still say nothing. The one allowed call is IoGate's
-# own body.
+# it would gate the path and still say nothing. The one allowed call is the
+# door's own body: IoGateAt since round 9, which IoGate calls at the query rate.
 IOERR_UNITS = ('PhosphorIoLib.pas', 'PhosphorSysLib.pas', 'PhosphorStrListLib.pas')
 BARE_ASK = re.compile(r'\bSandboxAllows\s*\(')
 
@@ -86,7 +87,7 @@ def bare_asks():
         with open(path, encoding='utf-8') as fh:
             text = strip_comments(fh.read())
         for name, body in routines_of(text):
-            if BARE_ASK.search(body) and not (base == 'PhosphorIoLib.pas' and name == 'IoGate'):
+            if BARE_ASK.search(body) and not (base == 'PhosphorIoLib.pas' and name == 'IoGateAt'):
                 bad.append('%s:%s' % (base, name))
     return bad
 

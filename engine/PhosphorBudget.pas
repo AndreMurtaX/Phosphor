@@ -303,13 +303,30 @@ const
       0.2      buffer_slice$,      } one Move into a fresh string, no walk
       0.2      path_combine$       }   MOVE      0.375 ns ->   48
       5.2      reverse$            } a walk with a Move per character
-                                       CHAR      5.5 ns  ->  704 (not yet
-                                       applied: see CpReverse)
+                                       CHAR      5.5 ns  ->  704 (applied by
+                                       CpReverse since 45c0363)
 
     and a search's own scan of its haystack is the RTL's IndexByte, BLOCK, not
     SCAN. TEXT is left in the table and no longer used: a split counts its
     pieces (a SCAN pass, charged before it is made) and is asked PIECE a piece
     and COPY a byte.
+
+    ROUND 9 ADDS THE ONE FAMILY ROUND 8 MEASURED FROM ITS CHEAPEST MEMBERS.
+    The path a file call reads was priced at REWRITE from file_exists,
+    dir_exists, file_readalltext$ and file_getsize, which is what the gate and
+    a failing QUERY cost. The doors that make the OS do something with the
+    whole path cost far more on Windows (4 MB paths, -O2, unbudgeted):
+
+      ns/elt   function            family
+     52-56     chdir, dir_setcurrent, mkdir, rmdir, forcedirectories,
+               dir_create, dir_delete     OSPATH  64 ns -> 8192
+      8.6      kill, file_delete   } a file removed: OS
+      3.9      file_getsize        } a directory search (FindFirst): OS
+
+    -- 30 to 45 times REWRITE, so 3000 chdir calls ran 117 s under a step
+    budget worth 2000 ms. On Linux the same doors cost 1 to 10 ns a byte, so
+    there they are charged up to 60 times their work -- for a path past
+    PATH_MAX, the only one IoGate prices, which no Linux call can use anyway.
 
     TWO KINDS OF PRICE, STATED SO NOBODY "FIXES" ONE INTO THE OTHER. These are
     TIME prices. A one-unit-a-byte charge on an ALLOCATION an argument sizes --
@@ -337,6 +354,7 @@ const
   BudgetMilliChar = 704;
   BudgetMilliPiece = 4352;
   BudgetMilliMove = 48;
+  BudgetMilliOsPath = 8192;
 
 { Install the ceilings for one run. Both 0 = inert (see the header). Nests: an
   inner Begin/End pair leaves the outer one's ceilings in place. }
@@ -436,6 +454,28 @@ function BudgetLinearOk(const AWhat: String; ACount, AMilliEach: Int64;
 function BudgetLinearAfter(ACount, AMilliEach: Int64): Boolean;
 function BudgetLinearAfterOk(const AWhat: String; ACount, AMilliEach: Int64;
                              var E: TPhosphorError): Boolean;
+
+{ RULE 1 FOR A HELPER THAT HAS NO ERROR TO WRITE (round 9, 2026-10-11): asked
+  before the work exactly as BudgetAllows / BudgetLinear are, and refused by the
+  same test -- but a refusal LATCHES, as a charge's does, so the door above can
+  find it by asking BudgetSpent.
+
+  WHY A THIRD SPELLING. BudgetAllows does not latch, so its Boolean is the only
+  record that it refused; a helper that turns that Boolean into an `Exit(False)`
+  hands a refusal to a caller that cannot tell it from any other False.
+  TPhosphorConfig.Save did exactly that, and TouchOk -- which asked BudgetSpent,
+  as every door above a LATCHING helper must -- found nothing: an autosaving
+  cfg_set@ reported success while the value never reached the file. A helper
+  either writes the refusal into an error it holds (BudgetLinearOk), or records
+  it in its unit's refusal FLAG in the statement that asks (IoLib's GWalkSpent,
+  a rag index's or a zip reader's FSpent -- which the doors read through
+  GateRefused / WalkRefused / `if r.FSpent`), or claims, so that the question
+  its caller asks is the one that answers. A flag keeps RULE 1: an oversized
+  path or file is refused and the run goes on. scripts/check-budget.py's
+  refusal gate holds the rule, and settles a flagged refusal only by a reader
+  of the flag -- BudgetSpent cannot see one. }
+function BudgetClaim(AUnits: Int64): Boolean;
+function BudgetClaimLinear(ACount, AMilliEach: Int64): Boolean;
 
 { RULE 2, ONE ITERATION AT A TIME, for a walk whose cost each step decides: a
   search of a list whose comparisons cost what the two strings share, a name
@@ -825,6 +865,20 @@ function BudgetLinearAfterOk(const AWhat: String; ACount, AMilliEach: Int64;
 begin
   Result := BudgetLinearAfter(ACount, AMilliEach);
   if not Result then E := BudgetRefusal(AWhat);
+end;
+
+function BudgetClaim(AUnits: Int64): Boolean;
+begin
+  if not GActive then Exit(True);
+  Result := BudgetAllows(AUnits);
+  // BudgetAllows left GWhy saying what was refused; latching keeps it.
+  if not Result then GSpent := True;
+end;
+
+function BudgetClaimLinear(ACount, AMilliEach: Int64): Boolean;
+begin
+  if not GActive then Exit(True);
+  Result := BudgetClaim(MilliToUnits(ACount, AMilliEach));
 end;
 
 function BudgetLinearOk(const AWhat: String; ACount, AMilliEach: Int64;

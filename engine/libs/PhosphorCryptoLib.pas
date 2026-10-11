@@ -299,7 +299,10 @@ end;
 // --- PBKDF2-HMAC-SHA256 (RFC 8018 section 5.2) ---------------------------------
 
 { False when the execution budget refused the work; Key is then undefined.
-  AIterations and ABytes are validated by the caller (>= 1). }
+  AIterations and ABytes are validated by the caller (>= 1). Every refusal here
+  LATCHES -- the rounds' charges always did, and the up-front prices of the
+  password and the salt are claims (round 9) -- so a caller that only had the
+  Boolean, or only asks BudgetSpent, reads the same answer. }
 function Pbkdf2Sha256(const Password, Salt: RawByteString;
                       AIterations: Int64; ABytes: Integer;
                       out Key: RawByteString): Boolean;
@@ -322,11 +325,11 @@ begin
     past TimeoutMs before the first charge read the clock. Asked BEFORE the work,
     UnitsPerBlock per 64-byte block, so an oversized request
     is refused rather than run. }
-  if not BudgetAllows((Int64(Length(Password)) div 64 + 1) * UnitsPerBlock) then Exit;
+  if not BudgetClaim((Int64(Length(Password)) div 64 + 1) * UnitsPerBlock) then Exit;
   HmacPrepare(Password, k);
   for blk := 1 to blocks do
   begin
-    if not BudgetAllows(((Int64(Length(Salt)) + 4) div 64 + 1) * UnitsPerBlock) then Exit;
+    if not BudgetClaim(((Int64(Length(Salt)) + 4) div 64 + 1) * UnitsPerBlock) then Exit;
     first := Salt + Chr(Byte(blk shr 24)) + Chr(Byte(blk shr 16)) +
              Chr(Byte(blk shr 8)) + Chr(Byte(blk));
     HmacDigest(k, PByte(Pointer(first)), Length(first), u);

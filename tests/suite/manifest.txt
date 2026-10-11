@@ -97,3 +97,4 @@
 97_case_noncharacters
 98_linear_rewrites
 99_delimitedtext
+100_strlist_round9

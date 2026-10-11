@@ -1549,6 +1549,29 @@ begin
         1000000, 0, 0, False);
   Report(GetTickCount64() - CryptoStart < 10000,
          'the crypto ceilings stopped within seconds, not minutes');
+  { THE DIGESTS ARE WORK TOO (round-6 diff review): they charged nothing, so a
+    loop of them over a large string ran past every ceiling and reported
+    success -- one call is one instruction. 1000000 steps = 256M units;
+    string$ of 10 MB charges 10M; each digest of it is 156251 blocks at
+    UnitsPerBlock = 36, 5.6M -- so about the 44th call is refused, before it
+    hashes, and the 200 the loop asks for are never reached. The old code
+    hashed all 200 (about 2 GB) and finished. }
+  CheckMsg('a step ceiling refuses sha256$ past what is left',
+        's$ = string$(10000000, 97)' + LF +
+        'for i = 1 to 200' + LF + 'k$ = sha256$(s$)' + LF + 'next' + LF,
+        1000000, 0, 'sha256$: that would take');
+  CheckMsg('a step ceiling refuses sha1$ past what is left',
+        's$ = string$(10000000, 97)' + LF +
+        'for i = 1 to 200' + LF + 'k$ = sha1$(s$)' + LF + 'next' + LF,
+        1000000, 0, 'sha1$: that would take');
+  CheckMsg('a step ceiling refuses md5$ past what is left',
+        's$ = string$(10000000, 97)' + LF +
+        'for i = 1 to 200' + LF + 'k$ = md5$(s$)' + LF + 'next' + LF,
+        1000000, 0, 'md5$: that would take');
+  CheckMsg('a step ceiling refuses hmac_sha256$ past what is left',
+        's$ = string$(10000000, 97)' + LF +
+        'for i = 1 to 200' + LF + 'k$ = hmac_sha256$("key", s$)' + LF + 'next' + LF,
+        1000000, 0, 'hmac_sha256$: that would take');
   // ...and the documented default fits inside the budget embedding.md prescribes.
   Check('password_hash$ at its default cost fits MaxSteps = 1000000',
         'r$ = password_hash$("pw")' + LF +

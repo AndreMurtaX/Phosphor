@@ -81,6 +81,9 @@ save_as$ = ""              rem what a save dialog answers (self-test)
 open_as$ = ""              rem what an open dialog answers, once (self-test)
 step_err$ = ""             rem what the last step_ok failed with
 probe_err$ = ""            rem why is_open_db could not tell (backup)
+hdr_version = 0            rem what file_header$ read: user_version,
+hdr_app = 0                rem   application_id,
+hdr_err$ = ""              rem   and why it could not read the file
 fold_map@ = sdict@()       rem fold$'s table: character -> its case folding
 fold_probe@ = sdict@()     rem what fold$ looks for before walking a string
 passed = 0
@@ -378,6 +381,10 @@ rem The new file is opened and prepared BEFORE the old connection is let
 rem go: a file that is not a usable database leaves whatever was open --
 rem and whoever was signed in -- exactly as it was, and answers 0.
 function open_database(path$) local new@, why$
+  if may_open_db(path$) <> 1 then
+    say("The database " + path$ + " could not be prepared: " + schema_msg$)
+    return 0
+  end if
   new@ = sqlite_open@(path$)
   if sqlite_isopen(new@) <> 1 then
     say("Could not open the database " + path$ + ": " + sqlite_errormsg$())
@@ -396,6 +403,96 @@ function open_database(path$) local new@, why$
   dict_clear@(current@)
   prepare_login()
   show(w@("login"))
+  return 1
+end function
+
+rem --- whose file it is, asked of its bytes and not of SQLite ---------------
+rem SQLite does more than read a file it is asked to read. A program killed
+rem in the middle of a transaction leaves a "hot journal" beside its file
+rem (name-journal), and the first query of whoever opens the file next --
+rem even PRAGMA user_version, even on a query_only connection -- rolls that
+rem journal back INTO the file and deletes it. So whether a file may be
+rem opened through SQLite at all is decided before, from its 100-byte
+rem header read as a plain file (sqlite.org/fileformat.html, section 1.3):
+rem "SQLite format 3" and a zero byte, then user_version as a big-endian
+rem 32-bit number at offset 60 and application_id at offset 68.
+rem file_header$ answers what it found -- "missing", "empty", "notdb", or
+rem "db" with hdr_version and hdr_app set -- or "unread", with hdr_err$
+rem saying why. (A channel closed on Linux drops the POSIX locks this
+rem process holds on that file; it is read only between statements, when
+rem the open connection holds none.)
+function file_header$(p$) local h$, n, i
+  hdr_version = 0
+  hdr_app = 0
+  hdr_err$ = ""
+  if file_exists(p$) <> 1 then return "missing"
+  h$ = ""
+  on error call header_fault
+  open p$ for input as #7
+  if hdr_err$ = "" then
+    n = lof(7)
+    if n > 100 then n = 100
+    if n > 0 then h$ = input$(n, #7)
+    close #7
+  end if
+  on error goto 0
+  if hdr_err$ <> "" then return "unread"
+  if bytelen(h$) = 0 then return "empty"
+  if bytelen(h$) < 100 or bytemid$(h$, 1, 15) <> "SQLite format 3" or byteat(h$, 16) <> 0 then return "notdb"
+  for i = 0 to 3
+    hdr_version = hdr_version * 256 + byteat(h$, 61 + i)
+    hdr_app = hdr_app * 256 + byteat(h$, 69 + i)
+  next
+  rem both are SIGNED 32-bit numbers, as the PRAGMAs answer them
+  if hdr_version >= 2147483648 then hdr_version = hdr_version - 4294967296
+  if hdr_app >= 2147483648 then hdr_app = hdr_app - 4294967296
+  return "db"
+end function
+
+rem file_header$'s error handler: what went wrong is its answer, and the
+rem reading goes on past the statement that failed (0 = resume next).
+function header_fault(code, msg$)
+  if hdr_err$ = "" then hdr_err$ = msg$
+  return 0
+end function
+
+rem The name of a file beside p$ holding a transaction that did not finish
+rem -- its rollback journal or its write-ahead log, when it holds anything
+rem -- which SQLite would act on once p$ is opened; "" when there is none.
+function unfinished$(p$)
+  if file_getsize(p$ + "-journal") > 0 then return p$ + "-journal"
+  if file_getsize(p$ + "-wal") > 0 then return p$ + "-wal"
+  return ""
+end function
+
+rem Whether p$ may be opened through SQLite: 1 when its header carries this
+rem program's application id, or when it is not there yet or empty or not
+rem marked by any program AND nothing unfinished lies beside it -- then
+rem db_owner$ looks at its tables, which only reads. Else 0, schema_msg$
+rem says why, and the file has not been opened at all.
+function may_open_db(p$) local h$, j$
+  schema_msg$ = ""
+  h$ = file_header$(p$)
+  if h$ = "unread" then
+    schema_msg$ = "it could not be read (" + hdr_err$ + ")."
+    return 0
+  end if
+  if h$ = "notdb" then
+    schema_msg$ = "it is not a SQLite database."
+    return 0
+  end if
+  if h$ = "db" then
+    if hdr_app = APP_ID then return 1
+    if hdr_app <> 0 then
+      schema_msg$ = "it belongs to another program (its application id is " + str$(hdr_app) + "), not to " + APP$ + "."
+      return 0
+    end if
+  end if
+  j$ = unfinished$(p$)
+  if j$ <> "" then
+    schema_msg$ = "a program stopped in the middle of changing it, and left " + j$ + " beside it. Nothing marks the file as this program's, and opening it would make SQLite roll that change back -- a write into a file that may be another program's. Open it with the program that made it first."
+    return 0
+  end if
   return 1
 end function
 
@@ -499,40 +596,65 @@ end function
 rem Whose file this is, before anything is written into it: "ours" or
 rem "new" (no table at all, no version, no owner -- what sqlite_open@
 rem makes of a name that was not there), else "" with schema_msg$ saying
-rem why. Version 3 marks its files with PRAGMA application_id; versions 1
-rem and 2 set none, so a file of theirs is known by its version AND by
-rem having every column version 1 built -- the columns are read from a
-rem version-1 schema built in memory, not from a list kept by hand.
+rem why. (open_database has already asked the file's header the same,
+rem without SQLite: may_open_db.) Version 3 marks its files with PRAGMA
+rem application_id; versions 1 and 2 set none, so a file of theirs is known
+rem by its version AND by having every column version 1 built. A marked
+rem file is not trusted on its mark alone either: it must have every table
+rem and column its version has, or the first query of the program fails on
+rem a table that is not there. The tables and columns are read from a
+rem schema built in memory the way this program builds one -- version 1's,
+rem or the whole upgrade's for the current version -- not from a list kept
+rem by hand. A file of a NEWER version is left to create_schema to refuse.
 function db_owner$(d@, v, app) local m@, s@, missing$, n
-  if app = APP_ID then return "ours"
-  if app <> 0 then
+  if app <> 0 and app <> APP_ID then
     schema_msg$ = "it belongs to another program (its application id is " + str$(app) + "), not to " + APP$ + "."
     return ""
   end if
+  if app = APP_ID and v > SCHEMA_VERSION then return "ours"
   n = sqlite_scalar(d@, "SELECT count(*) FROM sqlite_master")
   if n = 0 and v = 0 then return "new"
   missing$ = "?"
-  if v = 1 or v = 2 then
+  if v = 1 or v = 2 or (app = APP_ID and v = SCHEMA_VERSION) then
     missing$ = ""
     m@ = sqlite_open@()
-    schema_v1(m@)
-    s@ = sqlite_prepare@(m@, "SELECT m.name AS t, p.name AS c FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table'")
+    if v = SCHEMA_VERSION then
+      upgrade(m@, 0)
+    else
+      schema_v1(m@)
+    end if
+    s@ = sqlite_prepare@(m@, "SELECT m.name AS t, p.name AS c FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table' ORDER BY m.rowid, p.cid")
     while sqlite_step(s@) = 1
       if missing$ = "" then
-        if has_column(d@, sqlite_gets$(s@, "t"), sqlite_gets$(s@, "c")) = 0 then missing$ = sqlite_gets$(s@, "t") + "." + sqlite_gets$(s@, "c")
+        if has_column(d@, sqlite_gets$(s@, "t"), sqlite_gets$(s@, "c")) = 0 then
+          if has_column(d@, sqlite_gets$(s@, "t"), "") = 1 then
+            missing$ = "the column " + sqlite_gets$(s@, "t") + "." + sqlite_gets$(s@, "c")
+          else
+            missing$ = "the table " + sqlite_gets$(s@, "t")
+          end if
+        end if
       end if
     end while
     sqlite_finalize(s@)
     sqlite_close(m@)
   end if
   if missing$ = "" then return "ours"
+  if app = APP_ID then
+    if missing$ = "?" then
+      schema_msg$ = "it is marked as a " + APP$ + " database, but its schema version (" + str$(v) + ") is not one this program ever wrote -- the file is damaged. Open a backup of it instead."
+    else
+      schema_msg$ = "it is marked as a " + APP$ + " database, but it is not a complete one: " + missing$ + " is missing -- the file is damaged. Open a backup of it instead."
+    end if
+    return ""
+  end if
   schema_msg$ = "it is not a " + APP$ + " database -- it holds other tables (" + sqlite_scalar$(d@, "SELECT group_concat(name, ', ') FROM (SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name LIMIT 6)") + ") -- and this program does not write into another program's file."
   return ""
 end function
 
-rem 1 when table$ has a column col$.
+rem 1 when table$ has a column col$ -- or, with col$ "", any column at all:
+rem whether there is such a table.
 function has_column(d@, table$, col$) local s@, n
-  s@ = sqlite_prepare@(d@, "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2")
+  s@ = sqlite_prepare@(d@, "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2 OR ?2 = ''")
   sqlite_bindstr(s@, 1, table$)
   sqlite_bindstr(s@, 2, col$)
   n = 0
@@ -919,15 +1041,24 @@ rem names, and ß, where folding answers "ss", so STRASSE and straße were two.
 rem fold$ is alcase$ and then a table of the characters where the two part,
 rem derived from Unicode 15's casefold over every code point -- Python's
 rem str.casefold was the oracle, and fold$ was checked against it for all
-rem 1,112,062 characters. Only the noncharacters U+FFFE and U+FFFF differ:
-rem alcase$ turns them into "?". U+0130, the dotted capital I, is taken out
-rem before alcase$, which would answer a bare "i" where folding keeps the
-rem dot. A string alcase$ answers in ASCII has nothing in the table, and
+rem 1,112,062 characters. Three differ, two of them because alcase$ turns
+rem the noncharacters U+FFFE and U+FFFF into "?". The third is chosen:
+rem U+0130, the dotted capital I of Turkish, folds to a plain "i" here,
+rem where full folding answers "i" + U+0307 (a combining dot). Folding is
+rem for MATCHING, and a match should drop the dot the way Unicode's
+rem caseless identifier matching drops marks -- with the dot kept, İLKER
+rem could not sign in typing ilker or ILKER, and istanbul did not find
+rem İSTANBUL. (Version 2's keys, from alcase$, already said "i".) It is
+rem replaced before alcase$, which would answer the same "i" on its own
+rem today; this way the rule is written here and not left to alcase$. The
+rem keys depend on alcase$ all the same: it turns a byte that is not valid
+rem UTF-8 into "?", and a change to that would change the keys of such text.
+rem A string alcase$ answers in ASCII has nothing in the table, and
 rem neither has one without any of the table's probes (fold_init): those
 rem cost an alcase$ and a few instr calls. Only a string that may hold a
 rem character of the table is walked a character at a time.
 function fold$(s$) local t$, out$, i, n, b, w, start, c$, hit
-  t$ = alcase$(replacestr$(s$, chr$(304), "i" + chr$(775)))
+  t$ = alcase$(replacestr$(s$, chr$(304), "i"))
   n = bytelen(t$)
   if n = len(t$) then return t$
   hit = 0
@@ -1372,8 +1503,21 @@ rem it is proven another file -- it has no such table, it is not a database
 rem at all, or it holds no such mark -- and -1 when it cannot be told, with
 rem probe_err$ saying why: a read-only session cannot leave a mark, and a
 rem file that could not be READ (locked, say) proves nothing.
-function is_open_db(p$) local token$, s@, t@, seen$, code, why$, ans
+rem Before any of that, the file's header is read as bytes (file_header$):
+rem the open database carries this program's application id -- every file
+rem open_database accepts is at the current version, which sets it -- so a
+rem file without it is another file, proven without opening it through
+rem SQLite. That matters: SQLite would roll a hot journal left beside
+rem another program's file back into it, and the person may yet answer No
+rem to replacing it.
+function is_open_db(p$) local token$, s@, t@, seen$, code, why$, ans, h$
   probe_err$ = ""
+  h$ = file_header$(p$)
+  if h$ = "unread" then
+    probe_err$ = hdr_err$
+    return -1
+  end if
+  if h$ <> "db" or hdr_app <> APP_ID then return 0
   if read_only? = true then
     probe_err$ = "this database is read-only, so it cannot be marked to tell it apart"
     return -1
@@ -1457,10 +1601,18 @@ rem the open one; a name that IS there is deleted only once is_open_db has
 rem PROVEN it another file -- a name spelled like the open database is
 rem refused before that, and "cannot tell" is refused too. A delete that
 rem fails is said, not ignored, and "Backed up" is said only once the copy
-rem has been read back (backup_landed).
+rem has been read back (backup_landed). Before all of it, a name SQLite
+rem keeps beside a database (journal_name?) is refused. A file replaced
+rem with a journal of its own still beside it is safe: SQLite deletes a
+rem journal it finds beside an EMPTY database, which is what the backup
+rem starts from.
 function on_backup(sender@) local p$, same
   p$ = save_path$("phosphor-contacts-backup.db", "SQLite database (*.db)|*.db")
   if p$ = "" then return 0
+  if journal_name?(p$) = true then
+    say("A name ending in -journal, -wal or -shm is where SQLite keeps a database's unfinished work: a backup there would be cut short by the open database, or taken for the unfinished work of the file beside it. Back up to another name.")
+    return 0
+  end if
   if same_spelling?(p$, dbpath$) = true then
     say("That is the database you have open. A backup has to go to another file.")
     return 0
@@ -1491,6 +1643,20 @@ function on_backup(sender@) local p$, same
     say("The backup to " + p$ + " was written but does not read back (" + probe_err$ + "); do not rely on it.")
   end if
   return 0
+end function
+
+rem Whether p$ is named the way SQLite names the files it keeps beside a
+rem database -- name-journal, name-wal, name-shm. The open database's own
+rem are among them (its journal is truncated at its next transaction), and
+rem any other is read by SQLite as the unfinished work of the file it sits
+rem beside. Asked of the name in any case and without trailing dots and
+rem spaces, which Windows drops: every spelling of such a name is refused.
+function journal_name?(p$) local n$
+  n$ = alcase$(p$)
+  while right$(n$, 1) = "." or right$(n$, 1) = " "
+    n$ = left$(n$, len(n$) - 1)
+  end while
+  return right$(n$, 8) = "-journal" or right$(n$, 4) = "-wal" or right$(n$, 4) = "-shm"
 end function
 
 rem A save dialog -- or, in the self-test, the path it was told to use.
@@ -3176,6 +3342,43 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(last_msg$ = q$, "a target that cannot be deleted is reported, not ignored")
   sqlite_close(held@)
   file_delete(bk$)
+  rem The names SQLite keeps beside a database are no backup: the open
+  rem database's journal is cut short by its next transaction, and any
+  rem other is read as the unfinished work of the file beside it.
+  q$ = "A name ending in -journal"
+  save_as$ = path$ + "-journal"
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  n = flag(left$(last_msg$, 25) = q$ and file_exists(path$ + "-journal") = 0)
+  save_as$ = path$ + "-WAL."
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  check(n = 1 and left$(last_msg$, 25) = q$ and file_exists(path$ + "-wal") = 0, "a backup onto the open database's journal or log is refused, however the name is spelled")
+  rem Another program's file with a HOT journal beside it -- the rollback
+  rem journal of a program killed in mid-transaction. Opening it through
+  rem SQLite rolls the journal back into the file: the fixture is checked
+  rem to do that first, or the checks after it would prove nothing.
+  other$ = temppath$() + "contact_manager_selftest_hot.db"
+  check(make_hot_db(other$) = 1, "a hot journal can be made")
+  text$ = file_readalltext$(other$)
+  v@ = sqlite_open@(other$)
+  sqlite_exec(v@, "PRAGMA query_only = ON")
+  sqlite_scalar(v@, "PRAGMA user_version")
+  sqlite_close(v@)
+  check(file_readalltext$(other$) <> text$ and file_exists(other$ + "-journal") = 0, "and SQLite rolls it back into its file on a read, deleting it")
+  make_hot_db(other$)
+  text$ = file_readalltext$(other$)
+  check(open_database(other$) = 0 and instr(last_msg$, other$ + "-journal") > 0 and dbpath$ = path$, "another program's file with a hot journal is refused, naming the journal")
+  check(file_readalltext$(other$) = text$ and file_getsize(other$ + "-journal") > 0, "and neither the file nor its journal is touched")
+  save_as$ = other$
+  answer? = false
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  check(last_msg$ = "Replace " + other$ + "?" and file_readalltext$(other$) = text$ and file_getsize(other$ + "-journal") > 0, "a backup onto it asks first, and No leaves the file and its journal as they were")
+  answer? = true
+  menuitem_click@(w@("menu.backup"))
+  check(last_msg$ = "Backed up to " + other$ and file_exists(other$ + "-journal") = 0, "and Yes replaces it with a backup that reads back, its old journal gone")
+  file_delete(other$)
 
   rem --- users: an operator, the last-administrator rule ---
   pagecontrol_pageindex@(w@("pages"), 4)
@@ -3302,13 +3505,15 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
 
   rem --- case FOLDING, not lower-casing. The expected keys are
   rem CaseFolding.txt's: U+03C2 (final sigma) folds to U+03C3, status C;
-  rem U+00DF (ß) and U+1E9E (capital ß) fold to "ss", status F; U+0130
-  rem (dotted capital I) folds to "i" + U+0307, status F; U+FB01 (the fi
-  rem ligature) to "fi", status F; and U+AB70, a Cherokee small letter,
-  rem folds to its CAPITAL U+13A0, status C -- folding is not lower-casing ---
+  rem U+00DF (ß) and U+1E9E (capital ß) fold to "ss", status F; U+FB01 (the
+  rem fi ligature) to "fi", status F; and U+AB70, a Cherokee small letter,
+  rem folds to its CAPITAL U+13A0, status C -- folding is not lower-casing.
+  rem U+0130 (dotted capital I) is the one departure, on purpose: status F
+  rem says "i" + U+0307, and this program's rule says a plain "i" (fold$) ---
   check(fold$("ΣΩΚΡΑΤΗΣ") = "σωκρατη" + chr$(963) and fold$("σωκρατης") = "σωκρατη" + chr$(963), "a final sigma folds like any sigma")
   check(fold$("straße") = "strasse" and fold$("STRASSE") = "strasse" and fold$(chr$(7838)) = "ss", "ß and capital ß fold to ss")
-  check(fold$(chr$(304) + "STANBUL") = "i" + chr$(775) + "stanbul" and fold$(chr$(64257) + "LE") = "file" and fold$(chr$(43888)) = chr$(5024), "the dotted I, a ligature and Cherokee fold as CaseFolding.txt says")
+  check(fold$(chr$(64257) + "LE") = "file" and fold$(chr$(43888)) = chr$(5024), "a ligature and Cherokee fold as CaseFolding.txt says")
+  check(fold$(chr$(304) + "STANBUL") = "istanbul" and fold$(chr$(304)) = fold$("I") and fold$(chr$(304)) = fold$("i"), "the dotted capital I folds to a plain i, the key I and i have")
   check(fold$("Aço Forte") = "aço forte", "and an accented Latin name folds as it lower-cases")
   type_into("login.user", "admin")
   type_into("login.pass", "secret9")
@@ -3444,6 +3649,28 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(sqlite_scalar(v@, "PRAGMA user_version") = 2 and sqlite_scalar(v@, "SELECT count(*) FROM users WHERE username_key = 'strasse'") = 1, "and the version-2 database is left as it was")
   sqlite_close(v@)
   file_delete(path4$)
+  rem Turkish: version 2 keyed İLKER as alcase$ does. Folded, U+0130 is a
+  rem plain "i" (fold$), so the key after the upgrade is "ilker" -- the key
+  rem of ilker and of ILKER -- and İSTANBUL TİCARET is searched as
+  rem "istanbul ticaret". Kept with its dot, neither would be found.
+  v@ = sqlite_open@(path4$)
+  schema_v1(v@)
+  migrate_v2(v@)
+  sqlite_exec(v@, "INSERT INTO users(username, username_key, password, role) VALUES ('İLKER', " + sqlite_quote$(alcase$("İLKER")) + ", " + sqlite_quote$(password_hash$("ilker-pw", pw_cost)) + ", 'admin')")
+  sqlite_exec(v@, "INSERT INTO companies(kind, name, search_key) VALUES ('supplier', 'İSTANBUL TİCARET A.Ş.', " + sqlite_quote$(alcase$("İSTANBUL TİCARET A.Ş.")) + ")")
+  sqlite_exec(v@, "CREATE UNIQUE INDEX ux_users_username_key ON users(username_key); CREATE UNIQUE INDEX ux_product_lines_name_key ON product_lines(name_key); CREATE UNIQUE INDEX ux_companies_tax_key ON companies(kind, tax_key) WHERE tax_key <> ''; PRAGMA user_version = 2")
+  sqlite_close(v@)
+  check(open_database(path4$) = 1 and count_of("SELECT count(*) FROM users WHERE username_key = 'ilker'") = 1, "a version-2 user İLKER is upgraded to the key ilker")
+  type_into("login.user", "ilker")
+  type_into("login.pass", "ilker-pw")
+  click("login.go")
+  check(user_name$ = "İLKER", "and signs in typing ilker")
+  edit_text@(w@("s.search"), "istanbul")
+  check(stringgrid_rowcount(w@("s.grid")) = 2 and stringgrid_cell$(w@("s.grid"), 1, 2) = "İSTANBUL TİCARET A.Ş.", "a search for istanbul finds İSTANBUL TİCARET")
+  edit_text@(w@("s.search"), "")
+  menuitem_click@(w@("menu.signout"))
+  sqlite_close(db@)
+  file_delete(path4$)
 
   rem --- an upgrade is linear in its rows. Its duplicate check once counted
   rem every company of the same kind and tax id FOR EACH company: 8,000 took
@@ -3463,24 +3690,42 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   v@ = sqlite_open@(path4$)
   sqlite_exec(v@, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes(body) VALUES ('mine')")
   sqlite_close(v@)
+  rem "Nothing written" is asked of the file's BYTES: counting its tables
+  rem again could not see a write that changed no count.
+  text$ = file_readalltext$(path4$)
   check(open_database(path4$) = 0 and instr(last_msg$, "not a Contact Manager database") > 0 and instr(last_msg$, "notes") > 0, "another program's database is refused, naming its tables")
-  v@ = sqlite_open@(path4$)
-  check(sqlite_scalar(v@, "SELECT count(*) FROM sqlite_master") = 1 and sqlite_scalar(v@, "PRAGMA user_version") = 0 and sqlite_scalar(v@, "PRAGMA application_id") = 0, "and nothing was written into it")
-  sqlite_close(v@)
+  check(bytelen(text$) > 0 and file_readalltext$(path4$) = text$, "and nothing was written into it")
   file_delete(path4$)
   rem A users table of its own, at a version number that looks like ours.
   v@ = sqlite_open@(path4$)
   sqlite_exec(v@, "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT); INSERT INTO users(email) VALUES ('a@b.example'); PRAGMA user_version = 2")
   sqlite_close(v@)
+  text$ = file_readalltext$(path4$)
   check(open_database(path4$) = 0 and instr(last_msg$, "not a Contact Manager database") > 0, "so is one with a users table of its own")
-  v@ = sqlite_open@(path4$)
-  check(sqlite_scalar(v@, "SELECT count(*) FROM pragma_table_info('users')") = 2 and sqlite_scalar(v@, "SELECT count(*) FROM sqlite_master") = 1, "and its table is not altered")
-  sqlite_close(v@)
+  check(bytelen(text$) > 0 and file_readalltext$(path4$) = text$, "and its table is not altered")
   file_delete(path4$)
   v@ = sqlite_open@(path4$)
   sqlite_exec(v@, "PRAGMA application_id = 123")
   sqlite_close(v@)
-  check(open_database(path4$) = 0 and instr(last_msg$, "belongs to another program") > 0, "and so is a file another program has marked as its own")
+  text$ = file_readalltext$(path4$)
+  check(open_database(path4$) = 0 and instr(last_msg$, "belongs to another program") > 0 and file_readalltext$(path4$) = text$, "and so is a file another program has marked as its own")
+  file_delete(path4$)
+  rem This program's mark is not trusted alone: a file carrying it at the
+  rem current version, but without the tables that version has, is damaged
+  rem -- opened, its first query would fail on a table that is not there.
+  rem The first table this program builds is users (schema_v1).
+  v@ = sqlite_open@(path4$)
+  sqlite_exec(v@, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); PRAGMA application_id = " + str$(APP_ID) + "; PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  sqlite_close(v@)
+  text$ = file_readalltext$(path4$)
+  check(open_database(path4$) = 0 and instr(last_msg$, "not a complete one: the table users is missing") > 0 and file_readalltext$(path4$) = text$, "a file with this program's mark but not its tables is refused as damaged, and left alone")
+  file_delete(path4$)
+  rem And one that has every table but has lost a column of one.
+  v@ = sqlite_open@(path4$)
+  upgrade(v@, 0)
+  sqlite_exec(v@, "ALTER TABLE companies DROP COLUMN search_key; PRAGMA application_id = " + str$(APP_ID) + "; PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "the column companies.search_key is missing") > 0, "and so is one that lost a column")
   file_delete(path4$)
   rem An empty file is a database with nothing in it yet: a new one.
   file_createempty(path4$)
@@ -3556,6 +3801,31 @@ function upgrade_once_ms(path$, n) local v@, t0, ms
   sqlite_close(db@)
   file_delete(path$)
   return ms
+end function
+
+rem Leave at p$ another program's SQLite file with a HOT journal beside it,
+rem the way a program killed in the middle of a transaction leaves one: a
+rem table of 2,000 rows is changed inside a transaction with a cache of
+rem one page, so the changed pages are written into the file before the
+rem commit, with their old contents in the journal -- and the file and the
+rem journal are copied at that moment. 1 when the journal holds something.
+function make_hot_db(p$) local src$, v@
+  src$ = p$ + ".src"
+  if file_exists(p$) = 1 then file_delete(p$)
+  if file_exists(p$ + "-journal") = 1 then file_delete(p$ + "-journal")
+  if file_exists(src$) = 1 then file_delete(src$)
+  v@ = sqlite_open@(src$)
+  sqlite_exec(v@, "PRAGMA journal_mode = DELETE")
+  sqlite_exec(v@, "CREATE TABLE ledger (x); INSERT INTO ledger WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) SELECT i FROM n")
+  sqlite_exec(v@, "PRAGMA cache_size = 1")
+  sqlite_begin(v@)
+  sqlite_exec(v@, "UPDATE ledger SET x = x + 1000000")
+  file_copy(src$, p$)
+  file_copy(src$ + "-journal", p$ + "-journal")
+  sqlite_rollback(v@)
+  sqlite_close(v@)
+  file_delete(src$)
+  return flag(file_getsize(p$ + "-journal") > 0)
 end function
 
 rem The second spelling of path$ the backup checks use: kind 1 is the file

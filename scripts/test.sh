@@ -1256,14 +1256,20 @@ if adgot="$("$exe" "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; 
 # "--" before the file; "-" alone after it is a word
 if adgot="$("$exe" -- "$adp" - --x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 0 ] && [ "$adgot" = "$(printf '%s\n' 2 "$adp" - --x 2d2d78)" ] || ad_fail "-- before the file, - after it: got '$adgot'"
-# ROUND 6: an empty name after "--" and under debug is refused (a REPL otherwise),
-# and debug's refusal names debug's own options.
+# ROUND 6: an empty name after "--" and under debug is refused -- both were
+# already, and these pin it -- and debug's refusal names debug's own options.
+# "debug --" before the file is round 6's own: without it, "-dash.bas" is an
+# unknown option; with it, the file is named and the refusal is for --bogus.
 if adgot="$("$exe" -- "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "-- followed by an empty name: exit $adcode, got '$adgot'"
 if adgot="$("$exe" debug "" "$adp" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "debug with an empty name: exit $adcode, got '$adgot'"
 if adgot="$("$exe" debug "$adp" --out x < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 2 ] && [[ "$adgot" == *'--break'* ]] && [[ "$adgot" != *'reads only --out'* ]] || ad_fail "debug's refusal: got '$adgot'"
+if adgot="$("$exe" debug -- -dash.bas --bogus < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'unknown option --bogus after -dash.bas'* ]] || ad_fail "debug -- names a file like an option: exit $adcode, got '$adgot'"
+if adgot="$("$exe" debug -- "" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "debug -- followed by an empty name: exit $adcode, got '$adgot'"
 if [ "$okAD" -eq 0 ]; then echo 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused'
 else fail=1; fi
 
@@ -1408,7 +1414,13 @@ fi
 #    watchdog line;
 #  - END inside a modal whose form has onclosequery and onclose: the close
 #    asked both on the halted session and reported each refusal as a handler
-#    fault. Expected: "before", exit 0, and no "carries on" on stderr.
+#    fault. Expected: "before", exit 0, and no "carries on" in the output;
+#  - "the last window was closed" is asked again when the loop reads it, not
+#    decided while a handler runs (round-6 diff review): a handler that closes
+#    window A and shows window B (a wizard), and a window closed inside a modal
+#    with main shown once the dialog is answered, both used to leave app_run
+#    ended with a window still on screen. Expected: each loop ends only when
+#    its last window closes, at the tick the program says.
 printf '%s\n' 'main@ = form@("AG", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'dlg@ = form@("AG dialog", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/ag.bas"
@@ -1470,12 +1482,97 @@ printf '%s\n' 'end function' >> "$tmpdir/agend.bas"
 printf '%s\n' 'function c(s@)' >> "$tmpdir/agend.bas"
 printf '%s\n' '  return 0' >> "$tmpdir/agend.bas"
 printf '%s\n' 'end function' >> "$tmpdir/agend.bas"
+printf '%s\n' 'a@ = form@("A", 200, 100)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'b@ = form@("B", 200, 100)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'phase = 0' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'timer_interval@(t@, 200)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'tw@ = timer@()' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'timer_interval@(tw@, 8000)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'timer_ontimer@(tw@, "on_wd")' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'timer_enabled@(tw@, 1)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'form_show@(a@)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'println "app_run ended; phase " + str$(phase) + ", B visible " + str$(form_visible(b@))' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'end' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  phase = phase + 1' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  if phase = 1 then' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '    form_close@(a@)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '    form_show@(b@)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  if phase = 6 then form_close@(b@)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'function on_wd(s@)' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  println "watchdog"' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  app_quit()' >> "$tmpdir/agwiz.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agwiz.bas"
+printf '%s\n' 'main@ = form@("Main", 200, 100)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'dlg@ = form@("Login", 200, 100)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'button_modalresult@(ok@, 1)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'details@ = form@("Details", 200, 100)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'opened = 0' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'phase = 0' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 't2@ = timer@()' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_interval@(t2@, 250)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_ontimer@(t2@, "on_t2")' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_enabled@(t2@, 1)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'tw@ = timer@()' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_interval@(tw@, 8000)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_ontimer@(tw@, "on_wd")' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'timer_enabled@(tw@, 1)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'println "app_run ended; phase " + str$(phase) + ", main visible " + str$(form_visible(main@))' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'end' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  if opened = 1 then return 0' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  opened = 1' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  r = form_showmodal(dlg@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  println "dialog answered " + str$(r)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  form_show@(main@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'end function' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'function on_t2(s@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  phase = phase + 1' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  if phase = 1 then form_show@(details@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  if phase = 2 then form_close@(details@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  if phase = 3 then button_click@(ok@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  if phase = 8 then form_close@(main@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'end function' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'function on_wd(s@)' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  println "watchdog"' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  app_quit()' >> "$tmpdir/aglatch.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/aglatch.bas"
+printf '%s\n' 'end function' >> "$tmpdir/aglatch.bas"
 if command -v xvfb-run > /dev/null 2>&1; then
   okAG=0
-  if aggot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/ag.bas" < /dev/null 2>"$tmpdir/ag.err")"; then agcode=0; else agcode=$?; fi
-  [ "$agcode" -eq 0 ] && [ "$(printf '%s' "$aggot" | tr -d '\r')" = "ended" ] && grep -qF -- "in the event handler on_t;" "$tmpdir/ag.err" || { echo "FAIL  AG:the sender freed inside its modal: exit $agcode, got '$aggot', stderr '$(cat "$tmpdir/ag.err")'"; okAG=1; }
-  if aggot="$(timeout 60 xvfb-run -a "$exe" "$tmpdir/agend.bas" < /dev/null 2>"$tmpdir/agend.err")"; then agcode=0; else agcode=$?; fi
-  [ "$agcode" -eq 0 ] && [ "$(printf '%s' "$aggot" | tr -d '\r')" = "before" ] && ! grep -qF -- "carries on" "$tmpdir/agend.err" || { echo "FAIL  AG:END inside a modal with close handlers: exit $agcode, got '$aggot', stderr '$(cat "$tmpdir/agend.err")'"; okAG=1; }
+  # xvfb-run runs the program with 2>&1, so stdout and stderr arrive as ONE
+  # stream however this line redirects them: a separate stderr file is always
+  # empty, and a check that reads it cannot fail (round-6 diff review). Read the
+  # merged stream, as AE and AF do, line by line.
+  if timeout 60 xvfb-run -a "$exe" "$tmpdir/ag.bas" < /dev/null > "$tmpdir/ag.out" 2>&1; then agcode=0; else agcode=$?; fi
+  tr -d '\r' < "$tmpdir/ag.out" > "$tmpdir/ag.txt"
+  [ "$agcode" -eq 0 ] && grep -qxF -- "ended" "$tmpdir/ag.txt" && grep -qF -- "in the event handler on_t;" "$tmpdir/ag.txt" && ! grep -qF -- "watchdog" "$tmpdir/ag.txt" || { echo "FAIL  AG:the sender freed inside its modal: exit $agcode, got '$(cat "$tmpdir/ag.txt")'"; okAG=1; }
+  if timeout 60 xvfb-run -a "$exe" "$tmpdir/agend.bas" < /dev/null > "$tmpdir/agend.out" 2>&1; then agcode=0; else agcode=$?; fi
+  tr -d '\r' < "$tmpdir/agend.out" > "$tmpdir/agend.txt"
+  [ "$agcode" -eq 0 ] && grep -qxF -- "before" "$tmpdir/agend.txt" && ! grep -qF -- "carries on" "$tmpdir/agend.txt" || { echo "FAIL  AG:END inside a modal with close handlers: exit $agcode, got '$(cat "$tmpdir/agend.txt")'"; okAG=1; }
+  for agcase in agwiz aglatch; do
+    if timeout 60 xvfb-run -a "$exe" "$tmpdir/$agcase.bas" < /dev/null > "$tmpdir/$agcase.out" 2>&1; then agcode=0; else agcode=$?; fi
+    tr -d '\r' < "$tmpdir/$agcase.out" > "$tmpdir/$agcase.txt"
+    if [ "$agcase" = agwiz ]; then printf '%s\n' "app_run ended; phase 6, B visible 0" > "$tmpdir/$agcase.want"
+    else printf '%s\n' "dialog answered 1" "app_run ended; phase 8, main visible 0" > "$tmpdir/$agcase.want"; fi
+    [ "$agcode" -eq 0 ] && cmp -s "$tmpdir/$agcase.txt" "$tmpdir/$agcase.want" || { echo "FAIL  AG:$agcase -- the last window ends app_run, no other: exit $agcode, got '$(cat "$tmpdir/$agcase.txt")'"; okAG=1; }
+  done
   if [ "$okAG" -eq 0 ]; then echo 'PASS  AG:a modal session frees nothing its opener stands on, ends with the last window, and END reports no fault'
   else fail=1; fi
 else

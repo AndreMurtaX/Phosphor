@@ -117,6 +117,11 @@ println sha256$(body$)
   1 000 000 rounds both fit. With no budget installed, such a record takes as
   long as it says it will. The default cost fits comfortably inside the budget
   `embedding.md` prescribes (`MaxSteps = 1000000`) — twice, hash and verify.
+- **A digest is priced by what it hashes.** `sha256$`, `sha1$`, `md5$` and
+  `hmac_sha256$` each ask the budget for their input's 64-byte blocks, at the
+  SHA-256 price, before they start, and are refused (a catchable limit error)
+  when it cannot pay. Under the pair `embedding.md` prescribes that is about
+  45 digests of a 10 MB string; with no budget installed nothing is refused.
 - **Why SHA-256 is written out in the engine.** Free Pascal 3.2.2's `hash`
   package stops at SHA-1; MD5 and SHA-1 here come from it, SHA-256 is this
   unit's own, and all three are held to the published vectors and to a sweep of

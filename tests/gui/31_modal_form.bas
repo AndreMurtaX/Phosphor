@@ -147,6 +147,24 @@ gui_test_modal("make_free_ok")
 assert_eq(form_showmodal(dlg@), 1, "the session ended with OK")
 assert_eq(madeok, 40, "all 40 grids were made: each freed one was released")
 
+test_case("modal/what the opener stands on outlives the rounds (round-6 review)")
+rem The modal is opened from a button's own click, so that button is the
+rem running handler's SENDER, and its frames are under the session. One
+rem round frees a grid and the sender. Between rounds the session releases
+rem what it may: the grid at once, the sender not until the click handler
+rem has returned (GuiFlushFrees, at depth 0) -- so the next round sees
+rem exactly one more free waiting than the first saw before it freed
+rem anything. Releasing the sender too would answer 0.
+opener@ = button@(main@)
+button_onclick@(opener@, "open_from_click")
+openr = 0
+gui_test_modal("free_grid_and_opener")
+gui_test_modal("count_pending_ok")
+button_click@(opener@)
+assert_eq(openr, 1, "the session opened from the click ended with OK")
+assert_eq(freeerr, 0, "both frees were accepted")
+assert_eq(pendingafter - pendingbefore, 1, "the sender was kept, the grid released")
+
 test_case("modal/a form the LCL cannot make modal is refused, not raised")
 form_show@(main@)
 gui_clearerror()
@@ -263,6 +281,27 @@ endfunction
 
 function make_free_ok(f@)
   make_and_free(f@)
+  button_click@(ok@)
+  return 0
+endfunction
+
+function open_from_click(s@)
+  openr = form_showmodal(dlg@)
+  return 0
+endfunction
+
+function free_grid_and_opener(f@) local g@
+  pendingbefore = gui_test_pending()
+  g@ = stringgrid@(f@)
+  gui_clearerror()
+  control_free(g@)
+  control_free(opener@)
+  freeerr = gui_error()
+  return 0
+endfunction
+
+function count_pending_ok(f@)
+  pendingafter = gui_test_pending()
   button_click@(ok@)
   return 0
 endfunction

@@ -398,6 +398,16 @@ begin
   Result := ValInt(Length(GModalFns) - GModalHead);
 end;
 
+{ gui_test_pending() -- how many frees are waiting for a safe moment. Test only:
+  what the in-modal flush KEEPS (a running handler's sender) is otherwise
+  invisible to a script, whose handle died at control_free, and a use after
+  free under the LCL leaves no sign a test can read (round-6 review). }
+function f_gui_test_pending(const Args: array of TValue; out Err: TPhosphorError): TValue;
+begin
+  Err := NoError();
+  Result := ValInt(GuiPendingMark());
+end;
+
 { THE LEDGER, read when a file ends: a modal asked with no answer queued, an
   answer nothing used, or an answer taken by the wrong kind of modal FAILS the
   run. The runner said a forgotten answer "fails on the count", and nothing read
@@ -751,6 +761,7 @@ begin
     eng.Registry.Add('gui_test_fire:@$', @f_gui_test_fire);   // test only; see above
     eng.Registry.Add('gui_test_answer:n$', @f_gui_test_answer);      // test only: the modals
     eng.Registry.Add('gui_test_modal:$', @f_gui_test_modal);         // test only: modal forms
+    eng.Registry.Add('gui_test_pending:', @f_gui_test_pending);      // test only: deferred frees
     eng.Registry.Add('gui_test_answer:n$$', @f_gui_test_answer_kind);
     eng.Registry.Add('gui_test_selection:@', @f_gui_test_selection);
     eng.Registry.Add('gui_test_acknowledge:', @f_gui_test_acknowledge);

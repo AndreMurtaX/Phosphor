@@ -1557,6 +1557,21 @@ the sweep above. Verify before fixing, as with everything on this page.
     while the runners rebuilt it: a locked file, a debug-protocol block that
     failed for no reason of its own. Before blaming a red block, ask what else
     is running from bin/.
+  - **Then the fix commit was reviewed before it shipped, and that review was
+    worth a round.** Three adversarial readers of `git diff` over the round's
+    own commit found 13 more: the commit did not BUILD on Linux (two bodies
+    left inside `{$IFDEF WINDOWS}` while the interface declared them for every
+    OS -- Windows-green, again), block AG read a stderr file that `xvfb-run`
+    leaves empty because it runs the program with `2>&1` (so one check could
+    never pass and another could never fail), "the last window was closed"
+    was a LATCH set mid-handler (a wizard's close-A-show-B ended `app_run`
+    with B on screen), the digests charged nothing to the budget, and the
+    contact manager wrote into a foreign SQLite file whenever it had a hot
+    journal -- SQLite rolls it back on the first read, so "decide ownership
+    before writing" must mean "before OPENING". Two habits come out of it:
+    build a fix commit on the second OS before calling it reviewed, and a
+    check that reads a side channel (a stderr file, a count of rows) must be
+    seen to change when the thing it guards does.
 
 - **2026-10-10 · round 5: 34 survivors, 3 HIGH; the streak stays at 0.** Four
   investigators on today's new surfaces (arguments, crypto, modal forms and the

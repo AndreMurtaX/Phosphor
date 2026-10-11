@@ -683,6 +683,17 @@ function GuiOtherFormShown(AExcept: TObject): Boolean;
 
 procedure GuiLeaveLoop;
 
+{ "THE LAST WINDOW WAS CLOSED" IS A QUESTION, NOT AN ORDER (round-6 review).
+  A form's close used to set the loop's quit flag the moment nothing else was
+  shown -- a LATCH, decided while a handler was still running. A handler that
+  closes one window and then shows the next (a wizard's next page), or one that
+  closes a window inside a modal dialog and shows the main window once the dialog
+  is answered, left app_run with its window on screen and nothing dispatching it.
+  The closer now only REQUESTS; app_run asks again, when it reads the request,
+  whether any window is still shown, and ends only if none is. app_quit stays an
+  order. }
+procedure GuiLastWindowClosed;
+
 { A MODAL SESSION'S OWN FREES (round 5, 2026-10-10). GuiFlushFrees runs only at
   dispatch depth 0, and a modal opened from a handler never returns there until
   it closes -- so every control a handler freed inside a long-lived dialog stayed
@@ -1976,6 +1987,7 @@ type
 
 var
   GAppQuit: Boolean = False;   // set by GuiLeaveLoop, read by the loop below
+  GLastClosed: Boolean = False;   // set by GuiLastWindowClosed; asked again by the loop
   GWaker: TLoopWaker = nil;
 
 procedure TLoopWaker.Nudge(Data: PtrInt);
@@ -2017,6 +2029,13 @@ begin
   Application.QueueAsyncCall(@GWaker.Nudge, 0);
 end;
 
+procedure GuiLastWindowClosed;
+begin
+  GLastClosed := True;
+  if GWaker = nil then GWaker := TLoopWaker.Create;
+  Application.QueueAsyncCall(@GWaker.Nudge, 0);
+end;
+
 function f_app_run(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError;
@@ -2029,6 +2048,7 @@ begin
   // the application terminating (which is what closing the last window does), and
   // leaves the application usable either way.
   GAppQuit := False;
+  GLastClosed := False;
   while (not GAppQuit) and (not Application.Terminated) do
   begin
     { DISPATCH AND WAIT ARE SPLIT, AND THE FLAG IS READ BETWEEN THEM.
@@ -2055,6 +2075,13 @@ begin
     Application.ProcessMessages;
     GuiFlushFrees();   // every message has been dispatched: nothing stands on them
     if GAppQuit or Application.Terminated then Break;
+    { Every handler has returned: a window one of them showed after closing
+      another is on screen now, and this is the moment to ask. }
+    if GLastClosed then
+    begin
+      GLastClosed := False;
+      if not GuiOtherFormShown(nil) then Break;
+    end;
     Application.Idle(True);
   end;
   GuiFlushFrees();

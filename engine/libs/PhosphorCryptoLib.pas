@@ -484,9 +484,25 @@ end;
 
 // --- the registered functions --------------------------------------------------
 
+{ A DIGEST IS PRICED BY WHAT IT HASHES (round-6 diff review). The four digests
+  charged nothing, so under the pair docs/embedding.md prescribes twenty
+  sha256$ of a 100 MB string ran 9.3 s and reported success: the VM reads its
+  clock every 4096 instructions, and one call is one instruction. The size is
+  known before the first block, so this is RULE 1 -- asked, and refused, before
+  hashing. Every digest pays the SHA-256 price per 64-byte block; SHA-1 and MD5
+  compress faster, so they are over-priced, which is the direction that can
+  only refuse a little early and never run long. }
+function DigestAllowed(ABytes: Int64; const AWhat: String; out Err: TPhosphorError): Boolean;
+begin
+  Result := BudgetAllows((ABytes div 64 + 1) * UnitsPerBlock);
+  if not Result then Err := BudgetRefusal(AWhat);
+end;
+
 function t_sha256(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  Result := ValStr('');
+  if not DigestAllowed(Length(Args[0].Str), 'sha256$', Err) then Exit;
   Result := ValStr(ToHex(Sha256Bytes(Args[0].Str)));
 end;
 
@@ -494,7 +510,9 @@ function t_sha1(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: RawByteString; d: TSHA1Digest; raw: RawByteString;
 begin
   Err := NoError();
+  Result := ValStr('');
   s := Args[0].Str;
+  if not DigestAllowed(Length(s), 'sha1$', Err) then Exit;
   if s = '' then d := SHA1Buffer(s, 0)
   else d := SHA1Buffer(s[1], Length(s));
   SetLength(raw, SizeOf(d));
@@ -506,7 +524,9 @@ function t_md5(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var s: RawByteString; d: TMD5Digest; raw: RawByteString;
 begin
   Err := NoError();
+  Result := ValStr('');
   s := Args[0].Str;
+  if not DigestAllowed(Length(s), 'md5$', Err) then Exit;
   if s = '' then d := MD5Buffer(s, 0)
   else d := MD5Buffer(s[1], Length(s));
   SetLength(raw, SizeOf(d));
@@ -517,6 +537,11 @@ end;
 function t_hmac_sha256(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  Result := ValStr('');
+  { The key (hashed once when longer than a block, padded to two more) and the
+    message, plus the outer hash: within four blocks of the two lengths. }
+  if not DigestAllowed(Int64(Length(Args[0].Str)) + Length(Args[1].Str) + 3 * 64,
+                       'hmac_sha256$', Err) then Exit;
   Result := ValStr(ToHex(HmacSha256(Args[0].Str, Args[1].Str)));
 end;
 

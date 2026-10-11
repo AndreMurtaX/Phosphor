@@ -4544,6 +4544,12 @@ begin
     end;
 end;
 
+var
+  { Set by SelfExePath when this executable's own name holds an unpaired UTF-16
+    surrogate: it then names no file, and a packed application that cannot open
+    itself must say WHY rather than call its payload corrupt (round-6 review). }
+  GSelfNameBad: Boolean = False;
+
 function SelfExePath: String;
 {$IFDEF WINDOWS}
 var buf: array[0..1023] of WideChar; n: DWORD; ws: WideString;
@@ -4555,6 +4561,7 @@ begin
     application named app<U+D800>.exe read app.exe's payload. With U+FFFD the name
     opens nothing, and the payload reader says it cannot open its own file. }
   Result := WideToUtf8(ws);
+  GSelfNameBad := HasUnpairedSurrogate(ws);
 end;
 {$ELSE}
 begin
@@ -5361,9 +5368,19 @@ begin
       The report is wrapped for the same reason TCrashGuard's is -- a packed
       --no-console application may have no standard handles left. }
     try
-      Writeln(StdErr, 'phosphor: this application''s embedded program is corrupt: ', embWhy);
-      Writeln(StdErr, '  ', SelfExePath());
-      Writeln(StdErr, '  refusing to run. Reinstall it, or repack it from the .pbc it was built from.');
+      if GSelfNameBad then
+      begin
+        { Nothing is wrong with the program inside: the name cannot be opened. }
+        Writeln(StdErr, 'phosphor: this application cannot open its own file: its name holds a character that is not valid Unicode (an unpaired UTF-16 surrogate)');
+        Writeln(StdErr, '  ', SelfExePath());
+        Writeln(StdErr, '  refusing to run. Rename the file and run it again.');
+      end
+      else
+      begin
+        Writeln(StdErr, 'phosphor: this application''s embedded program is corrupt: ', embWhy);
+        Writeln(StdErr, '  ', SelfExePath());
+        Writeln(StdErr, '  refusing to run. Reinstall it, or repack it from the .pbc it was built from.');
+      end;
       Flush(StdErr);
     except
       // nowhere left to say it; the exit code still carries the news
@@ -5465,12 +5482,20 @@ begin
         AddProgramArg(arg)
       else if (arg = '--') and (dbgPath = '') then
       begin
-        { BEFORE THE FILE, "--" names it whatever it starts with, as in a run
-          (round 6: debug had no route to a file named like an option). }
+        { BEFORE THE FILE, "--" names it whatever it starts with (round 6:
+          debug had no route to a file named like an option). Unlike a run, it
+          ends nothing else: after the file, debug's own options are still
+          read, and a second "--" is what hands the rest to the program -- a
+          run has no options after its file, so its one "--" does both. }
         Inc(i);
-        if (i > ArgCount()) or (ArgStr(i) = '') then
+        if i > ArgCount() then
         begin
           Writeln(StdErr, 'phosphor debug: -- needs the program''s file after it');
+          Halt(2);
+        end;
+        if ArgStr(i) = '' then
+        begin
+          Writeln(StdErr, 'phosphor debug: the program''s file name is empty');
           Halt(2);
         end;
         RefuseBadWord(i, 'the program''s file name');

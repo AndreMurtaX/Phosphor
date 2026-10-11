@@ -72,8 +72,24 @@
 - `drawgrid_row` / `drawgrid_col` answer 0 for a grid with no scrollable cell.
 - The contact manager: a backup target is judged by file identity, not by its
   spelling; upgrades and refreshes are linear; user names, product lines and
-  search use Unicode case folding (schema version 3); another program's SQLite
-  file is never written to; an old read-only database is refused with a reason.
+  search use Unicode case folding (schema version 3), with the Turkish `İ`
+  folded to a plain `i` so an upgraded `İLKER` still signs in as `ilker`;
+  another program's SQLite file is never written to -- whose file it is is
+  read from its header bytes before SQLite opens it, since SQLite would roll
+  a hot journal back into it -- and a file with the program's mark but not
+  its tables is refused as damaged; a backup onto a `-journal`, `-wal` or
+  `-shm` name is refused; an old read-only database is refused with a reason.
+  Its self-test has 176 checks.
+- Found by reviewing round 6's own diff before it shipped: `sha256$`, `sha1$`,
+  `md5$` and `hmac_sha256$` charged nothing to the budget, so a loop of them
+  over a large string ran past every ceiling and reported success -- each is
+  now priced per 64-byte block and refused before it hashes. "The last window
+  was closed" is judged when `app_run` reads it, after every handler has
+  returned, so a handler that closes one window and shows the next (a wizard,
+  or the main window shown once a login dialog is answered) no longer ends the
+  loop with a window on screen. A packed application whose own file name holds
+  an unpaired surrogate says so instead of calling its program corrupt.
+  `phosphor debug -- ""` says the name is empty, and `debug --` is documented.
 
 ### Changed
 

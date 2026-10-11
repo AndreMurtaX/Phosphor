@@ -126,16 +126,18 @@ begin
     message loop when the user closed either of them -- with the other still open
     and, from the user's side, still expected to work.
 
-    So: leave the loop through GuiLeaveLoop, which sets the flag the loop reads
-    and does not touch Application.Terminated -- and only when nothing else is
+    So: ask the loop to leave, through a request it reads itself and that
+    does not touch Application.Terminated -- and only when nothing else is
     still shown. The form being closed is excluded from the count because
     CloseAction has only just been set and it is still Visible here. }
   { ANSWERING A MODAL IS NOT CLOSING A WINDOW (round 5). CloseModal runs DoClose
     on every answer -- OK as much as [X] -- and with no other form shown this
     ended app_run the moment a tray- or timer-driven program's dialog was
     answered. A modal session ends itself; the loop is not this form's to end. }
+  { And it only ASKS (round-6 review): app_run decides when it reads the
+    request, after every handler has returned -- see GuiLastWindowClosed. }
   if (not GuiOtherFormShown(Sender)) and (not InModalSession(Sender)) then
-    GuiLeaveLoop;
+    GuiLastWindowClosed;
 end;
 
 function TFormCloser.Handler: TCloseEvent;

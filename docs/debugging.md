@@ -51,6 +51,11 @@ replace the first list in silence). `--port` is single-valued, and a second one
 is refused (exit 2) rather than taking over. docs/decisions.md has every flag's
 rule and why.
 
+A file whose name starts with `-` is named after `--`:
+`phosphor debug -- -report.bas`. That `--` names the file and ends nothing
+else -- debug's own options are still read after it -- so the program's
+arguments follow a second one: `phosphor debug -- -report.bas --break 9 -- -v`.
+
 | key | what it does |
 | --- | ------------ |
 | `s` | step into — one statement, and *into* a call if the line has one |

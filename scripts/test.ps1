@@ -1729,7 +1729,21 @@ $null = $adProc.Handle; $null = $adProc.WaitForExit(30000)
 $adErr = Read-AD (Join-Path $adDir 'sur2.err')
 if (-not ($adProc.ExitCode -eq 2 -and $adErr.Contains('not valid Unicode') -and (Read-AD $adKeep) -eq 'PRECIOUS')) {
     $okAD = $false; Write-Host ("FAIL  AD:an unpaired surrogate in --out: exit {0}, keep.txt '{1}', stderr '{2}'" -f $adProc.ExitCode, (Read-AD $adKeep), $adErr) -ForegroundColor Red }
-# an empty name after "--", and under debug, is refused too (a REPL otherwise)
+# A PACKED application whose OWN name holds one (round-6 review): it cannot open
+# itself, and it said its embedded program was corrupt -- "Reinstall" for a file
+# that is fine and only needs renaming. Expected: exit 2, the name named as the
+# reason, and no word of corruption.
+$adSurApp = Join-Path $adDir ('argsapp' + $adSur + '.exe')
+[IO.File]::Copy($adApp, $adSurApp, $true)
+$adProc = Start-Process -FilePath $adSurApp -PassThru -NoNewWindow `
+         -RedirectStandardOutput $adOut -RedirectStandardError (Join-Path $adDir 'sur3.err')
+$null = $adProc.Handle; $null = $adProc.WaitForExit(30000)
+$adErr = Read-AD (Join-Path $adDir 'sur3.err')
+if (-not ($adProc.ExitCode -eq 2 -and $adErr.Contains('not valid Unicode') -and -not $adErr.Contains('corrupt'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:a packed application named with an unpaired surrogate: exit {0}, stderr '{1}'" -f $adProc.ExitCode, $adErr) -ForegroundColor Red }
+[IO.File]::Delete($adSurApp)
+# an empty name after "--", and under debug, is refused too (it already was:
+# these pin it, they did not find it)
 $adGot = Invoke-AD "`"$exe`" -- `"`" `"$adp`""
 if (-not ($adCode -eq 2 -and $adGot.Contains('file name is empty'))) {
     $okAD = $false; Write-Host ("FAIL  AD:-- followed by an empty name: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
@@ -1740,6 +1754,14 @@ if (-not ($adCode -eq 2 -and $adGot.Contains('file name is empty'))) {
 $adGot = Invoke-AD "`"$exe`" debug `"$adp`" --out x"
 if (-not ($adCode -eq 2 -and $adGot.Contains('--break') -and -not $adGot.Contains('reads only --out'))) {
     $okAD = $false; Write-Host ("FAIL  AD:debug's refusal: got '{0}'" -f $adGot) -ForegroundColor Red }
+# "debug --" before the file (round 6): without it "-dash.bas" is an unknown
+# option; with it the file is named, and the refusal is for --bogus
+$adGot = Invoke-AD "`"$exe`" debug -- -dash.bas --bogus"
+if (-not ($adCode -eq 2 -and $adGot.Contains('unknown option --bogus after -dash.bas'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:debug -- names a file like an option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adGot = Invoke-AD "`"$exe`" debug -- `"`""
+if (-not ($adCode -eq 2 -and $adGot.Contains('file name is empty'))) {
+    $okAD = $false; Write-Host ("FAIL  AD:debug -- followed by an empty name: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
 if ($okAD) { Write-Host 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused' -ForegroundColor Green }
 
 # --- AE: A REAL MODAL FORM ------------------------------------------------------
@@ -1806,7 +1828,13 @@ if ($okAF) { Write-Host 'PASS  AF:a modal in a real loop: no timer re-entry, OK 
 #    watchdog line;
 #  - END inside a modal whose form has onclosequery and onclose: the close
 #    asked both on the halted session and reported each refusal as a handler
-#    fault. Expected: "before", exit 0, and no "carries on" on stderr.
+#    fault. Expected: "before", exit 0, and no "carries on" on stderr;
+#  - "the last window was closed" is asked again when the loop reads it, not
+#    decided while a handler runs (round-6 diff review): a handler that closes
+#    window A and shows window B (a wizard), and a window closed inside a modal
+#    with main shown once the dialog is answered, both used to leave app_run
+#    ended with a window still on screen. Expected: each loop ends only when
+#    its last window closes, at the tick the program says.
 $agDir = Join-Path $tmp 'ag'
 New-Item -ItemType Directory -Force $agDir | Out-Null
 function Invoke-AG([string] $name, [string[]] $lines) {
@@ -1827,6 +1855,12 @@ if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq 'ended' -and $ag[3].Contains(
 $ag = Invoke-AG 'agend' @('dlg@ = form@("AG end", 200, 100)', 'form_onclosequery@(dlg@, "q?")', 'form_onclose@(dlg@, "c")', 't@ = timer@()', 'timer_interval@(t@, 200)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 'println "before"', 'r = form_showmodal(dlg@)', 'end', 'function on_t(s@)', '  end', '  return 0', 'end function', 'function q?(s@)', '  return true', 'end function', 'function c(s@)', '  return 0', 'end function')
 if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq 'before' -and -not $ag[3].Contains('carries on'))) {
     $okAG = $false; Write-Host ("FAIL  AG:END inside a modal with close handlers: ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
+$ag = Invoke-AG 'agwiz' @('a@ = form@("A", 200, 100)', 'b@ = form@("B", 200, 100)', 'phase = 0', 't@ = timer@()', 'timer_interval@(t@, 200)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 'tw@ = timer@()', 'timer_interval@(tw@, 8000)', 'timer_ontimer@(tw@, "on_wd")', 'timer_enabled@(tw@, 1)', 'form_show@(a@)', 'app_run()', 'println "app_run ended; phase " + str$(phase) + ", B visible " + str$(form_visible(b@))', 'end', 'function on_t(s@)', '  phase = phase + 1', '  if phase = 1 then', '    form_close@(a@)', '    form_show@(b@)', '  end if', '  if phase = 6 then form_close@(b@)', '  return 0', 'end function', 'function on_wd(s@)', '  println "watchdog"', '  app_quit()', '  return 0', 'end function')
+if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "app_run ended; phase 6, B visible 0")) {
+    $okAG = $false; Write-Host ("FAIL  AG:close one window, show the next: ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
+$ag = Invoke-AG 'aglatch' @('main@ = form@("Main", 200, 100)', 'dlg@ = form@("Login", 200, 100)', 'ok@ = button@(dlg@)', 'button_modalresult@(ok@, 1)', 'details@ = form@("Details", 200, 100)', 'opened = 0', 'phase = 0', 't@ = timer@()', 'timer_interval@(t@, 100)', 'timer_ontimer@(t@, "on_t")', 'timer_enabled@(t@, 1)', 't2@ = timer@()', 'timer_interval@(t2@, 250)', 'timer_ontimer@(t2@, "on_t2")', 'timer_enabled@(t2@, 1)', 'tw@ = timer@()', 'timer_interval@(tw@, 8000)', 'timer_ontimer@(tw@, "on_wd")', 'timer_enabled@(tw@, 1)', 'app_run()', 'println "app_run ended; phase " + str$(phase) + ", main visible " + str$(form_visible(main@))', 'end', 'function on_t(s@)', '  if opened = 1 then return 0', '  opened = 1', '  r = form_showmodal(dlg@)', '  println "dialog answered " + str$(r)', '  form_show@(main@)', '  return 0', 'end function', 'function on_t2(s@)', '  phase = phase + 1', '  if phase = 1 then form_show@(details@)', '  if phase = 2 then form_close@(details@)', '  if phase = 3 then button_click@(ok@)', '  if phase = 8 then form_close@(main@)', '  return 0', 'end function', 'function on_wd(s@)', '  println "watchdog"', '  app_quit()', '  return 0', 'end function')
+if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "dialog answered 1`napp_run ended; phase 8, main visible 0")) {
+    $okAG = $false; Write-Host ("FAIL  AG:a window closed inside a modal: ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
 if ($okAG) { Write-Host 'PASS  AG:a modal session frees nothing its opener stands on, ends with the last window, and END reports no fault' -ForegroundColor Green }
 
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and

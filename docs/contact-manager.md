@@ -5,7 +5,7 @@ program for the people a company buys from and sells to: suppliers and
 customers, the contacts at each one, the product lines those contacts serve,
 and a dated history of what was said to whom. It keeps everything in SQLite,
 behind a login with users, roles and hashed passwords, and it is one file of
-BASIC — about 3,600 lines, a fifth of them the self-test.
+BASIC — about 3,850 lines, a fifth of them the self-test.
 
 It is here for two reasons: to show what the language and its libraries add up
 to, and because writing it was this project's first real use. It found five
@@ -39,7 +39,18 @@ reason: at start-up the program then offers to pick another file or to end,
 and from **File > Open database...** it keeps the database you had open, and
 your session with it. Nothing is written into a file before the program knows
 it is its own: an empty file, one it marked as its own, or one an earlier
-version made (recognised by its tables and columns). A read-only database at
+version made (recognised by its tables and columns). It asks that of the
+file's **bytes** first — the 100-byte SQLite header, read as a plain file:
+the magic `SQLite format 3`, `user_version` at offset 60 and `application_id`
+at offset 68 — because SQLite itself does more than read: a *hot journal*
+left beside a file (`name-journal`, from a program killed in mid-transaction)
+is rolled back into the file by the first query, even a `PRAGMA` on a
+read-only connection. So a file another program marked is refused without
+being opened, and an unmarked one with an unfinished journal or write-ahead
+log beside it is refused too, naming that file: open it with the program that
+made it first. A file that carries the program's mark is not trusted on the
+mark alone either: one without every table and column its version has is
+refused as damaged, naming what is missing. A read-only database at
 the current version opens for looking: the sign-in says so, and every change
 is refused. A read-only database **from an earlier version** is refused
 instead, saying so: opening it means upgrading it, which writes to it, and the
@@ -75,11 +86,18 @@ $env:PHOSPHOR_CONTACTS_DEMO = '1'; phosphor examples\contact_manager.bas
 The **File** menu exports suppliers or customers to CSV (one row per contact,
 with the product lines it serves) and backs the database up — to any file but
 the open database itself, which it refuses under any name: another letter case
-on a folder that ignores case, a trailing dot on Windows, a link. It does not
-compare the names; it leaves a mark in the open database and looks for it in
-the target, opened read-only, and a file that is already there is replaced
-only once it is proven to be another file. "Backed up" is said only once the
-copy has been read back. **Account** changes your own password and signs out.
+on a folder that ignores case, a trailing dot on Windows, a link. Comparing the
+names catches only the spelling that matches, so a name that is spelled
+differently and already exists is asked of the files: the program leaves a
+mark in the open database and looks for it in the target, opened read-only
+— after the target's header has been read as bytes, so that a file without the
+program's mark is known to be another file without SQLite ever opening it. A
+file that is already there is replaced only once it is proven to be another
+file, and only if you say so. A name ending in `-journal`, `-wal` or `-shm` is
+refused outright: that is where SQLite keeps a database's unfinished work, and
+a backup there would be cut short by the open database or taken for the
+unfinished work of the file beside it. "Backed up" is said only once the copy
+has been read back. **Account** changes your own password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
 
@@ -114,8 +132,19 @@ program should never write, so a bug in the BASIC cannot corrupt it:
   (CaseFolding.txt) makes them `σ` and `ss`. The program's `fold$` is `alcase$`
   followed by a table of the 505 characters where the two differ, derived
   from Unicode 15's folding and checked against Python's `str.casefold` for
-  every code point; the two noncharacters U+FFFE and U+FFFF are the only ones
-  that differ, because `alcase$` turns them into `?`.
+  every code point. Three differ: the noncharacters U+FFFE and U+FFFF, which
+  `alcase$` turns into `?`, and — on purpose — the Turkish dotted capital `İ`
+  (U+0130). Full folding makes it `i` followed by a combining dot; `fold$`
+  makes it a plain `i`, because a key is for matching, and caseless matching
+  drops the dot as Unicode's identifier matching drops marks. With the dot
+  kept, a user `İLKER` could not sign in typing `ilker` or `ILKER`, and
+  `istanbul` did not find `İSTANBUL TİCARET`. The stored keys depend on
+  `alcase$`, which turns a byte that is not valid UTF-8 into `?` — and the
+  text that reaches it is not always valid UTF-8: an edit control keeps
+  whatever bytes it is given, and an upgrade keys the
+  text an older file already holds, which another tool may have written. So
+  a change in how `alcase$` treats such bytes would change those keys, and
+  would need a schema version of its own.
 - **A transaction** around saving a contact, its primary flag and its product
   lines: all of it or none of it.
 - **A schema version**, kept in `PRAGMA user_version`, and since version 3
@@ -195,12 +224,15 @@ With `PHOSPHOR_SELFTEST=1` the program builds every window **without showing
 one**, and drives them as a person would — typing with `edit_text@`, clicking
 with `button_click@` and `menuitem_click@`, picking rows with
 `stringgrid_cursor@`, double-clicking with `control_dblclick@` — against a
-throw-away database, then checks what landed in SQLite: 163 checks, from the
+throw-away database, then checks what landed in SQLite: 176 checks, from the
 first-run administrator to a cascade delete, the whole CSV file, an operator
-who cannot see the Users page, Greek and German names that differ only in
-case, the upgrades from versions 1 and 2, another program's database left
-untouched, and a backup onto the open database under other spellings of its
-name. Its message, confirmation and file boxes go through functions the test
+who cannot see the Users page, Greek, German and Turkish names that differ
+only in case, the upgrades from versions 1 and 2, another program's database
+left byte for byte untouched — one with a hot journal beside it among them,
+which the test makes by copying a file and its journal in the middle of a
+transaction, and first checks that SQLite would roll it back — a damaged file
+carrying the program's mark, and a backup onto the open database under other
+spellings of its name or of its journal's. Its message, confirmation and file boxes go through functions the test
 answers. `scripts/test-examples` runs it that way on Windows and on Linux
 (under `xvfb-run`).
 
@@ -226,7 +258,11 @@ program with its rule reverted. The second review's fixes were held to the same
 standard, on both systems: reverting the identity check, the read-back of a
 backup, the linear duplicate check, the one-sizing of the grid, the folding,
 its table probes, the dropped indexes of an upgrade, the owner check, the
-prepare check and the read-only message each made its own checks fail.
+prepare check and the read-only message each made its own checks fail. So did
+the sixth review's: the plain `i` for `İ`, the header read at start-up and in
+the backup's identity check, the table check of a marked file, and the
+refusal of journal names — and a write slipped into the owner check, which
+the old "nothing was written" check, counting tables, could not see.
 
 ## What writing it changed in Phosphor
 

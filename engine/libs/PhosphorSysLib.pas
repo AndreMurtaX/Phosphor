@@ -156,10 +156,11 @@ function GetEnvironmentVariableW(lpName, lpBuffer: PWideChar; nSize: LongWord): 
   (GetTempPathW's documentation). Same unit, same reason, as above. }
 function GetTempPathW(nBufferLength: LongWord; lpBuffer: PWideChar): LongWord;
   stdcall; external 'kernel32.dll' name 'GetTempPathW';
+{$ENDIF}
 
-{ UTF-16 to the engine's UTF-8: a surrogate pair is one code point, and an
-  unpaired surrogate -- which a Windows environment block can hold -- is
-  U+FFFD, Utf8Char's own answer for one. }
+{ Outside the Windows block, both of these: the interface declares them and
+  the console host calls them on every OS. Does W hold a surrogate that is not
+  half of a pair -- a UTF-16 string no UTF-8 can spell exactly? }
 function HasUnpairedSurrogate(const W: UnicodeString): Boolean;
 var i, n: Integer; c: Word;
 begin
@@ -182,6 +183,9 @@ begin
   end;
 end;
 
+{ UTF-16 to the engine's UTF-8: a surrogate pair is one code point, and an
+  unpaired surrogate -- which a Windows environment block can hold -- is
+  U+FFFD, Utf8Char's own answer for one. }
 function WideToUtf8(const W: UnicodeString): String;
 var i, n, cp, o: Integer; hi, lo: Word; ch, buf: String;
 begin
@@ -210,6 +214,7 @@ begin
   Result := Copy(buf, 1, o);
 end;
 
+{$IFDEF WINDOWS}
 { The engine's UTF-8 to UTF-16, STRICTLY: False for bytes that are not
   well-formed UTF-8 (a stray continuation byte, a truncated or overlong
   sequence, a surrogate, a code point past U+10FFFF). No variable can be named

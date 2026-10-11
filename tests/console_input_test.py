@@ -263,12 +263,25 @@ def run_windows(exe, work):
         sp = os.path.join(work, name + '.json')
         with open(sp, 'w', encoding='utf-8') as f:
             json.dump(spec, f)
-        p = subprocess.Popen([sys.executable, '-I', os.path.abspath(__file__), '--inner', sp],
-                             creationflags=CREATE_NEW_CONSOLE)
+        # THROUGH conhost.exe BY NAME, minimised and not activated. A bare
+        # CREATE_NEW_CONSOLE is handed by Windows 11 to the default terminal
+        # application, Windows Terminal, which opens a TAB per console and
+        # keeps it open after the program exits: 356 dead tabs (and as many
+        # OpenConsole/conhost processes) were left on the owner's desktop on
+        # 2026-10-11 by two days of these cases. conhost.exe named directly
+        # hosts its command in a classic console and closes with it.
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 7                      # SW_SHOWMINNOACTIVE
+        conhost = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'conhost.exe')
+        p = subprocess.Popen([conhost, sys.executable, '-I', os.path.abspath(__file__), '--inner', sp],
+                             creationflags=CREATE_NEW_CONSOLE, startupinfo=si)
         try:
             p.wait(timeout + 30 + sum(b[0] for b in bursts))
         except subprocess.TimeoutExpired:
-            p.kill()
+            # the whole tree: conhost, the inner harness and the program
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(p.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             p.wait(10)
         try:
             got = open(spec['out'], 'rb').read().decode('utf-8', 'replace').replace('\r', '')

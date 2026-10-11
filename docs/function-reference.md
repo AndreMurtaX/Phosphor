@@ -739,6 +739,13 @@ in-process (creation/write/access variants each behave the same underlying way).
 | `dir_copy(src$, dst$) → num` | copy a directory tree |
 | `dir_move(src$, dst$) → num` | move/rename a directory |
 
+**What a path is** (asked of the operating system, not read off the spelling — see [io.md](libraries/io.md))
+
+| function | description |
+| --- | --- |
+| `file_kind$(path$) → str` | what is at the path itself: `file`, `dir`, `link`, `fifo`, `device`, `socket`, `stream` (a Windows `name:stream`), or `none`; `""` when it cannot be told or the sandbox refuses. Opens nothing for reading |
+| `path_canonical$(path$) → str` | the one full name of the file the path leads to — links followed, `.`/`..` resolved, and on Windows 8.3 aliases expanded, trailing dots dropped, case as on disk; a name not there yet is its folder's canonical name joined to it. `""` for a link to nothing, a missing folder, a stream or a Windows device |
+
 **Path** (pure string operations)
 
 | function | description |

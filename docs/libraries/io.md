@@ -1,6 +1,6 @@
 # io — files, directories and paths, where a failure is an answer
 
-`engine/libs/PhosphorIoLib.pas` · 58 functions · always available
+`engine/libs/PhosphorIoLib.pas` · 60 functions · always available
 
 ## What it is for
 
@@ -112,6 +112,44 @@ Times are **date numbers**, the same values `now` and `strtodate` speak.
 | `dir_setcurrent(path$) → num` | `1` when the working directory moved. `0` when the directory does not exist (`ioerror()` `3`), or when it is outside the root or is `""` (`5`) — the move is refused rather than the writes that would follow it, and `""` names nothing to move to, with or without a sandbox |
 | `dir_copy(src$, dst$) → num` | `1` when the destination root was created and both ends were permitted, having then copied the tree file by file. A single file inside that could not be copied is **not** reported: the answer covers the destination, not every leaf |
 | `dir_move(src$, dst$) → num` | `1` when the rename happened. `0` when refused, when the target exists — even an empty directory, which Linux used to replace — or across volumes; like `file_move`, there is no copy fallback |
+
+### What a path is — asked of the operating system
+
+A file has more names than its spelling: on Windows an 8.3 alias
+(`TRUNCV~1.DB-` for `truncvictim.db-journal`), a trailing dot it drops, another
+case, a symbolic link or junction, a stream (`name:stream`, and `name::$DATA`,
+which *is* the file); on Linux a symbolic link. A check that reads the string
+judges one spelling and lets the others by — round 10 of the adversarial review
+found six such doors in one program. These two ask the OS instead. Both are
+sandbox-checked like every other path function: outside the root they answer
+`""` with `ioerror()` `5`.
+
+| function | what it answers |
+| --- | --- |
+| `file_kind$(path$) → str` | what is at `path$` itself: `"file"`, `"dir"`, `"link"` (a symbolic link or a Windows junction — whatever it leads to, and whether it leads anywhere), `"fifo"` (a Linux FIFO; on Windows a pipe, `\\.\pipe\…`), `"device"` (`/dev/null`; on Windows a name the OS maps to a device — the bare `NUL` or `CON`, as GetFullPathNameW decides, which on Windows 10 also covers `C:\x\CON`), `"socket"`, `"stream"` (Windows: any path naming a stream by its syntax), or `"none"` when nothing is there — the empty name included. `""` when it cannot be told, with `ioerror()` `3`; `0` after an answer. **Nothing is opened for reading**: on Linux it is an `lstat`; on Windows a handle with *no* access rights, on the entry itself and never through a link, and never on a name that is a device or a pipe |
+| `path_canonical$(path$) → str` | the one full name of the file `path$` leads to: links followed, `.` and `..` resolved, and on Windows 8.3 aliases expanded, a trailing dot or space dropped, the case as the folder holds it (`GetFinalPathNameByHandleW`, without its `\\?\`). A name that is **not there yet** answers its folder's canonical name joined to the name as given — the name a file created there would have. `""` with `ioerror()` `3` when there is no such name: a link that leads to no file (there is something there, and no file to name), a folder that is not there, a stream, a Windows device or pipe. On Linux a device or a FIFO has a name and answers it |
+
+Compare canonical names, not spellings, to ask whether two paths are one file —
+and compare them ignoring case on Windows only when one of them is not there yet.
+A hard link is still a second name nothing here can see.
+
+```basic
+rem Refuse a name that is not a plain file, or is another spelling of a log.
+p$ = path_combine$(temppath$(), "orders.db")
+k$ = file_kind$(p$)
+if k$ <> "file" and k$ <> "none" then
+  println "not a file: " + k$
+else
+  c$ = path_canonical$(p$)
+  if c$ = "" then
+    println "cannot tell where it leads: " + iostrerror$()
+  elseif right$(lcase$(c$), 4) = "-wal" then
+    println "that is a log: " + c$
+  else
+    println "ok: " + c$
+  end if
+end if
+```
 
 ### Paths — pure string operations
 

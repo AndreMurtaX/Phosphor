@@ -72,29 +72,44 @@ journal alone while its writer still holds the file's lock, and that lock
 cannot be asked without SQLite reading the file, so the refusal says the
 journal is either a program's at work right now or one that stopped in the
 middle of a change — and a person is not told to "recover" a live journal.
-And the journal looked for is the one SQLite will find,
-beside the file **as SQLite names it**: SQLite follows a symbolic link to its
-target on Linux and drops a trailing dot on Windows, so the journal it would
-roll back into `docs/phosphor-contacts.db` linked to `other.db`, or into
-`x.db.`, is `other.db-journal` or `x.db-journal` — not the one beside the name
-you gave. The program asks SQLite for that name (`PRAGMA database_list`, before
-any query) and judges the journal beside it. **Before SQLite 3.39.0** that
+And the journal looked for is the one SQLite will find — beside the file's
+**own name**, which the program asks of the operating system before anything
+else (`path_canonical$`): links followed, and on Windows an 8.3 alias expanded,
+a trailing dot dropped and the case taken from the folder. SQLite is then
+handed that name and no other, so the journal it rolls back is the one that
+was judged: on Windows SQLite names a link's journal after the *link*, and
+until round 10 a file of the program's own, crashed in mid-change and reached
+through a link, was opened torn, its journal never looked at. The program
+still asks SQLite for its own name of the file (`PRAGMA database_list`, before
+any query) and judges the journal beside that. **Before SQLite 3.39.0** that
 pragma reads the file to answer — and reading it is what rolls a hot journal
 back — so with an older library the program does not ask: it judges the
-journal beside the name you gave, and a file no program has marked is judged
+journal beside the file's own name, and a file no program has marked is judged
 on a copy of its own bytes before SQLite opens it, so another program's file
-is still refused and left as it was. What an older library loses is the
-journal's name in that refusal when it lies beside a link's target, and a
-torn first page put back through a link (that file is refused as no
-database). Some names are not handed to SQLite at all: one beginning `file:`
-is a URI to a library built to read URIs (Ubuntu's is; the sqlite.org DLL is
-not), naming a file nothing has looked at, and `:memory:` or no name is a
-database with no file; a name ending in `-journal`, `-wal` or `-shm`; and a
-name the folder lists that is no file — a folder, or a symbolic link that
-leads to no file, through which SQLite would create one wherever it leads. A
-name that is not there yet is asked of SQLite too (which creates the file, as
-opening it would the next moment): on Linux, a link that leads to a journal's
-name is refused there, and the empty file taken away.
+is still refused and left as it was.
+
+Some names are not handed to SQLite at all, and they are judged by **what they
+are**, asked of the operating system (`file_kind$`), not by how they are
+spelled — a file has more spellings than any list of them, and round 10 found
+six that walked past checks reading the name. Refused: a name beginning
+`file:`, which is a URI to a library built to read URIs (Ubuntu's is; the
+sqlite.org DLL is not), naming a file nothing has looked at; `:memory:` or no
+name, a database with no file (both compared exactly, as SQLite compares them:
+`FILE:x.db` is an ordinary name on Linux); a **stream** inside a file (on
+Windows `name:stream`, and `name::$DATA`, which *is* the file — so
+`other.db-journal:bk` is deleted with that journal at its database's next
+commit); a **device or a pipe** (`CON`, a Linux FIFO), which a read waits on
+for ever, past every limit; a folder; a **link that leads to no file**, which
+has no file's name, and through which SQLite would create one wherever it
+leads; and a name SQLite keeps beside a database — `-journal`, `-wal`, `-shm` —
+as you spelled it *or* as the operating system names it, so the 8.3 alias
+`TRUNCV~1.DB-` is refused as the `truncvictim.db-journal` it is. A name that
+is not there yet is asked of SQLite too (which creates the file, as opening it
+would the next moment), and a journal's name there is refused and the empty
+file taken away. What nothing here can see is a **hard link**: a second name of
+the same file, with nothing to tell it from a first. SQLite's own
+documentation lists it among the ways a database is corrupted, and this
+program inherits that.
 A file that carries the program's mark is not trusted on the mark alone
 either: one without every table, column, index and foreign key its version
 has is refused as damaged, naming what is missing — the uniqueness of user
@@ -139,24 +154,24 @@ $env:PHOSPHOR_CONTACTS_DEMO = '1'; phosphor examples\contact_manager.bas
 
 The **File** menu exports suppliers or customers to CSV (one row per contact,
 with the product lines it serves) and backs the database up — to any file but
-the open database itself, which it refuses under any name: another letter case
-on a folder that ignores case, a trailing dot on Windows, a link. Comparing the
-names catches only the spelling that matches, so a name that is spelled
-differently and already exists is asked of the files: the program leaves a
-mark in the open database and looks for it in the target, opened read-only
-— after the target's header has been read as bytes, so that a file without the
-program's mark is known to be another file without SQLite ever opening it. A
-file that is already there is replaced only once it is proven to be another
-file, and only if you say so. A name ending in `-journal`, `-wal` or `-shm` is
-refused outright: that is where SQLite keeps a database's unfinished work, and
-a backup there would be cut short by the open database or taken for the
-unfinished work of the file beside it. So is a name that *leads* to one: a
-symbolic link that points at nothing is no file, so nothing above stops it,
-and SQLite would write the backup through it to wherever it points. On
-Linux the name the backup will be written under is asked of SQLite first,
-which follows the link; on Windows SQLite's name for a link is the link's
-own, so there a name the folder lists that is no file — such a link, or a
-folder — is refused outright. A `file:` URI is refused too. "Backed up" is said only once the copy
+the open database itself, which it refuses under any name: another letter
+case on a folder that ignores case, a trailing dot or an 8.3 alias on Windows,
+a link — the names compared are the ones the operating system gives the files
+(`path_canonical$`). A name that still does not compare equal and already
+exists — a hard link, a Linux mount that ignores case — is asked of the files:
+the program leaves a mark in the open database and looks for it in the target,
+opened read-only — after the target's header has been read as bytes, so that a
+file without the program's mark is known to be another file without SQLite
+ever opening it. A file that is already there is replaced only once it is
+proven to be another file, and only if you say so — and through a link, the
+file it leads to is the one replaced and written. A name ending in `-journal`,
+`-wal` or `-shm` is refused outright: that is where SQLite keeps a database's
+unfinished work, and a backup there would be cut short by the open database or
+taken for the unfinished work of the file beside it. So is any other name of
+one — an 8.3 alias, a link, a stream inside it — and anything that is not a
+file: a folder, a device, a pipe, or a link that leads to no file, through
+which SQLite would write the backup to wherever it points. A `file:` URI is
+refused too. "Backed up" is said only once the copy
 has been read back. **Account** changes your own password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
@@ -331,9 +346,14 @@ does — round 9 found that nothing did, so the Linux judging could be removed
 with every runner green. A BASIC program cannot make a real link, so block AI
 of `scripts/test.sh` and of `scripts/test.ps1` makes two, each leading to no
 file yet, and names their folder in `PHOSPHOR_SELFTEST_LINKS`: the self-test
-then runs three checks more — a backup and a database through a link onto a
-journal's name are refused and write nothing there, and another program's
-file reached through a link is refused and left with its journal. The self-test
+then runs seven checks more — a backup and a database through a link onto a
+journal's name are refused and write nothing there; another program's file
+reached through a link is refused and left with its journal; on Windows a
+journal's 8.3 alias and a dangling link's 8.3 alias (the folder's own short
+names, which the block checks `dir /x` gives), on Linux a link to a journal
+and a dangling link, are refused at both doors; a pipe (a real FIFO on Linux)
+is refused without anything waiting on it; and the program's own file, killed
+in mid-change and reached through a link, opens with its journal rolled back. The self-test
 also pretends its SQLite is older than 3.39.0 for four checks, on every
 library: the version compared as numbers, the name of a file that is there not
 asked, and another program's file still refused and left byte for byte, under
@@ -371,7 +391,11 @@ not asked about a name that is no file (a directory, and the Windows links of
 block AI), a `file:` URI handed to SQLite, the old "a program stopped" wording
 for a journal whose writer is at work, a name that leads to a journal's opened
 as a database (block AI on Linux), and the judging by SQLite's name removed
-(block AI on Linux, where every sandboxed runner stayed green).
+(block AI on Linux, where every sandboxed runner stayed green). And the
+tenth's: a journal judged by its spelling instead of its canonical name (the
+8.3 alias in block AI), a stream's or a device's kind not asked, the database
+opened by the name given rather than its own (the crashed file through a link,
+on Windows), a URI compared in any case, and the short-file header test.
 
 ## What writing it changed in Phosphor
 

@@ -88,6 +88,7 @@ hdr_version = 0            rem what file_header$ read: user_version,
 hdr_app = 0                rem   application_id,
 hdr_err$ = ""              rem   and why it could not read the file
 name_err$ = ""             rem why sqlite_name$ could not answer
+canon$ = ""                rem the one name name_refusal$ found a path leads to
 name_safe? = false         rem this SQLite names a file without reading it
 fold_map@ = sdict@()       rem fold$'s table: character -> its case folding
 fold_probe@ = sdict@()     rem what fold$ looks for before walking a string
@@ -396,7 +397,10 @@ function open_database(path$) local new@, why$
     say("The database " + path$ + " could not be prepared: " + schema_msg$)
     return 0
   end if
-  new@ = sqlite_open@(path$)
+  rem The name the checks judged, and not path$: through a Windows link
+  rem SQLite would name the journal after the LINK and never roll back the
+  rem one beside the file (round 10), so it is handed the file's own name.
+  new@ = sqlite_open@(canon$)
   if sqlite_isopen(new@) <> 1 then
     say("Could not open the database " + path$ + ": " + sqlite_errormsg$())
     return 0
@@ -438,7 +442,10 @@ function file_header$(p$) local h$, i
   h$ = head$(p$, 100)
   if hdr_err$ <> "" then return "unread"
   if bytelen(h$) = 0 then return "empty"
-  if bytelen(h$) < 100 or bytemid$(h$, 1, 15) <> "SQLite format 3" or byteat(h$, 16) <> 0 then return "notdb"
+  rem (two tests: `or` evaluates every operand, and byteat of a byte past
+  rem the end of a short file is an error, not a no)
+  if bytelen(h$) < 100 then return "notdb"
+  if bytemid$(h$, 1, 15) <> "SQLite format 3" or byteat(h$, 16) <> 0 then return "notdb"
   for i = 0 to 3
     hdr_version = hdr_version * 256 + byteat(h$, 61 + i)
     hdr_app = hdr_app * 256 + byteat(h$, 69 + i)
@@ -453,10 +460,24 @@ rem The first n bytes of the file p$, read as a plain file -- "" when it
 rem has none -- or "" with hdr_err$ saying why it could not be read. (A
 rem channel closed on Linux drops the POSIX locks this process holds on
 rem that file; a file is read only between statements, when the open
-rem connection holds none.)
-function head$(p$, n) local h$, m
+rem connection holds none.) Only a FILE is opened: opening a FIFO on Linux
+rem or the console device CON on Windows waits for input that may never
+rem come, and no execution limit reaches a program blocked in the system
+rem call (round 10) -- so what is there is asked first (file_kind$).
+function head$(p$, n) local h$, m, k$
   hdr_err$ = ""
   h$ = ""
+  k$ = file_kind$(p$)
+  if k$ <> "file" then
+    if k$ = "none" then
+      hdr_err$ = "nothing is there"
+    elseif k$ = "" then
+      hdr_err$ = "what is there could not be told"
+    else
+      hdr_err$ = "it is a " + k$ + ", not a plain file"
+    end if
+    return ""
+  end if
   on error call header_fault
   open p$ for input as #7
   if hdr_err$ = "" then
@@ -486,8 +507,9 @@ rem unixFullPathname), so the journal it rolls back into a file reached
 rem through a link is the one beside the TARGET; and on Windows it drops a
 rem trailing dot or space (GetFullPathNameW), so "x.db." is x.db, with
 rem x.db-journal. (Windows does NOT follow a link here: its full name of a
-rem link is the link's own -- which is why name_refusal$ asks the folder
-rem about a link that leads to no file.) Opening CREATES a file that is
+rem link is the link's own -- which is why every name is made canonical
+rem first, name_refusal$, and SQLite is only ever handed that one.)
+rem Opening CREATES a file that is
 rem not there -- through a link that points at nothing, at the link's
 rem target -- so this is asked only of a file that exists, or of one about
 rem to be created anyway. And only a SQLite of 3.39.0 or later is asked
@@ -530,52 +552,48 @@ function version_at_least?(v$, min$) local i, a, b
 end function
 
 rem Why the name p$ must not be handed to SQLite as a database's at all;
-rem "" when it may be. Three kinds of name, each a door past the checks
-rem that judge a file by its name:
+rem "" when it may be -- and then canon$ holds the name everything after is
+rem done with: the one the OS gives the file (path_canonical$).
+rem A FILE IS JUDGED BY WHAT IT IS, NOT BY HOW IT IS SPELLED (round 10).
+rem Until then this read the name, and the OS has more spellings of a file
+rem than any list: on Windows the 8.3 alias of a journal (TRUNCV~1.DB- for
+rem truncvictim.db-journal) and of a link that leads to one (LONGLI~1.DAT),
+rem a stream inside a journal (other.db-journal:bk, deleted with it at that
+rem database's next commit), the main stream spelled out (x.db-wal::$DATA
+rem IS x.db-wal), the console (CON, which blocks whoever reads it); on
+rem Linux a FIFO (whose open blocks). Each reached a database or a backup
+rem past every check. So the OS is asked what the name IS (file_kind$) and
+rem what its one name is (path_canonical$), and the name rules are asked
+rem of that. Refused:
 rem  - one SQLite does not read as a path: "" and ":memory:" are databases
 rem    with no file, and one beginning "file:" is a URI wherever the library
 rem    was built to read URIs (Ubuntu's libsqlite3 is; the sqlite.org DLL
 rem    is not). SQLite would open the file the URI names, which nothing
 rem    here has looked at -- and roll a journal beside it back at the first
-rem    query. Refused on every system, so the two do not differ;
-rem  - one SQLite keeps beside a database (journal_name?);
-rem  - one the folder LISTS that is no file: a folder, or a symbolic link
-rem    that leads to no file. SQLite would create the file it leads to,
-rem    wherever that is -- and on Windows SQLite does not say where (its
-rem    full name of a link is the link's own), so a link onto a journal's
-rem    name passes every check made by name. (On Linux the folder does not
-rem    list such a link here; there sqlite_name$ follows it.)
-function name_refusal$(p$) local n$
-  n$ = alcase$(p$)
-  if n$ = "" or n$ = ":memory:" or left$(n$, 5) = "file:" then return "SQLite does not read that as the name of a file -- a name beginning with file: is a URI, and :memory: or no name at all is a database with no file. Give the file's path."
+rem    query. Refused on every system, so the two do not differ -- and
+rem    compared EXACTLY, as SQLite compares them (sqlite3ParseUri's memcmp
+rem    of "file:", strcmp of ":memory:"): "FILE:x.db" is a file on Linux;
+rem  - a stream (Windows: any name:stream, name::$DATA too), a device or a
+rem    pipe, a folder, or a link that leads to no file -- which has no
+rem    canonical name, and SQLite would create the file it leads to,
+rem    wherever that is;
+rem  - one SQLite keeps beside a database (journal_name?), as spelled or as
+rem    the OS names it.
+function name_refusal$(p$) local k$, c$
+  canon$ = ""
+  if p$ = "" or p$ = ":memory:" or left$(p$, 5) = "file:" then return "SQLite does not read that as the name of a file -- a name beginning with file: is a URI, and :memory: or no name at all is a database with no file. Give the file's path."
+  k$ = file_kind$(p$)
+  if k$ = "stream" then return "That name is a stream inside a file (name:stream), not a file of its own: a database there goes wherever that file goes, and if it is a journal, SQLite deletes it at its database's next commit. Use the name of a file."
+  if k$ = "" then return "Could not tell what is at " + p$ + " (" + iostrerror$() + "). Use the name of a file in a folder you can read."
+  c$ = path_canonical$(p$)
+  if k$ = "link" and c$ <> "" then k$ = file_kind$(c$)
+  if k$ = "device" or k$ = "fifo" or k$ = "socket" then return "Something is at " + p$ + " that is not a file but a device or a pipe: reading it waits for something that may never come. Use the name of a file."
+  if k$ = "dir" or k$ = "link" then return "Something is at " + p$ + " that is not a file: a folder, or a link that leads to no file. Use the name of a file, or one that is not there yet."
+  if c$ = "" then return "Could not tell where " + p$ + " leads: its folder is not there, or cannot be read. Use the name of a file in a folder that exists."
   if journal_name?(p$) = true then return JOURNAL_NAME_MSG$
-  if file_exists(p$) <> 1 and listed?(p$) = true then return "Something is at " + p$ + " that is not a file: a folder, or a link that leads to no file. Use the name of a file, or one that is not there yet."
+  if journal_name?(c$) = true then return "That name leads to " + c$ + ". " + JOURNAL_NAME_MSG$
+  canon$ = c$
   return ""
-end function
-
-rem Whether the folder of p$ lists an entry by p$'s name -- compared as
-rem Windows compares names there: in any case, and without the trailing
-rem dots and spaces it drops.
-function listed?(p$) local f$, n$, all$, i, e$
-  f$ = path_getfullpath$(p$)
-  n$ = path_getfilename$(f$)
-  if os_name$() = "Windows" then
-    while right$(n$, 1) = "." or right$(n$, 1) = " "
-      n$ = left$(n$, len(n$) - 1)
-    end while
-    n$ = alcase$(n$)
-  end if
-  if n$ = "" then return false
-  rem The name itself is the pattern: its * and ? match it too, and every
-  rem entry listed is compared again as a name.
-  all$ = dir_getentries$(path_getdirectoryname$(f$), n$)
-  if all$ = "" then return false
-  for i = 1 to wordcount(all$, chr$(10))
-    e$ = word$(all$, i, chr$(10))
-    if os_name$() = "Windows" then e$ = alcase$(e$)
-    if e$ = n$ then return true
-  next
-  return false
 end function
 
 rem The name of a file beside p$ -- p$ as SQLite names it, sqlite_name$ --
@@ -661,10 +679,14 @@ rem find beside it under another name, the file is opened only once its
 rem contents are this program's. What an older library loses is the name
 rem of a journal found elsewhere in the refusal, and a torn page 1 put back
 rem through a link (it is refused as no database).
-function may_open_db(p$) local h$, j$, q$
+function may_open_db(p$) local h$, j$, q$, c$
   schema_msg$ = name_refusal$(p$)
   if schema_msg$ <> "" then return 0
-  h$ = file_header$(p$)
+  rem From here on every question is asked of the name the OS gives the
+  rem file (name_refusal$ found it): an 8.3 alias, a trailing dot or a link
+  rem is another spelling of it, and the work SQLite finds lies beside it.
+  c$ = canon$
+  h$ = file_header$(c$)
   if h$ = "unread" then
     schema_msg$ = "it could not be read (" + hdr_err$ + ")."
     return 0
@@ -677,7 +699,7 @@ function may_open_db(p$) local h$, j$, q$
     end if
   end if
   if h$ = "missing" or name_safe? = true then
-    q$ = sqlite_name$(p$)
+    q$ = sqlite_name$(c$)
     if q$ = "" then
       schema_msg$ = "SQLite could not open it (" + name_err$ + ")."
       return 0
@@ -689,9 +711,9 @@ function may_open_db(p$) local h$, j$, q$
     end if
     j$ = unfinished$(q$)
   else
-    q$ = p$
-    j$ = unfinished$(p$)
-    if j$ = "" and h$ = "db" then return judge_copy(p$, "")
+    q$ = c$
+    j$ = unfinished$(c$)
+    if j$ = "" and h$ = "db" then return judge_copy(c$, "")
   end if
   if j$ = "" then
     if h$ <> "notdb" then return 1
@@ -1884,14 +1906,20 @@ function on_open_db(sender@) local p$
   return 0
 end function
 
-rem Whether two paths are spelled as one file: both made absolute, and
-rem compared ignoring case on Windows. This can only say YES -- a name with
-rem another case on a Linux mount that ignores case, a trailing dot or
-rem space on Windows, an 8.3 alias, a link, are all the same file spelled
-rem otherwise. is_open_db is what tells a file apart from the open one.
+rem Whether two paths name one file as the OS reads them: each made
+rem canonical (path_canonical$ -- links followed, an 8.3 alias, a trailing
+rem dot and the case on Windows all resolved), or, where that cannot be
+rem answered, made absolute; compared ignoring case on Windows. This can
+rem still only say YES -- a hard link, or another case on a Linux mount that
+rem ignores case, is the same file under a name of its own. is_open_db is
+rem what tells a file apart from the open one.
 function same_spelling?(a$, b$) local x$, y$
-  x$ = path_getfullpath$(a$)
-  y$ = path_getfullpath$(b$)
+  x$ = path_canonical$(a$)
+  y$ = path_canonical$(b$)
+  if x$ = "" or y$ = "" then
+    x$ = path_getfullpath$(a$)
+    y$ = path_getfullpath$(b$)
+  end if
   if os_name$() = "Windows" then
     x$ = alcase$(x$)
     y$ = alcase$(y$)
@@ -2007,14 +2035,17 @@ rem PROVEN it another file -- a name spelled like the open database is
 rem refused before that, and "cannot tell" is refused too. A delete that
 rem fails is said, not ignored, and "Backed up" is said only once the copy
 rem has been read back (backup_landed). Before all of it, a name SQLite
-rem must not be handed is refused (name_refusal$: a URI, a name SQLite keeps
-rem beside a database, something listed there that is no file) -- and so,
-rem before the backup is written, is a name SQLite resolves to a journal's.
+rem must not be handed is refused (name_refusal$: a URI, a stream, a device
+rem or a pipe, something there that is no file, a name SQLite keeps beside
+rem a database under any of its spellings) -- and so, before the backup is
+rem written, is a name SQLite resolves to a journal's. Everything after
+rem that is done to the name the OS gives the file (canon$): the file a
+rem link leads to is the one replaced, and the one written.
 rem A file replaced
 rem with a journal of its own still beside it is safe: SQLite deletes a
 rem journal it finds beside an EMPTY database, which is what the backup
 rem starts from.
-function on_backup(sender@) local p$, q$, same, why$
+function on_backup(sender@) local p$, q$, same, why$, c$
   p$ = save_path$("phosphor-contacts-backup.db", "SQLite database (*.db)|*.db")
   if p$ = "" then return 0
   why$ = name_refusal$(p$)
@@ -2022,12 +2053,13 @@ function on_backup(sender@) local p$, q$, same, why$
     say(why$)
     return 0
   end if
-  if same_spelling?(p$, dbpath$) = true then
+  c$ = canon$
+  if same_spelling?(c$, dbpath$) = true then
     say("That is the database you have open. A backup has to go to another file.")
     return 0
   end if
-  if file_exists(p$) = 1 then
-    same = is_open_db(p$)
+  if file_exists(c$) = 1 then
+    same = is_open_db(c$)
     if same = 1 then
       say("That is the database you have open. A backup has to go to another file.")
       return 0
@@ -2037,30 +2069,27 @@ function on_backup(sender@) local p$, q$, same, why$
       return 0
     end if
     if ask?("Replace " + p$ + "?") = false then return 0
-    if file_delete(p$) <> 1 then
+    if file_delete(c$) <> 1 then
       say("Could not replace " + p$ + ": it could not be deleted. Is it open in another program?")
       return 0
     end if
   end if
-  rem The checks above judge p$. A symbolic link that points at nothing is
-  rem no file, so they let it by -- and SQLite would write the backup
-  rem through it, to wherever it points, onto a journal's name for one. On
-  rem Windows the folder lists such a link, and name_refusal$ refused it
-  rem above; on Linux it does not, and SQLite follows the link: so the
-  rem name the backup will be WRITTEN under is asked of SQLite, which
-  rem creates the empty file the backup is about to fill; a journal's name
-  rem is refused, and that empty file taken away again.
-  q$ = sqlite_name$(p$)
+  rem A link that leads to no file has no canonical name, and name_refusal$
+  rem refused it above, on both systems. The name the backup will be
+  rem WRITTEN under is still asked of SQLite, which creates the empty file
+  rem the backup is about to fill: a journal's name is refused, and that
+  rem empty file taken away again.
+  q$ = sqlite_name$(c$)
   if q$ <> "" and journal_name?(q$) = true then
     if file_getsize(q$) = 0 then file_delete(q$)
     say("That name leads to " + q$ + ". " + JOURNAL_NAME_MSG$)
     return 0
   end if
-  if sqlite_backup(db@, p$) <> 1 then
+  if sqlite_backup(db@, c$) <> 1 then
     say("The backup failed: " + sqlite_errormsg$())
     return 0
   end if
-  if backup_landed(p$) = 1 then
+  if backup_landed(c$) = 1 then
     say("Backed up to " + p$)
   else
     say("The backup to " + p$ + " was written but does not read back (" + probe_err$ + "); do not rely on it.")
@@ -2073,7 +2102,9 @@ rem database -- name-journal, name-wal, name-shm. The open database's own
 rem are among them (its journal is truncated at its next transaction), and
 rem any other is read by SQLite as the unfinished work of the file it sits
 rem beside. Asked of the name in any case and without trailing dots and
-rem spaces, which Windows drops: every spelling of such a name is refused.
+rem spaces, which Windows drops. It judges a SPELLING, and a file has
+rem others -- an 8.3 alias, a link, a stream suffix -- so name_refusal$
+rem asks it of the name the OS gives the file (path_canonical$) as well.
 function journal_name?(p$) local n$
   n$ = alcase$(p$)
   while right$(n$, 1) = "." or right$(n$, 1) = " "
@@ -3803,10 +3834,10 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   rem system, each with the spelling that system has. TWO EXCEPTIONS, said
   rem rather than hidden. Under --sandbox -- the example runners use one --
   rem the SQLite package opens no file through a link at all, so on Linux
-  rem there the pair asks that refusal instead, which holds with or without
-  rem the judging by SQLite's name; that judging is proved on Linux by the
-  rem same pair run without a sandbox, which block AI of scripts/test.sh
-  rem does, and on Windows by every run. And a SQLite older than 3.39.0 is
+  rem there SQLite cannot be asked the name of the link; since round 10 the
+  rem program never hands it one (it judges and opens the file's own name,
+  rem path_canonical$), so there the pair asks that the journal named is
+  rem the one beside the file all the same. And a SQLite older than 3.39.0 is
   rem not asked the name at all (sqlite_name$): there the pair asks that
   rem the file's own bytes were judged instead -- the same count of checks
   rem on every library, so one golden serves them all.
@@ -3824,7 +3855,7 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
     check(open_database(alias$) = 0 and instr(last_msg$, "other tables (ledger)") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "another program's file reached that way is judged by its own bytes on a copy, refused, and left with its journal byte for byte")
   elseif named$ = "" and os_name$() <> "Windows" and instr(name_err$, "outside the sandbox root") > 0 then
     check(n = 1, "a file can be reached through a link with no journal beside it")
-    check(open_database(alias$) = 0 and instr(last_msg$, "outside the sandbox root") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "under a sandbox SQLite opens nothing through a link, and the file and its journal are left byte for byte")
+    check(open_database(alias$) = 0 and instr(last_msg$, sqlite_name$(other$) + "-journal") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "under a sandbox SQLite opens nothing through a link -- and is not handed one: the file's own name is judged, naming its journal, and both are left byte for byte")
   else
     check(n = 1 and named$ = sqlite_name$(other$), "a file can be reached by a name that has no journal beside it, though SQLite finds one")
     check(open_database(alias$) = 0 and instr(last_msg$, sqlite_name$(other$) + "-journal") > 0 and file_readalltext$(other$) = text$ and file_readalltext$(other$ + "-journal") = q$, "another program's file reached that way is judged by the journal SQLite would roll back, refused, and left with it byte for byte")
@@ -3865,6 +3896,42 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   n = flag(left$(last_msg$, 16 + len(z$)) = "Something is at " + z$)
   check(n = 1 and open_database(z$) = 0 and instr(last_msg$, "Something is at " + z$) > 0 and dir_exists(z$) = 1 and dbpath$ = path$, "a name that is listed but is no file is neither backed up to nor opened")
   dir_delete(z$)
+  rem WHAT A NAME IS, ASKED OF THE OS (round 10). On Windows name:stream is
+  rem a stream inside the file name, and name::$DATA is that file itself:
+  rem so x-journal:bk dies with x-journal, and x-wal::$DATA IS x-wal -- each
+  rem past every check of how the name ends. On Linux a colon is a
+  rem character of a file name like any other, and both are files.
+  z$ = path$ + "-journal:bk"
+  bad$ = path$ + "-wal::$DATA"
+  if os_name$() = "Windows" then
+    save_as$ = z$
+    last_msg$ = ""
+    menuitem_click@(w@("menu.backup"))
+    n = flag(left$(last_msg$, 21) = "That name is a stream" and file_exists(path$ + "-journal") = 0)
+    check(n = 1 and open_database(bad$) = 0 and instr(last_msg$, "is a stream inside a file") > 0 and dbpath$ = path$ and file_exists(path$ + "-wal") = 0, "a stream of a file -- of a journal, or a log's own stream spelled out -- is neither backed up to nor opened")
+  else
+    check(name_refusal$(z$) = "" and name_refusal$(bad$) = "", "a colon in a name is a character like any other where the system says so")
+  end if
+  rem A device is no file -- CON on Windows, /dev/null on Linux -- and the
+  rem console is read by waiting for a person: SQLite blocked opening CON,
+  rem past every execution limit.
+  if os_name$() = "Windows" then z$ = "CON" else z$ = "/dev/null"
+  save_as$ = z$
+  last_msg$ = ""
+  menuitem_click@(w@("menu.backup"))
+  n = flag(last_msg$ <> "" and left$(last_msg$, 9) <> "Backed up")
+  check(n = 1 and open_database(z$) = 0 and dbpath$ = path$ and file_header$(z$) <> "empty", "a device is neither backed up to nor opened, nor read as an empty file, and nothing waits on it")
+  rem SQLite reads a URI only from "file:" and a database with no file only
+  rem from ":memory:", both in lower case (sqlite3ParseUri, a memcmp; a
+  rem strcmp): "FILE:..." is a file on Linux, a stream on Windows -- either
+  rem way it is not refused as a URI.
+  check(instr(name_refusal$("FILE:" + bk$), "is a URI") = 0 and instr(name_refusal$(":MEMORY:"), "is a URI") = 0 and instr(name_refusal$("file:" + bk$), "is a URI") > 0, "only what SQLite reads as a URI, or as no file, is refused as one: file: and :memory: as SQLite spells them")
+  rem A file shorter than the sixteen bytes the header test reads: `or`
+  rem evaluates every operand, and byteat past its end ended the program.
+  z$ = temppath$() + "contact_manager_selftest_short.db"
+  file_writealltext(z$, "short")
+  check(file_header$(z$) = "notdb" and is_open_db(z$) = 0 and open_database(z$) = 0 and instr(last_msg$, "not a SQLite database") > 0 and dbpath$ = path$, "a file of a few bytes is no database, and is refused as one")
+  file_delete(z$)
   rem A journal whose program is still AT WORK on the file: SQLite would
   rem leave it (pager.c, hasHotJournal, asks the writer's lock first), and
   rem the program cannot ask that lock -- so it refuses the file, and does
@@ -3884,21 +3951,24 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   rem Real symbolic links, which a BASIC program cannot make: with
   rem PHOSPHOR_SELFTEST_LINKS naming a folder that holds tojournal.db ->
   rem other.db-journal and tohot.db -> hot.db, neither leading to a file
-  rem yet, three checks more run. Block AI of scripts/test.ps1 and
-  rem scripts/test.sh makes the links and runs this without a sandbox, on
-  rem each system, and expects the golden's count and these three.
+  rem yet, six checks more run here, and one more further on (toown.db).
+  rem The folder holds more for those (round 10): truncvictim.db-journal,
+  rem an empty journal; longlinkname.database -> victim.db-journal, which
+  rem leads to no file; toown.db -> own.db; on Linux tojrn.db ->
+  rem truncvictim.db-journal and a FIFO, pipe.db. On Windows the short
+  rem names TRUNCV~1.DB- and LONGLI~1.DAT are the folder's own 8.3 aliases
+  rem of the first two, which the block checks dir /x gives. Block AI of
+  rem scripts/test.ps1 and scripts/test.sh makes all of it and runs this
+  rem without a sandbox, on each system, and expects the golden's count
+  rem and these seven.
   z$ = environ$("PHOSPHOR_SELFTEST_LINKS")
   if z$ <> "" then
     alias$ = path_combine$(z$, "tojournal.db")
     q$ = path_combine$(z$, "other.db-journal")
-    rem Windows lists the link and its SQLite names it by its own name;
-    rem Linux does not list it, and its SQLite follows it.
-    if os_name$() = "Windows" then
-      named$ = "Something is at " + alias$
-    else
-      rem (either door: "That name..." from a backup, "that name..." from an open)
-      named$ = "hat name leads to " + q$
-    end if
+    rem A link that leads to no file is SOMETHING there with no canonical
+    rem name (path_canonical$), on both systems: refused before SQLite,
+    rem which would create the file it leads to, is handed it.
+    named$ = "Something is at " + alias$
     save_as$ = alias$
     answer? = true
     last_msg$ = ""
@@ -3910,18 +3980,58 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
     make_hot_db(q$)
     text$ = file_readalltext$(q$)
     named$ = file_readalltext$(q$ + "-journal")
-    rem On Linux the journal judged is the one beside the link's target, as
-    rem SQLite's own; on Windows SQLite builds it from the link's name and
-    rem would never roll hot.db-journal back, and the file is refused for
-    rem its tables -- as it is by an older SQLite on Linux.
-    if os_name$() = "Windows" or name_safe? = false then
-      n = flag(open_database(alias$) = 0 and instr(last_msg$, "other tables (ledger)") > 0)
-    else
-      n = flag(open_database(alias$) = 0 and instr(last_msg$, q$ + "-journal lies beside it") > 0)
-    end if
+    rem The journal judged is the one beside the link's TARGET, on both
+    rem systems and with every library: the name judged is the one the OS
+    rem gives the file (path_canonical$), and it is the one SQLite is
+    rem handed. (On Windows SQLite names a link's journal after the LINK,
+    rem and until round 10 hot.db-journal was never looked at.)
+    n = flag(open_database(alias$) = 0 and instr(last_msg$, path_canonical$(q$) + "-journal lies beside it") > 0)
     check(n = 1 and file_readalltext$(q$) = text$ and file_readalltext$(q$ + "-journal") = named$ and dbpath$ = path$, "another program's file reached through a real link is refused, and it and its journal are left byte for byte")
     file_delete(q$ + "-journal")
     file_delete(q$)
+    rem ANOTHER SPELLING OF A JOURNAL'S NAME (round 10): on Windows its 8.3
+    rem alias, on Linux a link to it. truncvictim.db-journal is the empty
+    rem journal a database in TRUNCATE mode leaves; a database written into
+    rem it was deleted at that database's next read.
+    q$ = path_combine$(z$, "truncvictim.db-journal")
+    if os_name$() = "Windows" then
+      alias$ = path_combine$(z$, "TRUNCV~1.DB-")
+    else
+      alias$ = path_combine$(z$, "tojrn.db")
+    end if
+    named$ = "That name leads to " + path_canonical$(q$) + "."
+    save_as$ = alias$
+    last_msg$ = ""
+    menuitem_click@(w@("menu.backup"))
+    n = flag(instr(last_msg$, named$) > 0 and file_exists(q$) = 1 and file_getsize(q$) = 0)
+    check(n = 1 and open_database(alias$) = 0 and instr(last_msg$, named$) > 0 and file_getsize(q$) = 0 and dbpath$ = path$, "another spelling of a journal's name -- an 8.3 alias, a link -- is neither backed up to nor opened, and the journal is left empty")
+    rem A link that leads to no file, under its 8.3 alias on Windows: the
+    rem round-9 refusal read the long name only, and LONGLI~1.DAT wrote the
+    rem backup into victim.db-journal.
+    q$ = path_combine$(z$, "victim.db-journal")
+    if os_name$() = "Windows" then
+      alias$ = path_combine$(z$, "LONGLI~1.DAT")
+    else
+      alias$ = path_combine$(z$, "longlinkname.database")
+    end if
+    named$ = "Something is at " + alias$
+    save_as$ = alias$
+    last_msg$ = ""
+    menuitem_click@(w@("menu.backup"))
+    n = flag(instr(last_msg$, named$) > 0 and file_exists(q$) = 0)
+    check(n = 1 and open_database(alias$) = 0 and instr(last_msg$, named$) > 0 and file_exists(q$) = 0 and dbpath$ = path$, "a link that leads to no file is refused under any of its names, at both doors")
+    rem A pipe: on Linux a FIFO, whose open blocks until a writer comes --
+    rem the program hung at both doors; on Windows a named pipe's name.
+    if os_name$() = "Windows" then
+      alias$ = chr$(92) + chr$(92) + "." + chr$(92) + "pipe" + chr$(92) + "phosphor-selftest-none"
+    else
+      alias$ = path_combine$(z$, "pipe.db")
+    end if
+    save_as$ = alias$
+    last_msg$ = ""
+    menuitem_click@(w@("menu.backup"))
+    n = flag(instr(last_msg$, "a device or a pipe") > 0)
+    check(n = 1 and open_database(alias$) = 0 and instr(last_msg$, "a device or a pipe") > 0 and dbpath$ = path$ and file_header$(alias$) <> "db", "a pipe is neither backed up to nor opened nor read, and nothing waits on it")
   end if
   save_as$ = other$
   answer? = false
@@ -4473,6 +4583,28 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(n = 2 and file_header$(path4$) = "notdb" and file_getsize(path4$) = bytelen(text$), "a file killed in mid-upgrade can have its first page torn as well")
   check(open_database(path4$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 3 and sqlite_scalar(db@, "PRAGMA application_id") = APP_ID and count_of("SELECT count(*) FROM companies WHERE tax_key <> ''") = 2000 and sqlite_scalar$(db@, "PRAGMA integrity_check") = "ok" and file_exists(path4$ + "-journal") = 0, "and it opens all the same: SQLite puts page 1 back, and the upgrade runs again")
   sqlite_close(db@)
+  rem This program's own file, killed in the middle of a change and reached
+  rem through a real link (block AI, toown.db -> own.db). SQLite rolls back
+  rem the journal beside the name it is HANDED, and on Windows its name of a
+  rem link is the link's own: handed the link, it read the half-written
+  rem file as whole and never looked at own.db-journal (round 10). It is
+  rem handed the file's own name, and the change is rolled back.
+  z$ = environ$("PHOSPHOR_SELFTEST_LINKS")
+  if z$ <> "" then
+    alias$ = path_combine$(z$, "toown.db")
+    q$ = path_combine$(z$, "own.db")
+    bad$ = q$ + ".src"
+    if file_exists(bad$) = 1 then file_delete(bad$)
+    n = file_copy(path4$, bad$)
+    v@ = sqlite_open@(bad$)
+    hot_begin(v@)
+    sqlite_exec(v@, "UPDATE companies SET notes = 'torn'")
+    n = n + hot_end(v@, bad$, q$)
+    n = n + flag(file_header$(q$) = "db" and hdr_app = APP_ID)
+    check(n = 3 and open_database(alias$) = 1 and count_of("SELECT count(*) FROM companies WHERE notes = 'torn'") = 0 and count_of("SELECT count(*) FROM companies") = 2000 and sqlite_scalar$(db@, "PRAGMA integrity_check") = "ok" and file_exists(q$ + "-journal") = 0, "this program's own file, killed mid-change and reached through a link, opens whole: its journal is rolled back")
+    sqlite_close(db@)
+    file_delete(q$)
+  end if
   file_delete(path4$)
   rem A key that cannot be computed fails the upgrade instead of passing it:
   rem a SELECT that does not compile used to step as zero rows.

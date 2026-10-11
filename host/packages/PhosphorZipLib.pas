@@ -662,7 +662,7 @@ begin
   // A name the archive does not hold is answered here. It used to go on to
   // paszlib's filter, which matched it case-insensitively and read another entry.
   if idx < 0 then Exit(False);
-  if not BudgetClaim(UZ.Entries[idx].Size) then
+  if not BudgetAllows(UZ.Entries[idx].Size) then
   begin
     FSpent := True;
     Exit(False);

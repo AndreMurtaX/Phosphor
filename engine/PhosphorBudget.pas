@@ -466,10 +466,14 @@ function BudgetLinearAfterOk(const AWhat: String; ACount, AMilliEach: Int64;
   TPhosphorConfig.Save did exactly that, and TouchOk -- which asked BudgetSpent,
   as every door above a LATCHING helper must -- found nothing: an autosaving
   cfg_set@ reported success while the value never reached the file. A helper
-  either writes the refusal into an error it holds (BudgetLinearOk), or claims,
-  so that the question its caller asks is the one that answers.
-  scripts/check-budget.py's refusal gate holds the rule: BudgetAllows and
-  BudgetLinear are asked only where a TPhosphorError is written. }
+  either writes the refusal into an error it holds (BudgetLinearOk), or records
+  it in its unit's refusal FLAG in the statement that asks (IoLib's GWalkSpent,
+  a rag index's or a zip reader's FSpent -- which the doors read through
+  GateRefused / WalkRefused / `if r.FSpent`), or claims, so that the question
+  its caller asks is the one that answers. A flag keeps RULE 1: an oversized
+  path or file is refused and the run goes on. scripts/check-budget.py's
+  refusal gate holds the rule, and settles a flagged refusal only by a reader
+  of the flag -- BudgetSpent cannot see one. }
 function BudgetClaim(AUnits: Int64): Boolean;
 function BudgetClaimLinear(ACount, AMilliEach: Int64): Boolean;
 

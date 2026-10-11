@@ -1480,8 +1480,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not RenderForSave(l, t) then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
-  // A spent budget writes nothing and renames nothing; a path the budget
-  // refuses (IoGate claims it) is this call's peLimit, not a 0 (round 9).
+  // A spent budget writes nothing and renames nothing (round 9).
   if BudgetSpent() then begin Err := BudgetRefusal('strings_savetofile'); Exit; end;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   { THE WRITE'S ANSWER IS THE ANSWER. This discarded SaveTextToFile's Boolean and
@@ -1491,9 +1490,13 @@ begin
     0 when nothing was written, which is what file_writealltext answers for the
     same refusal; an empty list also answers 0, exactly as strings_loadfromfile's
     0 means "no lines" from whichever cause. }
-  if SaveTextToFile(Args[1].Str, t) then
-    Result := ValInt(l.Count);
-  if BudgetSpent() then begin Err := BudgetRefusal('strings_savetofile'); Result := ValInt(0); end;
+  { A PATH THE BUDGET PRICED OUT is this call's peLimit, not that 0 (round 9).
+    IoGate's refusal of a long path does not latch -- it is an argument, refused
+    without spending the run -- so GateRefused is the only thing that can say
+    it; this door asked BudgetSpent, which a path refusal never sets, and
+    answered 0 with ioerror() 3. scripts/check-budget.py found it. }
+  if not (SaveTextToFile(Args[1].Str, t) or GateRefused('strings_savetofile', Err)) then Exit;
+  Result := ValInt(l.Count);
 end;
 
 { A REFUSED LOAD CHANGES NOTHING (round 8). The encoding was written before the
@@ -1504,7 +1507,14 @@ var l: TPhosphorStringList; s: String;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
-  LoadTextFromFile(Args[1].Str, s);
+  { A path the budget priced out is this call's peLimit (round 9): the load
+    used to go on with '' and answer 0 lines, a refusal read as an empty file.
+    Any other failure keeps that answer, as it always had. }
+  if not LoadTextFromFile(Args[1].Str, s) then
+  begin
+    GateRefused('strings_loadfromfile', Err);
+    if IsError(Err) then Exit;
+  end;
   { The read is charged for what it read, before the split is asked for. }
   if not BudgetLinearAfterOk('strings_loadfromfile', Length(s), BudgetMilliCopy, Err) then Exit;
   if not (BudgetLinearOk('strings_loadfromfile', Length(s), BudgetMilliScan, Err) and

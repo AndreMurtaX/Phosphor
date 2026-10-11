@@ -100,12 +100,15 @@ var
   set, so every operation that reports a walk (WalkRefused) reports this as the
   peLimit it is, and every other door asks GateRefused, which names it.
 
-  CLAIMED, SO IT LATCHES (round 9). It was BudgetLinear, which does not latch,
-  and GateRefused was the only thing that could tell a priced refusal from the
-  sandbox's: the five SysLib doors that never asked it answered a refused path
-  as a failure, and the run went on with nothing latched, so the comment's
-  "the run's budget refusing next" was false. A refusal now latches the run as
-  every helper's must (PhosphorBudget's BudgetClaim), and the door reports it. }
+  A REFUSAL HERE DOES NOT LATCH, AND THE DOOR MUST ASK (round 9). A long path
+  is an ARGUMENT, and an oversized argument is refused without spending the run
+  (RULE 1): the program may go on with a shorter one. So the refusal's only
+  record is GWalkSpent / GPathPriced, and every door that calls this asks
+  GateRefused or WalkRefused, which turn it into the door's peLimit -- the
+  five SysLib doors that never asked answered a refused path as 0 with
+  ioerror() 3, and nothing else would ever have said it. scripts/check-budget.py
+  holds the rule: a refusal recorded in a flag is settled only by a REPORTER
+  of that flag, never by a later BudgetSpent, which a flag does not set. }
 function IoGateAt(const APath: String; AUse: TPathUse; AMilliEach: Int64): Boolean;
 begin
   GPathPriced := False;
@@ -115,7 +118,7 @@ begin
     the disk exactly then), and bounds what an unpriced call can cost to 4096
     bytes of path. A longer path is priced WHOLE -- no OS accepts one past 32767
     UTF-16 units, but the gate and the conversion read it all first. }
-  if (Length(APath) > IoPathFreeBytes) and not BudgetClaimLinear(Length(APath), AMilliEach) then
+  if (Length(APath) > IoPathFreeBytes) and not BudgetLinear(Length(APath), AMilliEach) then
   begin
     GWalkSpent := True;
     GPathPriced := True;
@@ -193,7 +196,7 @@ begin
   if not IoGate(APath, puWrite) then Exit;
   // One byte written is one unit, like one byte read: a file_writealltext$ of a
   // gigabyte is a gigabyte of work inside one opCall whichever way it flows.
-  if not BudgetClaim(Length(AContent)) then
+  if not BudgetAllows(Length(AContent)) then
   begin
     GWalkSpent := True;
     Exit;
@@ -234,7 +237,7 @@ begin
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
       len := fs.Size;
-      if not BudgetClaim(len) then
+      if not BudgetAllows(len) then
       begin
         GWalkSpent := True;
         Exit;
@@ -560,7 +563,7 @@ begin
     total := 0;
     for i := 0 to l.Count - 1 do total := total + Length(l[i]) + 1;
     if total > 0 then Dec(total);
-    if not BudgetClaimLinear(total, BudgetMilliCopy) then
+    if not BudgetLinear(total, BudgetMilliCopy) then
     begin
       GWalkSpent := True;
       Exit;
@@ -815,7 +818,7 @@ function MoveTargetTaken(const ASrc, ADst: String): Boolean;
 begin
   // Both names are expanded by the OS below; the gate priced only the target.
   if (Length(ASrc) + Length(ADst) > IoPathFreeBytes) and
-     not BudgetClaimLinear(Length(ASrc) + Length(ADst), BudgetMilliOs) then
+     not BudgetLinear(Length(ASrc) + Length(ADst), BudgetMilliOs) then
   begin
     GWalkSpent := True;
     Exit(True);
@@ -1070,7 +1073,11 @@ end;
 function t_path_getfullpath(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  // ExpandFileName hands the path to the OS (GetFullPathNameW on Windows).
+  { ExpandFileName is the RTL's own FExpand (rtl/inc/fexpand.inc), a walk over
+    every byte of the path in Pascal -- NOT GetFullPathNameW, which this comment
+    used to claim: that call drops a trailing dot, and path_getfullpath$("a.")
+    keeps it (measured, round 9). The OS is asked only for the current
+    directory a relative path is joined to (GetDir). Priced at the OS rate. }
   if not BudgetLinearOk('path_getfullpath$', Length(Args[0].Str), BudgetMilliOs, Err) then
     Exit(ValStr(''));
   Result := ValStr(ExpandFileName(Args[0].Str));

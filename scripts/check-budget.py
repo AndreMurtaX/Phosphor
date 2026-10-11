@@ -2028,9 +2028,17 @@ def linear_scan(dirs, allowed, test_hosts=None):
 #   argument is a bad argument, not a spent run -- so its Boolean is the ONLY
 #   record of the refusal. It is asked only in a routine that holds a
 #   TPhosphorError, and the statement that asks it writes the refusal there
-#   (BudgetRefusal, or a reporter below), in place. A helper with no error to
-#   write uses CLAIM (BudgetClaim, BudgetClaimLinear): the same up-front test,
-#   and a refusal that latches.
+#   (BudgetRefusal, or a reporter below), in place -- OR the statement that
+#   asks it sets one of the unit REFUSAL FLAGS below (GWalkSpent, FSpent), which
+#   is the same record kept for a door to read. A helper that does neither uses
+#   CLAIM (BudgetClaim, BudgetClaimLinear): the same up-front test, and a
+#   refusal that latches. A FLAG is not the latch: BudgetSpent never sees it,
+#   so a refusal recorded in a flag is settled only by a reporter or a written
+#   BudgetRefusal after the call -- never by a BudgetSpent, never by a later
+#   consultation. (The first draft of this rule claimed everywhere, and a
+#   refused 400 KB file_writealltext then latched the run: probe_budget's "a
+#   refused write does not poison the next file_copy" caught it. An oversized
+#   argument is a bad argument, not a spent run -- RULE 1.)
 #
 #   LATCH (BudgetCharge, BudgetLinearAfter, BudgetAppend, the meter, BudgetSleep,
 #   BudgetSearchCost, BudgetClaim*) records the refusal in the budget itself.
@@ -2053,6 +2061,17 @@ REF_LATCH = ('BudgetCharge', 'BudgetLinearAfter', 'BudgetAppend', 'BudgetMeterAd
 # A later consultation SEES a latch -- answers False at once -- except the meter's
 # add, which only reaches the budget once a block has accrued.
 REF_SEES = (set(REF_ASK) | set(REF_OK) | set(REF_LATCH)) - {'BudgetMeterAdd'}
+#: THE REFUSAL FLAGS, each a unit's own record of a refusal its doors report:
+#: GWalkSpent (PhosphorIoLib: WalkRefused, GateRefused read it -- GPathPriced is
+#: set beside it) and FSpent (a rag index's or a zip reader's last call, which
+#: every rag_ / zip_read$ door turns into BudgetRefusal). Set as `F := True`,
+#: through a receiver or not, in the statement that asks.
+REF_FLAGS = ('GWalkSpent', 'GPathPriced', 'FSpent')
+REF_FLAG_SET = re.compile(r'\b(?:' + '|'.join(REF_FLAGS) + r')\s*:=\s*True\b', re.I)
+#: ...and read: an `if` whose condition names a flag, writing the refusal.
+REF_FLAG_READ = re.compile(r'\bif\b(?:(?!\bthen\b).)*?\b(?:' + '|'.join(REF_FLAGS) +
+                           r')\b(?:(?!\bthen\b).)*?\bthen\b\s*(?:begin\b)?[^;]*?'
+                           r'\bBudgetRefusal\s*\(', re.S | re.I)
 REF_TOKEN = re.compile(r"[A-Za-z_]\w*|:=|\S")
 #: The statements that TEST what a call answered.
 REF_TESTS = ('if', 'while', 'case')
@@ -2209,12 +2228,20 @@ def ref_reported_at(body, toks, pos, reporters):
         ref_reports(nxt, reporters)
 
 
+#: ref_ask_verdict's answer for an ask whose statement records the refusal in a
+#: REF_FLAGS flag: not a hole here, a duty its callers inherit (strictly).
+REF_FLAGGED = 'recorded in a refusal flag'
+
+
 def ref_ask_verdict(body, toks, pos, reporters, accountable):
-    """None when the ASK at pos is reported in place, else why it is not."""
+    """None when the ASK at pos is reported in place, REF_FLAGGED when its
+    statement sets a refusal flag, else why it is not reported."""
     i = ref_index(toks, pos)
-    start, _ = ref_statement(toks, i)
+    start, end = ref_statement(toks, i)
     if ref_bare(toks, start, i):
         return 'its answer is dropped (a bare call)'
+    if REF_FLAG_SET.search(ref_text(body, toks, start, end + 1)):
+        return REF_FLAGGED
     if not accountable:
         return 'asked in a helper with no error to write it into -- use BudgetClaim*'
     if ref_reported_at(body, toks, pos, reporters):
@@ -2222,11 +2249,13 @@ def ref_ask_verdict(body, toks, pos, reporters, accountable):
     return 'refused without latching, and the statement that sees it writes no refusal'
 
 
-def ref_settled(body, toks, pos, reporters):
+def ref_settled(body, toks, pos, reporters, strict=False):
     """Is the latching call at pos reported -- in its own statement, or by
     something after it that asks the latch: BudgetSpent, a reporter, or a later
     consultation (which answers False at once on a latched budget) whose own
-    statement reports?"""
+    statement reports? STRICT, for a refusal recorded only in a flag: neither
+    BudgetSpent nor a later consultation can see a flag, so only a reporter or
+    a written BudgetRefusal settles it."""
     if ref_reported_at(body, toks, pos, reporters):
         return True
     i = ref_index(toks, pos)
@@ -2239,16 +2268,23 @@ def ref_settled(body, toks, pos, reporters):
         return False
     base = toks[end][0] if end < len(toks) else len(body)
     after = body[base:]
-    if re.search(r'\bBudgetSpent\s*\(', after):
+    if not strict and re.search(r'\bBudgetSpent\s*\(', after):
         return True
     # A unit's own record of the latch, read later and written as the refusal:
     # `if o.Refused then E := BudgetRefusal(..)`, WalkRefused's GWalkSpent. The
     # gate cannot see which flag a helper sets; it can see that a refusal is
-    # WRITTEN after the call, which neither round-9 defect did.
-    if re.search(r'\bBudgetRefusal\s*\(', after):
+    # WRITTEN after the call, which neither round-9 defect did. A FLAG must be
+    # the thing that IF reads: `if BudgetSpent() then E := BudgetRefusal(..)`
+    # is the latch again, and does not see one.
+    if strict:
+        if REF_FLAG_READ.search(after):
+            return True
+    elif re.search(r'\bBudgetRefusal\s*\(', after):
         return True
     if any(re.search(r'\b' + re.escape(r) + r'\s*\(', after) for r in reporters):
         return True
+    if strict:
+        return False
     for p, _ in ref_calls(body, REF_SEES):
         if p > base and ref_reported_at(body, toks, p, reporters):
             return True
@@ -2383,13 +2419,21 @@ def refusal_scan(dirs, allowed, whole=None):
                 rep.add(k)
                 changed = True
     reporters = set(shortof[k] for k in rep)
+    # The reporters that READ a flag (WalkRefused, GateRefused): the only ones
+    # that settle a refusal a flag recorded. BudgetLinearAfterOk after a refused
+    # path is a reporter of its own charge, and sees nothing of the path.
+    flag_word = re.compile(r'\b(?:' + '|'.join(REF_FLAGS) + r')\b')
+    flag_reporters = set(shortof[k] for k in rep if flag_word.search(bodies[k]))
     holes = {}
     used = set()
+    flagged = {}
     # ASK: in place, in a routine holding an error.
     for key, body in bodies.items():
         for pos, name in ref_calls(body, REF_ASK):
             why = ref_ask_verdict(body, toks[key], pos, reporters, key in accountable)
-            if why:
+            if why == REF_FLAGGED:
+                flagged.setdefault(key, []).append((pos, name))
+            elif why:
                 holes.setdefault(key, []).append('%s: %s' % (name, why))
         # BudgetLinearOk does not latch either: its Boolean dropped means the
         # refused work went ahead with the error already written.
@@ -2400,29 +2444,46 @@ def refusal_scan(dirs, allowed, whole=None):
                 holes.setdefault(key, []).append('%s: its answer is dropped' % name)
 
     def unsettled(key, latching):
+        """[(name, strict)] of the refusals in key's body nothing settles.
+        latching maps a helper to True when what it hands on is a FLAG."""
         body = bodies[key]
-        cands = ref_calls(body, REF_LATCH) + \
-            [(p, shortof[k]) for p, k in sites[key] if k in latching and k != key]
-        return sorted(set(n for p, n in cands
-                          if not ref_settled(body, toks[key], p, reporters)))
+        cands = [(p, n, False) for p, n in ref_calls(body, REF_LATCH)] + \
+            [(p, shortof[k], latching[k]) for p, k in sites[key]
+             if k in latching and k != key] + \
+            [(p, n, True) for p, n in flagged.get(key, [])]
+        return sorted(set((n, s) for p, n, s in cands
+                          if not ref_settled(body, toks[key], p,
+                                             flag_reporters if s else reporters, s)))
     # LATCH: the helpers that hand the duty on, to a fixed point over the calls.
-    latching = set()
+    # A helper that hands on a flag is STRICT, and stays strict.
+    latching = {}
     changed = True
     while changed:
         changed = False
         for key in bodies:
-            if key in latching or key in accountable or not unsettled(key, latching):
+            if key in accountable:
+                continue
+            bad = unsettled(key, latching)
+            if not bad:
                 continue
             if key in whole:
                 used.add(key)
                 continue
-            latching.add(key)
-            changed = True
+            strict = any(s for _, s in bad) or latching.get(key, False)
+            if key not in latching or latching[key] != strict:
+                latching[key] = strict
+                changed = True
     for key in accountable:
         bad = unsettled(key, latching)
-        if bad:
+        loose = sorted(n for n, s in bad if not s)
+        tight = sorted(n for n, s in bad if s)
+        if loose:
             holes.setdefault(key, []).append(
-                'latched by %s, and nothing asks before the answer leaves' % ', '.join(bad))
+                'latched by %s, and nothing asks before the answer leaves' % ', '.join(loose))
+        if tight:
+            holes.setdefault(key, []).append(
+                'refused into a flag (%s) by %s, and no reporter of it is asked -- '
+                'BudgetSpent cannot see a flag' % ('/'.join(REF_FLAGS), ', '.join(tight)))
     out = []
     for key in sorted(holes):
         if key in allowed:
@@ -2978,6 +3039,42 @@ def prove():
              '  Result := A[0];\n'
              'end;\n',
              'PhosphorPlantedLib.pas:f_drop', 'dropped'),
+            # A FLAG is not the latch (strings_savetofile, found by this rule).
+            ('a refusal recorded in a flag, asked of the latch (strings_savetofile)',
+             'var GWalkSpent: Boolean;\n'
+             'function Gate(const P: String): Boolean;\n'
+             'begin\n'
+             '  Result := True;\n'
+             '  if not BudgetLinear(Length(P), BudgetMilliOs) then\n'
+             '  begin GWalkSpent := True; Exit(False); end;\n'
+             'end;\n'
+             'function f_save(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  Result := ValInt(Ord(Gate(A[0].Str)));\n'
+             '  if BudgetSpent() then E := BudgetRefusal(\'save\');\n'
+             'end;\n',
+             'PhosphorPlantedLib.pas:f_save', 'refused into a flag'),
+            ('... repaired: the door asks the flag\'s reporter',
+             'var GWalkSpent: Boolean;\n'
+             'function Gate(const P: String): Boolean;\n'
+             'begin\n'
+             '  Result := True;\n'
+             '  if not BudgetLinear(Length(P), BudgetMilliOs) then\n'
+             '  begin GWalkSpent := True; Exit(False); end;\n'
+             'end;\n'
+             'function Refused(const F: String; var E: TPhosphorError): Boolean;\n'
+             'begin\n'
+             '  Result := False;\n'
+             '  if GWalkSpent then E := BudgetRefusal(F);\n'
+             'end;\n'
+             'function f_save(const A: array of TValue; out E: TPhosphorError): TValue;\n'
+             'begin\n'
+             '  E := NoError();\n'
+             '  if not (Gate(A[0].Str) or Refused(\'save\', E)) then Exit(ValInt(0));\n'
+             '  Result := ValInt(1);\n'
+             'end;\n',
+             None, None),
         ]
         for label, src, want_key, want_why in ref_cases:
             with open(os.path.join(d, 'PhosphorPlantedLib.pas'), 'w',

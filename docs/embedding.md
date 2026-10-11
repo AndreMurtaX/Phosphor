@@ -590,8 +590,11 @@ oversized ARGUMENT -- `string$(1e18)` -- does not latch: refusing it leaves
 written into the calling function's error where it is asked. A refusal that
 LATCHES -- a charge for work under way, a meter, a wait -- is recorded in the
 budget itself, and every function asks the latch before its answer leaves. A
-helper deep in a library that has no error of its own to write into latches
-too, so the question its caller asks is the one that answers.
+helper deep in a library that has no error of its own to write into either
+records the refusal in its unit's own flag, which every door of that unit
+reads and reports (a file path or a file too large for what is left: refused,
+and the run goes on), or latches, so the question its caller asks is the one
+that answers.
 `scripts/check-budget.py` holds both rules. Two defects taught them: an
 autosaving `cfg_set@` whose save was refused by a price that did not latch
 reported success while the value never reached the file (the caller asked only
@@ -600,11 +603,13 @@ the latch), and `sqlite_row@` / `sqlite_fetchone@` / the last row of
 copying -- every one `""` -- as a success (the copy latched; nothing asked). The
 classic `chdir`, `mkdir`, `rmdir`, `forcedirectories`, `kill` and `fileexists`
 answered a priced path as a plain `0` with `ioerror()` 3 while `dir_create`
-beside them raised the `peLimit`; they raise it now, and `file_copy` reports a
-copy the budget stopped. One consequence a host can see: a path, a file read or
-a save that a helper refuses now latches the run (it used to be refused and
-forgotten), so the call after it is refused too -- which is what a budget that
-cannot afford the work should say.
+beside them raised the `peLimit`; they raise it now, as `strings_savetofile`
+and `strings_loadfromfile` do, and `file_copy` reports a copy the budget
+stopped. A refused PATH is still an argument refused: the program can catch the
+error and go on with a shorter one. One consequence a host can see: a helper
+whose only answer was a Boolean -- a list's join, a config's save, a PBKDF2
+derivation, an archive's entry count, a rag query's analysis -- now latches the
+run when it is refused, so the call after it is refused too.
 
 **A refused render is an error, never an empty answer.** `json_value$`,
 `json_gets$`, `json_items$`, `json_paths$`, `rag_analyze$` and

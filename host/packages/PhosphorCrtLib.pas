@@ -86,6 +86,11 @@ const
     bytes (ESC [ 1 ; 5 ~ is six); a stream that never reaches its final byte is
     not a key, and is not waited on forever. }
   CRT_SEQ_MAX = 32;
+  { termios' IUTF8 flag (c_iflag). FPC 3.2.2's termio unit declares it for some
+    targets and not for x86_64-linux, where the build failed on it (round 10,
+    found by the first Linux compile); the value is the kernel's, octal 0040000
+    (include/uapi/asm-generic/termbits.h), which macOS and the BSDs share. }
+  CRT_IUTF8 = &0040000;
 
 { WHERE ONE KEY ENDS, given the bytes a terminal has handed over (round 9,
   2026-10-11). ABytes is what is buffered, the next key first. Answers the key
@@ -1676,7 +1681,7 @@ begin
   Result.CrIsNl := (ifl and ICRNL) <> 0;
   Result.IgnoreCr := (ifl and IGNCR) <> 0;
   Result.NlIsCr := (ifl and INLCR) <> 0;
-  Result.Utf8 := (ifl and IUTF8) <> 0;
+  Result.Utf8 := (ifl and CRT_IUTF8) <> 0;
 end;
 
 { Shown where the line discipline shows its echo: on the terminal the keys
@@ -1698,7 +1703,7 @@ var tio: Termios;
 begin
   if ABytes = '' then Exit;
   if TCGetAttr(StdOutputHandle, tio) <> 0 then Exit;
-  gOutColumn := CrtColumnAfter(gOutColumn, ABytes, (tio.c_iflag and IUTF8) <> 0);
+  gOutColumn := CrtColumnAfter(gOutColumn, ABytes, (tio.c_iflag and CRT_IUTF8) <> 0);
 end;
 
 { A line the line discipline read and echoed: its Enter showed a newline

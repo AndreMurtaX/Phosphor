@@ -748,7 +748,7 @@ def run_unix(exe, work):
     import shlex
     import shutil
 
-    def job_control(shell, argv):
+    def job_control(shell, argv, judge_stopped_modes):
         nonlocal failed
         path = shutil.which(shell)
         if not path:
@@ -849,15 +849,24 @@ def run_unix(exe, work):
                 pass
             os.waitpid(pid, 0)
         os.close(fd)
-        if stopped_modes and got_b:
+        if (stopped_modes or not judge_stopped_modes) and got_b:
             print('PASS  ctrlz-fg-%s' % shell)
         else:
-            print('FAIL  ctrlz-fg-%s: want ECHO and ICANON while stopped and b answered unechoed '
-                  'after fg, got %s (pty said %r)' % (shell, ', '.join(steps), out[-300:]))
+            print('FAIL  ctrlz-fg-%s: want %sb answered unechoed after fg, got %s (pty said %r)'
+                  % (shell, 'ECHO and ICANON while stopped and ' if judge_stopped_modes else '',
+                     ', '.join(steps), out[-300:]))
             failed += 1
 
-    job_control('bash', ['--norc', '--noprofile', '-i'])
-    job_control('dash', ['-i'])
+    # WHICH SHELL CAN SHOW WHICH HALF. Interactive bash reads its prompt through
+    # readline, which turns ICANON and ECHO OFF while it waits -- so the modes
+    # read at bash's prompt are readline's, whatever the program left (the first
+    # Linux run of this case, 2026-10-11, failed on exactly that, with the
+    # program right). bash still shows the fg half: 'b' answered at once and
+    # unechoed. dash reads its prompt in cooked mode and restores nothing of its
+    # own, so the modes at ITS prompt are the ones the stopped program left:
+    # dash shows the stop half too.
+    job_control('bash', ['--norc', '--noprofile', '-i'], False)
+    job_control('dash', ['-i'], True)
 
     # ---- round 9: CTRL+C IN getkey$ PUTS THE TERMINAL BACK -------------------
     # The default action of SIGINT ended the process past finalization, and the

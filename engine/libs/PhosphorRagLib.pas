@@ -1335,8 +1335,12 @@ begin
   Result := Args[0];   // return the handle so calls can chain
   if not AsRag(Args[0], r) then Exit;
   r.Rebuild();
-  // A partial index must not read as a finished one.
-  if r.FSpent then Err := BudgetRefusal('rag_rebuild@');
+  { A partial index must not read as a finished one. The latch is asked beside
+    the flag (round 10): ParseHeader's charge reaches FSpent only through its
+    out parameter, which scripts/check-budget.py cannot follow, and a flag is
+    not a latch -- the gate now settles a latch only by a reader of it. On a
+    latched budget Rebuild has set FSpent anyway, so this answers the same. }
+  if r.FSpent or BudgetSpent() then Err := BudgetRefusal('rag_rebuild@');
 end;
 
 function t_rag_count(const Args: array of TValue; out Err: TPhosphorError): TValue;

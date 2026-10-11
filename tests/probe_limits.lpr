@@ -2117,10 +2117,13 @@ begin
            100000, 'strings_loadfromfile: that would take ' + IntToStr(Milli(10000, BudgetMilliRewrite)) +
                    ' units of work and only 1000 are left');
 
-  { (4) file_copy: CopyFileBytes charges the bytes it copies through
+  { (4) file_copy: CopyFileBytes charged the bytes it copied through
     BudgetCharge, which latches and sets no GWalkSpent, and WalkRefused asked
-    only the flag. A 10000-byte file at 15000 left: the read claims 10000, the
-    copy's 10000 is over the 5000 that remain -- latched, and now reported. }
+    only the flag; round 9 made that latch REPORTED. Round 10 removed the latch
+    itself: a copy is a read and a write of the same bytes, asked for whole
+    (2 units a byte) before a byte is read, and refused without latching. A
+    10000-byte file at 15000 left asks 20000 -- refused, the run goes on; the
+    round-9 version read 10000, then latched on the copy's 10000. }
   p := tmp + 'phosphor_r9_copy_src.bin';
   q := tmp + 'phosphor_r9_copy_dst.bin';
   DeleteFile(q);
@@ -2131,9 +2134,14 @@ begin
   finally
     fs.Free;
   end;
-  R9Expect('a file_copy whose copy charge is refused is its peLimit',
-           Caught('n = leaveunits%(15000)', 'n = file_copy("' + p + '", "' + q + '")'),
-           1000, 'file_copy: the run has spent its step budget of 1000 inside library calls');
+  R9Run(Caught('n = leaveunits%(15000)', 'n = file_copy("' + p + '", "' + q + '")') +
+        'println "AFTER " + str$(len(string$(100, 97)))' + LF, 1000, o, m);
+  Report(Pos('E:file_copy: that would take ' + IntToStr(2 * 10000) +
+             ' units of work and only 15000 are left', o) > 0,
+         'a file_copy the budget cannot afford is refused for the whole copy (got "' +
+         Trim(o) + '" / "' + m + '")');
+  Report(Pos('AFTER 100', o) > 0,
+         'a refused file_copy does not latch the run (got "' + Trim(o) + '" / "' + m + '")');
   Report(not FileExists(q), 'a refused file_copy writes no target');
   DeleteFile(p);
   DeleteFile(q);
@@ -2273,6 +2281,232 @@ begin
              Caught(sql, 'a@ = sqlite_tables@(db@)' + LF + 'println "TABLES " + str$(json_len(a@))'),
              100000, 'sqlite_tables@: the run has spent its step budget of 100000 inside library calls');
   end;
+end;
+
+{ ---------------------------------------------------------------------------
+  ROUND 10: AN ARGUMENT REFUSED IS NOT A RUN SPENT, AND A FILE IS WHAT IT IS NOW.
+
+  Every remainder below is set by leaveunits, so the prices are arithmetic:
+  one unit a byte read (ReadAllBytes, LoadTextFromFile), two a byte copied
+  (read + write), one a byte an archive declares. Each refused door is
+  followed by string$(100, 97) -- 100 units, inside every remainder here --
+  which a latched run refuses: "AFTER 100" is the proof the run went on.
+--------------------------------------------------------------------------- }
+{$ifdef windows}
+function R10CreateHardLinkW(ANew, AExisting: PWideChar; ASecurity: Pointer): LongBool;
+  stdcall; external 'kernel32.dll' name 'CreateHardLinkW';
+function R10CreateSymbolicLinkW(ALink, ATarget: PWideChar; AFlags: LongWord): ByteBool;
+  stdcall; external 'kernel32.dll' name 'CreateSymbolicLinkW';
+{$endif}
+
+function R10Link(const ATarget, ALink: String; ASymbolic: Boolean): Boolean;
+{$ifdef windows}
+var wt, wl: UnicodeString;
+begin
+  wt := UnicodeString(ATarget);
+  wl := UnicodeString(ALink);
+  // 2 = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (Developer Mode).
+  if ASymbolic then Result := R10CreateSymbolicLinkW(PWideChar(wl), PWideChar(wt), 2)
+  else Result := R10CreateHardLinkW(PWideChar(wl), PWideChar(wt), nil);
+end;
+{$else}
+begin
+  if ASymbolic then Result := fpSymlink(PChar(ATarget), PChar(ALink)) = 0
+  else Result := fpLink(PChar(ATarget), PChar(ALink)) = 0;
+end;
+{$endif}
+
+procedure R10WriteFile(const APath: String; ALen: Integer; AByte: Char);
+var fs: TFileStream; s: String;
+begin
+  fs := TFileStream.Create(APath, fmCreate);
+  try
+    s := StringOfChar(AByte, ALen);
+    if ALen > 0 then fs.WriteBuffer(s[1], ALen);
+  finally
+    fs.Free;
+  end;
+end;
+
+procedure CheckRound10;
+var
+  tmp, p, q, d, z, t, h, s, o, m, line: String;
+  fs: TFileStream;
+  i: Integer;
+const
+  After = 'println "AFTER " + str$(len(string$(100, 97)))' + LF;
+begin
+  tmp := StringReplace(GetTempDir(False), '\', '/', [rfReplaceAll]);
+
+  { (1) strings_loadfromfile OF A FILE TOO LARGE FOR WHAT IS LEFT. 10000 bytes
+    at one unit a byte against 1000 left. Round 9 CLAIMED that size, which
+    latched: the load was refused and string$(100) after it died too, blamed
+    on string$ for the file's 10000 units. }
+  p := tmp + 'phosphor_r10_load.txt';
+  R10WriteFile(p, 10000, 'x');
+  R9Run(Caught('l@ = strings@()' + LF + 'n = leaveunits%(1000)',
+               'n = strings_loadfromfile(l@, "' + p + '")') + After, 100000, o, m);
+  Report(Pos('E:strings_loadfromfile: that would take 10000 units of work and only 1000 are left', o) > 0,
+         'an oversized strings_loadfromfile is its own peLimit (got "' + Trim(o) + '" / "' + m + '")');
+  Report(Pos('AFTER 100', o) > 0,
+         'an oversized strings_loadfromfile does not latch the run (got "' + Trim(o) + '" / "' + m + '")');
+  DeleteFile(p);
+
+  { (2) unzip_extract AND zip_extractall OF AN ARCHIVE THAT DECLARES MORE THAN
+    IS LEFT: one honest 10000-byte entry, made unbudgeted, then extracted with
+    1000 left. Round 9 claimed the declared total (it had asked without
+    latching before), and a 300-byte read after it was refused. Nothing is
+    written. The remainder the archive meets is not pinned -- the entry count
+    and the local headers are priced before it -- only the price is. }
+  z := tmp + 'phosphor_r10_big.zip';
+  d := tmp + 'phosphor_r10_out';
+  DeleteFile(z);
+  R9Run('w@ = zip_create@("' + z + '")' + LF +
+        'n = zip_addstr(w@, string$(10000, 97), "big.txt")' + LF +
+        'n = zip_close(w@)' + LF, 0, o, m);
+  Report(FileExists(z), 'round 10: the test archive was made (' + m + ')');
+  R9Run(Caught('n = leaveunits%(1000)', 'n = unzip_extract("' + z + '", "' + d + '")') +
+        After, 100000, o, m);
+  Report(Pos('E:unzip_extract: that would take 10000 units of work and only ', o) > 0,
+         'an archive too large for what is left is unzip_extract''s peLimit (got "' +
+         Trim(o) + '" / "' + m + '")');
+  Report(Pos('AFTER 100', o) > 0,
+         'a refused unzip_extract does not latch the run (got "' + Trim(o) + '" / "' + m + '")');
+  Report(not FileExists(d + '/big.txt'), 'a refused unzip_extract writes nothing');
+  R9Run(Caught('r@ = zip_open@("' + z + '")' + LF + 'n = leaveunits%(1000)',
+               'n = zip_extractall(r@, "' + d + '")') + After, 100000, o, m);
+  Report(Pos('E:zip_extractall: that would take 10000 units of work and only ', o) > 0,
+         'an archive too large for what is left is zip_extractall''s peLimit (got "' +
+         Trim(o) + '" / "' + m + '")');
+  Report(Pos('AFTER 100', o) > 0,
+         'a refused zip_extractall does not latch the run (got "' + Trim(o) + '" / "' + m + '")');
+  Report(not FileExists(d + '/big.txt'), 'a refused zip_extractall writes nothing');
+  DeleteFile(z);
+
+  { (3) file_copy IS REFUSED BY SIZE, AND ONLY BY SIZE, AND NEVER LATCHES. A
+    copy asks 2 units a byte. With 15000 left: 7000 bytes ask 14000 and are
+    copied, whole; 10000 ask 20000 and are refused (checked in round 9's (4));
+    20000 ask 40000 and are refused the same way. Round 9's three questions
+    made 10000 the one that LATCHED while 20000 did not. }
+  p := tmp + 'phosphor_r10_copy_src.bin';
+  q := tmp + 'phosphor_r10_copy_dst.bin';
+  DeleteFile(q);
+  R10WriteFile(p, 7000, 'c');
+  R9Run(Caught('n = leaveunits%(15000)', 'n = file_copy("' + p + '", "' + q + '")') +
+        After, 1000, o, m);
+  Report((Pos('NO ERROR', o) > 0) and (Pos('AFTER 100', o) > 0) and
+         (FileText(q) = StringOfChar('c', 7000)),
+         'a file_copy inside the budget copies the whole file (got "' + Trim(o) + '" / "' + m + '")');
+  DeleteFile(q);
+  R10WriteFile(p, 20000, 'c');
+  R9Run(Caught('n = leaveunits%(15000)', 'n = file_copy("' + p + '", "' + q + '")') +
+        After, 1000, o, m);
+  Report((Pos('E:file_copy: that would take 40000 units of work and only 15000 are left', o) > 0) and
+         (Pos('AFTER 100', o) > 0) and not FileExists(q),
+         'a larger file_copy is refused the same way (got "' + Trim(o) + '" / "' + m + '")');
+  { dir_copy reaches the same copy through CopyTree, after a step per entry
+    walked, so its remainder is not pinned -- its price is. }
+  d := tmp + 'phosphor_r10_tree';
+  ForceDirectories(d);
+  R10WriteFile(d + '/one.bin', 10000, 'd');
+  R9Run(Caught('n = leaveunits%(15000)', 'n = dir_copy("' + d + '", "' + d + '_copy")') +
+        After, 1000, o, m);
+  Report((Pos('E:dir_copy: that would take 20000 units of work and only ', o) > 0) and
+         (Pos('AFTER 100', o) > 0) and not FileExists(d + '_copy/one.bin'),
+         'a dir_copy whose file the budget cannot afford is refused and does not latch (got "' +
+         Trim(o) + '" / "' + m + '")');
+  DeleteFile(d + '/one.bin');
+  RemoveDir(d);
+  RemoveDir(d + '_copy');
+  DeleteFile(p);
+
+  { (4) A CLAIM'S LATCH NAMES THE CALL THAT SPENT THE RUN. A list's join is one
+    of the deliberate latches docs/embedding.md lists. Its own door is told
+    the request it refused, unchanged; every later refusal used to be told the
+    SAME sentence -- string$ "would take" the join's units -- and is now told
+    who spent the run. }
+  R9Run('l@ = strings@()' + LF + 'n = strings_add(l@, string$(100000, 97))' + LF +
+        Caught('n = leaveunits%(1000)', 'x$ = strings_text$(l@)') +
+        // Caught's own labels are taken: the second catch is spelled out.
+        'on error goto h2' + LF + 'y$ = string$(100, 97)' + LF + 'println "NO ERROR 2"' + LF +
+        'goto done2' + LF + 'h2:' + LF + 'println "E:" + errmsg$()' + LF + 'done2:' + LF,
+        100000, o, m);
+  Report(Pos('E:strings_text$: that would take ', o) > 0,
+         'a refused join is told the request it refused (got "' + Trim(o) + '")');
+  Report(Pos('E:string$: the run''s budget was spent by an earlier strings_text$, ' +
+             'refused because that would take ', o) > 0,
+         'the next refusal names the call that spent the run (got "' + Trim(o) + '")');
+
+  { (5) A REFUSED strings_savetofile RENAMES NOTHING. The path is priced at the
+    query rate, 10000 bytes = 2160 units, past the ~1000 left; the encoding
+    asked for must not stick to a list that was not saved. }
+  R9Run(Caught('l@ = strings@()' + LF + 'n = strings_add(l@, "one")' + LF +
+               's$ = string$(10000, 97)' + LF + 'n = leaveunits%(1000)',
+               'n = strings_savetofile(l@, s$, "latin1")') +
+        'println "ENC " + strings_encoding$(l@)' + LF, 100000, o, m);
+  Report(Pos('E:strings_savetofile: that would take ', o) > 0,
+         'round 10: the save was refused (got "' + Trim(o) + '")');
+  Report(Pos('ENC utf-8', o) > 0,
+         'a refused strings_savetofile leaves the encoding as it was (got "' + Trim(o) + '")');
+
+  { (6) file_getsize AND file_getlastwritetime ANSWER FOR THE FILE AS IT IS NOW.
+    Round 9 read them from FindFirst, which on Windows is the DIRECTORY ENTRY:
+    0 for a file being written through another handle, the old size through a
+    hard link after an append through the other name, and the LINK's own entry
+    for a symbolic link. Linux (a stat) was right on every one, and still is. }
+  p := tmp + 'phosphor_r10_growing.txt';
+  R10WriteFile(p, 0, ' ');                          // created and closed empty
+  line := StringOfChar('0', 70) + #10;
+  fs := TFileStream.Create(p, fmOpenReadWrite or fmShareDenyNone);
+  try
+    for i := 1 to 2000 do fs.WriteBuffer(line[1], Length(line));
+    R9Run('println str$(file_getsize("' + p + '"))' + LF, 0, o, m);
+  finally
+    fs.Free;
+  end;
+  Report(Trim(o) = IntToStr(2000 * 71),
+         'file_getsize of a file being written through another handle (got "' + Trim(o) + '")');
+  DeleteFile(p);
+
+  t := tmp + 'phosphor_r10_target.txt';
+  h := tmp + 'phosphor_r10_hard.txt';
+  s := tmp + 'phosphor_r10_sym.txt';
+  DeleteFile(h); DeleteFile(s);
+  R10WriteFile(t, 12345, 'y');
+  if R10Link(t, h, False) then
+  begin
+    fs := TFileStream.Create(t, fmOpenReadWrite or fmShareDenyNone);
+    try
+      fs.Seek(0, soEnd);
+      fs.WriteBuffer(line[1], 5);
+    finally
+      fs.Free;
+    end;
+    R9Run('println str$(file_getsize("' + h + '"))' + LF, 0, o, m);
+    Report(Trim(o) = IntToStr(12345 + 5),
+           'file_getsize through a hard link after an append through the other name (got "' +
+           Trim(o) + '")');
+  end
+  else Report(False, 'round 10: could not make a hard link to ask about');
+  { An old, even-second time on the target -- set AFTER the append above, which
+    wrote "now" -- so that the link, made now, cannot share its DOS time. }
+  FileSetDate(t, DateTimeToFileDate(EncodeDate(2001, 2, 3) + EncodeTime(4, 5, 6, 0)));
+  if R10Link(t, s, True) then
+  begin
+    R9Run('println str$(file_getsize("' + s + '"))' + LF +
+          'if file_getlastwritetime("' + s + '") = file_getlastwritetime("' + t + '") then' + LF +
+          '  println "SAME"' + LF + 'else' + LF + '  println "DIFF"' + LF + 'end if' + LF,
+          0, o, m);
+    Report(Pos(IntToStr(12345 + 5) + LF, o) = 1,
+           'file_getsize through a symbolic link is the target''s (got "' + Trim(o) + '")');
+    Report(Pos('SAME', o) > 0,
+           'file_getlastwritetime through a symbolic link is the target''s (got "' + Trim(o) + '")');
+  end
+  else
+    { Windows makes an unprivileged symbolic link only in Developer Mode. The
+      hard link and the open file above still hold file_getsize there. }
+    Writeln('note: round 10 could not make a symbolic link here; that case was not run');
+  DeleteFile(s); DeleteFile(h); DeleteFile(t);
 end;
 
 procedure CheckFaultEscapes(const AName, ASource: String);
@@ -2978,6 +3212,7 @@ begin
 
   CheckRound8();
   CheckRound9();
+  CheckRound10();
 
   { --- a fault in the interpreter; see the section above --------------------- }
 

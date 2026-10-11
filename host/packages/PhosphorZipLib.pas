@@ -917,14 +917,21 @@ end;
   here, and copied 300 MiB (2026-10-09). That shape is refused outright now
   (JudgeArchive: no two entries share or overlap one local header), and a stored
   copy is charged by what it copies, so neither half rests on this sum. }
-function ArchiveFitsBudget(AUz: TUnZipper): Boolean;
+function ArchiveFitsBudget(AUz: TUnZipper; const AFn: String;
+                           var Err: TPhosphorError): Boolean;
 var i: Integer; total: Int64;
 begin
   total := 0;
   for i := 0 to AUz.Entries.Count - 1 do
     total := total + AUz.Entries[i].Size;
-  // A claim: this helper holds no error, and every caller reports the latch.
-  Result := BudgetClaim(total);
+  { AN ARCHIVE THAT ADMITS TO BEING TOO BIG IS AN ARGUMENT REFUSED, not a spent
+    run (round 10). Round 9 made this a CLAIM, which latches: unzip_extract of
+    an honest 4 MB entry was refused, and then a file_readalltext$ of a
+    300-byte file died with it, blamed for the archive's 4000000 units. Before
+    round 9 it asked without latching and both callers reported it, which is
+    the right shape; it is that again, written in the statement that asks. }
+  Result := True;
+  if not BudgetAllows(total) then begin Err := BudgetRefusal(AFn); Exit(False); end;
 end;
 
 function ArchiveIsSafe(AUz: TUnZipper): Boolean;
@@ -1370,10 +1377,9 @@ begin
           Err := ArchiveRefusal('unzip_extract', why);
         Exit;
       end;
-      if not ArchiveFitsBudget(uz) then
+      if not ArchiveFitsBudget(uz, 'unzip_extract', Err) then
       begin
         ZipErr := 1;
-        Err := BudgetRefusal('unzip_extract');
         Exit;
       end;
       try
@@ -1846,10 +1852,9 @@ begin
     end;
     { THE BUDGET, WHICH THIS DOOR NEVER ASKED (ledger d47): the declared total
       first, as unzip_extract asks it, then the meter on what really comes out. }
-    if not ArchiveFitsBudget(r.UZ) then
+    if not ArchiveFitsBudget(r.UZ, 'zip_extractall', Err) then
     begin
       ZipErr := 1;
-      Err := BudgetRefusal('zip_extractall');
       Exit;
     end;
     r.UZ.OutputPath := Args[1].Str;

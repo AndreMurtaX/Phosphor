@@ -65,7 +65,12 @@ follows `--`, so a misspelt `--sandbox` stops the run instead of being handed to
 the program; `-` alone is an ordinary word. `phosphor -- -name.bas` runs a file
 whose name starts with `-`. An empty file name is refused, and so, on Windows, is
 a file name holding a character that is not valid Unicode (an unpaired UTF-16
-surrogate): it would name a different file. On Windows the line is
+surrogate): it would name a different file -- at every place the host takes a
+word as a path: the file, `--out`, `--sandbox`, `--names`, and compile's, pack's
+and debug's files. `compile` and `pack` refuse a misspelt option the same way
+(`compile job.bas --chek` used to write its bytecode to a file named `--chek`),
+and take a file whose name starts with `-` after `--`:
+`phosphor compile -- -name.bas out.pbc`. On Windows the line is
 split by Microsoft's own rules (`\"` is a quote inside a quoted argument), which
 is what every launcher encodes for, and every argument reaches the program as
 UTF-8 -- bytes that are not, on Linux, arrive as U+FFFD. A packed executable's

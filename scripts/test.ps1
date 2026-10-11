@@ -1624,6 +1624,39 @@ $acGot = (Read-Text $acOut).Trim().ToLower()
 $okAC = ($acCode -eq 0) -and ($acGot -eq '61efbfbd62')
 if ($okAC) { Write-Host 'PASS  AC:environ$ answers U+FFFD for what is not a character' -ForegroundColor Green }
 else { Write-Host ("FAIL  AC:environ$ of an unpaired surrogate: exit {0}, want 61efbfbd62, got {1}" -f $acCode, $acGot) -ForegroundColor Red }
+# ROUND 7 (2026-10-11): the same value used as a PATH is not shown, it is used --
+# and U+FFFD names another directory. TEMP=tdir<D800> made temppath$ answer
+# tdir<U+FFFD> and a program wrote there. The rule (sys.md, temppath$): a value
+# that cannot be spelled is skipped as if unset, so with TMP=tdir the answer is
+# tdir\ -- TMP's own value plus the separator, written here, not read off a run
+# -- and the file lands in tdir; with both unusable, GetTempPathW answers the
+# same unusable TMP, and there is no temp directory: "". A decoy tdir<U+FFFD>
+# exists, so a wrong answer can write somewhere and be seen doing it.
+$acT = Join-Path $abDir 'tdir'
+$acDecoy = $acT + [string][char]0xFFFD
+New-Item -ItemType Directory -Force $acT, $acDecoy | Out-Null
+foreach ($d in $acT, $acDecoy) { $f = Join-Path $d 'written.txt'; if (Test-Path $f) { [IO.File]::Delete($f) } }
+$acTBas = Join-Path $abDir 'tmpw.bas'
+[IO.File]::WriteAllText($acTBas, ('println hex_encode$(temppath$())' + "`n" + 'if temppath$() <> "" then' + "`n" +
+    '  open temppath$() + "written.txt" for output as #1' + "`n" + '  print #1, "x"' + "`n" + '  close #1' + "`n" + 'end if' + "`n"), $utf8)
+$acTOut = Join-Path $abDir 'tmpw.out'
+$acSaveTemp = $env:TEMP; $acSaveTmp = $env:TMP
+$env:TEMP = $acT + [string][char]0xD800; $env:TMP = $acT
+cmd /c "`"$exe`" `"$acTBas`" < NUL > `"$acTOut`" 2>&1"
+$acTCode = $LASTEXITCODE
+$acTGot1 = (Read-Text $acTOut).Trim().ToLower()
+$env:TMP = $acT + [string][char]0xD800
+cmd /c "`"$exe`" `"$acTBas`" < NUL > `"$acTOut`" 2>&1"
+$acTCode2 = $LASTEXITCODE
+$acTGot2 = (Read-Text $acTOut).Trim()
+$env:TEMP = $acSaveTemp; $env:TMP = $acSaveTmp
+$acTWant = (($utf8.GetBytes($acT + '\') | ForEach-Object { $_.ToString('x2') }) -join '')
+$okACT = ($acTCode -eq 0) -and ($acTGot1 -eq $acTWant) -and (Test-Path (Join-Path $acT 'written.txt')) -and
+         -not (Test-Path (Join-Path $acDecoy 'written.txt')) -and ($acTCode2 -eq 0) -and ($acTGot2 -eq '')
+if ($okACT) { Write-Host 'PASS  AC:a TEMP that cannot name a directory is skipped, not read as another' -ForegroundColor Green }
+else { Write-Host ("FAIL  AC:TEMP with an unpaired surrogate: exit {0}, want {1}, got {2}; decoy written: {3}; both unusable: exit {4}, got '{5}'" -f
+       $acTCode, $acTWant, $acTGot1, (Test-Path (Join-Path $acDecoy 'written.txt')), $acTCode2, $acTGot2) -ForegroundColor Red }
+$okAC = $okAC -and $okACT
 
 # --- AD: A PROGRAM'S OWN COMMAND LINE -------------------------------------------
 # The twin of block AD in scripts/test.sh, whose comment carries the reason.
@@ -1742,6 +1775,76 @@ $adErr = Read-AD (Join-Path $adDir 'sur3.err')
 if (-not ($adProc.ExitCode -eq 2 -and $adErr.Contains('not valid Unicode') -and -not $adErr.Contains('corrupt'))) {
     $okAD = $false; Write-Host ("FAIL  AD:a packed application named with an unpaired surrogate: exit {0}, stderr '{1}'" -f $adProc.ExitCode, $adErr) -ForegroundColor Red }
 [IO.File]::Delete($adSurApp)
+# ROUND 7 (2026-10-11): EVERY SITE, NOT ONE. Round 6 put RefuseBadWord in front
+# of nine uses of a word as a path, and the cases above drove one of them (--out):
+# with any other guard deleted -- including the headline, job<D800>.bas running
+# job.bas -- every runner stayed green. One case per site now, each next to a
+# DECOY: the file, directory or output the word reads as once its surrogate is
+# U+FFFD. Without its guard a case opens the decoy (exit 0, "DECOY RAN"), binds
+# the decoy cage, or writes the U+FFFD-named output; with it, exit 2, the
+# diagnostic naming THAT site's word, and nothing written. Each runs in $adDir.
+$adFix = [string][char]0xFFFD
+$adSurIn = Join-Path $adDir 'sur.in'
+[IO.File]::WriteAllText($adSurIn, "c`n", $utf8)
+$adSurErr = Join-Path $adDir 'sur4.err'
+function Invoke-ADSur([string] $argLine) {
+    if (Test-Path $adOut) { [IO.File]::Delete($adOut) }
+    $p = Start-Process -FilePath $exe -ArgumentList $argLine -PassThru -NoNewWindow -WorkingDirectory $adDir `
+         -RedirectStandardOutput $adOut -RedirectStandardError $adSurErr -RedirectStandardInput $adSurIn
+    $null = $p.Handle
+    if (-not $p.WaitForExit(30000)) { $p.Kill(); $null = $p.WaitForExit(5000); $script:adCode = -1 }
+    else { $script:adCode = $p.ExitCode }
+    return ((Read-AD $adOut) + "`n" + (Read-AD $adSurErr))
+}
+$adJob = 'job' + $adSur + '.bas'
+[IO.File]::WriteAllText((Join-Path $adDir ('job' + $adFix + '.bas')), "println `"DECOY RAN`"`n", $utf8)
+New-Item -ItemType Directory -Force (Join-Path $adDir ('cage' + $adFix)) | Out-Null
+[IO.File]::WriteAllText((Join-Path $adDir ('n' + $adFix + '.txt')), '', $utf8)
+[IO.File]::Copy($adPbc, (Join-Path $adDir ('p' + $adFix + '.pbc')), $true)
+$adMade = @('c1.pbc', ('o' + $adFix + '.pbc'), 'c2.pbc', 'p1.exe', ('app' + $adFix + '.exe'))
+foreach ($m in $adMade) { $mp = Join-Path $adDir $m; if (Test-Path $mp) { [IO.File]::Delete($mp) } }
+$adSites = @(
+    @{ n='the program file';        a="`"$adJob`"";                                          w="the program's file name" },
+    @{ n='the file after --';       a="-- `"$adJob`"";                                       w="the program's file name" },
+    @{ n='--sandbox';               a="--sandbox `"cage$adSur`" `"$adp`"";                   w='the --sandbox directory' },
+    @{ n='compile''s input';        a="compile `"$adJob`" c1.pbc";                           w='a file name' },
+    @{ n='compile''s output';       a="compile `"$adp`" `"o$adSur.pbc`"";                    w='a file name' },
+    @{ n='--names';                 a="compile --check --names `"n$adSur.txt`" `"$adp`" c2.pbc"; w='the --names file' },
+    @{ n='pack''s input';           a="pack `"p$adSur.pbc`" p1.exe";                         w='a file name' },
+    @{ n='pack''s output';          a="pack `"$adPbc`" `"app$adSur.exe`"";                   w='a file name' },
+    @{ n='debug''s file';           a="debug `"$adJob`"";                                    w="the program's file name" },
+    @{ n='debug''s file after --';  a="debug -- `"$adJob`"";                                 w="the program's file name" }
+)
+foreach ($s in $adSites) {
+    $adGot = Invoke-ADSur $s.a
+    if (-not ($adCode -eq 2 -and $adGot.Contains($s.w + ' holds a character that is not valid Unicode') -and
+              -not $adGot.Contains('DECOY RAN'))) {
+        $okAD = $false; Write-Host ("FAIL  AD:an unpaired surrogate in {0}: exit {1}, got '{2}'" -f $s.n, $adCode, $adGot) -ForegroundColor Red }
+}
+foreach ($m in $adMade) {
+    if (Test-Path (Join-Path $adDir $m)) {
+        $okAD = $false; Write-Host ("FAIL  AD:a refused surrogate word still wrote {0}" -f $m) -ForegroundColor Red }
+}
+# ROUND 7: compile and pack took a misspelt option for the OUTPUT name and wrote
+# it, at exit 0 -- `pack x.pbc --no-consol` a CONSOLE program named
+# "--no-consol". Expected: exit 2, the misspelt word named, no such file; with
+# three words the word blamed is the option, not the real file after it; and a
+# file named like an option still compiles after "--" (exit 0, its output there).
+foreach ($m in @('--chek', '--no-consol', 'b.pbc', 'dash.pbc')) {
+    $mp = Join-Path $adDir $m; if (Test-Path -LiteralPath $mp) { [IO.File]::Delete($mp) } }
+$adGot = Invoke-ADSur "compile `"$adp`" --chek"
+if (-not ($adCode -eq 2 -and $adGot.Contains('compile: unknown option --chek') -and -not (Test-Path -LiteralPath (Join-Path $adDir '--chek')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:compile with a misspelt option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adGot = Invoke-ADSur "pack `"$adPbc`" --no-consol"
+if (-not ($adCode -eq 2 -and $adGot.Contains('pack: unknown option --no-consol') -and -not (Test-Path -LiteralPath (Join-Path $adDir '--no-consol')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:pack with a misspelt option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+$adGot = Invoke-ADSur "compile --chek `"$adp`" b.pbc"
+if (-not ($adCode -eq 2 -and $adGot.Contains('unknown option --chek') -and -not $adGot.Contains('b.pbc') -and -not (Test-Path (Join-Path $adDir 'b.pbc')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:compile blames the misspelt option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
+[IO.File]::WriteAllText((Join-Path $adDir '-dash.bas'), "println `"DASH`"`n", $utf8)
+$adGot = Invoke-ADSur "compile -- -dash.bas dash.pbc"
+if (-not ($adCode -eq 0 -and (Test-Path (Join-Path $adDir 'dash.pbc')))) {
+    $okAD = $false; Write-Host ("FAIL  AD:compile -- names a file like an option: exit {0}, got '{1}'" -f $adCode, $adGot) -ForegroundColor Red }
 # an empty name after "--", and under debug, is refused too (it already was:
 # these pin it, they did not find it)
 $adGot = Invoke-AD "`"$exe`" -- `"`" `"$adp`""
@@ -1863,7 +1966,63 @@ if (-not ($ag[0] -and $ag[1] -eq 0 -and $ag[2] -eq "dialog answered 1`napp_run e
     $okAG = $false; Write-Host ("FAIL  AG:a window closed inside a modal: ended={0} exit={1}, got '{2}', stderr '{3}'" -f $ag[0], $ag[1], $ag[2], $ag[3]) -ForegroundColor Red }
 if ($okAG) { Write-Host 'PASS  AG:a modal session frees nothing its opener stands on, ends with the last window, and END reports no fault' -ForegroundColor Green }
 
+# --- AH: ROUND 7, WHAT A WINDOWS PROCESS IS HANDED IN UTF-16 ---------------------
+# Two readers took UTF-16 one piece at a time and lost what did not fit the
+# piece: getkey$/inkey$ (a character outside the BMP is two key events; each
+# half converted alone answered '', and the keystroke vanished) and INPUT at a
+# console (one 8192-unit read taken for the whole line, so a longer line was two
+# lines and a pair cut at the boundary two U+FFFD). Neither runs unless stdin IS
+# a console, so tests/console_input_test.py types into a new one; its header
+# carries the measurements and the expected values. Like block V it opens a
+# console window, by necessity, once per case.
+$ahOut = Join-Path $tmp 'phosphor_coninput.out'
+cmd /c "python `"$root\tests\console_input_test.py`" `"$exe`" > `"$ahOut`" 2>&1"
+$ahCode = $LASTEXITCODE
+$ahText = Get-Content -Raw $ahOut
+if ($null -eq $ahText) { $ahText = '' }
+$okAH = ($ahCode -eq 0)
+if ($okAH) { Write-Host 'PASS  AH:a key outside the BMP is one key, and a long typed line is one line' -ForegroundColor Green }
+else {
+    Write-Host ("FAIL  AH:console input (exit {0})" -f $ahCode) -ForegroundColor Red
+    $ahText -split "`r?`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }
+}
+# And cfg_path$'s APPLICATION NAME, which came from the LCL's Application.Title
+# (ParamStrUTF8, which drops an unpaired surrogate): phosphor.exe copied as
+# ph<D800>x.exe answered phx.exe's own directory. The name is now read from the
+# wide module name, and one that cannot be spelled names no directory of its
+# own: cfg_path$ answers what it answers when the platform names none, the temp
+# directory (config.md). Expected: <local app data>\ph<C3 A9>x\ for a name that
+# CAN be spelled -- the folder from .NET, the name's UTF-8 written out -- and
+# temppath$ for the one that cannot; never <local app data>\phx\.
+$ahDir = Join-Path $tmp 'ah'
+New-Item -ItemType Directory -Force $ahDir | Out-Null
+$ahBas = Join-Path $ahDir 'cfg.bas'
+[IO.File]::WriteAllText($ahBas, ('println hex_encode$(cfg_path$())' + "`n" + 'println hex_encode$(temppath$())' + "`n"), $utf8)
+function Invoke-AH([string] $name) {
+    $copy = Join-Path $ahDir $name
+    [IO.File]::Copy($exe, $copy, $true)
+    $o = Join-Path $ahDir 'cfg.out'
+    $p = Start-Process -FilePath $copy -ArgumentList "`"$ahBas`"" -PassThru -NoNewWindow `
+         -RedirectStandardOutput $o -RedirectStandardError (Join-Path $ahDir 'cfg.err')
+    $null = $p.Handle
+    if (-not $p.WaitForExit(30000)) { $p.Kill(); $null = $p.WaitForExit(5000) }
+    $code = $p.ExitCode
+    [IO.File]::Delete($copy)
+    return @($code, @(([IO.File]::ReadAllText($o) -replace "`r", '').Trim().ToLower() -split "`n"))
+}
+function Hex-AH([string] $s) { return (($utf8.GetBytes($s) | ForEach-Object { $_.ToString('x2') }) -join '') }
+$ahLocal = [Environment]::GetFolderPath('LocalApplicationData').TrimEnd('\') + '\'
+$okAH2 = $true
+$ah = Invoke-AH ('ph' + [char]0xE9 + 'x.exe')
+if (-not ($ah[0] -eq 0 -and $ah[1][0] -eq (Hex-AH ($ahLocal + 'ph' + [char]0xE9 + 'x\')))) {
+    $okAH2 = $false; Write-Host ("FAIL  AH:cfg_path$ of ph<e-acute>x.exe: exit {0}, got {1}" -f $ah[0], ($ah[1] -join ' / ')) -ForegroundColor Red }
+$ah = Invoke-AH ('ph' + [char]0xD800 + 'x.exe')
+if (-not ($ah[0] -eq 0 -and $ah[1].Count -ge 2 -and $ah[1][0] -eq $ah[1][1] -and $ah[1][0] -ne (Hex-AH ($ahLocal + 'phx\')))) {
+    $okAH2 = $false; Write-Host ("FAIL  AH:cfg_path$ of ph<D800>x.exe: exit {0}, got {1}" -f $ah[0], ($ah[1] -join ' / ')) -ForegroundColor Red }
+if ($okAH2) { Write-Host 'PASS  AH:cfg_path$ names the application from its wide name, and never another application' -ForegroundColor Green }
+$okAH = $okAH -and $okAH2
+
 if ($okA -and $okB -and $okC -and $okD -and $okE -and $okF -and $okG -and $okR1a -and $okR1b -and
     $okH -and $okI -and $okJ -and $okK -and $okL -and $okM -and $okN -and $okO -and
     $okP -and $okQ -and $okR -and $okS -and $okT -and $okU -and $okV -and $okW -and
-    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF -and $okAG) { exit 0 } else { exit 1 }
+    $okX -and $okY -and $okZ -and $okAA -and $okAB -and $okAC -and $okAD -and $okAE -and $okAF -and $okAG -and $okAH) { exit 0 } else { exit 1 }

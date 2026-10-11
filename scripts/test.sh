@@ -1270,6 +1270,25 @@ if adgot="$("$exe" debug -- -dash.bas --bogus < /dev/null 2>&1)"; then adcode=0;
 [ "$adcode" -eq 2 ] && [[ "$adgot" == *'unknown option --bogus after -dash.bas'* ]] || ad_fail "debug -- names a file like an option: exit $adcode, got '$adgot'"
 if adgot="$("$exe" debug -- "" < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
 [ "$adcode" -eq 2 ] && [[ "$adgot" == *'file name is empty'* ]] || ad_fail "debug -- followed by an empty name: exit $adcode, got '$adgot'"
+# ROUND 7 (2026-10-11): compile and pack took a misspelt option for the OUTPUT
+# name and wrote it at exit 0 -- `pack x.pbc --no-consol` an application named
+# "--no-consol" without the --no-console asked for. Expected: exit 2, the
+# misspelt word named, no such file written; with three words the option is
+# blamed, not the real file after it; and "--" still names a file like an
+# option. Each runs in $tmpdir/adopt, so a wrong answer writes nowhere else.
+mkdir -p "$tmpdir/adopt"
+rm -f -- "$tmpdir/adopt/--chek" "$tmpdir/adopt/--no-consol" "$tmpdir/adopt/b.pbc" "$tmpdir/adopt/dash.pbc"
+if adgot="$(cd "$tmpdir/adopt" && "$exe" compile "$adp" --chek < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'compile: unknown option --chek'* ]] && [ ! -e "$tmpdir/adopt/--chek" ] || ad_fail "compile with a misspelt option: exit $adcode, got '$adgot'"
+if [ -f "$tmpdir/args.pbc" ]; then
+  if adgot="$(cd "$tmpdir/adopt" && "$exe" pack "$tmpdir/args.pbc" --no-consol < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+  [ "$adcode" -eq 2 ] && [[ "$adgot" == *'pack: unknown option --no-consol'* ]] && [ ! -e "$tmpdir/adopt/--no-consol" ] || ad_fail "pack with a misspelt option: exit $adcode, got '$adgot'"
+else ad_fail "no args.pbc to pack"; fi
+if adgot="$(cd "$tmpdir/adopt" && "$exe" compile --chek "$adp" b.pbc < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 2 ] && [[ "$adgot" == *'unknown option --chek'* ]] && [[ "$adgot" != *'b.pbc'* ]] && [ ! -e "$tmpdir/adopt/b.pbc" ] || ad_fail "compile blames the misspelt option: exit $adcode, got '$adgot'"
+printf '%s\n' 'println "DASH"' > "$tmpdir/adopt/-dash.bas"
+if adgot="$(cd "$tmpdir/adopt" && "$exe" compile -- -dash.bas dash.pbc < /dev/null 2>&1)"; then adcode=0; else adcode=$?; fi
+[ "$adcode" -eq 0 ] && [ -f "$tmpdir/adopt/dash.pbc" ] || ad_fail "compile -- names a file like an option: exit $adcode, got '$adgot'"
 if [ "$okAD" -eq 0 ]; then echo 'PASS  AD:a program gets its own command line (run, --, a packed app, the debugger) and an unknown option is refused'
 else fail=1; fi
 
@@ -1577,6 +1596,27 @@ if command -v xvfb-run > /dev/null 2>&1; then
   else fail=1; fi
 else
   echo 'SKIP  AG:the modal session in a real loop (no xvfb-run on this machine)'
+fi
+
+# --- AH: ROUND 7, A LONG LINE IS ONE LINE --------------------------------------
+# The twin of block AH in scripts/test.ps1, whose comment carries the defect: on
+# Windows a typed line longer than one 8192-unit console read arrived as two
+# INPUT lines, and a character outside the BMP split by the read as two U+FFFD.
+# The console half of that block (key events, a real console) and its
+# cfg_path$-by-exe-name half are Windows only: a Unix terminal hands over bytes,
+# and the Linux name stays the bytes on disk. What both systems share is
+# the line reader for stdin that is not a Windows console, and this pins it on
+# the same shape: 10000 'a' and U+1F600 (F0 9F 98 80) on one line, 'z' on the
+# next. Expected, counted rather than run: 10004 bytes ending 61 f09f9880, then z.
+okAH=0
+printf '%s\n' 'input a$' 'println str$(bytelen(a$)) + " " + hex_encode$(right$(a$, 2))' 'input b$' 'println b$' > "$tmpdir/ahline.bas"
+{ head -c 10000 /dev/zero | tr '\0' a; printf '\360\237\230\200\nz\n'; } > "$tmpdir/ahline.in"
+if ahgot="$("$exe" "$tmpdir/ahline.bas" < "$tmpdir/ahline.in" 2>&1)"; then ahcode=0; else ahcode=$?; fi
+ahwant="$(printf '%s\n' '? 10004 61f09f9880' '? z')"
+if [ "$ahcode" -eq 0 ] && [ "$(printf '%s' "$ahgot" | tr -d '\r')" = "$ahwant" ]; then
+  echo 'PASS  AH:a long line with a character outside the BMP is one INPUT line'
+else
+  echo "FAIL  AH:a long line: exit $ahcode, got '$(printf '%s' "$ahgot" | head -c 200)'"; okAH=1; fail=1
 fi
 
 exit "$fail"

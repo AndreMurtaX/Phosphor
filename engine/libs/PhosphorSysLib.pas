@@ -263,11 +263,17 @@ begin
 end;
 {$ENDIF}
 
-function HostEnv(const AName: String): String;
 {$IFDEF WINDOWS}
+{ The value AS WINDOWS HOLDS IT, in UTF-16, before any conversion: False for a
+  variable that is not set (or is empty), or a name no UTF-16 can spell. A
+  caller that is about to use the value as a PATH asks this, because an unpaired
+  surrogate converts to U+FFFD -- right for a value that is shown, wrong for one
+  that names a directory (HostTempDir). }
+function HostEnvWide(const AName: String; out AValue: UnicodeString): Boolean;
 var wn, buf: UnicodeString; got: LongWord;
 begin
-  Result := '';
+  AValue := '';
+  Result := False;
   if not Utf8ToWide(AName, wn) then Exit;
   { One read into a buffer of the largest value Windows sets: "the maximum size
     of a user-defined environment variable is 32,767 characters"
@@ -280,9 +286,19 @@ begin
   got := GetEnvironmentVariableW(PWideChar(wn), PWideChar(buf), 32768);
   if got = 0 then Exit;
   if got < 32768 then
-    Result := WideToUtf8(Copy(buf, 1, got))
+    AValue := Copy(buf, 1, got)
   else
-    Result := WideToUtf8(GetEnvironmentVariable(wn));
+    AValue := GetEnvironmentVariable(wn);
+  Result := AValue <> '';
+end;
+{$ENDIF}
+
+function HostEnv(const AName: String): String;
+{$IFDEF WINDOWS}
+var w: UnicodeString;
+begin
+  Result := '';
+  if HostEnvWide(AName, w) then Result := WideToUtf8(w);
 end;
 {$ELSE}
 begin
@@ -306,17 +322,29 @@ end;
   order with either variable set is unchanged (TEMP first, as the RTL reads it
   -- GetTempPathW would take TMP first). Linux's RTL already falls back to
   /tmp/. }
+{ A VALUE THAT CANNOT NAME A DIRECTORY IS NOT ONE (round 7, 2026-10-11). TEMP
+  holding an unpaired surrogate was converted to U+FFFD and used: temppath$
+  answered tdir<U+FFFD>, and a program wrote into THAT directory -- neither the
+  one TEMP names nor the one Windows calls its temp directory. The rule the
+  console host keeps for a word on its command line (RefuseBadWord): such a
+  value reads as a different path, so it is not used as one. It is skipped as
+  if unset -- TEMP, then TMP, then GetTempPathW -- and when what GetTempPathW
+  answers cannot be spelled either, there is no temp directory: "", which a
+  program can see. }
 function HostTempDir: String;
 {$IFDEF WINDOWS}
-var buf: UnicodeString; got: LongWord;
+var buf, w: UnicodeString; got: LongWord;
 {$ENDIF}
 begin
   if SandboxActive then Exit(SandboxScratchPath);
   {$IFDEF WINDOWS}
   if Assigned(OnGetTempDir) then Exit(GetTempDir(False));
-  Result := HostEnv('TEMP');
-  if Result = '' then Result := HostEnv('TMP');
-  if Result = '' then
+  Result := '';
+  if HostEnvWide('TEMP', w) and not HasUnpairedSurrogate(w) then
+    Result := WideToUtf8(w)
+  else if HostEnvWide('TMP', w) and not HasUnpairedSurrogate(w) then
+    Result := WideToUtf8(w)
+  else
   begin
     // the answer is the length written, without its NUL; a larger one is the
     // size the path needs, and a second call with that size reads it
@@ -328,7 +356,11 @@ begin
       got := GetTempPathW(got + 1, PWideChar(buf));
       if got >= LongWord(Length(buf)) then got := 0;
     end;
-    if got > 0 then Result := WideToUtf8(Copy(buf, 1, got));
+    if got > 0 then
+    begin
+      w := Copy(buf, 1, got);
+      if not HasUnpairedSurrogate(w) then Result := WideToUtf8(w);
+    end;
   end;
   if Result <> '' then Result := IncludeTrailingPathDelimiter(Result);
   {$ELSE}
@@ -348,22 +380,84 @@ begin
   {$ENDIF}
 end;
 
+{$IFDEF WINDOWS}
+{ Same unit, same reason, as GetEnvironmentVariableW above. hModule 0 is this
+  process's executable; the answer is the length written, or nSize when the
+  path was cut short. }
+function GetModuleFileNameW(hModule: PtrUInt; lpFilename: PWideChar; nSize: LongWord): LongWord;
+  stdcall; external 'kernel32.dll' name 'GetModuleFileNameW';
+
+{ The application's name for its configuration directory: what the RTL's
+  ApplicationName means -- the executable's file name without its extension,
+  unless a host named the application (OnGetApplicationName) -- but read from
+  the WIDE module name. False when that name cannot be spelled. }
+function HostAppName(out AName: String): Boolean;
+var buf, base: UnicodeString; got: LongWord; size, i: Integer;
+begin
+  AName := '';
+  size := 1024;
+  repeat
+    SetLength(buf, size);
+    got := GetModuleFileNameW(0, PWideChar(buf), size);
+    if got < LongWord(size) then Break;
+    size := size * 2;
+  until size > 65536;
+  if (got = 0) or (got >= LongWord(size)) then
+  begin
+    AName := ApplicationName;          // no wide name to read: the RTL's own
+    Exit(True);
+  end;
+  base := Copy(buf, 1, got);
+  for i := Length(base) downto 1 do
+    if (base[i] = '\') or (base[i] = '/') or (base[i] = ':') then
+    begin
+      base := Copy(base, i + 1, MaxInt);
+      Break;
+    end;
+  for i := Length(base) downto 1 do    // ChangeFileExt(.., ''): from the last dot
+    if base[i] = '.' then
+    begin
+      base := Copy(base, 1, i - 1);
+      Break;
+    end;
+  if HasUnpairedSurrogate(base) then Exit(False);
+  if Assigned(OnGetApplicationName) then AName := OnGetApplicationName()
+  else AName := WideToUtf8(base);
+  Result := True;
+end;
+{$ENDIF}
+
 { GetAppConfigDir(False), spelled as the RTL spells it on Windows -- the local
   application-data folder, then the vendor's name when there is one, then the
-  application's -- from the wide folder path. ApplicationName comes from
-  ParamStr(0), which the RTL already answers in UTF-8. With no such folder the
-  RTL's own fallback answers. }
+  application's -- from the wide folder path. }
+{ AND THE NAME FROM THE WIDE MODULE NAME TOO (round 7, 2026-10-11). This said
+  ApplicationName came from ParamStr(0), "which the RTL already answers in
+  UTF-8". Without the LCL it does not: SysUtils' ParamStr(0) is
+  GetModuleFileNameA (rtl/win/syswin.inc), so an engine-only embedder named
+  pemb<e-acute>.exe answered ...\pemb<E9>\, a lone CP1252 byte, and
+  pemb<alpha>.exe the
+  best-fit ...\pemba\ -- the directory of an application named pemba. With the
+  LCL, Application.Title is ParamStrUTF8, which DROPS an unpaired surrogate,
+  so ph<U+D800>x.exe answered phx.exe's directory. The name is now read wide,
+  and one holding an unpaired surrogate names no directory of its own: by the
+  rule HostTempDir and the console host keep, it is not used as a path, and
+  the answer is '' -- cfg_path$ then answers what it answers when the
+  platform names no configuration directory. A host that names the
+  application itself (the LCL's Application.Title) is still asked, as the RTL
+  asks it. On Linux the name stays the RTL's raw bytes: they ARE the
+  directory on disk, and scrubbing them would name another. }
 function HostAppConfigDir: String;
 {$IFDEF WINDOWS}
-var w: UnicodeString;
+var w: UnicodeString; name: String;
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
   w := GetWindowsSpecialDirUnicode(CSIDL_LOCAL_APPDATA);
   if w = '' then Exit(GetAppConfigDir(False));
+  if not HostAppName(name) then Exit('');
   Result := IncludeTrailingPathDelimiter(WideToUtf8(w));
   if VendorName <> '' then Result := IncludeTrailingPathDelimiter(Result + VendorName);
-  Result := IncludeTrailingPathDelimiter(Result + ApplicationName);
+  Result := IncludeTrailingPathDelimiter(Result + name);
   {$ELSE}
   Result := GetAppConfigDir(False);
   {$ENDIF}

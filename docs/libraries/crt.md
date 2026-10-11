@@ -43,7 +43,11 @@ person's terminal in raw mode). When stdin is **not** a terminal — a pipe, a
 redirect, the headless test harness — there is no keyboard at all, so `inkey$()`
 and `getkey$()` answer `""` and `keypressed()` answers `0` immediately, without
 blocking and without touching the terminal. A normal key comes back as its
-character, a whole UTF-8 character including accented ones; an arrow or function
+character, a whole UTF-8 character including accented ones and those outside the
+Basic Multilingual Plane — an emoji is one key of four bytes on both systems,
+though Windows delivers it as two key events (until 2026-10-11, round 7, Windows
+dropped both halves without a trace and the program read the *next* key in its
+place; a half that arrives with no partner is now U+FFFD, never `""`); an arrow or function
 key comes back as `chr$(0)` plus a code byte on Windows (a virtual-key code) and
 as the raw escape sequence on Unix; Escape pressed on its own is `chr$(27)` with
 nothing after it.

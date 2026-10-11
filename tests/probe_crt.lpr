@@ -128,6 +128,20 @@ begin
   Report(SameBytes(got, AWant),
          AName + ' (wanted [' + Hex(AWant) + '], got [' + Hex(got) + '])');
 end;
+
+var
+  PairUsed: Boolean;
+
+{ The pair decision: the key, AND whether the next event was taken for it. }
+procedure PairKey(const AName: String; AFirst: WideChar; AHave: Boolean; ANext: WideChar;
+                  const AWant: String; AWantUsed: Boolean);
+var got: String; used: Boolean;
+begin
+  got := CrtKeyFromPair(AFirst, AHave, ANext, used);
+  Report(SameBytes(got, AWant) and (used = AWantUsed),
+         AName + ' (wanted [' + Hex(AWant) + '] ' + BoolToStr(AWantUsed, True) +
+         ', got [' + Hex(got) + '] ' + BoolToStr(used, True) + ')');
+end;
 {$ENDIF}
 
 begin
@@ -166,6 +180,27 @@ begin
          'so it is still two bytes after crossing into a TValue');
   Report(Byte(ValStr(CrtKeyFromEvent(#0, VK_OEM_1_)).Str[2]) = VK_OEM_1_,
          'and the second byte is the virtual-key code the program will read');
+
+  // A CHARACTER OUTSIDE THE BMP (round 7, 2026-10-11). An INPUT_RECORD holds one
+  // UTF-16 unit, so U+1F600 arrives as two key events, D83D then DE00; each was
+  // converted alone by UTF8Encode, which drops a lone surrogate, so both halves
+  // answered '' -- "not a key" -- and the keystroke vanished. Expected, from the
+  // Unicode Standard (not from a run): D83D DE00 is 10000 + (3D shl 10) + 200 =
+  // U+1F600, whose UTF-8 is F0 9F 98 80; a half with no partner is U+FFFD, EF BF
+  // BD -- the answer WideToUtf8 gives, and never the empty string.
+  PairKey('a high half then a low half is ONE key', #$D83D, True, #$DE00,
+          #$F0#$9F#$98#$80, True);
+  PairKey('a high half with nothing waiting is U+FFFD', #$D83D, False, #0,
+          #$EF#$BF#$BD, False);
+  PairKey('a high half before a plain key is U+FFFD, and the key is left',
+          #$D83D, True, 'q', #$EF#$BF#$BD, False);
+  PairKey('a plain key never takes the event after it', 'q', True, #$DE00, 'q', False);
+  Key('a high half alone is U+FFFD, not nothing', #$D83D, 0, #$EF#$BF#$BD);
+  Key('and so is a low half alone', #$DE00, 0, #$EF#$BF#$BD);
+  Report(StringCodePage(CrtKeyFromPair(#$D83D, True, #$DE00, PairUsed)) = CP_UTF8,
+         'the pair is tagged with the engine code page');
+  Report(Length(ValStr(CrtKeyFromPair(#$D83D, True, #$DE00, PairUsed)).Str) = 4,
+         'and is still four bytes after crossing into a TValue');
   {$ELSE}
   // A NORMAL KEY IS ONE BYTE, and nothing else is consumed after it.
   Key('a printable key is its own byte', Ord('q'), @Feed, 'q');

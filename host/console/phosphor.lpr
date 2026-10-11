@@ -470,7 +470,7 @@ function TConsoleHost.ReadLine(out ALine: String): Boolean;
 var
   wbuf: array[0..8191] of WideChar;
   numRead: DWORD;
-  w: WideString;
+  w: UnicodeString;
   z: Integer;
   hadEOF: Boolean;
 {$ENDIF}
@@ -483,13 +483,33 @@ begin
   if FInIsConsole then
   begin
     w := '';
-    numRead := 0;
-    if not ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil) then
-      Exit(False);
-    if numRead = 0 then
-      Exit(False);                    // Ctrl+Z at line start -> EOF
-    SetLength(w, numRead);
-    Move(wbuf[0], w[1], numRead * SizeOf(WideChar));
+    { ONE LINE IS AS MANY READS AS IT TAKES (round 7, 2026-10-11). A read that
+      FILLS the buffer without reaching the line's end has not read the line:
+      the console keeps the rest for the next ReadConsoleW. This took one read
+      for one line, so a typed line longer than 8191 units arrived as TWO
+      INPUT lines -- the second INPUT silently given the tail of the first --
+      and a surrogate pair cut at the boundary was converted half by half,
+      into two U+FFFD. Each read is appended as UTF-16, and the line is
+      converted once, whole, so a pair across two reads is still one
+      character. A read that stops short of the buffer is where the console
+      ended it (the CR LF, a Ctrl+Z, a raw-mode key), as it always was. }
+    repeat
+      numRead := 0;
+      if not ReadConsoleW(FStdIn, @wbuf[0], Length(wbuf), numRead, nil) then
+      begin
+        if w = '' then Exit(False);
+        Break;                        // keep what this line already read
+      end;
+      if numRead = 0 then
+      begin
+        if w = '' then Exit(False);   // Ctrl+Z at line start -> EOF
+        Break;
+      end;
+      z := Length(w);
+      SetLength(w, z + Integer(numRead));
+      Move(wbuf[0], w[z + 1], numRead * SizeOf(WideChar));
+    until (numRead < DWORD(Length(wbuf))) or (w[Length(w)] = #10) or
+          (Pos(WideChar($1A), w) > 0);
     { A Ctrl+Z (#26) anywhere ends input; keep any text before it. }
     hadEOF := False;
     z := Pos(WideChar($1A), w);
@@ -855,6 +875,23 @@ begin
   Writeln(StdErr, AWho, ': unknown option ', AArg, ' after ', AFile);
   Writeln(StdErr, '  after the file, ', AWho, ' reads only ', reads, ';');
   Writeln(StdErr, '  a word meant for the program that starts with "-" goes after --');
+  Halt(2);
+end;
+
+{ THE SAME RULE FOR compile AND pack (round 7, 2026-10-11). Every word that was
+  not one of their options was taken for a file name, so `compile job.bas
+  --chek` wrote the bytecode to a file named "--chek" and `pack job.pbc
+  --no-consol` a CONSOLE executable named "--no-consol" -- the --no-console the
+  person asked for silently not applied -- both at exit 0; and with three words
+  the refusal blamed the third, a real file name, for what the misspelt flag
+  had done. A word that starts with "-" (other than "-" alone) is an option
+  there too, and an unknown one is refused; a FILE named like one goes after
+  "--", which ends the verb's options as it ends a run's. }
+procedure RefuseVerbOption(const AVerb, AArg, AReads: String);
+begin
+  Writeln(StdErr, 'phosphor: ', AVerb, ': unknown option ', AArg);
+  Writeln(StdErr, '  ', AVerb, ' reads only ', AReads, ';');
+  Writeln(StdErr, '  a file whose name starts with "-" goes after --');
   Halt(2);
 end;
 
@@ -5316,7 +5353,7 @@ procedure RunCommandLine;
 var
   i, code: Integer;
   arg, filePath, outPath, packIn, packOut, namesPath: String;
-  wantNames, namesGiven: Boolean;
+  wantNames, namesGiven, dashDash: Boolean;
   packFlags: LongWord;
   packArgs: Integer;
   payload: TBytesStream;
@@ -5546,6 +5583,7 @@ begin
   if (ArgCount() >= 1) and (ArgStr(1) = 'compile') then
   begin
     packFlags := 0;   // reused as "--check was given"
+    dashDash := False;
     packArgs := 0;
     packIn := '';
     packOut := '';
@@ -5575,12 +5613,16 @@ begin
         namesGiven := True;
         wantNames := False;
       end
-      else if arg = '--names' then
+      else if (arg = '--') and not dashDash then
+        dashDash := True
+      else if (arg = '--names') and not dashDash then
         wantNames := True
-      else if arg = '--check' then
+      else if (arg = '--check') and not dashDash then
         packFlags := 1
       else
       begin
+        if (not dashDash) and (Length(arg) > 1) and (arg[1] = '-') then
+          RefuseVerbOption('compile', arg, '--check and --names');
         Inc(packArgs);
         if packArgs <= 2 then RefuseBadWord(i, 'a file name');
         if packArgs = 1 then packIn := arg
@@ -5625,16 +5667,21 @@ begin
   if (ArgCount() >= 1) and (ArgStr(1) = 'pack') then
   begin
     packFlags := 0;
+    dashDash := False;
     packArgs := 0;
     packIn := '';
     packOut := '';
     for i := 2 to ArgCount() do
     begin
       arg := ArgStr(i);
-      if arg = '--no-console' then
+      if (arg = '--') and not dashDash then
+        dashDash := True
+      else if (arg = '--no-console') and not dashDash then
         packFlags := packFlags or PACK_FLAG_NOCONSOLE
       else
       begin
+        if (not dashDash) and (Length(arg) > 1) and (arg[1] = '-') then
+          RefuseVerbOption('pack', arg, '--no-console');
         Inc(packArgs);
         if packArgs <= 2 then RefuseBadWord(i, 'a file name');
         if packArgs = 1 then packIn := arg

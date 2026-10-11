@@ -595,6 +595,8 @@ var
 begin
   Err := NoError();
   Result := ValBool(False);
+  // The record is split and decoded, and its digest compared: linear in it.
+  if not BudgetLinearOk('password_verify?', Length(Args[1].Str), BudgetMilliRewrite, Err) then Exit;
   { A record that does not parse is simply not a match: the caller asked "is
     this the password", and for a damaged record the answer is no. }
   if not ParseRecord(Args[1].Str, iter, salt, want) then Exit;
@@ -607,8 +609,14 @@ begin
 end;
 
 function t_crypto_equal(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var n: Int64;
 begin
   Err := NoError();
+  Result := ValBool(False);
+  // Constant time means every byte of the shorter one is read, always.
+  n := Length(Args[0].Str);
+  if Length(Args[1].Str) < n then n := Length(Args[1].Str);
+  if not BudgetLinearOk('crypto_equal?', n, BudgetMilliScan, Err) then Exit;
   Result := ValBool(SameBytesConstTime(Args[0].Str, Args[1].Str));
 end;
 

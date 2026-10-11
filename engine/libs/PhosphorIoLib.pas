@@ -43,6 +43,8 @@ type
 const
   IOERR_REFUSED = 5;   // 'access denied' in IoErrorText
   IOERR_FAILED = 3;    // the operation was attempted and did not happen
+  { The longest path IoGate does not price: PATH_MAX on Linux. See IoGate. }
+  IoPathFreeBytes = 4096;
 
 function IoGate(const APath: String; AUse: TPathUse): Boolean;
 { THE ANSWER OF A FILESYSTEM MUTATOR, in one place: 1 when the operation
@@ -69,11 +71,48 @@ implementation
 var
   GIoError: Integer;   // last IO error code; ioerror()/iostrerror$() read it
   GWalkSpent: Boolean; // a tree walk stopped because the run's budget ran out
+  GPathPriced: Boolean; // the last IoGate refused because the budget priced its path
 
+{ THE PATH IS PRICED HERE, AT THE ONE DOOR EVERY FILE OPERATION PASSES (round
+  7). SandboxAllows reads the whole path -- a NUL scan, a trim, a walk of its
+  components -- and the RTL hands it to the OS as a wide string after that, so a
+  file call is linear in its path, which a script can make 50 MB long. Priced at
+  the OS rate, before the gate reads it. A refusal is the walk's: GWalkSpent is
+  set, so every operation that reports a walk (WalkRefused) reports this as the
+  peLimit it is, and the rest answer 0 with the run's budget refusing next. }
 function IoGate(const APath: String; AUse: TPathUse): Boolean;
 begin
+  GPathPriced := False;
+  { A path no longer than IoPathFreeBytes is the price of the system call it
+    rides on, and is NOT asked about: that keeps file_exists working after a
+    script has spent its budget (tests/packages/27_zip_integrity.bas looks at
+    the disk exactly then), and bounds what an unpriced call can cost to 4096
+    bytes of path. A longer path is priced WHOLE -- no OS accepts one past 32767
+    UTF-16 units, but the gate and the conversion read it all first. }
+  if (Length(APath) > IoPathFreeBytes) and not BudgetLinear(Length(APath), BudgetMilliOs) then
+  begin
+    GWalkSpent := True;
+    GPathPriced := True;
+    GIoError := IOERR_FAILED;
+    Exit(False);
+  end;
   Result := SandboxAllows(APath, AUse);
   if not Result then GIoError := IOERR_REFUSED;
+end;
+
+{ After an IoGate that said no, in an operation that does not otherwise report
+  a walk: a refusal by the BUDGET (the path priced in IoGate) is this function's
+  peLimit, named; a refusal by the SANDBOX stays what it always was, 0 with
+  ioerror() 5. Always False, so it reads `IoGate(..) or GateRefused(..)`. }
+function GateRefused(const AFn: String; var Err: TPhosphorError): Boolean;
+begin
+  Result := False;
+  if GPathPriced then
+  begin
+    Err := BudgetRefusal(AFn);
+    GPathPriced := False;
+    GWalkSpent := False;
+  end;
 end;
 
 { A DIRECTORY WALK IS A LOOP THE VM CANNOT SEE. CollectEntries, DeleteTree and
@@ -204,13 +243,13 @@ begin
   Err := NoError();
   // Outside the sandbox a file does not exist as far as the script is concerned:
   // answering truthfully would leak the shape of a filesystem it cannot read.
-  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puRead) or GateRefused('file_exists', Err)) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(FileExists(Args[0].Str)));
 end;
 function t_file_delete(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puDelete) then
+  if not (IoGate(Args[0].Str, puDelete) or GateRefused('file_delete', Err)) then
   begin Result := ValInt(0); Exit; end;
   Result := IoAnswer(DeleteFile(Args[0].Str));
 end;
@@ -252,16 +291,25 @@ begin
     if P[i] = '.' then Exit(i);
 end;
 
+{ THE PATH SPLITTERS are a backwards scan for a separator and a copy of what
+  they found: priced at the copy rate over the whole path, before either. }
+function PathOk(const AWho, APath: String; var Err: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearOk(AWho, Length(APath), BudgetMilliCopy, Err);
+end;
+
 function t_path_getfilename(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String;
 begin
   Err := NoError(); p := Args[0].Str;
+  if not PathOk('path_getfilename$', p, Err) then Exit(ValStr(''));
   Result := ValStr(Copy(p, LastSep(p) + 1, MaxInt));
 end;
 function t_path_getextension(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep, dot: Integer;
 begin
   Err := NoError(); p := Args[0].Str;
+  if not PathOk('path_getextension$', p, Err) then Exit(ValStr(''));
   sep := LastSep(p);
   dot := LastDotAfter(p, sep);
   if dot > 0 then Result := ValStr(Copy(p, dot, MaxInt)) else Result := ValStr('');
@@ -270,6 +318,7 @@ function t_path_getfilenamenoext(const Args: array of TValue; out Err: TPhosphor
 var p, fn: String; sep, dot: Integer;
 begin
   Err := NoError(); p := Args[0].Str;
+  if not PathOk('path_getfilenamenoext$', p, Err) then Exit(ValStr(''));
   sep := LastSep(p);
   fn := Copy(p, sep + 1, MaxInt);
   dot := LastDotAfter(p, sep);
@@ -279,6 +328,7 @@ function t_path_changeextension(const Args: array of TValue; out Err: TPhosphorE
 var p, ext: String; sep, dot: Integer;
 begin
   Err := NoError(); p := Args[0].Str; ext := Args[1].Str;
+  if not PathOk('path_changeextension$', p + ext, Err) then Exit(ValStr(''));
   sep := LastSep(p);
   dot := LastDotAfter(p, sep);
   if dot > 0 then Result := ValStr(Copy(p, 1, dot - 1) + ext) else Result := ValStr(p + ext);
@@ -290,13 +340,14 @@ function t_extractfilepath(const Args: array of TValue; out Err: TPhosphorError)
 var p: String;
 begin
   Err := NoError(); p := Args[0].Str;
+  if not PathOk('extractfilepath$', p, Err) then Exit(ValStr(''));
   Result := ValStr(Copy(p, 1, LastSep(p)));
 end;
 
 function t_dir_exists(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puRead) or GateRefused('dir_exists', Err)) then begin Result := ValInt(0); Exit; end;
   Result := ValInt(Ord(DirectoryExists(Args[0].Str)));
 end;
 
@@ -421,7 +472,7 @@ begin
   end;
 end;
 function ListToStr(const ADir, APattern: String; AFiles, ADirs, ARecursive: Boolean): String;
-var l: TStringList; i: Integer;
+var l: TStringList; i: Integer; total, at: Int64;
 begin
   Result := '';
   if not IoGate(ADir, puRead) then Exit;
@@ -435,10 +486,26 @@ begin
     // was platform-dependent. A byte order is arbitrary but it is the SAME
     // arbitrary order everywhere.
     l.CustomSort(@CompareEntryBytes);
+    { JOINED ONCE, NOT APPENDED (round 7). `Result := Result + l[i]` copies the
+      whole answer per entry when the heap cannot extend it -- O(entries x
+      bytes), the shape TPhosphorStringList.JoinInto was rewritten out of --
+      while the walk charged one step per entry. Measured once, sized once,
+      moved; and the bytes are charged, since the answer is a copy of them. }
+    total := 0;
+    for i := 0 to l.Count - 1 do total := total + Length(l[i]) + 1;
+    if total > 0 then Dec(total);
+    if not BudgetLinear(total, BudgetMilliCopy) then
+    begin
+      GWalkSpent := True;
+      Exit;
+    end;
+    SetLength(Result, total);
+    at := 1;
     for i := 0 to l.Count - 1 do
     begin
-      if i > 0 then Result := Result + #10;
-      Result := Result + l[i];
+      if i > 0 then begin Result[at] := #10; Inc(at); end;
+      if Length(l[i]) > 0 then Move(l[i][1], Result[at], Length(l[i]));
+      at := at + Length(l[i]);
     end;
   finally
     l.Free;
@@ -547,7 +614,7 @@ begin
   // Same class as dir_delete's: the answer was discarded and 1 returned regardless,
   // so a path that could not be created reported success. An empty path is refused
   // here too -- ForceDirectories('') answers True having made nothing.
-  if not IoGate(Args[0].Str, puWrite) then
+  if not (IoGate(Args[0].Str, puWrite) or GateRefused('dir_create', Err)) then
   begin
     Result := ValInt(0);
     Exit;
@@ -626,6 +693,7 @@ function t_dir_getparent(const Args: array of TValue; out Err: TPhosphorError): 
 var p: String; sep: Integer;
 begin
   Err := NoError(); p := Args[0].Str;
+  if not PathOk('dir_getparent$', p, Err) then Exit(ValStr(''));
   if (p <> '') and ((p[Length(p)] = '/') or (p[Length(p)] = '\')) then SetLength(p, Length(p) - 1);
   sep := LastSepIdx(p);
   if sep > 0 then Result := ValStr(Copy(p, 1, sep - 1)) else Result := ValStr('');
@@ -639,7 +707,7 @@ begin
   // Moving the working directory outside the root would make every RELATIVE path
   // after it resolve outside too, so the move itself is what has to be refused.
   Err := NoError();
-  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puRead) or GateRefused('dir_setcurrent', Err)) then begin Result := ValInt(0); Exit; end;
   if Args[0].Str = '' then Exit(IoRefused());   // see chdir: '' moved nothing and answered 1
   Result := IoAnswer(SetCurrentDir(Args[0].Str));
 end;
@@ -676,6 +744,13 @@ end;
   and needs a second writer racing for the same name. }
 function MoveTargetTaken(const ASrc, ADst: String): Boolean;
 begin
+  // Both names are expanded by the OS below; the gate priced only the target.
+  if (Length(ASrc) + Length(ADst) > IoPathFreeBytes) and
+     not BudgetLinear(Length(ASrc) + Length(ADst), BudgetMilliOs) then
+  begin
+    GWalkSpent := True;
+    Exit(True);
+  end;
   { IT ASKS THE GATE ITSELF, though both callers already have: a helper that
     probes the filesystem is a probe check-sandbox.py rightly will not trust to
     its callers, and the next caller may not have asked. A refused name is
@@ -688,9 +763,16 @@ end;
 function t_dir_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (IoGate(Args[0].Str, puDelete) and IoGate(Args[1].Str, puWrite)) then
+  if not ((IoGate(Args[0].Str, puDelete) or GateRefused('dir_move', Err)) and
+          (IoGate(Args[1].Str, puWrite) or GateRefused('dir_move', Err))) then
   begin Result := ValInt(0); Exit; end;
-  if MoveTargetTaken(Args[0].Str, Args[1].Str) then begin Result := ValInt(0); Exit; end;
+  GWalkSpent := False;          // only MoveTargetTaken's own refusal is asked about below
+  if MoveTargetTaken(Args[0].Str, Args[1].Str) then
+  begin
+    Result := ValInt(0);
+    if WalkRefused('dir_move', Err) then GWalkSpent := False;
+    Exit;
+  end;
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
 
@@ -712,9 +794,16 @@ end;
 function t_file_move(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not (IoGate(Args[0].Str, puDelete) and IoGate(Args[1].Str, puWrite)) then
+  if not ((IoGate(Args[0].Str, puDelete) or GateRefused('file_move', Err)) and
+          (IoGate(Args[1].Str, puWrite) or GateRefused('file_move', Err))) then
   begin Result := ValInt(0); Exit; end;
-  if MoveTargetTaken(Args[0].Str, Args[1].Str) then begin Result := ValInt(0); Exit; end;
+  GWalkSpent := False;          // only MoveTargetTaken's own refusal is asked about below
+  if MoveTargetTaken(Args[0].Str, Args[1].Str) then
+  begin
+    Result := ValInt(0);
+    if WalkRefused('file_move', Err) then GWalkSpent := False;
+    Exit;
+  end;
   Result := ValInt(Ord(RenameFile(Args[0].Str, Args[1].Str)));
 end;
 function t_file_createempty(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -728,7 +817,7 @@ function t_file_getsize(const Args: array of TValue; out Err: TPhosphorError): T
 var fs: TFileStream;
 begin
   Err := NoError(); Result := ValInt(0);
-  if not IoGate(Args[0].Str, puRead) then Exit;
+  if not (IoGate(Args[0].Str, puRead) or GateRefused('file_getsize', Err)) then Exit;
   try
     fs := TFileStream.Create(Args[0].Str, fmOpenRead or fmShareDenyNone);
     try Result := ValInt(fs.Size); finally fs.Free; end;
@@ -774,7 +863,7 @@ end;
 function t_file_settime(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puWrite) then begin Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puWrite) or GateRefused('file_settime', Err)) then begin Result := ValInt(0); Exit; end;
   FileSetDate(Args[0].Str, DateTimeToFileDate(AsDouble(Args[1])));
   Result := ValInt(1);
 end;
@@ -782,24 +871,56 @@ function t_file_gettime(const Args: array of TValue; out Err: TPhosphorError): T
 var age: LongInt;
 begin
   Err := NoError();
-  if not IoGate(Args[0].Str, puRead) then begin Result := ValInt(0); Exit; end;
+  if not (IoGate(Args[0].Str, puRead) or GateRefused('file_gettime', Err)) then begin Result := ValInt(0); Exit; end;
   age := FileAge(Args[0].Str);
   if age > 0 then Result := ValDouble(FileDateToDateTime(age)) else Result := ValInt(0);
 end;
 function DirTimeKey(AKind: Char; const APath: String): String;
 begin Result := AKind + APath; end;
+{ GDirTimes is a list the SCRIPT grows -- one line per directory it stamps -- and
+  Values[] finds a line by walking all of them, splitting each at its '='. So a
+  stamp read or written costs the list, plus the path it builds a key from. }
+function DirTimesOk(const AWho, APath: String; var Err: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearOk(AWho, GDirTimes.Count, BudgetMilliNameItem, Err) and
+            BudgetLinearOk(AWho, Length(APath), BudgetMilliCopy, Err);
+end;
 function t_dir_settime_c(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); GDirTimes.Values[DirTimeKey('c', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
+begin
+  Err := NoError(); Result := ValInt(0);
+  if not DirTimesOk('dir_setcreationtime', Args[0].Str, Err) then Exit;
+  GDirTimes.Values[DirTimeKey('c', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1);
+end;
 function t_dir_settime_w(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); GDirTimes.Values[DirTimeKey('w', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
+begin
+  Err := NoError(); Result := ValInt(0);
+  if not DirTimesOk('dir_setlastwritetime', Args[0].Str, Err) then Exit;
+  GDirTimes.Values[DirTimeKey('w', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1);
+end;
 function t_dir_settime_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); GDirTimes.Values[DirTimeKey('a', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1); end;
+begin
+  Err := NoError(); Result := ValInt(0);
+  if not DirTimesOk('dir_setlastaccesstime', Args[0].Str, Err) then Exit;
+  GDirTimes.Values[DirTimeKey('a', Args[0].Str)] := DtToStr(AsDouble(Args[1])); Result := ValInt(1);
+end;
 function t_dir_gettime_c(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('c', Args[0].Str)])); end;
+begin
+  Err := NoError(); Result := ValDouble(0);
+  if not DirTimesOk('dir_getcreationtime', Args[0].Str, Err) then Exit;
+  Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('c', Args[0].Str)]));
+end;
 function t_dir_gettime_w(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('w', Args[0].Str)])); end;
+begin
+  Err := NoError(); Result := ValDouble(0);
+  if not DirTimesOk('dir_getlastwritetime', Args[0].Str, Err) then Exit;
+  Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('w', Args[0].Str)]));
+end;
 function t_dir_gettime_a(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('a', Args[0].Str)])); end;
+begin
+  Err := NoError(); Result := ValDouble(0);
+  if not DirTimesOk('dir_getlastaccesstime', Args[0].Str, Err) then Exit;
+  Result := ValDouble(StrToDt(GDirTimes.Values[DirTimeKey('a', Args[0].Str)]));
+end;
 
 // --- path extras ------------------------------------------------------------
 function t_path_combine(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -811,19 +932,29 @@ end;
 function t_path_getdirectoryname(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep: Integer;
 begin
-  Err := NoError(); p := Args[0].Str; sep := LastSepIdx(p);
+  Err := NoError(); p := Args[0].Str;
+  if not PathOk('path_getdirectoryname$', p, Err) then Exit(ValStr(''));
+  sep := LastSepIdx(p);
   if sep > 0 then Result := ValStr(Copy(p, 1, sep - 1)) else Result := ValStr('');
 end;
 function t_path_hasextension(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var p: String; sep, dot, i: Integer;
 begin
-  Err := NoError(); p := Args[0].Str; sep := LastSepIdx(p); dot := 0;
+  Err := NoError(); p := Args[0].Str;
+  if not PathOk('path_hasextension', p, Err) then Exit(ValInt(0));
+  sep := LastSepIdx(p); dot := 0;
   for i := Length(p) downto sep + 1 do
     if p[i] = '.' then begin dot := i; Break; end;
   Result := ValInt(Ord(dot > 0));
 end;
 function t_path_getfullpath(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(ExpandFileName(Args[0].Str)); end;
+begin
+  Err := NoError();
+  // ExpandFileName hands the path to the OS (GetFullPathNameW on Windows).
+  if not BudgetLinearOk('path_getfullpath$', Length(Args[0].Str), BudgetMilliOs, Err) then
+    Exit(ValStr(''));
+  Result := ValStr(ExpandFileName(Args[0].Str));
+end;
 function t_path_ispathrooted(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := ValInt(Ord(IsRooted(Args[0].Str))); end;
 function t_path_isrelativepath(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -860,9 +991,19 @@ begin
   end;
 end;
 function t_path_hasvalidpathchars(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(HasValidChars(Args[0].Str, False))); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('path_hasvalidpathchars', Length(Args[0].Str), BudgetMilliScan, Err) then
+    Exit(ValInt(0));
+  Result := ValInt(Ord(HasValidChars(Args[0].Str, False)));
+end;
 function t_path_hasvalidfilenamechars(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(Ord(HasValidChars(Args[0].Str, True))); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('path_hasvalidfilenamechars', Length(Args[0].Str), BudgetMilliScan, Err) then
+    Exit(ValInt(0));
+  Result := ValInt(Ord(HasValidChars(Args[0].Str, True)));
+end;
 
 // --- io errors --------------------------------------------------------------
 function t_ioerror(const Args: array of TValue; out Err: TPhosphorError): TValue;

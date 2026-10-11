@@ -1130,6 +1130,10 @@ function Render(const AWho, P: String; const T: TDTParts; out E: TPhosphorError)
 var o: TFmtOut; pat: String;
 begin
   if P = '' then pat := FmtDate else pat := P;
+  { The pattern is walked twice -- once to count, once to write -- and the
+    output each walk makes is charged by Put; the walk itself is charged here,
+    because a pattern can be long and write nothing (round 7). }
+  if not BudgetLinearOk(AWho, 2 * Int64(Length(pat)), BudgetMilliScan, E) then Exit(ValStr(''));
   o.S := '';
   o.N := 0;
   o.Counting := True;

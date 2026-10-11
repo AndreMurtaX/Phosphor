@@ -907,7 +907,7 @@ end;
   the two mixed. }
 function NestedTexts(AObj: TJSONObject; const AWanted: array of Boolean;
   const AFn: String; out ATexts: TStringArray; out AErr: TPhosphorError): Boolean;
-var i: Integer; n: TJSONData;
+var i: Integer; n: TJSONData; e2: TPhosphorError;
 begin
   AErr := NoError();
   Result := True;
@@ -917,8 +917,9 @@ begin
     ATexts[i] := '';
     n := AObj.Items[i];
     if (not AWanted[i]) or not (n.JSONType in [jtArray, jtObject]) then Continue;
-    ATexts[i] := JsonText(n, False, 2, 0);
-    if ATexts[i] = '' then
+    e2 := NoError();
+    ATexts[i] := JsonText(n, False, 2, 0, AFn, e2);
+    if IsError(e2) then
     begin
       if BudgetSpent() then
         AErr := BudgetRefusal(AFn)
@@ -1049,6 +1050,9 @@ begin Err := NoError(); Result := OpenDatabase(':memory:'); end;
 function f_open(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  // The path is resolved (SqlTarget) and handed to the OS: priced first.
+  if not BudgetLinearOk('sqlite_open@', Length(Args[0].Str), BudgetMilliOs, Err) then
+    Exit(ValHandle(0));
   Result := OpenDatabase(Args[0].Str);   // which asks the gate
 end;
 
@@ -1408,6 +1412,8 @@ begin
   if not JsonNodeFromHandle(Args[1].Hnd, node) then Exit;
   if not (node is TJSONObject) then Exit;
   obj := TJSONObject(node);
+  // A parameter looked up per member, and the nested ones rendered (charged).
+  if not BudgetLinearOk('sqlite_bindjson', obj.Count, BudgetMilliNode, Err) then Exit;
   // Match by name: a parameter written :key. A key with no such parameter is
   // skipped, exactly as the reference documents -- and is never rendered.
   SetLength(params, obj.Count);
@@ -1638,10 +1644,15 @@ begin
   if not (node is TJSONObject) then Exit;
   obj := TJSONObject(node);
   if obj.Count = 0 then Exit;
+  if not BudgetLinearOk('sqlite_insertjson', obj.Count, BudgetMilliNode, Err) then Exit;
   cols := '';
   vals := '';
   for i := 0 to obj.Count - 1 do
   begin
+    { QUADRATIC APPEND, charged as it goes (round 7): the column list is rebuilt
+      per member, and a script's object decides how many there are. }
+    if not (BudgetAppend(Length(cols)) and BudgetAppend(Length(vals))) then
+    begin Err := BudgetRefusal('sqlite_insertjson'); Exit; end;
     if i > 0 then begin cols := cols + ', '; vals := vals + ', '; end;
     cols := cols + QuoteIdent(obj.Names[i]);
     vals := vals + '?';
@@ -1672,9 +1683,13 @@ begin
   if not (node is TJSONObject) then Exit;
   obj := TJSONObject(node);
   if obj.Count = 0 then Exit;
+  if not BudgetLinearOk('sqlite_updatejson', obj.Count, BudgetMilliNode, Err) then Exit;
   sets := '';
   for i := 0 to obj.Count - 1 do
   begin
+    // QUADRATIC APPEND, charged as it goes (round 7), as sqlite_insertjson's.
+    if not BudgetAppend(Length(sets)) then
+    begin Err := BudgetRefusal('sqlite_updatejson'); Exit; end;
     if i > 0 then sets := sets + ', ';
     sets := sets + QuoteIdent(obj.Names[i]) + ' = ?';
   end;
@@ -1760,6 +1775,8 @@ begin
   Err := NoError();
   Result := ValInt(0);
   if not GetDb(Args[0].Hnd, db) then Exit;
+  // The path is resolved, escaped into SQL and handed to the OS: priced first.
+  if not BudgetLinearOk('sqlite_backup', Length(Args[1].Str), BudgetMilliOs, Err) then Exit;
   { A PATH ARGUMENT IS A PATH ARGUMENT, whichever language spends it. This one
     was pasted into VACUUM INTO with no gate at all, so a confined script wrote a
     complete copy of its database -- every row -- anywhere on the disk, while

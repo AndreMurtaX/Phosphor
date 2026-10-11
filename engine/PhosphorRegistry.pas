@@ -132,7 +132,12 @@ type
     FCount: Integer;
     FHash: array of Integer;   // signature -> slot + 1; 0 is an empty bucket
     FHashMask: Integer;        // Length(FHash) - 1; the table is a power of two
+    { THE NAME INDEX (round 7), beside the signature one and the same size: each
+      distinct NAME -- the part of a key before its colon -- maps to the first
+      slot registered under it. HasName asks it; see there for why it must. }
+    FNameHash: array of Integer;
     procedure HashPut(const AKey: String; ASlot: Integer);
+    procedure NamePut(ASlot: Integer);
     procedure HashRebuild;
     function IndexOfKey(const AKey: String): Integer;
     function EnsureSlot(const AKey: String): Integer;
@@ -275,8 +280,47 @@ begin
   while n < FCount * 2 do n := n * 2;
   SetLength(FHash, 0);       // drop the old table; nothing in it is reused
   SetLength(FHash, n);       // a fresh dynamic array arrives zero-filled
+  SetLength(FNameHash, 0);   // the name index shares the size and the mask
+  SetLength(FNameHash, n);
   FHashMask := n - 1;
   for i := 0 to FCount - 1 do HashPut(FKeys[i], i);
+  for i := 0 to FCount - 1 do NamePut(i);
+end;
+
+{ The length of the NAME part of a key: everything before its first colon (a key
+  without one is all name). }
+function NameLen(const AKey: String): Integer;
+begin
+  Result := Pos(':', AKey) - 1;
+  if Result < 0 then Result := Length(AKey);
+end;
+
+{ Do the first ALen bytes of AKey spell AName exactly? Bytes, not `=`: see
+  HasName for what `=` does with two strings of different code pages. }
+function NameIs(const AKey: String; ALen: Integer; const AName: String): Boolean;
+begin
+  Result := (ALen = Length(AName)) and
+            ((ALen = 0) or (CompareByte(AKey[1], AName[1], ALen) = 0));
+end;
+
+{ Index ASlot's NAME, unless a slot with the same name already stands for it. The
+  table is never more than half full, so the probe ends. }
+procedure TPhosphorRegistry.NamePut(ASlot: Integer);
+var
+  b, n, s: Integer;
+  name: String;
+begin
+  n := NameLen(FKeys[ASlot]);
+  name := Copy(FKeys[ASlot], 1, n);
+  b := Integer(SigHash(name)) and FHashMask;
+  s := FNameHash[b];
+  while s <> 0 do
+  begin
+    if NameIs(FKeys[s - 1], NameLen(FKeys[s - 1]), name) then Exit;
+    b := (b + 1) and FHashMask;
+    s := FNameHash[b];
+  end;
+  FNameHash[b] := ASlot + 1;
 end;
 
 { THE TABLE IS INDEXED, AND THIS IS THE ONLY WAY IN.
@@ -355,7 +399,11 @@ begin
   // out unchanged: a repeat registration never reaches this line. Grow when the
   // table would pass half full, which is what keeps HashPut's probe terminating.
   if FCount * 2 > Length(FHash) then HashRebuild()
-  else HashPut(AKey, Result);
+  else
+  begin
+    HashPut(AKey, Result);
+    NamePut(Result);
+  end;
 end;
 
 procedure TPhosphorRegistry.Add(const ASignature: String; AFunc: TPhosphorFunc);
@@ -405,17 +453,38 @@ begin
   end;
 end;
 
+{ ONE HASHED LOOKUP, NOT A SCAN (round 7).
+
+  This was `Copy(LowerCase(FKeys[i]), 1, Length(prefix)) = prefix` for every one
+  of the ~1271 keys, with prefix := LowerCase(AName) + ':'. Each key was
+  lowercased and copied, and the `=` compared a string from the unit's literal
+  code page with one from the default code page -- which fpc_AnsiStr_Compare_equal
+  (rtl/inc/astrings.inc) answers by TRANSCODING both before it looks at a length.
+  So one funcexists? cost (keys x name length): 38906 ms for a 50 MB name, 7609 ms
+  for 10 MB, rc 0 under a 2000 ms ceiling, in any host that leaves
+  DefaultSystemCodePage alone (the LCL hosts set it to UTF-8 and escaped).
+
+  Now the name is hashed once and compared as BYTES against the few keys in its
+  probe chain: linear in the name, whatever the registry holds and whatever the
+  code pages. Keys are stored lowercased (EnsureSlot's callers), so lowering the
+  name gives the same bytes the old prefix test compared. The caller, which a
+  script reaches, prices the lowering (f_funcexists in PhosphorCallLib). }
 function TPhosphorRegistry.HasName(const AName: String): Boolean;
 var
-  i: Integer;
-  prefix: String;
+  b, s: Integer;
+  lname: String;
 begin
-  // Keys are '<name>:<argument codes>', so the name is everything before the
-  // first colon and a prefix match on 'name:' is exact.
-  prefix := LowerCase(AName) + ':';
-  for i := 0 to FCount - 1 do
-    if Copy(LowerCase(FKeys[i]), 1, Length(prefix)) = prefix then Exit(True);
   Result := False;
+  if FNameHash = nil then Exit;       // nothing registered yet
+  lname := LowerCase(AName);
+  b := Integer(SigHash(lname)) and FHashMask;
+  s := FNameHash[b];
+  while s <> 0 do
+  begin
+    if NameIs(FKeys[s - 1], NameLen(FKeys[s - 1]), lname) then Exit(True);
+    b := (b + 1) and FHashMask;
+    s := FNameHash[b];
+  end;
 end;
 
 function TPhosphorRegistry.Resolve(const AName: String;

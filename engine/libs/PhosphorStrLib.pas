@@ -177,8 +177,14 @@ begin
 end;
 
 // --- string splitting -------------------------------------------------------
+{ THE SLOTS GROW GEOMETRICALLY (round 7). `SetLength(Result, n + 1)` once per
+  piece reallocated -- and copied -- the whole array of pieces every time, so a
+  text of n lines cost O(n^2): count() of ten million one-byte lines took
+  12197 ms for ONE call, unbudgeted, which is what word$ and wordcount (priced
+  at their search) reached too. Doubling makes it linear; the final SetLength
+  trims the slack, so the answer is the array it always was. }
 function SplitBy(const S, Sep: String): TStringArray;
-var start, i, n: SizeInt;
+var start, i, n, cap: SizeInt;
 begin
   Result := nil;
   SetLength(Result, 0);
@@ -187,11 +193,16 @@ begin
     SetLength(Result, 1); Result[0] := S; Exit;
   end;
   n := 0;
+  cap := 0;
   start := 1;
   i := PosEx(Sep, S, start);
   while i > 0 do
   begin
-    SetLength(Result, n + 1);
+    if n >= cap then
+    begin
+      cap := cap * 2 + 16;
+      SetLength(Result, cap);
+    end;
     Result[n] := Copy(S, start, i - start);
     Inc(n);
     start := i + Length(Sep);
@@ -210,25 +221,129 @@ begin
       SetLength(Result[i], Length(Result[i]) - 1);
 end;
 
+{ THE LINE SUGAR WITHOUT THE SPLIT (round 7). count(), s$[n] and line$ split the
+  whole text into an array of every line to read its length or one element of
+  it -- an allocation per line for an answer that is one integer or one line.
+  These walk the text once and copy at most one line. The answers are exactly
+  SplitLines': a line ends at LF, one trailing CR is not part of it, and the
+  empty text is one empty line. }
+function LineCount(const S: String): Int64;
+var i: SizeInt;
+begin
+  Result := 1;
+  for i := 1 to Length(S) do
+    if S[i] = #10 then Inc(Result);
+end;
+
+{ The byte span [AFrom, ATo) of line AIndex (1-based), its CR not included.
+  False when the text has fewer lines. }
+function LineSpan(const S: String; AIndex: Int64; out AFrom, ATo: SizeInt): Boolean;
+var i: SizeInt; n: Int64;
+begin
+  Result := False;
+  AFrom := 1;
+  ATo := 1;
+  if AIndex < 1 then Exit;
+  n := 1;
+  i := 1;
+  while i <= Length(S) do
+  begin
+    if S[i] = #10 then
+    begin
+      if n = AIndex then Break;
+      Inc(n);
+      AFrom := i + 1;
+    end;
+    Inc(i);
+  end;
+  if n <> AIndex then Exit;
+  ATo := i;                                    // the LF, or Length(S) + 1
+  if (ATo > AFrom) and (S[ATo - 1] = #13) then Dec(ATo);
+  Result := True;
+end;
+
+{ The byte span [AFrom, ATo) of codepoint ACp (base 1); False when the string has
+  fewer. The walk is CpAt's; the caller charges what it walked before copying. }
+function CpSpan(const S: String; ACp: Int64; out AFrom, ATo: SizeInt): Boolean;
+begin
+  AFrom := 1;
+  ATo := 1;
+  Result := False;
+  if ACp < 1 then Exit;
+  AFrom := CpToByte(S, ACp);
+  if AFrom > Length(S) then Exit;
+  ATo := Utf8Advance(S, AFrom, 1);
+  Result := True;
+end;
+
 // --- library functions ------------------------------------------------------
 function s0(const Args: array of TValue): String; begin Result := Args[0].Str; end;
 
+{ EVERY PASS OVER THE ARGUMENT IS PRICED (round 7) -- see the BudgetMilli* table
+  in PhosphorBudget for what each family costs and how it was measured. A pass
+  whose length the arguments fix is asked BEFORE it runs (BudgetLinearOk); a
+  walk a count cuts short is charged for what it read, before the copy that
+  follows (BudgetLinearAfterOk), so left$(big$, 3) in a loop costs three
+  characters and not the string. }
 function f_ucase(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(AsciiCase(s0(A), True)); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('ucase$', Length(s0(A)), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  Result := ValStr(AsciiCase(s0(A), True));
+end;
 function f_lcase(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(AsciiCase(s0(A), False)); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('lcase$', Length(s0(A)), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  Result := ValStr(AsciiCase(s0(A), False));
+end;
 function f_len(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(CpLen(s0(A))); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('len', Length(s0(A)), BudgetMilliScan, E) then Exit(ValInt(0));
+  Result := ValInt(CpLen(s0(A)));
+end;
 function f_left(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpLeft(s0(A), ArgI64(A[1]))); end;
+var s: String; n: Int64; p: SizeInt;
+begin
+  E := NoError();
+  s := s0(A);
+  n := ArgI64(A[1]);
+  if n <= 0 then Exit(ValStr(''));            // CpLeft's own first line
+  p := Utf8Advance(s, 1, n);
+  if not BudgetLinearAfterOk('left$', p - 1, BudgetMilliCopy, E) then Exit(ValStr(''));
+  Result := ValStr(Copy(s, 1, p - 1));
+end;
 function f_right(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpRight(s0(A), ArgI64(A[1]))); end;
+var s: String; n: Int64; p: SizeInt;
+begin
+  E := NoError();
+  s := s0(A);
+  n := ArgI64(A[1]);
+  if n <= 0 then Exit(ValStr(''));            // CpRight's own first line
+  p := Utf8SuffixStart(s, n);
+  if not BudgetLinearAfterOk('right$', Length(s) - p + 1, BudgetMilliCopy, E) then
+    Exit(ValStr(''));
+  Result := ValStr(Copy(s, p, Length(s) - p + 1));
+end;
 function f_trim(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(ByteTrim(s0(A), True, True)); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('trim$', Length(s0(A)), BudgetMilliCopy, E) then Exit(ValStr(''));
+  Result := ValStr(ByteTrim(s0(A), True, True));
+end;
 function f_ltrim(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(ByteTrim(s0(A), True, False)); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('ltrim$', Length(s0(A)), BudgetMilliCopy, E) then Exit(ValStr(''));
+  Result := ValStr(ByteTrim(s0(A), True, False));
+end;
 function f_rtrim(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(ByteTrim(s0(A), False, True)); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('rtrim$', Length(s0(A)), BudgetMilliCopy, E) then Exit(ValStr(''));
+  Result := ValStr(ByteTrim(s0(A), False, True));
+end;
 function f_reverse(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: String; ok: Boolean;
 begin
@@ -252,8 +367,15 @@ begin
   // offset. The walk from the start byte is bounded by the string, and a count
   // past its end only stops at the end.
   pa := CpToByte(s0(A), startCp);
-  if pa > Length(s0(A)) then Exit(ValStr(''));
+  if pa > Length(s0(A)) then
+  begin
+    // The walk to the start was work too, answer or not.
+    BudgetLinearAfterOk('mid$', pa - 1, BudgetMilliScan, E);
+    Exit(ValStr(''));
+  end;
   pb := Utf8Advance(s0(A), pa, cnt);
+  // Both walks and the copy, charged before the copy is made.
+  if not BudgetLinearAfterOk('mid$', pb - 1, BudgetMilliCopy, E) then Exit(ValStr(''));
   Result := ValStr(Copy(s0(A), pa, pb - pa));
 end;
 
@@ -264,10 +386,17 @@ end;
   produce, and not a character. It answers U+FFFD, the same replacement chr$
   makes, so no door of this library names a surrogate. }
 function f_asc(const A: array of TValue; out E: TPhosphorError): TValue;
-var s: String; cp: Integer;
+var s: String; cp: Integer; pa, pb: SizeInt;
 begin
   E := NoError();
-  s := CpAt(s0(A), 1);
+  { The first CHARACTER, which a malformed string can make the whole string: a
+    lead byte and every continuation byte after it. Charged for what it read. }
+  s := '';
+  if CpSpan(s0(A), 1, pa, pb) then
+  begin
+    if not BudgetLinearAfterOk('asc', pb - 1, BudgetMilliCopy, E) then Exit(ValInt(0));
+    s := Copy(s0(A), pa, pb - pa);
+  end;
   if s = '' then cp := 0
   else if Ord(s[1]) < $80 then cp := Ord(s[1])
   else
@@ -358,6 +487,7 @@ function f_val(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: TNumberText;
 begin
   E := NoError();
+  if not BudgetLinearOk('val', Length(s0(A)), BudgetMilliNumber, E) then Exit(ValDouble(0));
   r := ReadNumberText(TrimNumberSpace(s0(A)));
   GValCode := r.Stop;   // 0 when the whole text parsed, else where it stopped
   if r.Ok then Result := ValDouble(r.Value) else Result := ValDouble(0);
@@ -786,12 +916,26 @@ end;
 
 // startsstr/endsstr take the TEXT first (decisions.md); *text variants are
 // case-insensitive.
+{ A copy of the needle's length out of the text, then a compare: priced by the
+  shorter of the two, which is all either reads. }
+function ShorterLen(const AOne, ATwo: String): Int64; inline;
+begin
+  if Length(AOne) < Length(ATwo) then Result := Length(AOne) else Result := Length(ATwo);
+end;
 function f_startsstr(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(Ord(Copy(s0(A), 1, Length(A[1].Str)) = A[1].Str)); end;
+begin
+  E := NoError();
+  if not BudgetLinearOk('startsstr', ShorterLen(s0(A), A[1].Str), BudgetMilliCopy, E) then
+    Exit(ValInt(0));
+  Result := ValInt(Ord(Copy(s0(A), 1, Length(A[1].Str)) = A[1].Str));
+end;
 function f_endsstr(const A: array of TValue; out E: TPhosphorError): TValue;
 var t, x: String;
-begin E := NoError(); t := s0(A); x := A[1].Str;
-  Result := ValInt(Ord((Length(x) <= Length(t)) and (Copy(t, Length(t) - Length(x) + 1, Length(x)) = x))); end;
+begin
+  E := NoError(); t := s0(A); x := A[1].Str;
+  if not BudgetLinearOk('endsstr', ShorterLen(t, x), BudgetMilliCopy, E) then Exit(ValInt(0));
+  Result := ValInt(Ord((Length(x) <= Length(t)) and (Copy(t, Length(t) - Length(x) + 1, Length(x)) = x)));
+end;
 { The *text predicates all fold through FoldText -- the one case rule, stated
   above DoReplace. SameText, which used to stand here, folds a..z only.
 
@@ -806,8 +950,10 @@ var t, ft, fx: String; k, n: Int64; e2: SizeInt; ok, ok2: Boolean;
 begin
   E := NoError();
   t := s0(A);
+  if not BudgetLinearOk('startstext', Length(A[1].Str), BudgetMilliScan, E) then Exit(ValInt(0));
   k := Utf8Len(A[1].Str);
   CpWalk(t, k, n, e2);
+  if not BudgetLinearAfterOk('startstext', e2 - 1, BudgetMilliScan, E) then Exit(ValInt(0));
   ft := FoldText(Copy(t, 1, e2 - 1), ok);
   fx := FoldText(A[1].Str, ok2);
   if not (ok and ok2) then begin E := BudgetRefusal('startstext'); Exit(ValInt(0)); end;
@@ -818,8 +964,11 @@ var t, ft, fx: String; k: Int64; st: SizeInt; ok, ok2: Boolean;
 begin
   E := NoError();
   t := s0(A);
+  if not BudgetLinearOk('endstext', Length(A[1].Str), BudgetMilliScan, E) then Exit(ValInt(0));
   k := Utf8Len(A[1].Str);
   st := CpSuffixStart(t, k);
+  if not BudgetLinearAfterOk('endstext', Length(t) - st + 1, BudgetMilliScan, E) then
+    Exit(ValInt(0));
   ft := FoldText(Copy(t, st, Length(t) - st + 1), ok);
   fx := FoldText(A[1].Str, ok2);
   if not (ok and ok2) then begin E := BudgetRefusal('endstext'); Exit(ValInt(0)); end;
@@ -842,6 +991,7 @@ function f_isnumeric(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: TNumberText;
 begin
   E := NoError();
+  if not BudgetLinearOk('isnumeric', Length(s0(A)), BudgetMilliNumber, E) then Exit(ValInt(0));
   r := ReadNumberText(TrimNumberSpace(s0(A)));
   Result := ValInt(Ord(r.Ok and IsFiniteD(r.Value)));
 end;
@@ -849,6 +999,7 @@ function f_isalpha(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: SizeInt; ok: Boolean;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
+  if not BudgetLinearOk('isalpha', Length(s), BudgetMilliScan, E) then Exit(ValInt(0));
   for i := 1 to Length(s) do
     if not (((s[i] >= 'A') and (s[i] <= 'Z')) or ((s[i] >= 'a') and (s[i] <= 'z'))) then ok := False;
   Result := ValInt(Ord(ok));
@@ -857,7 +1008,8 @@ end;
 function f_count(const A: array of TValue; out E: TPhosphorError): TValue;
 begin
   E := NoError();
-  if s0(A) = '' then Result := ValInt(0) else Result := ValInt(Length(SplitLines(s0(A))));
+  if not BudgetLinearOk('count', Length(s0(A)), BudgetMilliScan, E) then Exit(ValInt(0));
+  if s0(A) = '' then Result := ValInt(0) else Result := ValInt(LineCount(s0(A)));
 end;
 
 function f_word(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -867,6 +1019,8 @@ begin
   // SplitBy is a PosEx loop: the same naive product as instr, once per piece.
   if not BudgetAllows(SearchCost(s0(A), A[2].Str)) then
   begin E := BudgetRefusal('word$'); Exit(ValStr('')); end;
+  // ...and a string allocated per piece, at most one per byte of the text.
+  if not BudgetLinearOk('word$', Length(s0(A)), BudgetMilliText, E) then Exit(ValStr(''));
   parts := SplitBy(s0(A), A[2].Str);
   idx := ArgI64(A[1]);   // 1-based
   if (idx >= 1) and (idx <= Length(parts)) then Result := ValStr(parts[idx - 1]);
@@ -876,6 +1030,7 @@ begin
   E := NoError();
   if not BudgetAllows(SearchCost(s0(A), A[1].Str)) then
   begin E := BudgetRefusal('wordcount'); Exit(ValInt(0)); end;
+  if not BudgetLinearOk('wordcount', Length(s0(A)), BudgetMilliText, E) then Exit(ValInt(0));
   Result := ValInt(Length(SplitBy(s0(A), A[1].Str)));
 end;
 
@@ -936,14 +1091,34 @@ end;
 
 // helpers behind the s$[n] / s$[[n]] index sugar
 function f_strchar(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValStr(CpAt(s0(A), ArgI64(A[1]))); end;
-function f_strline(const A: array of TValue; out E: TPhosphorError): TValue;
-var lines: TStringArray; idx: Int64;
+var pa, pb: SizeInt;
 begin
   E := NoError(); Result := ValStr('');
-  lines := SplitLines(s0(A));
-  idx := ArgI64(A[1]);   // 1-based
-  if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
+  if not CpSpan(s0(A), ArgI64(A[1]), pa, pb) then
+  begin
+    if ArgI64(A[1]) >= 1 then BudgetLinearAfterOk('strchar$', Length(s0(A)), BudgetMilliScan, E);
+    Exit;
+  end;
+  if not BudgetLinearAfterOk('strchar$', pb - 1, BudgetMilliCopy, E) then Exit;
+  Result := ValStr(Copy(s0(A), pa, pb - pa));
+end;
+
+{ One line of the text by index, as SplitLines would have answered it. }
+function LineOf(const AFn: String; const S: String; AIndex: Int64;
+                var E: TPhosphorError): String;
+var a, b: SizeInt;
+begin
+  Result := '';
+  if not BudgetLinearOk(AFn, Length(S), BudgetMilliScan, E) then Exit;
+  if not LineSpan(S, AIndex, a, b) then Exit;
+  if not BudgetLinearOk(AFn, b - a, BudgetMilliCopy, E) then Exit;
+  Result := Copy(S, a, b - a);
+end;
+
+function f_strline(const A: array of TValue; out E: TPhosphorError): TValue;
+begin
+  E := NoError();
+  Result := ValStr(LineOf('strline$', s0(A), ArgI64(A[1]), E));
 end;
 
 { THE WRITE HALF OF THE SAME TWO SUGARS, and until 2026-09-18 there was none:
@@ -975,6 +1150,9 @@ begin
   E := NoError();
   s := s0(A);
   Result := ValStr(s);
+  // A walk to the character, and an answer that is a copy of the whole string.
+  if not BudgetLinearOk('a string index write', Length(s) + Length(A[2].Str),
+                        BudgetMilliRewrite, E) then Exit;
   idx := ArgI64(A[1]);          // 1-based
   if idx >= 1 then pa := CpToByte(s, idx) else pa := Length(s) + 1;
   if pa > Length(s) then
@@ -1210,6 +1388,7 @@ function f_proper(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: String; i: SizeInt; atStart: Boolean; c: Char;
 begin
   E := NoError(); r := s0(A); atStart := True;
+  if not BudgetLinearOk('proper$', Length(r), BudgetMilliRewrite, E) then Exit(ValStr(''));
   for i := 1 to Length(r) do
   begin
     c := r[i];
@@ -1230,6 +1409,7 @@ function f_swapcase(const A: array of TValue; out E: TPhosphorError): TValue;
 var r: String; i: SizeInt; c: Char;
 begin
   E := NoError(); r := s0(A);
+  if not BudgetLinearOk('swapcase$', Length(r), BudgetMilliRewrite, E) then Exit(ValStr(''));
   for i := 1 to Length(r) do
   begin
     c := r[i];
@@ -1264,7 +1444,9 @@ end;
 function f_ltab(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, n: Int64;
 begin
-  E := NoError(); s := ByteTrim(s0(A), True, True); w := ArgI64(A[1]); n := CpLen(s);
+  E := NoError();
+  if not BudgetLinearOk('ltab$', Length(s0(A)), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  s := ByteTrim(s0(A), True, True); w := ArgI64(A[1]); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
   if RunBytes(w - n, 1) < 0 then begin E := TooLong('ltab$'); Exit(ValStr('')); end;
   if not BudgetAllows(w - n) then begin E := BudgetRefusal('ltab$'); Exit(ValStr('')); end;
@@ -1273,7 +1455,9 @@ end;
 function f_rtab(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, n: Int64;
 begin
-  E := NoError(); s := ByteTrim(s0(A), True, True); w := ArgI64(A[1]); n := CpLen(s);
+  E := NoError();
+  if not BudgetLinearOk('rtab$', Length(s0(A)), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  s := ByteTrim(s0(A), True, True); w := ArgI64(A[1]); n := CpLen(s);
   if n >= w then Exit(ValStr(s));
   if RunBytes(w - n, 1) < 0 then begin E := TooLong('rtab$'); Exit(ValStr('')); end;
   if not BudgetAllows(w - n) then begin E := BudgetRefusal('rtab$'); Exit(ValStr('')); end;
@@ -1282,7 +1466,9 @@ end;
 function f_lfill(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f, r: String; w, n: Int64;
 begin
-  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2]));
+  if not BudgetLinearOk('lfill$', Length(s), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  n := CpLen(s);
   if n >= w then Exit(ValStr(s));
   if not RunOf('lfill$', f, w - n, r, E) then Exit(ValStr(''));
   Result := ValStr(r + s);
@@ -1290,7 +1476,9 @@ end;
 function f_rfill(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f, r: String; w, n: Int64;
 begin
-  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2])); n := CpLen(s);
+  E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2]));
+  if not BudgetLinearOk('rfill$', Length(s), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  n := CpLen(s);
   if n >= w then Exit(ValStr(s));
   if not RunOf('rfill$', f, w - n, r, E) then Exit(ValStr(''));
   Result := ValStr(s + r);
@@ -1305,6 +1493,7 @@ function f_center2(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; w, pad, l: Int64;
 begin
   E := NoError(); s := s0(A); w := ArgI64(A[1]);
+  if not BudgetLinearOk('center$', Length(s), BudgetMilliRewrite, E) then Exit(ValStr(''));
   if w <= CpLen(s) then Exit(ValStr(s));
   pad := w - CpLen(s);
   if RunBytes(pad, 1) < 0 then begin E := TooLong('center$'); Exit(ValStr('')); end;
@@ -1316,6 +1505,7 @@ function f_center3(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, f, r1, r2: String; w, pad, l: Int64;
 begin
   E := NoError(); s := s0(A); w := ArgI64(A[1]); f := Utf8Char(ArgI32(A[2]));
+  if not BudgetLinearOk('center$', Length(s), BudgetMilliRewrite, E) then Exit(ValStr(''));
   if w <= CpLen(s) then Exit(ValStr(s));   // compare before subtracting: see f_center2
   pad := w - CpLen(s);
   if RunBytes(pad, Length(f)) < 0 then begin E := TooLong('center$'); Exit(ValStr('')); end;
@@ -1330,6 +1520,7 @@ function f_isdigits(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: SizeInt; ok: Boolean;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
+  if not BudgetLinearOk('isdigits', Length(s), BudgetMilliScan, E) then Exit(ValInt(0));
   for i := 1 to Length(s) do if not ((s[i] >= '0') and (s[i] <= '9')) then ok := False;
   Result := ValInt(Ord(ok));
 end;
@@ -1337,6 +1528,7 @@ function f_isalnum(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: SizeInt; ok: Boolean; c: Char;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
+  if not BudgetLinearOk('isalnum', Length(s), BudgetMilliScan, E) then Exit(ValInt(0));
   for i := 1 to Length(s) do
   begin
     c := s[i];
@@ -1348,6 +1540,7 @@ function f_isspace(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: SizeInt; ok: Boolean;
 begin
   E := NoError(); s := s0(A); ok := s <> '';
+  if not BudgetLinearOk('isspace', Length(s), BudgetMilliScan, E) then Exit(ValInt(0));
   for i := 1 to Length(s) do if not (s[i] in [' ', #9, #10, #11, #12, #13]) then ok := False;
   Result := ValInt(Ord(ok));
 end;
@@ -1355,6 +1548,7 @@ function f_islower(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: SizeInt; hasLow, hasUp: Boolean; c: Char;
 begin
   E := NoError(); s := s0(A); hasLow := False; hasUp := False;
+  if not BudgetLinearOk('islower', Length(s), BudgetMilliScan, E) then Exit(ValInt(0));
   for i := 1 to Length(s) do
   begin
     c := s[i];
@@ -1367,6 +1561,7 @@ function f_isupper(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; i: SizeInt; hasLow, hasUp: Boolean; c: Char;
 begin
   E := NoError(); s := s0(A); hasLow := False; hasUp := False;
+  if not BudgetLinearOk('isupper', Length(s), BudgetMilliScan, E) then Exit(ValInt(0));
   for i := 1 to Length(s) do
   begin
     c := s[i];
@@ -1392,7 +1587,13 @@ begin
 end;
 
 function f_strcmp(const A: array of TValue; out E: TPhosphorError): TValue;
-begin E := NoError(); Result := ValInt(SignI(CompareStr(s0(A), A[1].Str))); end;
+begin
+  E := NoError();
+  // CompareStr reads the common prefix and no further.
+  if not BudgetLinearOk('strcmp', ShorterLen(s0(A), A[1].Str), BudgetMilliScan, E) then
+    Exit(ValInt(0));
+  Result := ValInt(SignI(CompareStr(s0(A), A[1].Str)));
+end;
 { strcmpi folds only as far as the comparison can reach. CompareStr is decided
   either at the first differing byte -- which lies inside the first min(length)
   CHARACTERS of both, the fold being one codepoint per codepoint -- or by the
@@ -1412,6 +1613,9 @@ begin
   if Length(sa) < Length(sb) then lim := Length(sa) + 1 else lim := Length(sb) + 1;
   CpWalk(sa, lim, ka, ea);
   CpWalk(sb, lim, kb, eb);
+  // These two walks, and the two shorter ones that follow over the same bytes.
+  if not BudgetLinearAfterOk('strcmpi', 2 * (Int64(ea) + eb), BudgetMilliScan, E) then
+    Exit(ValInt(0));
   if ka < kb then k := ka else k := kb;
   CpWalk(sa, k, kc, ea);
   CpWalk(sb, k, kc, eb);
@@ -1426,7 +1630,10 @@ end;
 function f_insert(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, ins: String; pos, n: Int64;
 begin
-  E := NoError(); s := s0(A); ins := A[1].Str; pos := ArgI64(A[2]); n := CpLen(s);
+  E := NoError(); s := s0(A); ins := A[1].Str; pos := ArgI64(A[2]);
+  if not BudgetLinearOk('insert$', Length(s) + Length(ins), BudgetMilliRewrite, E) then
+    Exit(ValStr(''));
+  n := CpLen(s);
   if pos < 1 then pos := 1;
   if pos > n + 1 then pos := n + 1;
   Result := ValStr(CpLeft(s, pos - 1) + ins + CpRight(s, n - (pos - 1)));
@@ -1445,7 +1652,9 @@ end;
 function f_delete(const A: array of TValue; out E: TPhosphorError): TValue;
 var s: String; pos, cnt, n, rem: Int64;
 begin
-  E := NoError(); s := s0(A); pos := ArgI64(A[1]); cnt := ArgI64(A[2]); n := CpLen(s);
+  E := NoError(); s := s0(A); pos := ArgI64(A[1]); cnt := ArgI64(A[2]);
+  if not BudgetLinearOk('delete$', Length(s), BudgetMilliRewrite, E) then Exit(ValStr(''));
+  n := CpLen(s);
   if pos < 1 then pos := 1;
   if pos > n + 1 then pos := n + 1;
   if cnt < 0 then cnt := 0;
@@ -1456,7 +1665,10 @@ end;
 function f_stuffstring(const A: array of TValue; out E: TPhosphorError): TValue;
 var s, repl: String; start, len, n, rem: Int64;
 begin
-  E := NoError(); s := s0(A); start := ArgI64(A[1]); len := ArgI64(A[2]); repl := A[3].Str; n := CpLen(s);
+  E := NoError(); s := s0(A); start := ArgI64(A[1]); len := ArgI64(A[2]); repl := A[3].Str;
+  if not BudgetLinearOk('stuffstring$', Length(s) + Length(repl), BudgetMilliRewrite, E) then
+    Exit(ValStr(''));
+  n := CpLen(s);
   if start < 1 then start := 1;
   if start > n + 1 then start := n + 1;
   if len < 0 then len := 0;
@@ -1466,12 +1678,9 @@ begin
 end;
 
 function f_line(const A: array of TValue; out E: TPhosphorError): TValue;
-var lines: TStringArray; idx: Int64;
 begin
-  E := NoError(); Result := ValStr('');
-  lines := SplitLines(s0(A));
-  idx := ArgI64(A[1]);   // 1-based
-  if (idx >= 1) and (idx <= Length(lines)) then Result := ValStr(lines[idx - 1]);
+  E := NoError();
+  Result := ValStr(LineOf('line$', s0(A), ArgI64(A[1]), E));
 end;
 
 function f_valcode(const A: array of TValue; out E: TPhosphorError): TValue;
@@ -1545,6 +1754,7 @@ begin
   if (n <= 0) or (i > Length(s)) then begin Result := ValStr(''); Exit; end;
   avail := Length(s) - i + 1;
   if n > avail then n := avail;
+  if not BudgetLinearOk('bytemid$', n, BudgetMilliCopy, E) then Exit(ValStr(''));
   Result := ValStr(Copy(s, i, n));   // Copy is byte-indexed: the run comes over verbatim
 end;
 

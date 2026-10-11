@@ -127,13 +127,37 @@ end;
 
 { Append, or -- when the list is Sorted -- insert at the ordered position. Returns
   the 0-based index the item landed at. }
+{ METERED (round 7). Each comparison reads up to the shorter of the two strings
+  and each item it passes is a step; both are charged as they happen, and a
+  spent budget leaves the list UNCHANGED (-1), for the caller to report. }
+function CompareCost(const AOne, ATwo: String): Int64; inline;
+begin
+  if Length(AOne) < Length(ATwo) then Result := Length(AOne) else Result := Length(ATwo);
+  Result := BudgetMilliItem + Result * BudgetMilliScan;
+end;
+
+{ What `=` reads: only strings of one length are compared byte by byte. }
+function EqualCost(const AOne, ATwo: String): Int64; inline;
+begin
+  Result := BudgetMilliItem;
+  if Length(AOne) = Length(ATwo) then Result := Result + Int64(Length(AOne)) * BudgetMilliScan;
+end;
+
 function TPhosphorStringList.AddIndexed(const S: String): Integer;
-var i: Integer;
+var i: Integer; m: TBudgetMeter;
 begin
   if Sorted then
   begin
+    BudgetMeterStart(m);
     i := 0;
-    while (i < Count) and (CompareStr(Items[i], S) <= 0) do Inc(i);
+    while (i < Count) and (CompareStr(Items[i], S) <= 0) do
+    begin
+      if m.On and not BudgetMeterAdd(m, CompareCost(Items[i], S)) then Exit(-1);
+      Inc(i);
+    end;
+    // The shift InsertAt makes, one item per slot past the insertion point.
+    if m.On and not BudgetMeterAdd(m, Int64(Count - i) * BudgetMilliItem) then Exit(-1);
+    if not BudgetMeterEnd(m) then Exit(-1);
     InsertAt(i, S);
     Result := i;
   end
@@ -379,6 +403,7 @@ var i: Integer; f: String;
 
 var
   dl, q: String;
+  m: TBudgetMeter;
 begin
   // Delimiter and QuoteChar are Chars, and every use of them here -- appended, and
   // handed to StringReplace -- converted them through this unit's code page, so a
@@ -387,8 +412,15 @@ begin
   dl := StringOfChar(Delimiter, 1);
   q := StringOfChar(QuoteChar, 1);
   Result := '';
+  BudgetMeterStart(m);
   for i := 0 to Count - 1 do
   begin
+    { Each field is scanned for a character that needs quoting, maybe rewritten
+      with its quotes doubled, and appended. Charged as it goes; a spent budget
+      stops the render, and the caller reports it (BudgetSpent). }
+    if m.On and not BudgetMeterAdd(m, BudgetMilliItem +
+                                      Int64(Length(Items[i])) * BudgetMilliRewrite) then
+      Exit('');
     if i > 0 then Result := Result + dl;
     f := Items[i];
     if NeedsQuote(f) then
@@ -396,11 +428,19 @@ begin
     else
       Result := Result + f;
   end;
+  if not BudgetMeterEnd(m) then Result := '';
 end;
 
 { Parse S into fields on Delimiter, honouring QuoteChar (with doubled quotes as an
   escape). When not StrictDelimiter, whitespace around a field is skipped. The
   read half of TStrings.DelimitedText. }
+{ QUADRATIC UNTIL ROUND 7. Each field used to SetLength its buffer to the size
+  of the WHOLE REST of the input -- and `field := fb` had just shared the old
+  one, so every field allocated a fresh block that large: one call on a 4 MB
+  string of two million fields took 19484 ms (N=1000000: 4797 ms), while its
+  commatext sibling took 94. Now ONE buffer, as long as the input (no field can
+  be longer), is allocated once and each field is COPIED out of it at its own
+  length -- linear, and the bytes are exactly the ones the old code kept. }
 procedure TPhosphorStringList.SetDelimitedText(const S: String);
 var i, n, fk: Integer; field: String; fb: RawByteString;
 begin
@@ -408,15 +448,14 @@ begin
   n := Length(S);
   i := 1;
   if n = 0 then Exit;
+  // Indexed writes into a RawByteString: appending byte by byte re-encodes any
+  // byte >= 128 through the UTF-8 codepage and lands it as '?' -- this splitter
+  // corrupted high bytes while its commatext sibling, which uses Copy, did not.
+  SetLength(fb, n);
   while True do
   begin
     if not StrictDelimiter then
       while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
-    // Build each field by INDEXED writes into a RawByteString (it can never be
-    // longer than the rest of the input). Appending byte by byte re-encodes any
-    // byte >= 128 through the UTF-8 codepage and lands it as '?' -- this splitter
-    // corrupted high bytes while its commatext sibling, which uses Copy, did not.
-    if n - i + 1 > 0 then SetLength(fb, n - i + 1) else SetLength(fb, 0);
     fk := 0;
     if (i <= n) and (S[i] = QuoteChar) then
     begin
@@ -436,8 +475,7 @@ begin
       while (i <= n) and (S[i] <> Delimiter) and
             (StrictDelimiter or (S[i] > ' ')) do
       begin Inc(fk); fb[fk] := S[i]; Inc(i); end;
-    SetLength(fb, fk);
-    field := fb;
+    field := Copy(fb, 1, fk);
     if not StrictDelimiter then
       while (i <= n) and (S[i] <> Delimiter) and (S[i] <= ' ') do Inc(i);
     Add(field);
@@ -446,10 +484,19 @@ begin
 end;
 
 function TPhosphorStringList.IndexOf(const S: String): Integer;
-var i: Integer;
+var i: Integer; m: TBudgetMeter;
 begin
+  BudgetMeterStart(m);
   for i := 0 to Count - 1 do
-    if Items[i] = S then Exit(i);
+  begin
+    if m.On and not BudgetMeterAdd(m, EqualCost(Items[i], S)) then Exit(-1);
+    if Items[i] = S then
+    begin
+      BudgetMeterEnd(m);
+      Exit(i);
+    end;
+  end;
+  BudgetMeterEnd(m);
   Result := -1;
 end;
 
@@ -457,12 +504,14 @@ end;
   items that are present (that is the documented trap that separates it from
   IndexOf); it never raises. }
 function TPhosphorStringList.Find(const S: String): Integer;
-var lo, hi, mid, c: Integer;
+var lo, hi, mid, c: Integer; m: TBudgetMeter;
 begin
+  BudgetMeterStart(m);
   lo := 0; hi := Count - 1;
   while lo <= hi do
   begin
     mid := (lo + hi) div 2;
+    if m.On and not BudgetMeterAdd(m, CompareCost(Items[mid], S)) then Exit(-1);
     c := CompareStr(Items[mid], S);
     if c = 0 then Exit(mid)
     else if c < 0 then lo := mid + 1
@@ -471,14 +520,33 @@ begin
   Result := -1;
 end;
 
+{ METERED (round 7): each line is scanned for its separator -- as far as the
+  separator, or the whole line when it has none -- and its name copied out and
+  compared, so a line costs what it holds, not a constant. 200 lookups in a list
+  of two million lines ran 12735 ms under a 2000 ms ceiling. }
 function TPhosphorStringList.IndexOfName(const AName: String): Integer;
-var i, p: Integer;
+var i, p: Integer; m: TBudgetMeter;
 begin
+  BudgetMeterStart(m);
   for i := 0 to Count - 1 do
   begin
     p := Pos(NameValueSeparator, Items[i]);
-    if (p > 0) and (Copy(Items[i], 1, p - 1) = AName) then Exit(i);
+    if m.On then
+    begin
+      if p > 0 then
+      begin
+        if not BudgetMeterAdd(m, BudgetMilliNameItem + Int64(p) * BudgetMilliCopy) then Exit(-1);
+      end
+      else if not BudgetMeterAdd(m, BudgetMilliNameItem + Int64(Length(Items[i])) * BudgetMilliScan) then
+        Exit(-1);
+    end;
+    if (p > 0) and (Copy(Items[i], 1, p - 1) = AName) then
+    begin
+      BudgetMeterEnd(m);
+      Exit(i);
+    end;
   end;
+  BudgetMeterEnd(m);
   Result := -1;
 end;
 
@@ -488,6 +556,8 @@ begin
   Result := '';
   idx := IndexOfName(AName);
   if idx < 0 then Exit;
+  // The value is copied out of the line IndexOfName stopped at.
+  if not BudgetLinearAfter(Length(Items[idx]), BudgetMilliCopy) then Exit;
   p := Pos(NameValueSeparator, Items[idx]);
   Result := Copy(Items[idx], p + 1, MaxInt);
 end;
@@ -521,13 +591,21 @@ begin
 end;
 
 function TPhosphorStringList.EqualsList(AOther: TPhosphorStringList): Boolean;
-var i: Integer;
+var i: Integer; m: TBudgetMeter;
 begin
   if AOther = nil then Exit(False);
   if Count <> AOther.Count then Exit(False);
+  BudgetMeterStart(m);
   for i := 0 to Count - 1 do
-    if Items[i] <> AOther.Items[i] then Exit(False);
-  Result := True;
+  begin
+    if m.On and not BudgetMeterAdd(m, EqualCost(Items[i], AOther.Items[i])) then Exit(False);
+    if Items[i] <> AOther.Items[i] then
+    begin
+      BudgetMeterEnd(m);
+      Exit(False);
+    end;
+  end;
+  Result := BudgetMeterEnd(m);
 end;
 
 { Capacity is the allocated slack, so it is exactly the backing array's length --
@@ -659,6 +737,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   Result := ValInt(l.AddIndexed(Args[1].Str) + 1);   // 1-based index the item took
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_add'); Result := ValInt(0); end;
 end;
 
 function t_strings_append(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -667,6 +746,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   l.AddIndexed(Args[1].Str);
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_append'); Exit; end;
   Result := ValInt(l.Count);
 end;
 
@@ -695,6 +775,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   i := l.IndexOf(Args[1].Str);
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_indexof'); Exit; end;
   if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);  // 1-based, 0 absent
 end;
 
@@ -704,6 +785,8 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), True, z, Err) then Exit;
+  // Every item from the insertion point on moves up one slot.
+  if not BudgetLinearOk('strings_insert', Int64(l.Count) - z, BudgetMilliItem, Err) then Exit;
   l.InsertAt(z, Args[2].Str);
   Result := ValInt(l.Count);
 end;
@@ -714,6 +797,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
+  if not BudgetLinearOk('strings_delete', Int64(l.Count) - z, BudgetMilliItem, Err) then Exit;
   l.DeleteAt(z);
   Result := ValInt(l.Count);
 end;
@@ -736,6 +820,8 @@ begin
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), False, zf, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[2]), False, zt, Err) then Exit;
+  // Every item between the two positions shifts one slot.
+  if not BudgetLinearOk('strings_move', Abs(Int64(zf) - zt), BudgetMilliItem, Err) then Exit;
   l.MoveItem(zf, zt);
   Result := ValInt(1);
 end;
@@ -764,6 +850,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   i := l.Find(Args[1].Str);
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_find'); Exit; end;
   if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);  // 1-based, 0 absent
 end;
 
@@ -774,6 +861,7 @@ begin
   if not GetList(Args[0], a, Err) then Exit;
   if not GetList(Args[1], b, Err) then Exit;
   Result := ValInt(Ord(a.EqualsList(b)));
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_equals'); Result := ValInt(0); end;
 end;
 
 function t_strings_free(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -826,6 +914,8 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
+  // RULE 1: the split is linear in the text, at its densest one item per byte.
+  if not BudgetLinearOk('strings_text', Length(Args[1].Str), BudgetMilliText, Err) then Exit;
   l.SetText(Args[1].Str);
   Result := ValInt(l.Count);
 end;
@@ -848,6 +938,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
+  if not BudgetLinearOk('strings_commatext', Length(Args[1].Str), BudgetMilliText, Err) then Exit;
   l.SetCommaText(Args[1].Str);
   Result := ValInt(l.Count);
 end;
@@ -868,6 +959,8 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
+  if not BudgetLinearOk('strings_delimitedtext', Length(Args[1].Str), BudgetMilliText, Err) then
+    Exit;
   l.SetDelimitedText(Args[1].Str);
   Result := ValInt(l.Count);
 end;
@@ -878,6 +971,8 @@ begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
   Result := ValStr(l.GetDelimitedText());
+  // An empty answer must not be how a refusal looks (see strings_text$).
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_delimitedtext$'); Result := ValStr(''); end;
 end;
 
 function t_strings_delimiter_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -937,6 +1032,7 @@ var l: TPhosphorStringList;
 begin
   Result := ValStr('');
   if GetList(Args[0], l, Err) then Result := ValStr(l.ValueOf(Args[1].Str));
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_values$'); Result := ValStr(''); end;
 end;
 
 function t_strings_values_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -944,7 +1040,11 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
+  // The line it writes is a copy of the name and the value.
+  if not BudgetLinearOk('strings_values', Length(Args[1].Str) + Length(Args[2].Str),
+                        BudgetMilliCopy, Err) then Exit;
   l.SetValue(Args[1].Str, Args[2].Str);
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_values'); Exit; end;
   Result := ValInt(1);
 end;
 
@@ -954,6 +1054,9 @@ begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
+  // One line scanned for its separator and its value copied out.
+  if not BudgetLinearOk('strings_valuefromindex$', Length(l.Items[z]), BudgetMilliCopy, Err) then
+    Exit;
   Result := ValStr(l.ValueAt(z));
 end;
 
@@ -963,6 +1066,8 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
+  if not BudgetLinearOk('strings_valuefromindex', Int64(Length(l.Items[z])) + Length(Args[2].Str),
+                        BudgetMilliCopy, Err) then Exit;
   l.SetValueAt(z, Args[2].Str);
   Result := ValInt(1);
 end;
@@ -973,6 +1078,7 @@ begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
+  if not BudgetLinearOk('strings_names$', Length(l.Items[z]), BudgetMilliCopy, Err) then Exit;
   Result := ValStr(l.NameAt(z));
 end;
 
@@ -984,6 +1090,7 @@ begin
   Result := ValStr('');
   if not GetList(Args[0], l, Err) then Exit;
   if not CheckIndex(l, ArgI32(Args[1]), False, z, Err) then Exit;
+  if not BudgetLinearOk('strings_keynames$', Length(l.Items[z]), BudgetMilliCopy, Err) then Exit;
   Result := ValStr(l.NameAt(z));
 end;
 
@@ -993,6 +1100,7 @@ begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
   i := l.IndexOfName(Args[1].Str);
+  if BudgetSpent() then begin Err := BudgetRefusal('strings_indexofname'); Exit; end;
   if i >= 0 then Result := ValInt(i + 1) else Result := ValInt(0);
 end;
 
@@ -1036,6 +1144,8 @@ var l: TPhosphorStringList;
 begin
   Result := ValInt(0);
   if not GetList(Args[0], l, Err) then Exit;
+  if not BudgetLinearOk('strings_duplicates', Length(Args[1].Str), BudgetMilliRewrite, Err) then
+    Exit;
   l.Duplicates := LowerCase(Args[1].Str);
   Result := ValInt(1);
 end;
@@ -1230,6 +1340,9 @@ begin
   if not GetList(Args[0], l, Err) then Exit;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
   LoadTextFromFile(Args[1].Str, s);
+  { The read is charged for what it read, before the split is asked for. }
+  if not BudgetLinearAfterOk('strings_loadfromfile', Length(s), BudgetMilliCopy, Err) then Exit;
+  if not BudgetLinearOk('strings_loadfromfile', Length(s), BudgetMilliText, Err) then Exit;
   Result := ValInt(LoadFromText(l, s));
 end;
 
@@ -1241,6 +1354,7 @@ begin
   if not GetList(Args[0], l, Err) then Exit;
   if not GetBytes(Args[1], b, Err) then Exit;
   if Length(Args) >= 3 then l.Encoding := Args[2].Str else l.Encoding := l.DefaultEncoding;
+  if not BudgetLinearOk('strings_loadfromstream', Length(b.Data), BudgetMilliText, Err) then Exit;
   Result := ValInt(LoadFromText(l, b.Data));
 end;
 

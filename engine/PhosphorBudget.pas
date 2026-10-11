@@ -32,9 +32,22 @@
             starts (BudgetPatternBounded) and refused if its worst case is
             unbounded work.
 
+  "CAN RUN LONG" INCLUDES A PASS OVER WHAT THE SCRIPT ALREADY HOLDS (round 7,
+  2026-10-11). This header used to read as though only a script-supplied COUNT
+  could make a call long, and about fifty functions linear in a string or a
+  container argument consulted nothing -- ucase$, val, environ$, dict_get,
+  strings_values$, json_clone@ -- because the argument was "already in memory".
+  It was; and the same 50 MB string handed to ucase$ 200 times in a loop ran
+  18344 ms under TimeoutMs 2000 and reported success. Such a pass is RULE 1 when
+  its length is fixed by the arguments (BudgetLinear, priced by the measured
+  BudgetMilli* table below), RULE 2 when only the walk finds out
+  (BudgetLinearAfter, the meter).
+
   scripts/check-budget.py is what keeps the rule from rotting: every loop or
   allocation over a script-supplied count, in engine/libs and host/packages, must
-  consult this unit or be listed there as exempt with a reason. The filesystem
+  consult this unit or be listed there as exempt with a reason -- and every
+  registered function whose work grows with a script-supplied string or
+  container must consult it in its own body (the linear pass). The filesystem
   sandbox learned that lesson the expensive way; this one starts with the gate.
 
   WHAT RULE 1 DOES NOT BOUND, STATED PLAINLY BECAUSE A HOST WILL OTHERWISE READ
@@ -203,6 +216,77 @@ const
     unit, on the same scale as BudgetUnitsPerMsOfWork. }
   BudgetBytesCopiedPerUnit = 8;
 
+  (* THE LINEAR PASS (adversarial round 7, 2026-10-11) -- prices for BudgetLinear,
+    in MILLI-units per element, because most of them are a fraction of a unit.
+
+    THE HOLE. RULE 1 bounds ONE call, and a function whose work is linear in its
+    argument was not asked at all: its argument was "already in memory". One
+    opCall is one VM instruction however long the argument is, and the VM reads
+    its clock every 4096 instructions, so under the ceilings docs/embedding.md
+    prescribes (MaxSteps 1000000, TimeoutMs 2000)
+
+        s$ = string$(50000000, 97)
+        for i = 1 to 200 : r$ = ucase$(s$) : next      ' 18344 ms, rc = 0
+
+    and environ$ 72891 ms, strings_values$ over two million lines 12515 ms, about
+    fifty functions in all, each reporting success. A string can be handed in a
+    loop; that it was paid for when it was built prices one pass, not two hundred.
+
+    THE PRICES ARE MEASURED, on the budget's clock scale: a unit is what
+    1/BudgetUnitsPerMsOfWork of a millisecond of work buys, so x ns of work per
+    element is x * 128 milli-units. Measured on this build (-O2, Windows, a
+    20 MB argument, 20 calls, setup subtracted, no ceilings; the round-7
+    verifiers' Linux timings of the same shapes are within about 25% of these,
+    either side):
+
+      ns/elt   function            family
+      0.04     buffer_fill         } a block primitive into memory that exists:
+      0.12     buffer_copy, _write }   FillChar, Move
+                                       BLOCK     0.125 ns ->   16
+      0.43     len, strcmp         } a byte loop or a block compare
+      0.51     buffer_equal        }
+      0.63     isalpha             }   SCAN      0.625 ns ->   80
+      0.90     left$/mid$/right$   } a copy into a fresh string (the page faults
+      0.94     dict key (hash)     }   of a new block included)
+                                       COPY      1.0 ns  ->  128
+      1.60     ucase$, swapcase$   } a per-byte rewrite of a copy
+      1.84     insert$, formatsettings$  REWRITE   1.7 ns  ->  216
+      3.36     val, isnumeric      } number text read
+                                       NUMBER    3.4 ns  ->  432
+      3.12     hex_encode$         } an encoder whose answer is up to six times
+      2.19     http_htmlencode$    }   its input
+                                       ENCODE    3.2 ns  ->  408
+      8.20     environ$            } bytes handed to the OS (a wide-string
+      5.85     path_getfullpath$   }   conversion and a system call over them)
+                                       OS        8.3 ns  -> 1064
+      8.43     strings_indexof     } per ITEM of a list compared or shifted
+      8.59     strings_delete      }
+                                       ITEM      9.0 ns  -> 1152
+     31.1      strings_indexofname } per item split at its name=value separator
+                                       NAMEITEM 32.0 ns  -> 4096
+     16.1      strings_commatext   } per BYTE of text split into items, at the
+      8.6      strings_text        }   densest the text can be (one item per two
+                                       bytes)  TEXT  16.3 ns  -> 2080
+     52.4      json_clone@         } per node of a tree deep-copied
+                                       NODE     52.5 ns  -> 6720
+
+    Each is rounded UP from its family's slowest member, unlike the append price
+    above: that one guards a quadratic and errs towards allowing; these guard
+    passes whose whole cost is the price, so a price under the work is an
+    overrun by exactly the shortfall. Over-charging costs little -- a legitimate
+    ucase$ of 3 MB is 0.2% of the documented allowance. *)
+  BudgetMilliBlock = 16;
+  BudgetMilliScan = 80;
+  BudgetMilliCopy = 128;
+  BudgetMilliRewrite = 216;
+  BudgetMilliNumber = 432;
+  BudgetMilliEncode = 408;
+  BudgetMilliOs = 1064;
+  BudgetMilliItem = 1152;
+  BudgetMilliNameItem = 4096;
+  BudgetMilliText = 2080;
+  BudgetMilliNode = 6720;
+
 { Install the ceilings for one run. Both 0 = inert (see the header). Nests: an
   inner Begin/End pair leaves the outer one's ceilings in place. }
 procedure BudgetBegin(AMaxSteps, ATimeoutMs: Int64);
@@ -270,6 +354,52 @@ function BudgetRemainingMs: Int64;
   is spent; the caller must stop and report, never hand back the half-built
   string. }
 function BudgetAppend(ALen: Int64): Boolean;
+
+{ RULE 1 FOR A LINEAR PASS: ACount elements at AMilliEach milli-units each (one
+  of the BudgetMilli* prices above), asked BEFORE the pass. True = charged, go
+  ahead; False = refused, without latching, exactly as BudgetAllows. With no
+  budget installed this is one Boolean test. }
+function BudgetLinear(ACount, AMilliEach: Int64): Boolean;
+
+{ The same, for a registered function: on a refusal E becomes the peLimit error
+  naming AWhat, so the call site is one line. E is left alone on success. }
+function BudgetLinearOk(const AWhat: String; ACount, AMilliEach: Int64;
+                        var E: TPhosphorError): Boolean;
+
+{ RULE 2 FOR A LINEAR PASS whose length is known only once it has run: a walk
+  that a count cuts short, over text that may be malformed. left$(s$, 1) reads one
+  character -- unless that character is a lead byte followed by fifty million
+  continuation bytes, which UTF-8's own rule makes ONE character. Pricing it by
+  Length(s) up front would refuse an honest loop of left$(big$, 3); pricing it by
+  the count would under-charge the malformed one. So the walk is charged for what
+  it actually read, the moment it has read it, and BEFORE the copy that follows:
+  an overrun is at most one walk, and the next consultation sees the latch.
+  False = the budget is spent (this one DOES latch, like BudgetCharge), and the
+  caller reports rather than answers. }
+function BudgetLinearAfter(ACount, AMilliEach: Int64): Boolean;
+function BudgetLinearAfterOk(const AWhat: String; ACount, AMilliEach: Int64;
+                             var E: TPhosphorError): Boolean;
+
+{ RULE 2, ONE ITERATION AT A TIME, for a walk whose cost each step decides: a
+  search of a list whose comparisons cost what the two strings share, a name
+  lookup that splits every line at its separator. Each step adds what it did
+  (in milli-units, a BudgetMilli* price times the elements it touched) and the
+  meter charges the budget in blocks of BudgetClockEvery units -- so the clock
+  is read from inside the loop and the per-step cost is one addition.
+
+  On is False when no budget is installed, and a caller tests it before calling
+  in, so an unbudgeted host pays one Boolean per step. A meter that says False
+  has latched the budget: the walk stops and the CALLER reports, by asking
+  BudgetSpent -- a walk that returns an index cannot say "refused" itself. }
+type
+  TBudgetMeter = record
+    On: Boolean;
+    Milli: Int64;
+  end;
+
+procedure BudgetMeterStart(out M: TBudgetMeter);
+function BudgetMeterAdd(var M: TBudgetMeter; AMilli: Int64): Boolean;
+function BudgetMeterEnd(var M: TBudgetMeter): Boolean;
 
 { THE ACHIEVABLE COST OF ONE NAIVE SEARCH of ANeedle in AHay, in units.
 
@@ -569,6 +699,67 @@ function BudgetAppend(ALen: Int64): Boolean;
 begin
   if ALen < 0 then ALen := 0;
   Result := BudgetCharge(ALen div BudgetBytesCopiedPerUnit);
+end;
+
+{ Milli-units to units, rounded UP, and saturating: a count that came from a
+  script can be large enough that the product would wrap back under the ceiling. }
+function MilliToUnits(ACount, AMilliEach: Int64): Int64;
+begin
+  if (ACount <= 0) or (AMilliEach <= 0) then Exit(0);
+  if ACount > (High(Int64) - 999) div AMilliEach then Exit(High(Int64));
+  Result := (ACount * AMilliEach + 999) div 1000;
+end;
+
+function BudgetLinear(ACount, AMilliEach: Int64): Boolean;
+begin
+  if not GActive then Exit(True);
+  Result := BudgetAllows(MilliToUnits(ACount, AMilliEach));
+end;
+
+function BudgetLinearAfter(ACount, AMilliEach: Int64): Boolean;
+begin
+  if not GActive then Exit(True);
+  Result := BudgetCharge(MilliToUnits(ACount, AMilliEach));
+end;
+
+function BudgetLinearAfterOk(const AWhat: String; ACount, AMilliEach: Int64;
+                             var E: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearAfter(ACount, AMilliEach);
+  if not Result then E := BudgetRefusal(AWhat);
+end;
+
+function BudgetLinearOk(const AWhat: String; ACount, AMilliEach: Int64;
+                        var E: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinear(ACount, AMilliEach);
+  if not Result then E := BudgetRefusal(AWhat);
+end;
+
+procedure BudgetMeterStart(out M: TBudgetMeter);
+begin
+  M.On := GActive;
+  M.Milli := 0;
+end;
+
+function BudgetMeterAdd(var M: TBudgetMeter; AMilli: Int64): Boolean;
+begin
+  Result := True;
+  if not M.On then Exit;
+  if AMilli > 0 then M.Milli := AddSat(M.Milli, AMilli);
+  if M.Milli >= Int64(BudgetClockEvery) * 1000 then
+  begin
+    Result := BudgetCharge(M.Milli div 1000);
+    M.Milli := M.Milli mod 1000;
+  end;
+end;
+
+function BudgetMeterEnd(var M: TBudgetMeter): Boolean;
+begin
+  Result := True;
+  if not M.On then Exit;
+  Result := BudgetCharge((M.Milli + 999) div 1000);
+  M.Milli := 0;
 end;
 
 function BudgetSpent: Boolean;

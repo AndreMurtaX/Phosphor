@@ -157,7 +157,7 @@ refused with `json value is not an array`.
 | `json_type(v@) → num` | the kind as a code: `1` number, `2` string, `3` boolean, `4` null, `5` array, `6` object (`0` unknown). Useful for comparing two values' kinds; to *name* one, use `json_typename$` |
 | `json_typename$(v@) → str` | `"object"`, `"array"`, `"number"`, `"string"`, `"boolean"` or `"null"`; `"unknown"` for a node of no known kind |
 | `json_value(v@) → num` | any node at all as a number, without ever raising: a number is itself, a boolean `1`/`0`, a numeric string its value, and a non-numeric string, null, object or array `0`. A string is numeric when `isnumeric` approves it, so `"nan"`, `"inf"`, `"5"` + NUL and `"1e999"` (number text with no Double) are `0` here — until 2026-10-09 each of those but the NUL made this function **raise** |
-| `json_value$(v@) → str` | any node as a string: a null reads `""`, an object or array its compact JSON text, everything else its own text |
+| `json_value$(v@) → str` | any node as a string: a null reads `""`, an object or array its compact JSON text, everything else its own text. A render the host's execution budget stops is this function's catchable limit error, as it is `json_stringify$`'s -- never `""` (so are `json_gets$`, `json_items$` and `json_paths$` on an object or array) |
 
 ### Dotted paths
 

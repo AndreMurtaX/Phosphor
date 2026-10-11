@@ -250,9 +250,19 @@ begin
 end;
 
 // --- bound functions --------------------------------------------------------
+{ DEFLATE IS PRICED BY ITS INPUT (round 7). Measured (-O2, no ceilings, 2 MB):
+  random bytes 29 ns a byte, English-like text 42 ns at level 6 and 76 ns at
+  level 9 -- the level-9 lazy matcher walks longer chains. Priced at 80 ns
+  whatever the level, on the budget's clock scale (128 milli-units a ns). The
+  CRC pass is in the same price. Decompression is metered by what it writes. }
+const
+  GzipMilliPerByte = 10240;
+
 function f_gzip_compress(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  if not BudgetLinearOk('gzip_compress$', Length(Args[0].Str), GzipMilliPerByte, Err) then
+    Exit(ValStr(''));
   try
     Result := ValStr(GzipWrap(Args[0].Str, 6));
     GzipErr := 0;
@@ -265,6 +275,8 @@ end;
 function f_gzip_compress_lvl(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  if not BudgetLinearOk('gzip_compress$', Length(Args[0].Str), GzipMilliPerByte, Err) then
+    Exit(ValStr(''));
   try
     Result := ValStr(GzipWrap(Args[0].Str, ArgI32(Args[1])));
     GzipErr := 0;
@@ -302,11 +314,15 @@ begin
   end;
 end;
 
-function DoCompressFile(const Src, Dst: String; ALevel: Integer): Boolean;
+function DoCompressFile(const Src, Dst: String; ALevel: Integer;
+                        var Err: TPhosphorError): Boolean;
 var raw: RawByteString;
 begin
   Result := False;
   if not LoadFileStr(Src, raw) then Exit;
+  // The read, charged for what it read; then the deflate, asked before it runs.
+  if not (BudgetLinearAfterOk('gzip_compressfile', Length(raw), BudgetMilliCopy, Err) and
+          BudgetLinearOk('gzip_compressfile', Length(raw), GzipMilliPerByte, Err)) then Exit;
   Result := SaveFileStr(Dst, GzipWrap(raw, ALevel));
 end;
 
@@ -314,7 +330,7 @@ function f_gzip_compressfile(const Args: array of TValue; out Err: TPhosphorErro
 begin
   Err := NoError();
   try
-    if DoCompressFile(Args[0].Str, Args[1].Str, 6) then
+    if DoCompressFile(Args[0].Str, Args[1].Str, 6, Err) then
     begin Result := ValInt(1); GzipErr := 0; end
     else begin Result := ValInt(0); GzipErr := 1; end;
   except
@@ -326,7 +342,7 @@ function f_gzip_compressfile_lvl(const Args: array of TValue; out Err: TPhosphor
 begin
   Err := NoError();
   try
-    if DoCompressFile(Args[0].Str, Args[1].Str, ArgI32(Args[2])) then
+    if DoCompressFile(Args[0].Str, Args[1].Str, ArgI32(Args[2]), Err) then
     begin Result := ValInt(1); GzipErr := 0; end
     else begin Result := ValInt(0); GzipErr := 1; end;
   except

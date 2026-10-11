@@ -22,7 +22,8 @@ unit PhosphorDictLib;
 interface
 
 uses
-  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles;
+  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles,
+  PhosphorBudget;
 
 type
   TPhosphorDict = class
@@ -187,18 +188,38 @@ end;
   contract untestable: a Clear that shortened the count without emptying the
   table is exactly the defect the guard would hide for every question asked
   before the next insert. }
+{ METERED (round 7). The key is hashed whole -- linear in it -- and the probe
+  walks a cluster whose length the KEYS decide: FNV-1a is not collision
+  resistant, so a script can build a dictionary whose keys all land in one run
+  of slots and make every lookup walk all of it. Both are charged as they
+  happen; a lookup that crosses the line still answers (its work is done) and
+  the next consultation of the run refuses. The caller prices the key up front
+  as well (KeyOk), so an oversized key is refused before it is hashed. }
 function TPhosphorDict.IndexOf(const AKey: String): Integer;
-var slot, probes, entry: Integer;
+var slot, probes, entry: Integer; m: TBudgetMeter;
 begin
   Result := -1;
+  BudgetMeterStart(m);
+  if m.On then BudgetMeterAdd(m, Int64(Length(AKey)) * BudgetMilliCopy);
   slot := Integer(HashKey(AKey) and LongWord(FMask));
   for probes := 1 to Length(FBuckets) do
   begin
     entry := FBuckets[slot];
-    if entry = 0 then Exit;          // an empty slot ends the probe: not present
-    if FKeys[entry - 1] = AKey then Exit(entry - 1);
+    if entry = 0 then Break;         // an empty slot ends the probe: not present
+    if m.On then
+    begin
+      BudgetMeterAdd(m, BudgetMilliItem);
+      if Length(FKeys[entry - 1]) = Length(AKey) then
+        BudgetMeterAdd(m, Int64(Length(AKey)) * BudgetMilliScan);
+    end;
+    if FKeys[entry - 1] = AKey then
+    begin
+      Result := entry - 1;
+      Break;
+    end;
     slot := (slot + 1) and FMask;
   end;
+  BudgetMeterEnd(m);
 end;
 
 procedure TPhosphorDict.SetVal(const AKey: String; const AVal: TValue);
@@ -315,6 +336,12 @@ begin Err := NoError(); Result := MakeDict(akString); end;
 function t_pdict_new(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := MakeDict(akPointer); end;
 
+{ RULE 1 for the key every lookup hashes whole: priced before it is hashed. }
+function KeyOk(const AWho, AKey: String; var Err: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearOk(AWho, Length(AKey), BudgetMilliCopy, Err);
+end;
+
 // (handle, key$, value) -> value; returns the dict handle so it reads as a
 // constructor-style call site too.
 function t_dict_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -322,6 +349,7 @@ var d: TPhosphorDict;
 begin
   Result := Args[0];
   if not GetDict(Args[0], d, Err) then Exit;
+  if not KeyOk('dict_set@', Args[1].Str, Err) then Exit;
   d.SetVal(Args[1].Str, Args[2]);
 end;
 
@@ -345,6 +373,7 @@ var d: TPhosphorDict; idx: Integer;
 begin
   Result := AMissing;
   if not GetDict(Args[0], d, Err) then Exit;
+  if not KeyOk('dict_get', Args[1].Str, Err) then Exit;
   idx := d.IndexOf(Args[1].Str);
   if idx >= 0 then Result := d.Vals[idx];
 end;
@@ -382,6 +411,7 @@ var d: TPhosphorDict; idx: Integer;
 begin
   Result := ValInt(-1);
   if not GetDict(Args[0], d, Err) then Exit;
+  if not KeyOk('dict_typeof', Args[1].Str, Err) then Exit;
   idx := d.IndexOf(Args[1].Str);
   if idx >= 0 then Result := ValInt(Ord(d.Vals[idx].Kind));
 end;
@@ -391,6 +421,7 @@ var d: TPhosphorDict; idx: Integer;
 begin
   Result := ValStr('');
   if not GetDict(Args[0], d, Err) then Exit;
+  if not KeyOk('dict_typeof$', Args[1].Str, Err) then Exit;
   idx := d.IndexOf(Args[1].Str);
   if idx < 0 then Exit;                 // absent answers "", never a kind name
   case d.Vals[idx].Kind of
@@ -408,6 +439,7 @@ var d: TPhosphorDict; idx: Integer;
 begin
   Result := Args[2];
   if not GetDict(Args[0], d, Err) then Exit;
+  if not KeyOk('dict_getdef', Args[1].Str, Err) then Exit;
   idx := d.IndexOf(Args[1].Str);
   if idx >= 0 then Result := d.Vals[idx] else Result := Args[2];
 end;
@@ -423,7 +455,9 @@ function t_dict_haskey(const Args: array of TValue; out Err: TPhosphorError): TV
 var d: TPhosphorDict;
 begin
   Result := ValInt(0);
-  if GetDict(Args[0], d, Err) then Result := ValInt(Ord(d.IndexOf(Args[1].Str) >= 0));
+  if not GetDict(Args[0], d, Err) then Exit;
+  if not KeyOk('dict_haskey', Args[1].Str, Err) then Exit;
+  Result := ValInt(Ord(d.IndexOf(Args[1].Str) >= 0));
 end;
 
 function t_dict_remove(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -434,7 +468,10 @@ begin
   // Answer whether anything was actually removed. It used to answer 1 for a key
   // that was never there, which is the one question this call exists to settle --
   // a mutator returns information, the rule arr_set and strings_add follow.
+  if not KeyOk('dict_remove', Args[1].Str, Err) then Exit;
   if d.IndexOf(Args[1].Str) < 0 then Exit;   // absent: nothing removed, answer 0
+  // Every entry after it moves down one, and the whole table is rebuilt.
+  if not BudgetLinearOk('dict_remove', d.Count, BudgetMilliItem, Err) then Exit;
   d.Remove(Args[1].Str);
   Result := ValInt(1);
 end;

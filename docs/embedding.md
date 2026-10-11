@@ -493,10 +493,64 @@ directly at `+` and on the way out of every library call, which is what bounds a
 script that sets only that one; the *work* refusals above still need one of the
 other two.
 
-The rule is kept honest by `scripts/check-budget.py`, one of the eight source
-gates: a loop or an allocation over a script-supplied count must consult the
-budget or be listed as exempt with a reason. Prose rots; this project has learned
-that twice.
+**A pass over what the script already holds is work too.** Until 2026-10-11
+this section said every operation that "can run long" consulted the ceilings,
+and about fifty did not: functions whose work is linear in a string, list,
+dictionary, tree or buffer the script hands them — `ucase$`, `len`, `mid$`,
+`val`, `environ$`, the `path_*` family, `dict_get`, `strings_values$`,
+`json_clone@`, `crypto_equal?` and their siblings. Each such call is one
+instruction however long its argument is, and the clock is read only every 4096
+instructions, so under exactly the ceilings above
+
+```basic
+s$ = string$(50000000, 97)
+for i = 1 to 200
+  r$ = ucase$(s$)        ' ran 18 s; with environ$, 73 s
+next
+```
+
+ran nine to thirty-six times past `TimeoutMs` and answered `rc = 0`. Every such
+pass is now **priced by what it reads**, at a rate measured on the budget's
+clock scale (a unit is 1/128000 of a millisecond of work): a byte scan costs
+0.625 ns a byte, a copy 1 ns, a case rewrite 1.7 ns, a number parse 3.4 ns, an
+OS call over a path 8.3 ns (a file operation's path of 4096 bytes or less is
+the price of its system call and is not asked about, so `file_exists` still
+answers after a script has spent its budget), a list item compared 9 ns, a JSON
+node copied 60 ns
+— the table, and how each figure was measured, is in
+`engine/PhosphorBudget.pas`. A pass whose length the arguments fix is asked
+**before** it runs and refused whole; a walk that a count cuts short (`left$`,
+`mid$` — a malformed string can make one character fifty megabytes long) is
+charged for what it read before the copy that follows; a walk whose cost each
+step decides (a list search, a dictionary probe) is metered as it goes. So the
+loop above now stops at the ceiling with `ucase$: that would take ... units of
+work`, and a legitimate call — `ucase$` of three megabytes, a JSON document of a
+few hundred kilobytes — spends a fraction of a percent of the allowance and runs
+exactly as before. Two quadratics went with it: `strings_delimitedtext` and
+`rag_analyze$` are linear now, and `funcexists?` no longer costs (registry size ×
+name length).
+
+**A refused render is an error, never an empty answer.** `json_value$`,
+`json_gets$`, `json_items$`, `json_paths$`, `rag_analyze$` and
+`rag_retrieve_json$` render JSON text; until 2026-10-11 a render the budget
+stopped came back as `""` and the run reported success. It is now the same
+catchable `peLimit` the function's siblings raise, naming the function.
+
+What is still outside: the work inside an RTL container this engine does not
+own — `TMemIniFile`'s section and key search behind the `cfg_*` functions,
+fpjson's own member table — is not priced per entry, only per byte of what the
+script hands in; and a pass is priced at a rate measured on one machine, so a
+host on hardware several times slower gets the same refusal points and a longer
+wall-clock run to reach them.
+
+The rule is kept honest by `scripts/check-budget.py`, one of the source gates,
+which asks two questions: a loop or an allocation over a script-supplied COUNT
+must consult the budget or be listed as exempt with a reason; and every
+registered function whose work grows with a script-supplied string or container
+must consult it in its own body — a helper that asks for some other part of the
+work does not answer for the pass beside it — or the walker must be exempt with
+the reason one call of it is O(1). Prose rots; this project has learned that
+three times.
 
 Three of those bound how **long** a script runs and the fourth bounds how much
 **heap** it adds; `SandboxRoot`, below, bounds **where** it writes. None of them
@@ -630,8 +684,14 @@ outside all four of them.
   interrupts the instruction underway. A program that never reaches 4096
   instructions is therefore not bounded in wall-clock time at all — which is how
   the three concatenations above finished at 5032 ms under a 2000 ms ceiling. A
-  library call that can run long consults the ceilings itself while it runs; a VM
-  instruction such as `opAdd` does not.
+  library call prices its own work — up front where its arguments fix the size,
+  as it goes where only the walk finds out (see
+  [the ceilings reach inside a library call](#the-ceilings-reach-inside-a-library-call-too)) —
+  so a loop of them is stopped by the budget and not by the 4096-instruction
+  clock; a VM instruction such as `opAdd` does not price itself. The call that
+  crosses the line is not interrupted: a priced pass is refused before it
+  starts, but a metered walk finishes the step it is on, so a run can overshoot
+  the ceiling by one call's step.
 
 - **The network.** `SandboxRoot` is a filesystem ceiling and nothing else, so the
   `http` package reaches the internet whatever the root is. A host that does not

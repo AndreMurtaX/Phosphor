@@ -1481,6 +1481,120 @@ begin
   end;
 end;
 
+{ --- ROUND 7: A PASS OVER WHAT THE SCRIPT HOLDS IS PRICED ----------------
+  A library call is one instruction however long its argument is, and the VM
+  reads its clock every 4096 of them -- so ucase$ of a 50 MB string, 200 times
+  in a loop, ran 18344 ms under MaxSteps 1000000 / TimeoutMs 2000 and reported
+  success. Every pass over a script-supplied string or container is now priced
+  (PhosphorBudget's BudgetMilli* table), and these checks hold it to that.
+
+  CheckTimed is CheckMsg plus the clock: the run must end with peLimit, name the
+  function, AND stop within AMaxMs -- a refusal that arrives after the damage
+  is the defect, not the fix (round 6's lesson about the salt). CheckQuick is
+  the other direction: a legitimate call of ordinary size must SUCCEED, and
+  quickly, because a quadratic that finishes is still a quadratic. }
+procedure CheckTimed(const AName, ASource: String; ASteps, ATimeoutMs: Int64;
+  const AFragment: String; AMaxMs: Int64);
+var
+  eng: TPhosphorEngine;
+  rc: Integer;
+  t0, took: QWord;
+begin
+  eng := TPhosphorEngine.Create();
+  try
+    eng.MaxSteps := ASteps;
+    eng.TimeoutMs := ATimeoutMs;
+    t0 := GetTickCount64();
+    rc := eng.Run(ASource);
+    took := GetTickCount64() - t0;
+    Report((rc <> 0) and (eng.LastError.Code = peLimit) and
+           (Pos(AFragment, eng.LastError.Message) > 0),
+           AName + ' (expected a limit naming "' + AFragment + '", got "' +
+           eng.LastError.Message + '")');
+    Report(took <= QWord(AMaxMs), AName + ' (stopped after ' + IntToStr(took) +
+           ' ms; the bound is ' + IntToStr(AMaxMs) + ')');
+  finally
+    eng.Free;
+  end;
+end;
+
+procedure CheckQuick(const AName, ASource: String; ASteps, ATimeoutMs: Int64;
+  AMaxMs: Int64);
+var
+  eng: TPhosphorEngine;
+  rc: Integer;
+  t0, took: QWord;
+begin
+  eng := TPhosphorEngine.Create();
+  try
+    eng.MaxSteps := ASteps;
+    eng.TimeoutMs := ATimeoutMs;
+    t0 := GetTickCount64();
+    rc := eng.Run(ASource);
+    took := GetTickCount64() - t0;
+    Report(rc = 0, AName + ' (expected success, got "' + eng.ErrorMessage + '")');
+    Report(took <= QWord(AMaxMs), AName + ' (took ' + IntToStr(took) +
+           ' ms; the bound is ' + IntToStr(AMaxMs) + ')');
+  finally
+    eng.Free;
+  end;
+end;
+
+{ A loop of ACount calls of AStmt. }
+function Loop(ACount: Integer; const AStmt: String): String;
+begin
+  Result := 'for i = 1 to ' + IntToStr(ACount) + LF + AStmt + LF + 'next' + LF;
+end;
+
+{ Milliseconds, best of two, to build a query of AWords distinct words ending
+  in "$" (both dedups see them) and analyse it ATimes, with no ceilings. -1 if
+  the run failed, which must not read as fast. }
+function RagMs(AWords, ATimes: Integer): Int64;
+var
+  eng: TPhosphorEngine;
+  src: String;
+  trial: Integer;
+  t0, dt: QWord;
+begin
+  src := 'l@ = strings@()' + LF +
+         'for i = 1 to ' + IntToStr(AWords) + LF +
+         'n = strings_add(l@, "w" + str$(i) + "$")' + LF + 'next' + LF +
+         'n = strings_linebreak(l@, " ")' + LF + 'q$ = strings_text$(l@)' + LF +
+         'r@ = rag@("")' + LF +
+         'for k = 1 to ' + IntToStr(ATimes) + LF + 'a$ = rag_analyze$(r@, q$)' + LF + 'next' + LF;
+  Result := High(Int64);
+  for trial := 1 to 2 do
+  begin
+    eng := TPhosphorEngine.Create();
+    try
+      t0 := GetTickCount64();
+      if eng.Run(src) <> 0 then Exit(-1);
+      dt := GetTickCount64() - t0;
+      if Int64(dt) < Result then Result := Int64(dt);
+    finally
+      eng.Free;
+    end;
+  end;
+end;
+
+procedure CheckRagScale;
+var small8, big, limit: Int64;
+begin
+  small8 := RagMs(5000, 8);
+  big := RagMs(40000, 1);
+  if (small8 < 0) or (big < 0) then
+  begin
+    Report(False, 'rag_analyze$ scale: a run failed');
+    Exit;
+  end;
+  limit := 2 * small8;
+  if limit < 48 then limit := 48;
+  Writeln(Format('scale: rag_analyze$: %d ms for 40000 words once, %d ms for 5000 eight times (limit %d)',
+                 [big, small8, limit]));
+  Report(big <= limit, 'rag_analyze$ costs what the query weighs: eight times the words, ' +
+                       'not sixty-four times the time');
+end;
+
 procedure CheckFaultEscapes(const AName, ASource: String);
 var
   eng: TPhosphorEngine;
@@ -1604,6 +1718,194 @@ begin
         'r$ = password_hash$("pw")' + LF +
         'if password_verify?("pw", r$) = false then x = 1 / 0' + LF,
         1000000, 0, 0, False);
+
+  { --- round 7: every linear pass is priced, by its measured family --------
+    THE EXACT REFUSAL POINTS, under MaxSteps = 100000 alone (no clock, so the
+    arithmetic is the whole story): the allowance is 100000 * 256 = 25600000
+    units, string$(1000000, c) costs 1000000 of them (RunOf asks one a byte),
+    and each call is ceil(bytes * price / 1000) for its family's price in
+    PhosphorBudget. A pass asked up front (BudgetLinearOk) is refused, without
+    latching, at the first call whose price exceeds what is left; a walk charged
+    after it ran (BudgetLinearAfterOk) and a metered walk latch at the call that
+    crosses the line. The old code charged nothing for any of these and ran all
+    of its calls. }
+  // ucase$, REWRITE 216: 216000 a call; 24600000 / 216000 = 113.9, so 113 calls
+  // spend 24408000 and leave 192000 for the 114th.
+  CheckMsg('ucase$ is priced per byte (REWRITE)',
+           'r$ = string$(1000000, 97)' + LF + Loop(200, 's$ = ucase$(r$)'),
+           100000, 0, 'ucase$: that would take 216000 units of work and only 192000 are left');
+  // len, SCAN 80: 80000 a call; 307 calls spend 24560000 and leave 40000.
+  CheckMsg('len is priced per byte (SCAN)',
+           'r$ = string$(1000000, 97)' + LF + Loop(400, 'n = len(r$)'),
+           100000, 0, 'len: that would take 80000 units of work and only 40000 are left');
+  // val, NUMBER 432: 432000 a call; 56 calls spend 24192000 and leave 408000.
+  CheckMsg('val is priced per byte (NUMBER)',
+           'z$ = string$(1000000, 48)' + LF + Loop(200, 'n = val(z$)'),
+           100000, 0, 'val: that would take 432000 units of work and only 408000 are left');
+  // environ$, OS 1064: 1064000 a call; 23 calls spend 24472000 and leave 128000.
+  CheckMsg('environ$ is priced per byte (OS)',
+           'r$ = string$(1000000, 97)' + LF + Loop(200, 'e$ = environ$(r$)'),
+           100000, 0, 'environ$: that would take 1064000 units of work and only 128000 are left');
+  // funcexists?, its own 320 (2.5 ns a byte, PhosphorCallLib): 320000 a call;
+  // 24600000 / 320000 = 76.9, so 76 calls spend 24320000 and leave 280000.
+  CheckMsg('funcexists? is priced per byte',
+           'r$ = string$(1000000, 97)' + LF + Loop(200, 'b? = funcexists?(r$)'),
+           100000, 0, 'funcexists?: that would take 320000 units of work and only 280000 are left');
+  // strcmp, SCAN over the shorter: two strings cost 2000000; 80000 a call;
+  // 23600000 / 80000 = 295 exactly, so the 296th finds 0 left.
+  CheckMsg('strcmp is priced by the shorter argument (SCAN)',
+           'r$ = string$(1000000, 97)' + LF + 't$ = string$(1000000, 97)' + LF +
+           Loop(400, 'n = strcmp(r$, t$)'),
+           100000, 0, 'strcmp: that would take 80000 units of work and only 0 are left');
+  CheckMsg('crypto_equal? is priced by the shorter argument (SCAN)',
+           'r$ = string$(1000000, 97)' + LF + 't$ = string$(1000000, 97)' + LF +
+           Loop(400, 'b? = crypto_equal?(r$, t$)'),
+           100000, 0, 'crypto_equal?: that would take 80000 units of work and only 0 are left');
+  // path_getfilename$, COPY 128: 128000 a call; 192 calls spend 24576000.
+  CheckMsg('path_getfilename$ is priced per byte (COPY)',
+           'r$ = string$(1000000, 97)' + LF + Loop(300, 'f$ = path_getfilename$(r$)'),
+           100000, 0, 'path_getfilename$: that would take 128000 units of work and only 24000 are left');
+  // left$ walks to the count, and is charged for what it walked AFTER the walk
+  // (COPY 128): 1000000 + 128000 k passes 25600000 at k = 193, which latches.
+  CheckMsg('left$ is charged for the walk it made',
+           'r$ = string$(1000000, 97)' + LF + Loop(300, 's$ = left$(r$, 1000000)'),
+           100000, 0, 'left$: the run has spent its step budget of 100000 inside library calls');
+  // ...and a short left$ of the same string costs three characters, not the
+  // string: 300 of them are 3 * 128 / 1000 -> 1 unit each.
+  Check('left$ of three characters of a long string is cheap',
+        'r$ = string$(1000000, 97)' + LF + Loop(300, 's$ = left$(r$, 3)'),
+        100000, 0, 0, False);
+  // dict_haskey: the key is priced before it is hashed (COPY, 128000), and the
+  // hash is metered again inside IndexOf (128000 more, charged at its end). So
+  // a call costs 256000 and is ASKED 128000: after 95 calls 280000 is left, the
+  // 96th is allowed and leaves 24000, and the 97th is refused.
+  CheckMsg('dict_haskey is priced by its key',
+           'r$ = string$(1000000, 97)' + LF + 'd@ = dict@()' + LF +
+           Loop(200, 'n = dict_haskey(d@, r$)'),
+           100000, 0, 'dict_haskey: that would take 128000 units of work and only 24000 are left');
+  // strings_values$ is metered per line: NAMEITEM 4096 + 2 bytes of name at
+  // COPY 128 = 4352 milli a line, 435200 units a call over 100000 lines. The
+  // list costs mulstring$'s 400000 and strings_text's 400000 * 2.08 = 832000;
+  // 24368000 left buys 55 calls (23936000), and the 56th latches mid-walk.
+  CheckMsg('strings_values$ is metered per line',
+           'l@ = strings@()' + LF +
+           'n = strings_text(l@, mulstring$("k=v" + chr$(10), 100000))' + LF +
+           Loop(200, 'v$ = strings_values$(l@, "zzz")'),
+           100000, 0, 'strings_values$: the run has spent its step budget of 100000 inside library calls');
+  // json_clone@ is priced per node, before it copies (CLONE 7680 milli): a
+  // 100001-element array is 768008 units a clone.
+  CheckMsg('json_clone@ is priced per node before it copies',
+           'j@ = json_parse@("[" + mulstring$("1,", 100000) + "1]")' + LF +
+           Loop(200, 'c@ = json_clone@(j@)' + LF + 'n = json_free(c@)'),
+           100000, 0, 'json_clone@: the run has spent its step budget of 100000 inside library calls');
+
+  { THE SAME, UNDER THE PAIR docs/embedding.md PRESCRIBES (MaxSteps 1000000,
+    TimeoutMs 2000), on the findings' own shapes -- each ran 6 to 45 times past
+    the clock and reported success. Each must now stop with the function named
+    within 3000 ms: the ceiling plus one call. }
+  CheckTimed('ucase$ x200 of 50 MB stops at the ceiling',
+             'r$ = string$(50000000, 97)' + LF + Loop(200, 's$ = ucase$(r$)'),
+             1000000, 2000, 'ucase$: ', 3000);
+  CheckTimed('environ$ x200 of 50 MB stops at the ceiling',
+             'r$ = string$(50000000, 97)' + LF + Loop(200, 'e$ = environ$(r$)'),
+             1000000, 2000, 'environ$: ', 3000);
+  CheckTimed('funcexists? x200 of 10 MB stops at the ceiling',
+             'r$ = string$(10000000, 97)' + LF + Loop(200, 'b? = funcexists?(r$)'),
+             1000000, 2000, 'funcexists?: ', 3000);
+  CheckTimed('strings_values$ x200 over 2000000 lines stops at the ceiling',
+             'l@ = strings@()' + LF +
+             'n = strings_text(l@, mulstring$("k=v" + chr$(10), 2000000))' + LF +
+             Loop(200, 'v$ = strings_values$(l@, "zzz")'),
+             1000000, 2000, 'strings_values$: ', 3000);
+  CheckTimed('json_clone@ x200 of 1000001 nodes stops at the ceiling',
+             'j@ = json_parse@("[" + mulstring$("1,", 1000000) + "1]")' + LF +
+             Loop(200, 'c@ = json_clone@(j@)' + LF + 'n = json_free(c@)'),
+             1000000, 2000, 'json_clone@: ', 3000);
+  CheckTimed('dict_get x200 with a 50 MB key stops at the ceiling',
+             'r$ = string$(50000000, 97)' + LF + 'd@ = dict@()' + LF +
+             Loop(200, 'n = dict_get(d@, r$)'),
+             1000000, 2000, 'dict_get: ', 3000);
+  { JsonText's swallowed refusal: json_value$ of a 30 MB array answered "" on its
+    eighth call and the run reported success. A render the budget stops is now
+    the peLimit of the function that asked for it. }
+  CheckTimed('json_value$ reports a render the budget stopped',
+             's$ = "[" + chr$(34) + string$(30000000, 97) + chr$(34) + "]"' + LF +
+             'j@ = json_parse@(s$)' + LF + Loop(8, 'v$ = json_value$(j@)'),
+             1000000, 2000, 'json_value$: ', 3000);
+  { rag_analyze$, now LINEAR (its dedup was quadratic) and priced by the query:
+    40000 words "w1 w2 ..." are 268894 bytes (188894 digits, 40000 w's and a
+    separator after each), at RagAnalyzeMilliPerByte 1216000 = 326975104
+    units: more than the whole 256000000 allowance, so it is refused up front. }
+  CheckTimed('rag_analyze$ of a 40000-word query is refused up front',
+             'l@ = strings@()' + LF + Loop(40000, 'n = strings_add(l@, "w" + str$(i))') +
+             'n = strings_linebreak(l@, " ")' + LF + 'q$ = strings_text$(l@)' + LF +
+             'r@ = rag@("")' + LF + 'a$ = rag_analyze$(r@, q$)' + LF,
+             1000000, 2000, 'rag_analyze$: that would take 326975104 units', 3000);
+
+  { AND THE LEGITIMATE CALLS OF ORDINARY SIZE STILL RUN, under the pair, and
+    quickly. strings_delimitedtext was QUADRATIC: one call on four megabytes
+    took 19484 ms and succeeded -- a success check alone would pass it, so each
+    of these is bounded in time as well. }
+  CheckQuick('strings_delimitedtext of 4 MB is linear',
+             'l@ = strings@()' + LF + 'n = strings_delimitedtext(l@, mulstring$("a,", 2000000))' + LF +
+             'if n <> 2000001 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  CheckQuick('count and line$ of a 1 MB text split nothing',
+             't$ = mulstring$("ab" + chr$(13) + chr$(10), 350000)' + LF +
+             'if count(t$) <> 350001 then x = 1 / 0' + LF +
+             'if line$(t$, 350000) <> "ab" then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  CheckQuick('ucase$ of 3 MB once',
+             's$ = ucase$(string$(3000000, 97))' + LF +
+             'if bytelen(s$) <> 3000000 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  // 75001 elements rendered compact: 75000 "123" and one "1", ", " between
+  // each pair (JsonWrite's array branch), and the brackets:
+  // 225000 + 1 + 75000 * 2 + 2 = 375003 bytes.
+  CheckQuick('json of a few hundred kilobytes parses and renders',
+             'j@ = json_parse@("[" + mulstring$("123,", 75000) + "1]")' + LF +
+             's$ = json_stringify$(j@)' + LF +
+             'if bytelen(s$) <> 375003 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  CheckQuick('rag_analyze$ of an ordinary question',
+             'r@ = rag@("")' + LF +
+             'a$ = rag_analyze$(r@, "how do I read a json file and sort the keys")' + LF +
+             'if bytelen(a$) = 0 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  { The two other quadratics, at a size the budget ALLOWS -- so only their
+    speed can fail these. rag_analyze$ deduplicated by scanning everything kept
+    (20000 "$" words: 2891 ms, past the clock); a query of them is 148894 bytes,
+    181 million units at RagAnalyzeMilliPerByte, inside the allowance, and runs
+    in under a second now. wordcount's SplitBy reallocated its slots once per
+    piece (4 million pieces: about 2 s; ten million: 12197 ms). }
+  CheckQuick('rag_analyze$ of 20000 distinct words is linear',
+             'l@ = strings@()' + LF + Loop(20000, 'n = strings_add(l@, "w" + str$(i) + "$")') +
+             'n = strings_linebreak(l@, " ")' + LF + 'q$ = strings_text$(l@)' + LF +
+             'r@ = rag@("")' + LF + 'a$ = rag_analyze$(r@, q$)' + LF +
+             'if bytelen(a$) = 0 then x = 1 / 0' + LF,
+             1000000, 2000, 3000);
+  { That check can be met by a quadratic dedup: at the largest query the budget
+    allows, the dedup's share is a second or so beside the intent scoring that
+    dominates. So the SHAPE is measured too, with no ceilings, the way
+    CheckNameTablesScale measures the name tables: a query of 5000 words
+    analysed eight times against one of 40000 analysed once. Linear, the two
+    cost the same; the old dedup made the second about six times the first
+    (1593 against 10172 ms at 40000). Best of two, threshold 2: linear measured
+    1.1, and the old dedup in ExtractKeywords ALONE measured 2.8. }
+  CheckRagScale();
+  CheckQuick('wordcount of 4000000 pieces is linear',
+             'if wordcount(mulstring$("a,", 4000000), ",") <> 4000001 then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
+  { Every file operation prices its PATH at the door (IoGate): a 50 MB path is
+    53200000 units at the OS rate, so the fourth file_exists of one is refused
+    -- and it is REPORTED, as file_exists's peLimit, not answered 0. }
+  CheckTimed('file_exists x200 of a 50 MB path stops at the ceiling',
+             'r$ = string$(50000000, 97)' + LF + Loop(200, 'n = file_exists(r$)'),
+             1000000, 2000, 'file_exists: ', 3000);
+  CheckQuick('funcexists? of a 50 MB name is one linear pass',
+             'b? = funcexists?(string$(50000000, 97))' + LF +
+             'if b? = true then x = 1 / 0' + LF,
+             1000000, 2000, 1500);
 
   { --- a fault in the interpreter; see the section above --------------------- }
 

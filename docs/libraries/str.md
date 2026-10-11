@@ -137,9 +137,14 @@ character boundary.
 ### Replace and edit
 
 All positions are base-1 codepoint positions and all four clamp. The edits
-cannot fail; the two replaces refuse a text or an answer of 2147483647 bytes or
-more (see the size rule at the top), and every search is priced against the
-host's execution budget.
+cannot fail on their arguments; the two replaces refuse a text or an answer of
+2147483647 bytes or more (see the size rule at the top), and every search is
+priced against the host's execution budget. So is every other pass over a
+string in this library -- the case functions, `len`, the slicers, the trims, the
+predicates, `val` and the rest -- by the bytes it reads, so under a host's
+ceilings a loop of them over a large string ends in the function's own catchable
+limit error instead of running past the clock
+([embedding](../embedding.md#the-ceilings-reach-inside-a-library-call-too)).
 
 | function | what it answers |
 | --- | --- |

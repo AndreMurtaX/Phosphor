@@ -318,6 +318,7 @@ begin
   if not GetBuf('buffer_fill', A[0], b, E) then Exit;
   v := ArgI64(A[1]);
   if not CheckByte('buffer_fill', v, E) then Exit;
+  if not BudgetLinearOk('buffer_fill', Length(b.Data), BudgetMilliBlock, E) then Exit;
   if Length(b.Data) > 0 then
     FillChar(b.Data[1], Length(b.Data), Byte(v));
   Result := ValInt(Length(b.Data));              // bytes filled
@@ -333,6 +334,7 @@ begin
   if not CheckRange('buffer_fillrange', Length(b.Data), p, n, E) then Exit;
   v := ArgI64(A[3]);
   if not CheckByte('buffer_fillrange', v, E) then Exit;
+  if not BudgetLinearOk('buffer_fillrange', n, BudgetMilliBlock, E) then Exit;
   if n > 0 then
     FillChar(b.Data[Integer(p)], Integer(n), Byte(v));
   Result := ValInt(n);                           // bytes filled
@@ -355,6 +357,7 @@ begin
   p := ArgI64(A[1]);
   n := ArgI64(A[2]);
   if not CheckRange('buffer_slice$', Length(b.Data), p, n, E) then Exit;
+  if not BudgetLinearOk('buffer_slice$', n, BudgetMilliCopy, E) then Exit;
   Result := ValStr(Copy(b.Data, Integer(p), Integer(n)));   // Copy, never concatenation
 end;
 
@@ -366,6 +369,7 @@ begin
   p := ArgI64(A[1]);
   s := A[2].Str;
   if not CheckRange('buffer_write', Length(b.Data), p, Length(s), E) then Exit;
+  if not BudgetLinearOk('buffer_write', Length(s), BudgetMilliBlock, E) then Exit;
   if Length(s) > 0 then
     Move(s[1], b.Data[Integer(p)], Length(s));
   Result := ValInt(Length(s));                   // bytes written
@@ -382,6 +386,7 @@ begin
   n  := ArgI64(A[4]);
   if not CheckRange('buffer_copy (source)', Length(src.Data), sp, n, E) then Exit;
   if not CheckRange('buffer_copy (destination)', Length(dst.Data), dp, n, E) then Exit;
+  if not BudgetLinearOk('buffer_copy', n, BudgetMilliBlock, E) then Exit;
   // Move, not a manual loop: it is defined for OVERLAPPING regions, so copying a
   // buffer onto itself (dst@ = src@) to shift bytes left or right is correct.
   if n > 0 then
@@ -466,6 +471,7 @@ begin
   if not GetBuf('buffer_equal', A[0], x, E) then Exit;
   if not GetBuf('buffer_equal', A[1], y, E) then Exit;
   if Length(x.Data) <> Length(y.Data) then Exit;
+  if not BudgetLinearOk('buffer_equal', Length(x.Data), BudgetMilliScan, E) then Exit;
   Result := ValInt(Ord((Length(x.Data) = 0) or
                        (CompareByte(x.Data[1], y.Data[1], Length(x.Data)) = 0)));
 end;

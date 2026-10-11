@@ -28,7 +28,14 @@ procedure RegisterJsonFuncs(Reg: TPhosphorRegistry);
 { Byte-exact JSON text for a node -- see the long note above the implementation.
   Exported because a sibling library that builds fpjson trees (the RAG index, the
   SQLite package) must not fall back on AsJSON, which re-encodes every byte >= $80. }
-function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
+{ A REFUSED RENDER IS AN ERROR, NEVER A VALUE (round 7). This used to answer ''
+  for a render the budget stopped (or a number with no JSON text), and its
+  callers handed that '' back as the answer: json_value$ of a 30 MB array printed
+  0 bytes and the run reported success; rag_analyze$ answered "" for a long
+  query. Now '' comes with Err set -- the budget's peLimit naming AWho, or the
+  out-of-range-number error -- and every caller returns Err. }
+function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer;
+                  const AWho: String; var Err: TPhosphorError): String;
 
 { Bridge for a sibling library (e.g. the opt-in SQLite package) that needs to
   build or read JSON handles WITHOUT duplicating the wrapper. JsonRegisterNode
@@ -463,15 +470,79 @@ begin
     Err := NoError();
 end;
 
-function NodeContains(ARoot, ATarget: TJSONData): Boolean;
+{ METERED (round 7): it walks every node of ARoot, and json_merge@ asks it of
+  both trees on every call -- 200 merges of a 2-million-node tree ran 2500 ms
+  under a 2000 ms ceiling. A spent budget stops the walk; the caller asks
+  BudgetSpent and reports. }
+function NodeContains(ARoot, ATarget: TJSONData; var M: TBudgetMeter): Boolean;
 var i: Integer;
 begin
   if (ARoot = nil) or (ATarget = nil) then Exit(False);
   if ARoot = ATarget then Exit(True);
   Result := False;
+  if M.On and not BudgetMeterAdd(M, BudgetMilliItem) then Exit;
   if ARoot.JSONType in [jtObject, jtArray] then
     for i := 0 to ARoot.Count - 1 do
-      if NodeContains(ARoot.Items[i], ATarget) then Exit(True);
+      if NodeContains(ARoot.Items[i], ATarget, M) then Exit(True);
+end;
+
+const
+  { THE PRICES OF A TREE (round 7), measured as PhosphorBudget's BudgetMilli*
+    table is (-O2, no ceilings, setup subtracted), in milli-units at 128 per ns:
+
+      json_clone@ of a 1000001-node array     59.4 ms   59 ns a node   -> 7680
+      json_parse@ of "[1,1,...]" (2 MB)       576 ns a node, 288 ns a byte
+      json_parse@ of 500000 short strings     470 ns a node,  43 ns a byte
+                                 -> 600 ns a node (76800) + 4 ns a byte (512)
+      json_stringify$ of a million numbers    188 ns a node, beyond its bytes
+                                 -> 24 units a node (BufAdd charges the bytes)
+      json_keys@ of 200000 members            121 ns a key            -> 15616
+
+    A parse cannot know its node count before it parses, so it COUNTS: one pass
+    over the text for the characters that open a value -- a comma, a colon, an
+    opening bracket or brace -- a count that can only over-estimate (a string
+    holding a comma counts it), and
+    the pass is itself charged before it is made, as BudgetSearchCost's is. }
+  JsonCloneMilliPerNode = 7680;
+  JsonParseMilliPerNode = 76800;
+  JsonParseMilliPerByte = 512;
+  JsonRenderUnitsPerNode = 24;
+  JsonKeyMilli = 15616;
+
+{ Charge a deep copy of N, node by node, BEFORE it is made. }
+function CloneMetered(N: TJSONData; var M: TBudgetMeter): Boolean;
+var i: Integer;
+begin
+  Result := True;
+  if N = nil then Exit;
+  if not BudgetMeterAdd(M, JsonCloneMilliPerNode) then Exit(False);
+  if N.JSONType in [jtObject, jtArray] then
+    for i := 0 to N.Count - 1 do
+      if not CloneMetered(N.Items[i], M) then Exit(False);
+end;
+
+{ N.Clone, priced first. nil with Err set when the budget refuses it. With no
+  budget installed the tree is not walked at all. }
+function PricedClone(const AWho: String; N: TJSONData; var Err: TPhosphorError): TJSONData;
+var m: TBudgetMeter;
+begin
+  Result := nil;
+  BudgetMeterStart(m);
+  if m.On and not (CloneMetered(N, m) and BudgetMeterEnd(m)) then
+  begin
+    Err := BudgetRefusal(AWho);
+    Exit;
+  end;
+  Result := N.Clone;
+end;
+
+{ An upper bound on the values a parse of AText makes: see the table above. }
+function JsonValueOpeners(const AText: String): Int64;
+var i: SizeInt;
+begin
+  Result := 1;
+  for i := 1 to Length(AText) do
+    if AText[i] in [',', ':', '[', '{'] then Inc(Result);
 end;
 
 { THE VIEWS OF A DYING SUBTREE DIE WITH IT (2026-10-08, second adversarial round).
@@ -606,6 +677,13 @@ function SetMember(O: TJSONObject; ALevel: Integer; const K: String;
   V: TJSONData; out Err: TPhosphorError): Boolean;
 var idx: Integer;
 begin
+  Err := NoError();
+  // StoredNameLength reads the whole name before the 255-byte cap can refuse it.
+  if not BudgetLinearOk('json member name', Length(K), BudgetMilliScan, Err) then
+  begin
+    V.Free;
+    Exit(False);
+  end;
   if GraftTooDeep(ALevel, V, Err) then
   begin
     V.Free;
@@ -663,8 +741,8 @@ end;
   (FirstWildNumber refuses the document), but a sibling package that builds a
   tree itself can -- the SQLite one adds a REAL column with Add(name, Double),
   and SQLite stores 1e999 as +Inf -- and that, too, reads 0 rather than raising. }
-function NumVal(N: TJSONData): TValue;
-var d: Double; r: TNumberText;
+function NumVal(N: TJSONData; const AWho: String; var Err: TPhosphorError): TValue;
+var d: Double; r: TNumberText; s: String;
 begin
   case N.JSONType of
     jtNumber:
@@ -685,7 +763,10 @@ begin
       if N.AsBoolean then Result := ValInt(1) else Result := ValInt(0);
     jtString:
       begin
-        r := ReadNumberText(TrimNumberSpace(N.AsString));
+        // A numeric string is read whole, and a script can make it 50 MB.
+        s := N.AsString;
+        if not BudgetLinearOk(AWho, Length(s), BudgetMilliNumber, Err) then Exit(ValInt(0));
+        r := ReadNumberText(TrimNumberSpace(s));
         if r.Ok and IsFiniteD(r.Value) then Result := ValDouble(r.Value)
         else Result := ValInt(0);
       end;
@@ -854,6 +935,11 @@ var
   a: TJSONArray;
 begin
   if B.Spent or B.Wild then Exit;
+  { EACH NODE, as well as each byte (round 7). BufAdd charges the bytes; a node
+    costs far more than its bytes -- a number's AsJSON is a float formatting --
+    and json_stringify$ of a million-number array charged 3M units for 188 ms of
+    work, which is 24M on the clock scale. }
+  if not BudgetCharge(JsonRenderUnitsPerNode) then begin B.Spent := True; Exit; end;
   if N = nil then begin BufAdd(B, 'null'); Exit; end;
   case N.JSONType of
     jtString:
@@ -991,11 +1077,6 @@ begin
   end;
 end;
 
-function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer): String;
-begin
-  if JsonTextTry(N, APretty, AIndent, ALevel, Result) <> jtrOk then Result := '';
-end;
-
 { Named for the caller, the way BudgetRefusal is, so `on error goto` reads which
   function stopped and why. }
 function WildRefusal(const AFn: String): TPhosphorError;
@@ -1004,12 +1085,22 @@ begin
     ': a number in the document is out of range and has no JSON text');
 end;
 
+function JsonText(N: TJSONData; APretty: Boolean; AIndent, ALevel: Integer;
+                  const AWho: String; var Err: TPhosphorError): String;
+begin
+  case JsonTextTry(N, APretty, AIndent, ALevel, Result) of
+    jtrBudget: begin Err := BudgetRefusal(AWho); Result := ''; end;
+    jtrWild:   begin Err := WildRefusal(AWho); Result := ''; end;
+  end;
+end;
+
 { Read any node as a string without raising: null is "", an object/array is its
-  compact JSON text, everything else its AsString. }
-function StrVal(N: TJSONData): String;
+  compact JSON text, everything else its AsString. A render the budget stops is
+  reported through Err (see JsonText), never answered as "". }
+function StrVal(N: TJSONData; const AWho: String; var Err: TPhosphorError): String;
 begin
   if (N = nil) or (N.JSONType = jtNull) then Result := ''
-  else if N.JSONType in [jtObject, jtArray] then Result := JsonText(N, False, 2, 0)
+  else if N.JSONType in [jtObject, jtArray] then Result := JsonText(N, False, 2, 0, AWho, Err)
   else Result := N.AsString;
 end;
 
@@ -2333,6 +2424,15 @@ var
   respelled, budget: Boolean;
 begin
   Result := ValInt(0);
+  Err := NoError();
+  { RULE 1, from the table above JsonValueOpeners: the counting pass first (it
+    is a pass, and is charged before it is made), then the values it counted
+    and the bytes. With no budget the count is not taken. }
+  if BudgetActive() then
+    if not (BudgetLinearOk('json_parse@', Length(Args[0].Str), BudgetMilliScan, Err) and
+            BudgetLinearOk('json_parse@', JsonValueOpeners(Args[0].Str), JsonParseMilliPerNode, Err) and
+            BudgetLinearOk('json_parse@', Length(Args[0].Str), JsonParseMilliPerByte, Err)) then
+      Exit;
   // Before the parser is entered at all -- see the note above JsonNestsTooDeep.
   if JsonNestsTooDeep(Args[0].Str, MaxJsonDepth, pos) then
   begin
@@ -2480,7 +2580,7 @@ begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
   m := FindMember(o, Args[1].Str);
-  if m <> nil then Result := NumVal(m)
+  if m <> nil then Result := NumVal(m, 'json_getn', Err)
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_gets(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -2489,7 +2589,7 @@ begin
   Result := ValStr('');
   if not GetObj(Args[0], o, Err) then Exit;
   m := FindMember(o, Args[1].Str);
-  if m <> nil then Result := ValStr(StrVal(m))
+  if m <> nil then Result := ValStr(StrVal(m, 'json_gets$', Err))
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_getb(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -2565,7 +2665,7 @@ begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
   z := ArgI32(Args[1]) - 1;
-  if (z >= 0) and (z < a.Count) then Result := NumVal(a.Items[z])
+  if (z >= 0) and (z < a.Count) then Result := NumVal(a.Items[z], 'json_itemn', Err)
   else if Length(Args) >= 3 then Result := Args[2]
   else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
     [z + 1, a.Count]));
@@ -2576,7 +2676,7 @@ begin
   Result := ValStr('');
   if not GetArr(Args[0], a, Err) then Exit;
   z := ArgI32(Args[1]) - 1;
-  if (z >= 0) and (z < a.Count) then Result := ValStr(StrVal(a.Items[z]))
+  if (z >= 0) and (z < a.Count) then Result := ValStr(StrVal(a.Items[z], 'json_items$', Err))
   else if Length(Args) >= 3 then Result := Args[2]
   else Err := MakeError(peRuntime, Format('json array index %d out of bounds 1..%d',
     [z + 1, a.Count]));
@@ -2616,6 +2716,13 @@ begin
 end;
 
 // --- dotted path ------------------------------------------------------------
+{ A path is split at every '.' and each segment looked up: linear in the path,
+  at the price of text split into items. }
+function PathOk(const AWho, APath: String; var Err: TPhosphorError): Boolean;
+begin
+  Result := BudgetLinearOk(AWho, Length(APath), BudgetMilliText, Err);
+end;
+
 function NavPath(Root: TJSONData; const Path: String; out Node: TJSONData): Boolean;
 var start, i, plen: Integer; part: String; cur: TJSONData;
 begin
@@ -2642,7 +2749,8 @@ var root, n: TJSONData;
 begin
   Result := ValStr('');
   if not GetNode(Args[0], root, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := ValStr(StrVal(n))
+  if not PathOk('json_paths$', Args[1].Str, Err) then Exit;
+  if NavPath(root, Args[1].Str, n) then Result := ValStr(StrVal(n, 'json_paths$', Err))
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 function t_json_pathn(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -2650,7 +2758,8 @@ var root, n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
-  if NavPath(root, Args[1].Str, n) then Result := NumVal(n)
+  if not PathOk('json_pathn', Args[1].Str, Err) then Exit;
+  if NavPath(root, Args[1].Str, n) then Result := NumVal(n, 'json_pathn', Err)
   else if Length(Args) >= 3 then Result := Args[2];
 end;
 
@@ -2688,13 +2797,13 @@ begin
   // json_value(json_string@("hello")) aborted the program with the RTL's own
   // "Invalid float value : hello". NumVal already reads a numeric string, answers
   // 0 for anything else, and cannot raise -- which is what a READER must do.
-  Result := NumVal(n);
+  Result := NumVal(n, 'json_value', Err);
 end;
 function t_json_value_s(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var n: TJSONData;
 begin
   Result := ValStr('');
-  if GetNode(Args[0], n, Err) then Result := ValStr(StrVal(n));
+  if GetNode(Args[0], n, Err) then Result := ValStr(StrVal(n, 'json_value$', Err));
 end;
 
 // --- type predicates and code -----------------------------------------------
@@ -2735,8 +2844,10 @@ begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
   if not GetNode(Args[2], v, Err) then Exit;
-  // clone: the object owns its own copy
-  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str, v.Clone, Err) then Exit;
+  // clone: the object owns its own copy, priced before it is made
+  v := PricedClone('json_set@', v, Err);
+  if v = nil then Exit;
+  if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str, v, Err) then Exit;
   Result := Args[0];
 end;
 
@@ -2763,7 +2874,9 @@ begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
   if not GetNode(Args[1], v, Err) then Exit;
-  if not AddItem(a, JsonLevelOf(Args[0]), v.Clone, Err) then Exit;
+  v := PricedClone('json_push@', v, Err);
+  if v = nil then Exit;
+  if not AddItem(a, JsonLevelOf(Args[0]), v, Err) then Exit;
   Result := Args[0];
 end;
 
@@ -2824,6 +2937,8 @@ var o: TJSONObject; arr: TJSONArray; i: Integer;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
+  // A fresh string node per member.
+  if not BudgetLinearOk('json_keys@', o.Count, JsonKeyMilli, Err) then Exit;
   arr := TJSONArray.Create();
   // Add(TJSONData), like every other array store here. The plain-string overload
   // re-encoded each name, which happened to CANCEL the loss fpjson's name hash
@@ -2841,6 +2956,7 @@ var root, n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
+  if not PathOk('json_pathb', Args[1].Str, Err) then Exit;
   if NavPath(root, Args[1].Str, n) and (n.JSONType = jtBoolean) then
     Result := ValInt(Ord(n.AsBoolean));
 end;
@@ -2849,6 +2965,7 @@ var root, n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], root, Err) then Exit;
+  if not PathOk('json_path@', Args[1].Str, Err) then Exit;
   if not NavPath(root, Args[1].Str, n) then
   begin
     Err := MakeError(peRuntime, 'no such json path');
@@ -2864,7 +2981,9 @@ var n: TJSONData;
 begin
   Result := ValInt(0);
   if not GetNode(Args[0], n, Err) then Exit;
-  Result := RegNewRoot(n.Clone);   // a clone owns itself: a new root
+  n := PricedClone('json_clone@', n, Err);
+  if n = nil then Exit;
+  Result := RegNewRoot(n);   // a clone owns itself: a new root
 end;
 { THE TWO TREES MUST BE DISJOINT, and this used to read freed memory when they
   were not.
@@ -2889,12 +3008,15 @@ end;
   inside the source, and the two being the same object. NodeContains, which the
   borrow machinery already uses, answers both questions. }
 function t_json_merge(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var t, s: TJSONObject; i: Integer;
+var t, s: TJSONObject; i: Integer; m: TBudgetMeter; inside: Boolean; c: TJSONData;
 begin
   Result := ValInt(0);
   if not GetObj(Args[0], t, Err) then Exit;
   if not GetObj(Args[1], s, Err) then Exit;
-  if NodeContains(t, s) or NodeContains(s, t) then
+  BudgetMeterStart(m);
+  inside := NodeContains(t, s, m) or NodeContains(s, t, m);
+  if not BudgetMeterEnd(m) then begin Err := BudgetRefusal('json_merge@'); Exit; end;
+  if inside then
   begin
     Err := MakeError(peRuntime,
       'json_merge@: the two values overlap -- one is inside the other, or they ' +
@@ -2902,7 +3024,11 @@ begin
     Exit;
   end;
   for i := 0 to s.Count - 1 do
-    if not SetMember(t, JsonLevelOf(Args[0]), s.Names[i], s.Items[i].Clone, Err) then Exit;
+  begin
+    c := PricedClone('json_merge@', s.Items[i], Err);
+    if c = nil then Exit;
+    if not SetMember(t, JsonLevelOf(Args[0]), s.Names[i], c, Err) then Exit;
+  end;
   Result := Args[0];
 end;
 
@@ -2973,7 +3099,8 @@ begin
         Result := nil;
       end
       else if IsHandle(V.Hnd) and (HandleObj(V.Hnd) is TPhosphorJson) then
-        Result := TPhosphorJson(HandleObj(V.Hnd)).Node.Clone   // literal takes a copy
+        // a literal takes a copy, priced before it is made (nil + Err if refused)
+        Result := PricedClone('a json value', TPhosphorJson(HandleObj(V.Hnd)).Node, Err)
       else
       begin
         Err := MakeError(peRuntime, 'not a valid json handle in a literal');

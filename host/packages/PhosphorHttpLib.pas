@@ -2837,6 +2837,9 @@ function f_http_baseurl_set(const Args: array of TValue; out Err: TPhosphorError
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_baseurl', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not HasCtl(Args[1].Str, False)); if gHttpErr = HTTP_OK then c.BaseUrl := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -2884,6 +2887,9 @@ function f_http_header_set(const Args: array of TValue; out Err: TPhosphorError)
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_header', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(IsToken(Args[1].Str) and not HasCtl(Args[2].Str, True)); if gHttpErr = HTTP_OK then c.Headers.SetVal(Args[1].Str, Args[2].Str); end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -2976,6 +2982,9 @@ function f_http_cookie_set(const Args: array of TValue; out Err: TPhosphorError)
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_cookie', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not (HasCtl(Args[1].Str, False) or HasCtl(Args[2].Str, False))); if gHttpErr = HTTP_OK then c.Cookies.SetVal(Args[1].Str, Args[2].Str); end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -3025,6 +3034,9 @@ function f_http_bearerauth(const Args: array of TValue; out Err: TPhosphorError)
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_bearerauth', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.AuthHeader := 'Bearer ' + Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -3034,6 +3046,9 @@ function f_http_customauth(const Args: array of TValue; out Err: TPhosphorError)
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_customauth', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.AuthHeader := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -3090,6 +3105,9 @@ function f_http_useragent_set(const Args: array of TValue; out Err: TPhosphorErr
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_useragent', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.UserAgent := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -3108,6 +3126,9 @@ function f_http_contenttype_set(const Args: array of TValue; out Err: TPhosphorE
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_contenttype', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.ContentType := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -3126,6 +3147,9 @@ function f_http_accept_set(const Args: array of TValue; out Err: TPhosphorError)
 var c: TPhosphorHttpClient;
 begin
   Err := NoError();
+  // The value is scanned for control bytes (and a name for a token) whole.
+  if not BudgetLinearOk('http_accept', Int64(Length(Args[1].Str)) + Length(Args[High(Args)].Str),
+                        BudgetMilliScan, Err) then Exit(ValInt(0));
   if GetClient(Args[0].Hnd, c) then
   begin Result := SetField(not HasCtl(Args[1].Str, True)); if gHttpErr = HTTP_OK then c.Accept := Args[1].Str; end
   else begin Result := ValInt(0); gHttpErr := HTTP_EHANDLE; end;
@@ -3292,6 +3316,8 @@ function f_http_formfile(const Args: array of TValue; out Err: TPhosphorError): 
 var f: TPhosphorHttpForm;
 begin
   Err := NoError();
+  if not BudgetLinearOk('http_formfile', Length(Args[2].Str), BudgetMilliCopy, Err) then
+    Exit(ValInt(0));
   if GetForm(Args[0].Hnd, f) then
   begin
     { The name it is sent under defaults to the disk file's own name. }
@@ -3338,17 +3364,39 @@ begin
 end;
 
 { ---- pure encoders (BASIC entry points) ------------------------------------ }
+{ The four text codecs are linear in their input -- 1.4 to 2.7 ns a byte,
+  measured -- and priced at PhosphorBudget's ENCODE rate before they run. }
 function f_http_urlencode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(DoUrlEncode(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('http_urlencode$', Length(Args[0].Str), BudgetMilliEncode, Err) then
+    Exit(ValStr(''));
+  Result := ValStr(DoUrlEncode(Args[0].Str));
+end;
 
 function f_http_urldecode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(DoUrlDecode(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('http_urldecode$', Length(Args[0].Str), BudgetMilliEncode, Err) then
+    Exit(ValStr(''));
+  Result := ValStr(DoUrlDecode(Args[0].Str));
+end;
 
 function f_http_htmlencode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(DoHtmlEncode(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('http_htmlencode$', Length(Args[0].Str), BudgetMilliEncode, Err) then
+    Exit(ValStr(''));
+  Result := ValStr(DoHtmlEncode(Args[0].Str));
+end;
 
 function f_http_htmldecode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(DoHtmlDecode(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('http_htmldecode$', Length(Args[0].Str), BudgetMilliEncode, Err) then
+    Exit(ValStr(''));
+  Result := ValStr(DoHtmlDecode(Args[0].Str));
+end;
 
 { ---- error accessors ------------------------------------------------------- }
 function f_http_error(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -3580,6 +3628,11 @@ begin
   AStatus := 0;
   Err := NoError();
   if not GetClient(AHandle.Hnd, cfg) then begin gHttpErr := HTTP_EHANDLE; Exit; end;
+  { The URL is built from the base and the path, split for its scheme (proxy
+    rules) and handed on; the body is copied into the request. Linear in all
+    three, and priced before any of it (round 7). }
+  if not BudgetLinearOk(AWho, Int64(Length(APath)) + Length(cfg.BaseUrl) + Length(ABody),
+                        BudgetMilliCopy, Err) then Exit;
   // A query too long for the run's budget is the run's refusal, like any other.
   if not ClientUrl(cfg, APath, url) then begin Err := BudgetRefusal(AWho); Exit; end;
   if ProxyRefused(cfg, url) then begin gHttpErr := HTTP_EPROXY; Exit; end;

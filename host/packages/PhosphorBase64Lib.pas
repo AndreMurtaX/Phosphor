@@ -38,8 +38,21 @@ implementation
 var
   B64Err: Integer = 0;   // 0 = the last base64 op was clean; 1 = it failed
 
+{ PRICED BY LENGTH (round 7). FPC's base64 coder is a stream, measured at
+  6.4-9.6 ns a byte (-O2, a 5 MB argument, no ceilings): priced at 10 ns, on the
+  budget's clock scale (128 milli-units a ns). hex is PhosphorBudget's ENCODE
+  family. Asked before the work, so a loop of encodes of one 50 MB string is
+  refused at the call that would cross the line. }
+const
+  B64MilliPerByte = 1280;
+
 function f_b64_encode(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValStr(EncodeStringBase64(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('base64_encode$', Length(Args[0].Str), B64MilliPerByte, Err) then
+    Exit(ValStr(''));
+  Result := ValStr(EncodeStringBase64(Args[0].Str));
+end;
 
 function f_b64_decode(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
@@ -47,6 +60,8 @@ begin
   // that broke it: base64_decode$("!!!!") let an EStreamError out of the RTL and
   // ended the program. The failure is recorded where base64_error() can read it.
   Err := NoError();
+  if not BudgetLinearOk('base64_decode$', Length(Args[0].Str), B64MilliPerByte, Err) then
+    Exit(ValStr(''));
   try
     Result := ValStr(DecodeStringBase64(Args[0].Str));
     B64Err := 0;
@@ -61,6 +76,8 @@ function f_b64_urlencode(const Args: array of TValue; out Err: TPhosphorError): 
 var s: String; i: Integer;
 begin
   Err := NoError();
+  if not BudgetLinearOk('base64_urlencode$', Length(Args[0].Str), B64MilliPerByte, Err) then
+    Exit(ValStr(''));
   s := EncodeStringBase64(Args[0].Str);
   for i := 1 to Length(s) do
     case s[i] of
@@ -77,6 +94,8 @@ var s: String; i: Integer;
 begin
   Err := NoError();
   s := Args[0].Str;
+  if not BudgetLinearOk('base64_urldecode$', Length(s), B64MilliPerByte, Err) then
+    Exit(ValStr(''));
   for i := 1 to Length(s) do
     case s[i] of
       '-': s[i] := '+';
@@ -136,13 +155,22 @@ var raw: RawByteString;
 begin
   Err := NoError();
   if LoadFileStr(Args[0].Str, raw) then
-  begin Result := ValStr(EncodeStringBase64(raw)); B64Err := 0; end
+  begin
+    // The read, charged for what it read; then the encode, asked before it runs.
+    if not (BudgetLinearAfterOk('base64_encodefile$', Length(raw), BudgetMilliCopy, Err) and
+            BudgetLinearOk('base64_encodefile$', Length(raw), B64MilliPerByte, Err)) then
+      Exit(ValStr(''));
+    Result := ValStr(EncodeStringBase64(raw)); B64Err := 0;
+  end
   else begin Result := ValStr(''); B64Err := 1; end;
 end;
 
 function f_b64_decodefile(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  // The decode, and a write of at most three quarters of it.
+  if not BudgetLinearOk('base64_decodefile', Length(Args[0].Str), B64MilliPerByte, Err) then
+    Exit(ValInt(0));
   try
     if SaveFileStr(Args[1].Str, DecodeStringBase64(Args[0].Str)) then
     begin Result := ValInt(1); B64Err := 0; end
@@ -226,6 +254,7 @@ var s: String; r: RawByteString; i, b: Integer;
 begin
   Err := NoError();
   s := Args[0].Str;
+  if not BudgetLinearOk('hex_encode$', Length(s), BudgetMilliEncode, Err) then Exit(ValStr(''));
   // Preallocate and write by index, like hex_decode$. The old `r := r + ...` in a
   // loop reallocated on every byte, making this quadratic: 4 MB cost 0.4 s but
   // 64 MB cost ~37 s. Now it is linear.
@@ -244,6 +273,7 @@ var s: String; r: RawByteString; i, hi, lo, n: Integer;
 begin
   Err := NoError();
   s := Args[0].Str;
+  if not BudgetLinearOk('hex_decode$', Length(s), BudgetMilliEncode, Err) then Exit(ValStr(''));
   // Build the bytes into a RawByteString by INDEXED assignment, exactly as the gzip
   // header does. Concatenating `r := r + Chr(b)` under {$codepage UTF8} re-encodes a
   // byte >= 128 into its multi-byte UTF-8 form (or '?'), which is why hex_decode$

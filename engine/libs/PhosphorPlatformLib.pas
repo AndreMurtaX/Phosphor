@@ -194,6 +194,9 @@ end;
 function t_formatsettings_get(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  // The name is lowered whole before it is compared.
+  if not BudgetLinearOk('formatsettings$', Length(Args[0].Str), BudgetMilliRewrite, Err) then
+    Exit(ValStr(''));
   case LowerCase(Args[0].Str) of
     'dateseparator':     Result := ValStr(DefaultFormatSettings.DateSeparator);
     'timeseparator':     Result := ValStr(DefaultFormatSettings.TimeSeparator);
@@ -212,6 +215,8 @@ function t_formatsettings_set(const Args: array of TValue; out Err: TPhosphorErr
 var v: String; c: Char;
 begin
   Err := NoError();
+  if not BudgetLinearOk('formatsettings', Length(Args[0].Str), BudgetMilliRewrite, Err) then
+    Exit(ValInt(0));
   v := Args[1].Str;
   if v <> '' then c := v[1] else c := #0;
   case LowerCase(Args[0].Str) of

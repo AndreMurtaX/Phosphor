@@ -34,7 +34,7 @@ unit PhosphorCallLib;
 interface
 
 uses
-  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorVM;
+  SysUtils, PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorVM, PhosphorBudget;
 
 procedure RegisterCallFuncs(Reg: TPhosphorRegistry);
 
@@ -55,9 +55,20 @@ end;
 
 { funcexists?(name$) -- can this name be called at all? Asked of the same two
   places CallByName looks, and about the NAME only. }
+{ The name is lowered and hashed once (TPhosphorRegistry.HasName) -- linear in
+  the name. It was (keys x name length) until round 7: one call on a 50 MB name,
+  38906 ms under a 2000 ms ceiling, in a host that leaves the default code page
+  alone. Measured after the fix in such a host (-O2, a 2 MB name, 20 calls):
+  2.3 ns a byte -- the lowering, the hash and the user-function scan -- so it is
+  priced at 2.5 ns, on the budget's clock scale (128 milli-units a ns). }
+const
+  FuncExistsMilliPerByte = 320;
+
 function f_funcexists(AVM: TObject; const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin
   Err := NoError();
+  Result := ValBool(False);
+  if not BudgetLinearOk('funcexists?', Length(Args[0].Str), FuncExistsMilliPerByte, Err) then Exit;
   Result := ValBool(TPhosphorVM(AVM).KnowsName(Args[0].Str));
 end;
 

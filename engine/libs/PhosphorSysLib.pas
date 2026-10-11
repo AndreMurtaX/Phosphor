@@ -65,6 +65,9 @@ function HasUnpairedSurrogate(const W: UnicodeString): Boolean;
 
 implementation
 
+uses
+  PhosphorBudget;   // round 7: environ$ and the colour names are priced by length
+
 { The length of the well-formed UTF-8 sequence that starts at S[I] (1 to 4),
   or, when none does, MINUS the length of its maximal subpart: the longest
   prefix of some well-formed sequence (at least 1). Table 3-7 of the Unicode
@@ -540,6 +543,10 @@ var name: String;
 begin
   Err := NoError();
   name := Args[0].Str;
+  { The name goes to the OS as a wide string and is looked up there: 8.2 ns a
+    byte, measured. 200 lookups of a 50 MB name ran 72891 ms under a 2000 ms
+    ceiling before this was asked (round 7). }
+  if not BudgetLinearOk('environ$', Length(name), BudgetMilliOs, Err) then Exit(ValStr(''));
   // one scan for either character
   if (name = '') or (LastDelimiter('=' + #0, name) > 0) then
     Exit(ValStr(''));
@@ -643,10 +650,20 @@ begin
     if ColorVals[i] = n then begin Result := ValStr(ColorNames[i]); Exit; end;
   Result := ValStr('$' + IntToHex(n, 6));
 end;
+{ A name compared against every colour name, then read as a literal. }
 function t_color(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(ColorOf(Args[0].Str)); end;
+begin
+  Err := NoError();
+  if not BudgetLinearOk('color', Length(Args[0].Str), BudgetMilliRewrite, Err) then Exit(ValInt(0));
+  Result := ValInt(ColorOf(Args[0].Str));
+end;
 function t_alphacolor(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := ValInt(ColorOf(Args[0].Str) or Int64($FF000000)); end;   // opaque alpha
+begin
+  Err := NoError();
+  if not BudgetLinearOk('alphacolor', Length(Args[0].Str), BudgetMilliRewrite, Err) then
+    Exit(ValInt(0));
+  Result := ValInt(ColorOf(Args[0].Str) or Int64($FF000000));   // opaque alpha
+end;
 
 procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 const

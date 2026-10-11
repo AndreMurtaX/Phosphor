@@ -170,7 +170,11 @@ SCAN_DIRS = [
 # and now image_setbitmap@) and pinned by tests/gui/19, 20 and 23, not by a gate.
 
 GATE = re.compile(r'\bBudget(Allows|Append|Charge|Active|Refusal|Sleep|Spent|PatternBounded|'
-                  r'UnitsPerStep|UnitsPerMs)\b')
+                  r'UnitsPerStep|UnitsPerMs|Linear\w*|Meter\w*|SearchCost)\b')
+# The verbs that CHARGE. The linear pass below asks for one of these in the
+# routine itself: naming BudgetRefusal or BudgetActive prices nothing.
+LIN_GATE = re.compile(r'\bBudget(Allows|Append|Charge|Sleep|Linear\w*|MeterAdd|MeterEnd|'
+                      r'SearchCost)\b')
 
 # A size or bound that is derived from something ALREADY IN MEMORY is bounded by
 # memory and is not an amplifier. This is what "derived" looks like in this tree.
@@ -187,10 +191,12 @@ DERIVED = re.compile(r'\bLength\s*\(|\bHigh\s*\(|Size\b|Count\b|Capacity\b|'
 LITERAL = re.compile(r'^[\s\d+\-*()]+$')
 # A NUMBER that came from the program. A local assigned from one of these is
 # tainted for the whole routine, however it is spelled afterwards -- which is
-# the case the whole check exists for. A STRING argument is deliberately not
-# tainted: it is already in memory, so its Length bounds a loop exactly as any
-# other container's does, and calling `p := Args[0].Str` unbounded would have
-# sent nine honest routines into ALLOWED for nothing.
+# the case the whole check exists for. A STRING argument is not tainted HERE:
+# this rule asks whether a call can be asked for more than memory holds, and a
+# string's Length bounds ONE call. It does not bound a loop of such calls --
+# that sentence used to end "exactly as any other container's does", and about
+# fifty functions ran up to 36x past TimeoutMs behind it (round 7). The LINEAR
+# PASS further down is the rule for strings and containers; see linear_scan.
 TAINT = re.compile(r'\bArgI32\s*\(|\bArgI64\s*\(|\bAsDouble\s*\(|'
                    r'\bArgs?\s*\[[^\]]*\]\s*\.\s*(?:Int|Num|Hnd)\b')
 
@@ -308,7 +314,12 @@ ALLOWED = {
     # rather than protective; the reason it was exempt is unchanged -- one entry
     # per byte of a string already in memory, trimmed to the count found.
     'PhosphorStrListLib.pas:TPhosphorStringList.SetDelimitedText':
-        'the field buffer is trimmed to the field it just read out of the input',
+        'ONE field buffer, the length of the input, allocated once; each field is '
+        'copied out of it at its own length. Until round 7 this reason read "the '
+        'field buffer is trimmed to the field it just read" -- true, and beside '
+        'the point: the buffer was sized to the REST of the input once per '
+        'field, which is quadratic (19484 ms for one 4 MB call). Its caller '
+        'prices the split per byte (linear pass)',
     'PhosphorBase64Lib.pas:f_hex_decode':
         'exactly half the input length, trimmed to the pairs actually decoded',
     'PhosphorHttpLib.pas:DoUrlDecode':
@@ -338,7 +349,9 @@ ALLOWED = {
     'PhosphorStrLib.pas:ToRadix':
         'a number in a base: at most 64 digits',
     'PhosphorStrListLib.pas:TPhosphorStringList.MoveItem':
-        'shifts between two indices of the list, so at most Count elements',
+        'shifts between two indices of the list, so at most Count elements in '
+        'one call -- which bounds the call and not a loop of them: t_strings_move '
+        'prices the slots it shifts before calling in (round 7, linear pass)',
     'PhosphorHttpLib.pas:EntIs':
         'the loop runs only when ALen equals Length(E), one of six literals of '
         'this unit, and DoHtmlDecode never offers an entity longer than ten bytes',
@@ -520,6 +533,24 @@ ALLOWED = {
     'PhosphorStrListLib.pas:TPhosphorStringList.CapacitySet':
         'strings_capacity asks BudgetAllows for exactly this slot count before '
         'calling in; CapacitySet has no other caller',
+
+    # ---- round 7: the linear builders the RAG analysis was rewritten onto ----
+    'PhosphorRagLib.pas:SbAdd':
+        'doubles the array when it is full; B.N is the count already written, '
+        'so n adds copy at most 2n slots in all -- amortised O(1) per item',
+    'PhosphorRagLib.pas:SbDone':
+        'trims the array to B.N, the count already written',
+    'PhosphorRagLib.pas:SetSlot':
+        'a linear probe of a table SetAdd keeps at most half full, so it ends at '
+        'an empty slot; the expected probe is O(1)',
+    'PhosphorRagLib.pas:SetAdd':
+        'doubles the table when it would pass half full and re-places what it '
+        'holds: amortised O(1) per word added',
+    'PhosphorRagLib.pas:TPhosphorRag.FunctionTotal':
+        'an INTEGER sum, one addition per document -- the append rule reads '
+        '`Result := Result + ...` as a string append',
+    'PhosphorRagLib.pas:IndexNames':
+        'the same integer sum, over the documents\' tag counts',
 
     # ---- A WAIT ON THE USER, which is what a key read IS ---------------------
     # Written down rather than hidden, like the sqlite note above. KbdRead's loop
@@ -1037,6 +1068,507 @@ def unmetered(dirs):
     return sorted(set(bad))
 
 
+#  --- THE LINEAR PASS (adversarial round 7, 2026-10-11) -------------------------
+# The note above TAINT said "a STRING argument is deliberately not tainted: it is
+# already in memory, so its Length bounds a loop exactly as any other container's
+# does". That is true of ONE CALL and false of a program: a length bounds what a
+# call costs, not how many times the call is made, and one opCall is one VM
+# instruction however long its argument is. The VM reads its clock every 4096
+# instructions, so 200 calls of ucase$ over one 50 MB string -- a string the
+# budget let string$ build -- ran 18344 ms under TimeoutMs 2000 and reported
+# success; environ$ 72891 ms; strings_values$ over a 2-million-line list
+# 12515 ms; ONE funcexists? on a 50 MB name 38906 ms. About fifty registered
+# functions had that shape and this gate was green on all of them, because the
+# one rule that could have seen them had been switched off by that sentence.
+#
+# So this is a SECOND RULE, beside the first and not instead of it (the first
+# keeps its semantics, its ALLOWED and its counts). It asks one question of every
+# REGISTERED function -- a name some Reg.Add/AddHost hands to the VM -- and of
+# everything it calls in these directories:
+#
+#     does it do work LINEAR (or worse) in the size of a script-supplied string,
+#     array, list, dictionary, tree or buffer -- a loop whose bound reads one, an
+#     allocation sized by one, or a call to a routine known to walk one?
+#
+# If so, the registered function must charge the budget IN ITS OWN BODY (or
+# through a helper that does nothing but ask -- see "consultation by proxy" in
+# linear_scan), or every walker on the way must charge for its own walk, or the
+# walker must be listed in LINEAR_ALLOWED with the reason one call of it is O(1)
+# whatever the script holds. A helper that asks for some OTHER work does not
+# answer for the walk beside it: that is how lfill$ hid behind RunOf. "The string
+# was paid for when it was built" is NOT such a reason
+# -- it was the reason for all fifty -- because the same string can be handed in
+# a loop.
+#
+# WHAT IS SCRIPT-SUPPLIED, as a lint can see it: a routine's parameters of a
+# string, value, array or object type (the registered function's `A` is one); a
+# local of a class a script holds through a handle (derived below from the
+# HandleObj casts, not listed); inside a METHOD of such a class, its fields; and
+# anything assigned from an expression that mentions one of those -- which is how
+# `s := A[0].Str`, `n := Length(s)` and `L := TPhosphorStringList(HandleObj(..))`
+# all become tainted. A loop over the ARITY -- `for i := 0 to High(A)` -- is not:
+# the arity is fixed by the call site, which the VM paid for one instruction per
+# argument.
+#
+# Approximate on purpose, the same way loop_spans is: an over-reach names a routine
+# that then gets a written reason; an under-reach is how the fifty went unseen.
+
+#: the linear pass reads the two directories that REGISTER functions. host/console
+#: registers none: its seams are judged by the first rule above.
+LINEAR_DIRS = [os.path.join(ROOT, 'engine', 'libs'), os.path.join(ROOT, 'host', 'packages')]
+
+LIN_PARAMTYPE = re.compile(r'\b(String|AnsiString|RawByteString|UTF8String|UnicodeString|'
+                           r'WideString|TValue|TBytes|TStringDynArray|TInt64DynArray|'
+                           r'TStrings|TStringList|TJSON\w+|TPhosphor\w+|TKVBag|TSqlite\w+|'
+                           r'TZip\w+)\b|\barray\s+of\b', re.I)
+LIN_ARRAYPARAM = re.compile(r'\barray\s+of\s+TValue\b', re.I)
+# A var section: from the header to the first `begin`, `name, name: Type;`.
+LIN_VARDECL = re.compile(r'\b([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:\s*([A-Za-z_][\w.]*)\s*;')
+# The class a handle is cast to. `HandleObj(x) is TFoo` and `TFoo(HandleObj(x))`.
+LIN_HANDLECLASS = [re.compile(r'HandleObj\s*\([^;]*?\)\s*\)?\s*is\s+(T[A-Za-z0-9_]+)'),
+                   re.compile(r'\b(T[A-Za-z0-9_]+)\s*\(\s*HandleObj\b')]
+LIN_STRSRC = re.compile(r'\.\s*Str\b|\bHandleObj\s*\(|\bArgStr\s*\(', re.I)
+LIN_REGISTER = re.compile(r'\b(?:Add|AddHost)\s*\([^;]*?,\s*@\s*([A-Za-z_]\w*)\s*\)')
+# Routines OUTSIDE these directories, or in the RTL, whose work is linear in an
+# argument. A call with a tainted argument is a linear pass. The value names which
+# argument carries the size: None = any argument, or the 0-based index of it.
+LINEAR_CALLS = {
+    # RTL: case, trim, compare, path splitting, number parsing, environment.
+    'LowerCase': None, 'UpperCase': None, 'AnsiLowerCase': None,
+    'AnsiUpperCase': None, 'Trim': None, 'TrimLeft': None, 'TrimRight': None,
+    'CompareStr': None, 'CompareText': None, 'SameText': None, 'SameStr': None,
+    'AnsiCompareStr': None, 'AnsiCompareText': None, 'AnsiSameText': None,
+    'AnsiSameStr': None,
+    'ExtractFileName': None, 'ExtractFileExt': None, 'ExtractFilePath': None,
+    'ExtractFileDir': None, 'ExtractFileDrive': None, 'ChangeFileExt': None,
+    'ExpandFileName': None, 'IncludeTrailingPathDelimiter': None,
+    'ExcludeTrailingPathDelimiter': None, 'GetEnvironmentVariable': None,
+    'StrToFloat': None, 'TryStrToFloat': None, 'StrToInt': None,
+    'StrToInt64': None, 'TryStrToInt': None, 'TryStrToInt64': None,
+    'StrToIntDef': None, 'StrToInt64Def': None, 'StrToFloatDef': None,
+    'UTF8Decode': None, 'UTF8Encode': None, 'UTF8ToString': None,
+    'ReverseString': None, 'AdjustLineBreaks': None, 'QuotedStr': None,
+    'AnsiQuotedStr': None, 'UniqueString': None,
+    # engine/*.pas, which this gate does not scan (see SCAN_DIRS).
+    'Utf8Len': None, 'Utf8Left': None, 'Utf8Right': None, 'Utf8Advance': 2,
+    'Utf8SuffixStart': None, 'Utf8Starts': None, 'KnowsName': None,
+    'HasName': None, 'ReadNumberText': None, 'TrimNumberSpace': None,
+    # fcl-json: a deep copy, and TJSONObject's own member search, which is a
+    # linear scan of the object's members (fpjson.pp, IndexOfName).
+    'Clone': None, 'IndexOfName': None,
+    # sized moves: the count is the argument named.
+    'Move': 2, 'FillChar': 1, 'CompareByte': 2, 'CompareMem': 2, 'SetString': 2,
+}
+LIN_CALL = re.compile(r'\b(' + '|'.join(sorted(LINEAR_CALLS, key=len, reverse=True)) +
+                      r')\s*\(')
+LIN_COPY = re.compile(r'\bCopy\s*\(', re.I)
+
+# THE WALKERS THAT ARE O(1) PER CALL, each with the reason. Keyed like ALLOWED,
+# "<file>:<routine>". A routine listed here is treated as NOT linear, so its
+# callers do not inherit a pass through it. Every reason must say why one call
+# costs a constant whatever the script holds -- not that the input was paid for.
+LINEAR_ALLOWED = {
+    # ---- bounded by the LANGUAGE ---------------------------------------------
+    'PhosphorArrayLib.pas:TPhosphorArray.FlatIndex':
+        'one step per DIMENSION, and DoDim takes one dimension per argument of '
+        'dim@, whose registered signatures stop at three (dim@:nnn): at most '
+        'three iterations whatever the array holds',
+    'PhosphorArrayLib.pas:TPhosphorArray.TotalSize':
+        'the same: a product over at most three dimensions',
+    'PhosphorCryptoLib.pas:ToHex':
+        'hex of a DIGEST or a DERIVED KEY, never of a script string: its callers '
+        'hand it 16, 20 or 32 digest bytes, or a pbkdf2 key that CountArg caps '
+        'at MaxDerivedBytes (1024)',
+    'PhosphorDateTimeLib.pas:Cited':
+        'quotes a date text in an error message only when it is at most 40 '
+        'bytes, and exits on its first line otherwise: at most 40 iterations',
+    # ---- AMORTISED: each item pays for its own copy once ---------------------
+    'PhosphorStrListLib.pas:TPhosphorStringList.Add':
+        'doubles the slot array when it is full, so n adds copy at most 2n slots '
+        'in all: O(1) per item, amortised, and the item itself is a reference',
+    'PhosphorDictLib.pas:TPhosphorDict.SetVal':
+        'its lookup is IndexOf, which is metered; what is left is the doubling of '
+        'the three arrays and the table when full -- amortised O(1) per entry, '
+        'each entry copied once per doubling it survives',
+    'PhosphorDictLib.pas:TPhosphorDict.Create':
+        'Reindex over FCount = 0: the eight-slot empty table, whatever comes later',
+    'PhosphorDictLib.pas:TPhosphorDict.Clear':
+        'sets FCount to 0 BEFORE it reindexes, so the table it rebuilds is the '
+        'eight-slot empty one; the entries are released by reference count, each '
+        'once, which their adds already paid for',
+    'PhosphorJsonLib.pas:RegisterNode':
+        'the borrowed-view table doubles when full and is rebuilt only when it '
+        'holds twice the live handles plus 1024 -- amortised O(1) per handle, '
+        'each registered by one json_get@-style call',
+    'PhosphorJsonLib.pas:AddDocView':
+        'compacts a document\'s view list only when it is full and doubles it '
+        'when it is still half full: amortised O(1) per view',
+    'PhosphorJsonLib.pas:t_json_free':
+        'frees each view of the document once; every view id was made by one '
+        'call (one instruction) and is visited once, when its document goes',
+    'PhosphorJsonLib.pas:InvalidateBorrowed':
+        'walks the subtree that is being REMOVED, and a node is removed (and '
+        'freed) once; every way a node is made -- parse, clone, set, push -- is '
+        'priced per node when it is made',
+    'PhosphorJsonLib.pas:GraftTooDeep':
+        'walks a node its caller has just MADE: a scalar, or a clone PricedClone '
+        'charged at 60 ns a node -- an order of magnitude more than this walk '
+        'costs a node',
+    'PhosphorJsonLib.pas:MemberIndex':
+        'refuses a name longer than JSON_MAX_NAME (255 bytes) on its first line, '
+        'so the hashed lookup it makes is of at most 255 bytes',
+    'PhosphorJsonLib.pas:BufStr':
+        'copies the rendered text once; every byte of it was charged by BufAdd as '
+        'it was written, at one unit a byte -- eight times the rate of a copy',
+    # ---- sqlite: bounded by what sqlite3 itself allows ----------------------
+    'PhosphorSqliteLib.pas:DoStep':
+        'loops over the COLUMNS of one result row, which sqlite3 caps at '
+        'SQLITE_MAX_COLUMN (2000 by default, 32767 in any build): a constant '
+        'of the library, whatever the script asked',
+    'PhosphorSqliteLib.pas:FindCol':
+        'at most SQLITE_MAX_COLUMN columns, each compared by SameText, which '
+        'stops at the shorter of the two names',
+    'PhosphorSqliteLib.pas:BuildRowObject':
+        'one member per COLUMN of the current row: at most SQLITE_MAX_COLUMN',
+    'PhosphorSqliteLib.pas:SqlTarget':
+        'compares the first five bytes of the name; the path itself is priced '
+        'by its callers (sqlite_open@ and sqlite_backup ask BudgetLinearOk '
+        'first), and sqlite_open@ with no argument passes the constant '
+        "':memory:', which never reaches it",
+    'PhosphorSqliteLib.pas:BindNode':
+        'reads the text of a JSON NUMBER held as a QWord -- at most twenty '
+        'digits -- never a string member',
+    # ---- NOT SCRIPT DATA: the OS or the host supplied it -------------------
+    'PhosphorSysLib.pas:HostTempDir':
+        'the size GetTempPathW (or the platform) reports for the temp path: an OS '
+        'path of at most 32767 characters, not a script string',
+    'PhosphorSysLib.pas:HostUserDir':
+        'an OS special-folder path, at most 32767 characters, not a script string',
+    'PhosphorSysLib.pas:HostAppConfigDir':
+        'an OS special-folder path, at most 32767 characters, not a script string',
+    'PhosphorSysLib.pas:t_paramstr':
+        'scrubs ParamStr(i): a word of this PROCESS\'S command line, which the '
+        'host was started with (at most 32767 characters on Windows); the '
+        'script chooses only the index',
+}
+
+#: Files the linear pass does not hold to the rule, with the reason. Only a TEST
+#: host may be here: its registered stand-ins exist for one runner's programs.
+LINEAR_TEST_HOSTS = {
+    'phosphorhttptest.lpr':
+        'the HTTP package\'s TEST host (tests/packages): its stand-ins resolve '
+        'and rewrite URLs the package\'s own test programs hand it, under no '
+        'ceilings, and no shipped binary links it',
+}
+
+
+def lin_split_args(text):
+    """Top-level comma split of a call's argument text."""
+    out, depth, cur = [], 0, []
+    for ch in text:
+        if ch in '([':
+            depth += 1
+        elif ch in ')]':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            out.append(''.join(cur))
+            cur = []
+            continue
+        cur.append(ch)
+    out.append(''.join(cur))
+    return out
+
+
+def lin_header(body):
+    """(params, arity-arrays): tainted parameter names, and the `array of TValue`
+    ones whose High/Length is an arity."""
+    m = PARAMLIST.match(body)
+    tainted, arity = set(), set()
+    if not m:
+        return tainted, arity
+    for part in m.group(1).split(';'):
+        if ':' not in part:
+            continue
+        names, typ = part.split(':', 1)
+        if not LIN_PARAMTYPE.search(typ):
+            continue
+        nms = NAMES.findall(DECOR.sub(' ', names))
+        tainted |= set(nms)
+        if LIN_ARRAYPARAM.search(typ):
+            arity |= set(nms)
+    return tainted, arity
+
+
+def lin_taint(name, body, containers, fields):
+    """The names in this routine that carry script-supplied size."""
+    tainted, arity = lin_header(body)
+    hdr_end = body.find('begin')
+    decls = body[:hdr_end] if hdr_end >= 0 else ''
+    for m in LIN_VARDECL.finditer(decls):
+        if m.group(2) in containers:
+            tainted |= set(NAMES.findall(m.group(1)))
+    if '.' in name:
+        cls = name.split('.')[0]
+        if cls in containers:
+            tainted |= fields.get(cls, set())
+            tainted.add('Self')
+    assigns = [(m.group(1), m.group(2)) for m in ASSIGN.finditer(body)]
+    changed = True
+    while changed:
+        changed = False
+        for nm, expr in assigns:
+            if nm in tainted:
+                continue
+            if LIN_STRSRC.search(expr) or (set(NAMES.findall(expr)) & tainted):
+                tainted.add(nm)
+                changed = True
+    return tainted, arity
+
+
+def lin_reads(expr, tainted, arity):
+    """Does this expression read the size of something script-supplied?"""
+    for a in arity:
+        expr = re.sub(r'\b(?:High|Length)\s*\(\s*' + re.escape(a) + r'\s*\)', ' 0 ', expr)
+    # SizeOf is a constant of the TYPE, whatever the variable holds.
+    expr = re.sub(r'\bSizeOf\s*\([^()]*\)', ' 0 ', expr, flags=re.I)
+    names = set(NAMES.findall(expr))
+    return bool(names & tainted) or bool(LIN_STRSRC.search(expr))
+
+
+def lin_direct(name, body, containers, fields, ours=frozenset()):
+    """Linear constructs written in this routine, as short labels. `ours` is the
+    set of names this body calls that resolve to a routine in these directories:
+    a LINEAR_CALLS name that is one of ours (TPhosphorStringList.IndexOfName, not
+    fcl-json's) is judged through the call graph instead, by what it does."""
+    tainted, arity = lin_taint(name, body, containers, fields)
+    if not tainted:
+        return []
+    hits = []
+    for m in FORLOOP.finditer(body):
+        limit = m.group(3) if m.group(2).lower() == 'to' else m.group(1)
+        if lin_reads(limit, tainted, arity):
+            hits.append('for .. %s' % ' '.join(limit.split())[:40])
+    for m in WHILELOOP.finditer(body):
+        if lin_reads(m.group(1), tainted, arity):
+            hits.append('while %s' % ' '.join(m.group(1).split())[:40])
+    for m in REPEATLOOP.finditer(body):
+        if lin_reads(m.group(1), tainted, arity):
+            hits.append('repeat .. until %s' % ' '.join(m.group(1).split())[:40])
+    for m in ALLOC.finditer(body):
+        args = lin_split_args(balanced_arg(body, m.end() - 1))
+        if lin_reads(args[-1], tainted, arity):
+            hits.append('%s(.., %s)' % (m.group(1), ' '.join(args[-1].split())[:30]))
+    for m in LIN_CALL.finditer(body):
+        if m.group(1) in ours:
+            continue
+        args = lin_split_args(balanced_arg(body, m.end() - 1))
+        which = LINEAR_CALLS[m.group(1)]
+        look = args if which is None else args[which:which + 1]
+        if any(lin_reads(a, tainted, arity) for a in look):
+            hits.append('%s(..)' % m.group(1))
+    for m in LIN_COPY.finditer(body):
+        args = lin_split_args(balanced_arg(body, m.end() - 1))
+        if len(args) == 2:
+            size = args[0]        # Copy(s, i): to the end of s
+        elif len(args) >= 3:
+            size = args[2]
+            if LITERAL.match(size):
+                continue
+            if re.search(r'\b(MaxInt|High)\b', size):
+                size = args[0]
+        else:
+            continue
+        if lin_reads(size, tainted, arity):
+            hits.append('Copy(.., %s)' % ' '.join(size.split())[:30])
+    return sorted(set(hits))
+
+
+def lin_classes(texts):
+    """(containers, fields): the classes a script holds through a handle, derived
+    from the casts, and each one's field names."""
+    containers = set()
+    for text in texts:
+        for rx in LIN_HANDLECLASS:
+            containers |= set(rx.findall(text))
+    fields = {}
+    for text in texts:
+        for m in re.finditer(r'\b(T[A-Za-z0-9_]+)\s*=\s*class\b(.*?)\bend\s*;', text, re.S):
+            if m.group(1) not in containers:
+                continue
+            fs = set()
+            for line in m.group(2).split(';'):
+                ln = line.strip()
+                if not ln or re.match(r'(?i)(procedure|function|constructor|destructor|'
+                                      r'property|class|public|private|protected|'
+                                      r'published|strict)\b', ln):
+                    ln = re.sub(r'(?is)^(public|private|protected|published|strict)\s+', '', ln)
+                    if not ln or re.match(r'(?i)(procedure|function|constructor|destructor|'
+                                          r'property|class)\b', ln):
+                        continue
+                if ':' in ln:
+                    fs |= set(NAMES.findall(ln.split(':')[0]))
+            fields[m.group(1)] = fs
+    return containers, fields
+
+
+_LIN_INDEX = {}
+
+
+def lin_index(routines):
+    """(free routines by name, methods by class then name), built once per scan."""
+    ident = id(routines)
+    if _LIN_INDEX.get('id') != ident:
+        free, meth = {}, {}
+        for key, short, _ in routines:
+            name = key.split(':', 1)[1]
+            if '.' in name:
+                cls = name.split('.')[0]
+                meth.setdefault(cls, {}).setdefault(short, []).append(key)
+            else:
+                free.setdefault(short, []).append(key)
+        _LIN_INDEX.clear()
+        _LIN_INDEX.update({'id': ident, 'free': free, 'meth': meth})
+    return _LIN_INDEX['free'], _LIN_INDEX['meth']
+
+
+LIN_MEMBER = re.compile(r'(\b[A-Za-z_]\w*|\))\s*\.\s*([A-Za-z_]\w*)')
+#: never resolved through an untyped receiver: every class has one.
+LIN_UBIQUITOUS = {'Create', 'Free', 'Destroy'}
+
+
+def lin_callees(key, body, routines):
+    """The routines in these directories this body calls -- resolved by class
+    where the source says which class, rather than by bare name: `Create` and
+    `IndexOf` are a method of half the classes here, and a name match sent the
+    walk of every constructor to every routine that builds anything."""
+    free, meth = lin_index(routines)
+    name = key.split(':', 1)[1]
+    own = name.split('.')[0] if '.' in name else None
+    types = {}
+    m = PARAMLIST.match(body)
+    heads = [m.group(1)] if m else []
+    hdr_end = body.find('begin')
+    for part in ';'.join(heads).split(';') + [body[:hdr_end] if hdr_end >= 0 else '']:
+        for d in LIN_VARDECL.finditer(part + ';'):
+            for nm in NAMES.findall(DECOR.sub(' ', d.group(1))):
+                types[nm] = d.group(2)
+        if ':' in part and part.count(':') == 1:
+            nms, typ = part.split(':')
+            for nm in NAMES.findall(DECOR.sub(' ', nms)):
+                types[nm] = typ.strip()
+    out = set()
+    members = set()
+    for mm in LIN_MEMBER.finditer(body):
+        recv, mem = mm.group(1), mm.group(2)
+        members.add(mm.start(2))
+        cands = []
+        if recv in meth:
+            cands = meth[recv].get(mem, [])
+        elif types.get(recv) in meth:
+            cands = meth[types[recv]].get(mem, [])
+        elif recv == 'Self' and own in meth:
+            cands = meth[own].get(mem, [])
+        elif recv not in types and mem not in LIN_UBIQUITOUS:
+            for cls in meth:
+                cands = cands + meth[cls].get(mem, [])
+        out |= set(cands)
+    for nm in NAMES.finditer(body):
+        if nm.start() in members:
+            continue
+        word = nm.group(0)
+        out |= set(free.get(word, []))
+        if own in meth:
+            out |= set(meth[own].get(word, []))
+    out.discard(key)
+    return sorted(out)
+
+
+def linear_scan(dirs, allowed, test_hosts=None):
+    """(holes, consulting-entries, used-exemptions, flagged-walkers).
+
+    holes: registered functions that reach a linear pass and consult nothing,
+    each with the chain that reaches it."""
+    files = []
+    for path in sources(dirs):
+        with open(path, encoding='utf-8') as fh:
+            files.append((os.path.basename(path), strip_comments(fh.read())))
+    containers, fields = lin_classes([t for _, t in files])
+    routines = []          # (key, short, body)
+    entries = set()
+    consults = set()
+    for base, text in files:
+        rs = list(routines_of(text))
+        entries |= set(LIN_REGISTER.findall(text))
+        for name, body in rs:
+            key = '%s:%s' % (base, name)
+            routines.append((key, name.split('.')[-1], body))
+            # DIRECT, not resolved through helpers the way the first rule's
+            # gated_names is. lfill$ calls RunOf, which consults -- for the pad
+            # it builds -- and so the first rule counts lfill$ as consulting;
+            # the CpLen of a 50 MB argument two lines earlier was charged
+            # nothing, and 200 calls ran 4015 ms past a 2000 ms ceiling. A
+            # consultation answers for the work beside it, not for the routine.
+            if LIN_GATE.search(body):
+                consults.add(key)
+    calls = {key: lin_callees(key, body, routines) for key, _, body in routines}
+    direct, used = {}, set()
+    for key, short, body in routines:
+        name = key.split(':', 1)[1]
+        ours = frozenset(c.split(':', 1)[1].split('.')[-1] for c in calls[key])
+        d = lin_direct(name, body, containers, fields, ours)
+        if d:
+            if key in allowed:
+                used.add(key)
+                continue
+            direct[key] = d
+    # A CONSULTATION BY PROXY. A helper that asks the budget and does no linear
+    # work of its own -- DigestAllowed, which prices a hash for its caller and
+    # sets the caller's error -- is the caller asking, spelled once. A helper
+    # that asks AND works (RunOf asks for the pad it builds) answers only for
+    # its own work, which is the lfill$ lesson above; it does not count.
+    wrappers = set(k for k in consults
+                   if k not in direct and not any(c in direct for c in calls[k]))
+    for key, _, _ in routines:
+        if key not in consults and any(c in wrappers for c in calls[key]):
+            consults.add(key)
+    # A routine is linear if it walks, or calls (by name) a linear routine that
+    # does not consult the budget itself. Fixed point.
+    linear = {k: list(v) for k, v in direct.items()}
+    changed = True
+    while changed:
+        changed = False
+        for key, short, _ in routines:
+            if key in allowed:
+                continue
+            for callee in calls[key]:
+                if callee in linear and callee not in consults:
+                    lab = 'via %s' % callee.split(':', 1)[1]
+                    cur = linear.setdefault(key, [])
+                    if lab not in cur:
+                        cur.append(lab)
+                        changed = True
+    # An exemption is USED only while the routine it names would be linear
+    # without it -- by its own walk or through a callee -- so an entry whose
+    # reason has stopped being needed is reported stale, like ALLOWED's.
+    for key, short, _ in routines:
+        if key in allowed and any(c in linear and c not in consults for c in calls[key]):
+            used.add(key)
+    holes, ok = [], 0
+    for key, short, _ in routines:
+        if short not in entries or key not in linear:
+            continue
+        if key in consults:
+            ok += 1
+            continue
+        base = key.split(':', 1)[0]
+        if test_hosts and base in test_hosts:
+            used.add(base)
+            continue
+        holes.append((key, linear[key]))
+    flagged = sorted(direct.items())
+    return holes, ok, used, flagged
+
+
 def report(holes):
     print('BUDGET HOLES -- these can run long without consulting the budget:')
     for key, hits in holes:
@@ -1283,6 +1815,57 @@ def prove():
             return 1
         print('prove: the same narrowing, listed as reviewed, is accepted.')
 
+        # ROUND SEVEN: THE LINEAR PASS, in the three shapes that decide it. A
+        # registered function reaching a byte loop over its STRING argument
+        # through a helper (the ucase$ shape: no count, no allocation the first
+        # rule could see); the same with the entry pricing the pass (quiet); and
+        # the lfill$ shape -- the entry calls a helper that asks the budget for
+        # work of its OWN, which must not count for the walk beside it.
+        lin_cases = [
+            ('a registered function walking its string through a helper',
+             'begin\n  Result := ValStr(Up(A[0].Str));\nend;\n', True),
+            ('the same, priced before the walk',
+             'begin\n'
+             "  if not BudgetLinearOk('up$', Length(A[0].Str), BudgetMilliRewrite, E) then Exit;\n"
+             '  Result := ValStr(Up(A[0].Str));\nend;\n', False),
+            ('the same, beside a helper that asks for its own work only',
+             "begin\n  Pad(' ', 3);\n  Result := ValStr(Up(A[0].Str));\nend;\n", True),
+        ]
+        for label, body, want in lin_cases:
+            with open(os.path.join(d, 'PhosphorPlantedLib.pas'), 'w',
+                      encoding='utf-8') as fh:
+                fh.write('unit PhosphorPlantedLib;\ninterface\nimplementation\n'
+                         'function Up(const S: String): String;\n'
+                         'var i: Integer;\n'
+                         'begin\n'
+                         '  Result := S;\n'
+                         '  for i := 1 to Length(Result) do Result[i] := UpCase(Result[i]);\n'
+                         'end;\n'
+                         # RunOf's shape: it asks, for the run of F it builds.
+                         'procedure Pad(const F: String; N: Integer);\n'
+                         'var r: String;\n'
+                         'begin\n'
+                         '  if not BudgetAllows(N * Length(F)) then Exit;\n'
+                         "  r := '';\n"
+                         '  SetLength(r, N * Length(F));\n'
+                         'end;\n'
+                         'function f_planted_up(const A: array of TValue;\n'
+                         '  out E: TPhosphorError): TValue;\n' + body +
+                         'procedure RegisterPlanted(Reg: TPhosphorRegistry);\n'
+                         'begin\n'
+                         "  Reg.Add('up$:$', @f_planted_up);\n"
+                         'end;\n'
+                         'end.\n')
+            holes, _, _, _ = linear_scan([d], {})
+            got = 'PhosphorPlantedLib.pas:f_planted_up' in [k for k, _ in holes]
+            if got != want:
+                print('PROVE FAILED: the linear pass on "%s" reported %s, wanted %s'
+                      % (label, [k for k, _ in holes] or 'nothing',
+                         'f_planted_up' if want else 'nothing'))
+                return 1
+            print('prove: linear pass, %s -> %s.'
+                  % (label, 'reported' if want else 'quiet'))
+
         # And the unzip rule, in both of the shapes d47 had: a LOCAL plain
         # unzipper asked to extract, and a FIELD reached through a handle. Then
         # the same two declared metered, which must go quiet.
@@ -1320,11 +1903,47 @@ def prove():
         return 0
 
 
+def linear(sites=False):
+    """The linear pass, as the plain run and --linear run it. With sites=True it
+    first lists EVERY routine it finds walking script-supplied data -- the
+    work-list the round-7 fix was made from -- and what answers for each."""
+    holes, ok, used, flagged = linear_scan(LINEAR_DIRS, LINEAR_ALLOWED,
+                                           LINEAR_TEST_HOSTS)
+    if sites:
+        for key, hits in flagged:
+            print('  %-56s %s' % (key, ', '.join(hits)))
+        print('linear sites: %d routines walk script-supplied data' % len(flagged))
+    if holes:
+        print('LINEAR HOLES -- registered functions whose work grows with a script-')
+        print('supplied string, array, list, dictionary, tree or buffer, and that')
+        print('consult nothing:')
+        for key, hits in holes:
+            print('  %-56s %s' % (key, ', '.join(hits)))
+        print('')
+        print('One call is one VM instruction however long its argument is, and the')
+        print('VM reads its clock every 4096 of them. Price the pass before it runs')
+        print('(BudgetLinearOk with a measured BudgetMilli* price), meter a walk whose')
+        print('length only the walk finds (BudgetMeterAdd), or list the walker in')
+        print('LINEAR_ALLOWED with the reason ONE call of it is O(1).')
+        return 1
+    stale = (set(LINEAR_ALLOWED) | set(LINEAR_TEST_HOSTS)) - used
+    if stale:
+        print('STALE LINEAR EXEMPTIONS -- listed but no longer reached:')
+        for key in sorted(stale):
+            print('  ' + key)
+        return 1
+    print('linear gate: %d registered functions do linear work, all consult the '
+          'budget; %d walkers exempt by name' % (ok, len(used)))
+    return 0
+
+
 def main():
     if '--prove' in sys.argv:
         return prove()
     if '--narrowing' in sys.argv:
         return narrowing()
+    if '--linear' in sys.argv:
+        return linear(sites=True)
     # A SCAN DIRECTORY THAT YIELDS NOTHING IS A GREEN LINE ABOUT NOTHING. This is
     # not hypothetical: host/console holds two .lpr files and sources() yielded
     # only .pas, so adding the directory without also widening the extensions
@@ -1367,8 +1986,10 @@ def main():
         print('inflates, and an archive decides how much that is (ledger d46).')
         return 1
     print('unzip gate: no archive is expanded through an unmetered unzipper')
-    # The narrowing sweep runs on every plain invocation too: a second rule that
-    # has to be REMEMBERED is a rule half the runs do not have.
+    # The linear pass and the narrowing sweep run on every plain invocation too:
+    # a second rule that has to be REMEMBERED is a rule half the runs do not have.
+    if linear():
+        return 1
     return narrowing()
 
 

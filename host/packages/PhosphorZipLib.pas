@@ -587,14 +587,26 @@ begin
 end;
 
 function TZipReader.IndexOf(const AName: String): Integer;
-var i: Integer;
+var i: Integer; m: TBudgetMeter;
 begin
   // By BYTES, the rule ExtractOnly selects by, so zip_exists, zip_entrysize and
   // the read that follows them can never disagree about which entry a name is.
+  // METERED (round 7): every entry of the archive is compared, and the archive
+  // decides how many there are; the callers report a spent budget.
   Result := -1;
+  BudgetMeterStart(m);
   for i := 0 to UZ.Entries.Count - 1 do
+  begin
+    if m.On and not BudgetMeterAdd(m, BudgetMilliItem +
+         Int64(Length(AName)) * BudgetMilliScan * Ord(Length(UZ.Entries[i].ArchiveFileName) = Length(AName))) then
+      Exit(-1);
     if NameBytesCompare(UZ.Entries[i].ArchiveFileName, AName) = 0 then
+    begin
+      BudgetMeterEnd(m);
       Exit(i);
+    end;
+  end;
+  BudgetMeterEnd(m);
 end;
 
 procedure TZipReader.DoCreateStream(Sender: TObject; var AStream: TStream; AItem: TFullZipFileEntry);
@@ -1532,7 +1544,11 @@ begin
   // 1/0, not a bool: assert_true/assert_false carry a message only on the
   // numeric overload (:n$), and there is no assert_*:?$ to catch a bool + msg.
   Err := NoError();
-  if GetReader(Args[0].Hnd, r) then Result := ValInt(Ord(r.IndexOf(Args[1].Str) >= 0))
+  if GetReader(Args[0].Hnd, r) then
+  begin
+    Result := ValInt(Ord(r.IndexOf(Args[1].Str) >= 0));
+    if BudgetSpent() then begin Err := BudgetRefusal('zip_exists'); Result := ValInt(0); end;
+  end
   else begin Result := ValInt(0); ZipErr := 1; end;
 end;
 
@@ -1577,6 +1593,7 @@ begin
   Result := ValInt(0);
   if not GetReader(Args[0].Hnd, r) then begin ZipErr := 1; Exit; end;
   i := r.IndexOf(Args[1].Str);
+  if BudgetSpent() then begin Err := BudgetRefusal('zip_entrysize'); Exit; end;
   if i >= 0 then Result := ValInt(r.UZ.Entries[i].Size)
   else ZipErr := 1;
 end;
@@ -1767,6 +1784,9 @@ var z: TZipper;
 begin
   Err := NoError();
   Result := ValInt(0);
+  // Both paths go to the gate and the OS, and one is split for its name.
+  if not BudgetLinearOk('zip_quick', Int64(Length(Args[0].Str)) + Length(Args[1].Str),
+                        BudgetMilliOs, Err) then Exit;
   { THE GATE WAS ASKED ABOUT ONE PATH, AND WITH THE OTHER PATH'S VERB. Args[0] is
     the file this READS into the archive and was checked with puWrite; Args[1] is
     the archive it WRITES and was not checked at all. The wrong verb was not

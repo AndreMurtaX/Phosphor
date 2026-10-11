@@ -117,11 +117,14 @@ type
     procedure Rebuild;
     function DocumentCount: Integer;
     function FunctionCount: Integer;
+    { Every function name of every document: what a pass over the index's
+      names costs, for the callers that price one. }
+    function FunctionTotal: Int64;
     function RetrieveList(const AQuery: String; AMaxTokens: Integer): TRagResultArr;
     function GetDocument(const AId: String; out AFound: Boolean): String;
     function FindByFunctions(const AFuncs: String): TRagResultArr;
     function FindByTags(const ATags: String): TRagResultArr;
-    function AnalyzeJson(const AQuery: String): String;
+    function AnalyzeJson(const AQuery: String; var Err: TPhosphorError): String;
     function Summary: String;
   end;
 
@@ -144,6 +147,99 @@ begin
   for i := 0 to High(A) do
     if A[i] = S then Exit(True);
   Result := False;
+end;
+
+{ LINEAR WHERE A QUERY IS SPLIT AND DEDUPLICATED (round 7). The query analysis
+  deduplicated its words with HasStr -- a scan of everything kept so far -- and
+  grew its arrays with AddStr, one SetLength per item: O(k^2) for k distinct
+  words. rag_analyze$ of a 40000-word query took 5687 ms (10172 with a "$" on
+  every word) under a 2000 ms ceiling and reported success. A builder that grows
+  geometrically and a hash set that answers "seen?" in one probe make it linear;
+  the words, and their order, are exactly the ones the scans kept. }
+type
+  TStrBuild = record
+    A: TStrArr;
+    N: Integer;
+  end;
+
+  { Open addressing over FNV-1a of the bytes, settled by `=` -- the comparison
+    HasStr made, so no word it would have kept is lost and none it would have
+    dropped is kept. Never more than half full. }
+  TStrSet = record
+    Keys: TStrArr;
+    Used: array of Boolean;
+    Count: Integer;
+  end;
+
+procedure SbAdd(var B: TStrBuild; const S: String);
+begin
+  if B.N >= Length(B.A) then SetLength(B.A, B.N * 2 + 16);
+  B.A[B.N] := S;
+  Inc(B.N);
+end;
+
+function SbDone(var B: TStrBuild): TStrArr;
+begin
+  SetLength(B.A, B.N);
+  Result := B.A;
+end;
+
+function StrHash(const S: String): LongWord;
+var i: Integer;
+begin
+  Result := $811C9DC5;
+  for i := 1 to Length(S) do
+  begin
+    Result := Result xor LongWord(Byte(S[i]));
+    Result := LongWord((QWord(Result) * 16777619) and $FFFFFFFF);
+  end;
+end;
+
+{ The slot holding K, or the empty slot where it would go. }
+function SetSlot(const S: TStrSet; const K: String): Integer;
+var mask: Integer;
+begin
+  mask := Length(S.Keys) - 1;
+  Result := Integer(StrHash(K) and LongWord(mask));
+  while S.Used[Result] and (S.Keys[Result] <> K) do
+    Result := (Result + 1) and mask;
+end;
+
+function SetHas(const S: TStrSet; const K: String): Boolean;
+begin
+  Result := (Length(S.Keys) > 0) and S.Used[SetSlot(S, K)];
+end;
+
+{ True when K was not there and is now. }
+function SetAdd(var S: TStrSet; const K: String): Boolean;
+var old: TStrArr; oldUsed: array of Boolean; i, slot, n: Integer;
+begin
+  if (S.Count + 1) * 2 > Length(S.Keys) then
+  begin
+    old := S.Keys;
+    oldUsed := S.Used;
+    n := 64;
+    while n < (S.Count + 1) * 2 do n := n * 2;
+    S.Keys := nil;
+    S.Used := nil;
+    SetLength(S.Keys, n);
+    SetLength(S.Used, n);
+    for i := 0 to High(old) do
+      if oldUsed[i] then
+      begin
+        slot := SetSlot(S, old[i]);
+        S.Keys[slot] := old[i];
+        S.Used[slot] := True;
+      end;
+  end;
+  slot := SetSlot(S, K);
+  Result := not S.Used[slot];
+  if Result then
+  begin
+    S.Keys[slot] := K;
+    S.Used[slot] := True;
+    Inc(S.Count);
+  end;
 end;
 
 function ContainsSub(const AHay, ANeedle: String): Boolean;
@@ -185,17 +281,18 @@ end;
 
 // Split on any of the given single-char delimiters, dropping empties.
 function SplitChars(const S: String; const Delims: TSysCharSet): TStrArr;
-var i, start: Integer; part: String;
+var i, start: Integer; part: String; b: TStrBuild;
 begin
-  Result := nil;
+  b := Default(TStrBuild);
   start := 1;
   for i := 1 to Length(S) + 1 do
     if (i > Length(S)) or (S[i] in Delims) then
     begin
       part := Copy(S, start, i - start);
-      if part <> '' then AddStr(Result, part);
+      if part <> '' then SbAdd(b, part);
       start := i + 1;
     end;
+  Result := SbDone(b);
 end;
 
 // Split into lines on LF, tolerating CRLF (a trailing CR is dropped).
@@ -347,6 +444,13 @@ begin
 end;
 
 // Distinct (case-insensitive) function names across all documents.
+function TPhosphorRag.FunctionTotal: Int64;
+var i: Integer;
+begin
+  Result := 0;
+  for i := 0 to High(FDocs) do Result := Result + Length(FDocs[i].Functions);
+end;
+
 function TPhosphorRag.FunctionCount: Integer;
 var i, j: Integer; seen: TStringList;
 begin
@@ -465,9 +569,11 @@ const
     'who','whom','where','when','why','how','of','in','to',
     'for','with','on','at','from','by');
 var cleaned, lw: String; i, k, bt, sp, blank: Integer;
-    words: TStrArr; isStop: Boolean;
+    words: TStrArr; isStop: Boolean; kept: TStrBuild; seen: TStrSet;
 begin
   Result := nil;
+  kept := Default(TStrBuild);
+  seen := Default(TStrSet);
   cleaned := LowerCase(AQuery);
   { ONE FORWARD PASS, bounded by the string it is walking. The judgement is made
     at the byte that BEGINS a character and `blank` carries the verdict across
@@ -518,22 +624,28 @@ begin
     if (lw = 'create') or (lw = 'make') or (lw = 'build') or (lw = 'want') or
        (lw = 'need') or (lw = 'please') or (lw = 'help') or (lw = 'show') or
        (lw = 'using') or (lw = 'like') or (lw = 'just') or (lw = 'some') then Continue;
-    if not HasStr(Result, lw) then AddStr(Result, lw);
+    if SetAdd(seen, lw) then SbAdd(kept, lw);
   end;
+  Result := SbDone(kept);
 end;
 
+{ The index's function names are lowered into a set ONCE per call -- InIndex
+  used to lower and compare every indexed name for every word of the query, up
+  to four times a word. Same answers: a word is in the index exactly when its
+  lowered spelling is one of the lowered names. }
 function TPhosphorRag.DetectFunctionNames(const AQuery: String): TStrArr;
-var words: TStrArr; k: Integer; lw: String;
-  function InIndex(const AName: String): Boolean;
-  var i, j: Integer;
+var words: TStrArr; k, i, j: Integer; lw: String; kept: TStrBuild; seen, names: TStrSet;
+  procedure Keep(const AName: String);
   begin
-    for i := 0 to High(FDocs) do
-      for j := 0 to High(FDocs[i].Functions) do
-        if LowerCase(FDocs[i].Functions[j]) = AName then Exit(True);
-    Result := False;
+    if SetAdd(seen, AName) then SbAdd(kept, AName);
   end;
 begin
-  Result := nil;
+  kept := Default(TStrBuild);
+  seen := Default(TStrSet);
+  names := Default(TStrSet);
+  for i := 0 to High(FDocs) do
+    for j := 0 to High(FDocs[i].Functions) do
+      SetAdd(names, LowerCase(FDocs[i].Functions[j]));
   words := SplitChars(LowerCase(AQuery), [' ', ',', ';', '(', ')']);
   for k := 0 to High(words) do
   begin
@@ -541,14 +653,15 @@ begin
     if lw = '' then Continue;
     if lw[Length(lw)] in ['#', '$', '@'] then
     begin
-      if not HasStr(Result, lw) then AddStr(Result, lw);
+      Keep(lw);
       Continue;
     end;
-    if InIndex(lw) then begin if not HasStr(Result, lw) then AddStr(Result, lw); Continue; end;
-    if InIndex(lw + '@') then begin if not HasStr(Result, lw + '@') then AddStr(Result, lw + '@'); end
-    else if InIndex(lw + '#') then begin if not HasStr(Result, lw + '#') then AddStr(Result, lw + '#'); end
-    else if InIndex(lw + '$') then begin if not HasStr(Result, lw + '$') then AddStr(Result, lw + '$'); end;
+    if SetHas(names, lw) then begin Keep(lw); Continue; end;
+    if SetHas(names, lw + '@') then Keep(lw + '@')
+    else if SetHas(names, lw + '#') then Keep(lw + '#')
+    else if SetHas(names, lw + '$') then Keep(lw + '$');
   end;
+  Result := SbDone(kept);
 end;
 
 function TPhosphorRag.DetectIntent(const AKws: TStrArr): String;
@@ -934,7 +1047,7 @@ begin
   end;
 end;
 
-function TPhosphorRag.AnalyzeJson(const AQuery: String): String;
+function TPhosphorRag.AnalyzeJson(const AQuery: String; var Err: TPhosphorError): String;
 var an: TRagAnalysis; obj: TJSONObject; kw, fn, hint: TJSONArray; i: Integer;
 begin
   an := AnalyzeQuery(AQuery);
@@ -955,7 +1068,8 @@ begin
     hint := TJSONArray.Create();
     for i := 0 to High(an.LibraryHints) do hint.Add(TJSONString.Create(an.LibraryHints[i]));
     obj.Add('library_hints', hint);
-    Result := JsonText(obj, False, 2, 0);
+    // A render the budget stops is reported, never answered as "".
+    Result := JsonText(obj, False, 2, 0, 'rag_analyze$', Err);
   finally
     obj.Free;
   end;
@@ -1072,11 +1186,36 @@ begin
   if AsRag(Args[0], r) then Result := ValInt(r.DocumentCount()) else Result := ValInt(0);
 end;
 
+{ FunctionCount and Summary put every function name (and tag) of the index into
+  a SORTED TStringList: a binary search and an insert that shifts the slots
+  after it, so n names cost n log n compares and about 2 n^2 bytes of pointer
+  moves. Priced as both, before the walk; n is what a rag@ over a folder of the
+  script's own files can make it. }
+function IndexNames(r: TPhosphorRag): Int64;
+var i: Int64;
+begin
+  Result := r.FunctionTotal;
+  for i := 0 to High(r.FDocs) do Result := Result + Length(r.FDocs[i].Tags);
+end;
+
+{ The pointer bytes n sorted inserts move, about 2 n^2, saturating. }
+function SortedInsertBytes(n: Int64): Int64;
+begin
+  if n <= 0 then Exit(0);
+  if n > High(Int64) div (2 * n) then Exit(High(Int64));
+  Result := 2 * n * n;
+end;
+
 function t_rag_funccount(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then Result := ValInt(r.FunctionCount()) else Result := ValInt(0);
+  Result := ValInt(0);
+  if not AsRag(Args[0], r) then Exit;
+  if not (BudgetLinearOk('rag_funccount', IndexNames(r), BudgetMilliNameItem, Err) and
+          BudgetLinearOk('rag_funccount', SortedInsertBytes(IndexNames(r)), BudgetMilliBlock, Err)) then
+    Exit;
+  Result := ValInt(r.FunctionCount());
 end;
 
 function t_rag_retrieve(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -1112,6 +1251,9 @@ begin
   if not AsRag(Args[0], r) then begin Result := ValStr('[]'); Exit; end;
   results := r.RetrieveList(Args[1].Str, 0);
   if r.FSpent then begin Err := BudgetRefusal('rag_retrieve_json$'); Exit(ValStr('[]')); end;
+  // Seven nodes a result, built before the render (which charges its own bytes).
+  if not BudgetLinearOk('rag_retrieve_json$', Int64(Length(results)) * 7, BudgetMilliNode, Err) then
+    Exit(ValStr('[]'));
   arr := TJSONArray.Create();
   try
     for i := 0 to High(results) do
@@ -1127,17 +1269,24 @@ begin
       obj.Add('content', results[i].Content);
       arr.Add(obj);
     end;
-    Result := ValStr(JsonText(arr, False, 2, 0));
+    Result := ValStr(JsonText(arr, False, 2, 0, 'rag_retrieve_json$', Err));
   finally
     arr.Free;
   end;
 end;
 
+{ IndexOfId lowers the id and every document's id to compare them. }
 function t_rag_doc(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag; found: Boolean;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then Result := ValStr(r.GetDocument(Args[1].Str, found))
+  if AsRag(Args[0], r) then
+  begin
+    if not (BudgetLinearOk('rag_doc$', Length(Args[1].Str), BudgetMilliRewrite, Err) and
+            BudgetLinearOk('rag_doc$', Length(r.FDocs), BudgetMilliNameItem, Err)) then
+      Exit(ValStr(''));
+    Result := ValStr(r.GetDocument(Args[1].Str, found));
+  end
   else Result := ValStr('Error: invalid RAG handle');
 end;
 
@@ -1165,18 +1314,43 @@ begin
   else Result := ValStr('');
 end;
 
+{ PRICED BY THE QUERY AND THE INDEX (round 7), now that the analysis is linear:
+  a pass per query byte (measured, RagAnalyzeMilliPerByte), a substring test of
+  every library document's id against the query (DetectLibraryHints), and every
+  indexed function name lowered into a set once. }
+const
+  { Measured after the dedup was made linear (-O2, no ceilings, three calls of
+    a query of n distinct words "w1 w2 ..."): n = 5000, 10000, 20000, 40000 cost
+    7.0, 6.5, 5.8, 5.5 us per query BYTE -- linear, and dominated by DetectIntent,
+    which scores every keyword against some 200 intent words. The densest query
+    of distinct words packs one word into four bytes ("aa1 "), where the same
+    37 us a word is 9.25 us a byte: priced at 9.5 us, 1216000 milli-units. }
+  RagAnalyzeMilliPerByte = 1216000;
+
 function t_rag_analyze(const Args: array of TValue; out Err: TPhosphorError): TValue;
-var r: TPhosphorRag;
+var r: TPhosphorRag; q: String;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then Result := ValStr(r.AnalyzeJson(Args[1].Str)) else Result := ValStr('');
+  Result := ValStr('');
+  if not AsRag(Args[0], r) then Exit;
+  q := Args[1].Str;
+  if not (BudgetLinearOk('rag_analyze$', Length(q), RagAnalyzeMilliPerByte, Err) and
+          BudgetLinearOk('rag_analyze$', Int64(Length(q)) * Length(r.FDocs), BudgetMilliScan, Err) and
+          BudgetLinearOk('rag_analyze$', r.FunctionTotal, BudgetMilliNameItem, Err)) then Exit;
+  Result := ValStr(r.AnalyzeJson(q, Err));
+  if IsError(Err) then Result := ValStr('');
 end;
 
 function t_rag_summary(const Args: array of TValue; out Err: TPhosphorError): TValue;
 var r: TPhosphorRag;
 begin
   Err := NoError();
-  if AsRag(Args[0], r) then Result := ValStr(r.Summary) else Result := ValStr('');
+  Result := ValStr('');
+  if not AsRag(Args[0], r) then Exit;
+  if not (BudgetLinearOk('rag_summary$', IndexNames(r), BudgetMilliNameItem, Err) and
+          BudgetLinearOk('rag_summary$', SortedInsertBytes(IndexNames(r)), BudgetMilliBlock, Err)) then
+    Exit;
+  Result := ValStr(r.Summary);
 end;
 
 function t_rag_error(const Args: array of TValue; out Err: TPhosphorError): TValue;

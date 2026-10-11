@@ -399,7 +399,7 @@ begin
 end;
 
 { gui_test_pending() -- how many frees are waiting for a safe moment. Test only:
-  what the in-modal flush KEEPS (a running handler's sender) is otherwise
+  what the in-modal flush KEEPS (anything born before the session) is otherwise
   invisible to a script, whose handle died at control_free, and a use after
   free under the LCL leaves no sign a test can read (round-6 review). }
 function f_gui_test_pending(const Args: array of TValue; out Err: TPhosphorError): TValue;

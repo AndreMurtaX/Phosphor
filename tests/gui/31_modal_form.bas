@@ -165,6 +165,39 @@ assert_eq(openr, 1, "the session opened from the click ended with OK")
 assert_eq(freeerr, 0, "both frees were accepted")
 assert_eq(pendingafter - pendingbefore, 1, "the sender was kept, the grid released")
 
+test_case("modal/nothing older than the session is freed inside it (round 7)")
+rem Checking r1 runs TRadioButton.ApplyChanges (lcl/include/radiobutton.inc),
+rem a loop over the PANEL's controls with its bound read once, and that
+rem loop unchecks r2 -- whose onchange opens the modal. So under the
+rem session lie r1's own method and a walk of its siblings, and r1 is no
+rem handler's sender: the LCL called on_r2, not a click of r1. One round
+rem frees r1 (the object whose method is running), r3 (a sibling the walk
+rem has not reached) and a grid made inside the session. Round 6 kept only
+rem the senders' trees and freed both radios beneath the LCL: an access
+rem violation for r1, "list index (2) out of bounds" for r3, each killing
+rem the program at the radio_checked@ below. Expected, from the LCL: r2
+rem is unchecked once the walk finishes; the grid is released between
+rem rounds and the two radios are not (2 more waiting); and they go once
+rem the walk has returned, at the next GUI call at depth 0.
+rmain@ = form@("radios", 300, 200)
+rpnl@ = panel@(rmain@)
+r1@ = radiobutton@(rpnl@)
+r2@ = radiobutton@(rpnl@)
+r3@ = radiobutton@(rpnl@)
+radio_checked@(r2@, 1)
+radio_onchange@(r2@, "on_r2")
+r2modal = -1
+gui_test_modal("free_radios_and_grid")
+gui_test_modal("count_pending_ok")
+gui_clearerror()
+radio_checked@(r1@, 1)
+assert_eq(gui_error(), 0, "checking r1 raised nothing and recorded nothing")
+assert_eq(r2modal, 1, "the session opened from r2's change ended with OK")
+assert_eq(freeerr, 0, "all three frees were accepted")
+assert_eq(pendingafter - pendingbefore, 2, "r1 and r3 were kept, the grid released")
+assert_eq(radio_checked(r2@), 0, "r2 was unchecked by the walk")
+assert_eq(gui_test_pending(), 0, "and the two radios went once the walk returned")
+
 test_case("modal/a form the LCL cannot make modal is refused, not raised")
 form_show@(main@)
 gui_clearerror()
@@ -296,6 +329,22 @@ function free_grid_and_opener(f@) local g@
   gui_clearerror()
   control_free(g@)
   control_free(opener@)
+  freeerr = gui_error()
+  return 0
+endfunction
+
+function on_r2(s@)
+  r2modal = form_showmodal(dlg@)
+  return 0
+endfunction
+
+function free_radios_and_grid(f@) local g@
+  pendingbefore = gui_test_pending()
+  g@ = stringgrid@(f@)
+  gui_clearerror()
+  control_free(g@)
+  control_free(r1@)
+  control_free(r3@)
   freeerr = gui_error()
   return 0
 endfunction

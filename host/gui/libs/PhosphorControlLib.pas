@@ -345,6 +345,11 @@ begin
     FreeHandle(A[0].Hnd);
     Exit(ValInt(0));
   end;
+  // A WINDOW ON SCREEN THAT IS FREED LEAVES IT, as surely as one closed (round
+  // 7): ask app_run the last-window question, as the closer does. Asked now,
+  // while the form is alive to be asked; app_run reads it after every handler
+  // has returned and after GuiFlushFrees, when this handle is already gone.
+  GuiWindowLeaving(h.Control);
   // INSIDE A HANDLER, THE LCL MAY BE STANDING ON IT -- or on the form that owns
   // it, or on anything else it touches on the way out of the event; which one
   // depends on each control's internals (TButtonControl.Click calls

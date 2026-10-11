@@ -38,14 +38,18 @@ The loop deserves one warning. `app_run()` is **Phosphor's own loop**, not LCL's
 application — it only asks the loop to return. That is what makes `app_run()`
 re-enterable: a host that runs one script after another, or an embedder that
 drives the engine between loops, gets a GUI that is still a GUI the second time.
-The one thing that *does* terminate the application is `end` inside an event
-handler, which has to end the program the window was clicked in, window included.
+Nothing in the GUI terminates the application — not `app_quit()`, not closing the
+last window, and not `end`. `end` inside an event handler leaves the loop exactly
+as `app_quit()` does, answers every modal form that is up with Cancel (`2`), and
+then the *program* ends, because the engine has halted: the statements after
+`app_run()` do not run. The application itself stays usable, which is what an
+embedder running the next script needs.
 
 ## Functions
 
 | function | what it answers |
 | --- | --- |
-| `app_run() → num` | enter the message loop and dispatch events until something leaves it. Returns `0` when it does. It is left by `app_quit()` **or** by the application terminating — which is what closing the last window does, and what `end` in a handler does. "The last window" is judged once every handler has returned, not while one runs: a handler that closes one window and shows the next keeps the loop running. There is no timeout: with no window shown and no path to `app_quit()`, it does not return |
+| `app_run() → num` | enter the message loop and dispatch events until something leaves it. Returns `0` when it does. It is left by `app_quit()`, by `end` in a handler (which then ends the program), **or** when a window leaves the screen — closed (the X button, `form_close@`) or freed (`control_free`) — and, once every handler has returned, no window of the program is left on screen. That is judged then, not while a handler runs: a handler that closes one window and shows the next keeps the loop running, and one that closes window A and hides window B ends it whichever it does first. A *window* here is a top-level form that is shown: a form placed inside another with `control_parent@` is part of that window, and a modal dialog never keeps the loop alive (nor does answering one end it). Hiding a window (`control_visible@(f@, 0)`) is not closing it — a program that hides its last window to the tray keeps its loop — and closing a form that was not on screen (never shown, or already hidden) closes no window. So with no window ever shown, as in a timer- or tray-driven program, only `app_quit()` or `end` leaves it. There is no timeout: with no window shown and no path to `app_quit()`, it does not return. Nothing here terminates the application; a later `app_run()` enters the loop normally |
 | `app_processmessages() → num` | dispatch everything currently pending and come straight back, so a long computation can keep its window alive without entering the loop. Always `0`; with nothing pending it does nothing and still answers `0` |
 | `app_quit() → num` | ask the running `app_run()` to return. Always `0`. It leaves the application usable — a later `app_run()` enters the loop normally. Called when no loop is running it is harmless: `app_run()` clears the request on entry, so it cannot poison the next loop |
 | `gui_error() → num` | the code of the last GUI failure, `0` if none since the last clear. `1` a handle that is not a live object of the expected class (fabricated, freed with its form, wrong class), an index outside the control's range, or an operation the control refused; `2` a bound BASIC handler that failed at run time — the event still returned, the failure is here; `3` the named property is not published on that control, or is of a kind the property bridge cannot reach. Reads a slot shared by every GUI package, not only this one |
@@ -111,9 +115,10 @@ Two things worth noticing:
   message -- is said once, so a timer that fails on every tick does not flood the
   log; after 64 distinct ones the host says so and stops. Until 2026-10-05 nothing
   was printed, and a packed GUI program with a broken handler simply did nothing.
-- **Closing the window works too.** The X button terminates the application,
-  which also ends `app_run()`, so the `println` after it runs whether the user
-  pressed *Done* or closed the window.
+- **Closing the window works too.** The X button closes the last window on
+  screen, which ends `app_run()` once the close has been handled, so the
+  `println` after it runs whether the user pressed *Done* or closed the window.
+  The application is not terminated either way.
 
 ## Notes
 

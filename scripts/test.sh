@@ -1457,6 +1457,21 @@ fi
 #    its sibling r3. Round 6 freed both under the walk -- an access violation,
 #    or "list index out of bounds" -- and the program died at radio_checked@.
 #    Expected: the walk finishes (r2 unchecked) and the modal answered 1.
+#  - ROUND 8 (2026-10-11): EVERY DOOR that makes a form a window, or stops it
+#    being one, asks app_run the same question. Expected, from the same rule
+#    and from LCL's TWinControl.Destroy (wincontrol.inc: the host's window is
+#    destroyed, its children only unparented -- a form owns itself and
+#    survives): a form embedded in a main window that is FREED has no window
+#    left, so nothing is on screen and the loop ends at the free, the form
+#    hidden (agembfree: tick 2, inner visible 0; it ran to the watchdog with
+#    inner visible 1); the same through a freed PANEL, the main window closed
+#    two ticks later (agembpanel: tick 4, inner visible 0); the only window
+#    moved with control_parent@ into a form never shown leaves the screen
+#    (agembhidden: tick 2); and a window shown without form_show@ -- by
+#    control_visible@ or by control_set@ "Visible" -- is closed by
+#    form_close@ like any other (agvisible, agvisset: tick 2, main visible 0;
+#    both ran to the watchdog: only form_show@ and form_onclose@ installed the
+#    closer that asks app_run, and now form@ does).
 printf '%s\n' 'main@ = form@("AG", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'dlg@ = form@("AG dialog", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/ag.bas"
@@ -1733,6 +1748,110 @@ printf '%s\n' '  end if' >> "$tmpdir/agradio.bas"
 printf '%s\n' '  if phase = 3 then button_click@(ok@)' >> "$tmpdir/agradio.bas"
 printf '%s\n' '  return 0' >> "$tmpdir/agradio.bas"
 printf '%s\n' 'end function' >> "$tmpdir/agradio.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'inner@ = form@("Inner", 100, 60)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'control_parent@(inner@, main@)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'control_visible@(inner@, 1)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", inner visible " + str$(form_visible(inner@))' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'end' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '  if ticks = 2 then x = control_free(main@)' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agembfree.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agembfree.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'pnl@ = panel@(main@)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'inner@ = form@("Inner", 100, 60)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'control_parent@(inner@, pnl@)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'control_visible@(inner@, 1)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", inner visible " + str$(form_visible(inner@))' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'end' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '  if ticks = 2 then x = control_free(pnl@)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '  if ticks = 4 then form_close@(main@)' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agembpanel.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'holder@ = form@("Holder", 300, 200)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'end' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '  if ticks = 2 then control_parent@(main@, holder@)' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agembhidden.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'control_visible@(main@, 1)' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", main visible " + str$(form_visible(main@))' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'end' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '  if ticks = 2 then form_close@(main@)' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agvisible.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agvisible.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'control_set@(main@, "Visible", true)' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", main visible " + str$(form_visible(main@))' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'end' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '  if ticks = 2 then form_close@(main@)' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agvisset.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agvisset.bas"
 if command -v xvfb-run > /dev/null 2>&1; then
   okAG=0
   # xvfb-run runs the program with 2>&1, so stdout and stderr arrive as ONE
@@ -1745,7 +1864,7 @@ if command -v xvfb-run > /dev/null 2>&1; then
   if timeout 60 xvfb-run -a "$exe" "$tmpdir/agend.bas" < /dev/null > "$tmpdir/agend.out" 2>&1; then agcode=0; else agcode=$?; fi
   tr -d '\r' < "$tmpdir/agend.out" > "$tmpdir/agend.txt"
   [ "$agcode" -eq 0 ] && grep -qxF -- "before" "$tmpdir/agend.txt" && ! grep -qF -- "carries on" "$tmpdir/agend.txt" || { echo "FAIL  AG:END inside a modal with close handlers: exit $agcode, got '$(cat "$tmpdir/agend.txt")'"; okAG=1; }
-  for agcase in agwiz aglatch agembed agorder agfree agtray aghidden agradio; do
+  for agcase in agwiz aglatch agembed agorder agfree agtray aghidden agradio agembfree agembpanel agembhidden agvisible agvisset; do
     if timeout 60 xvfb-run -a "$exe" "$tmpdir/$agcase.bas" < /dev/null > "$tmpdir/$agcase.out" 2>&1; then agcode=0; else agcode=$?; fi
     tr -d '\r' < "$tmpdir/$agcase.out" > "$tmpdir/$agcase.txt"
     case "$agcase" in
@@ -1757,6 +1876,11 @@ if command -v xvfb-run > /dev/null 2>&1; then
     agtray) printf '%s\n' 'app_run ended at tick 10' > "$tmpdir/$agcase.want" ;;
     aghidden) printf '%s\n' 'app_run ended at tick 10, onclose ran 1' > "$tmpdir/$agcase.want" ;;
     agradio) printf '%s\n' 'after: r2 0, modal answered 1' > "$tmpdir/$agcase.want" ;;
+    agembfree) printf '%s\n' 'app_run ended at tick 2, inner visible 0' > "$tmpdir/$agcase.want" ;;
+    agembpanel) printf '%s\n' 'app_run ended at tick 4, inner visible 0' > "$tmpdir/$agcase.want" ;;
+    agembhidden) printf '%s\n' 'app_run ended at tick 2' > "$tmpdir/$agcase.want" ;;
+    agvisible) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;
+    agvisset) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;
     esac
     [ "$agcode" -eq 0 ] && cmp -s "$tmpdir/$agcase.txt" "$tmpdir/$agcase.want" || { echo "FAIL  AG:$agcase -- want '$(cat "$tmpdir/$agcase.want")': exit $agcode, got '$(cat "$tmpdir/$agcase.txt")'"; okAG=1; }
   done

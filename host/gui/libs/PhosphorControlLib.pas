@@ -349,6 +349,11 @@ begin
   // 7): ask app_run the last-window question, as the closer does. Asked now,
   // while the form is alive to be asked; app_run reads it after every handler
   // has returned and after GuiFlushFrees, when this handle is already gone.
+  // AND A FORM EMBEDDED IN WHAT IS FREED IS LEFT WITHOUT A PARENT -- a form owns
+  // itself, so it outlives its host -- and with no window (round 8): it is hidden
+  // first, or it counted as a window on screen that nobody could see or close, and
+  // app_run never ended. See GuiHideOrphanedForms.
+  GuiHideOrphanedForms(h.Control);
   GuiWindowLeaving(h.Control);
   // INSIDE A HANDLER, THE LCL MAY BE STANDING ON IT -- or on the form that owns
   // it, or on anything else it touches on the way out of the event; which one
@@ -651,7 +656,7 @@ end;
 // A control's parent, which the property bridge cannot reach: TControl.Parent is
 // public, not published, so RTTI does not see it.
 function f_parent_set(const A: array of TValue; out E: TPhosphorError): TValue;
-var c, pc: TComponent; w: TWinControl;
+var c, pc: TComponent;
 begin
   E := NoError; Result := A[0];
   if not GuiResolve(A[0].Hnd, TControl, c) then Exit;
@@ -669,20 +674,16 @@ begin
   // descendants makes a cycle, and the LCL then recurses until the stack is gone --
   // reported as a BASIC stack overflow, but only after the process has spun for
   // minutes. Walk the proposed parent's chain first: if this control is anywhere on
-  // it, the request is a bug in the program, not a layout.
-  w := TWinControl(pc);
-  while w <> nil do
-  begin
-    if w = c then begin GGuiError := 1; Exit; end;
-    w := w.Parent;
-  end;
-  try
-    TControl(c).Parent := TWinControl(pc);
-  except
-    // The LCL refuses some pairings itself (EInvalidOperation). The package's rule
-    // is that a bad request is RECORDED, never raised into the program.
-    on Exception do GGuiError := 1;
-  end;
+  // it, the request is a bug in the program, not a layout. The chain walked is the
+  // one the moves still pending will make (round 8): two moves asked in one handler
+  // can each be fine alone and a cycle together.
+  if GuiWouldCycle(c, TWinControl(pc), True) then begin GGuiError := 1; Exit; end;
+  // INSIDE A HANDLER THE MOVE IS DEFERRED (round 8): the LCL may be walking the
+  // list it would take the control out of -- a radio's sibling walk ended in "list
+  // index out of bounds", raised into the program. See GuiMoveControl, which also
+  // asks app_run about a window that stops being one, and records an LCL refusal
+  // (the package's rule: a bad request is RECORDED, never raised).
+  GuiMoveControl(A[0].Hnd, A[1].Hnd, TControl(c), TWinControl(pc));
 end;
 
 // Anchors is a SET, so it reads and writes as the identifier list the bridge also

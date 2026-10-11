@@ -117,6 +117,15 @@ the platform installs, so Windows and Linux answer identically. It is *case*
 folding only: an accented letter still differs from its unaccented one, and
 `"ss"` does not match `"ß"`.
 
+**What has no case comes back as it went in, byte for byte.** That covers the
+noncharacters `U+FFFE` and `U+FFFF` (until 2026-10-10 both came back as `"?"`),
+and every byte that is not part of a well-formed UTF-8 character — a stray
+continuation byte, a truncated or overlong sequence, an encoded surrogate — which
+`bytemid$` and `buffer_slice$` can hand you. `aucase$` never replaces anything,
+and never changes what `len` counts. The *ignoring case* family compares such
+bytes exactly, and `replacetext$` replaces only a match that begins and ends on a
+character boundary.
+
 ### Splitting into fields and lines
 
 | function | what it answers |

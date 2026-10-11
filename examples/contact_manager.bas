@@ -467,9 +467,19 @@ end function
 
 rem Whether p$ may be opened through SQLite: 1 when its header carries this
 rem program's application id, or when it is not there yet or empty or not
-rem marked by any program AND nothing unfinished lies beside it -- then
-rem db_owner$ looks at its tables, which only reads. Else 0, schema_msg$
-rem says why, and the file has not been opened at all.
+rem marked by any program -- then db_owner$ looks at its tables, which only
+rem reads. Else 0, schema_msg$ says why, and the file has not been opened.
+rem An unmarked file with unfinished work beside it is the one case where
+rem looking is not only reading: SQLite acts on that work at the first
+rem query. And it is THIS program's most likely crash: an upgrade marks the
+rem file only as its last statement, so a version-1 or -2 file killed in
+rem mid-upgrade (11 s for 50,000 companies) is unmarked, with a hot journal
+rem -- and so is a first run killed before its first commit, an empty file
+rem beside a journal. So the work is judged on a COPY (judge_copy): SQLite
+rem does to the copy exactly what it would do to the file, and the copy's
+rem owner is the file's. Only a file that would be this program's, or new,
+rem once SQLite has done that, is opened; another program's is left, with
+rem its journal, byte for byte as it was.
 function may_open_db(p$) local h$, j$
   schema_msg$ = ""
   h$ = file_header$(p$)
@@ -489,11 +499,72 @@ function may_open_db(p$) local h$, j$
     end if
   end if
   j$ = unfinished$(p$)
-  if j$ <> "" then
-    schema_msg$ = "a program stopped in the middle of changing it, and left " + j$ + " beside it. Nothing marks the file as this program's, and opening it would make SQLite roll that change back -- a write into a file that may be another program's. Open it with the program that made it first."
+  if j$ = "" then return 1
+  return judge_copy(p$, j$)
+end function
+
+rem The scratch copy judge_copy works on, and the names SQLite keeps beside
+rem it; each is removed by name (never a folder) before and after.
+function check_copy$()
+  return temppath$() + "phosphor-contacts-check.db"
+end function
+
+function drop_check_copy() local c$
+  c$ = check_copy$()
+  if file_exists(c$) = 1 then file_delete(c$)
+  if file_exists(c$ + "-journal") = 1 then file_delete(c$ + "-journal")
+  if file_exists(c$ + "-wal") = 1 then file_delete(c$ + "-wal")
+  if file_exists(c$ + "-shm") = 1 then file_delete(c$ + "-shm")
+  return flag(file_exists(c$) = 0 and file_exists(c$ + "-journal") = 0 and file_exists(c$ + "-wal") = 0)
+end function
+
+rem p$ is unmarked and j$, beside it, holds unfinished work: copy the file
+rem and what lies beside it, let SQLite open the COPY and do what it does
+rem (roll a hot journal back, apply a log, drop a journal beside an empty
+rem file, or leave one whose header says it holds nothing), and ask
+rem db_owner$ whose file the result is. 1 when it is this program's or
+rem new; else 0 with schema_msg$ saying why.
+function judge_copy(p$, j$) local c$, c@, v, app, ok, why$, act$, pre$
+  c$ = check_copy$()
+  act$ = "roll back into it"
+  if right$(j$, 4) = "-wal" then act$ = "write into it"
+  pre$ = "a program stopped in the middle of changing it and left " + j$ + " beside it, which SQLite would " + act$
+  if drop_check_copy() <> 1 then
+    schema_msg$ = pre$ + "; the copy it is checked on first (" + c$ + ") could not be cleared."
     return 0
   end if
-  return 1
+  notice("Checking a database that a program left unfinished...")
+  ok = 1
+  if file_exists(p$) = 1 then ok = file_copy(p$, c$)
+  if ok = 1 and file_exists(p$ + "-journal") = 1 then ok = file_copy(p$ + "-journal", c$ + "-journal")
+  if ok = 1 and file_exists(p$ + "-wal") = 1 then ok = file_copy(p$ + "-wal", c$ + "-wal")
+  why$ = ""
+  if ok <> 1 then
+    why$ = "; it could not be copied to " + c$ + " to be checked first."
+  else
+    sqlite_clearerror()
+    c@ = sqlite_open@(c$)
+    if sqlite_isopen(c@) <> 1 then
+      why$ = "; the copy it is checked on first could not be opened (" + sqlite_errormsg$() + ")."
+    else
+      v = sqlite_scalar(c@, "PRAGMA user_version")
+      if sqlite_error() = 0 then app = sqlite_scalar(c@, "PRAGMA application_id")
+      if sqlite_error() <> 0 then
+        why$ = "; on a copy, SQLite could not do that (" + sqlite_errormsg$() + ")."
+      elseif db_owner$(c@, v, app) = "" then
+        why$ = " -- and once it has, " + schema_msg$
+      end if
+      sqlite_close(c@)
+    end if
+  end if
+  drop_check_copy()
+  notice("")
+  if why$ = "" then
+    schema_msg$ = ""
+    return 1
+  end if
+  schema_msg$ = pre$ + why$ + " The file and " + j$ + " are left as they are."
+  return 0
 end function
 
 rem The start-up could not open its database: offer to pick another file,
@@ -599,14 +670,18 @@ rem makes of a name that was not there), else "" with schema_msg$ saying
 rem why. (open_database has already asked the file's header the same,
 rem without SQLite: may_open_db.) Version 3 marks its files with PRAGMA
 rem application_id; versions 1 and 2 set none, so a file of theirs is known
-rem by its version AND by having every column version 1 built. A marked
-rem file is not trusted on its mark alone either: it must have every table
-rem and column its version has, or the first query of the program fails on
-rem a table that is not there. The tables and columns are read from a
-rem schema built in memory the way this program builds one -- version 1's,
-rem or the whole upgrade's for the current version -- not from a list kept
-rem by hand. A file of a NEWER version is left to create_schema to refuse.
-function db_owner$(d@, v, app) local m@, s@, missing$, n
+rem by its version AND by having everything version 1 built. A marked file
+rem is not trusted on its mark alone either: it must have everything its
+rem version has -- every table and column, or the first query of the
+rem program fails on a table that is not there, and every index and foreign
+rem key (schema_rules@), because the rules the program keeps live there and
+rem nowhere else: without ux_users_username_key, josé and JOSÉ are two
+rem users again, and nothing else in the program says no. All of it is read
+rem from a schema built in memory the way this program builds one --
+rem version 1's, or the whole upgrade's for the current version -- not from
+rem a list kept by hand. A file of a NEWER version is left to create_schema
+rem to refuse.
+function db_owner$(d@, v, app) local m@, s@, missing$, n, lost
   if app <> 0 and app <> APP_ID then
     schema_msg$ = "it belongs to another program (its application id is " + str$(app) + "), not to " + APP$ + "."
     return ""
@@ -615,6 +690,7 @@ function db_owner$(d@, v, app) local m@, s@, missing$, n
   n = sqlite_scalar(d@, "SELECT count(*) FROM sqlite_master")
   if n = 0 and v = 0 then return "new"
   missing$ = "?"
+  lost = 0
   if v = 1 or v = 2 or (app = APP_ID and v = SCHEMA_VERSION) then
     missing$ = ""
     m@ = sqlite_open@()
@@ -623,19 +699,21 @@ function db_owner$(d@, v, app) local m@, s@, missing$, n
     else
       schema_v1(m@)
     end if
-    s@ = sqlite_prepare@(m@, "SELECT m.name AS t, p.name AS c FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table' ORDER BY m.rowid, p.cid")
+    s@ = sqlite_prepare@(m@, "SELECT m.name AS t, p.name AS c, (p.cid = 0) AS first FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table' ORDER BY m.rowid, p.cid")
     while sqlite_step(s@) = 1
-      if missing$ = "" then
-        if has_column(d@, sqlite_gets$(s@, "t"), sqlite_gets$(s@, "c")) = 0 then
-          if has_column(d@, sqlite_gets$(s@, "t"), "") = 1 then
-            missing$ = "the column " + sqlite_gets$(s@, "t") + "." + sqlite_gets$(s@, "c")
-          else
-            missing$ = "the table " + sqlite_gets$(s@, "t")
-          end if
+      if has_column(d@, sqlite_gets$(s@, "t"), sqlite_gets$(s@, "c")) = 0 then
+        if has_column(d@, sqlite_gets$(s@, "t"), "") = 1 then
+          if missing$ = "" then missing$ = "the column " + sqlite_gets$(s@, "t") + "." + sqlite_gets$(s@, "c") + " is missing"
+        else
+          rem (a table that is not there fails each of its columns: count
+          rem it at its first)
+          if sqlite_getn(s@, "first") = 1 then lost = lost + 1
+          if missing$ = "" then missing$ = "the table " + sqlite_gets$(s@, "t") + " is missing"
         end if
       end if
     end while
     sqlite_finalize(s@)
+    if missing$ = "" then missing$ = rules_missing$(d@, m@, v)
     sqlite_close(m@)
   end if
   if missing$ = "" then return "ours"
@@ -643,12 +721,79 @@ function db_owner$(d@, v, app) local m@, s@, missing$, n
     if missing$ = "?" then
       schema_msg$ = "it is marked as a " + APP$ + " database, but its schema version (" + str$(v) + ") is not one this program ever wrote -- the file is damaged. Open a backup of it instead."
     else
-      schema_msg$ = "it is marked as a " + APP$ + " database, but it is not a complete one: " + missing$ + " is missing -- the file is damaged. Open a backup of it instead."
+      schema_msg$ = "it is marked as a " + APP$ + " database, but it is not a complete one: " + missing$ + " -- the file is damaged. Open a backup of it instead."
     end if
+    return ""
+  end if
+  rem Unmarked, at version 1 or 2, with every table of that version: an
+  rem earlier version's file that has lost a part -- or another program's
+  rem made to look like one. Its tables are this program's own, so the
+  rem message names what is missing, not "other tables".
+  if missing$ <> "?" and lost = 0 then
+    schema_msg$ = "it has the tables of a database an earlier version of " + APP$ + " made (schema version " + str$(v) + "), but " + missing$ + ": it is a damaged copy of one, or another program's file, and this program does not write into it. Open a backup of it instead."
     return ""
   end if
   schema_msg$ = "it is not a " + APP$ + " database -- it holds other tables (" + sqlite_scalar$(d@, "SELECT group_concat(name, ', ') FROM (SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name LIMIT 6)") + ") -- and this program does not write into another program's file."
   return ""
+end function
+
+rem Every index and foreign key of a database's tables, as a dictionary:
+rem "the index NAME" or "the foreign key TABLE.COLUMN" -> what it is (its
+rem table, whether it is unique and partial, its columns with their
+rem collation and order; the table and column it points at, and what a
+rem delete does there). Read from SQLite's own pragmas, so an index the
+rem column constraints made (sqlite_autoindex_users_1, for username UNIQUE)
+rem is one too. (A partial index's WHERE is not compared, only that it has
+rem one.)
+function schema_rules@(x@) local r@, s@, q$
+  q$ = "SELECT 'the index ' || il.name AS k, m.name || (CASE il." + chr$(34) + "unique" + chr$(34) + " WHEN 1 THEN ' unique' ELSE '' END) || (CASE il.partial WHEN 1 THEN ' partial' ELSE '' END) || ' (' ||"
+  q$ = q$ + " (SELECT group_concat(c, ', ') FROM (SELECT coalesce(x.name, '?') || ' ' || x.coll || (CASE x." + chr$(34) + "desc" + chr$(34) + " WHEN 1 THEN ' desc' ELSE '' END) AS c FROM pragma_index_xinfo(il.name) x WHERE x.key = 1 ORDER BY x.seqno)) || ')' AS s"
+  q$ = q$ + " FROM sqlite_master m, pragma_index_list(m.name) il WHERE m.type = 'table'"
+  q$ = q$ + " UNION ALL SELECT 'the foreign key ' || m.name || '.' || f." + chr$(34) + "from" + chr$(34) + ", f." + chr$(34) + "table" + chr$(34) + " || '.' || coalesce(f." + chr$(34) + "to" + chr$(34) + ", '') || ' on delete ' || f.on_delete"
+  q$ = q$ + " FROM sqlite_master m, pragma_foreign_key_list(m.name) f WHERE m.type = 'table'"
+  r@ = sdict@()
+  s@ = sqlite_prepare@(x@, q$)
+  while sqlite_step(s@) = 1
+    sdict_set@(r@, sqlite_gets$(s@, "k"), sqlite_gets$(s@, "s"))
+  end while
+  sqlite_finalize(s@)
+  return r@
+end function
+
+rem The first index or foreign key of the reference schema m@ that the file
+rem d@ does not have as m@ has it -- "the index X is missing", "... is not
+rem the one this program builds" -- or "". A file of version v below the
+rem current one is upgraded before it is used, and the upgrade builds some
+rem of these itself (the unique keys' indexes) and drops one (version 1's
+rem ux_companies_tax_id): only what the current version ALSO has, and the
+rem upgrade does not build, must be in it already -- else the upgrade would
+rem mark a file that the next start refuses as damaged. (For the current
+rem version m@ IS the current schema, and everything in it is asked.)
+function rules_missing$(d@, m@, v) local ref@, now@, got@, c@, i, k$, sig$, out$
+  ref@ = schema_rules@(m@)
+  got@ = schema_rules@(d@)
+  c@ = sqlite_open@()
+  upgrade(c@, 0)
+  now@ = schema_rules@(c@)
+  sqlite_close(c@)
+  out$ = ""
+  for i = 1 to dict_count(ref@)
+    k$ = dict_key$(ref@, i)
+    sig$ = sdict_get$(ref@, k$)
+    if out$ = "" then
+      if dict_haskey(now@, k$) = 1 and sdict_get$(now@, k$) = sig$ then
+        if dict_haskey(got@, k$) = 0 then
+          out$ = k$ + " is missing"
+        elseif sdict_get$(got@, k$) <> sig$ then
+          out$ = k$ + " is not the one this program builds"
+        end if
+      end if
+    end if
+  next
+  dict_free(ref@)
+  dict_free(got@)
+  dict_free(now@)
+  return out$
 end function
 
 rem 1 when table$ has a column col$ -- or, with col$ "", any column at all:
@@ -1057,7 +1202,7 @@ rem A string alcase$ answers in ASCII has nothing in the table, and
 rem neither has one without any of the table's probes (fold_init): those
 rem cost an alcase$ and a few instr calls. Only a string that may hold a
 rem character of the table is walked a character at a time.
-function fold$(s$) local t$, out$, i, n, b, w, start, c$, hit
+function fold$(s$) local t$, out$, i, j, n, b, w, start, c$, hit
   t$ = alcase$(replacestr$(s$, chr$(304), "i"))
   n = bytelen(t$)
   if n = len(t$) then return t$
@@ -1076,15 +1221,29 @@ function fold$(s$) local t$, out$, i, n, b, w, start, c$, hit
     if b < 128 then
       i = i + 1
     else
-      rem the length of a UTF-8 character, from its first byte
-      w = 2
-      if b >= 240 then
-        w = 4
-      elseif b >= 224 then
+      rem the length of a UTF-8 character, from its first byte -- when that
+      rem byte can begin one (C2-F4) AND that many continuation bytes
+      rem (80-BF) follow it. Anything else is not a character: one byte,
+      rem stepped over alone, as alcase$ steps it, so a stray byte cannot
+      rem swallow the character after it. (An overlong or surrogate form
+      rem that passes this is in no entry of the table, so it is not
+      rem folded either.)
+      w = 1
+      if b >= 194 and b <= 223 then
+        w = 2
+      elseif b >= 224 and b <= 239 then
         w = 3
+      elseif b >= 240 and b <= 244 then
+        w = 4
       end if
+      if i + w - 1 > n then w = 1
+      for j = i + 1 to i + w - 1
+        if w > 1 then
+          if byteat(t$, j) < 128 or byteat(t$, j) > 191 then w = 1
+        end if
+      next
       c$ = bytemid$(t$, i, w)
-      if dict_haskey(fold_map@, c$) = 1 then
+      if w > 1 and dict_haskey(fold_map@, c$) = 1 then
         out$ = out$ + bytemid$(t$, start, i - start) + sdict_get$(fold_map@, c$)
         start = i + w
       end if
@@ -2978,7 +3137,7 @@ function count_of(sql$)
   return sqlite_scalar(db@, sql$)
 end function
 
-function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, scratch$, kind, blind?, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, bob, bulk, t0, ms, t1, t2, i
+function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, scratch$, kind, blind?, id, s@, n, rec$, csvpath$, text$, nl$, q$, held@, v@, r@, bob, bulk, t0, ms, t1, t2, i
   pw_cost = 1000
   path$ = temppath$() + "contact_manager_selftest.db"
   if file_exists(path$) = 1 then file_delete(path$)
@@ -3515,6 +3674,13 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(fold$(chr$(64257) + "LE") = "file" and fold$(chr$(43888)) = chr$(5024), "a ligature and Cherokee fold as CaseFolding.txt says")
   check(fold$(chr$(304) + "STANBUL") = "istanbul" and fold$(chr$(304)) = fold$("I") and fold$(chr$(304)) = fold$("i"), "the dotted capital I folds to a plain i, the key I and i have")
   check(fold$("Aço Forte") = "aço forte", "and an accented Latin name folds as it lower-cases")
+  rem A byte that is not UTF-8 is one ill-formed unit and nothing more
+  rem (Unicode chapter 3, "maximal subpart"): 80 is a lone continuation
+  rem byte, E2 a lead with no continuation after it, F0 one followed by an
+  rem ASCII A. Each stays as it is -- alcase$ leaves it so -- and the ß
+  rem after it (C3 9F, well-formed) still folds to "ss", the A to "a".
+  check(fold$(bytestr$(128) + "ß") = bytestr$(128) + "ss" and fold$(bytestr$(226) + "ß") = bytestr$(226) + "ss" and fold$(bytestr$(240) + "Aß") = bytestr$(240) + "ass", "a stray byte does not hide the character after it from the fold")
+  check(fold$("ß" + bytestr$(128)) = "ss" + bytestr$(128) and fold$("ß" + bytestr$(226)) = "ss" + bytestr$(226) and fold$(bytestr$(195)) = bytestr$(195), "nor one after a character, or at the end of the text")
   type_into("login.user", "admin")
   type_into("login.pass", "secret9")
   click("login.go")
@@ -3601,6 +3767,7 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   check(open_database(path3$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 3 and sqlite_scalar(db@, "PRAGMA application_id") = 1349010253, "a version-1 database is upgraded to version 3, and marked as this program's")
   check(count_of("SELECT count(*) FROM users WHERE username_key = 'ana'") = 1 and count_of("SELECT count(*) FROM companies WHERE tax_key = '11444777000161'") = 2 and count_of("SELECT count(*) FROM product_lines WHERE name_key = 'ação'") = 1, "with the keys of the rows it had")
   check(count_of("SELECT count(*) FROM sqlite_master WHERE name = 'ux_companies_tax_id'") = 0 and count_of("SELECT count(*) FROM sqlite_master WHERE name = 'ux_companies_tax_key'") = 1, "and the tax-id index replaced by the key's")
+  check(db_owner$(db@, 3, APP_ID) = "ours", "and the file the upgrade made passes the damage check, indexes and foreign keys included")
   sqlite_begin(db@)
   check(upgrade(db@, 1) = 1, "the upgrade's steps can run again and find nothing to do")
   sqlite_rollback(db@)
@@ -3727,10 +3894,118 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   sqlite_close(v@)
   check(open_database(path4$) = 0 and instr(last_msg$, "the column companies.search_key is missing") > 0, "and so is one that lost a column")
   file_delete(path4$)
+  rem The program's uniqueness rules live in its indexes, and nowhere else
+  rem (on_user_save has no other check), and its deletes in its foreign
+  rem keys: a marked file without them is as damaged as one without a
+  rem column. The rules are read as SQLite reports them -- the expected
+  rem text is the DDL of schema_v1 and rekey_and_check: username_key has no
+  rem COLLATE, so BINARY; username is declared UNIQUE COLLATE NOCASE, which
+  rem SQLite builds as sqlite_autoindex_users_1; contacts.company_id
+  rem references companies(id) ON DELETE CASCADE.
+  v@ = sqlite_open@()
+  upgrade(v@, 0)
+  r@ = schema_rules@(v@)
+  check(sdict_get$(r@, "the index ux_users_username_key") = "users unique (username_key BINARY)" and sdict_get$(r@, "the index ux_companies_tax_key") = "companies unique partial (kind BINARY, tax_key BINARY)" and sdict_get$(r@, "the index sqlite_autoindex_users_1") = "users unique (username NOCASE)" and sdict_get$(r@, "the foreign key contacts.company_id") = "companies.id on delete CASCADE", "a schema's indexes and foreign keys are read as SQLite built them")
+  dict_free(r@)
+  sqlite_close(v@)
+  v@ = sqlite_open@(path4$)
+  upgrade(v@, 0)
+  sqlite_exec(v@, "DROP INDEX ux_users_username_key; PRAGMA application_id = " + str$(APP_ID) + "; PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  sqlite_close(v@)
+  text$ = file_readalltext$(path4$)
+  check(open_database(path4$) = 0 and instr(last_msg$, "not a complete one: the index ux_users_username_key is missing -- the file is damaged") > 0 and file_readalltext$(path4$) = text$, "and so is one that lost the unique index on user names, and it is left alone")
+  file_delete(path4$)
+  v@ = sqlite_open@(path4$)
+  upgrade(v@, 0)
+  sqlite_exec(v@, "DROP INDEX ux_companies_tax_key; CREATE INDEX ux_companies_tax_key ON companies(kind, tax_key) WHERE tax_key <> ''; PRAGMA application_id = " + str$(APP_ID) + "; PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "the index ux_companies_tax_key is not the one this program builds") > 0, "and one whose tax-id index of that name is no longer unique")
+  file_delete(path4$)
+  v@ = sqlite_open@(path4$)
+  upgrade(v@, 0)
+  sqlite_exec(v@, "DROP TABLE interactions; CREATE TABLE interactions (id INTEGER PRIMARY KEY, contact_id INTEGER NOT NULL, happened_on TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))); CREATE INDEX ix_interactions_contact ON interactions(contact_id, happened_on); PRAGMA application_id = " + str$(APP_ID) + "; PRAGMA user_version = " + str$(SCHEMA_VERSION))
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "the foreign key interactions.contact_id is missing") > 0, "and one whose history no longer goes with its contact")
+  file_delete(path4$)
+  rem An unmarked file of an earlier version is upgraded, and the upgrade
+  rem builds the unique keys' indexes but not ix_companies_name: a version-1
+  rem file without it would be upgraded, marked, and refused at the next
+  rem start. And a file with every table of version 1 that has lost a part
+  rem is named for what it lost -- its tables are this program's own, and
+  rem not "other tables".
+  v@ = sqlite_open@(path4$)
+  schema_v1(v@)
+  sqlite_exec(v@, "DROP INDEX ix_companies_name; PRAGMA user_version = 1")
+  sqlite_close(v@)
+  check(open_database(path4$) = 0 and instr(last_msg$, "the index ix_companies_name is missing") > 0 and file_header$(path4$) = "db" and hdr_version = 1 and hdr_app = 0, "a version-1 file without an index the upgrade does not build is refused, not upgraded")
+  file_delete(path4$)
+  v@ = sqlite_open@(path4$)
+  schema_v1(v@)
+  sqlite_exec(v@, "INSERT INTO users(username, password, role) VALUES ('Ana', 'x', 'admin'); ALTER TABLE companies DROP COLUMN notes; PRAGMA user_version = 1")
+  sqlite_close(v@)
+  text$ = file_readalltext$(path4$)
+  check(open_database(path4$) = 0 and instr(last_msg$, "an earlier version of Contact Manager made (schema version 1), but the column companies.notes is missing") > 0 and instr(last_msg$, "other tables") = 0 and file_readalltext$(path4$) = text$, "an earlier version's file that lost a column is named for that, not for holding other tables")
+  file_delete(path4$)
   rem An empty file is a database with nothing in it yet: a new one.
   file_createempty(path4$)
   check(open_database(path4$) = 1 and first_run? = true and sqlite_scalar(db@, "PRAGMA application_id") = 1349010253, "an empty file is made a new database")
   sqlite_close(db@)
+  file_delete(path4$)
+  rem --- this program's own files, left unfinished. An upgrade marks the
+  rem file only as its last statement, so a version-2 file killed in the
+  rem middle of its upgrade is UNMARKED, with a hot journal beside it -- the
+  rem program's likeliest crash. It is judged on a copy, which SQLite rolls
+  rem back exactly as it would roll back the file: a clean version 2, which
+  rem is then opened and upgraded again ---
+  q$ = path4$ + ".src"
+  v@ = make_v2@(q$, 2000)
+  hot_begin(v@)
+  n = upgrade(v@, 2)
+  check(n = 1 and hot_end(v@, q$, path4$) = 1 and file_header$(path4$) = "db" and hdr_version = 2 and hdr_app = 0, "a version-2 file killed in mid-upgrade is unmarked, with a journal beside it")
+  check(open_database(path4$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 3 and sqlite_scalar(db@, "PRAGMA application_id") = APP_ID and count_of("SELECT count(*) FROM companies WHERE tax_key <> ''") = 2000 and file_exists(path4$ + "-journal") = 0, "and it opens: SQLite rolls the change back, and the upgrade runs again")
+  check(file_exists(check_copy$()) = 0 and file_exists(check_copy$() + "-journal") = 0, "and the copy it was judged on is gone")
+  sqlite_close(db@)
+  file_delete(path4$)
+  rem A first run killed before its first commit: an empty file beside a
+  rem journal. Beside a file of no pages SQLite rolls nothing back; it
+  rem deletes the journal (sqlite.org/atomiccommit.html, a hot journal
+  rem needs a database that is not empty).
+  if file_exists(q$) = 1 then file_delete(q$)
+  v@ = sqlite_open@(q$)
+  sqlite_begin(v@)
+  n = upgrade(v@, 0)
+  check(n = 1 and hot_end(v@, q$, path4$) = 1 and file_exists(path4$) = 1 and file_getsize(path4$) = 0, "a first run killed before its first commit leaves an empty file beside a journal")
+  check(open_database(path4$) = 1 and first_run? = true and sqlite_scalar(db@, "PRAGMA application_id") = APP_ID and file_exists(path4$ + "-journal") = 0, "and it is opened as the new database it was")
+  sqlite_close(db@)
+  file_delete(path4$)
+  rem A journal another tool left in PERSIST mode: its header zeroed, so
+  rem it holds nothing to roll back (atomiccommit.html again) and the
+  rem change it was for stays committed.
+  v@ = make_v2@(path4$, 20)
+  sqlite_exec(v@, "PRAGMA journal_mode = PERSIST")
+  sqlite_exec(v@, "UPDATE companies SET notes = 'kept'")
+  sqlite_close(v@)
+  check(file_getsize(path4$ + "-journal") > 0 and file_header$(path4$) = "db" and hdr_app = 0, "a version-2 file can be left with a spent journal beside it")
+  check(open_database(path4$) = 1 and sqlite_scalar(db@, "PRAGMA user_version") = 3 and count_of("SELECT count(*) FROM companies WHERE notes = 'kept'") = 20, "and it opens, its committed change kept")
+  sqlite_close(db@)
+  if file_exists(path4$ + "-journal") = 1 then file_delete(path4$ + "-journal")
+  file_delete(path4$)
+  rem And another program's file whose last change is still in its
+  rem write-ahead log: the copy is judged WITH the log, as SQLite would
+  rem read the file, and the file and its log are left byte for byte.
+  if file_exists(q$) = 1 then file_delete(q$)
+  v@ = sqlite_open@(q$)
+  sqlite_exec(v@, "PRAGMA journal_mode = WAL")
+  sqlite_exec(v@, "CREATE TABLE ledger (x); INSERT INTO ledger VALUES (1)")
+  file_copy(q$, path4$)
+  file_copy(q$ + "-wal", path4$ + "-wal")
+  sqlite_close(v@)
+  file_delete(q$)
+  text$ = file_readalltext$(path4$)
+  q$ = file_readalltext$(path4$ + "-wal")
+  check(bytelen(q$) > 0 and open_database(path4$) = 0 and instr(last_msg$, path4$ + "-wal") > 0 and instr(last_msg$, "other tables (ledger)") > 0, "another program's file with a write-ahead log is judged with its log, and refused")
+  check(file_readalltext$(path4$) = text$ and file_readalltext$(path4$ + "-wal") = q$ and file_exists(path4$ + "-shm") = 0, "and the file and its log are left as they were")
+  file_delete(path4$ + "-wal")
   file_delete(path4$)
   rem A key that cannot be computed fails the upgrade instead of passing it:
   rem a SELECT that does not compile used to step as zero rows.
@@ -3806,26 +4081,53 @@ end function
 rem Leave at p$ another program's SQLite file with a HOT journal beside it,
 rem the way a program killed in the middle of a transaction leaves one: a
 rem table of 2,000 rows is changed inside a transaction with a cache of
-rem one page, so the changed pages are written into the file before the
-rem commit, with their old contents in the journal -- and the file and the
-rem journal are copied at that moment. 1 when the journal holds something.
+rem one page (hot_begin), so the changed pages are written into the file
+rem before the commit, with their old contents in the journal -- and the
+rem file and the journal are copied at that moment (hot_end). 1 when the
+rem journal holds something.
 function make_hot_db(p$) local src$, v@
   src$ = p$ + ".src"
-  if file_exists(p$) = 1 then file_delete(p$)
-  if file_exists(p$ + "-journal") = 1 then file_delete(p$ + "-journal")
   if file_exists(src$) = 1 then file_delete(src$)
   v@ = sqlite_open@(src$)
-  sqlite_exec(v@, "PRAGMA journal_mode = DELETE")
   sqlite_exec(v@, "CREATE TABLE ledger (x); INSERT INTO ledger WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) SELECT i FROM n")
-  sqlite_exec(v@, "PRAGMA cache_size = 1")
-  sqlite_begin(v@)
+  hot_begin(v@)
   sqlite_exec(v@, "UPDATE ledger SET x = x + 1000000")
+  return hot_end(v@, src$, p$)
+end function
+
+rem Begin a transaction on v@ whose changed pages spill into the file
+rem before any commit: a rollback journal, and a cache of one page.
+function hot_begin(v@)
+  sqlite_exec(v@, "PRAGMA journal_mode = DELETE")
+  sqlite_exec(v@, "PRAGMA cache_size = 1")
+  return sqlite_begin(v@)
+end function
+
+rem In the middle of v@'s transaction on src$: copy src$ and its journal
+rem to p$ -- what a crash at that moment leaves -- then roll back, close,
+rem and remove src$. 1 when the journal copied holds something.
+function hot_end(v@, src$, p$)
+  if file_exists(p$) = 1 then file_delete(p$)
+  if file_exists(p$ + "-journal") = 1 then file_delete(p$ + "-journal")
   file_copy(src$, p$)
   file_copy(src$ + "-journal", p$ + "-journal")
   sqlite_rollback(v@)
   sqlite_close(v@)
   file_delete(src$)
   return flag(file_getsize(p$ + "-journal") > 0)
+end function
+
+rem A database at p$ as version 2 left it, with n companies (each its own
+rem tax id) and one administrator; answered OPEN, at version 2.
+function make_v2@(p$, n) local v@
+  if file_exists(p$) = 1 then file_delete(p$)
+  v@ = sqlite_open@(p$)
+  schema_v1(v@)
+  migrate_v2(v@)
+  sqlite_exec(v@, "INSERT INTO users(username, username_key, password, role) VALUES ('Ana', 'ana', 'x', 'admin')")
+  sqlite_exec(v@, "INSERT INTO companies(kind, name, tax_id, tax_key, city) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < " + str$(n) + ") SELECT 'supplier', 'Empresa ' || printf('%06d', i), printf('%014d', i), printf('%014d', i), 'São Paulo' FROM n")
+  sqlite_exec(v@, "CREATE UNIQUE INDEX ux_users_username_key ON users(username_key); CREATE UNIQUE INDEX ux_product_lines_name_key ON product_lines(name_key); CREATE UNIQUE INDEX ux_companies_tax_key ON companies(kind, tax_key) WHERE tax_key <> ''; PRAGMA user_version = 2")
+  return v@
 end function
 
 rem The second spelling of path$ the backup checks use: kind 1 is the file

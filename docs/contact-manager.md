@@ -46,11 +46,23 @@ at offset 68 — because SQLite itself does more than read: a *hot journal*
 left beside a file (`name-journal`, from a program killed in mid-transaction)
 is rolled back into the file by the first query, even a `PRAGMA` on a
 read-only connection. So a file another program marked is refused without
-being opened, and an unmarked one with an unfinished journal or write-ahead
-log beside it is refused too, naming that file: open it with the program that
-made it first. A file that carries the program's mark is not trusted on the
-mark alone either: one without every table and column its version has is
-refused as damaged, naming what is missing. A read-only database at
+being opened. An unmarked one with an unfinished journal or write-ahead log
+beside it is this program's own most likely crash — an upgrade marks the file
+only as its last step, so one killed in mid-upgrade is unmarked with a hot
+journal, and so is a first run killed before its first commit — and it is
+judged on a **copy**: the file and what lies beside it are copied to the temp
+folder, SQLite opens the copy and does there exactly what it would do to the
+file (rolls the journal back, applies the log, or leaves a journal that holds
+nothing), and the copy's owner is the file's. The program's own file then
+opens and is upgraded again; another program's is refused, naming the journal
+and its tables, and it and its journal are left byte for byte as they were.
+A file that carries the program's mark is not trusted on the mark alone
+either: one without every table, column, index and foreign key its version
+has is refused as damaged, naming what is missing — the uniqueness of user
+names, product lines and tax ids lives in those indexes and nowhere else. An
+unmarked file that has an earlier version's tables but has lost a part of one
+is refused naming that part, as a damaged copy of an earlier version's file
+or another program's. A read-only database at
 the current version opens for looking: the sign-in says so, and every change
 is refused. A read-only database **from an earlier version** is refused
 instead, saying so: opening it means upgrading it, which writes to it, and the
@@ -146,7 +158,8 @@ program should never write, so a bug in the BASIC cannot corrupt it:
   a change in how `alcase$` treats such bytes would change those keys, and
   would need a schema version of its own. (It changed once already, from `?`
   to the byte itself, before version 3 shipped: every version-3 key is made
-  the new way.)
+  the new way.) `fold$` steps over such a byte alone, as `alcase$` does, so
+  a stray byte never hides the character after it from the fold.
 - **A transaction** around saving a contact, its primary flag and its product
   lines: all of it or none of it.
 - **A schema version**, kept in `PRAGMA user_version`, and since version 3
@@ -226,14 +239,18 @@ With `PHOSPHOR_SELFTEST=1` the program builds every window **without showing
 one**, and drives them as a person would — typing with `edit_text@`, clicking
 with `button_click@` and `menuitem_click@`, picking rows with
 `stringgrid_cursor@`, double-clicking with `control_dblclick@` — against a
-throw-away database, then checks what landed in SQLite: 176 checks, from the
+throw-away database, then checks what landed in SQLite: 194 checks, from the
 first-run administrator to a cascade delete, the whole CSV file, an operator
 who cannot see the Users page, Greek, German and Turkish names that differ
 only in case, the upgrades from versions 1 and 2, another program's database
 left byte for byte untouched — one with a hot journal beside it among them,
 which the test makes by copying a file and its journal in the middle of a
-transaction, and first checks that SQLite would roll it back — a damaged file
-carrying the program's mark, and a backup onto the open database under other
+transaction, and first checks that SQLite would roll it back, another with
+its last change still in a write-ahead log — the program's own files left
+unfinished (a version-2 file killed in mid-upgrade, a first run killed before
+its first commit, a spent journal), which open, a damaged file carrying the
+program's mark (a table, a column, a unique index or a foreign key gone), and
+a backup onto the open database under other
 spellings of its name or of its journal's. Its message, confirmation and file boxes go through functions the test
 answers. `scripts/test-examples` runs it that way on Windows and on Linux
 (under `xvfb-run`).
@@ -264,7 +281,12 @@ prepare check and the read-only message each made its own checks fail. So did
 the sixth review's: the plain `i` for `İ`, the header read at start-up and in
 the backup's identity check, the table check of a marked file, and the
 refusal of journal names — and a write slipped into the owner check, which
-the old "nothing was written" check, counting tables, could not see.
+the old "nothing was written" check, counting tables, could not see. And the
+seventh's: the old refusal of every unmarked file with a journal, the index
+and foreign-key comparison, the same comparison asked of an older file in
+full (which refuses every version-2 file, whose old tax-id index the upgrade
+drops), a copy judged without its journal or log, a copy left behind, the
+fold that stepped by a lead byte's width, and the earlier-version message.
 
 ## What writing it changed in Phosphor
 

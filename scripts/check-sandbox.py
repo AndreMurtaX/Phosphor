@@ -58,6 +58,15 @@ PRIMITIVES = [
     # while http_clientcert, beside it, had always asked. Neither assignment is
     # a Pascal file call, so this list had no way to tell the two apart.
     'gCAFile :=', '.ClientCert :=', '.ClientKey :=',
+    # THE OS'S OWN DOORS, declared in a unit rather than reached through the RTL
+    # (round 10, 2026-10-11): file_kind$, path_canonical$ and file_getsize ask
+    # kernel32 directly, and the RTL's attribute and link readers name a path
+    # too. The new code was gated, but nothing here would have flagged a future
+    # routine that called these without asking.
+    # GetFullPathNameW is NOT here: it is arithmetic on the string, documented
+    # as touching no file (it does not even check that the path exists).
+    'CreateFileW', 'GetFileAttributesExW', 'GetFileAttributesW',
+    'GetFinalPathNameByHandleW', 'FileGetAttr', 'FileGetSymLinkTarget',
 ]
 # DeleteTree and CopyTree are NOT in that list: they are this project's own
 # helpers and they ask the gate themselves, at every level of their recursion.
@@ -94,6 +103,21 @@ def bare_asks():
 # A routine may skip the gate only for a reason written down here. The key is
 # "<file>:<routine>"; the value is why. Anything not listed and not gated fails.
 ALLOWED = {
+    # ROUND 10's OWN DOORS. The kernel32 declarations carry the OS name in their
+    # 'external ... name' clause and are not routines a script reaches; the
+    # helpers are reached only from routines that ask the gate first.
+    'PhosphorIoLib.pas:IoGetFileAttributesExW': 'a kernel32 declaration, not a routine',
+    'PhosphorIoLib.pas:IoCreateFileW': 'a kernel32 declaration, not a routine',
+    'PhosphorIoLib.pas:KindCreateFileW': 'a kernel32 declaration, not a routine',
+    'PhosphorIoLib.pas:KindGetFileAttributesW': 'a kernel32 declaration, not a routine',
+    'PhosphorIoLib.pas:KindGetFinalPathNameByHandleW': 'a kernel32 declaration, not a routine',
+    'PhosphorIoLib.pas:WinFileNow': 'reached only from t_file_getsize and t_file_gettime, '
+        'each of which asks IoGateAt/IoGate for the same path first',
+    'PhosphorIoLib.pas:KindOpenFinal': 'reached only from KindOfWin and CanonicalWin, '
+        'each of which asks IoGateAt for the path first',
+    'PhosphorIoLib.pas:KindFinalName': 'reached only from KindOpenFinal (above), on a handle it opened',
+    'PhosphorSandbox.pas:IsDirectoryEntry': 'part of the gate: asks what an entry is so the gate can judge it',
+    'PhosphorSandbox.pas:IsLinkEntry': 'part of the gate: asks what an entry is so the gate can judge it',
     # The gate itself: these three ARE the check, so they cannot ask it.
     'PhosphorSandbox.pas:FollowLinks': 'resolves the path the gate then judges',
     'PhosphorSandbox.pas:SetSandboxRoot': 'installs the root; host-only, no script reaches it',

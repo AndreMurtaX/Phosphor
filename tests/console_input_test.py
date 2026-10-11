@@ -310,13 +310,15 @@ def run_windows(exe, work):
             else:
                 print('FAIL  %s: want the mode kept and exit %d, got %r' % (name, want, err))
                 failed += 1
-        elif got == want and err.endswith('exit 0') and (screen is None or shown == screen):
+        elif got == want and err.endswith('exit 0') and (screen is None or screen is True
+                                                         or shown == screen):
             print('PASS  %s' % name)
         else:
             print('FAIL  %s: want %r%s, got %r%s (%s)' % (
-                name, want, '' if screen is None else ' showing %r' % screen, got,
+                name, want, '' if screen in (None, True) else ' showing %r' % screen, got,
                 '' if screen is None else ' showing %r' % shown, err.replace('\n', ' / ')))
             failed += 1
+        return shown       # screen=True: captured, for a later case to compare with
 
     emoji = '\U0001F600'
     keys = ('crt_init()\nk1$ = getkey$()\nk2$ = getkey$()\ncrt_done()\n'
@@ -446,9 +448,17 @@ def run_windows(exe, work):
     # three taps of it before 'x' leave the line 'x'.
     case('repeat-tab-then-input', gk_in,
          [key(9, 0x09, rep=3), key(9, 0x09, False)] + typed('x\r'), '? |09 090978\n')
+    # HOW a control character is DRAWN is the console's, not phosphor's: Windows
+    # 11 draws ^A as '^A', the Windows Server console on the CI runner does not
+    # (2026-10-11: the first CI run of this case failed on the screen alone). So
+    # the screen expected of the held chord is what the SAME console draws for
+    # the same chord TAPPED -- the claim under test is "held = tapped".
+    tapped = case('taps-ctrl-a-then-input', gk_in,
+                  [key(1, 0x41, state=LEFT_CTRL), key(1, 0x41, False, state=LEFT_CTRL)] * 3
+                  + typed('x\r'), '? |01 010178\n', screen=True)
     case('repeat-ctrl-a-then-input', gk_in,
          [key(1, 0x41, state=LEFT_CTRL, rep=3), key(1, 0x41, False, state=LEFT_CTRL)] + typed('x\r'),
-         '? |01 010178\n', screen='^A^Ax')
+         '? |01 010178\n', screen=tapped if tapped is not None else '^A^Ax')
     case('repeat-backspace-then-input', gk_in,
          [key(8, 0x08, rep=3), key(8, 0x08, False)] + typed('x\r'), '? |08 78\n', screen='x')
 
@@ -923,6 +933,15 @@ def run_unix(exe, work):
 
 
 def main():
+    # A FAIL line quotes what the console handed over, which can be any
+    # character; the GitHub runner's stdout is cp1252, and printing one it
+    # cannot spell killed the harness mid-report (2026-10-11), so the failure
+    # itself was never seen. Escape what the stream cannot carry.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors='backslashreplace')
+        except (AttributeError, ValueError):
+            pass
     exe = os.path.abspath(sys.argv[1])
     work = tempfile.mkdtemp(prefix='phosphor-coninput-')
     if os.name == 'nt':

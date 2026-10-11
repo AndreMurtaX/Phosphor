@@ -1472,6 +1472,32 @@ fi
 #    form_close@ like any other (agvisible, agvisset: tick 2, main visible 0;
 #    both ran to the watchdog: only form_show@ and form_onclose@ installed the
 #    closer that asks app_run, and now form@ does).
+#  - ROUND 9 (2026-10-11): a move lands at once unless a walk may stand on the
+#    list it leaves (the control or its parent is a running sender or an
+#    ancestor of one), and while one waits every rule reads the parent ASKED
+#    (docs/libraries/gui-control.md, control_parent@). Expected: the only
+#    window moved by a timer into a panel of a form never shown, the panel then
+#    freed, has left the screen and app_run ends (agmovefree: tick 2, main
+#    visible 0 -- it was hidden without asking app_run and ran to the
+#    watchdog); the same move asked by a click on the window's OWN button
+#    waits, its target is freed before it lands, so it never happens and the
+#    window stays until it is closed (agmoveheld: tick 5, main visible 0 -- it
+#    was hidden and ran to the watchdog); a timer- or tray-driven program that
+#    builds a page into its hidden main window never shows a window, so only
+#    app_quit leaves the loop (agtrayembed: tick 10 -- the deferred move made
+#    the page a top-level window and its landing ended app_run at tick 2); and
+#    a form whose host is freed and that is re-shown in the same handler is a
+#    window of its own (gui-control.md, control_free), so it is painted when
+#    invalidated after main is closed (agreshow: tick 10, painted 1 -- it was
+#    left Visible with no window, and nothing painted). And while a move WAITS
+#    the parent asked is what counts, and its landing asks app_run nothing: a
+#    page embedded by a click on its own button, then made visible, never was
+#    a window in the program's view (agtrayheld: tick 10 -- the landing asked
+#    about the top-level window the deferral had shown); and a form released
+#    by a free under a walk, re-shown, is a window in the program's view
+#    before its move lands, so moving it into a form never shown, with main
+#    hidden, leaves nothing on screen (agviewleave: tick 2 -- judged by where
+#    it physically still was, it asked nothing and ran to the watchdog).
 printf '%s\n' 'main@ = form@("AG", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'dlg@ = form@("AG dialog", 200, 100)' >> "$tmpdir/ag.bas"
 printf '%s\n' 'ok@ = button@(dlg@)' >> "$tmpdir/ag.bas"
@@ -1852,6 +1878,188 @@ printf '%s\n' '    app_quit()' >> "$tmpdir/agvisset.bas"
 printf '%s\n' '  end if' >> "$tmpdir/agvisset.bas"
 printf '%s\n' '  return 0' >> "$tmpdir/agvisset.bas"
 printf '%s\n' 'end function' >> "$tmpdir/agvisset.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'holder@ = form@("Holder", 300, 200)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'pnl@ = panel@(holder@)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", main visible " + str$(form_visible(main@))' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'end' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '  if ticks = 2 then' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '    control_parent@(main@, pnl@)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '    x = control_free(pnl@)' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agmovefree.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'mb@ = button@(main@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'button_onclick@(mb@, "on_mb")' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'holder@ = form@("Holder", 300, 200)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'pnl@ = panel@(holder@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", main visible " + str$(form_visible(main@))' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'end' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'function on_mb(s@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  control_parent@(main@, pnl@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  x = control_free(pnl@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  if ticks = 2 then button_click@(mb@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  if ticks = 5 then form_close@(main@)' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agmoveheld.bas"
+printf '%s\n' 'main@ = form@("main", 500, 400)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'p@ = panel@(main@)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'end' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  if ticks = 2 then' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '    g@ = form@("page", 200, 100)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '    control_parent@(g@, p@)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '    control_visible@(g@, 1)' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  if ticks = 10 then app_quit()' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agtrayembed.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'pnl@ = panel@(main@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'inner@ = form@("Inner", 160, 90)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'pb@ = paintbox@(inner@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'control_size@(pb@, 100, 50)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'paintbox_onpaint@(pb@, "on_paint")' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'control_parent@(inner@, pnl@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'control_visible@(inner@, 1)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'paints = 0' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks) + ", painted " + str$(paints)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'end' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'function on_paint(s@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  paints = paints + 1' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  if ticks = 2 then' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    x = control_free(pnl@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    form_show@(inner@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  if ticks = 4 then form_close@(main@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  if ticks = 6 then' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    paints = 0' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    control_invalidate@(pb@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  if ticks = 10 then' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    if paints > 0 then paints = 1' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    form_close@(inner@)' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agreshow.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agreshow.bas"
+printf '%s\n' 'main@ = form@("main", 500, 400)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'p@ = panel@(main@)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'g@ = form@("page", 200, 100)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'gb@ = button@(g@)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'button_onclick@(gb@, "on_gb")' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'end' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'function on_gb(s@)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  control_parent@(g@, p@)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  control_visible@(g@, 1)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  if ticks = 2 then button_click@(gb@)' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  if ticks = 10 then app_quit()' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agtrayheld.bas"
+printf '%s\n' 'main@ = form@("Main", 300, 200)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'pnl@ = panel@(main@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'pb@ = button@(pnl@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'button_onclick@(pb@, "on_pb")' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'inner@ = form@("Inner", 160, 90)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'control_parent@(inner@, pnl@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'control_visible@(inner@, 1)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'holder@ = form@("Holder", 300, 200)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'hp@ = panel@(holder@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'form_show@(main@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'ticks = 0' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 't@ = timer@()' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'timer_interval@(t@, 100)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'timer_ontimer@(t@, "on_t")' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'timer_enabled@(t@, 1)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'app_run()' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'println "app_run ended at tick " + str$(ticks)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'end' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'function on_pb(s@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  x = control_free(pnl@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  form_show@(inner@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  control_visible@(main@, 0)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  control_parent@(inner@, hp@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'function on_t(s@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  ticks = ticks + 1' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  if ticks = 2 then button_click@(pb@)' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  if ticks = 30 then' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '    println "watchdog: app_run still running at tick 30"' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '    app_quit()' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  end if' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' '  return 0' >> "$tmpdir/agviewleave.bas"
+printf '%s\n' 'end function' >> "$tmpdir/agviewleave.bas"
 if command -v xvfb-run > /dev/null 2>&1; then
   okAG=0
   # xvfb-run runs the program with 2>&1, so stdout and stderr arrive as ONE
@@ -1864,7 +2072,7 @@ if command -v xvfb-run > /dev/null 2>&1; then
   if timeout 60 xvfb-run -a "$exe" "$tmpdir/agend.bas" < /dev/null > "$tmpdir/agend.out" 2>&1; then agcode=0; else agcode=$?; fi
   tr -d '\r' < "$tmpdir/agend.out" > "$tmpdir/agend.txt"
   [ "$agcode" -eq 0 ] && grep -qxF -- "before" "$tmpdir/agend.txt" && ! grep -qF -- "carries on" "$tmpdir/agend.txt" || { echo "FAIL  AG:END inside a modal with close handlers: exit $agcode, got '$(cat "$tmpdir/agend.txt")'"; okAG=1; }
-  for agcase in agwiz aglatch agembed agorder agfree agtray aghidden agradio agembfree agembpanel agembhidden agvisible agvisset; do
+  for agcase in agwiz aglatch agembed agorder agfree agtray aghidden agradio agembfree agembpanel agembhidden agvisible agvisset agmovefree agmoveheld agtrayembed agreshow agtrayheld agviewleave; do
     if timeout 60 xvfb-run -a "$exe" "$tmpdir/$agcase.bas" < /dev/null > "$tmpdir/$agcase.out" 2>&1; then agcode=0; else agcode=$?; fi
     tr -d '\r' < "$tmpdir/$agcase.out" > "$tmpdir/$agcase.txt"
     case "$agcase" in
@@ -1878,6 +2086,12 @@ if command -v xvfb-run > /dev/null 2>&1; then
     agradio) printf '%s\n' 'after: r2 0, modal answered 1' > "$tmpdir/$agcase.want" ;;
     agembfree) printf '%s\n' 'app_run ended at tick 2, inner visible 0' > "$tmpdir/$agcase.want" ;;
     agembpanel) printf '%s\n' 'app_run ended at tick 4, inner visible 0' > "$tmpdir/$agcase.want" ;;
+    agmovefree) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;
+    agmoveheld) printf '%s\n' 'app_run ended at tick 5, main visible 0' > "$tmpdir/$agcase.want" ;;
+    agtrayembed) printf '%s\n' 'app_run ended at tick 10' > "$tmpdir/$agcase.want" ;;
+    agreshow) printf '%s\n' 'app_run ended at tick 10, painted 1' > "$tmpdir/$agcase.want" ;;
+    agtrayheld) printf '%s\n' 'app_run ended at tick 10' > "$tmpdir/$agcase.want" ;;
+    agviewleave) printf '%s\n' 'app_run ended at tick 2' > "$tmpdir/$agcase.want" ;;
     agembhidden) printf '%s\n' 'app_run ended at tick 2' > "$tmpdir/$agcase.want" ;;
     agvisible) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;
     agvisset) printf '%s\n' 'app_run ended at tick 2, main visible 0' > "$tmpdir/$agcase.want" ;;

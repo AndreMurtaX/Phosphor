@@ -13,9 +13,10 @@ rem inside the loop. Round 7 deferred a FREE inside a handler; a
 rem control_parent@ that moved a sibling out of the panel still took it
 rem out of the list at once, and the loop read past its end: "List
 rem index (2) out of bounds", raised at the radio_checked@ that started
-rem the walk. A move asked for inside a handler now lands when the
-rem handler has returned (docs/libraries/gui-control.md,
-rem control_parent@).
+rem the walk. A move a walk may stand on -- out of the list of a
+rem running handler's sender or of one of its ancestors -- now waits
+rem until that handler has returned; any other lands at once (round 9;
+rem docs/libraries/gui-control.md, control_parent@).
 rem
 rem The doors into the walked list, each crossed here: a MOVE out of it
 rem (the defect), a FREE (deferred since round 7), a control MADE under
@@ -136,8 +137,9 @@ walk_case("free")
 
 rem --- a move inside a handler: judged with the moves still pending ---
 test_case("move/two moves in one handler are judged together for a cycle")
-rem Alone, each is fine; together pa@ would be its own ancestor. The
-rem second is refused while the first is still pending; after the
+rem Alone, each is fine; together pa@ would be its own ancestor. Both
+rem leave MAIN's list, and the clicked button is on main, so both wait.
+rem The second is refused while the first is still pending; after the
 rem handler, pa@ lives in pb@ -- so placing pb@ in pa@ is refused at
 rem top level too, by the chain that now exists.
 pa@ = panel@(main@)
@@ -184,12 +186,15 @@ end function
 test_case("move/a move into a panel freed in the same handler does not land")
 rem The panel is dead to the program the moment it is freed; a move into
 rem it would land a control in something already gone. Freed control
-rem handles stay dead; the radio stays where it was.
+rem handles stay dead; the radio stays where it was. The clicked button
+rem is in keep@, the panel k2 leaves, so the move waits (a walk of
+rem keep@'s list may be under the click) -- and a move that waits for a
+rem parent freed meanwhile does not land.
 fp@ = panel@(main@)
 keep@ = panel@(main@)
 k1@ = radiobutton@(keep@)
 k2@ = radiobutton@(keep@)
-mfree@ = button@(main@)
+mfree@ = button@(keep@)
 button_onclick@(mfree@, "on_move_then_free")
 raised = 0
 on error goto trapped
@@ -207,11 +212,13 @@ end function
 rem --- inside a modal session --------------------------------------
 test_case("modal/the dialog's own move lands between its rounds")
 rem The session is opened from a click on a button of MAIN, so that
-rem click's frames are under it. A move inside the dialog's own window
-rem cannot be under any walk of MAIN's and lands at the next round; a
-rem move of MAIN's controls waits until the click handler has returned
-rem (gui-control.md, control_parent@). Moves land in the order asked, so
-rem the dialog's is asked first.
+rem click's frames are under it -- and a walk under them can only be of
+rem the list of the button or of one of its ancestors: main's own list.
+rem A move inside the dialog's own window lands at once; so does a move
+rem out of a panel of main's the button is not in (round 9: round 8 held
+rem every move touching main's window until the click returned). A move
+rem out of MAIN's own list waits until the click handler has returned
+rem (gui-control.md, control_parent@).
 dlg@ = form@("dialog", 300, 200)
 dp@ = panel@(dlg@)
 dother@ = panel@(dlg@)
@@ -223,6 +230,9 @@ mp@ = panel@(main@)
 mother@ = panel@(main@)
 m1@ = radiobutton@(mp@)
 m3@ = radiobutton@(mp@)
+mr1@ = radiobutton@(main@)
+mr3@ = radiobutton@(main@)
+landed_r = -1
 opener@ = button@(main@)
 button_onclick@(opener@, "open_dialog")
 gui_test_modal("round_move")
@@ -230,8 +240,9 @@ gui_test_modal("round_read")
 button_click@(opener@)
 assert_eq(modalans, 1, "the dialog was answered OK")
 assert_eq(landed_d, 1, "the dialog's move had landed at the next round")
-assert_eq(landed_m, 0, "main's move had not: a handler of main's is under the session")
-assert_eq(sibling(m1@, m3@), 0, "and main's lands once the click has returned")
+assert_eq(landed_m, 1, "so had the move out of a panel of main's the opener is not in")
+assert_eq(landed_r, 0, "the move out of main's own list had not: the opener's click is under the session")
+assert_eq(sibling(mr1@, mr3@), 0, "and it lands once the click has returned")
 
 function open_dialog(s@)
   modalans = form_showmodal(dlg@)
@@ -241,12 +252,14 @@ end function
 function round_move(f@)
   control_parent@(d3@, dother@)
   control_parent@(m3@, mother@)
+  control_parent@(mr3@, mother@)
   return 0
 end function
 
 function round_read(f@)
   landed_d = 1 - sibling(d1@, d3@)
   landed_m = 1 - sibling(m1@, m3@)
+  landed_r = 1 - sibling(mr1@, mr3@)
   button_click@(ok@)
   return 0
 end function
@@ -353,10 +366,9 @@ function free_host(s@)
 end function
 
 test_case("orphan/a form moved into a host freed in the same handler is hidden")
-rem Its move has not landed when the host is freed, and then never will
-rem (the host is dead). Done at once, the move and the free would have
-rem left it without a parent and without a window -- hidden, which is
-rem what the form it was asked to go into decides, not where it is now.
+rem The clicked button is on main, so nothing a walk may stand on is
+rem touched: the move lands at once (round 9), and the free of the host
+rem then leaves the form without one -- hidden, and a top-level form.
 host@ = form@("host", 300, 200)
 inner@ = form@("inner", 100, 60)
 control_visible@(inner@, 1)

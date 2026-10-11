@@ -404,9 +404,12 @@ begin
     never end by its own buttons, and GTK complains it is not a window. }
   { The parent asked is the one counted (GuiEffectiveParent): a move a handler
     asked for has not landed yet, and is refused for a modal form when it does
-    -- so the form is judged as already where it was asked to go (round 8). }
+    -- so the form is judged as already where it was asked to go (round 8).
+    And a form still held by a host whose move OUT waits (round 9: a form
+    whose host was freed under a walk) is not a window yet either: refused
+    the same way until the move has landed. }
   if f.Visible or (not f.Enabled) or (fsModal in f.FormState) or
-     (GuiEffectiveParent(f) <> nil) or InHookModal(f) then
+     (GuiEffectiveParent(f) <> nil) or (f.Parent <> nil) or InHookModal(f) then
   begin
     GGuiError := 1;
     Exit;

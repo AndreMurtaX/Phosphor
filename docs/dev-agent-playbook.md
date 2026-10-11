@@ -1525,6 +1525,52 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-11 · round 7: 22 survivors, 9 HIGH, 0 killed -- the streak stays at 0.**
+  Four investigators on what round 6 and its diff review rewrote; seven of the nine
+  HIGH were one class, and most findings were OLDER defects of a class round 6 had
+  named and not finished.
+  - **A bound on one call is not a bound on a program.** `check-budget.py` said a
+    string's Length "bounds a loop exactly as any other container's does" -- true
+    of one call, false of a script that makes the call 200 times while the VM reads
+    its clock every 4096 instructions. Fifty functions sat behind that sentence
+    with the gate green. Price by what was READ, measured on the clock: by argument
+    length would refuse an honest `left$(big$, 3)`, by count would under-charge a
+    malformed string. And a consultation answers for the work BESIDE it, not for
+    the routine: `lfill$` "consulted" because `RunOf` priced its pad while the
+    uncharged `CpLen` of the 50 MB argument ran two lines earlier.
+  - **When the set to protect cannot be listed, invert the question.** Round 6's
+    "keep what the opener stands on" kept its SENDER and called that the class.
+    Under a modal loop lies the whole dispatch chain, and the LCL decides what it
+    touches (`TRadioButton.ApplyChanges` fires a sibling's onchange from inside a
+    walk over the parent's controls). Nothing made AFTER the session began can be
+    under it: one comparison (`TGuiRef.Born` against `GuiBirthMark`). The same
+    round found "the last window" decided at close time, so statement order inside
+    one handler decided whether `app_run` ended, and three call sites each with
+    their own idea of a window. One predicate, asked by every window that leaves.
+  - **A search for the converter misses the class "a UTF-16 unit converted
+    alone".** Round 6 replaced UTF8Encode in every reader of the command line and
+    console text; `CrtKeyFromEvent` reads key events and kept it, and `ReadLine`
+    made the same mistake one level up, taking one 8192-unit read for a line.
+    Collect UTF-16 until the unit that ends the item, then convert once.
+  - **A claim of "each layer pinned" is read against the call sites, not the
+    cases.** Round 6's commit said every fix was held by a test seen failing;
+    nine of its ten path guards had no case at all. A DECOY beside each case (a
+    U+FFFD-named file) turns a missing guard into "DECOY RAN" instead of a
+    different error.
+  - **A guard that refuses a shape of file must be asked which of your OWN code
+    paths leave that shape.** The contact manager refused every unmarked file with
+    a journal so SQLite would never roll back into a foreign file -- and it marks
+    its file last, so its own interrupted upgrade made exactly that shape. Instead
+    of predicting what SQLite does to a journal, it now lets SQLite do it to a
+    copy and judges the result.
+  - **Two batteries at once share `localhost`.** The Windows and WSL2 package runs
+    collided on the HTTPS test servers' fixed ports (WSL2 forwards them): a red
+    04/15/16 that a solo rerun cleared. Run the two machines one after the other.
+  - **The probe nobody timed.** `probe_limits`' corpus sweep compiles every prefix
+    of every file, twice: quadratic per file, and 85_datetime_round2.bas (3964
+    lines) alone took 667 s on Windows. It now cuts every line of a long file's
+    first and last 100 and strides over the middle, and prints what it left out.
+
 - **2026-10-10 · round 6: 23 survivors, 2 HIGH, 0 killed -- the streak stays at
   0, and BOTH HIGH were made by round 5's own fixes.**
   - **The Windows argv fix converted with `UTF8Encode`, which DROPS an unpaired

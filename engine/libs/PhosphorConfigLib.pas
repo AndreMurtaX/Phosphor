@@ -735,7 +735,7 @@ begin
   if SandboxActive then begin Result := ValStr(SandboxScratchPath); Exit; end;
   d := HostAppConfigDir;    // UTF-8 on Windows too (round 3): see PhosphorSysLib
   {$IFDEF WINDOWS}
-  if d = '' then d := HostTempDir;    // GetTempDir reads TEMP through the ANSI code page
+  if d = '' then d := HostTempDir;    // HostTempDir reads TEMP wide, and skips one holding an unpaired surrogate
   {$ELSE}
   if d = '' then d := GetTempDir;
   {$ENDIF}

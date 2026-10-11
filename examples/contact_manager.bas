@@ -504,9 +504,12 @@ function may_open_db(p$) local h$, j$
 end function
 
 rem The scratch copy judge_copy works on, and the names SQLite keeps beside
-rem it; each is removed by name (never a folder) before and after.
+rem it; each is removed by name (never a folder) before and after. The name
+rem is this run's own (a GUID, made once): two copies of the program started
+rem at the same moment would otherwise judge, and delete, each other's copy.
 function check_copy$()
-  return temppath$() + "phosphor-contacts-check.db"
+  if check_tag$ = "" then check_tag$ = guidfilename$(0)
+  return temppath$() + "phosphor-contacts-check-" + check_tag$ + ".db"
 end function
 
 function drop_check_copy() local c$

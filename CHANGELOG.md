@@ -52,6 +52,49 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (adversarial round 7, 2026-10-11)
+
+- **Library work that grows with what the script hands in is priced.** About
+  fifty functions whose work is linear in a string or container argument charged
+  nothing -- `ucase$`, `len`, the slicers, `val`, `environ$`, the `path_*`
+  family, `dict_get`, `strings_values$`, `json_clone@`, `crypto_equal?`,
+  `buffer_equal` and their siblings -- so under MaxSteps 1000000 / TimeoutMs 2000
+  a 200-call loop over a 50 MB string ran up to 36x past the clock and reported
+  success. Every such pass now asks the budget at a measured per-family price
+  (`BudgetMilli*` in `engine/PhosphorBudget.pas`): up front when its size is
+  known, for what it read when only the walk can tell. Five routines that were
+  worse than linear are linear now: `strings_delimitedtext`, `rag_analyze$`,
+  `funcexists?`, `word$`/`wordcount`, and the join behind `dir_getfiles$`. A JSON
+  render the budget stops is the calling function's limit error, not `""`.
+  `scripts/check-budget.py` gained a linear pass that sees the class, and
+  `docs/embedding.md` says exactly what is bounded.
+- GUI: a modal session's in-session release freed objects an LCL method was still
+  running on (a radio button whose check opened the modal, freed inside it, crashed
+  the outer `radio_checked@`). A session now releases only what was made inside
+  it; everything older waits until no handler is running.
+- GUI: a form embedded in another counted as a window, so closing the main window
+  left `app_run` running with nothing on screen; and whether `app_run` ended
+  depended on statement order ("close A, then hide B" ran forever). A window is now
+  a visible, top-level, non-modal form, and every window that leaves the screen --
+  closed or freed -- asks `app_run`, which answers once every handler has returned.
+  Hiding is not closing. The docs no longer say anything terminates the application.
+- On Windows, `getkey$`/`inkey$` dropped any character outside the BMP, and INPUT
+  at a console split a typed line longer than 8191 UTF-16 units (a pair at the cut
+  became two U+FFFD): a key is now its whole character, a line its whole line.
+  `cfg_path$` reads the application name from the wide executable name; a TEMP or
+  TMP holding an unpaired surrogate is skipped. `compile` and `pack` refuse a
+  misspelt option instead of writing it as the output file. Each of the nine
+  round-6 surrogate guards on the command line now has a case of its own.
+- **Contact manager: its own unfinished database no longer locks it out.** A file
+  it left mid-upgrade or before its first commit (unmarked, a journal beside it)
+  was refused as possibly another program's; it is now judged on a temp copy that
+  SQLite recovers as it would the real one, so the program's own files open and
+  another program's file and journal stay byte for byte as they were. The damage
+  check compares indexes and foreign keys too (a file missing the unique user-name
+  index let `josé` and `JOSÉ` in as two users); an earlier version's file that lost
+  a column is named for that; `fold$` steps a stray byte alone, as `alcase$` does.
+  194 self-test checks.
+
 ### Fixed (adversarial round 6, 2026-10-10)
 
 - On Windows a command-line word holding an unpaired UTF-16 surrogate was

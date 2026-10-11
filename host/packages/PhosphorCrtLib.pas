@@ -110,7 +110,11 @@ const
   and 'r' were one key; and nothing waited for the rest of a key, so an arrow
   or a character split across two reads was several keys. }
 function CrtAssembleKey(const ABytes: RawByteString; AFinal: Boolean;
-                        out ATaken, AWaitMs: Integer): String;
+                        out ATaken, AWaitMs: Integer): String; overload;
+{ The same, of the bytes of ABytes from AFrom on, without copying them: the
+  reader's queue answers a key from where its front is. }
+function CrtAssembleKey(const ABytes: RawByteString; AFrom: Integer; AFinal: Boolean;
+                        out ATaken, AWaitMs: Integer): String; overload;
 
 type
   { How a reader gets bytes: wait up to AWaitMs ms (0 polls, -1 waits for as
@@ -120,14 +124,32 @@ type
   TCrtFill = function(var ABuf: RawByteString; AWaitMs: Integer): Integer;
   TCrtClock = function: QWord;
   { THE ONE QUEUE getkey$, inkey$, keypressed() and the line reader share:
-    the bytes read from the terminal and not answered yet, and when the last
-    of them arrived. }
+    the bytes read from the terminal and not answered yet -- Buf from Head + 1
+    on; what is in front of that was answered -- and when the last of them
+    arrived.
+    A KEY COSTS THE SAME HOWEVER MUCH IS QUEUED (round 10, 2026-10-11). Each
+    answered key was cut off the front of Buf with Delete, which moves
+    everything behind it, and every read first took up to 4096 more bytes from
+    the terminal, so a paste grew the queue to its whole length: a megabyte
+    pasted into a getkey$ loop took 21 s, two took 77. The front is now an
+    index (Head), the answered bytes are dropped only when they are at least
+    as many as the ones still waiting (so each byte is moved at most once on
+    average; Moved counts them, for tests/probe_crt.lpr), and the terminal is
+    read only when fewer than CRT_SEQ_MAX bytes wait -- with that many, any
+    key is already decidable (CrtAssembleKey). }
   TCrtKeyReader = record
     Buf: RawByteString;
+    Head: Integer;
+    Moved: QWord;
     Arrived: QWord;
     Fill: TCrtFill;
     Clock: TCrtClock;
   end;
+
+{ An empty queue that reads through AFill on AClock. }
+procedure CrtReaderInit(out R: TCrtKeyReader; AFill: TCrtFill; AClock: TCrtClock);
+{ How many bytes wait in R, read and not answered. }
+function CrtReaderPending(const R: TCrtKeyReader): Integer;
 
 { The next key, taken from R. ABlock (getkey$) waits for one; otherwise
   (inkey$) it answers '' when no WHOLE key is there yet -- including the start
@@ -146,28 +168,72 @@ type
     when the program found it says: the characters (-1 for one switched off)
     and the echo flags. Linux's n_tty is the definition (drivers/tty/n_tty.c,
     eraser() and n_tty_receive_char_special()). }
+  { ALL OF THE TERMINAL'S SETTINGS THAT DECIDE AN EDIT (round 10, 2026-10-11):
+    Canon is ICANON -- off, the line discipline edits nothing, and every key
+    but the line's end is a character; Utf8 is IUTF8 -- off, a character is a
+    byte, and erase takes one; EchoNl is ECHONL, NlIsCr INLCR. Round 9's
+    editor read neither ICANON nor IUTF8, so with `stty -icanon` DEL still
+    erased, and with `stty -iutf8` erase still took a whole UTF-8 character:
+    the same keys answered one line typed ahead and another typed live. }
   TCrtEditKeys = record
     KErase, KWErase, KKill, KEof, KLNext: Integer;
-    EchoOn, EchoErase, EchoKill, EchoKillErase, EchoCtl, CrIsNl, IgnoreCr: Boolean;
+    EchoOn, EchoErase, EchoKill, EchoKillErase, EchoCtl, EchoNl: Boolean;
+    CrIsNl, IgnoreCr, NlIsCr, Canon, Utf8: Boolean;
   end;
   TCrtEditStep = (cesMore, cesLine, cesEnd);
+  { A line being edited: the line so far, whether the last byte was
+    literal-next, the terminal's column as n_tty counts it (ldata->column),
+    and the column the line's first character went to (canon_column) -- a
+    Tab is rubbed out by the columns it took FROM THERE. }
+  TCrtEditState = record
+    Line: String;
+    Literal: Boolean;
+    Column, CanonColumn: Integer;
+  end;
 
-{ A terminal in the state `stty sane` leaves it: erase DEL, kill Ctrl+U, word
-  erase Ctrl+W, end of file Ctrl+D, literal next Ctrl+V; echo, ECHOE, ECHOK,
-  ECHOKE, ECHOCTL, ICRNL. }
+{ A terminal in the state `stty sane` leaves it, with IUTF8 as a UTF-8
+  terminal sets it: canonical; erase DEL, kill Ctrl+U, word erase Ctrl+W, end
+  of file Ctrl+D, literal next Ctrl+V; echo, ECHOE, ECHOK, ECHOKE, ECHOCTL,
+  ICRNL. }
 function CrtSaneEditKeys: TCrtEditKeys;
+{ An empty line, begun with the cursor at AColumn: where the prompt left it. }
+procedure CrtEditStart(out S: TCrtEditState; AColumn: Integer);
 { ONE BYTE OF A LINE BEING EDITED, as the line discipline would edit it
-  (round 9, 2026-10-11). ALine is the line so far, ALiteral whether the last
-  byte was literal-next. Answers cesLine when AByte ended the line (the
+  (round 9, 2026-10-11). Answers cesLine when AByte ended the line (the
   newline is not in it), cesEnd for end of file on an empty line, cesMore
   otherwise; AEcho is what the terminal shows for it -- the character, its
   ^X form, or the backspaces that rub out what was erased. This is how keys
   typed while a key function held the terminal raw are edited and shown when
   INPUT reads them: Linux's line discipline does NOT re-read bytes that
   arrived raw when canonical mode is turned back on, and handed them over as
-  they were -- a DEL inside the line, and nothing on the screen. }
-function CrtEditLine(var ALine: String; var ALiteral: Boolean; AByte: Byte;
-                     const AKeys: TCrtEditKeys; out AEcho: String): TCrtEditStep;
+  they were -- a DEL inside the line, and nothing on the screen. The
+  definition is Linux's n_tty (drivers/tty/n_tty.c): eraser(),
+  n_tty_receive_char_special() and _canon(), echo_char(), and the column
+  counting of __process_echoes() and do_output_char(). ECHOPRT, EOL and EOL2
+  are not modelled. }
+function CrtEditLine(var S: TCrtEditState; AByte: Byte; const AKeys: TCrtEditKeys;
+                     out AEcho: String): TCrtEditStep;
+{ THE TERMINAL'S COLUMN after ABytes are written at column ACol, counted as
+  n_tty's do_output_char() counts it under OPOST and ONLCR: a newline or a
+  carriage return goes to 0, a Tab to the next multiple of 8, a backspace one
+  back (never below 0), a control character nowhere, a UTF-8 continuation
+  byte nowhere when AUtf8 (IUTF8), and every other byte one on -- the bytes
+  of an escape sequence after its ESC included, as the kernel counts them. }
+function CrtColumnAfter(ACol: Integer; const ABytes: RawByteString; AUtf8: Boolean): Integer;
+
+{ WHAT A JOB-CONTROL SIGNAL DOES TO THE TERMINAL (round 10, 2026-10-11).
+  Ctrl+Z stopped a program in getkey$ with the terminal raw: dash left it so
+  while the shell prompted (the 'fg' typed there was not echoed), and bash
+  put its own modes back and did not re-apply the job's on fg, so getkey$
+  then waited for Enter, and the key came back echoed. The convention every
+  raw-mode program keeps (vim, less, readline): on the stop signal put the
+  program's own modes back (ctaRestore), on continuing apply raw mode again
+  (ctaRaw) -- only while a key function owns raw mode, and only from the
+  terminal's foreground: a background job that touches the terminal is
+  stopped for it (SIGTTOU), and is continued again when brought forward. }
+type
+  TCrtTermAction = (ctaNone, ctaRestore, ctaRaw);
+function CrtJobSignalAction(AStopping, ARawOn, AForeground: Boolean): TCrtTermAction;
 
 {$IFNDEF WINDOWS}
 { The line reader's half of the Unix keyboard. After CrtLineModeBegin:
@@ -180,6 +246,15 @@ function CrtTypedAhead: Boolean;
 function CrtReadHeldByte(out AByte: Byte): Boolean;
 function CrtTerminalEditKeys: TCrtEditKeys;
 procedure CrtEcho(const ABytes: String);
+{ THE COLUMN THE TERMINAL IS AT, kept as n_tty keeps it (CrtColumnAfter), so
+  a line typed ahead begins where INPUT's prompt ended (round 10). The host
+  reports what it writes to the terminal with CrtNoteOutput, and the end of a
+  line the line discipline read itself (its echo is never seen here) with
+  CrtNoteLineEnded. Output this host did not write -- another process, or
+  stderr -- is not counted. }
+procedure CrtNoteOutput(const ABytes: String);
+procedure CrtNoteLineEnded;
+function CrtOutputColumn: Integer;
 {$ENDIF}
 
 {$IFDEF WINDOWS}
@@ -249,9 +324,24 @@ procedure CrtLineModeEnd(AWasRaw: Boolean);
   line, and the other presses stay for the next reads. False otherwise:
   APrefix is the start of the line (possibly ''), and they are all taken; the
   host SHOWS it and hands it to the console's line editor as text already
-  typed, so it can be erased like the rest. A key with no character (an
-  arrow, a function key) is not text, and a line has no place for it. }
+  typed, so it can be erased like the rest. Which presses those are is
+  CrtPressIsLineText's. }
 function CrtTakePendingLine(out APrefix: String): Boolean;
+{ IS A PRESS OF THIS KEY TEXT AT THE START OF A LINE? (round 10, 2026-10-11)
+  As the console's own cooked read answers it -- measured, three taps of each
+  character before 'x' Enter on Windows 11's conhost, and the same held with
+  a repeat count: every character is kept in the line, Tab and the Ctrl
+  chords (^A..^Z, ^\ ^] ^^ ^_) included, but Backspace or Ctrl+H (08),
+  Ctrl+J (0A) and Escape (1B), which edit a line and at its start have
+  nothing to edit. (Ctrl+S could not be measured -- the console would not
+  queue its events -- and is kept like the other chords; Ctrl+C and Enter
+  never get here: a signal, and an empty line of its own.) A key
+  with no character -- an arrow, a function key, chr(0) and a code -- is not
+  text: in a line it would MOVE or RECALL (Up and F3 bring back an earlier
+  line), which a press that came before the line cannot be made to do, so it
+  is dropped. Round 9 kept only presses from ' ' up, and a held Tab or Ctrl
+  chord lost its unanswered presses. }
+function CrtPressIsLineText(const AKey: String): Boolean;
 {$ENDIF}
 
 implementation
@@ -472,31 +562,38 @@ begin
   SetCodePage(RawByteString(Result), CP_UTF8, False);
 end;
 
-function CrtAssembleKey(const ABytes: RawByteString; AFinal: Boolean;
+function CrtAssembleKey(const ABytes: RawByteString; AFrom: Integer; AFinal: Boolean;
                         out ATaken, AWaitMs: Integer): String;
 var n, i, want: Integer; b0, c: Byte; bad: Boolean;
+
+  { the byte at position AAt of the key being assembled (1 = its first) }
+  function At(AAt: Integer): Byte;
+  begin
+    Result := Byte(ABytes[AFrom + AAt - 1]);
+  end;
+
 begin
   Result := '';
   ATaken := 0;
   AWaitMs := 0;
   bad := False;
-  n := Length(ABytes);
-  if n = 0 then Exit;
-  b0 := Byte(ABytes[1]);
+  n := Length(ABytes) - AFrom + 1;
+  if n <= 0 then Exit;
+  b0 := At(1);
   if b0 = 27 then
   begin
     ATaken := 1;                       // Escape alone, unless a sequence follows
     if n >= 2 then
     begin
-      c := Byte(ABytes[2]);
+      c := At(2);
       if c = Ord('[') then
       begin
-        if (n >= 3) and (ABytes[3] = '[') then
+        if (n >= 3) and (At(3) = Ord('[')) then
         begin
           // the Linux console's F1..F5: ESC [ [ and one letter
           if n >= 4 then
           begin
-            if (Byte(ABytes[4]) >= $40) and (Byte(ABytes[4]) <= $7E) then ATaken := 4;
+            if (At(4) >= $40) and (At(4) <= $7E) then ATaken := 4;
           end
           else if not AFinal then ATaken := 0;
         end
@@ -508,7 +605,7 @@ begin
           i := 3;
           while (i <= n) and (i <= CRT_SEQ_MAX) do
           begin
-            c := Byte(ABytes[i]);
+            c := At(i);
             if (c >= $40) and (c <= $7E) then begin ATaken := i; Break; end;
             if (c < $20) or (c > $3F) then Break;
             Inc(i);
@@ -520,7 +617,7 @@ begin
       begin
         if n >= 3 then
         begin
-          if (Byte(ABytes[3]) >= $40) and (Byte(ABytes[3]) <= $7E) then ATaken := 3;
+          if (At(3) >= $40) and (At(3) <= $7E) then ATaken := 3;
         end
         else if not AFinal then ATaken := 0;
       end;
@@ -550,7 +647,7 @@ begin
         else begin ATaken := 0; AWaitMs := CRT_UTF8_WAIT_MS; end;
         Break;
       end;
-      if not Utf8Continues(b0, Byte(ABytes[i + 1]), i) then
+      if not Utf8Continues(b0, At(i + 1), i) then
       begin
         ATaken := i;
         bad := True;
@@ -562,20 +659,61 @@ begin
   if bad then Exit(Replacement());
   // The key's own bytes: copied by index and tagged, as Replacement says.
   SetLength(Result, ATaken);
-  Move(ABytes[1], Result[1], ATaken);
+  Move(ABytes[AFrom], Result[1], ATaken);
   SetCodePage(RawByteString(Result), CP_UTF8, False);
 end;
 
-{ Drop the first ACount bytes of ABuf: they were answered. }
-procedure TakeFront(var ABuf: RawByteString; ACount: Integer);
+function CrtAssembleKey(const ABytes: RawByteString; AFinal: Boolean;
+                        out ATaken, AWaitMs: Integer): String;
 begin
-  if ACount >= Length(ABuf) then ABuf := ''
-  else Delete(ABuf, 1, ACount);
+  Result := CrtAssembleKey(ABytes, 1, AFinal, ATaken, AWaitMs);
 end;
 
-{ Whatever has already arrived, without waiting. }
+procedure CrtReaderInit(out R: TCrtKeyReader; AFill: TCrtFill; AClock: TCrtClock);
+begin
+  R.Buf := '';
+  R.Head := 0;
+  R.Moved := 0;
+  R.Arrived := 0;
+  R.Fill := AFill;
+  R.Clock := AClock;
+end;
+
+function CrtReaderPending(const R: TCrtKeyReader): Integer;
+begin
+  Result := Length(R.Buf) - R.Head;
+end;
+
+const
+  { The answered bytes kept in front of the queue before they are dropped:
+    at least this many, and at least as many as still wait. }
+  CRT_COMPACT_MIN = 4096;
+
+{ The first ACount waiting bytes were answered. They are dropped from Buf only
+  when that is cheap for the bytes answered (see TCrtKeyReader). }
+procedure TakeFront(var R: TCrtKeyReader; ACount: Integer);
+var rest: Integer;
+begin
+  Inc(R.Head, ACount);
+  rest := Length(R.Buf) - R.Head;
+  if rest <= 0 then
+  begin
+    R.Buf := '';
+    R.Head := 0;
+  end
+  else if (R.Head >= CRT_COMPACT_MIN) and (R.Head >= rest) then
+  begin
+    Delete(R.Buf, 1, R.Head);
+    Inc(R.Moved, QWord(rest));
+    R.Head := 0;
+  end;
+end;
+
+{ Whatever has already arrived, without waiting -- when it can matter: with
+  CRT_SEQ_MAX bytes waiting the next key is decided by them alone. }
 procedure Poll(var R: TCrtKeyReader);
 begin
+  if CrtReaderPending(R) >= CRT_SEQ_MAX then Exit;
   if R.Fill(R.Buf, 0) > 0 then R.Arrived := R.Clock();
 end;
 
@@ -596,7 +734,7 @@ begin
   Poll(R);
   for turn := 1 to 128 do
   begin
-    if R.Buf = '' then
+    if CrtReaderPending(R) = 0 then
     begin
       if not ABlock then Exit;
       got := R.Fill(R.Buf, -1);
@@ -604,7 +742,7 @@ begin
       if got > 0 then R.Arrived := R.Clock();
       Continue;
     end;
-    Result := CrtAssembleKey(R.Buf, False, taken, wait);
+    Result := CrtAssembleKey(R.Buf, R.Head + 1, False, taken, wait);
     if taken = 0 then
     begin
       // The start of a key. Its rest is waited for, from when its last byte
@@ -618,21 +756,21 @@ begin
         if got > 0 then R.Arrived := R.Clock();
         if got >= 0 then Continue;
       end;
-      Result := CrtAssembleKey(R.Buf, True, taken, wait);
+      Result := CrtAssembleKey(R.Buf, R.Head + 1, True, taken, wait);
     end;
-    TakeFront(R.Buf, taken);
+    TakeFront(R, taken);
     Exit;
   end;
-  Result := CrtAssembleKey(R.Buf, True, taken, wait);
-  TakeFront(R.Buf, taken);
+  Result := CrtAssembleKey(R.Buf, R.Head + 1, True, taken, wait);
+  TakeFront(R, taken);
 end;
 
 function CrtReaderReady(var R: TCrtKeyReader): Boolean;
 var taken, wait: Integer;
 begin
   Poll(R);
-  if R.Buf = '' then Exit(False);
-  CrtAssembleKey(R.Buf, False, taken, wait);
+  if CrtReaderPending(R) = 0 then Exit(False);
+  CrtAssembleKey(R.Buf, R.Head + 1, False, taken, wait);
   Result := (taken > 0) or (R.Clock() - R.Arrived >= QWord(wait));
 end;
 
@@ -643,14 +781,14 @@ begin
   // a wait a signal cut short (0) is waited again, as CrtReaderKey does
   for turn := 1 to 128 do
   begin
-    if R.Buf <> '' then Break;
+    if CrtReaderPending(R) > 0 then Break;
     got := R.Fill(R.Buf, -1);
     if got < 0 then Exit(False);
     if got > 0 then R.Arrived := R.Clock();
   end;
-  if R.Buf = '' then Exit(False);
-  AByte := Byte(R.Buf[1]);
-  TakeFront(R.Buf, 1);
+  if CrtReaderPending(R) = 0 then Exit(False);
+  AByte := Byte(R.Buf[R.Head + 1]);
+  TakeFront(R, 1);
   Result := True;
 end;
 
@@ -666,8 +804,20 @@ begin
   Result.EchoKill := True;
   Result.EchoKillErase := True;
   Result.EchoCtl := True;
+  Result.EchoNl := False;
   Result.CrIsNl := True;
   Result.IgnoreCr := False;
+  Result.NlIsCr := False;
+  Result.Canon := True;
+  Result.Utf8 := True;
+end;
+
+procedure CrtEditStart(out S: TCrtEditState; AColumn: Integer);
+begin
+  S.Line := '';
+  S.Literal := False;
+  S.Column := AColumn;
+  S.CanonColumn := AColumn;
 end;
 
 { A byte appended to a byte string, by index (see KeyBytes). }
@@ -679,13 +829,36 @@ begin
   S[n] := Chr(B);
 end;
 
+{ The kernel's iscntrl() (lib/ctype.c, _C): 00..1F and 7F. Its table is
+  Latin-1, and there 80..9F are nothing at all -- not control characters. }
 function IsCtl(B: Byte): Boolean;
 begin
   Result := (B < $20) or (B = $7F);
 end;
 
-{ How a byte is shown: as itself, or -- a control character under ECHOCTL,
-  except Tab -- as ^ and the character 40 hex above it (DEL as ^?). }
+{ WHAT WORD ERASE TAKES FOR A WORD: the kernel's isalnum(), or '_' (eraser(),
+  "Equivalent to BSD's ALTWERASE"). lib/ctype.c is Latin-1: C0..FF are
+  letters (_U, _L) except D7 and F7 (_P), and 80..BF are not. Under IUTF8 the
+  byte tested is a character's LEAD byte, so 'a-tilde' (C3 A3) is part of a
+  word -- and so is everything led by C3..DF other than D7, or by E0..F4,
+  quirks included: that is the definition the live line discipline applies.
+  Round 9 tested ASCII alone, and 'nao-tilde' Ctrl+W typed ahead left 'na-tilde'
+  where the same keys typed live erased the word. }
+function IsWordByte(B: Byte): Boolean;
+begin
+  Result := (Chr(B) in ['0'..'9', 'A'..'Z', 'a'..'z', '_']) or
+            ((B >= $C0) and (B <> $D7) and (B <> $F7));
+end;
+
+{ is_continuation(): a UTF-8 continuation byte, and only under IUTF8. }
+function IsCont(B: Byte; const AKeys: TCrtEditKeys): Boolean;
+begin
+  Result := AKeys.Utf8 and ((B and $C0) = $80);
+end;
+
+{ How a byte is shown (echo_char()): as itself, or -- a control character
+  under ECHOCTL, except Tab -- as ^ and the character 40 hex above it (DEL as
+  ^?). }
 procedure AddShown(var AEcho: String; B: Byte; AEchoCtl: Boolean);
 begin
   if AEchoCtl and IsCtl(B) and (B <> 9) then
@@ -704,43 +877,78 @@ begin
   AddByte(AEcho, 8);
 end;
 
-{ How many columns the tab at ALine[AAt] took, counted from the start of the
-  line. n_tty counts from the column the line began in, which is not known
-  here (the prompt is the program's); a line taken to begin on a tab stop is
-  the one approximation in this editor. }
-function TabWidth(const ALine: String; AAt: Integer): Integer;
-var i, col: Integer; b: Byte;
+function CrtColumnAfter(ACol: Integer; const ABytes: RawByteString; AUtf8: Boolean): Integer;
+var i: Integer; b: Byte;
 begin
-  col := 0;
-  for i := 1 to Length(ALine) do
+  Result := ACol;
+  for i := 1 to Length(ABytes) do
   begin
-    if i >= AAt then Break;
-    b := Byte(ALine[i]);
-    if b = 9 then col := (col or 7) + 1
-    else if (b and $C0) = $80 then          // a continuation byte takes no column
-    else if IsCtl(b) then Inc(col, 2)
-    else Inc(col);
+    b := Byte(ABytes[i]);
+    if (b = 10) or (b = 13) then Result := 0
+    else if b = 9 then Result := (Result or 7) + 1
+    else if b = 8 then
+    begin
+      if Result > 0 then Dec(Result);
+    end
+    else if IsCtl(b) then                    // no column
+    else if AUtf8 and ((b and $C0) = $80) then  // nor a continuation
+    else Inc(Result);
   end;
-  Result := 8 - (col and 7);
+end;
+
+{ HOW MANY COLUMNS THE TAB AT ALine[AAt] TOOK, as eraser() and
+  __process_echoes() count them: the columns of what stands between it and
+  the Tab before it -- or, with none, the start of the line, which began at
+  ACanonCol -- and the rest of that tab stop. A control character takes two
+  columns under ECHOCTL (^X) and none without; a continuation byte none under
+  IUTF8. Round 9 counted from column 0, taking every line to begin on a tab
+  stop: after INPUT's prompt 'Name:' a Tab erased typed ahead backed the
+  cursor six columns into the prompt, and the next key overwrote it ('Naxe:ab'
+  on the screen, 'abx' answered). }
+function TabWidth(const ALine: String; AAt, ACanonCol: Integer; const AKeys: TCrtEditKeys): Integer;
+var i, cols: Integer; b: Byte; afterTab: Boolean;
+begin
+  cols := 0;
+  afterTab := False;
+  for i := Length(ALine) downto 1 do     // from the character before the Tab
+  begin
+    if i >= AAt then Continue;
+    b := Byte(ALine[i]);
+    if b = 9 then
+    begin
+      afterTab := True;
+      Break;
+    end;
+    if IsCtl(b) then
+    begin
+      if AKeys.EchoCtl then Inc(cols, 2);
+    end
+    else if not IsCont(b, AKeys) then
+      Inc(cols);
+  end;
+  if not afterTab then Inc(cols, ACanonCol);
+  Result := 8 - (cols and 7);
 end;
 
 { Erase backwards, as n_tty's eraser() does: one character (AKind 0), a word
-  (1: trailing characters that are not alphanumeric or '_', then those that
-  are), or the whole line (2). A character is a UTF-8 lead and its
-  continuations. }
-procedure EraseBack(var ALine: String; AKind: Integer; const AKeys: TCrtEditKeys;
+  (1: trailing characters that are not word characters, then those that
+  are), or the whole line (2). A character is, under IUTF8, a lead byte and
+  its continuations, and without it one byte; a line that begins with a
+  continuation byte is not erased into ("do not partially erase"). }
+procedure EraseBack(var S: TCrtEditState; AKind: Integer; const AKeys: TCrtEditKeys;
                     var AEcho: String);
 var head, k, alnums: Integer; c: Byte;
 begin
   alnums := 0;
-  while Length(ALine) > 0 do           // each turn shortens the line
+  while Length(S.Line) > 0 do           // each turn shortens the line, or stops
   begin
-    head := Length(ALine);
-    while (head > 1) and ((Byte(ALine[head]) and $C0) = $80) do Dec(head);
-    c := Byte(ALine[head]);
+    head := Length(S.Line);
+    while (head > 1) and IsCont(Byte(S.Line[head]), AKeys) do Dec(head);
+    c := Byte(S.Line[head]);
+    if IsCont(c, AKeys) then Break;
     if AKind = 1 then
     begin
-      if (Chr(c) in ['0'..'9', 'A'..'Z', 'a'..'z', '_']) then Inc(alnums)
+      if IsWordByte(c) then Inc(alnums)
       else if alnums > 0 then Break;
     end;
     if AKeys.EchoOn then
@@ -749,7 +957,7 @@ begin
         AddShown(AEcho, Byte(AKeys.KErase), AKeys.EchoCtl)
       else if c = 9 then
       begin
-        for k := 1 to TabWidth(ALine, head) do AddByte(AEcho, 8);
+        for k := 1 to TabWidth(S.Line, head, S.CanonColumn, AKeys) do AddByte(AEcho, 8);
       end
       else
       begin
@@ -757,80 +965,131 @@ begin
         if (not IsCtl(c)) or AKeys.EchoCtl then AddRubout(AEcho);
       end;
     end;
-    SetLength(ALine, head - 1);
+    SetLength(S.Line, head - 1);
     if AKind = 0 then Break;
   end;
 end;
 
-function CrtEditLine(var ALine: String; var ALiteral: Boolean; AByte: Byte;
-                     const AKeys: TCrtEditKeys; out AEcho: String): TCrtEditStep;
+{ A character into the line, and shown; the first of a line records the
+  column the line began in (echo_set_canon_col(), under ECHO). }
+procedure PutChar(var S: TCrtEditState; B: Byte; const AKeys: TCrtEditKeys; var AEcho: String);
+begin
+  if AKeys.EchoOn then
+  begin
+    if S.Line = '' then S.CanonColumn := S.Column;
+    AddShown(AEcho, B, AKeys.EchoCtl);
+  end;
+  AddByte(S.Line, B);
+end;
+
+function EditByte(var S: TCrtEditState; AByte: Byte; const AKeys: TCrtEditKeys;
+                  var AEcho: String): TCrtEditStep;
 var c: Integer;
 begin
-  AEcho := '';
   Result := cesMore;
   c := AByte;
-  if ALiteral then
+  if S.Literal then
   begin
-    // the byte after literal-next is a character, whatever it is
-    ALiteral := False;
-    AddByte(ALine, AByte);
+    // the byte after literal-next is a character, whatever it is, and is
     // shown over the '^' literal-next left under the cursor
-    if AKeys.EchoOn then AddShown(AEcho, AByte, AKeys.EchoCtl);
+    S.Literal := False;
+    PutChar(S, AByte, AKeys, AEcho);
     Exit;
   end;
+  // the input map runs whether or not the line discipline is canonical
   if c = 13 then
   begin
     if AKeys.IgnoreCr then Exit;
     if AKeys.CrIsNl then c := 10;
-  end;
+  end
+  else if (c = 10) and AKeys.NlIsCr then
+    c := 13;
   if c = 10 then
   begin
-    if AKeys.EchoOn then AddByte(AEcho, 10);
+    // the line's end: shown as a raw newline -- canonical, under ECHO or
+    // ECHONL; not canonical, under ECHO, and a newline typed as itself
+    // (not mapped from a CR) as any other control character is
+    if AKeys.Canon then
+    begin
+      if AKeys.EchoOn or AKeys.EchoNl then AddByte(AEcho, 10);
+    end
+    else if AKeys.EchoOn then
+    begin
+      if AByte = 13 then AddByte(AEcho, 10)
+      else AddShown(AEcho, 10, AKeys.EchoCtl);
+    end;
     Exit(cesLine);
+  end;
+  if not AKeys.Canon then
+  begin
+    // ICANON off: no erase, no kill, no end of file -- characters
+    PutChar(S, c, AKeys, AEcho);
+    Exit;
   end;
   if c = AKeys.KEof then
   begin
     // on an empty line it is the end of input; on a line with text in it the
     // read stops short, and the host's reader goes on reading the same line
-    if ALine = '' then Exit(cesEnd);
+    if S.Line = '' then Exit(cesEnd);
     Exit;
   end;
   if c = AKeys.KErase then
   begin
-    EraseBack(ALine, 0, AKeys, AEcho);
+    EraseBack(S, 0, AKeys, AEcho);
     Exit;
   end;
   if c = AKeys.KWErase then
   begin
-    EraseBack(ALine, 1, AKeys, AEcho);
+    EraseBack(S, 1, AKeys, AEcho);
     Exit;
   end;
   if c = AKeys.KKill then
   begin
-    if ALine = '' then Exit;
-    if AKeys.EchoOn and not (AKeys.EchoKill and AKeys.EchoKillErase and AKeys.EchoErase) then
+    if S.Line = '' then Exit;
+    if not AKeys.EchoOn then
+    begin
+      S.Line := '';                     // gone, and nothing shown
+      Exit;
+    end;
+    if not (AKeys.EchoKill and AKeys.EchoKillErase and AKeys.EchoErase) then
     begin
       // shown, not rubbed out: the kill character, and a newline under ECHOK
-      ALine := '';
-      AddShown(AEcho, AByte, AKeys.EchoCtl);
+      S.Line := '';
+      AddShown(AEcho, Byte(c), AKeys.EchoCtl);
       if AKeys.EchoKill then AddByte(AEcho, 10);
       Exit;
     end;
-    EraseBack(ALine, 2, AKeys, AEcho);
+    EraseBack(S, 2, AKeys, AEcho);
     Exit;
   end;
   if c = AKeys.KLNext then
   begin
-    ALiteral := True;
-    if AKeys.EchoOn then
+    S.Literal := True;
+    // '^' under the cursor -- only where ECHOCTL would show the next key so
+    if AKeys.EchoOn and AKeys.EchoCtl then
     begin
       AddByte(AEcho, Ord('^'));
       AddByte(AEcho, 8);
     end;
     Exit;
   end;
-  AddByte(ALine, AByte);
-  if AKeys.EchoOn then AddShown(AEcho, AByte, AKeys.EchoCtl);
+  PutChar(S, c, AKeys, AEcho);
+end;
+
+function CrtEditLine(var S: TCrtEditState; AByte: Byte; const AKeys: TCrtEditKeys;
+                     out AEcho: String): TCrtEditStep;
+begin
+  AEcho := '';
+  Result := EditByte(S, AByte, AKeys, AEcho);
+  S.Column := CrtColumnAfter(S.Column, AEcho, AKeys.Utf8);
+end;
+
+function CrtJobSignalAction(AStopping, ARawOn, AForeground: Boolean): TCrtTermAction;
+begin
+  Result := ctaNone;
+  if not (ARawOn and AForeground) then Exit;
+  if AStopping then Result := ctaRestore
+  else Result := ctaRaw;
 end;
 
 {$IFDEF WINDOWS}
@@ -1171,19 +1430,27 @@ begin
   // The bytes, copied, never concatenated: the key is tagged UTF-8 and a
   // String concatenation would convert it to the system code page.
   n := Length(gRepKey);
-  if (n > 0) and (gRepKey[1] >= ' ') then
+  if CrtPressIsLineText(gRepKey) then
   begin
     SetLength(APrefix, n * gRepLeft);
     for i := 0 to gRepLeft - 1 do
       Move(gRepKey[1], APrefix[1 + i * n], n);
   end;
-  gRepLeft := 0;   // a key with no character is not text
+  gRepLeft := 0;   // taken: as text, or as presses a line has no place for
+end;
+
+function CrtPressIsLineText(const AKey: String): Boolean;
+begin
+  Result := (AKey <> '') and (AKey[1] <> #0) and
+            not ((Length(AKey) = 1) and (AKey[1] in [#8, #10, #27]));
 end;
 {$ELSE}
 var
   gRawOn: Boolean = False;
   gSavedTio: Termios;
+  gRawTio: Termios;                    // what KbdEnterRaw set, to set again
   gSignalsHandled: Boolean = False;
+  gOutColumn: Integer = 0;             // see CrtNoteOutput
 
 { CTRL+C ENDS A KEY LOOP, AND THE TERMINAL IS PUT BACK FIRST (round 9,
   2026-10-11). Signals stay on in raw mode -- Ctrl+C is the ordinary way out
@@ -1205,13 +1472,65 @@ begin
   FpKill(FpGetPid(), signal);
 end;
 
+{ Is this process's group the terminal's foreground one? Only then may it set
+  the terminal's modes without being stopped for it (SIGTTOU). }
+function TerminalIsForeground: Boolean;
+var pg: cint;
+begin
+  pg := 0;
+  Result := (TCGetPGrp(StdInputHandle, pg) >= 0) and (pg = FpGetpgrp());
+end;
+
+procedure ApplyTermAction(AAction: TCrtTermAction);
+begin
+  case AAction of
+    ctaRestore: TCSetAttr(StdInputHandle, TCSANOW, gSavedTio);
+    ctaRaw: TCSetAttr(StdInputHandle, TCSANOW, gRawTio);
+    ctaNone: ;
+  end;
+end;
+
+{ CTRL+Z, AND fg (round 10, 2026-10-11): see CrtJobSignalAction. On the stop
+  signal the terminal is put back, the default action restored, the signal
+  unblocked and sent again -- the process stops HERE -- and when it is
+  continued this handler is installed again and raw mode re-applied. errno is
+  kept: the stop lands in a select() that answers EINTR, which TerminalFill
+  reads as "nothing yet" only if errno still says so. }
+procedure KbdStop(signal: longint; info: psiginfo; context: psigcontext); cdecl;
+var act: SigActionRec; mask: TSigSet; err: cint;
+begin
+  err := fpgeterrno;
+  ApplyTermAction(CrtJobSignalAction(True, gRawOn, TerminalIsForeground()));
+  FillChar(act, SizeOf(act), 0);       // SIG_DFL: stop
+  FPSigAction(signal, @act, nil);
+  FpSigEmptySet(mask);
+  FpSigAddSet(mask, signal);
+  FpSigProcMask(SIG_UNBLOCK, @mask, nil);
+  FpKill(FpGetPid(), signal);          // stopped until SIGCONT
+  FillChar(act, SizeOf(act), 0);
+  act.sa_handler := @KbdStop;
+  FPSigAction(signal, @act, nil);
+  ApplyTermAction(CrtJobSignalAction(False, gRawOn, TerminalIsForeground()));
+  fpseterrno(err);
+end;
+
+{ Continued however it was stopped (a SIGSTOP, a background read): raw mode
+  again, if a key function owns it and the terminal is this job's. }
+procedure KbdContinue(signal: longint; info: psiginfo; context: psigcontext); cdecl;
+var err: cint;
+begin
+  err := fpgeterrno;
+  ApplyTermAction(CrtJobSignalAction(False, gRawOn, TerminalIsForeground()));
+  fpseterrno(err);
+end;
+
 { The handler goes on the signals that end a process at a keyboard or a
-  terminal's close -- and only where the action is still the default: a
-  signal the program was started with IGNORED (a background job's SIGINT) or
-  one somebody else handles is left alone. }
+  terminal's close, and on the job-control pair -- and only where the action
+  is still the default: a signal the program was started with IGNORED (a
+  background job's SIGINT) or one somebody else handles is left alone. }
 procedure HandleSignals;
 const
-  SIGS: array[0..3] of cint = (SIGINT, SIGQUIT, SIGTERM, SIGHUP);
+  SIGS: array[0..5] of cint = (SIGINT, SIGQUIT, SIGTERM, SIGHUP, SIGTSTP, SIGCONT);
 var act, old: SigActionRec; i: Integer;
 begin
   gSignalsHandled := True;
@@ -1221,7 +1540,9 @@ begin
     if FPSigAction(SIGS[i], nil, @old) <> 0 then Continue;
     if Assigned(old.sa_handler) then Continue;   // ignored, or handled already
     FillChar(act, SizeOf(act), 0);
-    act.sa_handler := @KbdSignal;
+    if SIGS[i] = SIGTSTP then act.sa_handler := @KbdStop
+    else if SIGS[i] = SIGCONT then act.sa_handler := @KbdContinue
+    else act.sa_handler := @KbdSignal;
     FPSigAction(SIGS[i], @act, nil);
   end;
 end;
@@ -1238,15 +1559,19 @@ begin
   tio.c_lflag := tio.c_lflag and not (ICANON or ECHO);
   tio.c_cc[VMIN] := 1;
   tio.c_cc[VTIME] := 0;
-  if TCSetAttr(StdInputHandle, TCSANOW, tio) = 0 then gRawOn := True;
+  gRawTio := tio;
+  // owned BEFORE the switch, and given up before the switch back: a stop
+  // signal between the two then finds the terminal it would put back
+  gRawOn := True;
+  if TCSetAttr(StdInputHandle, TCSANOW, tio) <> 0 then gRawOn := False;
 end;
 
 procedure KbdRestore;
 begin
   if gRawOn then
   begin
-    TCSetAttr(StdInputHandle, TCSANOW, gSavedTio);
     gRawOn := False;
+    TCSetAttr(StdInputHandle, TCSANOW, gSavedTio);
   end;
 end;
 
@@ -1309,7 +1634,7 @@ end;
 
 function CrtTypedAhead: Boolean;
 begin
-  Result := gRawOn and (gReader.Buf <> '');
+  Result := gRawOn and (CrtReaderPending(gReader) > 0);
 end;
 
 function CrtReadHeldByte(out AByte: Byte): Boolean;
@@ -1325,8 +1650,9 @@ begin
 end;
 
 { The editing the program's OWN terminal settings ask for -- the ones raw
-  mode replaced, not raw mode's. Word erase and literal-next exist only under
-  IEXTEN, as in the line discipline. }
+  mode replaced, not raw mode's: ICANON and IUTF8 among them (round 10).
+  Word erase and literal-next exist only under IEXTEN, as in the line
+  discipline. }
 function CrtTerminalEditKeys: TCrtEditKeys;
 var lf, ifl: Cardinal; ext: Boolean;
 begin
@@ -1345,8 +1671,12 @@ begin
   Result.EchoKill := (lf and ECHOK) <> 0;
   Result.EchoKillErase := (lf and ECHOKE) <> 0;
   Result.EchoCtl := (lf and ECHOCTL) <> 0;
+  Result.EchoNl := (lf and ECHONL) <> 0;
+  Result.Canon := (lf and ICANON) <> 0;
   Result.CrIsNl := (ifl and ICRNL) <> 0;
   Result.IgnoreCr := (ifl and IGNCR) <> 0;
+  Result.NlIsCr := (ifl and INLCR) <> 0;
+  Result.Utf8 := (ifl and IUTF8) <> 0;
 end;
 
 { Shown where the line discipline shows its echo: on the terminal the keys
@@ -1355,9 +1685,34 @@ end;
 procedure CrtEcho(const ABytes: String);
 begin
   if ABytes = '' then Exit;
+  CrtNoteOutput(ABytes);
   if FileWrite(StdInputHandle, ABytes[1], Length(ABytes)) < 0 then
     if IsATTY(StdOutputHandle) = 1 then
       FileWrite(StdOutputHandle, ABytes[1], Length(ABytes));
+end;
+
+{ Counted only when stdout IS a terminal: output to a file or a pipe moves no
+  cursor. }
+procedure CrtNoteOutput(const ABytes: String);
+var tio: Termios;
+begin
+  if ABytes = '' then Exit;
+  if TCGetAttr(StdOutputHandle, tio) <> 0 then Exit;
+  gOutColumn := CrtColumnAfter(gOutColumn, ABytes, (tio.c_iflag and IUTF8) <> 0);
+end;
+
+{ A line the line discipline read and echoed: its Enter showed a newline
+  when ECHO or ECHONL is on (n_tty_receive_char_canon()). }
+procedure CrtNoteLineEnded;
+var tio: Termios;
+begin
+  if TCGetAttr(StdInputHandle, tio) <> 0 then Exit;
+  if (tio.c_lflag and (ECHO or ECHONL)) <> 0 then gOutColumn := 0;
+end;
+
+function CrtOutputColumn: Integer;
+begin
+  Result := gOutColumn;
 end;
 {$ENDIF}
 
@@ -1386,12 +1741,12 @@ begin
   {$IFNDEF WINDOWS}
   if not Result then
   begin
-    if gReader.Buf <> '' then KbdEnterRaw();
+    if CrtReaderPending(gReader) > 0 then KbdEnterRaw();
     Exit;
   end;
   for i := 1 to 256 do
     if gReader.Fill(gReader.Buf, 0) <= 0 then Break;
-  if gReader.Buf <> '' then Exit;
+  if CrtReaderPending(gReader) > 0 then Exit;
   {$ELSE}
   if not Result then Exit;
   {$ENDIF}
@@ -1670,10 +2025,7 @@ end;
 
 initialization
   {$IFNDEF WINDOWS}
-  gReader.Buf := '';
-  gReader.Arrived := 0;
-  gReader.Fill := @TerminalFill;
-  gReader.Clock := @MonoClock;
+  CrtReaderInit(gReader, @TerminalFill, @MonoClock);
   {$ENDIF}
 
 finalization

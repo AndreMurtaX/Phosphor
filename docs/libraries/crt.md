@@ -45,7 +45,16 @@ Unix the process is still killed by `SIGINT` (also `SIGQUIT`, `SIGTERM` and
 `SIGHUP`, unless the program was started with one ignored), on Windows the
 exit status is still `C000013A` — but the terminal's echo and line editing are
 put back first. Until 2026-10-11 (round 9) they stayed off on both systems,
-under any parent that does not reset them itself. When stdin is **not** a terminal — a pipe, a
+under any parent that does not reset them itself. **On Unix, Ctrl+Z and `fg`
+work as in any full-screen program** (vim, less): stopping the program puts
+the terminal back for the shell, and continuing it in the foreground puts raw
+mode back, so the next `getkey$` answers the next key at once and unechoed.
+Until round 10 bash's `fg` left the program with echo and line editing on —
+`getkey$` waited for Enter — and dash prompted with echo off. (A program
+continued in the background leaves the terminal alone until it is brought
+forward.) A large paste into a key loop costs the same per key however much
+of it is waiting; until round 10 the queue was quadratic, and a pasted
+megabyte took 21 seconds to read. When stdin is **not** a terminal — a pipe, a
 redirect, the headless test harness — there is no keyboard at all, so `inkey$()`
 and `getkey$()` answer `""` and `keypressed()` answers `0` immediately, without
 blocking and without touching the terminal.
@@ -125,11 +134,26 @@ typed first, so it begins the line; it appears after the prompt, and
 Backspace, Ctrl+U and the rest reach back into it. What the screen shows is
 what `input` answers. On Unix those keys are edited by the terminal's own
 settings (`stty`: erase, kill, word erase, end of file, literal next, the echo
-flags) the way its line discipline would have edited them; Linux's own does
+flags, `icanon`, `iutf8`, `icrnl`, `igncr`, `inlcr`) the way Linux's line
+discipline (`n_tty`) would have edited them, so the same keys give the same
+line whether they were typed ahead or after the prompt: without `iutf8` erase
+takes one byte, without `icanon` nothing is edited; word erase takes what the
+kernel calls alphanumeric, which includes a character such as `ã` (its table
+is Latin-1, tested on a character's first byte); and a Tab is rubbed out by
+the columns it took counted from where the prompt ended — the columns the
+kernel counts, from what this host printed. Linux's own line discipline does
 not re-read keys that arrived raw, and until round 9 handed them over as raw
-bytes — a DEL inside the line, nothing on the screen. On Windows they were
-joined to the line after the console's read, invisible and out of reach of
-Backspace. (Until round 8, on Windows `input` after any key function — a
+bytes — a DEL inside the line, nothing on the screen; until round 10 the
+editor ignored `icanon` and `iutf8`, stopped a word at a non-ASCII letter, and
+rubbed a Tab out as if the line began at column 0, backing into the prompt.
+On Windows the remaining presses of a held key begin the line when they are
+text in a line as the console's own read keeps it — any character, a Tab and
+the Ctrl chords included — and are dropped when they are not: Backspace,
+Ctrl+J and Escape (which, before the line, have nothing to edit), and keys
+with no character (arrows and function keys, which would move the cursor or
+recall an earlier line). Until round 10 a held Tab or Ctrl chord lost them.
+On Windows they were joined to the line after the console's read, invisible
+and out of reach of Backspace, until round 9. (Until round 8, on Windows `input` after any key function — a
 single `keypressed()` was enough — answered whatever keys had arrived, `h` and
 then `ello` for the next `input`; on Linux it took the keys typed after the
 Enter, where no key function could see them.)

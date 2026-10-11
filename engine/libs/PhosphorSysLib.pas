@@ -40,6 +40,28 @@ procedure RegisterSysFuncs(Reg: TPhosphorRegistry);
 function HostEnv(const AName: String): String;
 function HostTempDir: String;
 function HostUserDir: String;
+
+{ THE UNIX TEMP DIRECTORY'S TWO DECISIONS, compiled on every system so that
+  tests/probe_crt.lpr runs them on both (round 10, 2026-10-11).
+  UnixCwdFromGetcwd: the working directory a getcwd call answered, or '' when
+  it answered none. AReturned is what the call returned, ABuf the whole
+  buffer it was handed. FPC 3.2.2's Linux fpgetcwd answers
+  the SYSCALL's result as a pointer -- -1, never nil, when it fails -- and the
+  RTL's GetDir, which ExpandFileName asks, copied the untouched buffer
+  regardless: with the working directory deleted, a relative TMPDIR=rel made
+  temppath$ '/rel/' and tempfilename$ six bytes of a stack address followed by
+  '/rel/TMP00000.tmp'. A directory is answered only when the call succeeded and
+  the buffer holds a full path, '/' first and NUL-terminated inside it (Linux
+  answers '(unreachable)...' for one outside the process's root).
+  UnixFullTempDir: AValue as a full directory with a trailing '/': as written
+  when it begins with '/', otherwise ACwd + '/' + AValue -- '' for an empty
+  value, or a relative one with no working directory to make it full against,
+  which the caller then skips as it skips an unset one. A leading '~' is a
+  directory NAMED '~': the environment is not shell-expanded, and
+  ExpandFileName's tilde expansion (FPC_FEXPAND_TILDE) made TMPDIR='~/y' the
+  user's $HOME/y/ while '~x' and '~user/z' were already relative names. }
+function UnixCwdFromGetcwd(AReturned: PtrInt; const ABuf: array of Char): String;
+function UnixFullTempDir(const AValue, ACwd: String): String;
 function HostAppConfigDir: String;
 
 { WELL-FORMED UTF-8, AND WHAT IS NOT (2026-10-09, round 4). On Windows the
@@ -415,6 +437,66 @@ begin
 end;
 {$ENDIF}
 
+function UnixCwdFromGetcwd(AReturned: PtrInt; const ABuf: array of Char): String;
+var i, n: Integer;
+begin
+  Result := '';
+  if (AReturned = 0) or (AReturned = -1) or (Length(ABuf) = 0) then Exit;
+  n := 0;
+  for i := 0 to High(ABuf) do
+  begin
+    if ABuf[i] = #0 then Break;
+    Inc(n);
+  end;
+  if (n = 0) or (n > High(ABuf)) or (ABuf[0] <> '/') then Exit;
+  // the buffer's bytes, then the path's: no larger than what getcwd was handed
+  SetLength(Result, Length(ABuf));
+  Move(ABuf[0], Result[1], Length(ABuf));
+  Result := Copy(Result, 1, n);
+end;
+
+function UnixFullTempDir(const AValue, ACwd: String): String;
+begin
+  Result := '';
+  if AValue = '' then Exit;
+  if AValue[1] = '/' then
+    Result := AValue
+  else
+  begin
+    if ACwd = '' then Exit;
+    Result := ACwd;
+    if Result[Length(Result)] <> '/' then Result := Result + '/';
+    Result := Result + AValue;
+  end;
+  if Result[Length(Result)] <> '/' then Result := Result + '/';
+end;
+
+{$IFNDEF WINDOWS}
+{ The RTL's getcwd, by the name BaseUnix itself binds it to (rtl/unix/
+  bunxh.inc) -- the engine uses no Unix unit. }
+function SysGetcwd(APath: PChar; ASize: SizeUInt): PChar; external name 'FPC_SYSC_GETCWD';
+
+function UnixCwd: String;
+var buf: array[0..4095] of Char; r: PChar;
+begin
+  FillChar(buf, SizeOf(buf), 0);
+  r := SysGetcwd(@buf[0], SizeOf(buf));
+  Result := UnixCwdFromGetcwd(PtrInt(r), buf);
+end;
+
+{ One candidate made full, or '' to skip it. A relative value is joined to the
+  working directory and only then normalised ('.' and '..') by ExpandFileName,
+  which -- handed a full path -- neither asks for the working directory nor
+  expands a tilde. }
+function UnixTempFrom(const AValue: String): String;
+begin
+  if AValue = '' then Exit('');
+  if AValue[1] = '/' then Exit(UnixFullTempDir(AValue, ''));
+  Result := UnixFullTempDir(AValue, UnixCwd());
+  if Result <> '' then Result := IncludeTrailingPathDelimiter(ExpandFileName(Result));
+end;
+{$ENDIF}
+
 function HostTempDir: String;
 {$IFDEF WINDOWS}
 var w: UnicodeString;
@@ -435,10 +517,13 @@ begin
   if (Result = '') and HostEnvWide('USERPROFILE', w) then Result := FullTempDir(w);
   if Result = '' then Result := FullTempDir(AskWidePath(@WindowsDirPath));
   {$ELSE}
-  // TEMP, TMP, TMPDIR, then /tmp/ -- the RTL's order -- and full
-  Result := GetTempDir(False);
-  if (Result <> '') and (Result[1] <> '/') then
-    Result := IncludeTrailingPathDelimiter(ExpandFileName(Result));
+  // TEMP, TMP, TMPDIR, then /tmp/ -- the RTL's order -- each made full, and
+  // one that cannot be skipped as if unset, as on Windows (round 10)
+  if Assigned(OnGetTempDir) then Exit(UnixTempFrom(GetTempDir(False)));
+  Result := UnixTempFrom(GetEnvironmentVariable('TEMP'));
+  if Result = '' then Result := UnixTempFrom(GetEnvironmentVariable('TMP'));
+  if Result = '' then Result := UnixTempFrom(GetEnvironmentVariable('TMPDIR'));
+  if Result = '' then Result := '/tmp/';
   {$ENDIF}
 end;
 

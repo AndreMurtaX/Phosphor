@@ -460,8 +460,11 @@ begin
   { Redirected (pipe/file, or NUL after crt_hideconsole): raw UTF-8 bytes. }
   FileWrite(FStdOut, AText[1], Length(AText));
   {$ELSE}
-  { Non-Windows: raw UTF-8 bytes, byte-exact. }
+  { Non-Windows: raw UTF-8 bytes, byte-exact -- and the terminal's column
+    noted, so a line typed ahead of INPUT knows where its prompt ended
+    (CrtNoteOutput, round 10). }
   FileWrite(StdOutputHandle, AText[1], Length(AText));
+  CrtNoteOutput(AText);
   {$ENDIF}
 end;
 
@@ -504,22 +507,24 @@ end;
   discipline will not edit them, so the line is read from them -- and then
   from the terminal, still raw -- each byte edited and shown by CrtEditLine,
   by the program's own terminal settings, as the line discipline would have
-  edited and shown it. }
+  edited and shown it -- from the column INPUT's prompt ended at (round 10:
+  a Tab is rubbed out by the columns it took from there). }
 function ReadTerminalLine(out ALine: String): Boolean;
-var c: Char; r, n: LongInt; keys: TCrtEditKeys; echo: String; literal: Boolean; b: Byte;
+var c: Char; r, n: LongInt; keys: TCrtEditKeys; echo: String; st: TCrtEditState; b: Byte;
 begin
   ALine := '';
   Result := False;
   if CrtTypedAhead() then
   begin
     keys := CrtTerminalEditKeys();
-    literal := False;
+    CrtEditStart(st, CrtOutputColumn());
     while CrtReadHeldByte(b) do
     begin
-      case CrtEditLine(ALine, literal, b, keys, echo) of
+      case CrtEditLine(st, b, keys, echo) of
         cesLine:
           begin
             CrtEcho(echo);
+            ALine := st.Line;
             Exit(True);
           end;
         cesEnd:
@@ -528,6 +533,7 @@ begin
           CrtEcho(echo);
       end;
     end;
+    ALine := st.Line;
     Exit(ALine <> '');                   // the terminal went away mid-line
   end;
   while True do
@@ -545,6 +551,7 @@ begin
     begin
       n := Length(ALine);
       if (n > 0) and (ALine[n] = #13) then SetLength(ALine, n - 1);
+      CrtNoteLineEnded();
       Exit(True);
     end;
     n := Length(ALine) + 1;

@@ -2119,6 +2119,9 @@ if ($okAG) { Write-Host 'PASS  AG:a modal session frees nothing its opener stand
 # that are not keys, an emoji written in two halves was two U+FFFD, and a
 # Ctrl+Z in a long line's first read left the tail for the next INPUT. The
 # Linux half of the same script runs from block AH of scripts/test.sh.
+# ROUND 10 (2026-10-11): the unanswered presses of a held Tab or Ctrl chord
+# begin the next INPUT's line, as the same keys tapped do (they were dropped:
+# only presses from ' ' up were kept), and a held Backspace's erase nothing.
 $ahOut = Join-Path $tmp 'phosphor_coninput.out'
 cmd /c "python `"$root\tests\console_input_test.py`" `"$exe`" > `"$ahOut`" 2>&1"
 $ahCode = $LASTEXITCODE

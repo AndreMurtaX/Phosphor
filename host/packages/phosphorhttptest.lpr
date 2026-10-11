@@ -831,6 +831,29 @@ begin
       head := Copy(req, 1, hdrEnd + 1);
       line := Copy(head, 1, Pos(#13, head) - 1);    // the request line
       path := ExtractWord(2, line, [' ']);
+      { READ THE BODY BEFORE ANSWERING (2026-10-11). This mode answered from the
+        head alone and closed with a POST's body unread -- and Windows closes a
+        socket that still holds unread bytes with a RESET, which can throw away
+        the answer already on its way to the client: 30_http_path_colon's POST
+        came back empty once on the CI's Windows runner and passed on a rerun
+        of the same commit. The body is read as the normal mode reads it, up to
+        its Content-Length, and dropped. }
+      want := 0;
+      p := Pos('content-length:', LowerCase(head));
+      if p > 0 then
+      begin
+        line := Copy(head, p + 15, MaxInt);
+        if Pos(#13, line) > 0 then line := Copy(line, 1, Pos(#13, line) - 1);
+        want := StrToIntDef(Trim(line), 0);
+      end;
+      k := Length(req) - (hdrEnd + 3);
+      while k < want do
+      begin
+        n := st.Read(buf[0], SizeOf(buf));
+        if n <= 0 then Break;
+        Inc(k, n);
+      end;
+      line := Copy(head, 1, Pos(#13, head) - 1);    // the request line, again
       extra := '';
       if Pos('/b/c/d;p?q', path) > 0 then
         extra := 'Location: ' + GRawLocation + #13#10

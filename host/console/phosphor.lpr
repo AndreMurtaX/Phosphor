@@ -5474,9 +5474,19 @@ begin
     Flush(StdErr);
     tid := 0;
     th := BeginThread(nil, DefaultStackSize, @DiagThreadLine, nil, 0, tid);
-    if th <> TThreadID(0) then
+    { A LOADED MACHINE IS NOT AN ENCODING DEFECT. Block W of scripts/test.ps1
+      failed once in four runs while a whole battery and several builds shared
+      the machine, and never in 180 runs alone (2026-10-11): the wait here was
+      10 s, after which the process went on to exit with the thread's line
+      perhaps unwritten -- read by the test as a wrong line. The wait is longer
+      now, and a thread that has still not finished SAYS so on stderr, so a
+      failure names its cause instead of looking like the bug W pins. }
+    if th = TThreadID(0) then
+      Writeln(StdErr, 'diag: the second thread could not be started')
+    else
     begin
-      WaitForThreadTerminate(th, 10000);
+      if WaitForThreadTerminate(th, 60000) <> 0 then
+        Writeln(StdErr, 'diag: the second thread did not finish within 60 s');
       CloseThread(th);
     end;
     host.Output('UTF-8 check: Olá — café — açúcar — ☕ — π ≈ 3.14159'#10);

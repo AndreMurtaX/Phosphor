@@ -1497,6 +1497,46 @@ end;
   is the defect, not the fix (round 6's lesson about the salt). CheckQuick is
   the other direction: a legitimate call of ordinary size must SUCCEED, and
   quickly, because a quadratic that finishes is still a quadratic. }
+{ HOW MUCH SLOWER THIS MACHINE IS THAN THE ONE THE BOUNDS WERE MEASURED ON
+  (2026-10-11). CheckTimed's and CheckQuick's millisecond bounds were set on the
+  development machine with about 1.5x headroom -- the first thing to fail on a
+  slower or loaded runner for no reason of the engine's. A reference workload
+  is timed here, through the same engine path the checks use, and every bound
+  is multiplied by how much longer it took than it did there (never by less
+  than 1: a faster machine keeps the bounds as measured). The reference is
+  300000 iterations of an add in a loop, 315 ms on the development machine
+  (Windows 11, 2026-10-11; 3 million took 3172-3282 ms in five runs). }
+var
+  GSpeedFactor: Double = 0;
+
+function SpeedFactor: Double;
+const
+  REF_MS = 315;
+var
+  eng: TPhosphorEngine;
+  t0, took: QWord;
+  fs: TFormatSettings;
+begin
+  if GSpeedFactor > 0 then Exit(GSpeedFactor);
+  fs := DefaultFormatSettings;
+  fs.DecimalSeparator := '.';   // the same line on every machine, whatever its locale
+  eng := TPhosphorEngine.Create();
+  try
+    t0 := GetTickCount64();
+    eng.Run('x = 0' + LineEnding + 'for i = 1 to 300000' + LineEnding +
+            '  x = x + i' + LineEnding + 'next' + LineEnding);
+    took := GetTickCount64() - t0;
+  finally
+    eng.Free;
+  end;
+  GSpeedFactor := took / REF_MS;
+  if GSpeedFactor < 1 then GSpeedFactor := 1;
+  Writeln('speed: the reference took ', took, ' ms (', REF_MS,
+          ' where the bounds were measured); timed bounds scale by ',
+          FormatFloat('0.00', GSpeedFactor, fs));
+  Result := GSpeedFactor;
+end;
+
 procedure CheckTimed(const AName, ASource: String; ASteps, ATimeoutMs: Int64;
   const AFragment: String; AMaxMs: Int64);
 var
@@ -1515,8 +1555,8 @@ begin
            (Pos(AFragment, eng.LastError.Message) > 0),
            AName + ' (expected a limit naming "' + AFragment + '", got "' +
            eng.LastError.Message + '")');
-    Report(took <= QWord(AMaxMs), AName + ' (stopped after ' + IntToStr(took) +
-           ' ms; the bound is ' + IntToStr(AMaxMs) + ')');
+    Report(took <= QWord(Round(AMaxMs * SpeedFactor())), AName + ' (stopped after ' +
+           IntToStr(took) + ' ms; the bound is ' + IntToStr(Round(AMaxMs * SpeedFactor())) + ')');
   finally
     eng.Free;
   end;
@@ -1537,8 +1577,8 @@ begin
     rc := eng.Run(ASource);
     took := GetTickCount64() - t0;
     Report(rc = 0, AName + ' (expected success, got "' + eng.ErrorMessage + '")');
-    Report(took <= QWord(AMaxMs), AName + ' (took ' + IntToStr(took) +
-           ' ms; the bound is ' + IntToStr(AMaxMs) + ')');
+    Report(took <= QWord(Round(AMaxMs * SpeedFactor())), AName + ' (took ' + IntToStr(took) +
+           ' ms; the bound is ' + IntToStr(Round(AMaxMs * SpeedFactor())) + ')');
   finally
     eng.Free;
   end;

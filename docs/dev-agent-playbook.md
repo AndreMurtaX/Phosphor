@@ -1525,6 +1525,25 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-11 · stabilization: four red-for-their-own-reasons tests.** After
+  round 10 the owner asked what was unstable, and every item was a TEST, not the
+  engine. (1) The CI's Windows Server console draws a written control character
+  as a glyph where Windows 11 draws `^A`, and the two disagree about the text a
+  program hands the line editor as already typed (`nInitialChars`) -- writing
+  `^A` explicitly showed THREE on Windows 11. No spelling is right on both, so
+  the held-chord case pins phosphor's part, the line, and not the console's
+  drawing. A FAIL line that quoted the glyph had killed the harness on a cp1252
+  stdout, so the failure itself was invisible. (2) The HTTP test server's raw
+  mode answered from the head and closed with a POST's body unread; Windows
+  resets such a socket, which can discard the answer in flight -- an empty
+  response once on CI, found by READING the server after a rerun passed.
+  (3) Block W's `--diag` waited 10 s for its thread and then exited; 0 failures
+  in 240 runs alone, 1 in 4 under a full battery plus builds. The wait is
+  longer and a timeout now names itself. (4) Timed bounds measured on one
+  machine now scale by a reference workload timed where they run (never below
+  1). Lesson: a flake that passes on a rerun is a test with a race in it until
+  shown otherwise -- read the harness for the race before calling it noise.
+
 - **2026-10-11 · round 10: 26 survivors, 5 HIGH, 3 killed -- the streak stays
   at 0.** One HIGH was round 9's own regression; three were one class.
   - **A spelling is not a file.** Round 9 fixed the contact manager's name checks

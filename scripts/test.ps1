@@ -1376,8 +1376,8 @@ foreach ($cp in 850, 65001, 437) {
                 ForEach-Object { '{0:x2}' -f $_ }) -join ' '
         }
         if ($codeW -ne 0 -or $tailW -ne 'c3 a9') {
-            Write-Host ("        W: under chcp {0} (exit {1}) stderr from {2}: '{3}'" -f
-                        $cp, $codeW, $who, $tailW) -ForegroundColor DarkGray
+            Write-Host ("        W: under chcp {0} (exit {1}) stderr from {2}: '{3}'; the whole stderr: {4}" -f
+                        $cp, $codeW, $who, $tailW, ($textW -replace "`r?`n", ' | ')) -ForegroundColor DarkGray
             $okW = $false
         }
     }

@@ -52,6 +52,19 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (stabilization, 2026-10-11)
+
+- The tests that failed for reasons of their own, not the engine's: the
+  console-input harness checks a held Ctrl chord by its ANSWER only (how a
+  console draws a control character differs between Windows 11 and the CI's
+  Windows Server console) and prints any character in a FAIL line; the HTTP
+  test server's raw mode reads a request's body before answering (closing a
+  Windows socket with unread bytes sends a reset that can discard the answer --
+  the one-off empty POST in `30_http_path_colon`); `phosphor --diag` waits up
+  to 60 s for its second thread and says so if it does not finish, and block W
+  prints the whole stderr when it fails; `probe_limits` scales its millisecond
+  bounds by how much slower the machine is than the one they were measured on.
+
 ### Fixed (adversarial round 10, 2026-10-11)
 
 - **The contact manager judges a file by what it is, not how it is spelled.**

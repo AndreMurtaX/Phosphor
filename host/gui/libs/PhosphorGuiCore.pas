@@ -89,6 +89,12 @@ type
       item's list view -- watched in its place. nil for a component (watched
       directly) and for anything owned by its own handle. }
     Holder: TComponent;
+    { WHEN Control WAS MADE: a serial GuiRegister stamps, and a deferred free
+      copies from the handle it replaces. Every GuiRegister call is a
+      constructor's (one handle per object, at its birth), so this orders
+      objects by creation -- which is what a modal session asks before it frees
+      anything (GuiFlushFreesSince). }
+    Born: Int64;
     { Arm the death notice, when the wrapped object is able to send one. }
     procedure Watch;
     procedure Notification(AComponent: TComponent; Operation: TOperation); override;
@@ -663,8 +669,9 @@ function GuiModsStr(Shift: TShiftState): String;
   gives AppProcessMessages something to dispatch -- so the loop makes a pass and
   re-reads the flag even where the wake itself is a no-op.
 
-  form_show@'s closer calls this too, for the LAST window only; see
-  PhosphorFormLib. Application.Terminate is never used: it sets a flag the LCL
+  END in a handler calls this too (GuiCallBack). A closed window does NOT: it
+  only requests (GuiWindowLeaving), and app_run decides. Application.Terminate
+  is never used: it sets a flag the LCL
   gives no public way to clear, so it turns "give me back control" into a one-way
   door for the whole process. }
 { Is any window OTHER than AExcept still on screen?
@@ -681,6 +688,13 @@ function GuiModsStr(Shift: TShiftState): String;
   host's own windows live, which is the set the question is about. }
 function GuiOtherFormShown(AExcept: TObject): Boolean;
 
+{ IS AObj A WINDOW ON SCREEN -- the one predicate every "the last window" question
+  asks (round 7, 2026-10-11): a form, VISIBLE, not in a modal session, and
+  TOP-LEVEL. A form placed inside another (control_parent@) is a control of that
+  window, not a window: counting it kept app_run running, with nothing on
+  screen, after the window it was embedded in was closed. }
+function GuiIsShownWindow(AObj: TObject): Boolean;
+
 procedure GuiLeaveLoop;
 
 { "THE LAST WINDOW WAS CLOSED" IS A QUESTION, NOT AN ORDER (round-6 review).
@@ -691,20 +705,47 @@ procedure GuiLeaveLoop;
   is answered, left app_run with its window on screen and nothing dispatching it.
   The closer now only REQUESTS; app_run asks again, when it reads the request,
   whether any window is still shown, and ends only if none is. app_quit stays an
-  order. }
+  order.
+
+  WHO REQUESTS (round 7, 2026-10-11): every window that LEAVES THE SCREEN by
+  being closed or freed -- whether or not another is shown at that moment,
+  because that is app_run's question to answer, once every handler has
+  returned. The closer used to ask it at close time, so "close A, then hide B"
+  in one handler left app_run running with nothing on screen while "hide B,
+  then close A" ended it. And only a window that WAS on screen: closing a form
+  that was never shown closes no window, and it used to end the loop of a
+  timer-driven program that had none. Hiding is not closing -- a program that
+  hides its last window to the tray keeps its loop. Call it with the form
+  BEFORE it goes; it does nothing for anything GuiIsShownWindow refuses. }
+procedure GuiWindowLeaving(AObj: TObject);
 procedure GuiLastWindowClosed;
 
 { A MODAL SESSION'S OWN FREES (round 5, 2026-10-10). GuiFlushFrees runs only at
   dispatch depth 0, and a modal opened from a handler never returns there until
   it closes -- so every control a handler freed inside a long-lived dialog stayed
   in memory, and charged to the GUI's ledger, until the dialog ended. A modal
-  session takes a MARK when it starts and, between its messages, frees what was
-  queued after the mark -- only that, and only when no handler is running inside
-  it, which is the same reasoning as GuiFlushFrees one level down: what was queued
-  before the session may be something the frame that opened it still stands on. }
+  session takes a mark when it starts and, between its messages and only when no
+  handler is running inside it, frees what may be freed.
+
+  WHAT MAY BE FREED IS WHAT WAS BORN INSIDE THE SESSION (round 7, 2026-10-11).
+  The mark is a BIRTH mark, not a place in the queue. Under the session lies the
+  whole dispatch chain that opened it, and what that chain stands on cannot be
+  listed: round 6 kept the running handlers' SENDERS, and a radio button whose
+  SetState was running under the session -- no handler's sender; the LCL itself
+  called the sibling's change handler from inside its loop over the parent's
+  controls -- was freed beneath it (an access violation), and freeing a SIBLING
+  shortened the list that loop was walking (list index out of bounds). An object
+  made after the session began cannot be under it: every frame below was entered
+  before the object existed. And nothing older dies with a younger one, because
+  a component's owner is fixed when it is made and is made first (control_parent@
+  moves the parent, never the owner; a node's or a menu item's children are made
+  after it). What is older stays pending, for GuiFlushFrees at depth 0 -- which
+  bounds what a long session holds to what existed before it opened; the
+  unbounded case, a dialog that makes and frees in a loop, is all newborn. }
 function GuiPendingMark: Integer;
+function GuiBirthMark: Int64;
 function GuiDispatchDepth: Integer;
-procedure GuiFlushFreesSince(AMark, ADepth: Integer);
+procedure GuiFlushFreesSince(ABirthMark: Int64; ADepth: Integer);
 
 { END IN A HANDLER ENDS EVERY MODAL SESSION TOO (round 5). GuiLeaveLoop sets the
   flag app_run's loop reads, and LCL's ShowModal loop reads only ModalResult and
@@ -888,6 +929,8 @@ var
     callback had none. Read only by identity, never dereferenced: a deferred
     free keeps every one of them alive until the stack is empty. }
   GSenders: array of TObject;
+  { The last serial GuiRegister stamped (TGuiRef.Born). }
+  GBirths: Int64 = 0;
 
 function GuiInDispatch: Boolean;
 begin
@@ -981,6 +1024,7 @@ begin
   // ...and its memory is held by an entry nobody can name, until it is safe.
   p := TGuiPendingFree.Create(nil);
   p.Control := obj;
+  p.Born := AHandle.Born;   // the OBJECT's birth, not this entry's
   p.Owns := True;
   p.Watch;
   SetLength(GPending, Length(GPending) + 1);
@@ -992,44 +1036,36 @@ begin
   Result := Length(GPending);
 end;
 
+function GuiBirthMark: Int64;
+begin
+  Result := GBirths;
+end;
+
 function GuiDispatchDepth: Integer;
 begin
   Result := GDispatchDepth;
 end;
 
-{ Does a handler that is running right now stand on AObj -- is its sender AObj,
-  or something that dies with AObj (DiesWith: owned by it, a menu item under it)?
-  Then AObj must outlive the handler: its LCL frames are still on the stack. }
-function SenderDiesWith(AObj: TObject): Boolean;
-var i: Integer;
-begin
-  for i := 0 to High(GSenders) do
-    if (GSenders[i] is TComponent) and DiesWith(TComponent(GSenders[i]), AObj) then
-      Exit(True);
-  Result := False;
-end;
-
-procedure GuiFlushFreesSince(AMark, ADepth: Integer);
+procedure GuiFlushFreesSince(ABirthMark: Int64; ADepth: Integer);
 var
   list, kept: array of Int64;
   i: Integer;
   o: TObject;
 begin
-  if (GDispatchDepth > ADepth) or (AMark < 0) or (Length(GPending) <= AMark) then Exit;
-  list := Copy(GPending, AMark, Length(GPending) - AMark);
-  SetLength(GPending, AMark);   // off the list first, as GuiFlushFrees does
+  if (GDispatchDepth > ADepth) or (Length(GPending) = 0) then Exit;
+  list := GPending;
+  GPending := nil;   // off the list first, as GuiFlushFrees does
   kept := nil;
   for i := 0 to High(list) do
   begin
-    { NOT WHAT THE OPENER STANDS ON (round 6, 2026-10-10). A free queued INSIDE
-      the session can still name the handler's own sender -- the timer whose tick
-      opened the modal, freed by a later round -- and its frames are under this
-      loop: freeing it here let TTimerGuard.Fire write to freed memory when the
-      modal returned, and the fault report read the handler name out of a freed
-      bridge. Such an entry stays pending, for GuiFlushFrees at depth 0. }
+    { ONLY WHAT WAS BORN INSIDE THE SESSION (see the interface note). Round 6
+      kept an entry only when a running handler's SENDER died with it -- the
+      timer whose tick opened the modal -- which is one of the things under the
+      session, not the class of them. An entry whose object already died (its
+      form went first) holds nothing and may go. }
     o := HandleObj(list[i]);
     if (o is TGuiRef) and (TGuiRef(o).Control <> nil) and
-       SenderDiesWith(TGuiRef(o).Control) then
+       (TGuiRef(o).Born <= ABirthMark) then
     begin
       SetLength(kept, Length(kept) + 1);
       kept[High(kept)] := list[i];
@@ -1037,10 +1073,14 @@ begin
     else
       FreeHandle(list[i]);
   end;
-  for i := 0 to High(kept) do
+  { Put back AHEAD of anything a destructor above queued meanwhile, in the
+    order they were asked for. }
+  list := GPending;
+  GPending := kept;
+  for i := 0 to High(list) do
   begin
     SetLength(GPending, Length(GPending) + 1);
-    GPending[High(GPending)] := kept[i];
+    GPending[High(GPending)] := list[i];
   end;
 end;
 
@@ -1841,6 +1881,8 @@ begin
   h := TGuiHandle.Create(nil);   // owned by the phosphor handle registry, not the LCL
   h.Control := AObj;
   h.Owns := AOwns;
+  Inc(GBirths);
+  h.Born := GBirths;             // every caller is a constructor: see TGuiRef.Born
   h.Watch;                       // tell me when you die
   GuiCapSizes(AObj);             // and never grow past what a window can hold
   Result := RegisterHandle(h);
@@ -1995,6 +2037,18 @@ begin
   // Deliberately empty. See GuiLeaveLoop.
 end;
 
+function GuiIsShownWindow(AObj: TObject): Boolean;
+begin
+  Result := (AObj is TForm) and TForm(AObj).Visible and
+            (TForm(AObj).Parent = nil) and
+            not (fsModal in TForm(AObj).FormState);
+end;
+
+procedure GuiWindowLeaving(AObj: TObject);
+begin
+  if GuiIsShownWindow(AObj) then GuiLastWindowClosed;
+end;
+
 function GuiOtherFormShown(AExcept: TObject): Boolean;
 var
   id: Int64;
@@ -2011,12 +2065,11 @@ begin
     o := HandleObj(id);
     { A form in a modal session is not counted (round 6): its answer never ends
       the loop, by design, so counting it meant closing the main window from
-      inside a dialog left app_run running with nothing on screen. }
+      inside a dialog left app_run running with nothing on screen. Nor is a form
+      embedded in another (round 7): see GuiIsShownWindow. }
     if (o is TGuiHandle) and (TGuiHandle(o).Control <> nil) and
        (TGuiHandle(o).Control <> AExcept) and
-       (TGuiHandle(o).Control is TForm) and
-       TForm(TGuiHandle(o).Control).Visible and
-       not (fsModal in TForm(TGuiHandle(o).Control).FormState) then
+       GuiIsShownWindow(TGuiHandle(o).Control) then
       Exit(True);
     id := NextLiveHandle(id);
   end;
@@ -2044,9 +2097,11 @@ begin
   // clear -- so once a program had left the loop, every later app_run() in that
   // process returned instantly, having dispatched nothing. A host that runs one
   // script after another, or an embedder driving the engine between loops, got a
-  // GUI that silently stopped being a GUI. This loop is left by app_quit AND by
-  // the application terminating (which is what closing the last window does), and
-  // leaves the application usable either way.
+  // GUI that silently stopped being a GUI. This loop is left by app_quit (END in
+  // a handler calls the same GuiLeaveLoop), by a window leaving the screen when
+  // none is left once every handler has returned (GuiWindowLeaving), and by
+  // Application.Terminated should an embedder set it -- nothing here does. The
+  // application stays usable for a later app_run whichever way it leaves.
   GAppQuit := False;
   GLastClosed := False;
   while (not GAppQuit) and (not Application.Terminated) do

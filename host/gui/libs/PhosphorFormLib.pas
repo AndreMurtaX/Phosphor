@@ -90,9 +90,11 @@ begin
 end;
 
 type
-  { Terminates the message loop when a top-level form is closed, so closing the
-    window (the X button) ends the program the way a main form would. Hides rather
-    than frees, so the handle registry frees the form once, at the end. }
+  { Asks app_run to end when a window on screen is closed, so closing the last
+    window (the X button) ends the loop the way a main form would -- it asks,
+    and app_run decides once every handler has returned; nothing terminates the
+    application. Hides rather than frees, so the handle registry frees the form
+    once, at the end. }
   TFormCloser = class(TComponent)
     { The program's own OnClose handler, when it bound one. The closer calls it
       before terminating, rather than being replaced by it: a form has one OnClose
@@ -135,9 +137,14 @@ begin
     ended app_run the moment a tray- or timer-driven program's dialog was
     answered. A modal session ends itself; the loop is not this form's to end. }
   { And it only ASKS (round-6 review): app_run decides when it reads the
-    request, after every handler has returned -- see GuiLastWindowClosed. }
-  if (not GuiOtherFormShown(Sender)) and (not InModalSession(Sender)) then
-    GuiLastWindowClosed;
+    request, after every handler has returned -- see GuiLastWindowClosed.
+    WHETHER ANOTHER WINDOW IS SHOWN IS NOT ASKED HERE ANY MORE (round 7): it was
+    the read-time question asked a second time, too early -- "close A, then hide
+    B" left app_run running with nothing on screen. What is asked is whether
+    THIS was a window on screen (GuiWindowLeaving): a form never shown, or one
+    already hidden, or one embedded in another, closes no window. }
+  if not InModalSession(Sender) then
+    GuiWindowLeaving(Sender);
 end;
 
 function TFormCloser.Handler: TCloseEvent;
@@ -327,10 +334,11 @@ end;
 type
   TFormAccess = class(TForm);   // DoClose is protected; derived from TForm, the type it casts
 
-  { Between the messages of a real modal session: free what was queued inside
+  { Between the messages of a real modal session: free what was born inside
     it (GuiFlushFreesSince's reasoning). }
   TModalIdle = class
-    Mark, Depth: Integer;
+    Mark: Int64;
+    Depth: Integer;
     procedure Idle(Sender: TObject; var Done: Boolean);
   end;
 
@@ -374,7 +382,8 @@ end;
 
 function f_form_showmodal(AVM: TObject; const A: array of TValue; out E: TPhosphorError): TValue;
 var
-  c: TComponent; f: TForm; r, round, mark, depth: Integer;
+  c: TComponent; f: TForm; r, round, depth: Integer;
+  mark: Int64;
   idle: TModalIdle;
 begin
   E := NoError; Result := ValInt(0);
@@ -390,7 +399,7 @@ begin
     Exit;
   end;
   r := 0;
-  mark := GuiPendingMark();
+  mark := GuiBirthMark();   // what is born after this may be freed inside
   depth := GuiDispatchDepth();
   GuiEnterCallback(c);
   try

@@ -52,6 +52,50 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (adversarial round 10, 2026-10-11)
+
+- **The contact manager judges a file by what it is, not how it is spelled.**
+  New engine functions `file_kind$` (`file`, `dir`, `link`, `fifo`, `device`,
+  `socket`, `stream`, `none`) and `path_canonical$` (the one full name: links
+  followed, 8.3 names expanded, case as on disk) ask the operating system. With
+  them the program refuses, at open and at backup, an 8.3 alias of another
+  database's journal, a dangling link's 8.3 alias, NTFS streams
+  (`other.db-journal:bk`, `x-wal::$DATA`), devices (`CON` hung inside SQLite) and
+  Linux FIFOs (the program blocked for ever), and opens, judges and backs up
+  under the canonical name -- so its own crashed file reached through a Windows
+  link is rolled back, not opened torn. `file:` and `:memory:` are compared
+  exactly, as SQLite does; a file shorter than 16 bytes no longer crashes the
+  header check. 217 self-test checks.
+- **The budget refuses an argument without spending the run, and a spent run
+  names who spent it.** `strings_loadfromfile`, `unzip_extract` and
+  `zip_extractall` latched the run on an oversized file or archive; they now
+  refuse and the run goes on. `file_copy`/`dir_copy` ask a copy's whole price
+  once, before reading. After a deliberate latch, a later refusal says which
+  call spent the run. On Windows `file_getsize` and the `file_get*time` functions
+  read the file, not its directory entry, so they are current while a file is
+  written and through hard and symbolic links (round 9 had moved them to the
+  directory entry: 0 or stale, on Windows only). A refused `strings_savetofile`
+  no longer renames the list's encoding. `check-budget.py` settles a latch only
+  with a reporter that reads the latch.
+- **GUI: radios.** A radio choice set while a dialog was hidden was undone on
+  Windows when it was shown again (the form handed focus to an unchecked radio,
+  which checks itself on win32); radio exclusivity is now the library's on every
+  OS; "no radio checked" is a per-OS answer -- gtk2 cannot uncheck a group's only
+  checked radio, as `gui-choice.md` now says, pointing to `radiogroup@` for
+  "none". Waiting `control_parent@` moves land as asked and are no longer refused
+  as a cycle; `control_taborder` reads where a control will land.
+- **Keyboard and temp directory.** On Unix, Ctrl+Z then `fg` inside a key loop
+  works as in vim or less; keys typed ahead of `input` are edited exactly as the
+  line discipline edits them live (ICANON, IUTF8, Latin-1 word erase, Tab from
+  the prompt's column); a pasted megabyte is linear. On Windows the presses of a
+  held Tab or Ctrl chord begin the next INPUT line. A relative TEMP/TMP/TMPDIR
+  under a deleted working directory is skipped (it read uninitialised memory),
+  and `~` is not expanded.
+- `scripts/check-sandbox.py` knows the operating system's own file doors
+  (`CreateFileW`, `GetFileAttributes(Ex)W`, `GetFinalPathNameByHandleW`,
+  `FileGetAttr`, `FileGetSymLinkTarget`); `os_platform$` is documented with the
+  spelling it answers (`Linux`, not `linux`).
+
 ### Fixed (adversarial round 9, 2026-10-11)
 
 - **A budget refusal is reported where it can be heard.** An autosaving

@@ -1525,6 +1525,43 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-11 · round 10: 26 survivors, 5 HIGH, 3 killed -- the streak stays
+  at 0.** One HIGH was round 9's own regression; three were one class.
+  - **A spelling is not a file.** Round 9 fixed the contact manager's name checks
+    one spelling at a time; round 10 found six more past them in one sitting (an
+    8.3 alias of a journal and of a dangling link, an NTFS stream, `::$DATA`,
+    `CON`, a FIFO). Each check was right about the string it was shown. The class
+    fix stopped reading the string: ask the OS what the path is and what its one
+    name is (`file_kind$`, `path_canonical$`), then apply the rules to that.
+  - **When replacing a primitive, measure it on both OSes against the cases that
+    make it differ.** Round 9 moved `file_getsize` to the directory entry to stop
+    opening a FIFO: a stat on Linux, a stale copy on Windows (0 for a file being
+    written, the link's own entry through a link).
+  - **A gate that knows two kinds must carry both.** The refusal gate stored each
+    helper's duty as one Boolean, so a helper that hands on a flag AND a latch
+    was recorded as a flag, and removing round 9's own fix stayed green.
+  - **An invariant left to the widgetset inherits every gap between widgetsets.**
+    Radio exclusivity lived in three walks (the LCL's, win32's, gtk2's group) and
+    a radio moved into a once-shown hidden form fell between them; win32's
+    check-on-focus undid a choice on re-show. And before asserting the same answer
+    on every OS, ask whether each widgetset can REPRESENT it: gtk2 cannot hold
+    "no radio checked".
+  - **A per-OS branch needs a run on the OS it is for.** The first per-OS test
+    compared `os_platform$()` with `linux`; it answers `Linux`, so the Linux
+    branch was dead code that read as covered -- caught only by running it there.
+  - **Worktrees could not reach WSL, so Linux was the coordinator's job, before
+    merge.** Three branches would have shipped broken: FPC's termio has no
+    `IUTF8` on x86_64-linux (the build failed), Python 3.12's `termios` has none
+    either, and a bash job-control case asserted terminal modes that bash's
+    readline owns at its prompt (dash shows them; bash shows the fg half).
+  - **After a reboot WSLg can announce a display it does not have.** `DISPLAY=:0`
+    with an empty `/tmp/.X11-unix` made the GUI-linked phosphor exit on "cannot
+    open display" in plain console tests. The Linux battery now runs as CI does,
+    with no display; tests that need one use xvfb-run.
+  - **A probe of a device name, run from the repository, leaves a file in it.** An
+    investigator's `NUL` probe created `nul.db` (a real 80 KB SQLite file) in the
+    repository root; found by `git status`, removed by name.
+
 - **2026-10-11 · round 9: 30 survivors, 7 HIGH, 1 killed -- the streak stays at
   0.** Every HIGH was made by round 8's own fixes or reached through a door next
   to one.

@@ -1185,6 +1185,493 @@ begin
   Result := ValStr(IoErrorText(GIoError));
 end;
 
+// ============================================================================
+//  What a path IS: file_kind$ and path_canonical$ (round 10)
+// ============================================================================
+{ A FILE JUDGED BY ITS SPELLING HAS AS MANY DOORS AS THE OS HAS SPELLINGS.
+  Round 10 measured six of them past checks that read the name: on Windows the
+  8.3 alias of a link (LONGLI~1.DAT for longlinkname.database), the 8.3 alias of
+  a journal (TRUNCV~1.DB- for truncvictim.db-journal), an NTFS stream
+  (other.db-journal:bk, which dies with other.db-journal), the main stream
+  spelled out (crashed.db-wal::$DATA IS crashed.db-wal), a device (CON, which a
+  read blocks on), and on Linux a FIFO (whose open blocks). Each check was right
+  about the spelling it was shown and wrong about the file. A list of spellings
+  is never finished, so these two ask the OS what the path IS:
+
+  file_kind$(p$) -- "file", "dir", "link", "fifo", "device", "socket",
+    "stream" or "none"; "" when it cannot be told (a refusal, a name the OS
+    will not look at, an entry that cannot be read). A LINK IS A LINK, whatever
+    it leads to or whether it leads anywhere: a POSIX symlink, a Windows
+    symbolic link or junction (any name-surrogate reparse point). "stream" is
+    any Windows path that names a stream by its syntax, "name::$DATA" included
+    -- that one names the file itself, and is still not the file's NAME.
+    "device" on Windows is a name the OS itself maps to a device: it is asked
+    of GetFullPathNameW, which answers \\.\CON for CON (Windows 11 maps only
+    the bare names; Windows 10 also C:\x\CON -- the OS decides, not a list).
+  path_canonical$(p$) -- the one full name of what p$ leads to: links
+    followed, 8.3 aliases expanded, case as the directory holds it, "." and
+    ".." gone. For a name that is not there yet, the canonical name of its
+    folder joined to the name as given -- so a file about to be created is
+    named as it will be. "" when it cannot be answered: a link that leads to
+    nothing (there is an entry, and no file to name), a folder that is not
+    there, a stream, a device, a refusal.
+
+  On Windows both open a HANDLE WITH NO ACCESS AT ALL (dwDesiredAccess 0): it
+  reads no byte, takes no lock a reader would notice, and is what
+  GetFinalPathNameByHandleW needs. file_kind$ opens it on the entry itself
+  (FILE_FLAG_OPEN_REPARSE_POINT), path_canonical$ through any links. Neither
+  opens a device or a pipe -- those are answered from the name first. On
+  Linux nothing is opened: lstat, and a walk of the components that reads each
+  link (realpath's own algorithm; libc is not linked into every binary that
+  carries the engine, so it is written here). }
+
+{$IFDEF WINDOWS}
+{ Declared from kernel32, as PhosphorSysLib declares its own: the engine
+  boundary keeps the 'windows' unit out. }
+function KindGetFullPathNameW(lpFileName: PWideChar; nBufferLength: LongWord; lpBuffer: PWideChar;
+  lpFilePart: Pointer): LongWord; stdcall; external 'kernel32.dll' name 'GetFullPathNameW';
+function KindCreateFileW(lpFileName: PWideChar; dwDesiredAccess, dwShareMode: LongWord;
+  lpSecurityAttributes: Pointer; dwCreationDisposition, dwFlagsAndAttributes: LongWord;
+  hTemplateFile: THandle): THandle; stdcall; external 'kernel32.dll' name 'CreateFileW';
+function KindCloseHandle(hObject: THandle): LongBool; stdcall; external 'kernel32.dll' name 'CloseHandle';
+function KindGetFileType(hFile: THandle): LongWord; stdcall; external 'kernel32.dll' name 'GetFileType';
+function KindGetFileAttributesW(lpFileName: PWideChar): LongWord; stdcall;
+  external 'kernel32.dll' name 'GetFileAttributesW';
+function KindGetFileInformationByHandleEx(hFile: THandle; AClass: LongInt; lpInfo: Pointer;
+  dwBufferSize: LongWord): LongBool; stdcall; external 'kernel32.dll' name 'GetFileInformationByHandleEx';
+function KindGetFinalPathNameByHandleW(hFile: THandle; lpszFilePath: PWideChar;
+  cchFilePath, dwFlags: LongWord): LongWord; stdcall; external 'kernel32.dll' name 'GetFinalPathNameByHandleW';
+function KindGetLastError: LongWord; stdcall; external 'kernel32.dll' name 'GetLastError';
+
+const
+  KIND_SHARE_ALL = 7;                     // FILE_SHARE_READ | WRITE | DELETE
+  KIND_OPEN_EXISTING = 3;
+  KIND_BACKUP_SEMANTICS = $02000000;      // a directory opens too
+  KIND_OPEN_REPARSE_POINT = $00200000;    // the entry itself, not where it leads
+  KIND_TYPE_DISK = 1;
+  KIND_TYPE_CHAR = 2;
+  KIND_TYPE_PIPE = 3;
+  KIND_ATTR_DIR = $10;
+  KIND_ATTR_REPARSE = $400;
+  KIND_NO_ATTR = $FFFFFFFF;               // INVALID_FILE_ATTRIBUTES
+  KIND_TAG_SURROGATE = $20000000;         // IsReparseTagNameSurrogate: symlink, junction
+  KIND_TAG_AF_UNIX = $80000023;
+  KIND_ATTR_TAG_INFO = 9;                 // FileAttributeTagInfo
+  { The errors that mean "nothing by that name": file not found, path not
+    found, and a name the file system cannot hold (ERROR_INVALID_NAME, which is
+    what a '*' or a '?' in a Windows name earns). }
+  KIND_ERR_NOT_FOUND = 2;
+  KIND_ERR_PATH_NOT_FOUND = 3;
+  KIND_ERR_INVALID_NAME = 123;
+
+type
+  TKindAttrTag = record
+    Attributes: LongWord;
+    ReparseTag: LongWord;
+  end;
+
+function KindBadHandle: THandle; inline;
+begin
+  Result := not THandle(0);
+end;
+
+{ UTF-16 to the engine's UTF-8; False when it holds an unpaired surrogate,
+  which no UTF-8 can spell -- such a name could be shown but not used. }
+function KindToUtf8(const W: UnicodeString; out S: String): Boolean;
+var i, n: Integer; c: Word;
+begin
+  S := '';
+  n := Length(W);
+  i := 1;
+  while i <= n do
+  begin
+    c := Word(W[i]);
+    if (c >= $D800) and (c <= $DBFF) then
+    begin
+      if (i = n) or (Word(W[i + 1]) < $DC00) or (Word(W[i + 1]) > $DFFF) then Exit(False);
+      Inc(i);
+    end
+    else if (c >= $DC00) and (c <= $DFFF) then
+      Exit(False);
+    Inc(i);
+  end;
+  S := UTF8Encode(W);
+  Result := True;
+end;
+
+{ The full path as WINDOWS makes it -- the same call CreateFileW makes on the
+  name, which is why its answer, and not the spelling, is judged: it drops a
+  trailing dot or space and turns a reserved device name into \\.\NAME. }
+function KindFullW(const APath: String): UnicodeString;
+var w: UnicodeString; n: LongWord;
+begin
+  Result := '';
+  w := UTF8Decode(APath);
+  if w = '' then Exit;
+  SetLength(Result, 1024);
+  n := KindGetFullPathNameW(PWideChar(w), Length(Result), PWideChar(Result), nil);
+  if n >= LongWord(Length(Result)) then
+  begin
+    SetLength(Result, n + 1);
+    n := KindGetFullPathNameW(PWideChar(w), Length(Result), PWideChar(Result), nil);
+  end;
+  if (n = 0) or (n >= LongWord(Length(Result))) then Exit('');
+  SetLength(Result, n);
+end;
+
+{ Where the path proper starts, past \\?\ or \\.\ , UNC\ , a drive's X: and a
+  UNC server -- so that a ':' after it can only be a stream's. }
+function KindBodyStart(const W: UnicodeString): Integer;
+var i: Integer;
+begin
+  i := 1;
+  if (Length(W) >= 4) and (W[1] = '\') and (W[2] = '\') and ((W[3] = '?') or (W[3] = '.')) and (W[4] = '\') then
+  begin
+    i := 5;
+    if (Length(W) >= i + 3) and (UpCase(W[i]) = 'U') and (UpCase(W[i + 1]) = 'N') and
+       (UpCase(W[i + 2]) = 'C') and (W[i + 3] = '\') then Exit(i + 4);
+  end
+  else if (Length(W) >= 2) and (W[1] = '\') and (W[2] = '\') then
+    Exit(3);
+  if (Length(W) >= i + 1) and (W[i + 1] = ':') and
+     (((W[i] >= 'A') and (W[i] <= 'Z')) or ((W[i] >= 'a') and (W[i] <= 'z'))) then
+    Inc(i, 2);
+  Result := i;
+end;
+
+function KindIsStream(const W: UnicodeString): Boolean;
+var i: Integer;
+begin
+  for i := KindBodyStart(W) to Length(W) do
+    if W[i] = ':' then Exit(True);
+  Result := False;
+end;
+
+{ A device by its full name: \\.\ and not \\.\X:\ (a drive spelled the device
+  way, which names files). 1 a device, 2 a pipe, 0 neither. }
+function KindDevice(const W: UnicodeString): Integer;
+begin
+  Result := 0;
+  if not ((Length(W) >= 4) and (W[1] = '\') and (W[2] = '\') and (W[3] = '.') and (W[4] = '\')) then Exit;
+  if (Length(W) >= 6) and (W[6] = ':') then Exit;
+  if (Length(W) >= 9) and (LowerCase(String(Copy(W, 5, 5))) = 'pipe\') then Exit(2);
+  Result := 1;
+end;
+
+{ The final name of an open handle, without the \\?\ the call prefixes. }
+function KindFinalName(H: THandle; out S: String): Boolean;
+var buf: UnicodeString; n: LongWord;
+begin
+  S := '';
+  SetLength(buf, 1024);
+  n := KindGetFinalPathNameByHandleW(H, PWideChar(buf), Length(buf), 0);
+  if n >= LongWord(Length(buf)) then
+  begin
+    SetLength(buf, n + 1);
+    n := KindGetFinalPathNameByHandleW(H, PWideChar(buf), Length(buf), 0);
+  end;
+  if (n = 0) or (n >= LongWord(Length(buf))) then Exit(False);
+  SetLength(buf, n);
+  if Copy(buf, 1, 8) = '\\?\UNC\' then buf := '\\' + Copy(buf, 9, MaxInt)
+  else if Copy(buf, 1, 4) = '\\?\' then buf := Copy(buf, 5, MaxInt);
+  Result := KindToUtf8(buf, S);
+end;
+
+{ What the entry at APath is, on Windows. Asks the gate itself: a helper that
+  probes the filesystem is not trusted to its callers (check-sandbox.py). }
+function KindOfWin(const APath: String; var AErr: TPhosphorError): String;
+var w: UnicodeString; h: THandle; t, attr, e: LongWord; info: TKindAttrTag; dev: Integer;
+begin
+  Result := '';
+  if not (IoGateAt(APath, puRead, BudgetMilliOs) or GateRefused('file_kind$', AErr)) then Exit;
+  w := KindFullW(APath);
+  if w = '' then Exit;
+  dev := KindDevice(w);
+  if dev = 2 then Exit('fifo');
+  if dev = 1 then Exit('device');
+  if KindIsStream(w) then Exit('stream');
+  h := KindCreateFileW(PWideChar(w), 0, KIND_SHARE_ALL, nil, KIND_OPEN_EXISTING,
+                       KIND_BACKUP_SEMANTICS or KIND_OPEN_REPARSE_POINT, 0);
+  if h = KindBadHandle() then
+  begin
+    e := KindGetLastError();
+    attr := KindGetFileAttributesW(PWideChar(w));
+    if attr = KIND_NO_ATTR then
+    begin
+      if (e = KIND_ERR_NOT_FOUND) or (e = KIND_ERR_PATH_NOT_FOUND) or (e = KIND_ERR_INVALID_NAME) then
+        Exit('none');
+      Exit('');
+    end;
+    // There, and held so that not even a handle with no access opens (a
+    // paging file): the attributes still say what it is, the tag is unread.
+    if (attr and KIND_ATTR_REPARSE) <> 0 then Exit('link');
+    if (attr and KIND_ATTR_DIR) <> 0 then Exit('dir');
+    Exit('file');
+  end;
+  try
+    t := KindGetFileType(h);
+    FillChar(info, SizeOf(info), 0);
+    if not KindGetFileInformationByHandleEx(h, KIND_ATTR_TAG_INFO, @info, SizeOf(info)) then
+      info.Attributes := KindGetFileAttributesW(PWideChar(w));
+  finally
+    KindCloseHandle(h);
+  end;
+  if t = KIND_TYPE_CHAR then Exit('device');
+  if t = KIND_TYPE_PIPE then Exit('fifo');
+  if t <> KIND_TYPE_DISK then Exit('');
+  if info.Attributes = KIND_NO_ATTR then Exit('');
+  if (info.Attributes and KIND_ATTR_REPARSE) <> 0 then
+  begin
+    if (info.ReparseTag and KIND_TAG_SURROGATE) <> 0 then Exit('link');
+    if info.ReparseTag = KIND_TAG_AF_UNIX then Exit('socket');
+  end;
+  if (info.Attributes and KIND_ATTR_DIR) <> 0 then Exit('dir');
+  Result := 'file';
+end;
+
+{ The final name of an EXISTING entry, through any links: "" when it cannot
+  be opened (a link that leads nowhere, a file held exclusively) or is no file
+  on a disk. ADirOnly: answer only for a directory. }
+function KindOpenFinal(const W: UnicodeString; ADirOnly: Boolean; out S: String; out AErr: LongWord): Boolean;
+var h: THandle; info: TKindAttrTag;
+begin
+  S := '';
+  Result := False;
+  h := KindCreateFileW(PWideChar(W), 0, KIND_SHARE_ALL, nil, KIND_OPEN_EXISTING, KIND_BACKUP_SEMANTICS, 0);
+  if h = KindBadHandle() then
+  begin
+    AErr := KindGetLastError();
+    Exit;
+  end;
+  AErr := 0;
+  try
+    if KindGetFileType(h) <> KIND_TYPE_DISK then Exit;
+    if ADirOnly then
+    begin
+      FillChar(info, SizeOf(info), 0);
+      if not KindGetFileInformationByHandleEx(h, KIND_ATTR_TAG_INFO, @info, SizeOf(info)) then Exit;
+      if (info.Attributes and KIND_ATTR_DIR) = 0 then Exit;
+    end;
+    Result := KindFinalName(h, S);
+  finally
+    KindCloseHandle(h);
+  end;
+end;
+
+function CanonicalWin(const APath: String; var AErr: TPhosphorError): String;
+var w, parent, leaf: UnicodeString; s, ls: String; e: LongWord; i, sep: Integer;
+begin
+  Result := '';
+  if not (IoGateAt(APath, puRead, BudgetMilliOs) or GateRefused('path_canonical$', AErr)) then Exit;
+  w := KindFullW(APath);
+  if (w = '') or (KindDevice(w) <> 0) or KindIsStream(w) then Exit;
+  if KindOpenFinal(w, False, s, e) then Exit(s);
+  if e <> KIND_ERR_NOT_FOUND then Exit;
+  // Nothing opened. An ENTRY there that cannot be opened is a link to
+  // nothing -- or a link onto a journal's name, LONGLI~1.DAT -- and has no
+  // canonical name: answering the parent plus the leaf would name the link,
+  // and SQLite writes where it leads.
+  if KindGetFileAttributesW(PWideChar(w)) <> KIND_NO_ATTR then Exit;
+  sep := 0;
+  for i := Length(w) downto KindBodyStart(w) do
+    if (w[i] = '\') or (w[i] = '/') then begin sep := i; Break; end;
+  if sep = 0 then Exit;
+  leaf := Copy(w, sep + 1, MaxInt);
+  if (leaf = '') or (leaf = '.') or (leaf = '..') then Exit;
+  parent := Copy(w, 1, sep);
+  if not KindOpenFinal(parent, True, s, e) then Exit;
+  if not KindToUtf8(leaf, ls) then Exit;
+  if (s <> '') and (s[Length(s)] = '\') then Result := s + ls
+  else Result := s + '\' + ls;
+end;
+{$ENDIF}
+
+{$IFNDEF WINDOWS}
+const
+  KIND_LINK_ATTR = $400;      // faSymLink, spelled out: it carries `platform`
+  KIND_SPECIAL_ATTR = $04;    // faSysFile: a FIFO, a device or a socket
+  KIND_ENOENT = 2;
+  KIND_ENOTDIR = 20;
+
+{ What the entry at APath is, on Unix: lstat, through FileGetAttr (which is
+  FpLStat there, rtl/unix/sysutils.pp), and for a special file its mode, from
+  FindFirst asked to lstat (faSymLink in the search attributes). }
+function KindOfUnix(const APath: String; var AErr: TPhosphorError): String;
+var a, e: LongInt; sr: TSearchRec; want: String; exact: Boolean; m: LongInt;
+begin
+  Result := '';
+  if not (IoGateAt(APath, puRead, BudgetMilliOs) or GateRefused('file_kind$', AErr)) then Exit;
+  a := FileGetAttr(APath);
+  if a = -1 then
+  begin
+    e := GetLastOSError();
+    if (e = KIND_ENOENT) or (e = KIND_ENOTDIR) then Exit('none');
+    Exit('');
+  end;
+  if (a and KIND_LINK_ATTR) <> 0 then Exit('link');
+  if (a and faDirectory) <> 0 then Exit('dir');
+  if (a and KIND_SPECIAL_ATTR) = 0 then Exit('file');
+  // A name may hold '*' or '?' on Unix, and FindFirst would read them as a
+  // pattern: the entries it walks are steps, as in the listings.
+  want := ExtractFileName(APath);
+  exact := (Pos('*', want) > 0) or (Pos('?', want) > 0);
+  m := -1;
+  if FindFirst(APath, faAnyFile or KIND_LINK_ATTR, sr) = 0 then
+  try
+    repeat
+      if exact and not BudgetCharge(BudgetUnitsPerStep) then
+      begin
+        AErr := BudgetRefusal('file_kind$');
+        Exit('');
+      end;
+      if exact and (sr.Name <> want) then Continue;
+      m := sr.Mode and $F000;
+      Break;
+    until FindNext(sr) <> 0;
+  finally
+    FindClose(sr);
+  end;
+  case m of
+    $1000: Result := 'fifo';
+    $2000, $6000: Result := 'device';
+    $C000: Result := 'socket';
+    $8000: Result := 'file';
+    $4000: Result := 'dir';
+  else
+    Result := '';
+  end;
+end;
+
+{ realpath, written out: every component in turn, a link read and its target
+  put in front of what is left (from the root when it is absolute), at most 40
+  links (the kernel's own MAXSYMLINKS). The LAST component alone may be
+  missing: then it is joined as given to its resolved folder. Each component
+  is a step, charged like a directory entry. }
+function CanonicalUnix(const APath: String; var AErr: TPhosphorError): String;
+var
+  rest, comp, cur, cand: String;
+  target: RawByteString;   // the signature FileGetSymLinkTarget takes by var
+  hops, a, p: LongInt;
+  isLast: Boolean;
+begin
+  Result := '';
+  if not (IoGateAt(APath, puRead, BudgetMilliOs) or GateRefused('path_canonical$', AErr)) then Exit;
+  if APath[1] = '/' then
+  begin
+    cur := '/';
+    rest := Copy(APath, 2, MaxInt);
+  end
+  else
+  begin
+    cur := GetCurrentDir();
+    if (cur = '') or (cur[1] <> '/') then Exit;
+    rest := APath;
+  end;
+  hops := 0;
+  while rest <> '' do
+  begin
+    if not BudgetCharge(BudgetUnitsPerStep) then
+    begin
+      AErr := BudgetRefusal('path_canonical$');
+      Exit('');
+    end;
+    p := Pos('/', rest);
+    if p = 0 then
+    begin
+      comp := rest;
+      rest := '';
+    end
+    else
+    begin
+      comp := Copy(rest, 1, p - 1);
+      rest := Copy(rest, p + 1, MaxInt);
+    end;
+    if (comp = '') or (comp = '.') then Continue;
+    if comp = '..' then
+    begin
+      p := Length(cur);
+      while (p > 1) and (cur[p] <> '/') do Dec(p);
+      cur := Copy(cur, 1, p);
+      if (Length(cur) > 1) and (cur[Length(cur)] = '/') then SetLength(cur, Length(cur) - 1);
+      Continue;
+    end;
+    if cur = '/' then cand := '/' + comp else cand := cur + '/' + comp;
+    isLast := rest = '';
+    a := FileGetAttr(cand);
+    if a = -1 then
+    begin
+      // Missing: an answer only for the last component, with no '/' after
+      // it (which would ask for a folder that is not there).
+      if isLast and (p = 0) and (GetLastOSError() = KIND_ENOENT) then Exit(cand);
+      Exit('');
+    end;
+    if (a and KIND_LINK_ATTR) <> 0 then
+    begin
+      Inc(hops);
+      if hops > 40 then Exit('');
+      target := '';
+      try
+        // It raises when the link leads nowhere (it stats the target):
+        // a dangling link has no canonical name.
+        if not FileGetSymLinkTarget(RawByteString(cand), target) then Exit('');
+      except
+        Exit('');
+      end;
+      if target = '' then Exit('');
+      if target[1] = '/' then cur := '/';
+      if rest = '' then rest := String(target) else rest := String(target) + '/' + rest;
+      Continue;
+    end;
+    if (not isLast) and ((a and faDirectory) = 0) then Exit('');
+    cur := cand;
+  end;
+  Result := cur;
+end;
+{$ENDIF}
+
+{ The empty name names nothing, on every system and under any sandbox: it is
+  answered before the gate, which refuses "" as a path (it would be the
+  working directory to a call that resolves it). }
+function t_file_kind(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var k: String;
+begin
+  Err := NoError();
+  if Args[0].Str = '' then
+  begin
+    GIoError := 0;
+    Exit(ValStr('none'));
+  end;
+  GIoError := 0;   // so a refusal's 5 below is this call's, not an earlier one's
+  {$IFDEF WINDOWS}
+  k := KindOfWin(Args[0].Str, Err);
+  {$ELSE}
+  k := KindOfUnix(Args[0].Str, Err);
+  {$ENDIF}
+  if k <> '' then GIoError := 0
+  else if GIoError <> IOERR_REFUSED then GIoError := IOERR_FAILED;
+  Result := ValStr(k);
+end;
+
+function t_path_canonical(const Args: array of TValue; out Err: TPhosphorError): TValue;
+var c: String;
+begin
+  Err := NoError();
+  if Args[0].Str = '' then
+  begin
+    GIoError := IOERR_FAILED;
+    Exit(ValStr(''));
+  end;
+  GIoError := 0;
+  {$IFDEF WINDOWS}
+  c := CanonicalWin(Args[0].Str, Err);
+  {$ELSE}
+  c := CanonicalUnix(Args[0].Str, Err);
+  {$ENDIF}
+  if c <> '' then GIoError := 0
+  else if GIoError <> IOERR_REFUSED then GIoError := IOERR_FAILED;
+  Result := ValStr(c);
+end;
+
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
 begin
   Reg.Add('dir_create:$',            @t_dir_create);
@@ -1257,6 +1744,9 @@ begin
   Reg.Add('extractfilepath$:$',          @t_extractfilepath);
   Reg.Add('changefileext$:$$',           @t_path_changeextension);
   Reg.Add('dir_exists:$',                @t_dir_exists);
+  // round 10: what a path IS, asked of the OS rather than read off its spelling
+  Reg.Add('file_kind$:$',                @t_file_kind);
+  Reg.Add('path_canonical$:$',           @t_path_canonical);
 end;
 
 initialization

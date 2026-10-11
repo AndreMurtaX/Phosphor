@@ -2175,23 +2175,41 @@ $okAH = $okAH -and $okAH2
 # pins on Windows: a backup to tojournal.db said "Backed up" and was written into
 # other.db-journal (SQLite's full name of a link is the link's own), where the
 # next open of other.db deleted it. Expected: every check passes, and the count
-# is the golden's plus the three checks the self-test runs only when that
+# is the golden's plus the seven checks the self-test runs only when that
 # variable is set. mklink makes a file link without elevation where Developer
 # Mode is on, as on this machine; where it cannot, the block FAILS, saying so --
 # a link check that quietly did not run is the defect class this block exists for.
+# ROUND 10 added what a name-reading check cannot see, all of it in the same
+# folder: longlinkname.database -> victim.db-journal (a link to no file) and
+# toown.db -> own.db (the self-test leaves its own crashed file there), and an
+# empty truncvictim.db-journal. The 8.3 short names Windows gives the first and
+# the last -- LONGLI~1.DAT and TRUNCV~1.DB- -- are what the self-test opens and
+# backs up to: round 10 measured both past the round-9 checks, one writing a
+# backup into victim.db-journal and one building a database inside a journal.
+# Whether a volume makes 8.3 names is a setting, so `dir /x` is asked for both;
+# a folder without them FAILS here rather than letting the checks pass on names
+# that alias nothing.
 $aiDir = Join-Path $tmp 'ai'
 New-Item -ItemType Directory -Force $aiDir | Out-Null
 $aiTemp = Join-Path $aiDir 'temp'
 New-Item -ItemType Directory -Force $aiTemp | Out-Null
 cmd /c "mklink `"$aiDir\tojournal.db`" `"$aiDir\other.db-journal`" > nul 2>&1"
 cmd /c "mklink `"$aiDir\tohot.db`" `"$aiDir\hot.db`" > nul 2>&1"
+cmd /c "mklink `"$aiDir\longlinkname.database`" `"$aiDir\victim.db-journal`" > nul 2>&1"
+cmd /c "mklink `"$aiDir\toown.db`" `"$aiDir\own.db`" > nul 2>&1"
+[IO.File]::WriteAllText((Join-Path $aiDir 'truncvictim.db-journal'), '')
 $aiLinks = @(Get-ChildItem $aiDir | Where-Object { $_.LinkType -eq 'SymbolicLink' }).Count
+$aiShort = (cmd /c "dir /x `"$aiDir`"") -join "`n"
+$aiAliases = ($aiShort -match 'LONGLI~1\.DAT +longlinkname\.database') -and ($aiShort -match 'TRUNCV~1\.DB- +truncvictim\.db-journal')
 $aiGolden = ([IO.File]::ReadAllText((Join-Path $root 'examples\contact_manager.expected')) -replace "`r", '').Trim()
 $aiWant = ''
-if ($aiGolden -match '^passed: (\d+)\nfailed: 0$') { $aiWant = "passed: $([int]$Matches[1] + 3)`nfailed: 0" }
+if ($aiGolden -match '^passed: (\d+)\nfailed: 0$') { $aiWant = "passed: $([int]$Matches[1] + 7)`nfailed: 0" }
 $okAI = $false
-if ($aiLinks -ne 2) {
-    Write-Host ("FAIL  AI:the contact manager through real links: mklink made {0} of 2 symbolic links in {1}" -f $aiLinks, $aiDir) -ForegroundColor Red
+if ($aiLinks -ne 4) {
+    Write-Host ("FAIL  AI:the contact manager through real links: mklink made {0} of 4 symbolic links in {1}" -f $aiLinks, $aiDir) -ForegroundColor Red
+} elseif (-not $aiAliases) {
+    Write-Host ("FAIL  AI:the volume of {0} did not give the 8.3 names LONGLI~1.DAT and TRUNCV~1.DB- (dir /x below)" -f $aiDir) -ForegroundColor Red
+    $aiShort -split "`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }
 } elseif ($aiWant -eq '') {
     Write-Host ("FAIL  AI:examples\contact_manager.expected is not 'passed: N / failed: 0': '{0}'" -f $aiGolden) -ForegroundColor Red
 } else {
@@ -2209,7 +2227,7 @@ if ($aiLinks -ne 2) {
     $env:TEMP = $aiSave[0]; $env:TMP = $aiSave[1]; $env:PHOSPHOR_SELFTEST = $aiSave[2]; $env:PHOSPHOR_SELFTEST_LINKS = $aiSave[3]
     $aiGot = ([IO.File]::ReadAllText($aiOut) -replace "`r", '').Trim()
     $okAI = $aiEnded -and ($aiP.ExitCode -eq 0) -and ($aiGot -eq $aiWant)
-    if ($okAI) { Write-Host 'PASS  AI:the contact manager refuses a backup or a database through a real link onto a journal, and judges a file reached through one' -ForegroundColor Green }
+    if ($okAI) { Write-Host 'PASS  AI:the contact manager refuses a backup or a database through a real link or an 8.3 alias onto a journal, and judges and opens a file reached through a link by its own name' -ForegroundColor Green }
     else {
         Write-Host ("FAIL  AI:the contact manager through real links: ended={0} exit={1}, want '{2}'" -f $aiEnded, $aiP.ExitCode, ($aiWant -replace "`n", ' / ')) -ForegroundColor Red
         $aiGot -split "`n" | ForEach-Object { if ($_) { Write-Host "        $_" -ForegroundColor DarkGray } }

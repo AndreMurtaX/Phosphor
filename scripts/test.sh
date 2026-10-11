@@ -2182,25 +2182,38 @@ fi
 # journal). The folder is named as `cd -P` names it, which is how SQLite names
 # a file reached through a link. Its own TMPDIR keeps the self-test's fixed
 # scratch names out of every other run's way. Expected: every check passes, and
-# the count is the golden's plus the three checks the self-test runs only when
+# the count is the golden's plus the seven checks the self-test runs only when
 # that variable is set. The twin is block AI of scripts/test.ps1.
+# ROUND 10 judged names by what they ARE, and the same folder now holds what
+# that is checked on: longlinkname.database -> victim.db-journal (a link to no
+# file), toown.db -> own.db (the self-test leaves its own crashed file there),
+# an empty truncvictim.db-journal with tojrn.db -> it (on Windows its 8.3 alias
+# stands where this link does), and a FIFO, pipe.db: round 10 measured the
+# program blocked for ever opening one at either door, past every limit.
 okAI=0
 aidir="$(cd -P "$tmpdir" && pwd)/ai"
 mkdir -p "$aidir/temp"
 ln -s "$aidir/other.db-journal" "$aidir/tojournal.db"
 ln -s "$aidir/hot.db" "$aidir/tohot.db"
+ln -s "$aidir/victim.db-journal" "$aidir/longlinkname.database"
+ln -s "$aidir/own.db" "$aidir/toown.db"
+: > "$aidir/truncvictim.db-journal"
+ln -s "$aidir/truncvictim.db-journal" "$aidir/tojrn.db"
+mkfifo "$aidir/pipe.db"
 aigolden="$(tr -d '\r' < "$root/examples/contact_manager.expected")"
 aiwant=""
 if [ "$(printf '%s\n' "$aigolden" | sed -n 2p)" = "failed: 0" ]; then
   ain="$(printf '%s\n' "$aigolden" | sed -n 1p | sed -n 's/^passed: \([0-9][0-9]*\)$/\1/p')"
-  if [ -n "$ain" ]; then aiwant="$(printf 'passed: %s\nfailed: 0' "$((ain + 3))")"; fi
+  if [ -n "$ain" ]; then aiwant="$(printf 'passed: %s\nfailed: 0' "$((ain + 7))")"; fi
 fi
-if [ -z "$aiwant" ]; then
+if [ ! -p "$aidir/pipe.db" ]; then
+  echo "FAIL  AI:mkfifo made no FIFO at $aidir/pipe.db"; okAI=1; fail=1
+elif [ -z "$aiwant" ]; then
   echo "FAIL  AI:examples/contact_manager.expected is not 'passed: N / failed: 0'"; okAI=1; fail=1
 elif command -v xvfb-run > /dev/null 2>&1; then
   if aigot="$(PHOSPHOR_SELFTEST=1 PHOSPHOR_SELFTEST_LINKS="$aidir" TMPDIR="$aidir/temp" timeout 300 xvfb-run -a "$exe" run "$root/examples/contact_manager.bas" < /dev/null 2>&1)"; then aicode=0; else aicode=$?; fi
   if [ "$aicode" -eq 0 ] && [ "$(printf '%s' "$aigot" | tr -d '\r')" = "$aiwant" ]; then
-    echo 'PASS  AI:the contact manager judges the journal beside a link'"'"'s target, and refuses a backup or a database through a link onto a journal'
+    echo 'PASS  AI:the contact manager judges the journal beside a link'"'"'s target, refuses a backup or a database through a link onto a journal or into a FIFO, and opens its own file through a link whole'
   else
     echo "FAIL  AI:the contact manager without a sandbox, through real links: exit $aicode, want '$(printf '%s' "$aiwant" | tr '\n' '/')', got:"
     printf '%s\n' "$aigot" | sed 's/^/        /'; okAI=1; fail=1

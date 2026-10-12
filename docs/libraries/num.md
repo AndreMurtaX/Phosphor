@@ -79,7 +79,7 @@ is the idiom the test corpus uses for it.
 
 | function | what it answers |
 | --- | --- |
-| `sin(n) → num` | sine. Always answers, in `-1 .. 1` for every finite argument: the argument is reduced exactly, so `sin(1e22)` is `-0.8522008497671888`. Correctly rounded (computed to about 100 bits, rounded once), the same bits on every OS |
+| `sin(n) → num` | sine. Always answers, in `-1 .. 1` for every finite argument: the argument is reduced exactly, so `sin(1e22)` is `-0.8522008497671888`. Correctly rounded (computed to about 100 bits, rounded once), the same bits on every OS. A fast path answers all but about 1 call in 350, in roughly 20-25 ns below `1.5 * 2^20` and 120 ns above, with those same bits: it answers only when it can prove the rounding, and hands the rest to the full computation (about 1 us) |
 | `cos(n) → num` | cosine. Always answers; the same exact reduction and rounding as `sin` |
 | `tan(n) → num` | tangent. Near a quarter turn it answers a very large **finite** number (a Double cannot land exactly on pi/2), never an infinity |
 | `asin(n) → num` | arc sine, in `-pi/2 .. pi/2`. Outside `-1 .. 1` is a domain error naming the value |

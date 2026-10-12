@@ -2549,6 +2549,224 @@ begin
   DeleteFile(s); DeleteFile(h); DeleteFile(t);
 end;
 
+{ ROUND 11: AN OPEN THAT WOULD WAIT IS REFUSED, AT EVERY DOOR.
+
+  open(2) of a Linux FIFO blocks until the other end comes -- for reading
+  until a writer, for writing until a reader -- inside one opCall, where
+  neither MaxSteps nor TimeoutMs reaches. Round 9 fixed file_getsize alone and
+  sixteen other doors hung. Every door that opens a path now asks
+  IoSpecialKind first, and refuses a FIFO, a socket or a device.
+
+  The expected answers are each door's documented refusal: the one it gives a
+  path the sandbox refuses (0, "", a zero handle, an error raised by a classic
+  OPEN), with ioerror() 222 where the door writes ioerror() at all --
+  ERROR_BAD_FILE_TYPE, the code IoErrorText names "not a file". }
+function R11Q(const S: String): String;
+begin
+  Result := '"' + S + '"';
+end;
+
+procedure CheckRound11Devices;
+var dev, o, m: String;
+begin
+  { A DEVICE, ON BOTH SYSTEMS. Neither of these blocks -- the null device reads
+    as empty and swallows a write -- so they run here without a thread, and
+    with the check removed they answer what an open answers (1, and "" with
+    ioerror() 2 or 0), not the refusal. }
+  {$ifdef windows} dev := 'NUL'; {$else} dev := '/dev/null'; {$endif}
+  R9Run('println str$(file_writealltext(' + R11Q(dev) + ', "x")) + " " + str$(ioerror())' + LF +
+        'println "[" + file_readalltext$(' + R11Q(dev) + ') + "] " + str$(ioerror()) + " " + iostrerror$()' + LF +
+        Caught('', 'open ' + R11Q(dev) + ' for output as #1'), 1000000, o, m);
+  Report(o = '0 222' + LF + '[] 222 not a file: a FIFO, a socket or a device' + LF +
+             'E:cannot open "' + dev + '": not a file but a FIFO, a socket or a device' + LF,
+         'a device is refused before it is opened, by the whole-file doors and by OPEN (got "' +
+         o + '" / "' + m + '")');
+end;
+
+{$ifdef unix}
+{ One door, on a thread, given 2 s -- a stat takes microseconds. Still waiting
+  is the defect, and is reported as such; the probe then opens the FIFO
+  read-write (O_RDWR never blocks on Linux: it is a reader AND a writer), which
+  lets a blocked open return, and closes it again, which ends a read blocked
+  after it -- repeated, bounded, until the run comes back. }
+procedure R11Door(const AName, ASrc, AWant, AFifo: String);
+var ask: TSizeAsk; waited, tries: Integer; hold: THandle;
+begin
+  ask := TSizeAsk.Create(True);
+  ask.Src := ASrc + LF;
+  ask.Start;
+  waited := 0;
+  while (not ask.Done) and (waited < 2000) do
+  begin
+    Sleep(10);
+    Inc(waited, 10);
+  end;
+  if ask.Done then
+  begin
+    Report(Trim(ask.Got) = AWant, AName + ' (wanted "' + AWant + '", got "' + Trim(ask.Got) +
+           '" / "' + ask.Msg + '")');
+    ask.Free;
+    Exit;
+  end;
+  Report(False, AName + ': still blocked after 2 s -- it OPENED the FIFO');
+  tries := 0;
+  while (not ask.Done) and (tries < 100) do
+  begin
+    hold := FileOpen(AFifo, fmOpenReadWrite);
+    Sleep(50);
+    if hold <> feInvalidHandle then FileClose(hold);
+    Inc(tries);
+  end;
+  // A thread that never came back is left running rather than waited on for ever.
+  if ask.Done then ask.Free
+  else Writeln(StdErr, 'FAIL: ', AName, ': the run never came back; its thread is abandoned');
+end;
+
+procedure CheckRound11Fifo;
+var
+  d, ff, lnk, lr, reg, tree, ex, jdb: String;
+  fs: TFileStream;
+  made: Boolean;
+const
+  Refused = 'not a file but a FIFO, a socket or a device';
+begin
+  d := GetTempDir(False) + 'phosphor_r11_fifo_' + IntToStr(GetProcessID()) + '/';
+  ff := d + 'ff';           // a FIFO
+  lnk := d + 'lnk';         // a symbolic link to it: an open follows it
+  reg := d + 'reg.txt';     // an ordinary file, "abc"
+  lr := d + 'lr';           // a symbolic link to that
+  tree := d + 'tree/';      // a.log, and a FIFO p.log -- io.md's worked example
+  ex := d + 'ex/';          // an extraction destination with a FIFO at x.txt
+  jdb := d + 'j.db';        // an empty database whose journal's name is a FIFO
+  made := ForceDirectories(tree) and ForceDirectories(ex) and
+          (fpMkFifo(PChar(ff), &600) = 0) and (fpSymlink(PChar(ff), PChar(lnk)) = 0) and
+          (fpSymlink(PChar(reg), PChar(lr)) = 0) and
+          (fpMkFifo(PChar(tree + 'p.log'), &600) = 0) and
+          (fpMkFifo(PChar(ex + 'x.txt'), &600) = 0) and
+          (fpMkFifo(PChar(jdb + '-journal'), &600) = 0);
+  if made then
+  begin
+    fs := TFileStream.Create(reg, fmCreate);
+    try fs.WriteBuffer(PChar('abc')^, 3); finally fs.Free; end;
+    fs := TFileStream.Create(tree + 'a.log', fmCreate);
+    try fs.WriteBuffer(PChar('A')^, 1); finally fs.Free; end;
+    fs := TFileStream.Create(jdb, fmCreate);
+    fs.Free;
+  end;
+  if not made then
+  begin
+    Report(False, 'round 11: could not make the FIFOs to ask about');
+    Exit;
+  end;
+
+  // The control: an ordinary file, and a link to one, still read.
+  R11Door('an ordinary file is still read',
+          'println file_readalltext$(' + R11Q(reg) + ') + " " + str$(ioerror())', 'abc 0', ff);
+  R11Door('an ordinary file through a link is still read',
+          'println file_readalltext$(' + R11Q(lr) + ') + " " + str$(ioerror())', 'abc 0', ff);
+
+  // --- IoLib, reading (the open waits for a writer) ---
+  R11Door('file_readalltext$ of a FIFO',
+          'println "[" + file_readalltext$(' + R11Q(ff) + ') + "] " + str$(ioerror())', '[] 222', ff);
+  R11Door('file_readalltext$ through a link to a FIFO',
+          'println "[" + file_readalltext$(' + R11Q(lnk) + ') + "] " + str$(ioerror())', '[] 222', ff);
+  R11Door('opentext$ of a FIFO',
+          'println "[" + opentext$(' + R11Q(ff) + ', "utf-8") + "] " + str$(ioerror())', '[] 222', ff);
+  R11Door('file_readallbytes@ of a FIFO',
+          'b@ = file_readallbytes@(' + R11Q(ff) + ')' + LF + 'println str$(ioerror())', '222', ff);
+  R11Door('file_copy from a FIFO',
+          'println str$(file_copy(' + R11Q(ff) + ', ' + R11Q(d + 'c1.txt') + ')) + " " + str$(ioerror()) + ' +
+          '" " + str$(file_exists(' + R11Q(d + 'c1.txt') + '))', '0 222 0', ff);
+  R11Door('file_appendalltext to a FIFO',
+          'println str$(file_appendalltext(' + R11Q(ff) + ', "x")) + " " + str$(ioerror())', '0 222', ff);
+  // --- IoLib, writing (the open waits for a reader) ---
+  R11Door('file_writealltext to a FIFO',
+          'println str$(file_writealltext(' + R11Q(ff) + ', "x")) + " " + str$(ioerror())', '0 222', ff);
+  R11Door('file_createempty of a FIFO',
+          'println str$(file_createempty(' + R11Q(ff) + ')) + " " + str$(ioerror())', '0 222', ff);
+  R11Door('savetext$ to a FIFO',
+          's$ = savetext$(' + R11Q(ff) + ', "utf-8", "x")' + LF + 'println str$(ioerror())', '222', ff);
+  R11Door('file_writeallbytes to a FIFO',
+          'b@ = buffer_new@(3)' + LF +
+          'println str$(file_writeallbytes(' + R11Q(ff) + ', b@)) + " " + str$(ioerror())', '0 222', ff);
+  R11Door('file_copy onto a FIFO',
+          'println str$(file_copy(' + R11Q(reg) + ', ' + R11Q(ff) + ')) + " " + str$(ioerror())', '0 222', ff);
+  { io.md's worked example: a tree holding a.log and a FIFO p.log. The copy
+    comes back; a.log is copied and p.log is not. (What dir_copy ANSWERS for a
+    tree with an entry it could not copy is not this round's question.) }
+  R11Door('dir_copy of a tree holding a FIFO',
+          'n = dir_copy(' + R11Q(tree) + ', ' + R11Q(d + 'copy') + ')' + LF +
+          'println str$(file_exists(' + R11Q(d + 'copy/a.log') + ')) + " " + str$(file_exists(' +
+          R11Q(d + 'copy/p.log') + '))', '1 0', tree + 'p.log');
+
+  // --- the classic OPEN, every mode ---
+  R11Door('open for input of a FIFO', Caught('', 'open ' + R11Q(ff) + ' for input as #1'),
+          'E:cannot open "' + ff + '": ' + Refused, ff);
+  R11Door('open for output of a FIFO', Caught('', 'open ' + R11Q(ff) + ' for output as #1'),
+          'E:cannot open "' + ff + '": ' + Refused, ff);
+  R11Door('open for append of a FIFO', Caught('', 'open ' + R11Q(ff) + ' for append as #1'),
+          'E:cannot open "' + ff + '": ' + Refused, ff);
+  R11Door('open for binary of a FIFO', Caught('', 'open ' + R11Q(lnk) + ' for binary as #1'),
+          'E:cannot open "' + lnk + '": ' + Refused, ff);
+
+  // --- the string list and the config ---
+  R11Door('strings_loadfromfile of a FIFO',
+          'l@ = strings@()' + LF +
+          'println str$(strings_loadfromfile(l@, ' + R11Q(ff) + ')) + " " + str$(ioerror())', '0 222', ff);
+  R11Door('strings_savetofile to a FIFO',
+          'l@ = strings@()' + LF + 'n = strings_add(l@, "x")' + LF +
+          'println str$(strings_savetofile(l@, ' + R11Q(ff) + ')) + " " + str$(ioerror())', '0 222', ff);
+  R11Door('cfg_open@ and cfg_save of a FIFO',
+          'c@ = cfg_open@(' + R11Q(ff) + ')' + LF + 'c@ = cfg_set@(c@, "s", "k", "v")' + LF +
+          'println str$(cfg_save(c@)) + " " + str$(ioerror())', '0 222', ff);
+
+  // --- the packages: gzip, base64, zip, sqlite, http ---
+  R11Door('gzip_compressfile from a FIFO',
+          'println str$(gzip_compressfile(' + R11Q(ff) + ', ' + R11Q(d + 'g.gz') + ')) + " " + str$(gzip_error())',
+          '0 1', ff);
+  R11Door('gzip_compressfile onto a FIFO',
+          'println str$(gzip_compressfile(' + R11Q(reg) + ', ' + R11Q(ff) + ')) + " " + str$(gzip_error())',
+          '0 1', ff);
+  R11Door('base64_encodefile$ of a FIFO',
+          'println "[" + base64_encodefile$(' + R11Q(ff) + ') + "] " + str$(base64_error())', '[] 1', ff);
+  R11Door('unzip_count of a FIFO',
+          'println str$(unzip_count(' + R11Q(ff) + ')) + " " + str$(zip_error())', '0 1', ff);
+  R11Door('zip_open@ of a FIFO',
+          'z@ = zip_open@(' + R11Q(ff) + ')' + LF + 'println str$(zip_error())', '1', ff);
+  R11Door('zip_create@ onto a FIFO',
+          'z@ = zip_create@(' + R11Q(ff) + ')' + LF + 'println str$(zip_error())', '1', ff);
+  R11Door('zip_addfile of a FIFO',
+          'z@ = zip_create@(' + R11Q(d + 'z.zip') + ')' + LF +
+          'println str$(zip_addfile(z@, ' + R11Q(ff) + ', "x")) + " " + str$(zip_error())', '0 1', ff);
+  R11Door('zip_compress of a folder holding a FIFO',
+          'println str$(zip_compress(' + R11Q(d + 't.zip') + ', ' + R11Q(tree) + ')) + " " + str$(zip_error())',
+          '0 1', tree + 'p.log');
+  R11Door('unzip_extract onto a FIFO standing under an entry''s name',
+          'z@ = zip_create@(' + R11Q(d + 'e.zip') + ')' + LF + 'n = zip_addstr(z@, "abc", "x.txt")' + LF +
+          'n = zip_close(z@)' + LF +
+          'println str$(unzip_extract(' + R11Q(d + 'e.zip') + ', ' + R11Q(ex) + ')) + " " + str$(zip_error())',
+          '0 1', ex + 'x.txt');
+  R11Door('sqlite_open@ of a FIFO',
+          's@ = sqlite_open@(' + R11Q(ff) + ')' + LF + 'println sqlite_errormsg$()',
+          'refused: the path is ' + Refused, ff);
+  R11Door('sqlite_open@ of a database whose journal is a FIFO',
+          's@ = sqlite_open@(' + R11Q(jdb) + ')' + LF + 'println sqlite_errormsg$()',
+          'refused: the path is ' + Refused, jdb + '-journal');
+  R11Door('http_ca_file$ of a FIFO',
+          'println "[" + http_ca_file$(' + R11Q(ff) + ') + "] " + str$(ioerror())', '[] 222', ff);
+
+  { Nothing recursive: each name this made, by name, then the folders, which
+    are empty by then or are left standing. }
+  DeleteFile(d + 'copy/a.log'); RemoveDir(d + 'copy');
+  DeleteFile(tree + 'a.log'); DeleteFile(tree + 'p.log'); RemoveDir(tree);
+  DeleteFile(ex + 'x.txt'); RemoveDir(ex);
+  DeleteFile(lnk); DeleteFile(lr); DeleteFile(ff); DeleteFile(reg); DeleteFile(jdb); DeleteFile(jdb + '-journal');
+  DeleteFile(d + 'z.zip'); DeleteFile(d + 'e.zip'); DeleteFile(d + 'c1.txt');
+  DeleteFile(d + 'g.gz'); DeleteFile(d + 't.zip');
+  RemoveDir(d);
+end;
+{$endif}
+
 procedure CheckFaultEscapes(const AName, ASource: String);
 var
   eng: TPhosphorEngine;
@@ -3253,6 +3471,8 @@ begin
   CheckRound8();
   CheckRound9();
   CheckRound10();
+  CheckRound11Devices();
+  {$ifdef unix} CheckRound11Fifo(); {$endif}
 
   { --- a fault in the interpreter; see the section above --------------------- }
 

@@ -188,7 +188,7 @@ interface
 uses
   SysUtils, Classes, Math, ctypes, fpjson, SQLite3Dyn,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
-  PhosphorSandbox, PhosphorBudget;
+  PhosphorSandbox, PhosphorBudget, PhosphorIoLib;
 
 { WHETHER THE RUNTIME LIBRARY LOADED, asked rather than guessed.
 
@@ -215,6 +215,10 @@ var
     package's own words instead of sqlite's "not authorized". Cleared
     immediately before each call that can prepare or step a statement. }
   GAuthDenied: Boolean = False;
+  { Set with a refusal of a FIFO, a socket or a device (SpecialRefused), so
+    RefusePath says that and not "outside the sandbox root"; RefusePath
+    clears it. }
+  GSpecialRefused: Boolean = False;
   { The ATTACH filename the authorizer APPROVED while preparing, so the statement
     can carry it and be asked again at step -- see DoStep. '' when there was none
     (or no sandbox, where there is nothing to re-check). }
@@ -484,7 +488,24 @@ end;
 procedure RefusePath;
 begin
   GLastErr := 14;   // SQLITE_CANTOPEN
-  GLastMsg := 'refused: the path is outside the sandbox root';
+  if GSpecialRefused then
+    GLastMsg := 'refused: the path is not a file but a FIFO, a socket or a device'
+  else
+    GLastMsg := 'refused: the path is outside the sandbox root';
+  GSpecialRefused := False;
+end;
+
+{ A FIFO, A SOCKET OR A DEVICE IS NO DATABASE (round 11). SQLite opens a name
+  itself, and a FIFO under it -- or under the journal or the WAL beside it,
+  which opening a database reads when it is there -- blocks that open or the
+  first read past every ceiling. True, with RefusePath's words set up, when
+  AFull or one of those two companions is one. }
+function SpecialRefused(const AFull: String; ACompanions: Boolean): Boolean;
+begin
+  Result := (IoSpecialKind(AFull) <> '') or
+            (ACompanions and ((IoSpecialKind(AFull + '-journal') <> '') or
+                              (IoSpecialKind(AFull + '-wal') <> '')));
+  if Result then GSpecialRefused := True;
 end;
 
 { RESOLVE THE NAME THE WAY SQLITE IS ABOUT TO RESOLVE IT.
@@ -597,7 +618,7 @@ end;
   failure DENIES. }
 function SandboxAuthorizer(pUserData: Pointer; code: cint;
                            s1, s2, s3, s4: PAnsiChar): cint; cdecl;
-var nm: String;
+var nm, full: String;
 begin
   Result := SQLITE_OK;
   try
@@ -616,6 +637,14 @@ begin
         begin
           nm := PtrStr(s1);
           if not SqlPathAllowed(nm, s1 <> nil) then
+          begin
+            GAuthDenied := True;
+            Result := SQLITE_DENY;
+          end
+          { ...and a FIFO, a socket or a device under the name, or under its
+            journal's or WAL's, is no database (round 11): SpecialRefused. }
+          else if (s1 <> nil) and SqlTarget(nm, True, full) and (full <> '') and
+                  SpecialRefused(full, True) then
           begin
             GAuthDenied := True;
             Result := SQLITE_DENY;
@@ -1032,7 +1061,8 @@ begin
     confined run wrote into C:\Dev. }
   if (APath <> ':memory:') and
      ((APath = '') or (not SqlTarget(APath, True, full))
-                   or (not SandboxAllows(full, puWrite))) then
+                   or (not SandboxAllows(full, puWrite))
+                   or SpecialRefused(full, True)) then
   begin
     RefusePath();
     Exit;
@@ -1869,7 +1899,8 @@ begin
     different file the moment a data directory was set -- measured, 8192 bytes
     outside the root. '' is refused here for the reason OpenDatabase gives. }
   if (Args[1].Str = '') or (not SqlTarget(Args[1].Str, True, full))
-                        or (not SandboxAllows(full, puWrite)) then
+                        or (not SandboxAllows(full, puWrite))
+                        or SpecialRefused(full, True) then
   begin
     RefusePath();
     Exit;

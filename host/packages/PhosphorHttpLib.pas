@@ -2344,7 +2344,9 @@ begin
   if path <> '' then path := ExpandFileName(path);
   if (path <> '') and not (IoGate(path, puRead) or GateRefused('http_ca_file$', Err)) then
     Exit(ValStr(''));
-  IoAnswer(True);              // only for its effect: ioerror() is THIS call's, 0
+  // OpenSSL's open of a FIFO would block a request past every ceiling (round 11).
+  if (path <> '') and (IoSpecialKind(path) <> '') then Exit(ValStr(''));
+  IoAnswer(True);             // only for its effect: ioerror() is THIS call's, 0
   gCAFile := path;
   Result := ValStr(Args[0].Str);
 end;
@@ -3254,6 +3256,7 @@ begin
   key := ExpandFileName(key);
   if not ((IoGate(cert, puRead) or GateRefused('http_clientcert', Err)) and
           (IoGate(key, puRead) or GateRefused('http_clientcert', Err))) then Exit(ValInt(0));
+  if (IoSpecialKind(cert) <> '') or (IoSpecialKind(key) <> '') then Exit(ValInt(0));   // round 11
   c.ClientCert := cert;
   c.ClientKey := key;
   Result := IoAnswer(True);

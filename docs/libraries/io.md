@@ -56,16 +56,37 @@ the root. Outside the root, `file_exists` and `dir_exists` answer `0` — a
 deliberate lie, because answering truthfully would map a filesystem the script is
 not allowed to read.
 
+**A FIFO, a socket or a device is never opened.** Opening a Linux FIFO waits in
+the kernel for the other end — a writer for a reader, a reader for a writer — and
+no [execution ceiling](../embedding.md#the-ceilings-reach-inside-a-library-call-too)
+reaches a call that is waiting there: `MaxSteps` and `TimeoutMs` are asked between
+instructions. So every function on this page that reads or writes a file's
+contents, the classic `open … as #n` in every mode, the string list's and the
+config's file calls, and the packages' file doors (gzip, base64, zip, sqlite, and
+the http certificate paths) first ask what the path leads to, **links followed**,
+and refuse a FIFO, a socket or a device — `file_kind$`'s `"fifo"`, `"socket"` and
+`"device"`, which on Windows are a pipe (`\\.\pipe\…`) and a name the OS maps to a
+device (`NUL`, `CON`). The refusal is the door's ordinary failure (`0`, `""`, an
+empty buffer; a classic `open` raises `cannot open "…": not a file but a FIFO, a
+socket or a device`), and `ioerror()` is `222`, `"not a file: a FIFO, a socket or a
+device"`. Writing to `/dev/null` or `NUL` is refused with the rest: nothing on
+this page ever promised it. A folder walk that meets one — `dir_copy` over a tree
+holding a FIFO — copies everything else and leaves it out. Until round 11 only
+`file_getsize` knew this, and sixteen doors hung on a FIFO, this page's worked
+example among them. What is left: the question and the open are two calls, so
+**another process** replacing a file with a FIFO between them still wins — a
+script cannot make a FIFO itself.
+
 ## Functions
 
 ### Whole-file text
 
 | function | what it answers |
 | --- | --- |
-| `file_readalltext$(path$) → str` | the whole file, byte for byte. `""` when the file is missing, locked or outside the sandbox — and `ioerror()` becomes `2`, or `5` when the sandbox refused the path. An empty file answers `""` too |
+| `file_readalltext$(path$) → str` | the whole file, byte for byte. `""` when the file is missing, locked or outside the sandbox — and `ioerror()` becomes `2`, or `5` when the sandbox refused the path, or `222` when it is a FIFO, a socket or a device. An empty file answers `""` too |
 | `file_writealltext(path$, text$) → num` | `1` when the bytes were written (creating or replacing the file), `0` when the path was refused or could not be opened. Writing `""` makes an empty file |
 | `file_appendalltext(path$, text$) → num` | `1` when the text was added to the end; a file that does not exist is created. It reads the file and rewrites it, so the cost is the size of the **file**, not of the addition — for repeated appending, open a channel instead |
-| `file_exists(path$) → num` | `1` if the file is there. `0` for a directory, and `0` for anything outside the sandbox root whether it exists or not |
+| `file_exists(path$) → num` | `1` if the file is there. `0` for a directory, and `0` for anything outside the sandbox root whether it exists or not. A FIFO, a socket or a device is there too and answers `1`, though no door opens it (see *a FIFO, a socket or a device is never opened*, above); `file_kind$` tells them apart |
 | `file_delete(path$) → num` | `1` when the file is gone by this call. `0` when it was missing, in use, or refused — `ioerror()` is `3` for a plain failure, `5` for a refusal, and `0` again after a success |
 | `file_copy(src$, dst$ [, overwrite]) → num` | `1` when the bytes arrived. `0` when either end was refused, the source could not be read — or the three-argument form was given `0` and the target already exists. **The two-argument form always overwrites**. Under an [execution budget](../embedding.md#the-ceilings-reach-inside-a-library-call-too) a copy costs two units a byte (it reads and writes every byte) and is asked for **whole, before a byte is read**: a file too large for what is left is the call's `peLimit`, nothing is written, and the run goes on — a smaller `file_copy` after it still works. `dir_copy` asks the same of each file it copies |
 | `file_move(src$, dst$) → num` | `1` when the rename happened. `0` when refused, when the target already exists — a file, a directory or a symlink, on every platform (until 2026-10-05 Linux replaced an existing file instead) — or when the two paths are on different volumes: it is one rename, with no copy-and-delete fallback. A rename that changes only the case of a name still works. The existence check and the rename are two calls, so a second process creating the target between them can still lose it on Linux |
@@ -178,7 +199,7 @@ as separators on every platform.
 
 | function | what it answers |
 | --- | --- |
-| `ioerror() → num` | `0` clean, `2` a read that found nothing, `3` an operation that failed, `5` a path the sandbox refused (from any function that asks it). Only the functions noted above write to it — everything else leaves it alone, so read it **immediately** after the call you care about, not later |
+| `ioerror() → num` | `0` clean, `2` a read that found nothing, `3` an operation that failed, `5` a path the sandbox refused (from any function that asks it), `222` a path that leads to a FIFO, a socket or a device, which nothing opens. Only the functions noted above write to it — everything else leaves it alone, so read it **immediately** after the call you care about, not later |
 | `iostrerror$() → str` | the text for that code: `"No error"` for `0`, `"file not found"`, `"path not found"`, and named entries for the other codes a BASIC program meets. Always English, on every machine: the operating system's own message came back in the machine's language and its ANSI code page, which is not valid UTF-8 and could not hold a golden across two computers. A code with no entry reads `I/O error <n>` |
 
 ## A worked example

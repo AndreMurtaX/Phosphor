@@ -43,6 +43,7 @@ type
 const
   IOERR_REFUSED = 5;   // 'access denied' in IoErrorText
   IOERR_FAILED = 3;    // the operation was attempted and did not happen
+  IOERR_NOT_A_FILE = 222; // ERROR_BAD_FILE_TYPE: a FIFO, a socket or a device; see IoSpecialKind
   { The longest path IoGate does not price: PATH_MAX on Linux. See IoGate. }
   IoPathFreeBytes = 4096;
 
@@ -78,6 +79,36 @@ function IoQueried(AYes: Boolean): TValue;
   5. For a request the gate passes but that names nothing to act on -- chdir("")
   with no sandbox in force, which the RTL answers True without moving. }
 function IoRefused: TValue;
+{ WHAT AN OPEN OF APath WOULD REACH, ASKED BEFORE IT IS MADE (round 11): its
+  kind -- "fifo", "socket" or "device", file_kind$'s words -- when it is one of
+  those, links followed as an open follows them, and then ioerror() is
+  IOERR_NOT_A_FILE; '' when the open may go ahead (a file, a folder, nothing
+  there yet, or what cannot be told -- the open itself answers those).
+  "unknown" when the budget stopped the question (Linux, a name holding a
+  wildcard: see the body) -- refused too, and the run is spent. Anything but
+  '' is a refusal. The caller prices the path first, as it does for the open.
+
+  open(2) of a Linux FIFO BLOCKS in the kernel until the other end appears --
+  a reader for a writer, a writer for a reader -- and neither MaxSteps nor
+  TimeoutMs can reach a call blocked inside one opCall. Round 9 fixed
+  file_getsize alone; every other door that opens a path hung on one: sixteen
+  of them measured, through io.md's own worked example among them. A device
+  is refused with it -- a console, a terminal, a named pipe on Windows waits
+  for a person or a peer the same way -- and so is a socket, which no open
+  reads. Every door that opens a path the script named asks THIS, after the
+  gate and before the open: the IoLib, string-list, config and channel doors
+  and the packages' file doors. One check, with one answer on both systems.
+
+  WHY NOT O_NONBLOCK. An open with O_NONBLOCK and an fstat after it would close
+  the window between the question and the open, but no door here makes its own
+  open(2): TFileStream, the RTL's text files, TZipper, SQLite and OpenSSL each
+  open the path themselves, with flags no caller sets, and the engine may not
+  use the Unix units that would. So the path is asked first, by the same
+  lstat-and-mode reading file_kind$ makes. What that leaves, said rather than
+  implied: ANOTHER process that replaces a file by a FIFO between the question
+  and the open still wins -- a script cannot make a FIFO, so it needs a second
+  party racing for the same name. }
+function IoSpecialKind(const APath: String): String;
 
 procedure RegisterIoFuncs(Reg: TPhosphorRegistry);
 
@@ -203,6 +234,7 @@ begin
   // Asked HERE and not at each caller: a t_ function added later inherits the
   // guard by calling this, and cannot forget it.
   if not IoGate(APath, puWrite) then Exit;
+  if IoSpecialKind(APath) <> '' then Exit;   // a FIFO's open blocks: refused, not waited on
   // One byte written is one unit, like one byte read: a file_writealltext$ of a
   // gigabyte is a gigabyte of work inside one opCall whichever way it flows.
   if (not APaid) and not BudgetAllows(Length(AContent)) then
@@ -251,7 +283,8 @@ begin
   AContent := '';
   Result := False;
   if not IoGate(APath, puRead) then Exit;
-  if not FileExists(APath) then Exit;
+  if not FileExists(APath) then Exit;   // true for a FIFO, which is why the next line is there
+  if IoSpecialKind(APath) <> '' then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
@@ -295,8 +328,10 @@ begin
   // 2 is "nothing there to read"; a REFUSAL has already recorded 5 inside
   // ReadAllBytes, and must not be overwritten into a claim that the file is
   // missing -- which is what this line used to make of every refusal (n10).
+  // A FIFO or a device refused before its open keeps its own code the same way.
   GIoError := 0;
-  if (not ReadAllBytes(Args[0].Str, s)) and (GIoError <> IOERR_REFUSED) then GIoError := 2;
+  if (not ReadAllBytes(Args[0].Str, s)) and (GIoError <> IOERR_REFUSED) and
+     (GIoError <> IOERR_NOT_A_FILE) then GIoError := 2;
   if WalkRefused('file_readalltext$', Err) then Exit(ValStr(''));
   Result := ValStr(s);
 end;
@@ -1383,6 +1418,7 @@ begin
     101: Result := 'the directory is not empty';
     112: Result := 'not enough space on the disk';
     183: Result := 'the file already exists';
+    222: Result := 'not a file: a FIFO, a socket or a device';
   else
     Result := 'I/O error ' + IntToStr(ACode);
   end;
@@ -1704,9 +1740,13 @@ const
 
 { What the entry at APath is, on Unix: lstat, through FileGetAttr (which is
   FpLStat there, rtl/unix/sysutils.pp), and for a special file its mode, from
-  FindFirst asked to lstat (faSymLink in the search attributes). }
-function KindOfUnix(const APath: String; var AErr: TPhosphorError): String;
-var a, e: LongInt; sr: TSearchRec; want: String; exact: Boolean; m: LongInt;
+  FindFirst asked to lstat (faSymLink in the search attributes).
+  AFollow (IoSpecialKind, round 11): what the LINKS lead to, which is what an
+  open reaches -- a link's mode is asked of FindFirst WITHOUT faSymLink, which
+  makes it a stat (rtl/unix/sysutils.pp FindGetFileInfo). A link that leads
+  nowhere answers ''. }
+function KindOfUnixAs(const APath: String; AFollow: Boolean; var AErr: TPhosphorError): String;
+var a, e: LongInt; sr: TSearchRec; want: String; exact: Boolean; m, attrs: LongInt;
 begin
   Result := '';
   if not (IoGateAt(APath, puRead, BudgetMilliOs) or GateRefused('file_kind$', AErr)) then Exit;
@@ -1717,15 +1757,23 @@ begin
     if (e = KIND_ENOENT) or (e = KIND_ENOTDIR) then Exit('none');
     Exit('');
   end;
-  if (a and KIND_LINK_ATTR) <> 0 then Exit('link');
-  if (a and faDirectory) <> 0 then Exit('dir');
-  if (a and KIND_SPECIAL_ATTR) = 0 then Exit('file');
+  if (a and KIND_LINK_ATTR) <> 0 then
+  begin
+    if not AFollow then Exit('link');
+  end
+  else
+  begin
+    if (a and faDirectory) <> 0 then Exit('dir');
+    if (a and KIND_SPECIAL_ATTR) = 0 then Exit('file');
+  end;
+  attrs := faAnyFile;
+  if not AFollow then attrs := attrs or KIND_LINK_ATTR;
   // A name may hold '*' or '?' on Unix, and FindFirst would read them as a
   // pattern: the entries it walks are steps, as in the listings.
   want := ExtractFileName(APath);
   exact := (Pos('*', want) > 0) or (Pos('?', want) > 0);
   m := -1;
-  if FindFirst(APath, faAnyFile or KIND_LINK_ATTR, sr) = 0 then
+  if FindFirst(APath, attrs, sr) = 0 then
   try
     repeat
       if exact and not BudgetCharge(BudgetUnitsPerStep) then
@@ -1749,6 +1797,11 @@ begin
   else
     Result := '';
   end;
+end;
+
+function KindOfUnix(const APath: String; var AErr: TPhosphorError): String;
+begin
+  Result := KindOfUnixAs(APath, False, AErr);
 end;
 
 { realpath, written out: every component in turn, a link read and its target
@@ -1837,6 +1890,42 @@ begin
   Result := cur;
 end;
 {$ENDIF}
+
+{ See the interface. On Windows it is the name half of KindOfWin, which opens
+  nothing: a device or a pipe is a name the OS maps to one (KindDevice of the
+  full name CreateFileW itself would be handed). On Linux it is KindOfUnix
+  through the links. }
+function IoSpecialKind(const APath: String): String;
+{$IFNDEF WINDOWS}
+var e: TPhosphorError;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  { The full name reads the path whole, as the open beside it does: no work
+    of a new kind, and a door that prices its path (IoGate, BudgetLinearOk)
+    has priced it before it asks. }
+  case KindDevice(KindFullW(APath)) of
+    1: Result := 'device';
+    2: Result := 'fifo';
+  else
+    Result := '';
+  end;
+  {$ELSE}
+  Result := '';
+  { A path past PATH_MAX reaches no file: the kernel answers ENAMETOOLONG
+    before it looks. Not asking it also keeps the gate inside KindOfUnixAs
+    from pricing a long path the door's own gate has priced already. }
+  if Length(APath) > IoPathFreeBytes then Exit;
+  e := NoError();
+  Result := KindOfUnixAs(APath, True, e);
+  { A name holding '*' or '?' is walked for, a step an entry, and a walk the
+    budget stopped could not tell: the run is spent (BudgetCharge latched it)
+    and the open must not go ahead blind. }
+  if IsError(e) then Result := 'unknown'
+  else if (Result <> 'fifo') and (Result <> 'socket') and (Result <> 'device') then Result := '';
+  {$ENDIF}
+  if Result <> '' then GIoError := IOERR_NOT_A_FILE;
+end;
 
 { The empty name names nothing, on every system and under any sandbox: it is
   answered before the gate, which refuses "" as a path (it would be the

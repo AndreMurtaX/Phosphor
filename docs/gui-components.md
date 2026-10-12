@@ -221,6 +221,10 @@ blocks. A bitmap is freed at once: nothing the framework dispatches stands on on
 The single exception is the form being closed, from its own `form_onclose@` /
 `form_onclosequery@`: that free is refused with `gui_error() = 1`.
 `tests/gui/27_free_in_handler.bas` crosses every event kind with each victim.
+Finding what dies costs what dies -- the controls, menu items, nodes and items
+the free destroys -- and not the number of handles the program holds; until
+2026-10-12 it asked every live handle, and `tests/gui/35_free_cost.bas` pins
+the difference.
 
 ### Error and handle model
 

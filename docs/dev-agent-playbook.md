@@ -1525,6 +1525,33 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-12 · GUI frees walk what dies, not what lives.** Round 9 fixed the
+  N*H class in ONE of the three routines that had it (the orphan rule) and left
+  ForgetDying and GuiForgetNodes scanning every live handle on every free --
+  the instance, not the class. Both now walk the dying tree and look each object
+  up in round 9's index; a deferred free takes its object's index entry, so the
+  one-live-reference-per-object rule (every GuiRegister is a constructor's,
+  checked by reading all 58 call sites) is what makes a lookup complete.
+  - **A cost claim needs a test that can fail.** Round 9's commit said "a button
+    free at 100k handles is flat" and nothing pinned it. `35_free_cost` measures
+    ratios inside its own run (100k-held vs bare; a deep submenu vs a flat one,
+    best of trials, 4x + slack) and was watched failing on the build before
+    (5342 vs 419 ms) and under seven of eight mutations of the new walk.
+  - **The survivor is worth naming.** Leaving deferred frees out of the index is
+    unobservable: a component's free notification still clears it, and a node's
+    parent is always made first and freed after it, so the child's deferred
+    free always runs first. Reasoned from the order, then tried (`end` in a
+    handler, so ResetHandles frees by slot): no double free. Kept for the
+    invariant, reported as uncatchable rather than given a test that cannot fail.
+  - **Reaching an object two ways makes a walk quadratic in silence.** A menu
+    item dies with its menu parent and with its owner; walking both made a
+    6000-deep submenu cost 653 ms against 1 ms flat. Only a cost test saw it --
+    every correctness assertion stayed green.
+  - **Still open, a different mechanism:** each node handle registers a
+    FreeNotification with its tree view, and the RTL keeps those in a TFPList it
+    scans on every add and remove (compon.inc), so making k node handles in one
+    tree costs k^2: 100k nodes take ~6 s to make, with no free involved.
+
 - **2026-10-12 · a fifth red-for-its-own-reasons test: the keyboard was not
   the harness's.** In a full Windows battery, block AH's `getkey-then-input`
   answered `|65 7868656c6c6f` once: getkey$ took an 'e' and the first INPUT

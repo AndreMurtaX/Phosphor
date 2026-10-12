@@ -52,6 +52,20 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (GUI, 2026-10-12)
+
+- **A free inside a handler costs what it destroys, not what is alive.**
+  `control_free` inside an event handler, and any free of a tree node or list
+  item, asked every live handle whether it died with the object -- so freeing N
+  controls in a program holding H handles cost N*H: 2000 buttons made and freed
+  in one click took 2.1 s beside 100k other handles, against 0.1 s with none.
+  The free now walks what dies (the components it owns, at every depth, the
+  items under a menu item, the nodes and items of a dying tree or list view, a
+  node's subtree) and finds each handle -- or deferred free -- through the
+  object index round 9 added: 20-30 ms at 0, 10k and 100k handles alike.
+  `tests/gui/35_free_cost.bas` pins what is dropped and the cost, as ratios
+  measured in the run.
+
 ### Fixed (adversarial round 11, 2026-10-12) -- stabilization mode
 
 Round 11 attacked the language core and the data libraries for the first time in

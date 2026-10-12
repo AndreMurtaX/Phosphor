@@ -99,8 +99,13 @@ type
     { FOUND BY ITS OBJECT (round 9): this handle's registry id, and the object
       it was registered for -- the key of the object-to-handle index, kept
       apart from Control because Control is nil'd when the object dies and the
-      index entry must still be found to be removed. Set by GuiRegister only;
-      0 and nil for a deferred free, which no reader looks up by object. }
+      index entry must still be found to be removed. Set by GuiRegister, and
+      by GuiFreeLater for a deferred free, which takes over its object's
+      entry from the handle it replaces: a free that destroys the object
+      before the deferred free runs finds it there (ForgetDying). An object
+      has at most ONE live reference -- one handle, made with it, then at
+      most one deferred free, made once that handle is dropped -- so one
+      entry per object is all the index holds. }
     Id: Int64;
     IdxKey: Pointer;
     { Arm the death notice, when the wrapped object is able to send one. }
@@ -941,11 +946,11 @@ procedure RegisterGuiCoreFuncs(Reg: TPhosphorRegistry);
   the subtree the free is about to destroy. No notification can report that
   death: nodes are not components, and their tree view is still alive.
 
-  SAFE TO WALK BECAUSE OF AN INVARIANT, not because of luck: every non-nil
-  Control in the registry points at a live object. A component is watched
-  directly, a node or item through its Holder, and this routine covers the one
-  death neither reports. That is what lets `is TTreeNode` and HasAsParent read
-  each Control below without reading freed memory. }
+  It walks the subtree that dies, not the registry, and looks each node up in
+  the object index: a free costs the size of what it destroys, never the
+  number of live handles (2026-10-11). The node itself is live -- every
+  non-nil Control in the registry points at a live object, which this routine
+  is one of the guards of -- so its children can be read. }
 procedure GuiForgetNodes(AObj: TObject);
 
 implementation
@@ -964,7 +969,8 @@ uses
   shift so every probe chain stays whole.
 
   An entry is trusted only after it is CHECKED: the id must still name a
-  TGuiHandle whose Control is that very object (HandleOf). An object that dies
+  TGuiHandle (HandleOf) -- or, for a reader dropping references, any TGuiRef
+  (ForgetRef) -- whose Control is that very object. An object that dies
   leaves its entry behind until its handle is destroyed, and its address may
   be reused meanwhile; the check refuses such an entry, and a reused address
   that is registered again simply overwrites it. }
@@ -1105,36 +1111,62 @@ begin
   end;
 end;
 
-procedure GuiForgetNodes(AObj: TObject);
+{ THE REFERENCE TO AObj, DROPPED: its handle, or the deferred free holding it
+  -- found through the index, which holds both (see TGuiRef.Id), and trusted
+  only while its Control is still AObj. Unwatched as the death notice would
+  leave it. A no-op for an object nothing references, or one already dropped. }
+procedure ForgetRef(AObj: TObject);
 var
   id: Int64;
-  i: Integer;
   o: TObject;
   h: TGuiRef;
-  dies: Boolean;
+begin
+  id := IdxFind(AObj);
+  if id = 0 then Exit;
+  o := HandleObj(id);
+  if not (o is TGuiRef) then Exit;
+  h := TGuiRef(o);
+  if (h.Control = nil) or (h.Control <> AObj) then Exit;
+  if h.Watched then TComponent(h.Control).RemoveFreeNotification(h);
+  if h.Holder <> nil then h.Holder.RemoveFreeNotification(h);
+  h.Holder := nil;
+  h.Control := nil;
+end;
+
+{ ARoot and every node beneath it, each ONCE: down to the first child, else
+  across to the next sibling, climbing back no higher than ARoot. Each node
+  is entered once and climbed out of once, so this is linear in the subtree
+  -- which is what the free is about to destroy anyway. }
+procedure ForgetSubtree(ARoot: TTreeNode);
+var
+  n: TTreeNode;
+begin
+  n := ARoot;
+  while n <> nil do
+  begin
+    ForgetRef(n);
+    if n.GetFirstChild() <> nil then
+      n := n.GetFirstChild()
+    else
+    begin
+      while (n <> ARoot) and (n.GetNextSibling() = nil) do n := n.Parent;
+      if n = ARoot then n := nil else n := n.GetNextSibling();
+    end;
+  end;
+end;
+
+{ BEFORE A NODE OR AN ITEM IS FREED: what dies is the
+  node and its subtree, or the item alone, and each is looked up by itself.
+  Until then this walked EVERY live handle, so a node free in a program
+  holding H handles cost H -- 2000 node frees in one click handler at 100k
+  handles took five seconds (2026-10-11). }
+procedure GuiForgetNodes(AObj: TObject);
 begin
   if AObj = nil then Exit;
-  id := FirstLiveHandle();
-  for i := 1 to LiveHandleCount() do
-  begin
-    if id = 0 then Break;
-    o := HandleObj(id);
-    if o is TGuiRef then
-    begin
-      h := TGuiRef(o);
-      dies := (h.Control <> nil) and (h.Holder <> nil) and
-              ((h.Control = AObj) or
-               ((AObj is TTreeNode) and (h.Control is TTreeNode) and
-                TTreeNode(h.Control).HasAsParent(TTreeNode(AObj))));
-      if dies then
-      begin
-        h.Holder.RemoveFreeNotification(h);
-        h.Holder := nil;
-        h.Control := nil;
-      end;
-    end;
-    id := NextLiveHandle(id);
-  end;
+  if AObj is TTreeNode then
+    ForgetSubtree(TTreeNode(AObj))
+  else
+    ForgetRef(AObj);
 end;
 
 destructor TGuiRef.Destroy;
@@ -1278,37 +1310,79 @@ begin
   Result := False;
 end;
 
+{ The nodes or items AComp holds, when it is a control that holds some: a
+  reference to one names AComp as its Holder, and dies with it. }
+procedure ForgetHeld(AComp: TComponent);
+var
+  n: TTreeNode;
+  i: Integer;
+begin
+  if AComp is TCustomTreeView then
+  begin
+    n := TCustomTreeView(AComp).Items.GetFirstNode();
+    while n <> nil do
+    begin
+      ForgetSubtree(n);
+      n := n.GetNextSibling();
+    end;
+  end
+  else if AComp is TCustomListView then
+    for i := 0 to TCustomListView(AComp).Items.Count - 1 do
+      ForgetRef(TCustomListView(AComp).Items[i]);
+end;
+
 { Drop every reference -- a program's handle or another deferred free -- to AObj
   or to anything that dies with it, as the free notifications would when it is
   really freed. Run while everything is still alive, which is what lets each
-  Control and Holder be asked its owner: the registry's invariant (every non-nil
-  Control is live) holds until this returns. }
+  object be walked to and looked up: the registry's invariant (every non-nil
+  Control is live) holds until this returns.
+
+  WHAT DIES IS WALKED, NOT WHAT LIVES (2026-10-11). Until then this asked every
+  live handle whether it died with AObj, so every control_free inside a
+  handler cost the whole registry: 2000 button frees in one click at 100k
+  handles took ten seconds. What a free destroys is exactly what this walks:
+  the components AObj owns, theirs in turn (TComponent.Destroy frees them),
+  the items under a menu item (TMenuItem.Destroy frees them, though the menu
+  owns them), and the nodes or items each dying tree or list view holds --
+  and each is looked up in the index by itself. So a free costs what it
+  destroys, which it was going to pay anyway.
+
+  A menu item reached through its menu parent is skipped when its OWNER also
+  dies: it is reached through the owner's components, and walking it twice
+  would walk its submenu twice, at every level -- quadratic in a deep menu.
+  The stack is explicit for the same reason: a submenu is as deep as a
+  program makes it. }
 procedure ForgetDying(AObj: TComponent);
 var
-  id: Int64;
-  i: Integer;
-  o: TObject;
-  h: TGuiRef;
+  stack: array of TComponent;
+  top, i: Integer;
+  c, k: TComponent;
 begin
-  id := FirstLiveHandle();
-  for i := 1 to LiveHandleCount() do
+  SetLength(stack, 16);
+  stack[0] := AObj;
+  top := 1;
+  while top > 0 do
   begin
-    if id = 0 then Break;
-    o := HandleObj(id);
-    if o is TGuiRef then
+    Dec(top);
+    c := stack[top];
+    ForgetRef(c);
+    ForgetHeld(c);
+    if top + c.ComponentCount + 1 > Length(stack) then
+      SetLength(stack, 2 * (top + c.ComponentCount + 1));
+    for i := 0 to c.ComponentCount - 1 do
     begin
-      h := TGuiRef(o);
-      if (h.Control <> nil) and
-         ((h.Watched and DiesWith(TComponent(h.Control), AObj)) or
-          ((h.Holder <> nil) and DiesWith(h.Holder, AObj))) then
-      begin
-        if h.Watched then TComponent(h.Control).RemoveFreeNotification(h);
-        if h.Holder <> nil then h.Holder.RemoveFreeNotification(h);
-        h.Holder := nil;
-        h.Control := nil;
-      end;
+      stack[top] := c.Components[i];
+      Inc(top);
     end;
-    id := NextLiveHandle(id);
+    if c is TMenuItem then
+      for i := 0 to TMenuItem(c).Count - 1 do
+      begin
+        k := TMenuItem(c).Items[i];
+        if DiesWith(k.Owner, AObj) then Continue;   // reached through its owner
+        if top + 1 > Length(stack) then SetLength(stack, 2 * (top + 1));
+        stack[top] := k;
+        Inc(top);
+      end;
   end;
 end;
 
@@ -1333,6 +1407,12 @@ begin
   p.Watch;
   SetLength(GPending, Length(GPending) + 1);
   GPending[High(GPending)] := RegisterHandle(p);
+  { ...and it takes the object's place in the index, where AHandle's entry
+    (dropped just above) stood: a later free of what owns obj -- or of a node
+    above it -- finds THIS reference by looking obj up, and drops it. }
+  p.Id := GPending[High(GPending)];
+  p.IdxKey := obj;
+  IdxPut(obj, p.Id);
 end;
 
 // --- moves that wait for a walk to finish (see GuiMoveControl) -------------

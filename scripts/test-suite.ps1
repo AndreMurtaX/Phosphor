@@ -453,6 +453,11 @@ else {
         @{ name='bench_debug';    src='tests\bench_debug.lpr' },
         @{ name='probe_budget';   src='scripts\probe_budget.lpr' },
         @{ name='probe_crt';      src='tests\probe_crt.lpr' },
+        # sin and cos, bit for bit against a copy of the round-11 definition:
+        # the fast path (2026-10-12) claims the same bits for every Double, and
+        # rests that claim on an error bound this measures. `--full` sweeps 16
+        # million arguments; `--bench` prints the timings.
+        @{ name='probe_trig';     src='tests\probe_trig.lpr' },
         @{ name='phosphorembed';  src='host\embed\phosphorembed.lpr' },
         # The Lazarus demo's scripting, which has no LCL in it precisely so that
         # something other than a person can run it. See lazarus/demo/demo_smoke.lpr.

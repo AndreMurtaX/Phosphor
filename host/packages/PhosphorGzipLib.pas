@@ -36,7 +36,8 @@ interface
 
 uses
   SysUtils, Classes, zstream,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox, PhosphorBudget;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorSandbox, PhosphorBudget,
+  PhosphorIoLib;
 
 procedure RegisterGzipFuncs(Reg: TPhosphorRegistry);
 
@@ -227,6 +228,7 @@ begin
   S := '';
   if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(APath, puRead) then Exit;
+  if IoSpecialKind(APath) <> '' then Exit;   // a FIFO's open blocks (round 11)
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try
@@ -251,6 +253,7 @@ begin
   Result := False;
   if not BudgetLinearOk(AWho, Length(APath), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(APath, puWrite) then Exit;
+  if IoSpecialKind(APath) <> '' then Exit;
   try
     fs := TFileStream.Create(APath, fmCreate);
     try

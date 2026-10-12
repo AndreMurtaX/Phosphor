@@ -21,7 +21,8 @@ interface
 uses
   SysUtils, Classes, IniFiles, contnrs,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox,
-  PhosphorBudget, PhosphorSysLib;
+  PhosphorBudget, PhosphorSysLib,
+  PhosphorIoLib;   // IoSpecialKind: a FIFO is not read or written (round 11)
 
 procedure RegisterConfigFuncs(Reg: TPhosphorRegistry);
 
@@ -443,7 +444,10 @@ begin
       so a refusal latches and both doors above -- cfg_open@ and cfg_reload@,
       which ask BudgetSpent -- report it (round 9). }
     if (FileName <> '') and not BudgetClaimLinear(Length(FileName), BudgetMilliOs) then Exit;
-    if (FileName <> '') and SandboxAllows(FileName, puRead) and FileExists(FileName) then
+    { A FIFO or a device under the name is read as no file at all: its open
+      blocks past every ceiling (round 11), and ioerror() says what it is. }
+    if (FileName <> '') and SandboxAllows(FileName, puRead) and FileExists(FileName) and
+       (IoSpecialKind(FileName) = '') then
     begin
       sl.Options := sl.Options + [soPreserveBOM];
       sl.LoadFromFile(FileName, nil);
@@ -492,7 +496,8 @@ begin
   // in the process's working directory, which is precisely the escape this
   // exists to stop. (This refusal used to sit in front of Ini.UpdateFile; it
   // sits in front of the line layer's writer now, unchanged.)
-  Result := (FileName <> '') and SandboxAllows(FileName, puWrite);
+  Result := (FileName <> '') and SandboxAllows(FileName, puWrite) and
+            (IoSpecialKind(FileName) = '');   // nor written to a FIFO (round 11)
   if not Result then Exit;
   { The path is the script's, and the save hands it to the OS twice (the folder
     it forces, the file it writes): priced once, up front (round 8).

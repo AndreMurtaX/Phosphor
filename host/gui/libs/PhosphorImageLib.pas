@@ -20,7 +20,8 @@ interface
 
 uses
   SysUtils, Classes, Controls, ExtCtrls, ComCtrls, Graphics,
-  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore, PhosphorSandbox;
+  PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorGuiCore, PhosphorSandbox,
+  PhosphorIoLib;
 
 procedure RegisterImageFuncs(Reg: TPhosphorRegistry);
 
@@ -62,6 +63,8 @@ begin
   if not SandboxAllows(A[1].Str, puRead) then
   begin GGuiError := ERR_FILE_NOT_FOUND; Exit; end;
   if not FileExists(A[1].Str) then begin GGuiError := ERR_FILE_NOT_FOUND; Exit; end;
+  // A FIFO's open blocks past every ceiling, a device's read waits (round 11).
+  if IoSpecialKind(A[1].Str) <> '' then begin GGuiError := ERR_LOAD_FAILED; Exit; end;
   { AND THE SIZE IS IN THE FILE. TPicture.LoadFromFile has no size pre-check at
     all -- it finds a graphic class by extension and hands it the stream. Measured
     on this tree: a FIFTY-FOUR BYTE .bmp whose header claims 30000 x 30000 took the
@@ -238,6 +241,7 @@ begin
   if not GuiResolve(A[0].Hnd, TImageList, c) then Exit;
   if not SandboxAllows(A[1].Str, puRead) then begin GGuiError := 1; Exit; end;
   if not FileExists(A[1].Str) then begin GGuiError := 1; Exit; end;
+  if IoSpecialKind(A[1].Str) <> '' then begin GGuiError := 1; Exit; end;   // round 11
   // THE DECODE IS THE ALLOCATION, and it is sized by the file, not by the list.
   // Measured: this call on a real 50 MB 1-bit .bmp of 20000 x 20000 committed
   // 1731 MB into a 32 x 32 icon list with nothing reported, and on a 54-byte .bmp

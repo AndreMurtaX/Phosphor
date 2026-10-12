@@ -803,6 +803,15 @@ length), `loc(n)` (the 1-based position of the next byte), and `input$(k, #n)` (
 exactly `k` **bytes**). `close` with no number closes every open channel.
 `open … for append` adds to an existing file.
 
+**`open` opens files, never a FIFO, a socket or a device.** In every mode it
+first asks what the path leads to, links followed, and raises `cannot open "…":
+not a file but a FIFO, a socket or a device` for one of those — a Linux FIFO's
+open waits in the kernel for the other end, where no execution ceiling reaches,
+and a device such as `CON` or `/dev/tty` waits for a person. The null device
+(`/dev/null`, `NUL`) is the one device it still opens. The same rule holds
+for every whole-file function; see
+[io.md](libraries/io.md#functions).
+
 **Reading is streamed.** `open … for input` does *not* load the file — it reads a
 window at a time, so a file far larger than memory is fine and opening one is
 instant regardless of its size. A read costs what it reads: one `line input` of

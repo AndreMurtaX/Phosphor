@@ -39,7 +39,8 @@ interface
 uses
   SysUtils, Classes, Types, Controls, Forms,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorVM,
-  PhosphorSandbox;   // GuiImageFileCost reads a file, so it asks the gate itself
+  PhosphorSandbox,   // GuiImageFileCost reads a file, so it asks the gate itself
+  PhosphorIoLib;     // ...and IoSpecialKind before it opens one (round 11)
 
 type
   { A registry entry for an LCL object. Control is a TObject so a handle can also
@@ -2696,6 +2697,8 @@ begin
     trust. Refusing here answers "no opinion", which makes the caller load the file
     the ordinary way and meet the sandbox's own refusal there. }
   if not SandboxAllows(APath, puRead) then Exit;
+  // Nor opened when it is a FIFO or a device (round 11); both callers refuse it.
+  if IoSpecialKind(APath) <> '' then Exit;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
   except

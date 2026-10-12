@@ -57,7 +57,7 @@ interface
 uses
   SysUtils, Classes, Zipper,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorSandbox,
-  PhosphorBudget;
+  PhosphorBudget, PhosphorIoLib;
 
 procedure RegisterZipFuncs(Reg: TPhosphorRegistry);
 
@@ -345,6 +345,9 @@ procedure TMeteredUnZipper.OpenIn(Sender: TObject; var AStream: TStream);
 begin
   if not SandboxAllows(FileName, puRead) then
     raise EPhosphorZipRefused.Create('refused: the archive is outside the sandbox root');
+  // A FIFO's open blocks past every ceiling (round 11): refused, not waited on.
+  if IoSpecialKind(FileName) <> '' then
+    raise EPhosphorZipRefused.Create('refused: the archive is not a file but a FIFO, a socket or a device');
   FInput := TGuardedInput.Create(
     TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite), Self);
   AStream := FInput;
@@ -430,6 +433,15 @@ begin
     bytes and lands on the same byte. It sets only fields of Item that it sets
     again, and the method it answers is the one inherited will act on. }
   ReadZipHeader(Item, method);
+  { THE FILE THE ENTRY IS WRITTEN TO is opened by paszlib with fmCreate, and a
+    FIFO already standing under its name blocks that open past every ceiling
+    (round 11). The name is paszlib's own (GetOutputFileName: the output path
+    and the local name with '/' made the platform's separator), asked here,
+    before inherited opens it. In-memory extraction opens no file. }
+  if (not Assigned(OnCreateStream)) and
+     (IoSpecialKind(OutputPath + StringReplace(Item.DiskFileName, '/', DirectorySeparator,
+                                               [rfReplaceAll])) <> '') then
+    raise EPhosphorZipRefused.Create('refused: an entry would be written into a FIFO, a socket or a device');
   stored := method = 0;
   if stored then
   begin
@@ -525,6 +537,8 @@ constructor TZipWriter.Create(const APath: String);
 begin
   if not SandboxAllows(APath, puWrite) then
     raise EPhosphorZipRefused.Create('refused: the path is outside the sandbox root');
+  if IoSpecialKind(APath) <> '' then   // its open at zip_close would block (round 11)
+    raise EPhosphorZipRefused.Create('refused: the path is not a file but a FIFO, a socket or a device');
   Z := TZipper.Create();
   Z.FileName := APath;
   Owned := TList.Create();
@@ -551,6 +565,8 @@ begin
     raise EInOutError.Create('zip_addfile: "' + ADisk + '" is outside the sandbox root');
   if not FileExists(ADisk) then
     raise EInOutError.Create('zip_addfile: "' + ADisk + '" does not exist');
+  if IoSpecialKind(ADisk) <> '' then   // read at zip_close, where its open would block (round 11)
+    raise EInOutError.Create('zip_addfile: "' + ADisk + '" is not a file but a FIFO, a socket or a device');
   CheckEntryName('zip_addfile', AArchive);
   if FindFirst(ADisk, faAnyFile, sr) = 0 then
   begin
@@ -770,6 +786,9 @@ begin
     left the slot reading clean. }
   if not SandboxAllows(Args[0].Str, puWrite) then begin ZipErr := 1; Exit(ValInt(0)); end;
   if not SandboxAllows(Args[1].Str, puRead) then begin ZipErr := 1; Exit(ValInt(0)); end;
+  // A FIFO's open blocks past every ceiling (round 11): the archive's here,
+  // each file's below.
+  if IoSpecialKind(Args[0].Str) <> '' then begin ZipErr := 1; Exit(ValInt(0)); end;
   try
     z := TZipper.Create();
     try
@@ -829,7 +848,8 @@ begin
             and at DeleteTree: "re-asked at every level of the recursion". And
             zip_addfile gates the individual path already, so without this line
             adding one file was refused while archiving its parent succeeded. }
-          if not SandboxAllows(base + names[i], puRead) then
+          if (not SandboxAllows(base + names[i], puRead)) or
+             (IoSpecialKind(base + names[i]) <> '') then
           begin
             ZipErr := 1;
             Exit(ValInt(0));       // the finally below frees the list, once
@@ -1318,6 +1338,12 @@ begin
   { Judged before the archive is even opened, so this refusal is a property of the
     archive and never an outcome of I/O. JudgeArchive asks it again; it is cheap. }
   if LinkRefusal(AEntries, AWhy) then Exit;
+  if IoSpecialKind(APath) <> '' then   // a FIFO's open blocks (round 11)
+  begin
+    AUnreadable := True;
+    AWhy := 'the archive is not a file but a FIFO, a socket or a device';
+    Exit;
+  end;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
   except
@@ -1424,6 +1450,7 @@ begin
   // first, as zip_compress and zip_addfile always were (round 9).
   if not BudgetLinearOk('unzip_count', Length(Args[0].Str), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
+  if IoSpecialKind(Args[0].Str) <> '' then begin ZipErr := 1; Exit; end;   // round 11
   try
     uz := TUnZipper.Create();
     try
@@ -1452,6 +1479,7 @@ begin
   // first, as zip_compress and zip_addfile always were (round 9).
   if not BudgetLinearOk('unzip_entry$', Length(Args[0].Str), BudgetMilliOs, Err) then Exit;
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
+  if IoSpecialKind(Args[0].Str) <> '' then begin ZipErr := 1; Exit; end;   // round 11
   try
     uz := TUnZipper.Create();
     try
@@ -1901,6 +1929,8 @@ begin
     is only read, and leaves the one being written to unguarded. }
   if not SandboxAllows(Args[0].Str, puRead) then begin ZipErr := 1; Exit; end;
   if not SandboxAllows(Args[1].Str, puWrite) then begin ZipErr := 1; Exit; end;
+  if (IoSpecialKind(Args[0].Str) <> '') or (IoSpecialKind(Args[1].Str) <> '') then
+  begin ZipErr := 1; Exit; end;   // a FIFO's open blocks (round 11)
   { A SOURCE THAT IS NOT THERE IS A FAILURE ANSWERED BEFORE THE OUTPUT IS TOUCHED
     -- the rule TZipWriter.AddFile already carries, and here it guards data, not
     just tidiness. SaveToFile opens the archive with fmCreate FIRST and

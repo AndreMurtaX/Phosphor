@@ -812,6 +812,7 @@ var fs: TFileStream;
 begin
   Result := False;
   if not IoGate(APath, puWrite) then Exit;
+  if IoSpecialKind(APath) <> '' then Exit;   // a FIFO's open blocks (round 11)
   try
     fs := TFileStream.Create(APath, fmCreate);
     try
@@ -830,6 +831,7 @@ begin
   // now that the helper holds the door's error.
   if not (IoGate(APath, puRead) or GateRefused(AFn, Err)) then Exit;
   if not FileExists(APath) then Exit;
+  if IoSpecialKind(APath) <> '' then Exit;   // a FIFO's open blocks (round 11)
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
     try

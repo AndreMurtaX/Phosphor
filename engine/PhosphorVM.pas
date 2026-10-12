@@ -801,6 +801,9 @@ type
 
 implementation
 
+uses
+  PhosphorIoLib;   // IoSpecialKind, for a channel's OPEN (round 11)
+
 function IsStateFault(E: Exception): Boolean;
 begin
   if E = nil then Exit(False);
@@ -1423,6 +1426,10 @@ begin
     Exit(MakeError(peRuntime, 'cannot open "' + APath + '": outside the sandbox root'));
   if (fmode <> cmInput) and not SandboxAllows(APath, puWrite) then
     Exit(MakeError(peRuntime, 'cannot open "' + APath + '" for writing: outside the sandbox root'));
+  // A FIFO's open blocks in the kernel past every ceiling, a device's read
+  // waits on a person: asked before any mode opens it (round 11).
+  if IoSpecialKind(APath) <> '' then
+    Exit(MakeError(peRuntime, 'cannot open "' + APath + '": not a file but a FIFO, a socket or a device'));
   // Reset the slot field by field -- FillChar over a record holding a managed
   // string would zero the reference without releasing it.
   FChannels[ANum].Stream := nil;

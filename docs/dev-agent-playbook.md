@@ -1525,6 +1525,35 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-12 · a fifth red-for-its-own-reasons test: the keyboard was not
+  the harness's.** In a full Windows battery, block AH's `getkey-then-input`
+  answered `|65 7868656c6c6f` once: getkey$ took an 'e' and the first INPUT
+  `xhello`. Passed 3 of 3 alone. The two suspects were a burst arriving before
+  the program was ready and an ordering defect between raw and line mode;
+  READING ruled out both. Every reader on that path -- HeadKey and KbdRead
+  (ReadConsoleInputW) and the host's cooked ReadConsoleW -- takes ONE queue
+  in order, and the queue keeps what was written to it whether or not phosphor
+  is reading yet (`getkey-then-input-queued` types everything before the
+  program starts). So no timing puts any of the case's keys ahead of its first
+  'x', and an 'e' answered first must be a key the case never typed: one
+  foreign 'e' queued ahead of the 'x' gives exactly those bytes, measured --
+  getkey$ takes it, and the line is everything the case typed. Measured too:
+  keys arriving 0-1 s after launch, 21 of 21 green, and the original timings
+  under 32 CPU spinners, 25 of 25 -- load was never the variable. The door: the
+  case's console was MINIMISED (SW_SHOWMINNOACTIVE, chosen on 2026-10-11 to
+  stop Windows Terminal tabs), and a minimised window is still a VISIBLE one
+  (`IsWindowVisible` 1, `IsIconic` 1) that Alt+Tab, a taskbar click or the
+  window beneath one that closes can make the foreground window -- on a
+  desktop the owner was using during the battery. It is now started hidden
+  (`IsWindowVisible` 0), and the inner harness refuses a case whose console
+  window is visible (watched catching that with the old flag: every case
+  HARNESS, exit 2). The full Windows half passes hidden, the screen-reading
+  and Ctrl+C cases included, and under the same load. Lesson: the 2026-10-11
+  rule held -- a rerun that passes means read the harness -- and the race was
+  not in the harness's timing but in its ASSUMPTION that the keys it types are
+  the only keys. A test that types into a real console owns that console's
+  input only while nobody else can reach it; make that a checked fact.
+
 - **2026-10-12 · round 11, the first stabilization round: 41 survivors, 8 HIGH,
   0 killed.** The scope proposal (docs/proposal-1.0.md) asked for rounds that fix
   only HIGH, each fix reviewed before merge, and the rest in a ledger. Two

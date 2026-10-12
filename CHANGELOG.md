@@ -95,6 +95,11 @@ each reviewed adversarially before merge. The MEDIUM and LOW findings are in
   to 60 s for its second thread and says so if it does not finish, and block W
   prints the whole stderr when it fails; `probe_limits` scales its millisecond
   bounds by how much slower the machine is than the one they were measured on.
+- (2026-10-12) The console-input harness starts each Windows case's console
+  **hidden**, not minimised: a minimised window can still be brought to the
+  foreground, and one key typed into it there made `getkey-then-input` fail
+  once in a full battery. It refuses to run a case in a console whose window
+  is visible.
 
 ### Fixed (adversarial round 10, 2026-10-11)
 

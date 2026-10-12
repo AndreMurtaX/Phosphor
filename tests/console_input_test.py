@@ -34,7 +34,8 @@ here, every case a measured defect (see PhosphorCrtLib.pas#CrtEventKey):
 
 No headless runner can reach any of this: these paths run only when stdin IS a
 terminal. On Windows this script starts a copy of itself in a NEW console
-(CREATE_NEW_CONSOLE), which writes key events into that console's input buffer
+(CREATE_NEW_CONSOLE, its window hidden so that no keyboard can add a key to a
+case's -- run_windows says why), which writes key events into that console's input buffer
 with WriteConsoleInputW -- a key-down and a key-up per UTF-16 unit, as a
 keyboard makes them, or the exact records a case names -- before the program
 starts or, for the timed cases, in bursts while it runs, stdout to a file. On
@@ -152,6 +153,18 @@ def inner(spec_path):
         return ''
 
     with open(spec['out'], 'wb') as fo, open(spec['err'], 'wb') as fe:
+        # NO KEYBOARD CAN REACH THIS CONSOLE, or the keys a case types are not
+        # the only keys in its input: a console whose window can be shown can
+        # be made the foreground window, and a key typed there joins the case's
+        # (see run_windows, where it is started hidden). Asked before any key
+        # is written. No window at all (0) is no keyboard either.
+        k32.GetConsoleWindow.restype = wt.HWND
+        u32 = ctypes.WinDLL('user32')
+        u32.IsWindowVisible.argtypes = [wt.HWND]
+        cw = k32.GetConsoleWindow()
+        if cw and u32.IsWindowVisible(cw):
+            fe.write(b'HARNESS: the console window is visible, so a keyboard can type into it\n')
+            return
         bad = write(spec['pre'])
         if bad:
             fe.write(bad.encode())
@@ -263,16 +276,28 @@ def run_windows(exe, work):
         sp = os.path.join(work, name + '.json')
         with open(sp, 'w', encoding='utf-8') as f:
             json.dump(spec, f)
-        # THROUGH conhost.exe BY NAME, minimised and not activated. A bare
-        # CREATE_NEW_CONSOLE is handed by Windows 11 to the default terminal
-        # application, Windows Terminal, which opens a TAB per console and
-        # keeps it open after the program exits: 356 dead tabs (and as many
-        # OpenConsole/conhost processes) were left on the owner's desktop on
-        # 2026-10-11 by two days of these cases. conhost.exe named directly
-        # hosts its command in a classic console and closes with it.
+        # THROUGH conhost.exe BY NAME, and HIDDEN. A bare CREATE_NEW_CONSOLE
+        # is handed by Windows 11 to the default terminal application, Windows
+        # Terminal, which opens a TAB per console and keeps it open after the
+        # program exits: 356 dead tabs (and as many OpenConsole/conhost
+        # processes) were left on the owner's desktop on 2026-10-11 by two
+        # days of these cases. conhost.exe named directly hosts its command in
+        # a classic console and closes with it.
+        # HIDDEN, NOT MINIMISED (2026-10-12): a minimised window is still a
+        # VISIBLE one (IsWindowVisible 1, IsIconic 1), so Windows can make it
+        # the foreground window -- Alt+Tab, a taskbar click, or the window
+        # beneath one that closes -- and then a key the owner types goes into
+        # the case's input. That is the only way 'getkey-then-input' could
+        # answer '|65 7868656c6c6f': every reader here takes one queue in
+        # order, so no timing puts a key ahead of the 'x' the case types
+        # first, and ONE foreign 'e' ahead of it gives exactly those bytes
+        # (getkey$ takes the 'e', the line is everything the case typed). It
+        # failed once in a full battery on the owner's desktop and passed 3 of
+        # 3 alone. A hidden window is never activated, so no keyboard reaches
+        # it; inner() refuses a console whose window is visible.
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = 7                      # SW_SHOWMINNOACTIVE
+        si.wShowWindow = 0                      # SW_HIDE
         conhost = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'conhost.exe')
         p = subprocess.Popen([conhost, sys.executable, '-I', os.path.abspath(__file__), '--inner', sp],
                              creationflags=CREATE_NEW_CONSOLE, startupinfo=si)

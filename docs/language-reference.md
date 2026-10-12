@@ -797,7 +797,8 @@ exactly `k` **bytes**). `close` with no number closes every open channel.
 first asks what the path leads to, links followed, and raises `cannot open "…":
 not a file but a FIFO, a socket or a device` for one of those — a Linux FIFO's
 open waits in the kernel for the other end, where no execution ceiling reaches,
-and a device such as `CON` or `/dev/tty` waits for a person. The same rule holds
+and a device such as `CON` or `/dev/tty` waits for a person. The null device
+(`/dev/null`, `NUL`) is the one device it still opens. The same rule holds
 for every whole-file function; see
 [io.md](libraries/io.md#functions).
 

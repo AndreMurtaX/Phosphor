@@ -45,7 +45,7 @@ interface
 uses
   SysUtils, Classes, StrUtils, fpjson,
   PhosphorValue, PhosphorErrors, PhosphorRegistry, PhosphorHandles, PhosphorJsonLib,
-  PhosphorSandbox, PhosphorBudget;
+  PhosphorSandbox, PhosphorBudget, PhosphorIoLib;
 
 procedure RegisterRagFuncs(Reg: TPhosphorRegistry);
 
@@ -342,6 +342,8 @@ begin
   Result := True;
   if not SandboxAllows(APath, puRead) then Exit;
   if not FileExists(APath) then Exit;
+  // A FIFO's open blocks past every ceiling (round 11): read as unreadable.
+  if IoSpecialKind(APath) <> '' then Exit;
   opened := False;
   try
     fs := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);

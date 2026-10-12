@@ -61,16 +61,20 @@ the kernel for the other end — a writer for a reader, a reader for a writer �
 no [execution ceiling](../embedding.md#the-ceilings-reach-inside-a-library-call-too)
 reaches a call that is waiting there: `MaxSteps` and `TimeoutMs` are asked between
 instructions. So every function on this page that reads or writes a file's
-contents, the classic `open … as #n` in every mode, the string list's and the
-config's file calls, and the packages' file doors (gzip, base64, zip, sqlite, and
-the http certificate paths) first ask what the path leads to, **links followed**,
-and refuse a FIFO, a socket or a device — `file_kind$`'s `"fifo"`, `"socket"` and
-`"device"`, which on Windows are a pipe (`\\.\pipe\…`) and a name the OS maps to a
-device (`NUL`, `CON`). The refusal is the door's ordinary failure (`0`, `""`, an
-empty buffer; a classic `open` raises `cannot open "…": not a file but a FIFO, a
-socket or a device`), and `ioerror()` is `222`, `"not a file: a FIFO, a socket or a
-device"`. Writing to `/dev/null` or `NUL` is refused with the rest: nothing on
-this page ever promised it. A folder walk that meets one — `dir_copy` over a tree
+contents, the classic `open … as #n` in every mode, the string list's, the
+config's and the RAG index's file reads, the GUI's picture loaders, and the
+packages' file doors (gzip, base64, zip, sqlite, and the http certificate paths)
+first ask what the path leads to, **links followed**, and refuse a FIFO, a socket
+or a device — `file_kind$`'s `"fifo"`, `"socket"` and `"device"`. On Windows that
+is asked of the OS by a handle opened with no access rights, not of the spelling:
+a named pipe is refused by any of its names (`\\.\pipe\x`, `\\localhost\pipe\x`,
+`\\?\UNC\…`, `\\?\GLOBALROOT\Device\NamedPipe\x`), and so is `CON`. The refusal is
+the door's ordinary failure (`0`, `""`, an empty buffer; a classic `open` raises
+`cannot open "…": not a file but a FIFO, a socket or a device`), and `ioerror()` is
+`222`, `"not a file: a FIFO, a socket or a device"`. **The null device is the one
+device let through** — `/dev/null` (or a link to it) on Linux, `NUL` / `\\.\NUL` on
+Windows — because it waits for nothing: writing to it is still how a program
+throws output away. A folder walk that meets one — `dir_copy` over a tree
 holding a FIFO — copies everything else and leaves it out. Until round 11 only
 `file_getsize` knew this, and sixteen doors hung on a FIFO, this page's worked
 example among them. What is left: the question and the open are two calls, so

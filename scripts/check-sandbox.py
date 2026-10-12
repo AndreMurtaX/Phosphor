@@ -116,6 +116,13 @@ ALLOWED = {
     'PhosphorIoLib.pas:KindOpenFinal': 'reached only from KindOfWin and CanonicalWin, '
         'each of which asks IoGateAt for the path first',
     'PhosphorIoLib.pas:KindFinalName': 'reached only from KindOpenFinal (above), on a handle it opened',
+    # ROUND 11's open check. Asking the gate here as well ran the sandbox's walk
+    # twice per open (+70% on a sandboxed read, measured by the review).
+    'PhosphorIoLib.pas:UnixKind': 'reached only from KindOfUnix, which asks IoGateAt first, '
+        'and from IoSpecialKind (below)',
+    'PhosphorIoLib.pas:IoSpecialKind': 'asked by a door AFTER its own gate, about the same path '
+        '(a zip entry or a SQLite journal: beside the folder or the database it gated), just '
+        'before its open; it opens a handle with no access rights and reads nothing',
     'PhosphorSandbox.pas:IsDirectoryEntry': 'part of the gate: asks what an entry is so the gate can judge it',
     'PhosphorSandbox.pas:IsLinkEntry': 'part of the gate: asks what an entry is so the gate can judge it',
     # The gate itself: these three ARE the check, so they cannot ask it.

@@ -99,3 +99,5 @@
 99_delimitedtext
 100_strlist_round9
 101_file_kind
+102_resume_past_return
+103_function_suffix

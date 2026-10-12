@@ -97,6 +97,11 @@ type
     FLocalTypes: array of TVarType;
     FLocalCount: Integer;
     FRetType: TVarType;
+    { The opStmt of every `return` in the function being compiled. Each is
+      re-patched to the body's END once that is known (ParseFunction): had the
+      return succeeded, control would have left the function, so that is where
+      "past this statement" is for `resume next` -- not the next line of text. }
+    FRetStmts: array of Integer;
     // loop context stack (for BREAK / CONTINUE)
     FLoopBreaks: array of array of Integer;
     FLoopConts: array of array of Integer;
@@ -705,6 +710,7 @@ begin
 
   FInFunction := True;
   FRetType := retType;
+  FRetStmts := nil;
   // Skip the body in normal flow. This jump is ALSO the body's end marker: it sits
   // immediately before the entry point and its target is the first instruction that
   // is not part of the body, which is how the VM knows where a body stops when
@@ -790,6 +796,11 @@ begin
   FProg.Emit(opPushConst, FProg.Consts.Add(DefaultValue(retType)), 0, ln);
   FProg.Emit(opRetFunc, 0, 0, ln);
   FProg.Patch(jOver, FProg.Count);
+  // A return statement ends where the body ends: the VM's ResumeAtNextStmt then
+  // takes its "function ends, hands back the default" path. See FRetStmts.
+  for i := 0 to High(FRetStmts) do
+    FProg.Patch(FRetStmts[i], FProg.Count);
+  FRetStmts := nil;
   if not IsKeyword('endfunction') then begin FailUnterminated('function', ['endfunction'], ln); Exit; end;
   FLex.Advance();
   FInFunction := False;
@@ -2587,6 +2598,10 @@ begin
       FLex.Advance();
       if FInFunction then
       begin
+        // This statement's opStmt is the instruction just before: ParseStatement
+        // emits it and calls straight into this body. See FRetStmts.
+        SetLength(FRetStmts, Length(FRetStmts) + 1);
+        FRetStmts[High(FRetStmts)] := FProg.Count - 1;
         // a function return carries a value (default of the return type if bare:
         // at end of line, before a ':' separator, or at end of input)
         if AtStatementEnd() then

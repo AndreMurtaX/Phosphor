@@ -21,7 +21,9 @@ uses
 procedure RegisterNumFuncs(Reg: TPhosphorRegistry);
 
 { The sine/cosine internals, exported for tests/probe_trig.lpr, which checks
-  them bit for bit against a copy of the round-11 code. Nothing else calls them. }
+  them bit for bit against a copy of the round-11 code. Nothing else calls them,
+  and no host should: SinCosFast's answer is only valid when it returns True,
+  and none of the three is a registered name. }
 function SinCosD(x: Double; wantCos: Boolean): Double;
 function SinCosFast(x: Double; wantCos: Boolean; out yh, yl: Double): Boolean;
 function RemPio2Parts(x: Double; out rHi, rLo: Double): Integer;
@@ -453,12 +455,14 @@ end;
   when it does not (Ziv's strategy):
 
   - reduction, for pi/4 < |x| < 1.5 * 2^20: Cody and Waite's, with pi/2 split
-    as C1 + C2 + C3 + C4 -- three 33-bit parts and a Double, 152 bits of pi/2
-    (fdlibm's constants, re-derived from pi). n = nearest(x * 2/pi) is below
-    2^20, so each n*Ci (i <= 3) is exact, x - n*C1 is exact (Sterbenz), the
-    next two subtractions are carried exactly by TwoSum, and the error left in
-    r is below 2^-128 absolute -- 2^-67 relative even at the smallest |r| any
-    Double reaches (about 2^-61). Above the bound the reduction is RemPio2,
+    as C1 + C2 + C3 + C4 -- three short parts (31, 32 and 28 significant bits)
+    and a Double, 152 bits of pi/2 (fdlibm's constants, re-derived from pi).
+    n = nearest(x * 2/pi) is below 2^20, so each n*Ci (i <= 3) is exact, x -
+    n*C1 is exact (Sterbenz), the next two subtractions are carried by TwoSum,
+    and what is left is the rounding of the low word: about 2^-107 absolute
+    when |r| is near pi/4, and never worse than 2^-76 relative, even at the
+    smallest |r| any Double reaches (about 2^-61). Above the bound the
+    reduction is RemPio2,
     which is the definition's own (its r, bit for bit).
   - kernel: r = a + t, a = j/64 the nearest, |t| <= 1/128, and
       sin r = sin a + cos a * t + (sin a * ct + cos a * st)

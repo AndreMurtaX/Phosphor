@@ -1525,6 +1525,40 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-12 · stabilization batch 1 · typed arrays and SWAP (ledger 2, 3, 13).**
+  An element write now asks `StoreCheck` -- the assignment's own rule, not a
+  second one -- with the array's kind mapped to a suffix type, in `t_arr_set`,
+  which is the only routine that writes an element after `dim@` fills it: the
+  typed setters, `arr_set@`, the bracket form, its compound form and SWAP all
+  call it. The typed setters were already narrow by SIGNATURE (`sarr_set@` with
+  a number is *no function*, code 4); the loose door was `arr_set@`, which is
+  registered for every value kind, and the bracket sugar compiles to it.
+  - **SWAP's second store could fail after the first was done**, and the
+    asymmetry is narrower than it looks: once element kinds are enforced, the
+    only store that fails one way and not the other is an int% receiving a
+    Double outside Int64. Each scalar side is now stored first into a temporary
+    of its OWN type (the same opStoreVar rule), elements are written next and
+    scalars last, so nothing is written until every store that can fail has
+    passed. The reasoning that an element write cannot then fail is written at
+    ParseSwap.
+  - **The index was evaluated twice**, once to read and once to write, and the
+    old comment asked for side-effect-free indices. Side effects were not the
+    whole of it: `swap a@[1], a@[a@[1]]` has none, and its second write re-read
+    an index the first write had just changed -- an out-of-range abort, or a
+    write to the wrong element. Handle and indices are now evaluated once into
+    temporaries. Found by asking what "validated before either store" needs to
+    be TRUE, not by a report.
+  - **A compound door that cannot reach the defect is not a test of it.** The
+    first draft of 106 used `s@[2] += 1` as a compound case; `"old" + 1` is the
+    string `"old1"`, so the store was legal, and `4 + "x"` is refused by the `+`
+    before the store is reached. The case was dropped and the reason written in
+    a `rem`, rather than kept as an assertion that passes on both builds.
+  - Mutations, rebuilt with `-B`: the kind check widened to `vtAny` fails 106
+    (an element holding `"hi"` where 7 was asserted) and 107; the pristine
+    compiler fails 107 five times and aborts at `index 10 out of bounds`; the
+    two scalar pre-checks typed `vtAny` fail exactly the five value-destroyed
+    assertions.
+
 - **2026-10-12 · GUI frees walk what dies, not what lives.** Round 9 fixed the
   N*H class in ONE of the three routines that had it (the orphan rule) and left
   ForgetDying and GuiForgetNodes scanning every live handle on every free --

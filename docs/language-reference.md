@@ -203,6 +203,37 @@ println GREETING$; ", score = "; score
 Hi, score = 30
 ```
 
+### SWAP
+
+`swap a, b` exchanges two values. Each side is a variable or an array element
+(`a@[i]`, `grid@[r, c]`); an element's handle and indices are evaluated once. Each
+side receives the other's value by the rule an assignment uses -- coerced to its
+suffix, or refused -- so `swap x, n%` with `x = 2.5` leaves `n%` holding what
+`n% = 2.5` holds.
+
+**A swap is all-or-nothing.** Every store is checked before either is done: if one
+would be refused -- `swap s$, x` (a type mismatch), `swap x, n%` with `x = 1e300`
+(too large for an int%), an index out of range -- the statement fails with that
+error and **both values are as they were**, including under `on error goto ...
+resume next`.
+
+```basic
+a = 1
+b = 2
+swap a, b
+println a; " "; b
+names@ = sdim@(2)
+names@[1] = "Ada"
+names@[2] = "Alan"
+swap names@[1], names@[2]
+println names@[1]
+```
+
+```
+2 1
+Alan
+```
+
 ---
 
 ## Operators
@@ -491,7 +522,12 @@ Create an array with `dim@` (numbers), `sdim@` (strings) or `pdim@` (handles); i
 returns a handle. **Indices are 1-based.** Read and write elements with bracket
 sugar `a@[i]`, and query bounds with `lbound` / `ubound` / `ndims`. Arrays can be
 multi-dimensional (`dim@(rows, cols)`), and compound assignment works on elements
-(`a@[i] += 1`).
+(`a@[i] += 1`). **An element holds its array's kind**, by the rule an assignment
+uses: a `dim@` element takes what a plain name takes (a number or an int%), an
+`sdim@` element what a `$` name takes, a `pdim@` element what an `@` name takes.
+Anything else -- `a@[1] = "hi"` on a `dim@` array -- is refused with a type
+mismatch (`err()` 3, *cannot store string into numeric array*) and the element is
+unchanged.
 
 ```basic
 a@ = dim@(5)
@@ -1193,6 +1229,7 @@ n   = 3.14        ' number (Double)      i% = 7      ' integer
 s$  = "text"      ' string               b? = 1 < 2  ' boolean (true/false)
 h@  = dim@(3)     ' handle (array/dict/file/json/…)
 const PI = 3.14159                       ' fixed, assignment is an error
+swap a, b                                ' exchange; all-or-nothing
 
 ' --- operators ---------------------------------------------------------
 +  -  *           /  (real, ->float)     \  (integer)     ^  (power)

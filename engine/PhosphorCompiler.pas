@@ -60,6 +60,16 @@ type
     IsLocal: Boolean;
   end;
 
+  { One side of a SWAP, as EmitReadTarget leaves it: a scalar's name, or an
+    @-array element whose handle and indices were evaluated ONCE into Slots
+    (the handle first), so the write stores to the element that was read. }
+  TSwapTarget = record
+    Name: String;
+    Line: Integer;
+    IsElem: Boolean;
+    Slots: array of THiddenSlot;
+  end;
+
   TPhosphorCompiler = class
   private
     FLex: TLexer;
@@ -195,8 +205,8 @@ type
     procedure ParseSwap;          // swap <lvalue>, <lvalue>
     procedure ParsePrintFile(AAddNewline: Boolean);   // print #n [, item[; item...]]
     procedure ParsePrintUsing(AAddNewline: Boolean);  // print using fmt$; args
-    procedure EmitReadTarget(APos: Integer);   // SWAP: emit code that reads an lvalue
-    procedure EmitWriteTarget(APos: Integer; const ATemp: THiddenSlot); // SWAP: assign a temp into an lvalue
+    procedure EmitReadTarget(APos: Integer; out ATarget: TSwapTarget);   // SWAP: emit code that reads an lvalue
+    procedure EmitWriteTarget(const ATarget: TSwapTarget; const ATemp: THiddenSlot); // SWAP: assign a temp into an lvalue
     procedure SkipTarget;         // SWAP: advance the lexer past one lvalue
     function  InputTypeCode(const AName: String): Integer;
     procedure ParseStatement;      // the depth-guarded door; calls the body below
@@ -2228,9 +2238,10 @@ begin
 end;
 
 { SWAP support. A target is a scalar variable or an @-array element. The two are
-  read into hidden temporaries first, then cross-written, so aliasing is safe and
-  the exchange is atomic in effect. Index expressions are re-parsed (via the lexer
-  marks) for the read and the write; keep them side-effect free. }
+  read into hidden temporaries first, then cross-written, so aliasing is safe.
+  An element's handle and indices are evaluated ONCE, at the read, and the write
+  reuses them -- so the element written is the element read, and an index
+  expression runs once. See ParseSwap for why the exchange is all-or-nothing. }
 procedure TPhosphorCompiler.SkipTarget;
 var depth: Integer;
 begin
@@ -2248,59 +2259,85 @@ begin
   end;
 end;
 
-procedure TPhosphorCompiler.EmitReadTarget(APos: Integer);
-var name: String; ln, nidx: Integer;
+procedure TPhosphorCompiler.EmitReadTarget(APos: Integer; out ATarget: TSwapTarget);
+var nidx, i: Integer;
 begin
   FLex.Reset(APos);
-  name := FLex.Cur().StrVal;
-  ln := FLex.Cur().Line;
-  if FLex.Peek().Kind = tkLBracket then
+  ATarget.Name := FLex.Cur().StrVal;
+  ATarget.Line := FLex.Cur().Line;
+  ATarget.IsElem := FLex.Peek().Kind = tkLBracket;
+  SetLength(ATarget.Slots, 0);
+  if ATarget.IsElem then
   begin
-    if VarTypeOf(name) <> vtHandle then begin Fail('SWAP can index only a handle (@) variable', ln); Exit; end;
-    EmitLoadVar(name, ln);      // the handle
+    if VarTypeOf(ATarget.Name) <> vtHandle then begin Fail('SWAP can index only a handle (@) variable', ATarget.Line); Exit; end;
+    // The handle, then each index, into a temporary of its own (see THiddenSlot:
+    // an index expression can re-enter this same SWAP).
+    SetLength(ATarget.Slots, 1);
+    ATarget.Slots[0] := NewHidden(vtAny);
+    EmitLoadVar(ATarget.Name, ATarget.Line);
+    EmitStoreHidden(ATarget.Slots[0], ATarget.Line);
     FLex.Advance(); FLex.Advance(); // the name, '['
-    ParseExpr(); nidx := 1;
-    while (not FFailed) and (FLex.Cur().Kind = tkComma) do
-    begin FLex.Advance(); ParseExpr(); Inc(nidx); end;
+    nidx := 0;
+    repeat
+      if nidx > 0 then FLex.Advance();   // the ','
+      ParseExpr();
+      if FFailed then Exit;
+      Inc(nidx);
+      SetLength(ATarget.Slots, nidx + 1);
+      ATarget.Slots[nidx] := NewHidden(vtAny);
+      EmitStoreHidden(ATarget.Slots[nidx], ATarget.Line);
+    until FLex.Cur().Kind <> tkComma;
     Expect(tkRBracket, ''']''');
-    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, ln);
+    if FFailed then Exit;
+    for i := 0 to nidx do
+      EmitLoadHidden(ATarget.Slots[i], ATarget.Line);
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_get')), 1 + nidx, ATarget.Line);
   end
   else
   begin
-    EmitLoadVar(name, ln);
+    EmitLoadVar(ATarget.Name, ATarget.Line);
     FLex.Advance();               // the name
   end;
 end;
 
-procedure TPhosphorCompiler.EmitWriteTarget(APos: Integer; const ATemp: THiddenSlot);
-var name: String; ln, nidx: Integer;
+procedure TPhosphorCompiler.EmitWriteTarget(const ATarget: TSwapTarget; const ATemp: THiddenSlot);
+var i: Integer;
 begin
-  FLex.Reset(APos);
-  name := FLex.Cur().StrVal;
-  ln := FLex.Cur().Line;
-  if FLex.Peek().Kind = tkLBracket then
+  if ATarget.IsElem then
   begin
-    if VarTypeOf(name) <> vtHandle then begin Fail('SWAP can index only a handle (@) variable', ln); Exit; end;
-    EmitLoadVar(name, ln);      // the handle
-    FLex.Advance(); FLex.Advance(); // the name, '['
-    ParseExpr(); nidx := 1;
-    while (not FFailed) and (FLex.Cur().Kind = tkComma) do
-    begin FLex.Advance(); ParseExpr(); Inc(nidx); end;
-    Expect(tkRBracket, ''']''');
-    EmitLoadHidden(ATemp, ln);                // the value to store
-    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set@')), 1 + nidx + 1, ln);
-    FProg.Emit(opPop, 0, 0, ln);              // discard arr_set's returned handle
+    for i := 0 to High(ATarget.Slots) do
+      EmitLoadHidden(ATarget.Slots[i], ATarget.Line);   // the handle, the indices
+    EmitLoadHidden(ATemp, ATarget.Line);                 // the value to store
+    FProg.Emit(opCall, FProg.Consts.Add(ValStr('arr_set@')), Length(ATarget.Slots) + 1, ATarget.Line);
+    FProg.Emit(opPop, 0, 0, ATarget.Line);               // discard arr_set's returned handle
   end
   else
   begin
-    EmitLoadHidden(ATemp, ln);
-    FLex.Advance();               // the name
-    EmitStoreVar(name, ln);
+    EmitLoadHidden(ATemp, ATarget.Line);
+    EmitStoreVar(ATarget.Name, ATarget.Line);
   end;
 end;
 
+{ SWAP IS ALL-OR-NOTHING: every store that can fail is tried before any
+  target is written. Until 2026-10-12 the two writes were simply emitted in
+  order, so `swap x, n%` with x = 1e300 stored 5 into x and then failed to
+  store 1e300 into n% -- and under `resume next` the 1e300 was gone.
+
+  A SCALAR target is checked by storing its new value first into a temporary of
+  the TARGET'S OWN type, which runs the very store rule the variable's store
+  does (coerced, or refused with the same code). The real store then copies a
+  value already of that type, which cannot fail.
+
+  AN ELEMENT target is written next, before any scalar, and cannot fail once
+  the scalars passed: the reads checked the handle and the indices, the writes
+  reuse those same values, and the element-kind rule is the scalar rule with no
+  int% kind in it -- an element kind takes the other side's value exactly when
+  the other side takes the element's (numeric with number or int%, string with
+  string, pointer with handle). So when both targets are elements and the first
+  write is refused, the second would have been too, and nothing was written.
+  The scalar writes come last. }
 procedure TPhosphorCompiler.ParseSwap;
-var m1, m2, mEnd: Integer; t1, t2: THiddenSlot;
+var m1, m2, mEnd: Integer; t1, t2, c1, c2: THiddenSlot; a1, a2: TSwapTarget;
 begin
   FLex.Advance();   // 'swap'
   m1 := FLex.Mark();
@@ -2316,12 +2353,30 @@ begin
   // an index expression can re-enter this same SWAP. See THiddenSlot.
   t1 := NewHidden(vtAny);
   t2 := NewHidden(vtAny);
-  EmitReadTarget(m1);  if FFailed then Exit;
-  EmitStoreHidden(t1, FLex.Cur().Line);
-  EmitReadTarget(m2);  if FFailed then Exit;
-  EmitStoreHidden(t2, FLex.Cur().Line);
-  EmitWriteTarget(m1, t2);  if FFailed then Exit;
-  EmitWriteTarget(m2, t1);  if FFailed then Exit;
+  EmitReadTarget(m1, a1);  if FFailed then Exit;
+  EmitStoreHidden(t1, a1.Line);
+  EmitReadTarget(m2, a2);  if FFailed then Exit;
+  EmitStoreHidden(t2, a2.Line);
+  // Check each scalar's store into a temporary of its own type, before any write.
+  c1 := t2;
+  c2 := t1;
+  if not a1.IsElem then
+  begin
+    c1 := NewHidden(VarTypeOf(a1.Name));
+    EmitLoadHidden(t2, a1.Line);
+    EmitStoreHidden(c1, a1.Line);
+  end;
+  if not a2.IsElem then
+  begin
+    c2 := NewHidden(VarTypeOf(a2.Name));
+    EmitLoadHidden(t1, a2.Line);
+    EmitStoreHidden(c2, a2.Line);
+  end;
+  // The elements, then the scalars.
+  if a1.IsElem then begin EmitWriteTarget(a1, c1); if FFailed then Exit; end;
+  if a2.IsElem then begin EmitWriteTarget(a2, c2); if FFailed then Exit; end;
+  if not a1.IsElem then begin EmitWriteTarget(a1, c1); if FFailed then Exit; end;
+  if not a2.IsElem then begin EmitWriteTarget(a2, c2); if FFailed then Exit; end;
   FLex.Reset(mEnd);
 end;
 

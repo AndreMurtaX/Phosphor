@@ -30,6 +30,17 @@ where it finds out the promise was false. Until 2026-09-06 this page described
 both spellings as converting at the call boundary, which is the one thing they do
 not do: a program written to that description aborts.
 
+**A write, unlike a read, is checked against the array's kind** — by the rule an
+assignment uses, in the one setter every write goes through (the typed setters,
+`arr_set@`, the bracket sugar and `swap`). A numeric element takes what a plain
+name takes (an int% or a Double, kept as given), a string element what a `$` name
+takes, a handle element what an `@` name takes. Anything else is refused with a
+type mismatch (`err()` 3) whose message names the array's kind — `a@[1] = "hi"` on
+a `dim@` array is *cannot store string into numeric array* — and nothing is
+written. So an array only ever holds its own kind, and the mismatch above can
+only come from reading with the wrong *spelling*. Until 2026-10-12 a write was
+kept as given, and `a@[1] = "hi"` put a string into a numeric array.
+
 **Every failure here is a returned error, never a raised one** (decisions.md). A
 handle that is not an array, an index outside its bounds, the wrong *number* of
 indices, a dimension smaller than 1, a dimension product that overflows — each
@@ -75,7 +86,7 @@ the bounds check rather than wrapped into a valid one.
 | --- | --- |
 | `narr_set@(a@, i [, i [, i]], value) → handle` | writes a numeric element and answers **the array**, so the call chains. Wrong index count, out-of-range index or bad handle: the corresponding error, and nothing is written |
 | `narr_get(a@, i [, i [, i]]) → num` | the element. On a string array it answers **the string**, unconverted — the read is kind-agnostic, not coercing — and `n = narr_get(s@, 1)` then fails at the assignment with *cannot store string into number variable* |
-| `sarr_set@(a@, i, value$) → handle` | writes a string element and answers the array. One index only |
+| `sarr_set@(a@, i, value$) → handle` | writes a string element and answers the array. One index only. A value that is not a string is refused (called with a number it matches no signature: *no function*, `err()` 4); the bracket form refuses it with a type mismatch |
 | `sarr_get$(a@, i) → str` | the element; `""` for a slot never written, which is a real answer and not a signal of failure. On a numeric array it answers the number, unconverted, and the mismatch surfaces at the store |
 | `parr_set@(a@, i, value@) → handle` | stores a handle in a handle array and answers **the array**, not the handle stored. The array does not take ownership of what it holds |
 | `parr_get@(a@, i) → handle` | the stored handle; the nil handle `0` for a slot never written. Nil is not an array, so passing it on gets `not a valid array handle` |
@@ -85,7 +96,7 @@ the bounds check rather than wrapped into a valid one.
 | function | what it answers |
 | --- | --- |
 | `arr_get(a@, i [, i [, i]]) → value` | what `a@[i]`, `a@[i, j]` and `a@[i, j, k]` compile to. One implementation for every element kind, reading the array's own kind |
-| `arr_set@(a@, i [, i [, i]], value) → handle` | what `a@[i] = v` compiles to, for a numeric, string or handle value. It answers the array, like the typed setters. What makes `a@[i] += 1` evaluate the index exactly once is not this return value — the compiler duplicates the handle and the indices on the stack and discards whatever the call answers |
+| `arr_set@(a@, i [, i [, i]], value) → handle` | what `a@[i] = v` compiles to, for a numeric, string or handle value; a value of another kind than the array's is refused with a type mismatch and nothing is written. It answers the array, like the typed setters. What makes `a@[i] += 1` evaluate the index exactly once is not this return value — the compiler duplicates the handle and the indices on the stack and discards whatever the call answers |
 | `arr_free(a@) → num` | releases the array and revokes its handle, answering `1`. Freeing the same handle twice is **the error `not a valid array handle`**, not a quiet `0` — ids are never reused within a run, so a stale handle stays detectably stale. Freeing is optional: every handle is released at the end of the run |
 | `pointer@(n) → handle` | relabels a plain number as a handle value **without creating anything**. It exists so tests can prove that a library validates a handle instead of dereferencing it: `ndims(pointer@(305419896))` answers the error `not a valid array handle` on every platform, where following the address would be a crash |
 

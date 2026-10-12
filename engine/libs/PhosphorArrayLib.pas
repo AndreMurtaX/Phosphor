@@ -223,13 +223,26 @@ begin Result := DoDim(akPointer, Args, Err); end;
   store string into number variable" -- so the spelling a reader takes from the
   name was the one that could not work. And the value written is information the
   caller already has: it just passed it in. The array is the useful answer,
-  because it chains. }
+  because it chains.
+
+  THE ELEMENT KIND IS ASKED BY THE STORE RULE AN ASSIGNMENT USES. This is the
+  one routine that writes an element after creation -- every typed setter, the
+  bracket sugar, its compound form and SWAP all call it -- so the rule lives
+  here once. A numeric array holds what a suffix-less name holds (an int% or a
+  Double, kept as given), a string array what a `$` name holds, a pointer
+  array what an `@` name holds; anything else is refused with the type-mismatch
+  code a `s$ = 5` gets, and nothing is written. Until 2026-10-12 the value was
+  stored as given: `a@[1] = "hi"` put a string into a dim@ array and
+  sarr_get$ could answer an int. }
 function t_arr_set(const Args: array of TValue; out Err: TPhosphorError): TValue;
+const
+  ElemType: array[TArrayKind] of TVarType = (vtNumber, vtString, vtHandle);
 var
   a: TPhosphorArray;
   idx: array of Int64;
   i: Integer;
   flat: Int64;
+  v: TValue;
 begin
   Result := Args[0];
   if not GetArr(Args[0], a, Err) then Exit;
@@ -238,7 +251,15 @@ begin
     idx[i - 1] := ArgI32(Args[i]);
   Err := a.FlatIndex(idx, flat);
   if IsError(Err) then Exit;
-  a.Data[flat] := Args[High(Args)];
+  Err := StoreCheck(ElemType[a.Kind], Args[High(Args)], v);
+  if IsError(Err) then
+  begin
+    if Err.Code = peTypeMismatch then
+      Err := MakeError(peTypeMismatch, 'cannot store ' +
+        KindName(Args[High(Args)].Kind) + ' into ' + a.TypeName() + ' array');
+    Exit;
+  end;
+  a.Data[flat] := v;
 end;
 
 // Generic element read: (handle, index...).

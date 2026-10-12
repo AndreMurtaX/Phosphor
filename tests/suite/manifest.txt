@@ -103,3 +103,5 @@
 103_function_suffix
 104_trig_log_round11
 105_json_int_round11
+106_typed_array_kind
+107_swap_atomic

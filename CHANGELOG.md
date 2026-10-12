@@ -76,6 +76,22 @@
   `tests/gui/36_node_cost.bas` pins the ratios and
   `tests/gui/37_node_watch.bas` the node and item frees inside a handler.
 
+### Fixed (stabilization batch 1, 2026-10-12)
+
+- **A typed array holds its own kind** (ledger rows 2 and 13). An element
+  write is now a store by the assignment rule, in the one setter every write
+  goes through (the typed setters, `arr_set@`, `a@[i] = v` and `swap`): a
+  string into a `dim@` array, or a number into an `sdim@` or `pdim@` one, is a
+  type mismatch (`err()` 3) naming the array's kind, and nothing is written.
+  It used to be kept as given, so `sarr_get$` could answer an int.
+  `tests/suite/106_typed_array_kind.bas`.
+- **`swap` is all-or-nothing** (ledger row 3). Both stores are checked before
+  either is done, so `swap x, n%` with `x = 1e300` fails with both values
+  unchanged instead of destroying `x`; an element's handle and indices are
+  evaluated once, so `swap a@[1], a@[a@[1]]` exchanges the elements it read.
+  `swap` is now in `docs/language-reference.md`.
+  `tests/suite/107_swap_atomic.bas`.
+
 ### Fixed (adversarial round 11, 2026-10-12) -- stabilization mode
 
 Round 11 attacked the language core and the data libraries for the first time in

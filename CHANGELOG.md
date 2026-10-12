@@ -65,6 +65,16 @@
   object index round 9 added: 20-30 ms at 0, 10k and 100k handles alike.
   `tests/gui/35_free_cost.bas` pins what is dropped and the cost, as ratios
   measured in the run.
+- **A tree node or list item handle no longer costs more the more of them a
+  view holds.** Each one -- and each deferred free of one -- registered a free
+  notification with its tree or list view, a list the runtime scans on every
+  add and remove, so making k handles in one tree was quadratic: 90 000
+  `treenode@` calls on top of 10 000 took 3.4 s, and 2000 node make+free pairs
+  in a click 335 ms beside 100 000 nodes. The view now owns one watch that
+  every handle into it joins and leaves in constant time: 0.2 s and 8 ms, and
+  freeing the form that held the 100 000 nodes went from 1.7 s to 15 ms.
+  `tests/gui/36_node_cost.bas` pins the ratios and
+  `tests/gui/37_node_watch.bas` the node and item frees inside a handler.
 
 ### Fixed (adversarial round 11, 2026-10-12) -- stabilization mode
 

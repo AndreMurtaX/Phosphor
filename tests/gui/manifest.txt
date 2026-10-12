@@ -37,3 +37,5 @@
 33_move_view
 34_radio_choice
 35_free_cost
+36_node_cost
+37_node_watch

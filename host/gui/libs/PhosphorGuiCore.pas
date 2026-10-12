@@ -68,6 +68,19 @@ type
     die with a node above it, which no notification reports: GuiForgetNodes
     covers that, called before a node is freed.
 
+    ONE WATCH PER HOLDER, NOT ONE NOTIFICATION PER NODE (2026-10-12). Each node
+    or item reference used to call Holder.FreeNotification(Self) itself, and
+    the RTL keeps a component's free notifications in a TFPList it SCANS on
+    every add (IndexOf before Add) and every remove (compon.inc in the
+    RTL): k node handles in one tree cost O(k^2) to make -- 90k
+    treenode@ calls on top of 10k took 3.3 s -- and every node free or handle
+    destroy cost O(k). Now the holder OWNS one TGuiHolderWatch, and every
+    reference into it is linked on that watch's intrusive list (HNext/HPrev):
+    it joins and leaves in constant time, and the holder's destructor
+    destroys what it owns, the watch among them, which drops every reference
+    still linked -- on every path that frees a holder, with nothing to find
+    first.
+
     TGuiRef IS THE MECHANISM AND TGuiHandle IS THE ONE A PROGRAM CAN NAME. The
     other kind of TGuiRef is a free DEFERRED until an event's dispatch unwinds
     (see GuiFreeLater): it must watch and free its object exactly as a handle
@@ -88,8 +101,14 @@ type
     Watched: Boolean;
     { The CONTROL that owns a non-component Control -- a node's tree view, an
       item's list view -- watched in its place. nil for a component (watched
-      directly) and for anything owned by its own handle. }
+      directly) and for anything owned by its own handle. Set exactly while
+      this reference is linked on the holder's watch, so a Holder still set
+      is a live control. }
     Holder: TComponent;
+    { THE HOLDER'S WATCH (a TGuiHolderWatch, owned by Holder) and this
+      reference's place on its list. All nil when unlinked. }
+    HWatch: TComponent;
+    HNext, HPrev: TGuiRef;
     { WHEN Control WAS MADE: a serial GuiRegister stamps, and a deferred free
       copies from the handle it replaces. Every GuiRegister call is a
       constructor's (one handle per object, at its birth), so this orders
@@ -1081,6 +1100,71 @@ begin
     Result := TGuiHandle(o);
 end;
 
+// --- one watch per holder (see TGuiRef.HWatch) -------------------------------
+type
+  { EVERY REFERENCE INTO ONE TREE VIEW OR LIST VIEW, on one intrusive list.
+    OWNED BY THAT CONTROL, so the control's own destructor destroys it -- after
+    its nodes, where a free notification would have come -- and the watch's
+    destructor drops every reference still linked. Every path that frees a
+    holder runs that destructor: control_free at depth 0 (which nils the
+    holder's handle BEFORE the free, so a check against that handle would miss
+    it), the form's cascade, a deferred free, ResetHandles in slot order. }
+  TGuiHolderWatch = class(TComponent)
+  public
+    Head: TGuiRef;
+    procedure Link(ARef: TGuiRef);
+    procedure Unlink(ARef: TGuiRef);
+    destructor Destroy; override;
+  end;
+
+procedure TGuiHolderWatch.Link(ARef: TGuiRef);
+begin
+  ARef.HPrev := nil;
+  ARef.HNext := Head;
+  if Head <> nil then Head.HPrev := ARef;
+  Head := ARef;
+  ARef.HWatch := Self;
+end;
+
+{ Off the list, and the fields that said it was on one cleared -- Control too,
+  since a node or item is only ever held through its holder. }
+procedure TGuiHolderWatch.Unlink(ARef: TGuiRef);
+begin
+  if ARef.HPrev <> nil then ARef.HPrev.HNext := ARef.HNext else Head := ARef.HNext;
+  if ARef.HNext <> nil then ARef.HNext.HPrev := ARef.HPrev;
+  ARef.HNext := nil;
+  ARef.HPrev := nil;
+  ARef.HWatch := nil;
+  ARef.Holder := nil;
+  ARef.Control := nil;
+end;
+
+destructor TGuiHolderWatch.Destroy;
+begin
+  // THE HOLDER IS DYING, and every node or item it held is already gone. Each
+  // reference is only cleared; nothing it names is read.
+  while Head <> nil do Unlink(Head);
+  inherited Destroy;
+end;
+
+{ AHolder's watch, made (owned by AHolder) the first time. Linear in what
+  AHolder owns, which is its event bridges and this. }
+function WatchOf(AHolder: TComponent): TGuiHolderWatch;
+var i: Integer;
+begin
+  for i := 0 to AHolder.ComponentCount - 1 do
+    if AHolder.Components[i] is TGuiHolderWatch then
+      Exit(TGuiHolderWatch(AHolder.Components[i]));
+  Result := TGuiHolderWatch.Create(AHolder);
+end;
+
+{ A node or item reference out of its holder's watch: Control and Holder nil'd.
+  A no-op for a reference that is not linked. }
+procedure DetachRef(ARef: TGuiRef);
+begin
+  if ARef.HWatch <> nil then TGuiHolderWatch(ARef.HWatch).Unlink(ARef);
+end;
+
 procedure TGuiRef.Watch;
 begin
   Watched := Control is TComponent;   // asked ONCE, while the pointer is certainly live
@@ -1090,8 +1174,10 @@ begin
     Holder := TTreeNode(Control).TreeView
   else if Control is TListItem then
     Holder := TListItem(Control).ListView;
+  // Onto the holder's watch, NOT onto the holder's free-notification list: that
+  // list is scanned on every add and remove (see the interface note).
   if Holder <> nil then
-    Holder.FreeNotification(Self);
+    WatchOf(Holder).Link(Self);
 end;
 
 procedure TGuiRef.Notification(AComponent: TComponent; Operation: TOperation);
@@ -1099,16 +1185,10 @@ begin
   inherited Notification(AComponent, Operation);
   // The control this handle names is going away. Drop the reference NOW, while the
   // pointer is still valid to compare -- after this the handle is stale, which is a
-  // state the resolver already knows how to refuse.
+  // state the resolver already knows how to refuse. (The control that holds a node
+  // or an item reports its death through its watch, not here.)
   if (Operation = opRemove) and (AComponent = Control) then
     Control := nil;
-  // AND SO IS THE CONTROL THAT HOLDS A NODE OR AN ITEM, which takes the node or
-  // item with it. Dropped the same way, for the same reason.
-  if (Operation = opRemove) and (Holder <> nil) and (AComponent = Holder) then
-  begin
-    Control := nil;
-    Holder := nil;
-  end;
 end;
 
 { THE REFERENCE TO AObj, DROPPED: its handle, or the deferred free holding it
@@ -1128,7 +1208,7 @@ begin
   h := TGuiRef(o);
   if (h.Control = nil) or (h.Control <> AObj) then Exit;
   if h.Watched then TComponent(h.Control).RemoveFreeNotification(h);
-  if h.Holder <> nil then h.Holder.RemoveFreeNotification(h);
+  DetachRef(h);
   h.Holder := nil;
   h.Control := nil;
 end;
@@ -1187,12 +1267,9 @@ begin
   // notification already set Control to nil, so c is nil here and nothing is asked.
   if Watched and (c <> nil) then
     TComponent(c).RemoveFreeNotification(Self);
-  // A Holder still set is a live control: its notification would have nil'd it.
-  if Holder <> nil then
-  begin
-    Holder.RemoveFreeNotification(Self);
-    Holder := nil;
-  end;
+  // A Holder still set is a live control: its watch would have nil'd it. Off
+  // that watch in constant time.
+  DetachRef(Self);
   if Owns and (c <> nil) then
   begin
     // THE LEDGER'S OTHER CREDIT PATH, and the only one a TBitmap has: it is not a

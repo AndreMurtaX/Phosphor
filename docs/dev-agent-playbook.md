@@ -1547,10 +1547,43 @@ the sweep above. Verify before fixing, as with everything on this page.
     item dies with its menu parent and with its owner; walking both made a
     6000-deep submenu cost 653 ms against 1 ms flat. Only a cost test saw it --
     every correctness assertion stayed green.
-  - **Still open, a different mechanism:** each node handle registers a
-    FreeNotification with its tree view, and the RTL keeps those in a TFPList it
-    scans on every add and remove (compon.inc), so making k node handles in one
-    tree costs k^2: 100k nodes take ~6 s to make, with no free involved.
+  - **~~Still open, a different mechanism~~ -- closed the same day.** Each node
+    handle (and each deferred free of one) registered a FreeNotification with
+    its tree view, and the RTL keeps those in a TFPList it scans on every add
+    (`IndexOf` before `Add`) and every remove (compon.inc), so making k node
+    handles in one tree cost k^2. Now the holder OWNS one `TGuiHolderWatch` and
+    every reference into it is linked on that watch's intrusive list: constant
+    time to join and leave, and the holder's own destructor destroys the watch,
+    which drops the list. Measured against the build before: 90k `treenode@`
+    on top of 10k, 3356 -> 205 ms; a whole program of 100k nodes in one tree,
+    teardown included, 4956 -> 331 ms; 2000 node make+free pairs in a click
+    beside 100k nodes, 335 -> 8 ms; freeing the form that holds them, 1699 ->
+    15 ms. `tests/gui/36_node_cost.bas` pins both ratios (199 vs 19 and 238 vs
+    10 ms on the build before), `37_node_watch.bas` the node, item and
+    menu-item frees inside a handler crossed with a second death. Seven
+    mutants of the watch, each built with `-B` and run over the whole GUI
+    manifest: six fail (the per-node notification restored or one watch per
+    reference: 36; the watch's death silent, unowned, a destroyed reference
+    left linked, a stale list head: 22, 35, 36 or 37, by crash or hang). The
+    seventh -- `ForgetRef` leaving the reference linked -- is equivalent: the
+    reference's own destructor, or the holder's death, unlinks it anyway.
+  - **An RTL service has a cost model; read it before calling it per object.**
+    `FreeNotification` reads as O(1) and is O(listeners on that component). One
+    grep of compon.inc settled it, as section 3 already says of `intpower`.
+  - **Owning the watcher made its death free.** A component owned by the
+    holder is destroyed by the holder's destructor on EVERY path that frees it
+    -- `control_free` at depth 0 nils the holder's handle BEFORE the free, so
+    anything keyed on that handle would have missed it -- with no self-free
+    inside a notification loop and no index to find it in first.
+  - **The same fix, built twice.** This was first written on a branch that did
+    not contain the walk above, and it rewrote `ForgetDying` and
+    `GuiForgetNodes` a second time, differently. It surfaced only when the
+    Linux clone refused to fast-forward: the WSL tree was on the earlier
+    branch. Rebuilt on top of it, the watch shrank from an object-keyed table
+    with per-object chains to one list -- the one-reference-per-object rule the
+    walk had already established made the table unnecessary. Before starting a
+    follow-up, find the commit the request describes (`git log --all`), not
+    only `main`.
 
 - **2026-10-12 · a fifth red-for-its-own-reasons test: the keyboard was not
   the harness's.** In a full Windows battery, block AH's `getkey-then-input`

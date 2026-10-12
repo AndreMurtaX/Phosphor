@@ -143,6 +143,12 @@ it answers `""`/`0` with `gui_error()` `1`. A node or item is removed with
 and every handle into that subtree is refused afterwards, as is a second free.
 (Until 2026-10-05 freeing the tree left node handles dangling, and freeing one of
 them then was a double free — see [gui-components.md](../gui-components.md).)
+A node or item handle costs the same in a tree of a hundred thousand nodes as in
+an empty one, to make and to free: the tree or list view keeps one list of the
+handles into it, which a handle joins and leaves in constant time. (Until
+2026-10-12 each handle registered with the view on its own, in a list the
+runtime scans on every add and remove: the 100 000th node handle cost a scan of
+the 99 999 before it.)
 
 **What is deliberately not here.** There is no removal by index or by text (a node
 or item goes only through `control_free` on its handle), no column removal, no

@@ -91,6 +91,15 @@
   evaluated once, so `swap a@[1], a@[a@[1]]` exchanges the elements it read.
   `swap` is now in `docs/language-reference.md`.
   `tests/suite/107_swap_atomic.bas`.
+- **`sin` and `cos` are fast again, with the same bits** (ledger row R1).
+  Round 11 made them correctly rounded and identical on both OSes at about
+  1 us a call; a proven fast path (Cody-Waite reduction below 1.5 * 2^20, a
+  table kernel, and a rounding test that hands the rare doubtful call to the
+  round-11 code) brings that to 20-30 ns for ordinary arguments, about the
+  platform `sin`, and the huge-argument reduction is 10x faster too. No
+  answer changed: `tests/probe_trig.lpr` compares every result bit for bit
+  with a copy of the round-11 code (0 mismatches over 42 million checks on
+  both OSes; its quick mode runs in the suite).
 
 ### Fixed (adversarial round 11, 2026-10-12) -- stabilization mode
 

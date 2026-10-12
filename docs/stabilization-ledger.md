@@ -63,7 +63,7 @@ reviews found and was left, by the stabilization rule:
 
 | # | area | sev | finding | proposed | note |
 |---|---|---|---|---|---|
-| R1 | num | MEDIUM | `sin`/`cos` now cost about 1 us a call, 17x the old (a trig-heavy loop runs 2x slower) | **FIX** | a fast path: polynomial below pi/4, Cody-Waite for moderate arguments, Payne-Hanek only for huge ones; word-level bit reads |
+| R1 | num | MEDIUM | `sin`/`cos` now cost about 1 us a call, 17x the old (a trig-heavy loop runs 2x slower) | **FIX** | a fast path: polynomial below pi/4, Cody-Waite for moderate arguments, Payne-Hanek only for huge ones; word-level bit reads. FIXED 2026-10-12, stabilization batch 1 |
 | R2 | num | MEDIUM | `tan` refuses every abs(x) >= 2^63 while `sin`/`cos` now answer | **FIX** | route `tan` through the same reduction |
 | R3 | num | LOW | `tan`, `atan`, `ln`, `exp` still differ by 1 ulp between the OSes | **ACCEPT** | or route through pure-Pascal versions; document |
 | R4 | json | LOW | `json_getn` widens an Int64 node to a Double; the "json_getn answers the same for both" assertion in 105_json_int_round11 passes without the fix | **DOC** | state it in json.md; rewrite or drop that assertion |

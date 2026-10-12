@@ -208,6 +208,8 @@ type
     procedure EmitReadTarget(APos: Integer; out ATarget: TSwapTarget);   // SWAP: emit code that reads an lvalue
     procedure EmitWriteTarget(const ATarget: TSwapTarget; const ATemp: THiddenSlot); // SWAP: assign a temp into an lvalue
     procedure SkipTarget;         // SWAP: advance the lexer past one lvalue
+    function  NeedsSwapCheck(const ATo, AFrom: TSwapTarget): Boolean;  // SWAP: can ATo's store fail?
+    function  SwapCheckSlot(const ATo: TSwapTarget): THiddenSlot;     // SWAP: the check temporary
     function  InputTypeCode(const AName: String): Integer;
     procedure ParseStatement;      // the depth-guarded door; calls the body below
     procedure ParseStatementBody;
@@ -2335,7 +2337,42 @@ end;
   the other side takes the element's (numeric with number or int%, string with
   string, pointer with handle). So when both targets are elements and the first
   write is refused, the second would have been too, and nothing was written.
-  The scalar writes come last. }
+  The scalar writes come last.
+
+  NO CHECK WHERE THE SUFFIXES ALREADY DECIDE IT (NeedsSwapCheck): a scalar
+  receiving another scalar of its own type, or a plain name receiving an int%,
+  is stored unchanged by the rule, so `swap x, y` emits what it emitted before
+  the check existed -- the check made 2M of them 26% slower. The one value the
+  suffixes cannot see is a non-finite Double in a plain-named PARAMETER, which
+  only a host can bind (CallFunction; see SuffixCheck) and which no store
+  accepts: such a swap can still fail on its second store. }
+function TPhosphorCompiler.NeedsSwapCheck(const ATo, AFrom: TSwapTarget): Boolean;
+var tt, tf: TVarType;
+begin
+  if ATo.IsElem then Exit(False);     // see above: an element write cannot fail last
+  if AFrom.IsElem then Exit(True);    // an element's kind is known only at run time
+  tt := VarTypeOf(ATo.Name);
+  tf := VarTypeOf(AFrom.Name);
+  Result := not ((tt = tf) or ((tt = vtNumber) and (tf = vtInt)));
+end;
+
+{ The check temporary lives where the TARGET lives, so a refusal is worded as
+  the target's own store would word it ("variable" for a global, "local" for a
+  frame slot). A global target inside a function gets a hidden GLOBAL, which
+  THiddenSlot otherwise forbids there because a recursive call could clobber
+  it -- but no user code runs between this temporary's store and its load:
+  only the other check, arr_set@ (a library call) and the stores themselves. }
+function TPhosphorCompiler.SwapCheckSlot(const ATo: TSwapTarget): THiddenSlot;
+begin
+  if FInFunction and (LocalIndex(ATo.Name) < 0) then
+  begin
+    Result.Idx := NewHiddenVar(VarTypeOf(ATo.Name));
+    Result.IsLocal := False;
+  end
+  else
+    Result := NewHidden(VarTypeOf(ATo.Name));
+end;
+
 procedure TPhosphorCompiler.ParseSwap;
 var m1, m2, mEnd: Integer; t1, t2, c1, c2: THiddenSlot; a1, a2: TSwapTarget;
 begin
@@ -2360,15 +2397,15 @@ begin
   // Check each scalar's store into a temporary of its own type, before any write.
   c1 := t2;
   c2 := t1;
-  if not a1.IsElem then
+  if NeedsSwapCheck(a1, a2) then
   begin
-    c1 := NewHidden(VarTypeOf(a1.Name));
+    c1 := SwapCheckSlot(a1);
     EmitLoadHidden(t2, a1.Line);
     EmitStoreHidden(c1, a1.Line);
   end;
-  if not a2.IsElem then
+  if NeedsSwapCheck(a2, a1) then
   begin
-    c2 := NewHidden(VarTypeOf(a2.Name));
+    c2 := SwapCheckSlot(a2);
     EmitLoadHidden(t1, a2.Line);
     EmitStoreHidden(c2, a2.Line);
   end;

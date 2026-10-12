@@ -1558,6 +1558,15 @@ the sweep above. Verify before fixing, as with everything on this page.
     compiler fails 107 five times and aborts at `index 10 out of bounds`; the
     two scalar pre-checks typed `vtAny` fail exactly the five value-destroyed
     assertions.
+  - **The pre-merge review found two LOWs in the check, both from a
+    temporary standing in for a target.** A refused swap of a GLOBAL inside a
+    function said "string local", because the check temporary was a frame slot
+    and the refusal came from the local store; it now lives where the target
+    lives. And every scalar swap paid for a check the suffixes had already
+    decided: 2M `swap x, y` went 2.52 -> 2.98 s. NeedsSwapCheck skips it for
+    same-type and int%-into-plain pairs (2.54 s). The one hole left is
+    written at ParseSwap: a host-bound non-finite parameter. A stand-in has to
+    answer as the thing it stands for -- its words and its cost included.
 
 - **2026-10-12 · GUI frees walk what dies, not what lives.** Round 9 fixed the
   N*H class in ONE of the three routines that had it (the orphan rule) and left

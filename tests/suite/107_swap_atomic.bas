@@ -136,6 +136,37 @@ h5:
   resume next
 h5_done:
 
+test_case("swap/a refused swap of a global inside a function is worded as its assignment")
+rem gs$ is a GLOBAL (not in the function's local list). Inside the
+rem function, gs$ = p is refused; swap gs$, p is refused by the same
+rem store, so its message must be that assignment's, word for word.
+gs$ = "G"
+nerr = 0
+m1$ = ""
+m2$ = ""
+c1 = 0
+c2 = 0
+on error goto h6
+r = global_swap(7)
+on error goto 0
+assert_eq(nerr, 2, "both statements were refused")
+assert_eq(c1, 3, "the assignment is a type mismatch")
+assert_eq(c2, 3, "the swap is a type mismatch")
+assert_true(m2$ = m1$, "the swap's message is the assignment's")
+assert_true(gs$ = "G", "gs$ is unchanged")
+goto h6_done
+h6:
+  nerr = nerr + 1
+  if nerr = 1 then
+    c1 = err()
+    m1$ = errmsg$()
+  else
+    c2 = err()
+    m2$ = errmsg$()
+  end if
+  resume next
+h6_done:
+
 test_case("swap/a swap that fits stores each value by the assignment rule")
 rem k% = 2.5 holds what the store rule makes of 2.5; after the swap
 rem n% must hold the same, and x the 5 that n% held.
@@ -173,6 +204,12 @@ end
 function bump()
   calls = calls + 1
   return 3
+end function
+
+function global_swap(p)
+  gs$ = p
+  swap gs$, p
+  return 0
 end function
 
 function local_swap$() local lx, ln%

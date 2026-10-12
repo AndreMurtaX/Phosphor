@@ -279,6 +279,15 @@ back as `9007199254740993`. Until round 4 of 2026-10-09 the number `-0` read
 `+0` and was written `0`, and a long spelling of an integer came back a Double
 (`9.0071992547409920E+015`).
 
+**An `int%` goes in exact.** `json_setn@`, `json_pushn@`, `json_number@`,
+`json_setval@`, `json_pushval@` and the `{ }` / `[ ]` literals store an `int%`
+as the integer node a parse of its digits builds, every digit kept:
+`json_setn@(o@, "id", 9007199254740993)` is written `{"id":9007199254740993}`,
+and `9223372036854775807` stays an integer. A Double argument follows the rule
+in the table (an integer when whole and within int64 range). Until round 11 of
+2026-10-11 an `int%` was widened to a Double first, so an id past 2^53 lost its
+last digits and High(Int64) was written `9.2233720368547758E+018`.
+
 **A refusal names what you wrote, where it ends.** `json_parse@`'s message for a
 token in the wrong place quotes the token and gives the column where it ends
 (`Error at line 1, Pos 6: Expected colon (:), got token "1".` for

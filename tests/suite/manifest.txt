@@ -99,3 +99,5 @@
 99_delimitedtext
 100_strlist_round9
 101_file_kind
+102_trig_log_round11
+103_json_int_round11

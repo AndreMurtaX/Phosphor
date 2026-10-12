@@ -52,6 +52,37 @@
   database; its database schema is now version 2, migrated in place. Its
   self-test has 133 checks.
 
+### Fixed (adversarial round 11, 2026-10-12) -- stabilization mode
+
+Round 11 attacked the language core and the data libraries for the first time in
+many rounds and found 41 survivors; only the eight HIGH were fixed in the round,
+each reviewed adversarially before merge. The MEDIUM and LOW findings are in
+`docs/stabilization-ledger.md` with a proposed decision each.
+
+- **The language core.** `resume next` after a fault inside a `return`
+  expression ran the code after the `return` (a function answered 99 where no
+  path could): it now ends the function with its type's default, wherever the
+  `return` sits and under `on error call` too. **Parameters and results obey
+  their suffix** by the assignment rule: `twice%(2.5)` is 4 (was 5), a number
+  passed to `a$` or returned from a `$` function is a type mismatch -- and
+  unsuffixed parameters and plain-named functions hold only numbers now
+  (`id("s")` with `function id(x)` is refused at runtime). A refused `on error
+  call` handler's message names the fault it was handling. String `s$ - n` and
+  `line input #`/`input #`/`input$(n, #)` respect `MaxMemoryBytes`.
+- **Numbers.** `sin`/`cos` answered `x` itself on Linux for abs(x) >= 2^63 and
+  lost digits below it; `log2`/`log10` were one ulp off on exact powers on
+  Windows (`int(log2(8))` was 2). All four are now computed the same way on both
+  OSes and correctly rounded; an `int%` given to a JSON number writer is stored
+  as an exact integer (ids past 2^53 kept every digit).
+- **No door opens a FIFO, a socket or a device** (except the null device): on
+  Linux opening a FIFO blocked in the kernel past every ceiling, and round 9 had
+  fixed one door of seventeen. One shared check runs before every open; on
+  Windows it judges the handle, so a named pipe is refused by any of its names.
+- **Contact manager: Export to CSV** wrote over any existing file, the open
+  database included (on Linux every record was destroyed). It now refuses any
+  SQLite database by its bytes, asks before replacing another file, and writes
+  to a temporary file moved into place only when complete.
+
 ### Fixed (stabilization, 2026-10-11)
 
 - The tests that failed for reasons of their own, not the engine's: the

@@ -1525,6 +1525,31 @@ the sweep above. Verify before fixing, as with everything on this page.
 
 ## Retrospective log (appended each round)
 
+- **2026-10-12 · round 11, the first stabilization round: 41 survivors, 8 HIGH,
+  0 killed.** The scope proposal (docs/proposal-1.0.md) asked for rounds that fix
+  only HIGH, each fix reviewed before merge, and the rest in a ledger. Two
+  things came out of running it.
+  - **The core had been left alone, not made safe.** Attacked for the first time
+    in many rounds, the VM and compiler gave three HIGH as old as the language
+    itself: resume-next past a faulting `return`, parameters and results that
+    ignored their suffix, and memory doors the ceiling never asked. Rounds that
+    only attack what the last round rewrote miss what nobody rewrote.
+  - **The pre-merge review earned its place at once.** It found two HIGH in the
+    FIFO fix (a Windows pipe by another spelling -- the round-10 lesson about
+    spellings, broken by the fix meant to cure it; and RAG/GUI doors outside the
+    fixer's files) and two MEDIUM in the core fix (13-28% slower calls; a
+    refused handler that swallowed the fault it was called for). All four were
+    fixed before anything shipped. A fix that is green on both OSes and
+    mutation-proven can still be wrong in what it costs and in the doors it
+    never saw.
+  - **A rule for one door is a rule for every door that does the same thing**
+    -- said three times in this round's own fixer reports (statement ends,
+    suffix checks, memory checks) and once more by the CSV export, which wrote
+    over the open database while the backup door, a screen away, had refused
+    exactly that since round 7.
+  - **Parallel fixers numbered their tests the same way** (two 102s and two
+    103s); renumbered at merge. Give each fixer its number range up front.
+
 - **2026-10-11 · stabilization: four red-for-their-own-reasons tests.** After
   round 10 the owner asked what was unstable, and every item was a TEST, not the
   engine. (1) The CI's Windows Server console draws a written control character

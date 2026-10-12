@@ -67,8 +67,8 @@ All four answer an `int%`. A magnitude past Int64 range is error code `1`,
 
 | function | what it answers |
 | --- | --- |
-| `log10(n) → num` | base-10 logarithm. Needs a strictly positive argument; `0` or negative is a domain error naming the value |
-| `log2(n) → num` | base-2 logarithm, same domain rule |
+| `log10(n) → num` | base-10 logarithm. Needs a strictly positive argument; `0` or negative is a domain error naming the value. Correctly rounded (computed to about 100 bits, rounded once), the same bits on every OS, so an exact power answers the exact integer: `int(log10(1e15))` is `15` |
+| `log2(n) → num` | base-2 logarithm, same domain rule. Correctly rounded (computed to about 100 bits, rounded once), the same bits on every OS; a power of two answers its exponent exactly: `int(log2(8))` is `3` |
 | `ln(n) → num` | natural logarithm, same domain rule |
 | `exp(n) → num` | e raised to `n`. Unbounded input: an argument large enough to overflow the Double answers the finiteness error (code `1`) rather than an infinity |
 
@@ -79,8 +79,8 @@ is the idiom the test corpus uses for it.
 
 | function | what it answers |
 | --- | --- |
-| `sin(n) → num` | sine. Always answers |
-| `cos(n) → num` | cosine. Always answers |
+| `sin(n) → num` | sine. Always answers, in `-1 .. 1` for every finite argument: the argument is reduced exactly, so `sin(1e22)` is `-0.8522008497671888`. Correctly rounded (computed to about 100 bits, rounded once), the same bits on every OS |
+| `cos(n) → num` | cosine. Always answers; the same exact reduction and rounding as `sin` |
 | `tan(n) → num` | tangent. Near a quarter turn it answers a very large **finite** number (a Double cannot land exactly on pi/2), never an infinity |
 | `asin(n) → num` | arc sine, in `-pi/2 .. pi/2`. Outside `-1 .. 1` is a domain error naming the value |
 | `acos(n) → num` | arc cosine, in `0 .. pi`. Same `-1 .. 1` domain rule |

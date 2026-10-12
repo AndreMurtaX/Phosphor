@@ -101,3 +101,5 @@
 101_file_kind
 102_resume_past_return
 103_function_suffix
+104_trig_log_round11
+105_json_int_round11

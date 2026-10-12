@@ -425,6 +425,24 @@ begin
   else Result := TJSONFloatNumber.Create(d);
 end;
 
+{ AN int% IS EXACT, AND EVERY NUMBER WRITER WIDENED IT (2026-10-11, round 11).
+  json_setn@, json_pushn@, json_number@, json_setval@/json_pushval@ and the
+  literals all called NumNode(AsDouble(..)), so an int% id past 2^53 was
+  rounded before the node was built: 9007199254740993 was written
+  ...992, and High(Int64) -- whose nearest Double is 2^63, outside the
+  range -- became a FLOAT node, 9.2233720368547758E+018. json_parse@ of the
+  same text keeps every digit. Every writer of a script value goes through
+  this one door: an int% builds the integer node a parse of its digits
+  builds; a Double goes through the NumNode above. }
+function NumNode(const V: TValue): TJSONData;
+begin
+  if V.Kind <> vkInt then Exit(NumNode(AsDouble(V)));
+  if (V.Int >= Low(Integer)) and (V.Int <= High(Integer)) then
+    Result := TJSONIntegerNumber.Create(Integer(V.Int))
+  else
+    Result := TJSONInt64Number.Create(V.Int);
+end;
+
 { A borrowed handle points at a node its parent owns. Replacing or removing that
   member FREES the node, and the borrowed handle was left pointing into freed
   memory -- reading it was an access violation, and writing through it corrupted
@@ -2593,7 +2611,7 @@ begin
   Result := ValInt(0);
   if not GetObj(Args[0], o, Err) then Exit;
   if not SetMember(o, JsonLevelOf(Args[0]), Args[1].Str,
-                   NumNode(AsDouble(Args[2])), Err) then Exit;
+                   NumNode(Args[2]), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_sets(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -2693,7 +2711,7 @@ var a: TJSONArray;
 begin
   Result := ValInt(0);
   if not GetArr(Args[0], a, Err) then Exit;
-  if not AddItem(a, JsonLevelOf(Args[0]), NumNode(AsDouble(Args[1])), Err) then Exit;
+  if not AddItem(a, JsonLevelOf(Args[0]), NumNode(Args[1]), Err) then Exit;
   Result := Args[0];
 end;
 function t_json_pushs(const Args: array of TValue; out Err: TPhosphorError): TValue;
@@ -2861,7 +2879,7 @@ begin Err := NoError(); Result := RegNewRoot(TJSONNull.Create()); end;
 function t_json_bool(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := RegNewRoot(TJSONBoolean.Create(AsDouble(Args[0]) <> 0)); end;
 function t_json_number(const Args: array of TValue; out Err: TPhosphorError): TValue;
-begin Err := NoError(); Result := RegNewRoot(NumNode(AsDouble(Args[0]))); end;
+begin Err := NoError(); Result := RegNewRoot(NumNode(Args[0])); end;
 function t_json_string(const Args: array of TValue; out Err: TPhosphorError): TValue;
 begin Err := NoError(); Result := RegNewRoot(TJSONString.Create(Args[0].Str)); end;
 
@@ -3198,7 +3216,7 @@ function ValueToNode(const V: TValue; out Err: TPhosphorError): TJSONData;
 begin
   Err := NoError();
   case V.Kind of
-    vkInt, vkDouble: Result := NumNode(AsDouble(V));
+    vkInt, vkDouble: Result := NumNode(V);
     vkString:        Result := TJSONString.Create(V.Str);
     vkBool:          Result := TJSONBoolean.Create(V.Bl);
     vkHandle:

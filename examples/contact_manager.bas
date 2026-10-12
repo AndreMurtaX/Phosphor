@@ -82,6 +82,7 @@ last_msg$ = ""             rem what the last message box said (self-test)
 answer? = true             rem what a confirmation answers (self-test)
 save_as$ = ""              rem what a save dialog answers (self-test)
 open_as$ = ""              rem what an open dialog answers, once (self-test)
+short_write = 0            rem > 0: the export writes only so many bytes (self-test)
 step_err$ = ""             rem what the last step_ok failed with
 probe_err$ = ""            rem why is_open_db could not tell (backup)
 hdr_version = 0            rem what file_header$ read: user_version,
@@ -3309,9 +3310,39 @@ function on_export_button(sender@)
   return 0
 end function
 
-function export_csv(k) local p$, s@, out$, nl$, i, n, sql$, cols$, lines$
+rem The export replaces a file only once the person agrees, and never a
+rem database (round 11: on Linux a CSV written over the open database
+rem destroyed every row and said "Exported"). The name is judged as the
+rem backup judges it (name_refusal$: what the OS says is there, and the one
+rem name it gives the file -- so a journal, a log, a device, a link that
+rem leads nowhere are refused under any spelling), and a file that is there
+rem by its BYTES (file_header$): a SQLite database -- the open one under
+rem any name, a backup of it, another program's -- is refused, and so is a
+rem file that cannot be read to tell. The CSV is written beside the target
+rem under a free name and put in its place only once it is all there; the
+rem old file is moved aside first and moved back if that fails, so a
+rem failure leaves the file that was there as it was.
+function export_csv(k) local p$, s@, out$, nl$, i, n, sql$, cols$, lines$, why$, c$, h$, t$, o$
   p$ = save_path$(kind$(k) + "s.csv", "CSV file (*.csv)|*.csv")
   if p$ = "" then return 0
+  why$ = name_refusal$(p$)
+  if why$ <> "" then
+    say(why$)
+    return 0
+  end if
+  c$ = canon$
+  if file_exists(c$) = 1 then
+    h$ = file_header$(c$)
+    if h$ = "unread" then
+      say("Could not read " + p$ + " to make sure it is no database (" + hdr_err$ + "), so it was left alone. Export to another file.")
+      return 0
+    end if
+    if h$ = "db" then
+      say("That is a SQLite database -- the one you have open, a backup of it, or another program's -- and a CSV written over it would destroy it. Export to another file.")
+      return 0
+    end if
+    if ask?("Replace " + p$ + "?") = false then return 0
+  end if
   nl$ = chr$(13) + chr$(10)
   cols$ = "company,trade_name,tax_id,category,phone,email,city,state,country,contact,job_title,contact_email,contact_phone,whatsapp,product_lines"
   out$ = cols$ + nl$
@@ -3334,12 +3365,59 @@ function export_csv(k) local p$, s@, out$, nl$, i, n, sql$, cols$, lines$
     out$ = out$ + lines$ + nl$
   end while
   sqlite_finalize(s@)
-  if file_writealltext(p$, out$) = 1 then
-    status("Exported " + str$(n) + " row(s) to " + p$)
-  else
-    say("Could not write " + p$)
+  t$ = free_name$(c$ + ".part")
+  if t$ = "" then
+    say("Could not write " + p$ + ": no free name beside it for the file being written.")
+    return 0
   end if
+  rem (short_write cuts the write short, as a full disk would: self-test)
+  if short_write > 0 then
+    file_writealltext(t$, bytemid$(out$, 1, short_write))
+  else
+    file_writealltext(t$, out$)
+  end if
+  if file_getsize(t$) <> bytelen(out$) then
+    if file_exists(t$) = 1 then file_delete(t$)
+    say("Could not write " + p$)
+    return 0
+  end if
+  if file_exists(c$) = 1 then
+    o$ = free_name$(c$ + ".old")
+    i = 0
+    if o$ <> "" then i = file_move(c$, o$)
+    if i <> 1 then
+      file_delete(t$)
+      say("Could not replace " + p$ + ": it could not be moved aside. Is it open in another program?")
+      return 0
+    end if
+    if file_move(t$, c$) <> 1 then
+      file_delete(t$)
+      if file_move(o$, c$) = 1 then
+        say("Could not write " + p$)
+      else
+        say("Could not write " + p$ + ", and the file that was there could not be put back: it is " + o$)
+      end if
+      return 0
+    end if
+    file_delete(o$)
+  elseif file_move(t$, c$) <> 1 then
+    file_delete(t$)
+    say("Could not write " + p$)
+    return 0
+  end if
+  status("Exported " + str$(n) + " row(s) to " + p$)
   return n
+end function
+
+rem p$, or p$ followed by 2, 3, ... -- the first name nothing is at; ""
+rem when none of a hundred is free.
+function free_name$(p$) local i, t$
+  for i = 1 to 100
+    t$ = p$
+    if i > 1 then t$ = t$ + str$(i)
+    if file_kind$(t$) = "none" then return t$
+  next
+  return ""
 end function
 
 rem ===============================================================
@@ -3795,6 +3873,87 @@ function run_selftest() local path$, path2$, path3$, path4$, bad$, bk$, other$, 
   end if
   check(last_msg$ = q$, "a target that cannot be deleted is reported, not ignored")
   sqlite_close(held@)
+  rem --- export: never over a database, under any name it has, nor over
+  rem any other file unless the person says so; and a write that fails
+  rem leaves the file that was there (round 11: on Linux an export onto the
+  rem open database destroyed every row and said "Exported") ---
+  q$ = "That is a SQLite database"
+  answer? = true
+  save_as$ = path$
+  last_msg$ = ""
+  n = export_csv(1)
+  check(n = 0 and left$(last_msg$, len(q$)) = q$ and file_header$(path$) = "db" and count_of("SELECT count(*) FROM companies") = 5, "an export onto the open database is refused, and it keeps its rows")
+  for kind = 1 to 2
+    file_writealltext(scratch$, "x")
+    blind? = file_exists(spelling$(scratch$, kind)) = 1
+    file_delete(scratch$)
+    other$ = spelling$(path$, kind)
+    if blind? = false and file_exists(other$) = 1 then file_delete(other$)
+    save_as$ = other$
+    last_msg$ = ""
+    n = export_csv(1)
+    if blind? = true then
+      check(n = 0 and left$(last_msg$, len(q$)) = q$ and file_header$(path$) = "db" and count_of("SELECT count(*) FROM companies") = 5, "and under another spelling of its name (" + str$(kind) + ") where the folder reads it as the same file")
+    else
+      check(n > 0 and left$(file_readalltext$(other$), 8) = "company," and file_header$(path$) = "db", "and where the folder reads that spelling (" + str$(kind) + ") as another file, the export is written there")
+      file_delete(other$)
+    end if
+  next
+  rem A name that is no spelling of it at all: on Linux the link
+  rem /proc/self/fd/N to the file SQLite holds open; on Windows the folder's
+  rem 8.3 alias of it, where the volume keeps one and it is CONTAC~N.DB.
+  alias$ = ""
+  for i = 0 to 255
+    if os_name$() = "Windows" then
+      z$ = extractfilepath$(path$) + "CONTAC~" + str$(i) + ".DB"
+    else
+      z$ = "/proc/self/fd/" + str$(i)
+    end if
+    if alias$ = "" and i > 0 and (i < 10 or os_name$() <> "Windows") then
+      if file_exists(z$) = 1 then
+        if alcase$(path_canonical$(z$)) = alcase$(path_canonical$(path$)) then alias$ = z$
+      end if
+    end if
+  next
+  save_as$ = alias$
+  last_msg$ = ""
+  n = 0
+  if alias$ <> "" then n = export_csv(1)
+  check(n = 0 and (alias$ = "" or left$(last_msg$, len(q$)) = q$) and file_header$(path$) = "db" and count_of("SELECT count(*) FROM companies") = 5, "and through a name that is no spelling of it -- a link to it, its 8.3 alias -- where there is one")
+  save_as$ = bk$
+  text$ = file_readalltext$(bk$)
+  last_msg$ = ""
+  n = export_csv(1)
+  check(n = 0 and left$(last_msg$, len(q$)) = q$ and file_readalltext$(bk$) = text$, "and so is one onto a backup of it: a database is never written over")
+  q$ = "A name ending in -journal"
+  save_as$ = path$ + "-journal"
+  last_msg$ = ""
+  n = export_csv(1)
+  i = flag(n = 0 and left$(last_msg$, 25) = q$ and file_exists(path$ + "-journal") = 0)
+  save_as$ = path$ + "-WAL."
+  last_msg$ = ""
+  n = export_csv(1)
+  check(i = 1 and n = 0 and left$(last_msg$, 25) = q$ and file_exists(path$ + "-wal") = 0, "an export onto the open database's journal or log is refused, however the name is spelled")
+  z$ = temppath$() + "contact_manager_selftest_export.csv"
+  if file_exists(z$) = 1 then file_delete(z$)
+  save_as$ = z$
+  export_csv(1)
+  text$ = file_readalltext$(z$)
+  file_writealltext(z$, "precious")
+  answer? = false
+  last_msg$ = ""
+  n = export_csv(1)
+  check(n = 0 and last_msg$ = "Replace " + z$ + "?" and file_readalltext$(z$) = "precious", "an export onto a file that is there asks first, and No leaves it byte for byte")
+  answer? = true
+  short_write = 10
+  last_msg$ = ""
+  n = export_csv(1)
+  short_write = 0
+  check(n = 0 and last_msg$ = "Could not write " + z$ and file_readalltext$(z$) = "precious" and file_exists(z$ + ".part") = 0 and file_exists(z$ + ".old") = 0, "an export whose write stops part-way leaves the file that was there as it was, and nothing beside it")
+  last_msg$ = ""
+  n = export_csv(1)
+  check(n > 0 and left$(text$, 8) = "company," and last_msg$ = "Replace " + z$ + "?" and file_readalltext$(z$) = text$ and file_exists(z$ + ".part") = 0 and file_exists(z$ + ".old") = 0, "and Yes replaces it with the whole export, with nothing left beside it")
+  file_delete(z$)
   file_delete(bk$)
   rem The names SQLite keeps beside a database are no backup: the open
   rem database's journal is cut short by its next transaction, and any

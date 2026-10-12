@@ -172,7 +172,20 @@ one — an 8.3 alias, a link, a stream inside it — and anything that is not a
 file: a folder, a device, a pipe, or a link that leads to no file, through
 which SQLite would write the backup to wherever it points. A `file:` URI is
 refused too. "Backed up" is said only once the copy
-has been read back. **Account** changes your own password and signs out.
+has been read back.
+
+The CSV export is judged the same way before it writes a byte. The names the
+backup refuses — a journal's, a log's, a stream, a device, a pipe, a folder, a
+link that leads nowhere, a URI — it refuses too, under the name the operating
+system gives the file. A file that is already there is read as bytes first:
+a SQLite database (the open one under any of its names, a backup of it, or
+another program's) is never written over, and nor is a file that cannot be
+read to tell. Any other existing file is replaced only if you say so. The CSV
+is written beside the target under a free name (`NAME.part`) and put in its
+place only once all of it is there. The old file is moved aside to
+`NAME.old` and moved back if that step fails, then deleted. So an export that
+fails leaves the file that was there as it was. **Account** changes your own
+password and signs out.
 
 ![A company's contacts, with the product lines each one serves](images/contact-manager-contacts.png)
 
@@ -317,7 +330,9 @@ page torn, a first run killed before its first commit, a spent journal), which
 open, a damaged file carrying the program's mark (a table, a column, a unique
 index or a foreign key gone) and one whose names differ only in case, which
 opens, an earlier version's file that lost a table, and a backup onto the open
-database under other spellings of its name or of its journal's. Its message, confirmation and file boxes go through functions the test
+database under other spellings of its name or of its journal's, and an export
+onto it, onto a backup, onto a file you answer No for, and one whose write
+stops part-way. Its message, confirmation and file boxes go through functions the test
 answers. `scripts/test-examples` runs it that way on Windows and on Linux
 (under `xvfb-run`).
 

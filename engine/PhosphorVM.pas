@@ -2564,6 +2564,25 @@ end;
   and isnan/isinfinite/str$ seeing it through a parameter is pinned behaviour
   (tests/probe_value.lpr#CheckLibraryDoorOnNonFinite, probe_bytecode's seam
   cases). Into an int% it is refused, as the int% store refuses it. }
+{ THE ANSWER SuffixCheck GIVES WITHOUT ASKING IT: True exactly when the store
+  rule would hand V back unchanged, so the callers skip the check, and its
+  TValue copies, on the call that already fits -- which is nearly every call.
+  Measured 2026-10-11: checking every argument and result made each user call
+  13-28% slower (fib(27) 0.68 -> 0.84 s). Anything else, vtAny included, takes
+  the full check. }
+function KindFits(T: TVarType; K: TValueKind): Boolean; inline;
+begin
+  case T of
+    vtNumber: Result := (K = vkInt) or (K = vkDouble);
+    vtInt:    Result := K = vkInt;
+    vtString: Result := K = vkString;
+    vtHandle: Result := K = vkHandle;
+    vtBool:   Result := K = vkBool;
+  else
+    Result := False;
+  end;
+end;
+
 function SuffixCheck(AProg: TProgram; AFunc, ASlot: Integer; const V: TValue;
   out R: TValue): TPhosphorError;
 var t: TVarType;
@@ -2981,7 +3000,13 @@ var
         FInHandler := False;
         if IsError(callErr) then
         begin
-          LastError := callErr; ErrorLine := FErrLine; Exit(False);
+          { The handler could not be run, or failed -- and the fault it was
+            called FOR would otherwise vanish: `function handler(code, msg)`
+            is refused at its msg parameter (2026-10-11), and the program
+            stopped naming only that. Both are named. }
+          LastError := MakeError(callErr.Code, callErr.Message +
+            ' -- while handling: ' + FErrMsg + ' (line ' + IntToStr(FErrLine) + ')');
+          ErrorLine := FErrLine; Exit(False);
         end;
         if FHalted then Exit(True);          // the handler said END: end the program
         // NonFinite first: `<> 0` on a NaN is a trap, not a test (see NonFinite),
@@ -3802,10 +3827,14 @@ begin
             if Fault(MakeError(peRuntime, 'return outside a function')) then Continue else Exit(False);
           // The value is coerced to the function's suffix, or refused here, in the
           // function's own frame, at its `return` line. See SuffixCheck.
-          v := Pop();
-          e := SuffixCheck(FProg, FFrames[FFrameSP - 1].FuncIndex, -1, v, r);
-          if IsError(e) then if Fault(e) then Continue else Exit(False);
-          Push(r);
+          if (FSP = 0) or not KindFits(FProg.UserFuncs[FFrames[FFrameSP - 1].FuncIndex].RetType,
+                                       FStack[FSP - 1].Kind) then
+          begin
+            v := Pop();
+            e := SuffixCheck(FProg, FFrames[FFrameSP - 1].FuncIndex, -1, v, r);
+            if IsError(e) then if Fault(e) then Continue else Exit(False);
+            Push(r);
+          end;
           savedRet :=FFrames[FFrameSP - 1].ReturnAddr;  // value stays on the stack
           Dec(FFrameSP);
           // A re-entrant call (CallUserFunc) stops here, handing its return value
@@ -3864,9 +3893,12 @@ begin
             e := NoError();
             for i := 0 to argc - 1 do
             begin
-              e := SuffixCheck(FProg, ufi, i, FStack[FSP - argc + i], r);
-              if IsError(e) then Break;
-              FStack[FSP - argc + i] := r;
+              if not KindFits(FProg.UserFuncs[ufi].LocalTypes[i], FStack[FSP - argc + i].Kind) then
+              begin
+                e := SuffixCheck(FProg, ufi, i, FStack[FSP - argc + i], r);
+                if IsError(e) then Break;
+                FStack[FSP - argc + i] := r;
+              end;
             end;
             if IsError(e) then if Fault(e) then Continue else Exit(False);
             { AND THE FRAME STACK IS BOUNDED, for the third time and the same
@@ -5277,7 +5309,7 @@ end;
 function TPhosphorVM.CallUserFunc(const AName: String; const Args: array of TValue;
   out Err: TPhosphorError): TValue;
 var
-  ufi, i, saved, savedSP, slots: Integer;
+  ufi, i, j, saved, savedSP, slots: Integer;
   savedLimit: Boolean;
   savedMask: TFPUExceptionMask;
   evalAtSeamDoor: Boolean;
@@ -5372,13 +5404,19 @@ begin
   end;
   // opCall's argument binding, on opCall's frame, reached the other way: each
   // argument is coerced to its parameter's suffix or the call is refused here,
-  // before anything is pushed. See SuffixCheck.
-  SetLength(bound, Length(Args));
+  // before anything is pushed. See SuffixCheck. `bound` is allocated only when an
+  // argument does not already fit (KindFits): this door is callfunc's, per call.
   for i := 0 to High(Args) do
-  begin
-    Err := SuffixCheck(FProg, ufi, i, Args[i], bound[i]);
-    if IsError(Err) then Exit;
-  end;
+    if not KindFits(FProg.UserFuncs[ufi].LocalTypes[i], Args[i].Kind) then
+    begin
+      if bound = nil then
+      begin
+        SetLength(bound, Length(Args));
+        for j := 0 to High(Args) do bound[j] := Args[j];
+      end;
+      Err := SuffixCheck(FProg, ufi, i, Args[i], bound[i]);
+      if IsError(Err) then Exit;
+    end;
   // opCall's two frame ceilings, on opCall's growth, reached the other way. A host
   // event dispatcher calls in at whatever depth the VM already stands at, so the
   // bounds have to be here too; see MaxFrameDepth.
@@ -5419,7 +5457,8 @@ begin
   end;
   SetLength(FFrames[FFrameSP].Locals, Length(FProg.UserFuncs[ufi].LocalTypes));
   for i := 0 to Length(Args) - 1 do
-    FFrames[FFrameSP].Locals[i] := bound[i];
+    if bound <> nil then FFrames[FFrameSP].Locals[i] := bound[i]
+    else FFrames[FFrameSP].Locals[i] := Args[i];
   for i := Length(Args) to High(FProg.UserFuncs[ufi].LocalTypes) do
     FFrames[FFrameSP].Locals[i] := DefaultValue(FProg.UserFuncs[ufi].LocalTypes[i]);
   FFrames[FFrameSP].FuncIndex := ufi;

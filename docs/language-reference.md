@@ -988,7 +988,12 @@ integer overflow, `2` division by zero, `3` type mismatch, `4` unknown function,
 state with `err_clear()`, or route faults to a function with `on error call fn`. **That function must take
 exactly two arguments** — the error code and the message, in that order — because
 that is what the VM passes. A one-argument handler fails with *no BASIC function
-… taking 2 argument(s)* and the program stops:
+… taking 2 argument(s)* and the program stops. So does a handler whose parameters
+do not take a number and a string: `function handler(code, msg)` is refused at
+`msg`, because an argument is stored into its parameter as an assignment would
+store it (see Functions & LOCAL). Either way the message also names the fault
+the handler was called for — *… -- while handling: division by zero (line 2)*.
+The shape that works:
 
 ```basic
 on error call handler

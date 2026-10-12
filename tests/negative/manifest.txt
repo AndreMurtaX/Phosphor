@@ -60,3 +60,4 @@
 43_bare_call_without_parentheses|on its own does nothing -- a call needs parentheses
 45_gosub_abandons_after_a_stale_deep_fault|control reached the end of the program inside risky
 46_gosub_abandons_after_a_stale_deep_fault_resumed|control reached the end of the program inside risky
+47_onerror_call_handler_msg_without_suffix|while handling: division by zero (line 13)

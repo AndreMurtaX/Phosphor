@@ -449,6 +449,16 @@ Define a function with `function name(args) … return value … endfunction` (t
 two-word `end function` is accepted). The name's suffix is the return type:
 `greet$` returns a string, `factorial` returns a number. Recursion is fine.
 
+Suffixes hold at both ends of a call, by the same rule as an assignment. Each
+argument is stored into its parameter as `n% = 2.5` would store it — coerced
+(a parameter `n%` given `2.5` holds `2`, as that assignment makes it) or refused at the
+call with a type mismatch (`123` for a parameter `a$`), before the body runs. The
+value a `return` hands back is stored into the function's name the same way:
+`avg%` returning `1.5` answers the `int%` that `k% = 1.5` holds, and a `$`
+function returning a number is refused at that `return`. A parameter with no
+suffix keeps what it is given, an `int%` or a Double. Until 2026-10-11 neither end
+was checked.
+
 Variables listed after `local` are private to the call. **Any name you use that
 is *not* in the `local` list refers to a global** — so declare your scratch
 variables as locals unless you deliberately want to share one.
@@ -964,6 +974,13 @@ runs on, returns, and the caller's half-finished expression carries on with its
 result. If the fault happened on the function's *last* statement there is no next
 statement in it: the function ends there and hands back the default value for its
 type (`0`, or `""` for a `$` name), and the caller continues with that.
+
+**A `return` whose value fails is the same case**, wherever it sits — in an `if`
+block, a loop, a `case` arm. Had it succeeded, the function would have been left,
+so `resume next` (or an `on error call` handler answering `0`) ends the function
+with that default; nothing written after the `return` runs. Until 2026-10-11 it
+continued at the next line of text: the line after the `return`, the code meant
+for the other case of the `if`, or the loop's next pass.
 
 Error codes: `1`
 integer overflow, `2` division by zero, `3` type mismatch, `4` unknown function,

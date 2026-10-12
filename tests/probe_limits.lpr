@@ -166,6 +166,24 @@ begin
     Report(False, AName + ' (the ballast was collected under the check)');
 end;
 
+{ ONE LINE OF ALen 'a' bytes and an LF, written by the host, for the file-read
+  doors of the memory ceiling. The process id is in the name, so two worktrees
+  probing at once do not share it; forward slashes, so the path can sit in a
+  BASIC string literal. The caller deletes it. }
+function MakeOneLineFile(const AName: String; ALen: Integer): String;
+var fs: TFileStream; s: String;
+begin
+  Result := StringReplace(GetTempDir(False), '\', '/', [rfReplaceAll]) +
+            IntToStr(GetProcessID()) + '_' + AName;
+  s := StringOfChar('a', ALen) + #10;
+  fs := TFileStream.Create(Result, fmCreate);
+  try
+    fs.WriteBuffer(s[1], Length(s));
+  finally
+    fs.Free;
+  end;
+end;
+
 { The host frees 512 MB of its own the first time the script prints; the script
   keeps allocating and must still be refused. }
 procedure CheckMemHostFrees(const AName: String);
@@ -2944,6 +2962,8 @@ begin
   Writeln(Format('price sweep: %d rows, %d outside the bound', [PriceRows, PriceBad]));
 end;
 
+var
+  bigLine: String;   // the one-line file of the memory ceiling's read doors
 begin
   if (ParamCount >= 1) and (ParamStr(1) = '--prices') then
   begin
@@ -3916,6 +3936,43 @@ begin
            'next' + LF +
            'goto fin' + LF + 'oops:' + LF + 'resume next' + LF + 'fin:' + LF,
            32 * 1024 * 1024, 'memory limit exceeded');
+
+  { THE DOORS opAdd AND THE LIBRARY EXIT ARE NOT (2026-10-11). `s$ - n` copies up
+    to all of s$, and a file read keeps a string as long as the file says; none of
+    them asked, so twelve `s$ - n` kept 1.2 GB under 256 MB and one `line input #`
+    kept 1 GB, both at rc 0. Each case below is a short script with no library
+    call after the growth, so only the door's own ask can refuse it: four 12 MB
+    copies are 48 MB against a 32 MB ceiling (the 12 MB source counted too). }
+  CheckMem('memory ceiling: string - n is asked like +',
+           's$ = string$(12000000, 97)' + LF +
+           'a$ = s$ - 1' + LF + 'b$ = s$ - 2' + LF +
+           'c$ = s$ - 3' + LF + 'd$ = s$ - 4' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+  bigLine := MakeOneLineFile('phosphor_r11_bigline.txt', 12000000);
+  CheckMem('memory ceiling: line input # is asked',
+           'open "' + bigLine + '" for input as #1 : line input #1, a$ : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : line input #1, b$ : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : line input #1, c$ : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : line input #1, d$ : close #1' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+  CheckMem('memory ceiling: input # is asked',
+           'open "' + bigLine + '" for input as #1 : input #1, a$ : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : input #1, b$ : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : input #1, c$ : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : input #1, d$ : close #1' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+  CheckMem('memory ceiling: input$(n, #) is asked',
+           'open "' + bigLine + '" for input as #1 : a$ = input$(12000000, #1) : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : b$ = input$(12000000, #1) : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : c$ = input$(12000000, #1) : close #1' + LF +
+           'open "' + bigLine + '" for input as #1 : d$ = input$(12000000, #1) : close #1' + LF,
+           32 * 1024 * 1024, 'memory limit exceeded');
+  { AND THE SAME READS UNDER A CEILING THEY FIT: the ask refuses growth, not reading. }
+  CheckMem('a file read the ceiling has room for is not refused',
+           'open "' + bigLine + '" for input as #1 : line input #1, a$ : close #1' + LF +
+           'if len(a$) <> 12000000 then' + LF + '  x = 1 / 0' + LF + 'end if' + LF,
+           64 * 1024 * 1024, '');
+  DeleteFile(bigLine);
 
   CheckNameTablesScale();
   CheckMaxHandles();
